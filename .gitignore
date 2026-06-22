@@ -20,3 +20,6 @@ venv/
 
 # private strategy notes — remove this line if you want it public
 btc5min-handoff.md
+
+# private operational runbook (contains VPS host / ops) — never public
+CLAUDE.md
