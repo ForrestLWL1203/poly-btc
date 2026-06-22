@@ -1,0 +1,22 @@
+# credentials / secrets — NEVER commit (public repo)
+secret/
+*.pem
+*.key
+.env
+.env.*
+
+# local collection data
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.mypy_cache/
+
+# private strategy notes — remove this line if you want it public
+btc5min-handoff.md
