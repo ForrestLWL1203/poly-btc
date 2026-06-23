@@ -40,7 +40,7 @@ SETTLE_GRACE_SEC = 75.0      # settle this long past end (after straggler pollin
 DROP_TIMEOUT_SEC = 300.0     # give up on a window unsettled this long past end (avoid pile-up)
 RET_LOOKBACKS = (1, 3, 5, 10)
 TRADE_PAGE_SIZE = 100
-TRADE_MAX_PAGES = 25
+TRADE_MAX_PAGES = 30        # /trades 400s past offset ~3000; takerOnly=true stays well under
 SPOT_HISTORY_SEC = 120.0     # feed history; must still hold the window boundaries at settle time
 EPS = 1e-6
 
@@ -133,7 +133,10 @@ class Collector:
             batch = await asyncio.to_thread(
                 fetch_market_trades, window.condition_id,
                 limit=TRADE_PAGE_SIZE, offset=page * TRADE_PAGE_SIZE, pages=1,
-                taker_only=False,   # full fills (maker+taker); classify roles later
+                # takerOnly=true = one clean row per fill (incl makers; verified it
+                # captures pure-maker powerwinner 22/22). takerOnly=false over-expands
+                # every leg → 3000+ rows/window → hits the /trades offset cap → misses fills.
+                taker_only=True,
             )
             if not batch:
                 break
