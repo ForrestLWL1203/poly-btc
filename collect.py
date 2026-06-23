@@ -133,6 +133,7 @@ class Collector:
             batch = await asyncio.to_thread(
                 fetch_market_trades, window.condition_id,
                 limit=TRADE_PAGE_SIZE, offset=page * TRADE_PAGE_SIZE, pages=1,
+                taker_only=False,   # full fills (maker+taker); classify roles later
             )
             if not batch:
                 break
@@ -284,10 +285,9 @@ class Collector:
                  round(pair_cost, 6) if pair_cost else None, dual,
                  realized, incomplete, w["first_ts"], w["last_ts"]),
             )
-        # per-fill detail only for two-sided wallets
+        # per-fill detail for ALL wallets (complete substrate; roles classified
+        # later by re-pulling target wallets). dual_wallets kept only for stats.
         for f in state.fills:
-            if f["wallet"] not in dual_wallets:
-                continue
             self.db.execute(
                 """INSERT OR IGNORE INTO trades
                    (fill_key, window_slug, condition_id, wallet, name, side, outcome, token,

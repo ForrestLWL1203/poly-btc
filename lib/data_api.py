@@ -102,13 +102,18 @@ def normalize_activity_event(raw: dict[str, Any], *, wallet: str, observed_at: s
     }
 
 
-def fetch_market_trades(condition_id: str, *, limit: int = 100, offset: int = 0, pages: int = 4) -> list[dict[str, Any]]:
+def fetch_market_trades(condition_id: str, *, limit: int = 100, offset: int = 0, pages: int = 4, taker_only: bool | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
     page_size = min(limit, 100)
     page_count = max(max(1, pages), (max(1, limit) + page_size - 1) // page_size)
     for page in range(page_count):
-        data = _get_json("/trades", {"market": condition_id, "limit": page_size, "offset": offset + page * page_size})
+        params: dict[str, Any] = {"market": condition_id, "limit": page_size, "offset": offset + page * page_size}
+        if taker_only is not None:
+            # takerOnly=false returns ALL fills (maker+taker, multiple rows per tx);
+            # we capture everything and classify roles later per target wallet.
+            params["takerOnly"] = "true" if taker_only else "false"
+        data = _get_json("/trades", params)
         if not isinstance(data, list):
             break
         for row in data:

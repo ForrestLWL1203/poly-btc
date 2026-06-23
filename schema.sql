@@ -95,3 +95,4 @@ CREATE TABLE IF NOT EXISTS trades (
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_wallet_window ON trades(wallet, window_slug);
+CREATE INDEX IF NOT EXISTS idx_trades_window ON trades(window_slug);
