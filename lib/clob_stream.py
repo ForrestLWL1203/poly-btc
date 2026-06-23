@@ -190,6 +190,8 @@ class ClobBookStream:
             self._handle_book(event)
         elif event_type == "price_change":
             self._handle_price_change(event)
+        elif event_type == "best_bid_ask":
+            self._handle_best_bid_ask(event)
         elif event_type == "last_trade_price":
             self._handle_last_trade(event)
 
@@ -208,24 +210,31 @@ class ClobBookStream:
             parsed.sort(key=lambda pair: pair[0], reverse=reverse)
         return dict(parsed)
 
-    def _record_top(self, token: str) -> None:
-        """Append the current best bid/ask of ``token`` to its rolling history."""
-        book = self._books.get(token)
-        if book is None:
+    def _handle_best_bid_ask(self, event: dict[str, Any]) -> None:
+        """Record top-of-book from the dedicated ``best_bid_ask`` event.
+
+        This is the clean source: the CLOB WS emits ``best_bid_ask`` only when the
+        best bid/ask PRICE moves — far lower rate than the ``price_change`` firehose
+        (which fires on every size flicker at any level). Sizes are read from the
+        book maintained by book/price_change. History dedups on (bid, ask) price.
+        """
+        token = str(event.get("asset_id") or "")
+        if not token:
             return
-        bids = book["bids"]
-        asks = book["asks"]
-        best_bid = max(bids) if bids else None
-        best_ask = min(asks) if asks else None
-        bid_size = bids.get(best_bid) if best_bid is not None else None
-        ask_size = asks.get(best_ask) if best_ask is not None else None
-        now = time.time()
+        try:
+            best_bid = float(event["best_bid"]) if event.get("best_bid") else None
+            best_ask = float(event["best_ask"]) if event.get("best_ask") else None
+        except (TypeError, ValueError):
+            return
+        book = self._books.get(token)
+        bid_size = book["bids"].get(best_bid) if (book and best_bid is not None) else None
+        ask_size = book["asks"].get(best_ask) if (book and best_ask is not None) else None
         hist = self._top_history.setdefault(token, deque())
-        # Skip no-op duplicates to keep history compact under chatty price_change bursts.
         if hist:
-            _, p_bid, p_ask, p_bs, p_as = hist[-1]
-            if (p_bid, p_ask, p_bs, p_as) == (best_bid, best_ask, bid_size, ask_size):
+            _, p_bid, p_ask, _, _ = hist[-1]
+            if (p_bid, p_ask) == (best_bid, best_ask):   # price unchanged -> skip size flicker
                 return
+        now = time.time()
         hist.append((now, best_bid, best_ask, bid_size, ask_size))
         cutoff = now - self.top_history_sec
         while hist and hist[0][0] < cutoff:
@@ -240,7 +249,8 @@ class ClobBookStream:
             "asks": self._parse_side(event.get("asks", []), reverse=False),
             "received_at": time.monotonic(),
         }
-        self._record_top(token)
+        # top-of-book HISTORY is fed by best_bid_ask (clean); book/price_change only
+        # maintain depth here.
 
     def _handle_price_change(self, event: dict[str, Any]) -> None:
         changes = event.get("price_changes") or ([event] if event.get("price") else [])
@@ -264,8 +274,6 @@ class ClobBookStream:
                 book[side_key].pop(price, None)
             book["received_at"] = time.monotonic()
             touched.add(token)
-        for token in touched:
-            self._record_top(token)
 
     def _handle_last_trade(self, event: dict[str, Any]) -> None:
         token = str(event.get("asset_id") or "")
