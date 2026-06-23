@@ -6,6 +6,7 @@ secret/
 .env.*
 
 # local collection data
+data/
 *.db
 *.db-wal
 *.db-shm

@@ -26,7 +26,6 @@ import time
 from pathlib import Path
 
 from lib.market import MarketSeries, MarketWindow, find_current_or_next_window
-from lib.crypto_price import fetch_crypto_price_api
 from lib.price_feed import ChainlinkPriceFeed
 from lib.clob_stream import ClobBookStream
 from lib.data_api import fetch_market_trades, normalize_trade
@@ -37,11 +36,12 @@ REFRESH_WINDOWS_SEC = 15.0
 POLL_TRADES_SEC = 2.0
 SETTLE_CHECK_SEC = 20.0
 TRADE_STRAGGLER_SEC = 60.0
-SETTLE_GRACE_SEC = 20.0
+SETTLE_GRACE_SEC = 75.0      # settle this long past end (after straggler polling completes)
+DROP_TIMEOUT_SEC = 300.0     # give up on a window unsettled this long past end (avoid pile-up)
 RET_LOOKBACKS = (1, 3, 5, 10)
 TRADE_PAGE_SIZE = 100
 TRADE_MAX_PAGES = 25
-SPOT_HISTORY_SEC = 60.0
+SPOT_HISTORY_SEC = 120.0     # feed history; must still hold the window boundaries at settle time
 EPS = 1e-6
 
 
@@ -70,15 +70,15 @@ def _ret_bps(feed: ChainlinkPriceFeed, ts: float, lookback: int) -> float | None
 
 
 class WindowState:
-    __slots__ = ("window", "open_price", "seen", "fills", "settled", "open_written")
+    __slots__ = ("window", "open_price", "close_price", "seen", "fills", "settled")
 
     def __init__(self, window: MarketWindow) -> None:
         self.window = window
-        self.open_price: float | None = None
+        self.open_price: float | None = None    # BTC spot at start_epoch (from our feed)
+        self.close_price: float | None = None   # BTC spot at end_epoch
         self.seen: set[str] = set()
         self.fills: list[dict] = []      # buffered until settlement
         self.settled = False
-        self.open_written = False
 
 
 class Collector:
@@ -188,35 +188,57 @@ class Collector:
             "ret_5s_bps": rets[5], "ret_10s_bps": rets[10],
         }
 
-    # ---- settlement: aggregate + persist ---------------------------------
-    async def settle_windows(self) -> None:
-        now = time.time()
-        for state in list(self.active.values()):
-            if not state.open_written:
-                await self._fetch_open(state)
-            if state.settled or now < state.window.end_epoch + SETTLE_GRACE_SEC:
-                continue
-            await self._settle(state)
+    # ---- settlement: feed-based open/close, aggregate + persist ----------
+    def _snapshot_boundaries(self) -> None:
+        """Record BTC spot at each window's start/end from our Chainlink feed.
 
-    async def _fetch_open(self, state: WindowState) -> None:
-        data = await asyncio.to_thread(fetch_crypto_price_api, state.window)
-        if data and data.get("openPrice") is not None:
-            state.open_price = float(data["openPrice"])
-            state.open_written = True
-            self.db.execute("UPDATE windows SET open_price=? WHERE slug=?",
-                            (state.open_price, state.window.slug))
+        Replaces the (now Cloudflare-blocked) crypto-price API: the live-data WS
+        is the same Chainlink BTC/USD source the official resolution uses. Called
+        every loop tick so boundary ticks are captured before they age out of the
+        feed history.
+        """
+        now = time.time()
+        dirty = False
+        for state in self.active.values():
+            w = state.window
+            if state.open_price is None and now >= w.start_epoch:
+                p = self.feed.price_at_or_before(w.start_epoch, max_backward_sec=90.0)
+                if p:
+                    state.open_price = p
+                    self.db.execute("UPDATE windows SET open_price=? WHERE slug=?", (round(p, 2), w.slug))
+                    dirty = True
+            if state.close_price is None and now >= w.end_epoch:
+                p = self.feed.price_at_or_before(w.end_epoch, max_backward_sec=90.0)
+                if p:
+                    state.close_price = p
+                    dirty = True
+        if dirty:
             self.db.commit()
 
-    async def _settle(self, state: WindowState) -> None:
-        data = await asyncio.to_thread(fetch_crypto_price_api, state.window)
-        if not data or not data.get("completed") or data.get("closePrice") is None:
-            return
-        open_p, close_p = float(data["openPrice"]), float(data["closePrice"])
+    def settle_windows(self) -> None:
+        now = time.time()
+        for state in list(self.active.values()):
+            if state.settled:
+                continue
+            w = state.window
+            if now < w.end_epoch + SETTLE_GRACE_SEC:
+                continue
+            if state.open_price is not None and state.close_price is not None:
+                self._settle(state)
+            elif now > w.end_epoch + DROP_TIMEOUT_SEC:
+                # never captured boundary prices (joined mid-window / feed gap) — drop, don't pile up
+                del self.active[w.slug]
+                state.fills = []
+                print(f"[{now_utc_iso()}] DROP {w.slug} (no boundary price "
+                      f"open={state.open_price} close={state.close_price})")
+
+    def _settle(self, state: WindowState) -> None:
+        open_p, close_p = state.open_price, state.close_price
         winning = "UP" if close_p > open_p else "DOWN"
         self.db.execute(
             """UPDATE windows SET open_price=?, close_price=?, winning_side=?,
                settled=1, settled_at=? WHERE slug=?""",
-            (open_p, close_p, winning, now_utc_iso(), state.window.slug),
+            (round(open_p, 2), round(close_p, 2), winning, now_utc_iso(), state.window.slug),
         )
         n_fills = len(state.fills)
         n_wallets, n_dual = self._persist_window(state, winning)
@@ -224,7 +246,7 @@ class Collector:
         state.settled = True
         del self.active[state.window.slug]
         print(f"[{now_utc_iso()}] settled {state.window.slug} {winning} "
-              f"(open={open_p} close={close_p}) fills={n_fills} "
+              f"(open={open_p:.2f} close={close_p:.2f}) fills={n_fills} "
               f"wallets={n_wallets} dual={n_dual}")
 
     def _aggregate(self, state: WindowState, winning: str) -> dict[str, dict]:
@@ -333,9 +355,10 @@ class Collector:
                 if now - self._t_trades >= POLL_TRADES_SEC:
                     self._t_trades = now
                     await self.poll_trades()
+                self._snapshot_boundaries()   # cheap; capture open/close before they age out
                 if now - self._t_settle >= SETTLE_CHECK_SEC:
                     self._t_settle = now
-                    await self.settle_windows()
+                    self.settle_windows()
                 try:
                     await asyncio.wait_for(self._stop.wait(), timeout=1.0)
                 except asyncio.TimeoutError:
