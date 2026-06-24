@@ -74,21 +74,30 @@ class Observer:
             legs = self.db.execute("SELECT count(*) FROM paper_legs").fetchone()[0]
             _log(f"heartbeat: {ep} episodes, {legs} paper legs recorded")
 
+    @staticmethod
+    def _quiet(loop, context):
+        msg = str(context.get("exception") or context.get("message"))
+        if "SSL" in msg or "closed" in msg.lower():
+            return                                  # transient closed-connection noise
+        loop.default_exception_handler(context)
+
     # -- run loop with reconnect ---------------------------------------------
     async def run(self):
+        asyncio.get_event_loop().set_exception_handler(self._quiet)
         asyncio.create_task(self._announce())
         while not self.stop:
             try:
+                for a in self.addrs:                # REST backfill BEFORE opening the WS, so
+                    self.backfill(a)                # the blocking calls can't starve the socket
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
                     self.ws = conn
-                    for a in self.addrs:
-                        self.backfill(a)            # catch anything missed while down
-                    await self.subscribe_all()
                     hb = asyncio.create_task(self.heartbeat())
-                    _log(f"connected, monitoring {len(self.addrs)} wallets")
+                    sub = asyncio.create_task(self.subscribe_all())  # subscribe WHILE reading,
+                    _log(f"connected, monitoring {len(self.addrs)} wallets")  # never block the read
                     async for raw in conn:
                         self.on_message(raw)
                     hb.cancel()
+                    sub.cancel()
             except Exception as exc:  # noqa: BLE001
                 _log(f"ws error: {exc}; reconnecting in 3s")
                 await asyncio.sleep(3)
