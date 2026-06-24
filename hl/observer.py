@@ -33,8 +33,12 @@ class Observer:
         self.pos: dict = {}              # (addr,coin) -> net position
         self.open_ep: dict = {}          # (addr,coin) -> live episode state
         self.last_fill_ms: dict = {a: now_ms() - 6 * 3600_000 for a in addrs}
+        self.valid_coins: set = set()    # standard perp universe; empty => allow all
         self.ws = None
         self.stop = False
+
+    def _bbo_ok(self, coin: str) -> bool:
+        return bool(coin) and (not self.valid_coins or coin in self.valid_coins)
 
     # -- subscriptions --------------------------------------------------------
     async def _sub(self, subscription: dict):
@@ -52,7 +56,7 @@ class Observer:
         await self._sub(ws.bbo("BTC"))   # liveness baseline
 
     async def ensure_coin(self, coin: str):
-        if coin and coin not in self.sub_coins:
+        if coin and coin not in self.sub_coins and self._bbo_ok(coin):
             self.sub_coins.add(coin)
             self.coin_hist.setdefault(coin, deque())
             try:
@@ -85,6 +89,8 @@ class Observer:
     # -- run loop with reconnect ---------------------------------------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
+        self.valid_coins = rest.perp_universe()
+        _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded against unknown names)")
         asyncio.create_task(self._announce())
         while not self.stop:
             try:

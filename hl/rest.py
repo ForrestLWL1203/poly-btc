@@ -91,3 +91,12 @@ def account_birth_ms(addr: str):
     if isinstance(page, list) and page:
         return min(x["time"] for x in page)
     return None
+
+
+def perp_universe() -> set:
+    """Valid perp coin names (for the standard dex). Used to guard bbo subscriptions —
+    subscribing bbo for an unknown coin name closes the WS connection."""
+    m = post_soft({"type": "meta"})
+    if isinstance(m, dict):
+        return {u.get("name") for u in m.get("universe", []) if u.get("name")}
+    return set()
