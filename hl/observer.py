@@ -42,9 +42,10 @@ class Observer:
         await asyncio.sleep(0.05)
 
     async def subscribe_all(self):
+        # userFills only — it already carries the `liquidation` field, so we skip
+        # userEvents (a 2nd user-specific sub per wallet that risks tripping HL's limit).
         for a in self.addrs:
             await self._sub(ws.user_fills(a))
-            await self._sub(ws.user_events(a))
         for a in self.addrs:
             for c in self.seed_coins.get(a, set()):
                 await self.ensure_coin(c)
