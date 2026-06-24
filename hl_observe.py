@@ -18,6 +18,8 @@ def main() -> int:
     o = sub.add_parser("observe")
     o.add_argument("--top", type=int, default=config.MAX_WS_USERS,
                    help=f"WS-monitor top-N enabled watchlist (HL cap: {config.MAX_WS_USERS} users/IP)")
+    o.add_argument("--extra", action="append", default=[],
+                   help="extra address(es) to monitor for debugging (still capped at the WS limit)")
     sub.add_parser("report")
     args = ap.parse_args()
 
@@ -25,6 +27,12 @@ def main() -> int:
     if args.cmd == "observe":
         n = min(args.top, config.MAX_WS_USERS)
         addrs, seed = observer.load_targets(db, n)
+        merged = []                                   # extras first, then watchlist, capped at n
+        for a in [x.lower() for x in args.extra] + addrs:
+            if a not in merged:
+                merged.append(a)
+        addrs = merged[:n]
+        seed = {a: seed.get(a, set()) for a in addrs}
         if not addrs:
             print("no enabled watchlist targets yet — run the scanner first.")
             return 1
