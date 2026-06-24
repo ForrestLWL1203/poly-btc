@@ -7,6 +7,7 @@ storage tables. Monitors the top-N enabled watchlist targets (HL cap: 10 users/I
 """
 import asyncio
 import json
+import logging
 import time
 from collections import deque
 
@@ -14,6 +15,8 @@ import websockets
 
 from . import config, paper, rest, ws
 from .util import f, now_ms
+
+logging.getLogger("websockets").setLevel(logging.CRITICAL)  # silence library reconnect noise
 
 
 def _log(msg: str):
@@ -98,6 +101,7 @@ class Observer:
             page.sort(key=lambda x: x["time"])
             for x in page:
                 self.process_fill(addr, x, live=False)
+            self.db.commit()
 
     # -- message router -------------------------------------------------------
     def on_message(self, raw: str):
@@ -107,8 +111,12 @@ class Observer:
             d = m.get("data", {})
             a = (d.get("user") or "").lower()
             snap = bool(d.get("isSnapshot"))
-            for x in d.get("fills", []) or []:
+            fills = d.get("fills", []) or []
+            for x in fills:
                 self.process_fill(a, x, live=not snap)
+            if fills:
+                self.db.commit()        # one commit per message, not per fill (else the
+                                        # 100s-of-fills snapshot blocks the event loop -> WS drop)
         elif ch == "userEvents":
             liq = (m.get("data") or {}).get("liquidation")
             if liq:
@@ -148,7 +156,7 @@ class Observer:
             (addr, tid, t, now_ms(), coin, x.get("side"), x.get("dir"), f(x.get("px")),
              f(x.get("sz")), f(x.get("closedPnl")), f(x.get("fee")), 1 if x.get("crossed") else 0,
              1 if liq else 0, (liq or {}).get("method"), x.get("hash")))
-        self.db.commit()
+        # NB: caller (on_message / backfill) commits in batch — never commit per fill here.
 
         sz = f(x.get("sz"))
         signed = sz if x.get("side") == "B" else -sz
