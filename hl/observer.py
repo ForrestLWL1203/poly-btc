@@ -94,8 +94,6 @@ class Observer:
         asyncio.create_task(self._announce())
         while not self.stop:
             try:
-                for a in self.addrs:                # REST backfill BEFORE opening the WS, so
-                    self.backfill(a)                # the blocking calls can't starve the socket
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
                     self.ws = conn
                     hb = asyncio.create_task(self.heartbeat())
@@ -109,30 +107,21 @@ class Observer:
                 _log(f"ws error: {exc}; reconnecting in 3s")
                 await asyncio.sleep(3)
 
-    # -- REST backfill on (re)connect ----------------------------------------
-    def backfill(self, addr: str):
-        since = self.last_fill_ms.get(addr, now_ms() - 6 * 3600_000)
-        page = rest.post_soft({"type": "userFillsByTime", "user": addr, "startTime": since + 1})
-        if isinstance(page, list) and page:
-            page.sort(key=lambda x: x["time"])
-            for x in page:
-                self.process_fill(addr, x, live=False)
-            self.db.commit()
-
     # -- message router -------------------------------------------------------
     def on_message(self, raw: str):
         m = json.loads(raw)
         ch = m.get("channel")
         if ch == "userFills":
             d = m.get("data", {})
+            if d.get("isSnapshot"):
+                return                  # drop the on-subscribe history dump — we only
+                                        # paper-trade FUTURE round-trips observed live
             a = (d.get("user") or "").lower()
-            snap = bool(d.get("isSnapshot"))
             fills = d.get("fills", []) or []
             for x in fills:
-                self.process_fill(a, x, live=not snap)
+                self.process_fill(a, x, live=True)
             if fills:
-                self.db.commit()        # one commit per message, not per fill (else the
-                                        # 100s-of-fills snapshot blocks the event loop -> WS drop)
+                self.db.commit()        # one commit per message, not per fill
         elif ch == "userEvents":
             liq = (m.get("data") or {}).get("liquidation")
             if liq:
