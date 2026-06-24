@@ -1,9 +1,18 @@
 """Live WS observer + paper-copy driver.
 
-Owns the stateful streaming: connect/reconnect/heartbeat/resubscribe, REST backfill
-on reconnect (completeness), per-coin bbo buffers, streaming episode detection, and
-liquidation alerts. Delegates pure sim math to paper.py and all persistence to the
-storage tables. Monitors the top-N enabled watchlist targets (HL cap: 10 users/IP).
+Owns the stateful streaming: connect/reconnect/heartbeat/resubscribe, reconnect
+reconciliation (don't stay stranded when the master exits during a disconnect),
+per-coin bbo buffers, and a PARTIAL-AWARE copy state machine. Every master action
+on a tracked position (open / add / reduce / close) is persisted immediately to
+copy_action with full detail + our mirrored fill; each copied position lives in
+copy_position (open→closed), so nothing is held only in memory — it survives
+restarts (open positions are reloaded on startup).
+
+Sizing: fixed `NOTIONAL` per position, entered at the master's open. We do NOT add
+on scale-in; on scale-out we reduce our copy PROPORTIONALLY (|master pos| / peak).
+Primary copy = 2s latency (what copy_action records); pnl_05/2/5 on copy_position
+carry the 3-band latency sensitivity. Exit price comes from the live book at
+fill_time + latency (taker). Leverage is irrelevant to PnL (notional × move).
 """
 import asyncio
 import json
@@ -14,9 +23,11 @@ from collections import deque
 import websockets
 
 from . import config, paper, rest, ws
-from .util import f, now_ms
+from .util import f, now_iso, now_ms
 
-logging.getLogger("websockets").setLevel(logging.CRITICAL)  # silence library reconnect noise
+logging.getLogger("websockets").setLevel(logging.CRITICAL)
+LAT = config.LATENCIES
+PRIMARY = 2.0 if 2.0 in LAT else LAT[len(LAT) // 2]
 
 
 def _log(msg: str):
@@ -30,11 +41,9 @@ class Observer:
         self.seed_coins = seed_coins
         self.coin_hist: dict = {}        # coin -> deque[(ts_ms, bid, ask)]
         self.sub_coins: set = set()
-        self.pos: dict = {}              # (addr,coin) -> net position
-        self.open_ep: dict = {}          # (addr,coin) -> live episode state
-        self.last_fill_ms: dict = {a: now_ms() - 6 * 3600_000 for a in addrs}
-        self.valid_coins: set = set()    # standard perp universe; empty => allow all
-        self.last_msg_ms = now_ms()      # last time ANY ws message arrived (for gap sizing)
+        self.open_ep: dict = {}          # (addr,coin) -> position state
+        self.valid_coins: set = set()
+        self.last_msg_ms = now_ms()
         self.connected_once = False
         self.ws = None
         self.stop = False
@@ -42,20 +51,42 @@ class Observer:
     def _bbo_ok(self, coin: str) -> bool:
         return bool(coin) and (not self.valid_coins or coin in self.valid_coins)
 
+    # -- restart recovery: reload open copies from db ------------------------
+    def _reload_open(self):
+        rows = self.db.execute(
+            "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,"
+            "entry_05,entry_2,entry_5,rem_05,rem_2,rem_5,pnl_05,pnl_2,pnl_5,mae_pct,num_actions "
+            "FROM copy_position WHERE status='open'").fetchall()
+        for r in rows:
+            (pid, addr, coin, side, mo, mpx, peak, e05, e2, e5, r05, r2, r5, p05, p2, p5, mae, na) = r
+            ev = asyncio.Event()
+            if e2 is not None:
+                ev.set()
+            self.open_ep[(addr, coin)] = {
+                "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
+                "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
+                "entries": {0.5: e05, 2.0: e2, 5.0: e5} if e2 is not None else None,
+                "rem": {0.5: r05 or 0, 2.0: r2 or 0, 5.0: r5 or 0},
+                "pnl": {0.5: p05 or 0, 2.0: p2 or 0, 5.0: p5 or 0},
+                "entries_ready": ev, "lock": asyncio.Lock(), "mae": mae or 0.0,
+                "num_actions": na or 0, "gap": False}
+        if rows:
+            _log(f"reloaded {len(rows)} open copy positions from db")
+
     # -- subscriptions --------------------------------------------------------
     async def _sub(self, subscription: dict):
         await self.ws.send(ws.sub_msg(subscription))
         await asyncio.sleep(0.05)
 
     async def subscribe_all(self):
-        # userFills only — it already carries the `liquidation` field, so we skip
-        # userEvents (a 2nd user-specific sub per wallet that risks tripping HL's limit).
         for a in self.addrs:
             await self._sub(ws.user_fills(a))
         for a in self.addrs:
             for c in self.seed_coins.get(a, set()):
                 await self.ensure_coin(c)
-        await self._sub(ws.bbo("BTC"))   # liveness baseline
+        for (_, coin) in self.open_ep:          # reloaded positions need their book too
+            await self.ensure_coin(coin)
+        await self._sub(ws.bbo("BTC"))
 
     async def ensure_coin(self, coin: str):
         if coin and coin not in self.sub_coins and self._bbo_ok(coin):
@@ -77,33 +108,35 @@ class Observer:
     async def _announce(self):
         while not self.stop:
             await asyncio.sleep(300)
-            ep = self.db.execute("SELECT count(*) FROM episodes_live").fetchone()[0]
-            legs = self.db.execute("SELECT count(*) FROM paper_legs").fetchone()[0]
-            _log(f"heartbeat: {ep} episodes, {legs} paper legs recorded")
+            o = self.db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
+            c = self.db.execute("SELECT count(*) FROM copy_position WHERE status!='open'").fetchone()[0]
+            a = self.db.execute("SELECT count(*) FROM copy_action").fetchone()[0]
+            _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
 
     @staticmethod
     def _quiet(loop, context):
         msg = str(context.get("exception") or context.get("message"))
         if "SSL" in msg or "closed" in msg.lower():
-            return                                  # transient closed-connection noise
+            return
         loop.default_exception_handler(context)
 
     # -- run loop with reconnect ---------------------------------------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
         self.valid_coins = rest.perp_universe()
-        _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded against unknown names)")
+        _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded)")
+        self._reload_open()                         # restore open copies from db (restart-safe)
         asyncio.create_task(self._announce())
         while not self.stop:
             try:
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
                     self.ws = conn
                     hb = asyncio.create_task(self.heartbeat())
-                    sub = asyncio.create_task(self.subscribe_all())  # subscribe WHILE reading,
-                    if self.connected_once and self.open_ep:        # reconcile the disconnect gap:
-                        asyncio.create_task(self.reconcile_gap(self.last_msg_ms))  # did a tracked
-                    self.connected_once = True                      # master exit while we were down?
-                    _log(f"connected, monitoring {len(self.addrs)} wallets")
+                    sub = asyncio.create_task(self.subscribe_all())
+                    if self.connected_once and self.open_ep:
+                        asyncio.create_task(self.reconcile_gap(self.last_msg_ms))
+                    self.connected_once = True
+                    _log(f"connected, monitoring {len(self.addrs)} wallets ({len(self.open_ep)} open copies)")
                     async for raw in conn:
                         self.on_message(raw)
                     hb.cancel()
@@ -120,14 +153,13 @@ class Observer:
         if ch == "userFills":
             d = m.get("data", {})
             if d.get("isSnapshot"):
-                return                  # drop the on-subscribe history dump — we only
-                                        # paper-trade FUTURE round-trips observed live
+                return                  # forward-only: ignore the on-subscribe history dump
             a = (d.get("user") or "").lower()
             fills = d.get("fills", []) or []
             for x in fills:
-                self.process_fill(a, x, live=True)
+                self.process_fill(a, x)
             if fills:
-                self.db.commit()        # one commit per message, not per fill
+                self.db.commit()
         elif ch == "userEvents":
             liq = (m.get("data") or {}).get("liquidation")
             if liq:
@@ -148,17 +180,142 @@ class Observer:
         while h and h[0][0] < cutoff:
             h.popleft()
         mid = (bid + ask) / 2
-        for (a, c), ep in self.open_ep.items():       # track MAE on open paper positions
-            if c == coin and ep.get("their_open_px"):
-                adv = ((ep["their_open_px"] - mid) if ep["side"] == "long"
-                       else (mid - ep["their_open_px"])) / ep["their_open_px"]
+        for (a, c), ep in self.open_ep.items():
+            if c == coin:
+                adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
+                       else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
 
-    # -- reconnect reconciliation (don't stay stranded in a position the master exited) --
+    def _record_fill(self, addr, x):
+        liq = x.get("liquidation")
+        self.db.execute(
+            "INSERT OR IGNORE INTO live_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (addr, x.get("tid"), x.get("time"), now_ms(), x.get("coin"), x.get("side"), x.get("dir"),
+             f(x.get("px")), f(x.get("sz")), f(x.get("closedPnl")), f(x.get("fee")),
+             1 if x.get("crossed") else 0, 1 if liq else 0, (liq or {}).get("method"), x.get("hash")))
+
+    # -- core: master fills -> copy actions ----------------------------------
+    def process_fill(self, addr: str, x: dict):
+        coin = x.get("coin")
+        if not coin or x.get("tid") is None:
+            return
+        self._record_fill(addr, x)
+        t = x["time"]
+        sz = f(x.get("sz"))
+        signed = sz if x.get("side") == "B" else -sz
+        pos0 = f(x.get("startPosition"))
+        pos1 = pos0 + signed
+        px = f(x.get("px"))
+        key = (addr, coin)
+        liq = bool(x.get("liquidation"))
+        if coin not in self.sub_coins:
+            asyncio.create_task(self.ensure_coin(coin))
+
+        ep = self.open_ep.get(key)
+        if ep is None:
+            if abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT:
+                self._open_position(addr, coin, t, px, pos1)
+            return
+        ep["master_peak"] = max(ep["master_peak"], abs(pos1))
+        if liq:
+            ep["was_liq"] = 1
+        if abs(pos1) >= abs(pos0) - config.FLAT and not abs(pos1) < config.FLAT:
+            self._record_action(ep, addr, coin, t, "add", px, signed, pos1, 0.0, px, 0.0, 0.0)
+        else:
+            asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
+                                                   closing=abs(pos1) < config.FLAT, liq=liq))
+
+    def _open_position(self, addr, coin, t, px, pos1):
+        side = "long" if pos1 > 0 else "short"
+        cur = self.db.execute(
+            "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
+            "master_peak_sz,our_notional,opened_at,num_actions) VALUES (?,?,?,'open',?,?,?,?,?,0)",
+            (addr, coin, side, t, px, abs(pos1), config.NOTIONAL, now_iso()))
+        ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
+              "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
+              "entries": None, "rem": {L: 0.0 for L in LAT}, "pnl": {L: 0.0 for L in LAT},
+              "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
+              "num_actions": 0, "gap": False}
+        self.open_ep[(addr, coin)] = ep
+        asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
+
+    async def _resolve_entry(self, addr, coin, ep, t, master_px):
+        await asyncio.sleep(max(LAT) + 0.3)
+        side_is_buy = ep["side"] == "long"
+        h = self.coin_hist.get(coin, deque())
+        entries = {}
+        for L in LAT:
+            ba = paper.book_at(h, t + int(L * 1000))
+            entries[L] = (ba[1] if side_is_buy else ba[0]) if ba else master_px  # taker: buy@ask
+        ep["entries"] = entries
+        ep["rem"] = {L: config.NOTIONAL / entries[L] for L in LAT}
+        ep["entries_ready"].set()
+        self.db.execute(
+            "UPDATE copy_position SET entry_05=?,entry_2=?,entry_5=?,rem_05=?,rem_2=?,rem_5=? WHERE pos_id=?",
+            (entries[0.5], entries[2.0], entries[5.0], ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pos_id"]))
+        slip = (entries[PRIMARY] - master_px) / master_px * 1e4 * ep["sign"]
+        msz = ep["master_peak"] * ep["sign"]        # master's signed open size / position-after
+        self._record_action(ep, addr, coin, t, "open", master_px, msz, msz,
+                            ep["rem"][PRIMARY] * ep["sign"], entries[PRIMARY], 0.0, slip)
+        self.db.commit()
+
+    async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, gap=False):
+        async with ep["lock"]:
+            try:
+                await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
+            except asyncio.TimeoutError:
+                pass
+            if ep.get("entries") is None:
+                return
+            await asyncio.sleep(max(LAT) + 0.3)
+            side_is_buy = ep["side"] == "long"
+            h = self.coin_hist.get(coin, deque())
+            target_frac = 0.0 if closing else abs(pos1) / max(ep["master_peak"], 1e-12)
+            prim = {"qty": 0.0, "px": master_px, "pnl": 0.0}
+            for L in LAT:
+                qty_total = config.NOTIONAL / ep["entries"][L]
+                close_qty = max(0.0, ep["rem"][L] - qty_total * target_frac)
+                at = now_ms() if gap else t + int(L * 1000)
+                ba = paper.book_at(h, at)
+                exit_px = (ba[0] if side_is_buy else ba[1]) if ba else master_px  # taker: sell@bid
+                pnl = close_qty * (exit_px - ep["entries"][L]) * ep["sign"]
+                ep["pnl"][L] += pnl
+                ep["rem"][L] -= close_qty
+                if L == PRIMARY:
+                    prim = {"qty": close_qty, "px": exit_px, "pnl": pnl}
+            slip = (master_px - prim["px"]) / master_px * 1e4 * ep["sign"]
+            action = "close" if closing else "reduce"
+            self._record_action(ep, addr, coin, t, action, master_px, signed, pos1,
+                                -prim["qty"] * ep["sign"], prim["px"], prim["pnl"], slip)
+            status = ("liquidated" if (closing and liq) else "gap_closed" if (closing and gap)
+                      else "closed" if closing else "open")
+            self.db.execute(
+                "UPDATE copy_position SET rem_05=?,rem_2=?,rem_5=?,pnl_05=?,pnl_2=?,pnl_5=?,"
+                "mae_pct=?,was_liq=?,status=?,closed_at=? WHERE pos_id=?",
+                (ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pnl"][0.5], ep["pnl"][2.0],
+                 ep["pnl"][5.0], ep["mae"], ep.get("was_liq", 0), status,
+                 now_iso() if closing else None, ep["pos_id"]))
+            self.db.commit()
+            if closing:
+                self.open_ep.pop((addr, coin), None)
+                pct = ep["pnl"][PRIMARY] / config.NOTIONAL * 100
+                _log(f"CLOSED {addr[:10]} {coin} {ep['side']} pnl(2s)={pct:+.2f}% "
+                     f"mae={ep['mae']*100:.2f}% actions={ep['num_actions']}{' [GAP]' if gap else ''}"
+                     f"{' [LIQ]' if liq else ''}")
+
+    def _record_action(self, ep, addr, coin, t, action, master_px, sz_delta, pos_after,
+                       our_qty_delta, our_px, realized, slip):
+        ep["num_actions"] += 1
+        self.db.execute(
+            "INSERT INTO copy_action (pos_id,addr,coin,ts,recv_ms,action,master_px,master_sz_delta,"
+            "master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ep["pos_id"], addr, coin, t, now_ms(), action, master_px, sz_delta, pos_after,
+             our_qty_delta, our_px, realized, slip))
+        self.db.execute("UPDATE copy_position SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
+                        (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
+
+    # -- reconnect reconciliation --------------------------------------------
     async def reconcile_gap(self, gap_since: int):
-        """On reconnect, dynamic-lookback (gap + margin) ONLY for wallets we have an open copy
-        on: if the master closed during the downtime, finalize our copy as a late (gap) exit.
-        New positions opened during the gap are ignored — we never saw their live entry."""
         margin = 60_000
         tracked: dict = {}
         for (addr, coin) in list(self.open_ep.keys()):
@@ -175,125 +332,19 @@ class Observer:
             for x in sorted(page, key=lambda fl: fl["time"]):
                 key = (addr, x.get("coin"))
                 ep = self.open_ep.get(key)
-                if ep is None:                       # only reconcile positions we are tracking
+                if ep is None:
                     continue
                 signed = f(x.get("sz")) * (1 if x.get("side") == "B" else -1)
                 pos1 = f(x.get("startPosition")) + signed
-                self.pos[key] = pos1
-                ep["their_close_px"] = f(x.get("px"))
-                if x.get("liquidation"):
-                    ep["was_liq"] = 1
-                if abs(pos1) < config.FLAT:           # master exited while we were down
-                    ep["close_ms"] = x["time"]
-                    ep["gap_exit"] = True
-                    self.open_ep.pop(key, None)
-                    _log(f"GAP-EXIT {addr[:10]} {x.get('coin')}: master closed during downtime "
-                         f"-> closing our copy late")
-                    asyncio.create_task(self._finalize(addr, x.get("coin"), ep))
-
-    # -- core: fills -> episodes ---------------------------------------------
-    def process_fill(self, addr: str, x: dict, live: bool):
-        tid, coin = x.get("tid"), x.get("coin")
-        if not coin or tid is None:
-            return
-        t = x["time"]
-        self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), t)
-        liq = x.get("liquidation")
-        self.db.execute(
-            "INSERT OR IGNORE INTO live_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (addr, tid, t, now_ms(), coin, x.get("side"), x.get("dir"), f(x.get("px")),
-             f(x.get("sz")), f(x.get("closedPnl")), f(x.get("fee")), 1 if x.get("crossed") else 0,
-             1 if liq else 0, (liq or {}).get("method"), x.get("hash")))
-        # NB: caller (on_message / backfill) commits in batch — never commit per fill here.
-
-        sz = f(x.get("sz"))
-        signed = sz if x.get("side") == "B" else -sz
-        pos0 = f(x.get("startPosition"))
-        pos1 = pos0 + signed
-        key = (addr, coin)
-        self.pos[key] = pos1
-        px = f(x.get("px"))
-        if live and coin not in self.sub_coins:
-            asyncio.create_task(self.ensure_coin(coin))
-
-        ep = self.open_ep.get(key)
-        if ep is None and abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT:
-            ep = {"side": "long" if pos1 > 0 else "short", "open_ms": t, "their_open_px": px,
-                  "live": live, "mae": 0.0, "was_liq": 1 if liq else 0, "entries": None,
-                  "entries_ready": asyncio.Event()}
-            self.open_ep[key] = ep
-            if live:
-                asyncio.create_task(self._resolve_entries(coin, ep))
-        elif ep is not None:
-            ep["their_close_px"] = px
-            if liq:
-                ep["was_liq"] = 1
-            if abs(pos1) < config.FLAT:
-                ep["close_ms"] = t
-                self.open_ep.pop(key, None)
-                if ep.get("live"):
-                    asyncio.create_task(self._finalize(addr, coin, ep))
-                else:
-                    self._record_episode(addr, coin, ep)
-
-    async def _resolve_entries(self, coin, ep):
-        await asyncio.sleep(max(config.LATENCIES) + 0.2)
-        side_is_buy = ep["side"] == "long"
-        h = self.coin_hist.get(coin, deque())
-        entries = {}
-        for L in config.LATENCIES:
-            ba = paper.book_at(h, ep["open_ms"] + int(L * 1000))
-            entries[L] = (ba[1] if side_is_buy else ba[0]) if ba else None
-        ep["entries"] = entries
-        ep["entries_ready"].set()
-
-    async def _finalize(self, addr, coin, ep):
-        await asyncio.sleep(max(config.LATENCIES) + 0.3)
-        try:
-            await asyncio.wait_for(ep["entries_ready"].wait(), timeout=10)
-        except asyncio.TimeoutError:
-            pass
-        side_is_buy = ep["side"] == "long"
-        h = self.coin_hist.get(coin, deque())
-        gap = ep.get("gap_exit")
-        exits = {}
-        for L in config.LATENCIES:
-            # normal: exit at master-close + our latency. gap-exit: we only learned of the
-            # master's close on reconnect, so we exit LATE at the reconnect price (same for all
-            # bands) — this prices the cost of the disconnect into the result.
-            at = now_ms() if gap else ep["close_ms"] + int(L * 1000)
-            ba = paper.book_at(h, at)
-            exits[L] = (ba[0] if side_is_buy else ba[1]) if ba else None   # close = opposite side
-        self._record_episode(addr, coin, ep)
-        their_op = ep["their_open_px"]
-        their_cl = ep.get("their_close_px", their_op)
-        legs = paper.compute_legs(ep["side"], their_op, their_cl, ep.get("entries") or {}, exits)
-        for lg in legs:
-            self.db.execute(
-                "INSERT OR REPLACE INTO paper_legs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (addr, coin, ep["open_ms"], lg["latency_s"], lg["our_entry_px"], lg["our_exit_px"],
-                 lg["slip_entry_bps"], lg["slip_exit_bps"], lg["pnl_usd"], lg["pnl_pct"], lg["fees_usd"]))
-        self.db.commit()
-        their_pct = (their_cl - their_op) / their_op * 100 * (1 if side_is_buy else -1)
-        _log(f"copied {addr[:10]} {coin} {ep['side']} hold={(ep['close_ms']-ep['open_ms'])/3600000:.1f}h "
-             f"theirPnL={their_pct:+.2f}% mae={ep.get('mae',0)*100:.2f}% legs={len(legs)}")
-
-    def _record_episode(self, addr, coin, ep):
-        if "close_ms" not in ep:
-            return
-        side_is_buy = ep["side"] == "long"
-        op, cl = ep["their_open_px"], ep.get("their_close_px", ep["their_open_px"])
-        self.db.execute(
-            "INSERT OR REPLACE INTO episodes_live VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (addr, coin, ep["open_ms"], ep["close_ms"], ep["side"],
-             (ep["close_ms"] - ep["open_ms"]) / 1000.0, op, cl,
-             (cl - op) / op * (1 if side_is_buy else -1), ep.get("mae", 0.0), ep.get("was_liq", 0)))
-        self.db.commit()
+                ep["master_peak"] = max(ep["master_peak"], abs(pos1))
+                if abs(pos1) < abs(f(x.get("startPosition"))) - config.FLAT:   # a reduce/close in the gap
+                    await self._apply_reduce(addr, x.get("coin"), ep, x["time"], f(x.get("px")), signed,
+                                             pos1, closing=abs(pos1) < config.FLAT,
+                                             liq=bool(x.get("liquidation")), gap=True)
 
 
 # ------------------------------------------------------------------------- loaders
 def load_targets(db, n: int):
-    """Top-N enabled watchlist targets (by rank) + the coins they recently traded."""
     addrs = [r[0] for r in db.execute(
         "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
         "WHERE COALESCE(c.enabled,1)=1 ORDER BY w.rank LIMIT ?", (n,)).fetchall()]
@@ -305,17 +356,17 @@ def load_targets(db, n: int):
 # -------------------------------------------------------------------------- report
 def report(db) -> None:
     rows = db.execute(
-        "SELECT addr, latency_s, count(*) n, avg(pnl_pct)*100 avg_pct, sum(pnl_usd) tot, "
-        "avg(slip_entry_bps) sin, sum(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END)*1.0/count(*) winr "
-        "FROM paper_legs GROUP BY addr, latency_s ORDER BY addr, latency_s").fetchall()
+        "SELECT addr, count(*) n, "
+        "sum(CASE WHEN pnl_2>0 THEN 1 ELSE 0 END)*1.0/count(*) winr, "
+        "sum(pnl_05) p05, sum(pnl_2) p2, sum(pnl_5) p5, avg(pnl_2/our_notional)*100 avg2, "
+        "avg(num_actions) acts FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY p2 DESC").fetchall()
+    op = db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
     if not rows:
-        print("no paper legs yet — observer needs to run while targets trade.")
+        print(f"no closed copy positions yet ({op} open). Observer needs a target to complete a round-trip.")
         return
-    print(f"\nPAPER COPY RESULTS (notional ${config.NOTIONAL:g}/trade, taker {config.TAKER_FEE*1e4:.1f}bps/side)\n")
-    hdr = f"{'addr':42} {'lat':>4} {'trades':>6} {'avgPnL%':>8} {'totUSD':>9} {'win%':>5} {'slipIn(bps)':>11}"
+    print(f"\nPAPER COPY RESULTS (notional ${config.NOTIONAL:g}/position; pnl by latency band)  [{op} still open]\n")
+    hdr = f"{'addr':42} {'closed':>6} {'win%':>5} {'pnl@0.5s':>9} {'pnl@2s':>9} {'pnl@5s':>9} {'avg2%':>7} {'acts':>5}"
     print(hdr); print("-" * len(hdr))
-    for addr, lat, n, avg_pct, tot, sin, winr in rows:
-        print(f"{addr:42} {lat:>4.1f} {n:>6} {avg_pct:>+7.2f}% {tot:>9,.1f} {winr*100:>4.0f}% {sin:>11.1f}")
-    print("\n(avgPnL% = our return per $ notional after slippage+fees, by copy latency)")
-    ep = db.execute("SELECT count(*), sum(was_liquidated) FROM episodes_live").fetchone()
-    print(f"observed master episodes: {ep[0]}  (liquidations: {ep[1] or 0})")
+    for addr, n, winr, p05, p2, p5, avg2, acts in rows:
+        print(f"{addr:42} {n:>6} {winr*100:>4.0f}% {p05:>9,.1f} {p2:>9,.1f} {p5:>9,.1f} {avg2:>+6.2f}% {acts:>5.1f}")
+    print("\n(pnl@Xs = total $ if we'd copied at that reaction latency; primary copy = 2s)")

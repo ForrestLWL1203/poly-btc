@@ -135,18 +135,36 @@ CREATE TABLE IF NOT EXISTS live_fills (
     PRIMARY KEY (addr, tid)
 );
 CREATE INDEX IF NOT EXISTS idx_lf_addr ON live_fills(addr, time_ms);
-CREATE TABLE IF NOT EXISTS episodes_live (
-    addr TEXT, coin TEXT, open_ms INTEGER, close_ms INTEGER, side TEXT,
-    hold_s REAL, their_open_px REAL, their_close_px REAL, their_pnl_pct REAL,
-    mae_pct REAL, was_liquidated INTEGER,
-    PRIMARY KEY (addr, coin, open_ms)
+
+-- One row per copied position (our mirror of a master round-trip). UI "trades" list.
+-- Persisted on OPEN (status=open) and finalized on CLOSE — never kept only in memory,
+-- so it survives restarts and is fully reconstructable. Primary copy = 2s latency;
+-- pnl_05/pnl_2/pnl_5 carry the 3-band latency sensitivity at the position level.
+CREATE TABLE IF NOT EXISTS copy_position (
+    pos_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    addr TEXT, coin TEXT, side TEXT,
+    status         TEXT,                 -- open / closed / gap_closed / liquidated
+    master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
+    our_notional   REAL,
+    entry_05 REAL, entry_2 REAL, entry_5 REAL,   -- our entry px per latency band
+    rem_05 REAL,   rem_2 REAL,   rem_5 REAL,      -- our remaining qty (coin) per band
+    pnl_05 REAL DEFAULT 0, pnl_2 REAL DEFAULT 0, pnl_5 REAL DEFAULT 0,
+    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
+    opened_at TEXT, closed_at TEXT
 );
-CREATE TABLE IF NOT EXISTS paper_legs (
-    addr TEXT, coin TEXT, open_ms INTEGER, latency_s REAL,
-    our_entry_px REAL, our_exit_px REAL, slip_entry_bps REAL, slip_exit_bps REAL,
-    pnl_usd REAL, pnl_pct REAL, fees_usd REAL,
-    PRIMARY KEY (addr, coin, open_ms, latency_s)
+CREATE INDEX IF NOT EXISTS idx_cp_status ON copy_position(status);
+CREATE INDEX IF NOT EXISTS idx_cp_addr ON copy_position(addr);
+
+-- One row per master action on a tracked position (open / add / reduce / close), with
+-- full detail + OUR mirrored fill at the primary 2s latency. UI "timeline / drill-down".
+CREATE TABLE IF NOT EXISTS copy_action (
+    act_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    pos_id INTEGER, addr TEXT, coin TEXT, ts INTEGER, recv_ms INTEGER,
+    action         TEXT,                 -- open / add / reduce / close
+    master_px REAL, master_sz_delta REAL, master_pos_after REAL,
+    our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL
 );
+CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
 """
 
 
