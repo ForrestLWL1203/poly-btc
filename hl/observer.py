@@ -132,6 +132,37 @@ class Observer:
         if rows:
             _log(f"reloaded {len(rows)} open copy positions from db")
 
+    async def _reconcile_open(self):
+        """Startup state-reconcile (replaces the deleted time-based backfill for EXITS). Forward-only
+        means we can't see a master's close that happened while we were down → a reloaded copy could
+        orphan-hold. So for ONLY the wallets we still hold a copy on, fetch the master's CURRENT
+        positions (clearinghouseState); if the master no longer holds ours (flat on that coin, or
+        flipped to the opposite side), close our copy now at the live book. Masters still in the
+        position (same side) are left untouched — forward polling follows their next action."""
+        held = sorted({addr for (addr, _) in self.open_ep})
+        for addr in held:
+            st = await asyncio.to_thread(rest.post_soft, {"type": "clearinghouseState", "user": addr})
+            if not isinstance(st, dict):
+                continue                              # ambiguous fetch — safer to hold than wrong-close
+            szi = {}
+            for ap in st.get("assetPositions", []):
+                p = ap.get("position", {}) or {}
+                if p.get("coin") is not None:
+                    szi[p["coin"]] = f(p.get("szi")) or 0.0
+            for (a, coin), ep in list(self.open_ep.items()):
+                if a != addr:
+                    continue
+                m = szi.get(coin, 0.0)                # master's signed size on this coin, now
+                still = (m > config.FLAT) if ep["side"] == "long" else (m < -config.FLAT)
+                if still:
+                    continue                          # master still in it (same side) -> keep & follow
+                ba = await asyncio.to_thread(rest.book_top, coin)
+                mid = ((ba[0] + ba[1]) / 2) if ba else ep["entry_px"]
+                await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
+                                         closing=True, liq=False, maker=False, gap=True, forced_px=mid)
+                _log(f"RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
+                     f"pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f} (master flat at restart)")
+
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False):
         addrs, seed = load_targets(self.db, self.top_n, self.min_score)
@@ -301,6 +332,7 @@ class Observer:
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
                 self.stock_coins.add(coin)
+        await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
