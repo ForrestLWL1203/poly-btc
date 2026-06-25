@@ -27,6 +27,14 @@ MAX_BACKFILL_S = 3600      # never look back further than this on a poll (forwar
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs ~MAX_BACKFILL_S;
 #                                the rest is audit) — keeps the only unbounded-on-disk table bounded
 
+# Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
+# balance; each copy commits MARGIN_PCT of CURRENT AVAILABLE balance as isolated margin, at the
+# master's leverage capped to MAX_LEV. notional = margin * leverage; liquidation when price crosses
+# the isolated liq level (loss = margin). No stop-loss in v1 (the 2% margin is the per-trade max loss).
+INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
+MARGIN_PCT = 0.02           # margin per copy = this fraction of available balance
+MAX_LEV = 10.0              # cap on the master's leverage we mirror
+
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
 # If our entry price is more than this % worse than the master's, SKIP that open (don't chase).

@@ -29,8 +29,6 @@ from . import config, rest, ws
 from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
-LAT = config.LATENCIES
-PRIMARY = 2.0 if 2.0 in LAT else LAT[len(LAT) // 2]
 STALE_MS = 30_000          # a detected fill older than this priced at master px (book unreliable)
 
 
@@ -50,8 +48,46 @@ class Observer:
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
+        self.balance = config.INITIAL_BALANCE   # paper account realized equity (persisted)
+        self.acct_lock = asyncio.Lock()  # serialize margin allocation across concurrent opens
         self.ws = None
         self.stop = False
+
+    # -- paper account ------------------------------------------------------
+    def _available(self) -> float:
+        """Balance not currently tied up as isolated margin (margin scales with rem_size/size as a
+        position is partially closed)."""
+        locked = self.db.execute(
+            "SELECT COALESCE(SUM(margin * rem_size / size),0) FROM copy_position "
+            "WHERE status='open' AND size>0").fetchone()[0]
+        return self.balance - (locked or 0.0)
+
+    def _load_account(self):
+        row = self.db.execute("SELECT balance FROM copy_account WHERE id=1").fetchone()
+        if row:
+            self.balance = row[0]
+        else:
+            self.db.execute("INSERT INTO copy_account (id,initial_balance,balance,updated_at) "
+                            "VALUES (1,?,?,?)", (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now_iso()))
+            self.db.commit()
+        _log(f"account: balance ${self.balance:,.2f} / available ${self._available():,.2f}")
+
+    def _save_account(self):
+        self.db.execute("UPDATE copy_account SET balance=?, updated_at=? WHERE id=1",
+                        (self.balance, now_iso()))
+
+    def _target_leverage(self, addr, coin):
+        """The master's leverage for this coin (from clearinghouseState), capped to MAX_LEV. Falls
+        back to MAX_LEV if it can't be read (mirror-capped intent)."""
+        cs = rest.clearinghouse_state(addr)
+        lev = None
+        if isinstance(cs, dict):
+            for ap in cs.get("assetPositions", []):
+                pos = ap.get("position", {})
+                if pos.get("coin") == coin:
+                    lev = f((pos.get("leverage") or {}).get("value"))
+                    break
+        return max(1.0, min(lev or config.MAX_LEV, config.MAX_LEV))
 
     def _copyable(self, coin: str) -> bool:
         """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
@@ -71,23 +107,21 @@ class Observer:
     # -- restart recovery: reload open copies from db ------------------------
     def _reload_open(self):
         rows = self.db.execute(
-            "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,"
-            "entry_05,entry_2,entry_5,rem_05,rem_2,rem_5,pnl_05,pnl_2,pnl_5,mae_pct,num_actions "
+            "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
+            "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,mae_pct,num_actions "
             "FROM copy_position WHERE status='open'").fetchall()
         for r in rows:
-            (pid, addr, coin, side, mo, mpx, peak, e05, e2, e5, r05, r2, r5, p05, p2, p5, mae, na) = r
+            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, mae, na) = r
             ev = asyncio.Event()
-            if e2 is not None:
+            if epx is not None:
                 ev.set()
             self.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
-                "open_maker": False, "open_oid": None,
-                "entries": {0.5: e05, 2.0: e2, 5.0: e5} if e2 is not None else None,
-                "rem": {0.5: r05 or 0, 2.0: r2 or 0, 5.0: r5 or 0},
-                "pnl": {0.5: p05 or 0, 2.0: p2 or 0, 5.0: p5 or 0},
-                "entries_ready": ev, "lock": asyncio.Lock(), "mae": mae or 0.0,
-                "num_actions": na or 0, "gap": False}
+                "open_maker": False, "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
+                "notional": notl or 0.0, "entry_px": epx, "size": sz or 0.0, "rem_size": rem or 0.0,
+                "liq_px": liq or 0.0, "realized_pnl": rpnl or 0.0, "entries_ready": ev,
+                "lock": asyncio.Lock(), "mae": mae or 0.0, "num_actions": na or 0, "gap": False}
         if rows:
             _log(f"reloaded {len(rows)} open copy positions from db")
 
@@ -230,6 +264,7 @@ class Observer:
                             adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
                                    else (mid - ep["master_open_px"])) / ep["master_open_px"]
                             ep["mae"] = max(ep.get("mae", 0.0), adv)
+                    self._maybe_liquidate(coin, mid)             # isolated stop-out if liq_px crossed
             await asyncio.sleep(2 if self.stock_coins else 5)
 
     @staticmethod
@@ -248,6 +283,7 @@ class Observer:
         self.valid_coins = self.crypto_coins | rest.builder_universe()  # + transparent stocks (l2Book)
         _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
+        self._load_account()                       # restore paper account balance (restart-safe)
         self._reload_open()                        # restore open copies (restart-safe)
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
@@ -293,6 +329,7 @@ class Observer:
                 adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
+        self._maybe_liquidate(coin, mid)           # isolated stop-out if price crossed liq_px
 
     def _record_fill(self, addr, x) -> bool:
         """Insert the fill; True if NEW, False if this tid was already seen (dedup). This is what
@@ -346,13 +383,14 @@ class Observer:
         side = "long" if pos1 > 0 else "short"
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
-            "master_peak_sz,our_notional,opened_at,num_actions) VALUES (?,?,?,'open',?,?,?,?,?,0)",
-            (addr, coin, side, t, px, abs(pos1), config.NOTIONAL, now_iso()))
+            "master_peak_sz,opened_at,num_actions) VALUES (?,?,?,'open',?,?,?,?,0)",
+            (addr, coin, side, t, px, abs(pos1), now_iso()))
         ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
-              "open_maker": maker, "open_oid": oid, "entries": None, "rem": {L: 0.0 for L in LAT},
-              "pnl": {L: 0.0 for L in LAT}, "entries_ready": asyncio.Event(),
-              "lock": asyncio.Lock(), "mae": 0.0, "num_actions": 0, "gap": False}
+              "open_maker": maker, "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
+              "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
+              "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
+              "num_actions": 0, "gap": False}
         self.open_ep[(addr, coin)] = ep
         asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
 
@@ -361,67 +399,85 @@ class Observer:
         stale = (now_ms() - t) > STALE_MS            # backfilled-late: book is no longer the fill's
         px = master_px if stale else self._fill_px(coin, is_buy, ep["open_maker"], master_px)
         chase = (px - master_px) / master_px * 1e4 * ep["sign"]   # bps worse than master (+ = worse)
-        # Chase guard (UI-tunable): on a spike the master eats the book with size and our taker fill
-        # lands worse — past the threshold we DON'T chase. Taker opens only; maker rests passively.
         if (config.MAX_ENTRY_CHASE_PCT is not None and not ep["open_maker"]
-                and chase > config.MAX_ENTRY_CHASE_PCT * 100):
+                and chase > config.MAX_ENTRY_CHASE_PCT * 100):     # spike too far past master -> skip
             self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
             self.db.commit()
             self.open_ep.pop((addr, coin), None)
             _log(f"SKIP {addr[:10]} {coin} open: chase {chase:+.1f}bps > {config.MAX_ENTRY_CHASE_PCT}% (spike)")
             return
-        entries = {L: px for L in LAT}               # one live-book price (REST single latency)
-        ep["entries"] = entries
-        ep["rem"] = {L: config.NOTIONAL / px for L in LAT}
+        lev = await asyncio.to_thread(self._target_leverage, addr, coin)   # master's leverage, capped
+        async with self.acct_lock:                   # serialize margin allocation across opens
+            margin = max(0.0, self._available() * config.MARGIN_PCT)
+            notional = margin * lev
+            size = notional / px if px else 0.0
+            liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
+            ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px,
+                      size=size, rem_size=size, liq_px=liq_px)
+            self.db.execute(
+                "UPDATE copy_position SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,"
+                "liq_px=? WHERE pos_id=?", (lev, margin, notional, px, size, size, liq_px, ep["pos_id"]))
+            self.db.commit()
         ep["entries_ready"].set()
-        self.db.execute(
-            "UPDATE copy_position SET entry_05=?,entry_2=?,entry_5=?,rem_05=?,rem_2=?,rem_5=? WHERE pos_id=?",
-            (px, px, px, ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pos_id"]))
-        msz = ep["master_peak"] * ep["sign"]         # master's signed open size / position-after
+        msz = ep["master_peak"] * ep["sign"]
         self._record_action(ep, addr, coin, t, "open", ep["open_maker"], ep["open_oid"], master_px,
-                            msz, msz, ep["rem"][PRIMARY] * ep["sign"], px, 0.0, chase)
+                            msz, msz, size * ep["sign"], px, 0.0, chase)
         self.db.commit()
+        _log(f"OPEN {addr[:10]} {coin} {ep['side']} ${margin:,.0f}m {lev:.0f}x notl=${notional:,.0f} "
+             f"@ {px:g} liq={liq_px:g} avail=${self._available():,.0f}")
 
-    async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker, oid=None, gap=False):
+    async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker,
+                            oid=None, gap=False, forced_px=None):
         async with ep["lock"]:
             try:
                 await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
             except asyncio.TimeoutError:
                 pass
-            if ep.get("entries") is None:
+            if ep.get("entry_px") is None or (addr, coin) not in self.open_ep:
                 return
             is_buy = ep["side"] == "short"           # closing a long => sell; closing a short => buy
             stale = (now_ms() - t) > STALE_MS
-            exit_px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
+            exit_px = (forced_px if forced_px is not None
+                       else master_px if stale else self._fill_px(coin, is_buy, maker, master_px))
             target_frac = 0.0 if closing else abs(pos1) / max(ep["master_peak"], 1e-12)
-            prim = {"qty": 0.0, "px": exit_px, "pnl": 0.0}
-            for L in LAT:
-                qty_total = config.NOTIONAL / ep["entries"][L]
-                close_qty = max(0.0, ep["rem"][L] - qty_total * target_frac)
-                pnl = close_qty * (exit_px - ep["entries"][L]) * ep["sign"]
-                ep["pnl"][L] += pnl
-                ep["rem"][L] -= close_qty
-                if L == PRIMARY:
-                    prim = {"qty": close_qty, "px": exit_px, "pnl": pnl}
-            slip = (master_px - prim["px"]) / master_px * 1e4 * ep["sign"]
+            close_size = max(0.0, ep["rem_size"] - ep["size"] * target_frac)
+            pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"]
+            ep["rem_size"] -= close_size
+            ep["realized_pnl"] += pnl
+            self.balance += pnl                       # realize into the paper account
+            slip = (master_px - exit_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             action = "close" if closing else "reduce"
             self._record_action(ep, addr, coin, t, action, maker, oid, master_px, signed, pos1,
-                                -prim["qty"] * ep["sign"], prim["px"], prim["pnl"], slip)
+                                -close_size * ep["sign"], exit_px, pnl, slip)
             status = ("liquidated" if (closing and liq) else "gap_closed" if (closing and gap)
                       else "closed" if closing else "open")
             self.db.execute(
-                "UPDATE copy_position SET rem_05=?,rem_2=?,rem_5=?,pnl_05=?,pnl_2=?,pnl_5=?,"
-                "mae_pct=?,was_liq=?,status=?,closed_at=? WHERE pos_id=?",
-                (ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pnl"][0.5], ep["pnl"][2.0],
-                 ep["pnl"][5.0], ep["mae"], ep.get("was_liq", 0), status,
-                 now_iso() if closing else None, ep["pos_id"]))
+                "UPDATE copy_position SET rem_size=?,realized_pnl=?,mae_pct=?,was_liq=?,status=?,"
+                "closed_at=? WHERE pos_id=?", (ep["rem_size"], ep["realized_pnl"], ep["mae"],
+                ep.get("was_liq", 0), status, now_iso() if closing else None, ep["pos_id"]))
+            self._save_account()
             self.db.commit()
             if closing:
                 self.open_ep.pop((addr, coin), None)
-                pct = ep["pnl"][PRIMARY] / config.NOTIONAL * 100
-                _log(f"CLOSED {addr[:10]} {coin} {ep['side']} pnl={pct:+.2f}% "
-                     f"mae={ep['mae']*100:.2f}% actions={ep['num_actions']}{' [GAP]' if gap else ''}"
-                     f"{' [LIQ]' if liq else ''}")
+                ret = (ep["realized_pnl"] / ep["margin"] * 100) if ep["margin"] else 0.0
+                _log(f"CLOSED {addr[:10]} {coin} {ep['side']} pnl=${ep['realized_pnl']:+,.1f} "
+                     f"({ret:+.0f}% on margin) bal=${self.balance:,.0f}"
+                     f"{' [GAP]' if gap else ''}{' [LIQ]' if liq else ''}")
+
+    async def _liquidate(self, addr, coin, ep):
+        if ep.get("liquidating") or (addr, coin) not in self.open_ep:
+            return
+        ep["liquidating"] = True
+        ep["was_liq"] = 1                             # isolated stop-out at liq_px: loss = remaining margin
+        await self._apply_reduce(addr, coin, ep, now_ms(), ep["liq_px"], 0.0, 0.0,
+                                 closing=True, liq=True, maker=False, forced_px=ep["liq_px"])
+
+    def _maybe_liquidate(self, coin, mid):
+        for (a, c), ep in list(self.open_ep.items()):
+            if c == coin and ep.get("liq_px") and ep["rem_size"] > config.FLAT and not ep.get("liquidating"):
+                hit = mid <= ep["liq_px"] if ep["side"] == "long" else mid >= ep["liq_px"]
+                if hit:
+                    asyncio.create_task(self._liquidate(a, coin, ep))
 
     def _record_action(self, ep, addr, coin, t, action, maker, oid, master_px, sz_delta, pos_after,
                        our_qty_delta, our_px, realized, slip):
@@ -474,18 +530,24 @@ def load_targets(db, n: int):
 
 # -------------------------------------------------------------------------- report
 def report(db) -> None:
+    acct = db.execute("SELECT initial_balance, balance FROM copy_account WHERE id=1").fetchone()
+    init, bal = acct if acct else (config.INITIAL_BALANCE, config.INITIAL_BALANCE)
+    op, locked = db.execute(
+        "SELECT count(*), COALESCE(SUM(margin*rem_size/size),0) FROM copy_position "
+        "WHERE status='open' AND size>0").fetchone()
+    liqd = db.execute("SELECT count(*) FROM copy_position WHERE status='liquidated'").fetchone()[0]
+    print(f"\nPAPER ACCOUNT: balance ${bal:,.2f} (start ${init:,.0f}, {('+' if bal>=init else '')}"
+          f"{(bal/init-1)*100:.2f}%) | available ${bal-(locked or 0):,.2f} | {op} open, {liqd} liquidated\n")
     rows = db.execute(
-        "SELECT addr, count(*) n, "
-        "sum(CASE WHEN pnl_2>0 THEN 1 ELSE 0 END)*1.0/count(*) winr, "
-        "sum(pnl_2) p2, avg(pnl_2/our_notional)*100 avg2, "
-        "avg(num_actions) acts FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY p2 DESC").fetchall()
-    op = db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
+        "SELECT addr, count(*) n, sum(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END)*1.0/count(*) winr, "
+        "sum(realized_pnl) pnl, sum(CASE WHEN status='liquidated' THEN 1 ELSE 0 END) liq, "
+        "avg(num_actions) acts FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY pnl DESC").fetchall()
     if not rows:
-        print(f"no closed copy positions yet ({op} open). Observer needs a target to complete a round-trip.")
+        print(f"no closed copy positions yet ({op} open). Needs a target to complete a round-trip.")
         return
-    print(f"\nPAPER COPY RESULTS (notional ${config.NOTIONAL:g}/position; live-book pricing)  [{op} still open]\n")
-    hdr = f"{'addr':42} {'closed':>6} {'win%':>5} {'pnl$':>10} {'avg%':>7} {'acts':>5}"
+    hdr = f"{'addr':42} {'closed':>6} {'win%':>5} {'pnl$':>10} {'liq':>4} {'acts':>5}"
     print(hdr); print("-" * len(hdr))
-    for addr, n, winr, p2, avg2, acts in rows:
-        print(f"{addr:42} {n:>6} {winr*100:>4.0f}% {p2:>10,.1f} {avg2:>+6.2f}% {acts:>5.1f}")
-    print("\n(pnl = total $ at our copy fills vs the master; fixed ${:g} notional/position)".format(config.NOTIONAL))
+    for addr, n, winr, pnl, liq, acts in rows:
+        print(f"{addr:42} {n:>6} {winr*100:>4.0f}% {pnl:>+10,.1f} {liq:>4} {acts:>5.1f}")
+    print(f"\n(margin {config.MARGIN_PCT*100:g}% of available/trade, master leverage capped {config.MAX_LEV:g}x, "
+          "isolated, no stop)")

@@ -146,19 +146,29 @@ CREATE TABLE IF NOT EXISTS live_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_lf_addr ON live_fills(addr, time_ms);
 
--- One row per copied position (our mirror of a master round-trip). UI "trades" list.
--- Persisted on OPEN (status=open) and finalized on CLOSE — never kept only in memory,
--- so it survives restarts and is fully reconstructable. Primary copy = 2s latency;
--- pnl_05/pnl_2/pnl_5 carry the 3-band latency sensitivity at the position level.
+-- Our paper account: ONE row. balance = realized equity (starts at initial_balance, += closed
+-- PnL); available = balance - sum(margin of open positions); each new copy locks margin_pct of
+-- available. Persisted so the simulated wallet survives restarts.
+CREATE TABLE IF NOT EXISTS copy_account (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    initial_balance REAL,
+    balance         REAL,
+    updated_at      TEXT
+);
+
+-- One row per copied position (our mirror of a master round-trip). UI "trades" list. Persisted on
+-- OPEN (status=open) and finalized on CLOSE/LIQUIDATION — never memory-only, survives restarts.
+-- Real-account model: isolated margin, leverage = min(master's, MAX_LEV), notional = margin*lev,
+-- size = notional/entry; liquidation when price crosses liq_px (loss = margin). No stop-loss (v1).
 CREATE TABLE IF NOT EXISTS copy_position (
     pos_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     addr TEXT, coin TEXT, side TEXT,
     status         TEXT,                 -- open / closed / gap_closed / liquidated
     master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
-    our_notional   REAL,
-    entry_05 REAL, entry_2 REAL, entry_5 REAL,   -- our entry px per latency band
-    rem_05 REAL,   rem_2 REAL,   rem_5 REAL,      -- our remaining qty (coin) per band
-    pnl_05 REAL DEFAULT 0, pnl_2 REAL DEFAULT 0, pnl_5 REAL DEFAULT 0,
+    leverage REAL, margin REAL, notional REAL,    -- our sizing (margin = 2% of available at open)
+    entry_px REAL, size REAL, rem_size REAL,       -- our fill px, position size (coin), remaining
+    liq_px REAL,                                   -- isolated liquidation price (loss = margin)
+    realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
     mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
     opened_at TEXT, closed_at TEXT
 );
