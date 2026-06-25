@@ -602,50 +602,85 @@ def load_targets(db, n: int, min_score: float = 0.0):
 
 # -------------------------------------------------------------------------- report
 def report(db) -> None:
+    """On-demand snapshot. ONE table row per (followed-wallet, coin) — open + closed copies merged.
+    For OPEN rows the master's side (margin/entry/leverage) is fetched LIVE from clearinghouseState
+    (so it reflects where the target stands NOW), the PnL is live mark-to-market (tagged 浮); CLOSED
+    rows show realized PnL (tagged 实) and the master's entry as recorded at open (live state gone)."""
+    from collections import defaultdict
     acct = db.execute("SELECT initial_balance, balance FROM copy_account WHERE id=1").fetchone()
     init, bal = acct if acct else (config.INITIAL_BALANCE, config.INITIAL_BALANCE)
-    liqd = db.execute("SELECT count(*) FROM copy_position WHERE status='liquidated'").fetchone()[0]
-    # OPEN positions: fetch live top-of-book per coin -> mark-to-market unrealized + true equity
-    opens = db.execute("SELECT pos_id,addr,coin,side,entry_px,rem_size,margin,size,realized_pnl,leverage "
-                       "FROM copy_position WHERE status='open' AND size>0").fetchall()
-    px, unreal, locked, rows_open = {}, 0.0, 0.0, []
-    for pos_id, a, coin, side, entry, rem, mgn, size, rpnl, lev in opens:
-        if coin not in px:
+    rank_of = {a: r for r, a in db.execute("SELECT rank, addr FROM watchlist").fetchall()}
+
+    groups = defaultdict(list)                       # (addr,coin) -> [position rows]
+    for row in db.execute(
+            "SELECT pos_id,addr,coin,side,leverage,margin,entry_px,size,rem_size,realized_pnl,status,"
+            "master_open_px FROM copy_position").fetchall():
+        groups[(row[1], row[2])].append(row)
+
+    open_keys = {(a, c) for (a, c), rs in groups.items() if any(x[10] == "open" for x in rs)}
+    mark = {}                                        # coin -> live mid (open positions only)
+    for (_, coin) in open_keys:
+        if coin not in mark:
             ba = rest.book_top(coin)
-            px[coin] = ((ba[0] + ba[1]) / 2) if ba else entry
-        u = rem * (px[coin] - entry) * (1 if side == "long" else -1)
-        cur_mgn = mgn * rem / size
-        unreal += u; locked += cur_mgn
-        # the OPEN action: master's fill px, our copy px, and copy latency (our detect - master fill)
-        oa = db.execute("SELECT master_px, our_px, recv_ms-ts FROM copy_action "
-                        "WHERE pos_id=? AND action='open' ORDER BY act_id LIMIT 1", (pos_id,)).fetchone()
-        m_px, o_px, lag_ms = oa if oa else (entry, entry, None)
-        rows_open.append((a[:10], coin, side, lev, cur_mgn, m_px, o_px, lag_ms, rpnl, u))
-    equity = bal + unreal
-    print(f"\nPAPER ACCOUNT  equity ${equity:,.2f}  ({equity/init-1:+.2%} vs ${init:,.0f} start)")
-    print(f"  realized balance ${bal:,.2f} | unrealized ${unreal:+,.2f} | available ${bal-locked:,.2f} | "
-          f"{len(opens)} open, {liqd} liquidated\n")
-    rows = db.execute(
-        "SELECT addr, count(*) n, sum(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END)*1.0/count(*) winr, "
-        "sum(realized_pnl) pnl, sum(CASE WHEN status='liquidated' THEN 1 ELSE 0 END) liq "
-        "FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY pnl DESC").fetchall()
-    if rows:
-        print("CLOSED (realized PnL, per wallet):")
-        h = f"  {'addr':42} {'closed':>6} {'win%':>5} {'pnl$':>9} {'liq':>4}"
-        print(h + "\n  " + "-" * (len(h) - 2))
-        for addr, n, winr, pnl, liq in rows:
-            print(f"  {addr:42} {n:>6} {winr*100:>4.0f}% {pnl:>+9,.1f} {liq:>4}")
-    if rows_open:
-        print("\nOPEN (mark-to-market):")
-        h = (f"  {'addr':10} {'coin':12} {'side':5} {'lev':>4} {'margin$':>8} {'mstr_px':>11} "
-             f"{'our_px':>11} {'lag':>6} {'real$':>7} {'unreal$':>9} {'tot%mgn':>8}")
-        print(h + "\n  " + "-" * (len(h) - 2))
-        for a, coin, side, lev, cur_mgn, m_px, o_px, lag_ms, rpnl, u in sorted(rows_open, key=lambda r: -(r[8] + r[9])):
-            tot = rpnl + u
-            lag = f"{lag_ms/1000:.1f}s" if lag_ms is not None else "—"
-            print(f"  {a:10} {coin:12} {side:5} {lev:>3.0f}x {cur_mgn:>8.0f} {m_px:>11g} "
-                  f"{o_px:>11g} {lag:>6} {rpnl:>+7.1f} {u:>+9.1f} "
-                  f"{(tot/cur_mgn*100 if cur_mgn else 0):>+7.0f}%")
-        print("  (mstr_px = target wallet's fill | our_px = our copy fill | lag = our detect − target fill)")
+            mark[coin] = ((ba[0] + ba[1]) / 2) if ba else None
+    master = {}                                      # addr -> {coin -> live master position dict}
+    for addr in {a for (a, _) in open_keys}:
+        cs = rest.clearinghouse_state(addr)
+        mp = {}
+        if isinstance(cs, dict):
+            for ap in cs.get("assetPositions", []):
+                p = ap.get("position", {}) or {}
+                if p.get("coin"):
+                    mp[p["coin"]] = p
+        master[addr] = mp
+
+    table, open_margin, total_unreal = [], 0.0, 0.0
+    for (addr, coin), rs in groups.items():
+        realized = sum(x[9] for x in rs)
+        opens = [x for x in rs if x[10] == "open"]
+        num = rank_of.get(addr)
+        num_s = f"#{num}" if num else addr[:6]
+        if opens:
+            r = opens[0]
+            our_lev, our_mgn, our_entry, rem, side = r[4], r[5], r[6], r[8], r[3]
+            mk = mark.get(coin) or our_entry
+            unreal = rem * (mk - our_entry) * (1 if side == "long" else -1)
+            open_margin += our_mgn; total_unreal += unreal
+            mp = master.get(addr, {}).get(coin, {})
+            m_entry = f(mp.get("entryPx"))
+            m_lev = (mp.get("leverage") or {}).get("value")
+            m_mgn = f(mp.get("marginUsed")) or (f(mp.get("positionValue")) / m_lev if m_lev else None)
+            lr = db.execute("SELECT recv_ms-ts FROM copy_action WHERE pos_id=? AND action='open' "
+                            "ORDER BY act_id LIMIT 1", (r[0],)).fetchone()
+            lag_ms = lr[0] if lr else None
+            table.append((num_s, coin, side, m_mgn, m_entry, m_lev, lag_ms,
+                          our_entry, our_mgn, our_lev, realized + unreal, "浮"))
+        else:                                        # fully closed (master live state gone)
+            r = rs[-1]
+            table.append((num_s, coin, r[3], None, r[11], None, None,
+                          r[6], r[5], r[4], realized, "实"))
+    equity = bal + total_unreal
+
+    print(f"\n{'='*100}")
+    print(f"PAPER COPY 报告    权益 ${equity:,.2f}    ROI {equity/init-1:+.2%}   (起始 ${init:,.0f})")
+    print(f"  已实现余额 ${bal:,.2f}   浮动盈亏 ${total_unreal:+,.2f}   "
+          f"持仓占用保证金 ${open_margin:,.2f}   可动用余额 ${bal-open_margin:,.2f}")
+    n_open = sum(1 for t in table if t[11] == "浮")
+    print(f"  在持 {n_open} 笔 / 已平 {len(table)-n_open} 笔   (按 钱包+币种 合并)")
+    print("=" * 100)
+    if not table:
+        print("  (还没有跟单记录)\n"); return
+    h = ("  {:>4} {:10} {:5}|{:>10} {:>11} {:>6}|{:>7}|{:>11} {:>10} {:>6}|{:>11}".format(
+        "编号", "coin", "side", "tgt_mgn", "tgt_px", "tgt_lv", "lag", "our_px", "our_mgn", "our_lv", "pnl$"))
+    print(h + "\n  " + "-" * (len(h) - 2))
+    def s(v, fmt): return (fmt % v) if v is not None else "—"
+    for t in sorted(table, key=lambda r: -r[10]):
+        num_s, coin, side, m_mgn, m_entry, m_lev, lag_ms, o_entry, o_mgn, o_lev, pnl, lbl = t
+        lag = f"{lag_ms/1000:.1f}s" if lag_ms is not None else "—"
+        print("  {:>4} {:10} {:5}|{:>10} {:>11} {:>6}|{:>7}|{:>11} {:>10} {:>5}x|{:>+10,.1f}{}".format(
+            num_s, coin, side, s(m_mgn, "$%,.0f"), s(m_entry, "%g"), s(m_lev, "%.0fx"),
+            lag, ("%g" % o_entry), o_mgn, o_lev, pnl, lbl))
+    print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
+          "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
     print(f"\n(margin {config.MARGIN_PCT*100:g}% open / {config.ADD_MARGIN_PCT*100:g}% per add of available, "
           f"master leverage capped {config.MAX_LEV:g}x, isolated, no stop)")
