@@ -59,15 +59,23 @@ def gates(m: dict, now_ms: int, p) -> tuple:
     if (now_ms - m["last_fill_ms"]) / 86400_000.0 > p.inactive_days:
         return False, "inactive"
     if m["n_trades"] < p.min_trades:
-        return False, "too_few_trades"
+        return False, "too_few_trades"          # raised w/ win gate: high win over few trades = luck
     if m["net_pnl"] <= 0:
         return False, "not_profitable"
+    if m["win_rate"] < getattr(p, "min_win", 0.0):
+        return False, "win_too_low"             # CONSISTENCY — the primary selector
+    if m["roi_equity"] < getattr(p, "min_roi_eq", 0.0):
+        return False, "roi_too_low"             # realized 14d strength (not leaderboard unrealized)
+    dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0)
+    if dd_eq > getattr(p, "max_dd_eq", 1e9):
+        return False, "drawdown_too_high"        # variance cap (equity drawdown)
     if m["trades_per_day"] > p.max_tpd:
-        return False, "too_frequent"
+        return False, "too_frequent"            # TRUE frequency (episodes/day), not volume turnover
     if m["median_hold_s"] < p.min_hold_h * 3600:
         return False, "hold_too_short"
-    # NB: no taker/maker gate — patient limit (maker) traders are followable now (we mirror
-    # their resting orders via the poller). MMs are excluded by the hold/frequency gates above.
+    # NB: no taker/maker gate (maker limit traders are followable via the poller); no volume-turnover
+    # gate (it conflates leverage w/ frequency) — real frequency is episodes/day above. MMs never
+    # return to flat -> 0 episodes -> caught by too_few_trades.
     return True, "ok"
 
 

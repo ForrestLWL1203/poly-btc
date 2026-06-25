@@ -216,6 +216,38 @@ def _record_run(db, started, t0, candidates, probed, added, retired, kept, rejec
     db.commit()
 
 
+def regate(db, p) -> int:
+    """Re-apply gates() + score() on ALREADY-STORED profile metrics (no network, no re-fetch) and
+    rebuild the watchlist. Thresholds (win/roiEq/dd/tpd/hold/...) can be tuned in seconds without a
+    full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
+    now = int(time.time() * 1000)
+    stamp = now_iso()
+    rows = db.execute(
+        "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,win_rate,roi_equity,"
+        "max_drawdown,acct_value,trades_per_day,median_hold_s,age_days,times_active,liq_worst_pct "
+        "FROM profile").fetchall()
+    n_active = 0
+    for r in rows:
+        (addr, old, n_tr, perp_frac, last_fill, net, win, roi_eq, mdd, acct, tpd, hold, age, ta, liqw) = r
+        m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
+             "net_pnl": net or 0.0, "win_rate": win or 0.0, "roi_equity": roi_eq or 0.0,
+             "max_drawdown": mdd or 0.0, "acct_value": acct or 0.0, "trades_per_day": tpd or 0.0,
+             "median_hold_s": hold or 0, "age_days": age, "times_active": ta or 0,
+             "liq_worst_pct": liqw or 0.0}
+        if m["n_trades"] == 0:
+            ok, reason = False, "no_perp_trades"
+        else:
+            ok, reason = metrics.gates(m, now, p)
+        status = "active" if ok else ("retired" if old == "active" else "rejected")
+        score = metrics.score(m) if ok else 0.0
+        db.execute("UPDATE profile SET status=?,reason=?,score=? WHERE addr=?", (status, reason, score, addr))
+        n_active += 1 if ok else 0
+    db.commit()
+    n = refresh_watchlist(db, stamp)
+    print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
+    return n
+
+
 # ----------------------------------------------------------------------------- scan
 def scan(db, p) -> None:
     now_ms = int(time.time() * 1000)
@@ -227,7 +259,8 @@ def scan(db, p) -> None:
     if not p.no_harvest:
         print("harvest leaderboard ...", flush=True)
         n_cand = harvest(db, p.min_acct, p.max_turnover, p)
-        print(f"  {n_cand} candidates (acct>={p.min_acct:g}, turnover<={p.max_turnover:g}x, "
+        turn = "off" if p.max_turnover >= 1e8 else f"<={p.max_turnover:g}x"
+        print(f"  {n_cand} candidates (acct>=${p.min_acct:g}, turnover {turn}, "
               f"mon_roi>{getattr(p,'min_roi',0.2):.0%}, all_roi>0, 24h-active)", flush=True)
 
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(p.order, "mon_roi")
