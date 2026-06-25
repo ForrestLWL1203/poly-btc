@@ -24,16 +24,19 @@ def main() -> int:
         pr.add_argument("--max-daily-eps", type=float, default=30.0, help="reject bots: max median episodes/active-day")
         pr.add_argument("--min-activity", type=float, default=0.5, help="min active_days/lookback (regular trading)")
 
-    s = sub.add_parser("scan", help="harvest + refresh actives + probe new -> update watchlist")
+    s = sub.add_parser("scan", help="full sweep: re-profile ALL candidates -> rebuild watchlist")
     s.add_argument("--days", type=int, default=14)
-    s.add_argument("--limit", type=int, default=120, help="max NEW candidates to probe this run")
+    s.add_argument("--limit", type=int, default=100000, help="cap workset size (default ~unbounded = full sweep)")
     s.add_argument("--order", choices=["mon_roi", "week_roi", "mon_pnl"], default="mon_roi")
     s.add_argument("--min-acct", type=float, default=5000, help="noise guard only (we copy by pct, not $)")
     s.add_argument("--max-turnover", type=float, default=1e9, help="OFF by default (volume!=frequency)")
     s.add_argument("--min-roi", type=float, default=0.20, help="modest 30d (month) ROI floor (coarse)")
-    s.add_argument("--min-crypto", type=float, default=0.3, help="pre-screen: min recent crypto-fill share")
+    s.add_argument("--min-crypto", type=float, default=0.3, help="(unused) legacy prescreen arg")
     s.add_argument("--max-pages", type=int, default=15)
-    s.add_argument("--workers", type=int, default=4, help="concurrent profiling threads (REST pacer still caps total rate)")
+    s.add_argument("--workers", type=int, default=4, help="concurrent profiling threads (rate is capped by --scan-interval)")
+    s.add_argument("--scan-interval", type=float, default=8.0,
+                   help="REST pace (s/request) for the scan PROCESS — slow trickle so it shares the IP "
+                        "rate limit with the always-on observer (8s = ~7.5/min, leaves ~67/min for copy)")
     add_gate_args(s)
     s.add_argument("--no-harvest", action="store_true")
 
@@ -51,7 +54,8 @@ def main() -> int:
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA)
     if args.cmd == "scan":
-        scanner.scan(db, args)
+        config.MIN_POST_INTERVAL = args.scan_interval   # slow this PROCESS's REST pace (trickle);
+        scanner.scan(db, args)                          # the observer process keeps its own fast pace
     elif args.cmd == "watchlist":
         scanner.watchlist(db, args.top)
     elif args.cmd == "harvest":

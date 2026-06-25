@@ -251,13 +251,18 @@ def scan(db, p) -> None:
         print(f"  {n_cand} candidates (acct>=${p.min_acct:g}, turnover {turn}, "
               f"mon_roi>{getattr(p,'min_roi',0.2):.0%}, all_roi>0, 24h-active)", flush=True)
 
+    # FULL sweep every cycle (now cheap): re-profile EVERY candidate fresh — so a wallet that was
+    # rejected on a past bad window gets re-discovered when it improves, and degraded actives retire.
+    # No incremental "120 new + NOT IN profile" -> no permanent exclusion, no stale profiles.
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(p.order, "mon_roi")
-    actives = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
-    new = [r[0] for r in db.execute(
-        "SELECT addr FROM leaderboard WHERE is_candidate=1 AND addr NOT IN (SELECT addr FROM profile)"
-        f" ORDER BY {order} DESC LIMIT ?", (p.limit,)).fetchall()]
-    workset = actives + new
-    print(f"scan: refresh {len(actives)} active + probe {len(new)} new = {len(workset)} wallets, window {p.days}d\n")
+    cand = [r[0] for r in db.execute(
+        f"SELECT addr FROM leaderboard WHERE is_candidate=1 ORDER BY {order} DESC").fetchall()]
+    seen = set(cand)
+    off_active = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()
+                  if r[0] not in seen]                 # actives that fell off the candidate list — recheck too
+    workset = (cand + off_active)[:p.limit]
+    print(f"scan: FULL sweep {len(workset)} wallets ({len(cand)} candidates + {len(off_active)} off-list "
+          f"actives), {p.days}d window, pace {getattr(p, 'scan_interval', 0.8):g}s/req\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
     cols = storage.PROFILE_COLS.split(",")
@@ -299,7 +304,7 @@ def scan(db, p) -> None:
 
     n_active = refresh_watchlist(db, stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
-    _record_run(db, started, t0, candidates, len(new), added, retired, kept, rejected, n_active)
+    _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active)
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
           f"{rejected} rejected. watchlist now: {n_active} active.", flush=True)
 
