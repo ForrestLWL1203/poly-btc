@@ -83,40 +83,12 @@ def _margin_snapshot(addr):
     return mt, (ntl / av if av else 0.0)
 
 
-def _prescreen(addr, universe, p, now_ms):
-    """Cheap Stage-1 (1 call, latest ~2000 fills): reject dormant / no-recent-crypto / builder-
-    dominant BEFORE the heavy full 14d fetch — so we only fully-profile likely-copyable wallets."""
-    latest = rest.user_fills_latest(addr)
-    if not isinstance(latest, list) or not latest:
-        return False, "no_fills"
-    crypto = [x for x in latest if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
-    if not crypto:
-        return False, "no_crypto"
-    if (now_ms - max(x["time"] for x in crypto)) / 86400_000.0 > p.inactive_days:
-        return False, "no_recent_crypto"          # no crypto trade in the last few days
-    if len(crypto) / len(latest) < getattr(p, "min_crypto", 0.3):
-        return False, "builder_dominant"          # recent activity is mostly non-crypto
-    return True, "ok"
-
-
-def _write_reject(db, addr, prior, stamp, reason):
-    status = "retired" if (prior or {}).get("status") == "active" else "rejected"
-    with _db_lock:
-        db.execute(
-            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
-            (addr, status, reason, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 0,
-             (prior or {}).get("age_days"), 0, 0, None, 0, 0, 0,
-             (prior or {}).get("first_added"), stamp, (prior or {}).get("times_seen", 0) + 1,
-             (prior or {}).get("times_active", 0)))
-        db.commit()
-    return status, reason, {"n_trades": 0, "score": 0.0}, False
-
-
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
-    pre_ok, pre_reason = _prescreen(addr, universe, p, now_ms)   # Stage 1: cheap
-    if not pre_ok:
-        return _write_reject(db, addr, prior, stamp, pre_reason)
-    raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)  # Stage 2: full
+    # ONE aggregated fetch per wallet (aggregateByTime -> ~1 page, trade-level). No separate
+    # pre-screen call: gates() already rejects dormant ("inactive"), spot/opaque-dominant
+    # ("spot_dominant") and no-trades ("no_perp_trades") on this same data — the old two-stage
+    # split only existed to avoid a heavy raw fetch, which aggregation made cheap.
+    raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)
     for x in raw:
         x["user"] = addr
     # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,

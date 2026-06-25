@@ -8,7 +8,10 @@ UA = {"User-Agent": "hl-copytrade/0.3", "Accept": "application/json", "Content-T
 
 # numeric
 FLAT = 1e-6                 # |position| below this (coin units) counts as flat
-MIN_POST_INTERVAL = 0.16    # global REST pacing between POSTs (avoid 429)
+MIN_POST_INTERVAL = 0.8     # global REST pacing between POSTs. HL's /info limit is weight-based
+#                             (~1200 weight/min) and fill queries weigh ~20 => ~60 req/min; 0.8s
+#                             (75/min) stays under it. The 429 backoff self-regulates any overshoot,
+#                             and the thread-safe pacer means more workers fill RTT, not raise rate.
 
 # HL WS hard limits (per IP, official): the binding one is unique users.
 MAX_WS_USERS = 10           # max unique users across user-specific subscriptions (WS only)

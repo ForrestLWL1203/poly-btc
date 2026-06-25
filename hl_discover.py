@@ -36,7 +36,7 @@ def main() -> int:
     s.add_argument("--min-roi", type=float, default=0.20, help="modest 30d (month) ROI floor (coarse)")
     s.add_argument("--min-crypto", type=float, default=0.3, help="pre-screen: min recent crypto-fill share")
     s.add_argument("--max-pages", type=int, default=15)
-    s.add_argument("--workers", type=int, default=8, help="concurrent profiling threads (REST pacer still caps total rate)")
+    s.add_argument("--workers", type=int, default=4, help="concurrent profiling threads (REST pacer still caps total rate)")
     add_gate_args(s)
     s.add_argument("--no-harvest", action="store_true")
 
