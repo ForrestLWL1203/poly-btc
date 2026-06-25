@@ -24,12 +24,24 @@ def main() -> int:
         pr.add_argument("--max-daily-eps", type=float, default=30.0, help="reject bots: max median episodes/active-day")
         pr.add_argument("--min-activity", type=float, default=0.5, help="min active_days/lookback (regular trading)")
 
+    def add_harvest_args(pr):
+        # STAGE-1 leaderboard prefilter (3-window cascade; 0 per-wallet API). Defaults in config.
+        pr.add_argument("--min-acct", type=float, default=config.HARVEST_MIN_ACCT,
+                        help="real-capital noise guard (we copy by pct, not $)")
+        pr.add_argument("--max-turnover", type=float, default=config.HARVEST_MAX_TURNOVER,
+                        help="anti-MM: daily turnover (mon_vlm/acct/30) ceiling")
+        pr.add_argument("--vol24-min", type=float, default=config.HARVEST_VOL24_MIN,
+                        help="24h volume floor (leveraged notional) = active now")
+        pr.add_argument("--week-roi-min", type=float, default=config.HARVEST_WEEK_ROI_MIN,
+                        help="7d ROI floor = meaningful recent return")
+        pr.add_argument("--mon-roi-max", type=float, default=config.HARVEST_MON_ROI_MAX,
+                        help="anti-lottery: max 30d ROI (cut tiny-acct gamblers)")
+
     s = sub.add_parser("scan", help="full sweep: re-profile ALL candidates -> rebuild watchlist")
     s.add_argument("--days", type=int, default=14)
     s.add_argument("--limit", type=int, default=100000, help="cap workset size (default ~unbounded = full sweep)")
     s.add_argument("--order", choices=["mon_roi", "week_roi", "mon_pnl"], default="mon_roi")
-    s.add_argument("--min-acct", type=float, default=5000, help="noise guard only (we copy by pct, not $)")
-    s.add_argument("--max-turnover", type=float, default=1e9, help="OFF by default (volume!=frequency)")
+    add_harvest_args(s)
     s.add_argument("--min-crypto", type=float, default=0.3, help="(unused) legacy prescreen arg")
     s.add_argument("--max-pages", type=int, default=5, help="cap fill pages/wallet (aggregateByTime -> "
                    "14d is ~1 page; >5 pages of trade-level fills = HFT/MM we reject anyway)")
@@ -44,8 +56,7 @@ def main() -> int:
     w.add_argument("--top", type=int, default=40)
 
     h = sub.add_parser("harvest", help="refresh candidate pool only")
-    h.add_argument("--min-acct", type=float, default=5000)
-    h.add_argument("--max-turnover", type=float, default=1e9)
+    add_harvest_args(h)
 
     g = sub.add_parser("regate", help="re-apply gate thresholds on STORED profiles (no re-fetch) + rebuild watchlist")
     add_gate_args(g)

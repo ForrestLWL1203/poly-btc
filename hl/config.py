@@ -49,6 +49,19 @@ MAX_ADDS = 3                # follow the master's scale-ins up to this many adds
 # Applies to taker opens only (maker rests passively; exits are never blocked — always follow out).
 MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.5% worse than master
 
+# Stage-1 leaderboard prefilter (UI-tunable). The leaderboard gives each wallet's perf across
+# 24h/7d/30d/allTime in ONE bulk fetch — so we discriminate on THREE windows BEFORE any per-wallet
+# API profiling: 24h volume = active NOW, 7d/30d returns = recent + stable, allTime = lifetime track
+# record. ~hundreds survive → profile becomes a small confirmation step, not a multi-thousand sweep.
+# (Volume is leveraged notional, so the floors are large.) The expensive REALIZED/risk judgment —
+# realized PnL, perp-copyability, hold-skew, self-liquidation, current underwater — stays in the
+# per-wallet profile gates()+score(); this stage only buys a concentrated, active, stable seed set.
+HARVEST_MIN_ACCT = 5000.0       # real capital (noise guard; we copy by %, not $)
+HARVEST_VOL24_MIN = 200_000.0   # 24h volume floor (leveraged notional) = genuinely active today
+HARVEST_WEEK_ROI_MIN = 0.10     # 7d ROI floor = meaningful recent return (not "+1%/week")
+HARVEST_MON_ROI_MAX = 3.0       # anti-lottery: cut tiny-account high-leverage gamblers (absurd 30d ROI)
+HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceiling; >10x/day = market-maker
+
 # v3 score shape (interpretable, UI-tunable — NOT arbitrary quality cutoffs). The watchlist is
 # top-N by SCORE = Quality × Survival × FreqFit × Health; these tune the curves, not hard gates.
 SCORE_K = 5.0          # daily-stats confidence: w = active_days/(active_days+K). Low-freq → lean overall ROI
