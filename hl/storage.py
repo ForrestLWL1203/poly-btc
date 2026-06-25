@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS profile (
     avg_notional     REAL,
     age_days         REAL,
     last_fill_ms     INTEGER,
+    lev_proxy        REAL,                -- avg position notional / equity (historical eff. leverage)
+    margin_type      TEXT,                -- isolated / cross / mixed / flat (current snapshot)
+    cur_leverage     REAL,                -- current account effective leverage (totalNtlPos/equity)
+    liq_count        INTEGER DEFAULT 0,   -- # self-liquidation events in window (liquidatedUser==self)
+    liq_worst_pct    REAL DEFAULT 0,      -- worst single self-liquidation loss as % of equity (<=0)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -89,6 +94,10 @@ CREATE TABLE IF NOT EXISTS watchlist (
     age_days       REAL,
     top_coin       TEXT,
     perp_frac      REAL,
+    lev_proxy      REAL,
+    margin_type    TEXT,
+    cur_leverage   REAL,
+    liq_worst_pct  REAL,
     times_active   INTEGER,
     first_added    TEXT,
     last_fill_ms   INTEGER,
@@ -124,8 +133,9 @@ PROFILE_COLS = (
     "addr,status,reason,score,n_fills,n_trades,window_days,trades_per_day,taker_frac_notl,"
     "median_hold_s,win_rate,net_pnl,roi_equity,roi_notional,total_notl,acct_value,perp_frac,"
     "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
-    "last_fill_ms,first_added,last_refreshed,times_seen,times_active"
-)  # 30 columns
+    "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
+    "first_added,last_refreshed,times_seen,times_active"
+)  # 35 columns
 
 OBSERVE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_fills (

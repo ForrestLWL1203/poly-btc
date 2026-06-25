@@ -40,6 +40,38 @@ def harvest(db, min_acct: float, max_turnover: float) -> int:
 
 
 # -------------------------------------------------------------------------- profile
+def _self_liquidations(fills, addr, acct):
+    """Self-liquidation events (liquidation.liquidatedUser == this wallet, NOT where it was the
+    liquidator). Returns (count_by_coin, worst_single_loss_pct_of_equity<=0). Account blow-up
+    doesn't transfer to our isolated per-trade copy, so this is a mild high-variance flag."""
+    bycoin = {}
+    for x in fills:
+        liq = x.get("liquidation") or {}
+        if (liq.get("liquidatedUser") or "").lower() == addr:
+            bycoin[x["coin"]] = bycoin.get(x["coin"], 0.0) + f(x.get("closedPnl"))
+    if not bycoin:
+        return 0, 0.0
+    worst = min(bycoin.values())
+    return len(bycoin), (worst / acct * 100 if acct else 0.0)
+
+
+def _margin_snapshot(addr):
+    """(margin_type, current_account_leverage) from clearinghouseState. Snapshot only — flat
+    wallet -> ('flat', 0). Mixed positions -> 'mixed'. Returns (None, 0) on fetch failure."""
+    cs = rest.clearinghouse_state(addr)
+    if not isinstance(cs, dict):
+        return None, 0.0
+    ms = cs.get("marginSummary", {})
+    av = f(ms.get("accountValue")); ntl = f(ms.get("totalNtlPos"))
+    pos = cs.get("assetPositions", []) or []
+    if not pos:
+        return "flat", 0.0
+    types = {(pp.get("position", {}).get("leverage") or {}).get("type") for pp in pos}
+    types.discard(None)
+    mt = next(iter(types)) if len(types) == 1 else ("mixed" if types else "flat")
+    return mt, (ntl / av if av else 0.0)
+
+
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)
     for x in raw:
@@ -63,6 +95,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     m["acct_value"] = acct_value
     m["roi_equity"] = (m["net_pnl"] / acct_value) if acct_value else 0.0
     m["times_active"] = (prior or {}).get("times_active", 0)
+    m["lev_proxy"] = (m["avg_notional"] / acct_value) if acct_value else 0.0  # hist. eff. leverage
+    m["liq_count"], m["liq_worst_pct"] = _self_liquidations(raw, addr, acct_value)
 
     if m["n_trades"] == 0:
         ok, reason = False, "no_perp_trades"
@@ -71,13 +105,19 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     m["times_active"] += 1 if ok else 0
 
     age_days = (prior or {}).get("age_days")
-    if ok and age_days is None:
-        try:
-            birth = rest.account_birth_ms(addr)
-            if birth:
-                age_days = (now_ms - birth) / 86400_000.0
-        except Exception:  # noqa: BLE001
-            pass
+    m["margin_type"] = (prior or {}).get("margin_type")
+    m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
+    if ok:
+        if age_days is None:
+            try:
+                birth = rest.account_birth_ms(addr)
+                if birth:
+                    age_days = (now_ms - birth) / 86400_000.0
+            except Exception:  # noqa: BLE001
+                pass
+        mt, cl = _margin_snapshot(addr)              # isolated/cross + current leverage (snapshot)
+        if mt is not None:
+            m["margin_type"], m["cur_leverage"] = mt, cl
     m["age_days"] = age_days
 
     prev_status = (prior or {}).get("status")
@@ -93,12 +133,13 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
             [(addr, e["coin"], e["side"], e["open_ms"], e["close_ms"], e["hold_s"], e["net_pnl"],
               e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]) for e in eps])
     db.execute(
-        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 30)})",
+        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
         (addr, status, reason, m["score"], m["n_fills"], m["n_trades"], m["window_days"],
          m["trades_per_day"], m["taker_frac_notl"], m["median_hold_s"], m["win_rate"],
          m["net_pnl"], m["roi_equity"], m["roi_notional"], m["total_notl"], m["acct_value"],
          m["perp_frac"], m["gross_pnl"], m["total_fee"], m["n_coins"], m["top_coin"],
          m["long_frac"], m["max_drawdown"], m["avg_notional"], m["age_days"], m["last_fill_ms"],
+         m["lev_proxy"], m["margin_type"], m["cur_leverage"], m["liq_count"], m["liq_worst_pct"],
          first_added, stamp, (prior or {}).get("times_seen", 0) + 1, m["times_active"]))
     db.commit()
     return status, reason, m, hit_cap
@@ -112,15 +153,16 @@ def refresh_watchlist(db, stamp) -> int:
     rows = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
         "p.n_trades, p.trades_per_day, p.taker_frac_notl, p.median_hold_s, p.win_rate, p.max_drawdown, "
-        "p.age_days, p.top_coin, p.perp_frac, p.times_active, p.first_added, p.last_fill_ms "
+        "p.age_days, p.top_coin, p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
+        "p.times_active, p.first_added, p.last_fill_ms "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
         "WHERE p.status='active' ORDER BY p.score DESC").fetchall()
     for rank, r in enumerate(rows, 1):
         db.execute(
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
-            "perp_frac,times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
+            "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r[0], stamp))
     db.commit()
@@ -196,18 +238,21 @@ def scan(db, p) -> None:
 def watchlist(db, top: int) -> None:
     """Show OUR curated tiny leaderboard (the watchlist table)."""
     rows = db.execute(
-        "SELECT w.rank,w.addr,w.score,w.roi_equity,w.mon_roi,w.net_pnl,w.n_trades,w.trades_per_day,"
-        "w.taker_frac,w.median_hold_s,w.win_rate,w.age_days,w.times_active,w.last_fill_ms,w.top_coin,"
-        "w.display_name,COALESCE(c.enabled,1) "
+        "SELECT w.rank,w.addr,w.score,w.roi_equity,w.mon_roi,w.win_rate,w.max_drawdown,w.acct_value,"
+        "w.lev_proxy,w.margin_type,w.cur_leverage,w.liq_worst_pct,w.taker_frac,w.median_hold_s,"
+        "w.age_days,w.times_active,w.top_coin,w.display_name,COALESCE(c.enabled,1) "
         "FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr ORDER BY w.rank LIMIT ?",
         (top,)).fetchall()
-    now_ms = int(time.time() * 1000)
-    print(f"\nWATCHLIST (our tiny leaderboard) — {len(rows)} perp targets; roiEq/monRoi = leverage-correct equity ROI\n")
-    hdr = (f"{'#':>2} {'addr':42} {'on':>2} {'score':>6} {'roiEq':>7} {'monRoi':>7} {'net$':>9} {'trd':>4} "
-           f"{'t/d':>4} {'taker':>6} {'hold':>6} {'win':>4} {'age':>5} {'seen':>4} {'idle':>5} {'coin':>6}")
+    print(f"\nWATCHLIST — {len(rows)} crypto-perp targets (core=consistent profit+survival; "
+          f"lev/margin/liq are OBSERVED context, we copy isolated per-trade w/ our own cap)\n")
+    hdr = (f"{'#':>2} {'addr':42} {'on':>2} {'score':>6} {'roiEq':>7} {'monRoi':>7} {'win':>4} {'maxDD%':>6} "
+           f"{'lev':>5} {'margin':>7} {'worstLiq':>8} {'taker':>5} {'hold':>6} {'age':>5} {'seen':>4} {'coin':>6}")
     print(hdr); print("-" * len(hdr))
-    for (rank, addr, sc, roi_eq, mon_roi, net, trd, tpd, taker, hold, win, age, ta, lastfill, coin, name, on) in rows:
-        idle_h = (now_ms - (lastfill or now_ms)) / 3600_000.0
+    for (rank, addr, sc, roi_eq, mon_roi, win, dd, acct, lev, mtype, curlev, liqw, taker, hold,
+         age, ta, coin, name, on) in rows:
+        ddp = (dd / acct * 100) if acct else 0
+        levshow = curlev if curlev else (lev or 0)
         print(f"{rank:>2} {addr:42} {'Y' if on else 'n':>2} {sc:>6.1f} {roi_eq*100:>+6.1f}% "
-              f"{(mon_roi or 0)*100:>+6.1f}% {net:>9,.0f} {trd:>4} {tpd:>4.1f} {taker*100:>5.0f}% "
-              f"{hold/3600:>5.1f}h {win*100:>3.0f}% {age or 0:>4.0f}d {ta:>4} {idle_h:>4.0f}h {coin or '':>6}  {name or ''}")
+              f"{(mon_roi or 0)*100:>+6.1f}% {win*100:>3.0f}% {ddp:>5.1f}% {levshow:>4.1f}x "
+              f"{(mtype or '?'):>7} {(liqw or 0):>+7.1f}% {taker*100:>4.0f}% {hold/3600:>5.1f}h "
+              f"{age or 0:>4.0f}d {ta:>4} {coin or '':>6}  {name or ''}")

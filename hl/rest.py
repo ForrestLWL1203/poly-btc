@@ -93,6 +93,12 @@ def account_birth_ms(addr: str):
     return None
 
 
+def clearinghouse_state(addr: str):
+    """Current account state — open positions with leverage {type isolated/cross, value} and
+    marginSummary (accountValue, totalNtlPos). Snapshot only (flat wallet -> no positions)."""
+    return post_soft({"type": "clearinghouseState", "user": addr})
+
+
 def perp_universe() -> set:
     """Valid perp coin names (for the standard dex). Used to guard bbo subscriptions —
     subscribing bbo for an unknown coin name closes the WS connection."""

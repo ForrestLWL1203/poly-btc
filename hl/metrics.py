@@ -72,11 +72,18 @@ def gates(m: dict, now_ms: int, p) -> tuple:
 
 
 def score(m: dict) -> float:
+    """Core = consistent profitability + survival. We copy small isolated per-trade with our own
+    leverage cap + stop, so we do NOT inherit a target's account-level risk — leverage/margin-type
+    are OBSERVED (not scored), and a self-liquidation only mildly flags high variance (their
+    account blow-up doesn't transfer to us). The judge is consistent profitability over time."""
     roi = m["roi_equity"]
     dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0)
-    rr = roi / (dd_eq + 0.01)                                  # equity-ROI return / risk
-    base = rr * (0.5 + m["win_rate"]) * (0.5 + m["taker_frac_notl"])
-    age = m.get("age_days") or 999
-    fresh = 1.0 + max(0.0, (30.0 - age) / 30.0) * 0.5         # younger -> up to +50%
-    persist = 0.5 + 0.5 * min(m.get("times_active", 1), 10) / 10.0
-    return base * fresh * persist
+    rr = roi / (dd_eq + 0.01)                                  # risk-adjusted return (core)
+    consistency = 0.4 + 0.6 * m["win_rate"]                    # per-trade consistency
+    age = m.get("age_days") or 0
+    survival = (0.4 + 0.3 * min(age, 365) / 365                # longevity (900d profitable = proven)
+                + 0.3 * min(m.get("times_active", 1), 10) / 10)  # + persistence across our scans
+    copyab = 0.5 + 0.5 * m["taker_frac_notl"]                  # copyability
+    worst = abs(m.get("liq_worst_pct") or 0.0)                 # worst self-liquidation, % of equity
+    liq_factor = 0.6 if worst >= 20 else (0.85 if worst >= 5 else 1.0)  # mild: only catastrophic bites
+    return rr * consistency * survival * copyab * liq_factor
