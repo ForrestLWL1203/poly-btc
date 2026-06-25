@@ -40,11 +40,14 @@ def harvest(db, min_acct: float, max_turnover: float) -> int:
 
 
 # -------------------------------------------------------------------------- profile
-def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp):
+def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)
     for x in raw:
         x["user"] = addr
-    perp = [x for x in raw if not is_spot(x["coin"])]
+    # only COPYABLE activity counts: standard crypto perps. Spot AND builder/index perps
+    # (xyz:*, #NNNN) are excluded so builder-heavy wallets don't qualify on trades we can't
+    # copy / can't even identify. perp_frac is now the crypto-perp share of fills.
+    perp = [x for x in raw if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
     perp_frac = (len(perp) / len(raw)) if raw else 0.0
     eps = build_episodes(perp)
     m = metrics.compute_metrics(perp, eps, now_ms)
@@ -140,6 +143,7 @@ def scan(db, p) -> None:
     stamp = now_iso()
     start_ms = now_ms - p.days * 86400_000
 
+    universe = rest.perp_universe()              # standard crypto perps only are copyable
     if not p.no_harvest:
         print("harvest leaderboard ...", flush=True)
         n_cand = harvest(db, p.min_acct, p.max_turnover)
@@ -161,7 +165,7 @@ def scan(db, p) -> None:
         lbrow = db.execute("SELECT account_value, week_roi, mon_roi FROM leaderboard WHERE addr=?", (addr,)).fetchone()
         lb = {"account_value": lbrow[0]} if lbrow else {}
         try:
-            status, reason, m, hit_cap = _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp)
+            status, reason, m, hit_cap = _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe)
         except Exception as exc:  # noqa: BLE001
             print(f"  [{i}/{len(workset)}] {addr[:12]} FAIL: {exc}")
             continue
