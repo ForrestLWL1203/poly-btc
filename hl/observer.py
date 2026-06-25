@@ -149,6 +149,18 @@ class Observer:
             a = self.db.execute("SELECT count(*) FROM copy_action").fetchone()[0]
             _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
 
+    async def prune_live_fills(self):
+        """Keep live_fills bounded on disk. tid-dedup only needs ~MAX_BACKFILL_S of history (the
+        poll cursor never re-fetches older than that), so deleting rows past the retention window
+        can't cause re-processing — the rest is just audit. Runs at startup then every 6h."""
+        while not self.stop:
+            cutoff = now_ms() - config.LIVE_FILLS_RETENTION_DAYS * 86400_000
+            n = self.db.execute("DELETE FROM live_fills WHERE time_ms < ?", (cutoff,)).rowcount
+            self.db.commit()
+            if n:
+                _log(f"pruned {n} live_fills older than {config.LIVE_FILLS_RETENTION_DAYS}d")
+            await asyncio.sleep(6 * 3600)
+
     # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
     async def poll_loop(self):
         """Primary engine. Round-robin every watchlist wallet's recent fills (cursor − overlap,
@@ -243,6 +255,7 @@ class Observer:
         self._load_cursors()                       # restore per-wallet REST cursors
         self._reload_targets(init=True)            # load watchlist + forward-only cursors for new
         asyncio.create_task(self._announce())
+        asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
         asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book)
         asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)

@@ -24,6 +24,8 @@ MAX_TARGETS = 60            # max watchlist wallets the signal poller covers (bo
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's cursor (tid-dedup absorbs it)
 MAX_BACKFILL_S = 3600      # never look back further than this on a poll (forward-only, bounds stale cursors)
+LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs ~MAX_BACKFILL_S;
+#                                the rest is audit) — keeps the only unbounded-on-disk table bounded
 
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
