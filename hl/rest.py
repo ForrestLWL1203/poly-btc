@@ -60,13 +60,19 @@ def get_leaderboard() -> list:
     return data["leaderboardRows"] if isinstance(data, dict) else data
 
 
-def user_fills_by_time(addr: str, start_ms: int):
-    return post({"type": "userFillsByTime", "user": addr, "startTime": start_ms})
+def user_fills_by_time(addr: str, start_ms: int, aggregate: bool = True):
+    """Fills since start_ms. aggregate=True asks HL to COMBINE an order's partial fills (slices) into
+    one row per trade — ~100x fewer rows (a sliced wallet: 1852 raw -> 19 aggregated) with all the
+    fields we profile on (startPosition/closedPnl/dir/crossed/sz/fee). Trade-level granularity is
+    exactly what episode reconstruction wants; we never needed the raw slices to profile a wallet."""
+    return post({"type": "userFillsByTime", "user": addr, "startTime": start_ms,
+                 "aggregateByTime": aggregate})
 
 
-def user_fills_latest(addr: str):
-    """Most recent ~2000 fills (1 call) — for the cheap pre-screen (recent crypto activity)."""
-    return post({"type": "userFills", "user": addr})
+def user_fills_latest(addr: str, aggregate: bool = True):
+    """Most recent ~2000 fills (1 call) — for the cheap pre-screen. Aggregated so the 2000-cap
+    covers many more trades (recency check isn't fooled by one heavily-sliced order)."""
+    return post({"type": "userFills", "user": addr, "aggregateByTime": aggregate})
 
 
 def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
