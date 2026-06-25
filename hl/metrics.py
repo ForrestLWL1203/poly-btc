@@ -122,10 +122,13 @@ def score(m: dict) -> float:
     consistency = pos ** (w * config.SCORE_GAMMA)             # high-freq must be green MOST days; low-freq lenient
     quality = rar * consistency
 
-    # survival = cross-scan persistence only (times_active = how many scans it stayed eligible). Age
-    # is NOT used: we don't fetch wallet history (wasteful), and a new wallet with strong recent
-    # performance shouldn't be penalised for being young. New wallet floors at 0.6, proven climbs to 1.
-    survival = 0.6 + 0.4 * min(m.get("times_active", 1), 10) / 10
+    # survival = blow-up risk × a SMALL persistence bonus. times_active (how many of OUR scans this
+    # wallet has stayed eligible) is a mild DURABILITY REWARD, not a penalty: brand-new-to-us = 0.9,
+    # proven-across-10-scans = 1.0 — so a strong recent performer isn't crushed just for being newly
+    # discovered. (The within-window track-record bar — ≥7 active days of 14 — is the GATE's job, not
+    # this; this axis is only cross-scan persistence.) Blow-up is the real risk and the main lever:
+    # a self-liquidation ≥20% of equity ×0.6, ≥5% ×0.85.
+    survival = 0.9 + 0.1 * min(m.get("times_active", 1), 10) / 10
     worst_liq = abs(m.get("liq_worst_pct") or 0.0)
     survival *= 0.6 if worst_liq >= 20 else (0.85 if worst_liq >= 5 else 1.0)
 
