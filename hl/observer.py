@@ -84,8 +84,11 @@ class Observer:
 
     def _target_leverage(self, addr, coin):
         """The master's leverage for this coin (from clearinghouseState), capped to MAX_LEV. Falls
-        back to MAX_LEV if it can't be read (mirror-capped intent)."""
-        cs = rest.clearinghouse_state(addr)
+        back to MAX_LEV if it can't be read (mirror-capped intent). MUST name the builder dex for
+        stock/builder perps (xyz:*) — the standard call returns [] for those, which silently fell
+        back to MAX_LEV and over-levered every stock-perp copy to 10x regardless of the master."""
+        dex = coin.split(":")[0] if ":" in coin else None
+        cs = rest.clearinghouse_state(addr, dex)
         lev = None
         if isinstance(cs, dict):
             for ap in cs.get("assetPositions", []):
@@ -141,14 +144,21 @@ class Observer:
         position (same side) are left untouched — forward polling follows their next action."""
         held = sorted({addr for (addr, _) in self.open_ep})
         for addr in held:
-            st = await asyncio.to_thread(rest.post_soft, {"type": "clearinghouseState", "user": addr})
-            if not isinstance(st, dict):
-                continue                              # ambiguous fetch — safer to hold than wrong-close
-            szi = {}
-            for ap in st.get("assetPositions", []):
-                p = ap.get("position", {}) or {}
-                if p.get("coin") is not None:
-                    szi[p["coin"]] = f(p.get("szi")) or 0.0
+            # standard perp + each builder dex we hold a position on (stock perps aren't in the
+            # standard clearinghouseState — without the dex they'd read as flat and get wrong-closed).
+            dexes = sorted({c.split(":")[0] for (a, c) in self.open_ep if a == addr and ":" in c})
+            szi, all_ok = {}, True
+            for dex in [None] + dexes:
+                st = await asyncio.to_thread(rest.clearinghouse_state, addr, dex)
+                if not isinstance(st, dict):
+                    all_ok = False
+                    break                             # a fetch failed — safer to hold than wrong-close
+                for ap in st.get("assetPositions", []):
+                    p = ap.get("position", {}) or {}
+                    if p.get("coin") is not None:
+                        szi[p["coin"]] = f(p.get("szi")) or 0.0
+            if not all_ok:
+                continue
             for (a, coin), ep in list(self.open_ep.items()):
                 if a != addr:
                     continue
