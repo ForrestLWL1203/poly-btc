@@ -587,17 +587,21 @@ def report(db) -> None:
     init, bal = acct if acct else (config.INITIAL_BALANCE, config.INITIAL_BALANCE)
     liqd = db.execute("SELECT count(*) FROM copy_position WHERE status='liquidated'").fetchone()[0]
     # OPEN positions: fetch live top-of-book per coin -> mark-to-market unrealized + true equity
-    opens = db.execute("SELECT addr,coin,side,entry_px,rem_size,margin,size,realized_pnl "
+    opens = db.execute("SELECT pos_id,addr,coin,side,entry_px,rem_size,margin,size,realized_pnl,leverage "
                        "FROM copy_position WHERE status='open' AND size>0").fetchall()
     px, unreal, locked, rows_open = {}, 0.0, 0.0, []
-    for a, coin, side, entry, rem, mgn, size, rpnl in opens:
+    for pos_id, a, coin, side, entry, rem, mgn, size, rpnl, lev in opens:
         if coin not in px:
             ba = rest.book_top(coin)
             px[coin] = ((ba[0] + ba[1]) / 2) if ba else entry
         u = rem * (px[coin] - entry) * (1 if side == "long" else -1)
         cur_mgn = mgn * rem / size
         unreal += u; locked += cur_mgn
-        rows_open.append((a[:10], coin, side, cur_mgn, rpnl, u))
+        # the OPEN action: master's fill px, our copy px, and copy latency (our detect - master fill)
+        oa = db.execute("SELECT master_px, our_px, recv_ms-ts FROM copy_action "
+                        "WHERE pos_id=? AND action='open' ORDER BY act_id LIMIT 1", (pos_id,)).fetchone()
+        m_px, o_px, lag_ms = oa if oa else (entry, entry, None)
+        rows_open.append((a[:10], coin, side, lev, cur_mgn, m_px, o_px, lag_ms, rpnl, u))
     equity = bal + unreal
     print(f"\nPAPER ACCOUNT  equity ${equity:,.2f}  ({equity/init-1:+.2%} vs ${init:,.0f} start)")
     print(f"  realized balance ${bal:,.2f} | unrealized ${unreal:+,.2f} | available ${bal-locked:,.2f} | "
@@ -614,11 +618,15 @@ def report(db) -> None:
             print(f"  {addr:42} {n:>6} {winr*100:>4.0f}% {pnl:>+9,.1f} {liq:>4}")
     if rows_open:
         print("\nOPEN (mark-to-market):")
-        h = f"  {'addr':10} {'coin':12} {'side':5} {'margin$':>8} {'real$':>7} {'unreal$':>9} {'tot%mgn':>8}"
+        h = (f"  {'addr':10} {'coin':12} {'side':5} {'lev':>4} {'margin$':>8} {'mstr_px':>11} "
+             f"{'our_px':>11} {'lag':>6} {'real$':>7} {'unreal$':>9} {'tot%mgn':>8}")
         print(h + "\n  " + "-" * (len(h) - 2))
-        for a, coin, side, cur_mgn, rpnl, u in sorted(rows_open, key=lambda r: -(r[4] + r[5])):
+        for a, coin, side, lev, cur_mgn, m_px, o_px, lag_ms, rpnl, u in sorted(rows_open, key=lambda r: -(r[8] + r[9])):
             tot = rpnl + u
-            print(f"  {a:10} {coin:12} {side:5} {cur_mgn:>8.0f} {rpnl:>+7.1f} {u:>+9.1f} "
+            lag = f"{lag_ms/1000:.1f}s" if lag_ms is not None else "—"
+            print(f"  {a:10} {coin:12} {side:5} {lev:>3.0f}x {cur_mgn:>8.0f} {m_px:>11g} "
+                  f"{o_px:>11g} {lag:>6} {rpnl:>+7.1f} {u:>+9.1f} "
                   f"{(tot/cur_mgn*100 if cur_mgn else 0):>+7.0f}%")
+        print("  (mstr_px = target wallet's fill | our_px = our copy fill | lag = our detect − target fill)")
     print(f"\n(margin {config.MARGIN_PCT*100:g}% open / {config.ADD_MARGIN_PCT*100:g}% per add of available, "
           f"master leverage capped {config.MAX_LEV:g}x, isolated, no stop)")
