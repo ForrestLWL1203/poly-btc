@@ -37,12 +37,16 @@ def _log(msg: str):
 
 
 class Observer:
-    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None):
+    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None,
+                 margin_pct: float = None, add_margin_pct: float = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
+        # strategy sizing — dynamic (UI-tunable): margin on open vs each follow-on add, as % of available
+        self.margin_pct = config.MARGIN_PCT if margin_pct is None else margin_pct
+        self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
@@ -416,7 +420,7 @@ class Observer:
             return
         lev = await asyncio.to_thread(self._target_leverage, addr, coin)   # master's leverage, capped
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * config.MARGIN_PCT)
+            margin = max(0.0, self._available() * self.margin_pct)
             notional = margin * lev
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
@@ -455,7 +459,7 @@ class Observer:
             px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
             lev = ep["leverage"]
             async with self.acct_lock:
-                add_margin = max(0.0, self._available() * config.MARGIN_PCT)
+                add_margin = max(0.0, self._available() * self.add_margin_pct)
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
@@ -588,22 +592,40 @@ def load_targets(db, n: int, min_score: float = 0.0):
 def report(db) -> None:
     acct = db.execute("SELECT initial_balance, balance FROM copy_account WHERE id=1").fetchone()
     init, bal = acct if acct else (config.INITIAL_BALANCE, config.INITIAL_BALANCE)
-    op, locked = db.execute(
-        "SELECT count(*), COALESCE(SUM(margin*rem_size/size),0) FROM copy_position "
-        "WHERE status='open' AND size>0").fetchone()
     liqd = db.execute("SELECT count(*) FROM copy_position WHERE status='liquidated'").fetchone()[0]
-    print(f"\nPAPER ACCOUNT: balance ${bal:,.2f} (start ${init:,.0f}, {('+' if bal>=init else '')}"
-          f"{(bal/init-1)*100:.2f}%) | available ${bal-(locked or 0):,.2f} | {op} open, {liqd} liquidated\n")
+    # OPEN positions: fetch live top-of-book per coin -> mark-to-market unrealized + true equity
+    opens = db.execute("SELECT addr,coin,side,entry_px,rem_size,margin,size,realized_pnl "
+                       "FROM copy_position WHERE status='open' AND size>0").fetchall()
+    px, unreal, locked, rows_open = {}, 0.0, 0.0, []
+    for a, coin, side, entry, rem, mgn, size, rpnl in opens:
+        if coin not in px:
+            ba = rest.book_top(coin)
+            px[coin] = ((ba[0] + ba[1]) / 2) if ba else entry
+        u = rem * (px[coin] - entry) * (1 if side == "long" else -1)
+        cur_mgn = mgn * rem / size
+        unreal += u; locked += cur_mgn
+        rows_open.append((a[:10], coin, side, cur_mgn, rpnl, u))
+    equity = bal + unreal
+    print(f"\nPAPER ACCOUNT  equity ${equity:,.2f}  ({equity/init-1:+.2%} vs ${init:,.0f} start)")
+    print(f"  realized balance ${bal:,.2f} | unrealized ${unreal:+,.2f} | available ${bal-locked:,.2f} | "
+          f"{len(opens)} open, {liqd} liquidated\n")
     rows = db.execute(
         "SELECT addr, count(*) n, sum(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END)*1.0/count(*) winr, "
-        "sum(realized_pnl) pnl, sum(CASE WHEN status='liquidated' THEN 1 ELSE 0 END) liq, "
-        "avg(num_actions) acts FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY pnl DESC").fetchall()
-    if not rows:
-        print(f"no closed copy positions yet ({op} open). Needs a target to complete a round-trip.")
-        return
-    hdr = f"{'addr':42} {'closed':>6} {'win%':>5} {'pnl$':>10} {'liq':>4} {'acts':>5}"
-    print(hdr); print("-" * len(hdr))
-    for addr, n, winr, pnl, liq, acts in rows:
-        print(f"{addr:42} {n:>6} {winr*100:>4.0f}% {pnl:>+10,.1f} {liq:>4} {acts:>5.1f}")
-    print(f"\n(margin {config.MARGIN_PCT*100:g}% of available/trade, master leverage capped {config.MAX_LEV:g}x, "
-          "isolated, no stop)")
+        "sum(realized_pnl) pnl, sum(CASE WHEN status='liquidated' THEN 1 ELSE 0 END) liq "
+        "FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY pnl DESC").fetchall()
+    if rows:
+        print("CLOSED (realized PnL, per wallet):")
+        h = f"  {'addr':42} {'closed':>6} {'win%':>5} {'pnl$':>9} {'liq':>4}"
+        print(h + "\n  " + "-" * (len(h) - 2))
+        for addr, n, winr, pnl, liq in rows:
+            print(f"  {addr:42} {n:>6} {winr*100:>4.0f}% {pnl:>+9,.1f} {liq:>4}")
+    if rows_open:
+        print("\nOPEN (mark-to-market):")
+        h = f"  {'addr':10} {'coin':12} {'side':5} {'margin$':>8} {'real$':>7} {'unreal$':>9} {'tot%mgn':>8}"
+        print(h + "\n  " + "-" * (len(h) - 2))
+        for a, coin, side, cur_mgn, rpnl, u in sorted(rows_open, key=lambda r: -(r[4] + r[5])):
+            tot = rpnl + u
+            print(f"  {a:10} {coin:12} {side:5} {cur_mgn:>8.0f} {rpnl:>+7.1f} {u:>+9.1f} "
+                  f"{(tot/cur_mgn*100 if cur_mgn else 0):>+7.0f}%")
+    print(f"\n(margin {config.MARGIN_PCT*100:g}% open / {config.ADD_MARGIN_PCT*100:g}% per add of available, "
+          f"master leverage capped {config.MAX_LEV:g}x, isolated, no stop)")
