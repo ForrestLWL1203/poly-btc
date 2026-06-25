@@ -161,10 +161,29 @@ CREATE TABLE IF NOT EXISTS copy_action (
     act_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     pos_id INTEGER, addr TEXT, coin TEXT, ts INTEGER, recv_ms INTEGER,
     action         TEXT,                 -- open / add / reduce / close
+    maker          INTEGER,              -- 1 = master's fill was a resting-limit (maker) fill
+    master_oid     INTEGER,              -- master's order id -> JOIN target_orders for placed px/sz
     master_px REAL, master_sz_delta REAL, master_pos_after REAL,
     our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL
 );
+CREATE INDEX IF NOT EXISTS idx_ca_oid ON copy_action(master_oid);
 CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
+
+-- Target wallets' RESTING orders (limit ladders + TP/SL triggers), captured by a REST
+-- poller of frontendOpenOrders (zero WS-slot cost). Reveals their intentions BEFORE
+-- execution → maker-copy candidates + their take-profit/stop levels. One row per (addr,
+-- oid); status flips to 'gone' when it leaves the book (filled or cancelled).
+CREATE TABLE IF NOT EXISTS target_orders (
+    addr        TEXT, oid INTEGER,
+    coin        TEXT, side TEXT,
+    order_type  TEXT,                 -- Limit / Take Profit Market / Stop Market / ...
+    limit_px    REAL, trigger_px REAL, sz REAL,
+    reduce_only INTEGER, is_trigger INTEGER,
+    status      TEXT,                 -- open / gone
+    first_seen  TEXT, last_seen TEXT,
+    PRIMARY KEY (addr, oid)
+);
+CREATE INDEX IF NOT EXISTS idx_to_addr ON target_orders(addr, status);
 """
 
 

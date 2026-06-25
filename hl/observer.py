@@ -113,6 +113,41 @@ class Observer:
             a = self.db.execute("SELECT count(*) FROM copy_action").fetchone()[0]
             _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
 
+    # -- REST poll of targets' resting orders (limit ladders + TP/SL) --------
+    async def poll_orders(self):
+        """Every ~5s, snapshot each target's open orders via frontendOpenOrders (REST, no
+        WS slot) and persist them to target_orders — their INTENTIONS (maker entries, take-
+        profit/stop levels) ahead of execution. Diff-based: orders that vanish flip to 'gone'."""
+        while not self.stop:
+            for addr in self.addrs:
+                oo = await asyncio.to_thread(rest.post_soft, {"type": "frontendOpenOrders", "user": addr})
+                if not isinstance(oo, list):
+                    continue
+                seen = set()
+                for o in oo:
+                    oid = o.get("oid")
+                    if oid is None:
+                        continue
+                    seen.add(oid)
+                    self.db.execute(
+                        "INSERT INTO target_orders (addr,oid,coin,side,order_type,limit_px,trigger_px,"
+                        "sz,reduce_only,is_trigger,status,first_seen,last_seen) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,'open',?,?) "
+                        "ON CONFLICT(addr,oid) DO UPDATE SET sz=excluded.sz,limit_px=excluded.limit_px,"
+                        "trigger_px=excluded.trigger_px,order_type=excluded.order_type,status='open',"
+                        "last_seen=excluded.last_seen",
+                        (addr, oid, o.get("coin"), o.get("side"), o.get("orderType"), f(o.get("limitPx")),
+                         f(o.get("triggerPx")), f(o.get("sz")), 1 if o.get("reduceOnly") else 0,
+                         1 if o.get("isTrigger") else 0, now_iso(), now_iso()))
+                for (oid,) in self.db.execute(
+                        "SELECT oid FROM target_orders WHERE addr=? AND status='open'", (addr,)).fetchall():
+                    if oid not in seen:
+                        self.db.execute("UPDATE target_orders SET status='gone', last_seen=? "
+                                        "WHERE addr=? AND oid=?", (now_iso(), addr, oid))
+                self.db.commit()
+                await asyncio.sleep(0.3)             # pace REST across wallets
+            await asyncio.sleep(5)
+
     @staticmethod
     def _quiet(loop, context):
         msg = str(context.get("exception") or context.get("message"))
@@ -127,6 +162,7 @@ class Observer:
         _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded)")
         self._reload_open()                         # restore open copies from db (restart-safe)
         asyncio.create_task(self._announce())
+        asyncio.create_task(self.poll_orders())     # REST poll resting orders (zero WS cost)
         while not self.stop:
             try:
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
@@ -208,24 +244,26 @@ class Observer:
         px = f(x.get("px"))
         key = (addr, coin)
         liq = bool(x.get("liquidation"))
+        maker = not bool(x.get("crossed"))   # crossed=False -> a resting-limit (maker) fill
+        oid = x.get("oid")
         if coin not in self.sub_coins:
             asyncio.create_task(self.ensure_coin(coin))
 
         ep = self.open_ep.get(key)
         if ep is None:
             if abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT:
-                self._open_position(addr, coin, t, px, pos1)
+                self._open_position(addr, coin, t, px, pos1, maker, oid)
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if liq:
             ep["was_liq"] = 1
         if abs(pos1) >= abs(pos0) - config.FLAT and not abs(pos1) < config.FLAT:
-            self._record_action(ep, addr, coin, t, "add", px, signed, pos1, 0.0, px, 0.0, 0.0)
+            self._record_action(ep, addr, coin, t, "add", maker, oid, px, signed, pos1, 0.0, px, 0.0, 0.0)
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
-                                                   closing=abs(pos1) < config.FLAT, liq=liq))
+                                                   closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid))
 
-    def _open_position(self, addr, coin, t, px, pos1):
+    def _open_position(self, addr, coin, t, px, pos1, maker, oid):
         if not self._bbo_ok(coin):
             return              # only copy standard-universe coins (we have a real book to
                                 # price our fills); skip stock/builder perps (xyz:*, #NNNN)
@@ -236,20 +274,23 @@ class Observer:
             (addr, coin, side, t, px, abs(pos1), config.NOTIONAL, now_iso()))
         ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
-              "entries": None, "rem": {L: 0.0 for L in LAT}, "pnl": {L: 0.0 for L in LAT},
-              "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
-              "num_actions": 0, "gap": False}
+              "open_maker": maker, "open_oid": oid, "entries": None, "rem": {L: 0.0 for L in LAT},
+              "pnl": {L: 0.0 for L in LAT}, "entries_ready": asyncio.Event(),
+              "lock": asyncio.Lock(), "mae": 0.0, "num_actions": 0, "gap": False}
         self.open_ep[(addr, coin)] = ep
         asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
 
     async def _resolve_entry(self, addr, coin, ep, t, master_px):
-        await asyncio.sleep(max(LAT) + 0.3)
-        side_is_buy = ep["side"] == "long"
-        h = self.coin_hist.get(coin, deque())
-        entries = {}
-        for L in LAT:
-            ba = paper.book_at(h, t + int(L * 1000))
-            entries[L] = (ba[1] if side_is_buy else ba[0]) if ba else master_px  # taker: buy@ask
+        if ep["open_maker"]:
+            entries = {L: master_px for L in LAT}    # mirror their resting limit -> fill at that px
+        else:
+            await asyncio.sleep(max(LAT) + 0.3)      # taker: our market fill = book at t+latency
+            side_is_buy = ep["side"] == "long"
+            h = self.coin_hist.get(coin, deque())
+            entries = {}
+            for L in LAT:
+                ba = paper.book_at(h, t + int(L * 1000))
+                entries[L] = (ba[1] if side_is_buy else ba[0]) if ba else master_px  # buy@ask
         ep["entries"] = entries
         ep["rem"] = {L: config.NOTIONAL / entries[L] for L in LAT}
         ep["entries_ready"].set()
@@ -258,11 +299,11 @@ class Observer:
             (entries[0.5], entries[2.0], entries[5.0], ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pos_id"]))
         slip = (entries[PRIMARY] - master_px) / master_px * 1e4 * ep["sign"]
         msz = ep["master_peak"] * ep["sign"]        # master's signed open size / position-after
-        self._record_action(ep, addr, coin, t, "open", master_px, msz, msz,
-                            ep["rem"][PRIMARY] * ep["sign"], entries[PRIMARY], 0.0, slip)
+        self._record_action(ep, addr, coin, t, "open", ep["open_maker"], ep["open_oid"], master_px,
+                            msz, msz, ep["rem"][PRIMARY] * ep["sign"], entries[PRIMARY], 0.0, slip)
         self.db.commit()
 
-    async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, gap=False):
+    async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker, oid=None, gap=False):
         async with ep["lock"]:
             try:
                 await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
@@ -270,7 +311,8 @@ class Observer:
                 pass
             if ep.get("entries") is None:
                 return
-            await asyncio.sleep(max(LAT) + 0.3)
+            if not maker:                            # taker needs the book at t+latency; maker fills
+                await asyncio.sleep(max(LAT) + 0.3)  # at their limit px, no book wait needed
             side_is_buy = ep["side"] == "long"
             h = self.coin_hist.get(coin, deque())
             target_frac = 0.0 if closing else abs(pos1) / max(ep["master_peak"], 1e-12)
@@ -278,9 +320,11 @@ class Observer:
             for L in LAT:
                 qty_total = config.NOTIONAL / ep["entries"][L]
                 close_qty = max(0.0, ep["rem"][L] - qty_total * target_frac)
-                at = now_ms() if gap else t + int(L * 1000)
-                ba = paper.book_at(h, at)
-                exit_px = (ba[0] if side_is_buy else ba[1]) if ba else master_px  # taker: sell@bid
+                if maker:
+                    exit_px = master_px              # mirror their resting limit -> fill at that px
+                else:
+                    ba = paper.book_at(h, now_ms() if gap else t + int(L * 1000))
+                    exit_px = (ba[0] if side_is_buy else ba[1]) if ba else master_px  # taker: sell@bid
                 pnl = close_qty * (exit_px - ep["entries"][L]) * ep["sign"]
                 ep["pnl"][L] += pnl
                 ep["rem"][L] -= close_qty
@@ -288,7 +332,7 @@ class Observer:
                     prim = {"qty": close_qty, "px": exit_px, "pnl": pnl}
             slip = (master_px - prim["px"]) / master_px * 1e4 * ep["sign"]
             action = "close" if closing else "reduce"
-            self._record_action(ep, addr, coin, t, action, master_px, signed, pos1,
+            self._record_action(ep, addr, coin, t, action, maker, oid, master_px, signed, pos1,
                                 -prim["qty"] * ep["sign"], prim["px"], prim["pnl"], slip)
             status = ("liquidated" if (closing and liq) else "gap_closed" if (closing and gap)
                       else "closed" if closing else "open")
@@ -306,14 +350,15 @@ class Observer:
                      f"mae={ep['mae']*100:.2f}% actions={ep['num_actions']}{' [GAP]' if gap else ''}"
                      f"{' [LIQ]' if liq else ''}")
 
-    def _record_action(self, ep, addr, coin, t, action, master_px, sz_delta, pos_after,
+    def _record_action(self, ep, addr, coin, t, action, maker, oid, master_px, sz_delta, pos_after,
                        our_qty_delta, our_px, realized, slip):
         ep["num_actions"] += 1
         self.db.execute(
-            "INSERT INTO copy_action (pos_id,addr,coin,ts,recv_ms,action,master_px,master_sz_delta,"
-            "master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (ep["pos_id"], addr, coin, t, now_ms(), action, master_px, sz_delta, pos_after,
-             our_qty_delta, our_px, realized, slip))
+            "INSERT INTO copy_action (pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,"
+            "master_sz_delta,master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ep["pos_id"], addr, coin, t, now_ms(), action, 1 if maker else 0, oid, master_px, sz_delta,
+             pos_after, our_qty_delta, our_px, realized, slip))
         self.db.execute("UPDATE copy_position SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
 
@@ -343,7 +388,8 @@ class Observer:
                 if abs(pos1) < abs(f(x.get("startPosition"))) - config.FLAT:   # a reduce/close in the gap
                     await self._apply_reduce(addr, x.get("coin"), ep, x["time"], f(x.get("px")), signed,
                                              pos1, closing=abs(pos1) < config.FLAT,
-                                             liq=bool(x.get("liquidation")), gap=True)
+                                             liq=bool(x.get("liquidation")),
+                                             maker=not bool(x.get("crossed")), oid=x.get("oid"), gap=True)
 
 
 # ------------------------------------------------------------------------- loaders
