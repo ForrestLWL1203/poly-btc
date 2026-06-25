@@ -116,10 +116,16 @@ def clearinghouse_state(addr: str):
 
 def perp_universe() -> set:
     """Standard crypto perp coin names. These price via WS bbo (subscribing bbo for a name NOT in
-    here — builder/stock coin or junk — closes the WS connection, so this guards bbo subs)."""
-    m = post_soft({"type": "meta"})
-    if isinstance(m, dict):
-        return {u.get("name") for u in m.get("universe", []) if u.get("name")}
+    here — builder/stock coin or junk — closes the WS connection, so this guards bbo subs).
+    Retries: an empty result here is load-bearing — callers filter copyable fills by it, so a
+    transient empty would silently DROP ALL CRYPTO. Retry hard before giving up."""
+    for _ in range(6):
+        m = post_soft({"type": "meta"})
+        if isinstance(m, dict):
+            names = {u.get("name") for u in m.get("universe", []) if u.get("name")}
+            if names:
+                return names
+        time.sleep(0.5)
     return set()
 
 
@@ -142,8 +148,13 @@ def builder_universe(dexes=BUILDER_DEXES) -> set:
 
 def copyable_universe(builder_dexes=BUILDER_DEXES) -> set:
     """Everything we can copy: standard crypto perps ∪ transparent builder perps (stocks/commodities).
-    Spot is still excluded upstream (is_spot). Used by the scanner to count copyable activity."""
-    return perp_universe() | builder_universe(builder_dexes)
+    Spot is still excluded upstream (is_spot). HARD-FAILS if the crypto set is empty: a partial
+    (stock-only) universe would silently drop every crypto trade and corrupt the whole sweep — far
+    worse than aborting. (A failed builder fetch just degrades to crypto-only, which is safe.)"""
+    crypto = perp_universe()
+    if not crypto:
+        raise RuntimeError("perp_universe() empty after retries — refusing a crypto-less universe")
+    return crypto | builder_universe(builder_dexes)
 
 
 def book_top(coin: str):

@@ -231,6 +231,8 @@ class Observer:
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
         self.crypto_coins = rest.perp_universe()           # price via WS bbo
+        if not self.crypto_coins:                          # load-bearing: empty would make crypto
+            raise RuntimeError("perp_universe() empty — refusing a crypto-less copy universe")
         self.valid_coins = self.crypto_coins | rest.builder_universe()  # + transparent stocks (l2Book)
         _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
