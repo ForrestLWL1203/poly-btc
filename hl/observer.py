@@ -109,10 +109,10 @@ class Observer:
     def _reload_open(self):
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
-            "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,mae_pct,num_actions "
+            "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,add_count,mae_pct,num_actions "
             "FROM copy_position WHERE status='open'").fetchall()
         for r in rows:
-            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, mae, na) = r
+            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, adds, mae, na) = r
             ev = asyncio.Event()
             if epx is not None:
                 ev.set()
@@ -121,8 +121,9 @@ class Observer:
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
                 "open_maker": False, "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
                 "notional": notl or 0.0, "entry_px": epx, "size": sz or 0.0, "rem_size": rem or 0.0,
-                "liq_px": liq or 0.0, "realized_pnl": rpnl or 0.0, "entries_ready": ev,
-                "lock": asyncio.Lock(), "mae": mae or 0.0, "num_actions": na or 0, "gap": False}
+                "liq_px": liq or 0.0, "realized_pnl": rpnl or 0.0, "add_count": adds or 0,
+                "entries_ready": ev, "lock": asyncio.Lock(), "mae": mae or 0.0, "num_actions": na or 0,
+                "gap": False}
         if rows:
             _log(f"reloaded {len(rows)} open copy positions from db")
 
@@ -373,7 +374,7 @@ class Observer:
         if liq:
             ep["was_liq"] = 1
         if abs(pos1) >= abs(pos0) - config.FLAT and not abs(pos1) < config.FLAT:
-            self._record_action(ep, addr, coin, t, "add", maker, oid, px, signed, pos1, 0.0, px, 0.0, 0.0)
+            asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, maker, oid))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
                                                    closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid))
@@ -390,7 +391,7 @@ class Observer:
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
               "open_maker": maker, "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
               "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
-              "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
+              "add_count": 0, "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
               "num_actions": 0, "gap": False}
         self.open_ep[(addr, coin)] = ep
         asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
@@ -427,6 +428,49 @@ class Observer:
         _log(f"OPEN {addr[:10]} {coin} {ep['side']} ${margin:,.0f}m {lev:.0f}x notl=${notional:,.0f} "
              f"@ {px:g} liq={liq_px:g} avail=${self._available():,.0f}")
 
+    async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, maker, oid):
+        """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
+        another MARGIN_PCT of available at the current price; the avg entry + liq_px recompute.
+        Past the cap we record his add but don't follow (the delta-based exit still mirrors him)."""
+        async with ep["lock"]:
+            try:
+                await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
+            except asyncio.TimeoutError:
+                pass
+            if ep.get("entry_px") is None or (addr, coin) not in self.open_ep:
+                return
+            if ep["add_count"] >= config.MAX_ADDS:    # cap reached — observe but don't follow
+                self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
+                                    0.0, master_px, 0.0, 0.0)
+                self.db.commit()
+                return
+            is_buy = ep["side"] == "long"             # adding to a long => buy more
+            stale = (now_ms() - t) > STALE_MS
+            px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
+            lev = ep["leverage"]
+            async with self.acct_lock:
+                add_margin = max(0.0, self._available() * config.MARGIN_PCT)
+            add_size = (add_margin * lev / px) if px else 0.0
+            new_size = ep["rem_size"] + add_size
+            ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
+                              if new_size else px)    # size-weighted average entry
+            ep["rem_size"] = new_size
+            ep["size"] += add_size
+            ep["margin"] += add_margin
+            ep["notional"] += add_margin * lev
+            ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / lev) if is_buy else ep["entry_px"] * (1 + 1.0 / lev)
+            ep["add_count"] += 1
+            slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
+            self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
+                                add_size * ep["sign"], px, 0.0, slip)
+            self.db.execute(
+                "UPDATE copy_position SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,liq_px=?,"
+                "add_count=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
+                ep["rem_size"], ep["liq_px"], ep["add_count"], ep["pos_id"]))
+            self.db.commit()
+            _log(f"ADD {addr[:10]} {coin} #{ep['add_count']} +${add_margin:,.0f}m avg={ep['entry_px']:g} "
+                 f"liq={ep['liq_px']:g} avail=${self._available():,.0f}")
+
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker,
                             oid=None, gap=False, forced_px=None):
         async with ep["lock"]:
@@ -440,8 +484,12 @@ class Observer:
             stale = (now_ms() - t) > STALE_MS
             exit_px = (forced_px if forced_px is not None
                        else master_px if stale else self._fill_px(coin, is_buy, maker, master_px))
-            target_frac = 0.0 if closing else abs(pos1) / max(ep["master_peak"], 1e-12)
-            close_size = max(0.0, ep["rem_size"] - ep["size"] * target_frac)
+            # delta-based: close the SAME fraction of our position the master just closed of his —
+            # correct for any build-up (adds we followed, adds we skipped past the cap, or none).
+            pos0 = pos1 - signed
+            reduce_frac = (1.0 if closing or abs(pos0) < config.FLAT
+                           else max(0.0, min(1.0, (abs(pos0) - abs(pos1)) / abs(pos0))))
+            close_size = ep["rem_size"] * reduce_frac
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"]
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl

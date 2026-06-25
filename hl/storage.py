@@ -169,6 +169,7 @@ CREATE TABLE IF NOT EXISTS copy_position (
     entry_px REAL, size REAL, rem_size REAL,       -- our fill px, position size (coin), remaining
     liq_px REAL,                                   -- isolated liquidation price (loss = margin)
     realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
+    add_count INTEGER DEFAULT 0,                   -- follow-on adds taken (capped at MAX_ADDS)
     mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
     opened_at TEXT, closed_at TEXT
 );

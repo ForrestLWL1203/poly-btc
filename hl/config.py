@@ -32,8 +32,9 @@ LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup onl
 # master's leverage capped to MAX_LEV. notional = margin * leverage; liquidation when price crosses
 # the isolated liq level (loss = margin). No stop-loss in v1 (the 2% margin is the per-trade max loss).
 INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
-MARGIN_PCT = 0.02           # margin per copy = this fraction of available balance
+MARGIN_PCT = 0.02           # margin per copy (open AND each follow-on add) = fraction of available
 MAX_LEV = 10.0              # cap on the master's leverage we mirror
+MAX_ADDS = 3                # follow the master's scale-ins up to this many adds/position (avg down)
 
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
