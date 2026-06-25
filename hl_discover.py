@@ -2,7 +2,7 @@
 """CLI entrypoint for the discovery scanner. Logic lives in hl/ (scanner, metrics,
 rest, fills, storage). Run from the repo root so `import hl` resolves.
 
-  python3 hl_discover.py --db data/hl.db scan --days 14 --limit 120
+  python3 hl_discover.py --db data/hl.db scan --days 14 --scan-interval 8   # full sweep, paced
   python3 hl_discover.py --db data/hl.db watchlist
   python3 hl_discover.py --db data/hl.db harvest
 """
@@ -30,9 +30,9 @@ def main() -> int:
     s.add_argument("--order", choices=["mon_roi", "week_roi", "mon_pnl"], default="mon_roi")
     s.add_argument("--min-acct", type=float, default=5000, help="noise guard only (we copy by pct, not $)")
     s.add_argument("--max-turnover", type=float, default=1e9, help="OFF by default (volume!=frequency)")
-    s.add_argument("--min-roi", type=float, default=0.20, help="modest 30d (month) ROI floor (coarse)")
     s.add_argument("--min-crypto", type=float, default=0.3, help="(unused) legacy prescreen arg")
-    s.add_argument("--max-pages", type=int, default=15)
+    s.add_argument("--max-pages", type=int, default=5, help="cap fill pages/wallet (aggregateByTime -> "
+                   "14d is ~1 page; >5 pages of trade-level fills = HFT/MM we reject anyway)")
     s.add_argument("--workers", type=int, default=4, help="concurrent profiling threads (rate is capped by --scan-interval)")
     s.add_argument("--scan-interval", type=float, default=8.0,
                    help="REST pace (s/request) for the scan PROCESS — slow trickle so it shares the IP "
@@ -46,7 +46,6 @@ def main() -> int:
     h = sub.add_parser("harvest", help="refresh candidate pool only")
     h.add_argument("--min-acct", type=float, default=5000)
     h.add_argument("--max-turnover", type=float, default=1e9)
-    h.add_argument("--min-roi", type=float, default=0.20)
 
     g = sub.add_parser("regate", help="re-apply gate thresholds on STORED profiles (no re-fetch) + rebuild watchlist")
     add_gate_args(g)

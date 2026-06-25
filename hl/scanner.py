@@ -17,11 +17,12 @@ _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker t
 
 # -------------------------------------------------------------------------- harvest
 def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
-    """COARSE candidate funnel only — the leaderboard ROI is unrealized-inflated (account MTM,
-    incl held winners + builder/spot), so it's a weak floor, NOT the strength judge. Real
-    strength = our realized-crypto profile. Keep: real capital, not an MM (turnover), lifetime
-    profitable, a modest recent ROI floor, and active in the last 24h."""
-    min_mon = getattr(p, "min_roi", 0.20)        # modest 30d ROI floor (exclude weak/losing)
+    """COARSE candidate funnel only — DELIBERATELY LOOSE. The leaderboard ROI is unrealized-inflated
+    (account MTM, incl held winners + builder/spot), so it's the WRONG signal for strength — the real
+    judge is our realized-crypto profile (gates: net_pnl>0; score: roi_equity). So the prefilter does
+    NOT cull on ROI anymore (that pre-discarded steady realized-profitable wallets on bad data). Keep
+    only: real capital (noise guard), not an MM (turnover), lifetime profitable, and traded in the
+    last 7d (coarse net; the precise 3-day cutoff is enforced by gates() on our real last_fill)."""
     rows = rest.get_leaderboard()
     now = now_iso()
     n_cand = 0
@@ -31,9 +32,8 @@ def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
         acct = f(r.get("accountValue"))
         turnover = (f(mo.get("vlm")) / acct / 30.0) if acct > 0 else 0.0
         cand = (acct >= min_acct and 0 < turnover <= max_turnover
-                and f(al.get("roi")) > 0                       # lifetime profitable
-                and f(mo.get("roi")) > min_mon                 # modest 30d floor
-                and f(d.get("vlm")) > 0)                       # active last 24h
+                and f(al.get("roi")) > 0                       # lifetime profitable (track record)
+                and f(wk.get("vlm")) > 0)                      # traded in the last 7d (loose net)
         db.execute(
             "INSERT OR REPLACE INTO leaderboard (addr,display_name,account_value,"
             "day_pnl,day_roi,day_vlm,week_pnl,week_roi,week_vlm,mon_pnl,mon_roi,mon_vlm,"
@@ -131,21 +131,16 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
         ok, reason = metrics.gates(m, now_ms, p)
     m["times_active"] += 1 if ok else 0
 
-    age_days = (prior or {}).get("age_days")
     m["margin_type"] = (prior or {}).get("margin_type")
     m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
     if ok:
-        if age_days is None:
-            try:
-                birth = rest.account_birth_ms(addr)
-                if birth:
-                    age_days = (now_ms - birth) / 86400_000.0
-            except Exception:  # noqa: BLE001
-                pass
         mt, cl, uw = _margin_snapshot(addr)          # margin type + current leverage + worst underwater
         if mt is not None:
             m["margin_type"], m["cur_leverage"], m["open_underwater"] = mt, cl, uw
-    m["age_days"] = age_days
+    # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
+    # new wallet with strong recent performance). Survival now leans on times_active (our own observed
+    # cross-scan persistence), not age. Keep any age a prior run already had; never fetch a new one.
+    m["age_days"] = (prior or {}).get("age_days")
 
     prev_status = (prior or {}).get("status")
     status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
@@ -249,7 +244,7 @@ def scan(db, p) -> None:
         n_cand = harvest(db, p.min_acct, p.max_turnover, p)
         turn = "off" if p.max_turnover >= 1e8 else f"<={p.max_turnover:g}x"
         print(f"  {n_cand} candidates (acct>=${p.min_acct:g}, turnover {turn}, "
-              f"mon_roi>{getattr(p,'min_roi',0.2):.0%}, all_roi>0, 24h-active)", flush=True)
+              f"all_roi>0, traded-last-7d)", flush=True)
 
     # FULL sweep every cycle (now cheap): re-profile EVERY candidate fresh — so a wallet that was
     # rejected on a past bad window gets re-discovered when it improves, and degraded actives retire.

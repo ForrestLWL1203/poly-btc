@@ -122,8 +122,10 @@ def score(m: dict) -> float:
     consistency = pos ** (w * config.SCORE_GAMMA)             # high-freq must be green MOST days; low-freq lenient
     quality = rar * consistency
 
-    age = m.get("age_days") or 0
-    survival = (0.4 + 0.3 * min(age, 365) / 365 + 0.3 * min(m.get("times_active", 1), 10) / 10)
+    # survival = cross-scan persistence only (times_active = how many scans it stayed eligible). Age
+    # is NOT used: we don't fetch wallet history (wasteful), and a new wallet with strong recent
+    # performance shouldn't be penalised for being young. New wallet floors at 0.6, proven climbs to 1.
+    survival = 0.6 + 0.4 * min(m.get("times_active", 1), 10) / 10
     worst_liq = abs(m.get("liq_worst_pct") or 0.0)
     survival *= 0.6 if worst_liq >= 20 else (0.85 if worst_liq >= 5 else 1.0)
 

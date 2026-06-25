@@ -100,13 +100,6 @@ def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
     return out, True
 
 
-def account_birth_ms(addr: str):
-    """First-ever fill time (address age)."""
-    page = user_fills_by_time(addr, 0)
-    if isinstance(page, list) and page:
-        return min(x["time"] for x in page)
-    return None
-
 
 def clearinghouse_state(addr: str):
     """Current account state — open positions with leverage {type isolated/cross, value} and
