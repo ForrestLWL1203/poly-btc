@@ -31,7 +31,7 @@ def main() -> int:
     s.add_argument("--days", type=int, default=14)
     s.add_argument("--limit", type=int, default=120, help="max NEW candidates to probe this run")
     s.add_argument("--order", choices=["mon_roi", "week_roi", "mon_pnl"], default="mon_roi")
-    s.add_argument("--min-acct", type=float, default=5000, help="noise guard only (we copy by %, not $)")
+    s.add_argument("--min-acct", type=float, default=5000, help="noise guard only (we copy by pct, not $)")
     s.add_argument("--max-turnover", type=float, default=1e9, help="OFF by default (volume!=frequency)")
     s.add_argument("--min-roi", type=float, default=0.20, help="modest 30d (month) ROI floor (coarse)")
     s.add_argument("--min-crypto", type=float, default=0.3, help="pre-screen: min recent crypto-fill share")
