@@ -26,10 +26,11 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 MIN_FOLLOW_SCORE = 1.2      # follow watchlist wallets with v3 score >= this (quality threshold, UI-tunable)
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
-POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's cursor (tid-dedup absorbs it)
-MAX_BACKFILL_S = 3600      # never look back further than this on a poll (forward-only, bounds stale cursors)
-LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs ~MAX_BACKFILL_S;
-#                                the rest is audit) — keeps the only unbounded-on-disk table bounded
+POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
+#                            it) so a fill landing between poll rounds isn't missed. This is the ONLY
+#                            look-back — the observer is forward-only, it never catches up on history.
+LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap
+#                                window; the rest is audit) — keeps the only unbounded table bounded
 
 # Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
 # balance; each copy commits MARGIN_PCT of CURRENT AVAILABLE balance as isolated margin, at the

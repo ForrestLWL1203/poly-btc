@@ -196,9 +196,9 @@ class Observer:
             _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
 
     async def prune_live_fills(self):
-        """Keep live_fills bounded on disk. tid-dedup only needs ~MAX_BACKFILL_S of history (the
-        poll cursor never re-fetches older than that), so deleting rows past the retention window
-        can't cause re-processing — the rest is just audit. Runs at startup then every 6h."""
+        """Keep live_fills bounded on disk. tid-dedup only needs the last POLL_OVERLAP_MS of history
+        (the forward-only cursor re-fetches only a few seconds back), so deleting rows past the
+        retention window can't cause re-processing — the rest is just audit. Runs at startup then 6h."""
         while not self.stop:
             cutoff = now_ms() - config.LIVE_FILLS_RETENTION_DAYS * 86400_000
             n = self.db.execute("DELETE FROM live_fills WHERE time_ms < ?", (cutoff,)).rowcount
@@ -209,20 +209,21 @@ class Observer:
 
     # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
     async def poll_loop(self):
-        """Primary engine. Round-robin every watchlist wallet's recent fills (cursor − overlap,
-        capped at MAX_BACKFILL_S so a stale cursor can't replay ancient history), replaying each
-        through the idempotent process_fill. No fixed period — the REST pacer sets the cadence;
-        a full round over ~tens of wallets takes a few seconds. Re-reads the watchlist table
-        periodically so rolling discovery flows in without a restart."""
+        """Primary engine. Round-robin every watchlist wallet's recent fills (cursor − a few-second
+        overlap so a fill landing between rounds isn't missed; tid-dedup absorbs the re-fetch),
+        replaying each through the idempotent process_fill. No fixed period — the REST pacer sets the
+        cadence; a full round over ~tens of wallets takes a few seconds. Strictly FORWARD-ONLY: each
+        wallet's cursor starts at now (set in _reload_targets), so we only ever copy fills that
+        happen while we're live — never history. Re-reads the watchlist periodically so rolling
+        discovery flows in without a restart."""
         last_reload = now_ms()
         while not self.stop:
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
                 self._reload_targets()
                 last_reload = now_ms()
             for addr in list(self.addrs):
-                floor = now_ms() - config.MAX_BACKFILL_S * 1000
-                since = max(self.last_fill_ms.get(addr, now_ms()), floor) - config.POLL_OVERLAP_MS
-                await self.backfill(addr, since)
+                since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS
+                await self._poll_fills(addr, since)
             await asyncio.sleep(1)                 # small breath between rounds
 
     # -- REST poll of targets' resting orders (limit ladders + TP/SL) --------
@@ -300,8 +301,7 @@ class Observer:
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
                 self.stock_coins.add(coin)
-        self._load_cursors()                       # restore per-wallet REST cursors
-        self._reload_targets(init=True)            # load watchlist + forward-only cursors for new
+        self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
@@ -542,32 +542,19 @@ class Observer:
         self.db.execute("UPDATE copy_position SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
 
-    # -- per-wallet REST cursor ----------------------------------------------
-    def _load_cursors(self):
-        for addr, lfm in self.db.execute("SELECT addr, last_fill_ms FROM wallet_cursor").fetchall():
-            if lfm:
-                self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), lfm)
-
-    def _save_cursor(self, addr):
-        lfm = self.last_fill_ms.get(addr)
-        if lfm:
-            self.db.execute(
-                "INSERT INTO wallet_cursor (addr,last_fill_ms,updated_at) VALUES (?,?,?) "
-                "ON CONFLICT(addr) DO UPDATE SET last_fill_ms=excluded.last_fill_ms,updated_at=excluded.updated_at",
-                (addr, lfm, now_iso()))
-
-    async def backfill(self, addr: str, since: int):
-        """REST-fetch the wallet's fills since `since` and replay through the idempotent process_fill
-        (dedup by tid). aggregateByTime MERGES an order's partial fills into one TRADE-level row, so
-        (a) one sliced order = one record (not N), and (b) it isn't mis-counted as N scale-ins."""
+    async def _poll_fills(self, addr: str, since: int):
+        """SIGNAL fetch: REST-pull the wallet's fills since `since` (a few seconds back — the live
+        poll window, NOT history) and replay through the idempotent process_fill (dedup by tid).
+        aggregateByTime MERGES an order's partial fills into one TRADE-level row, so (a) one sliced
+        order = one record (not N), and (b) it isn't mis-counted as N scale-ins. The cursor lives
+        only in memory (self.last_fill_ms): startup is strictly forward-only — we never catch up on
+        fills we missed while down, because copying an entry we didn't see live is meaningless."""
         page = await asyncio.to_thread(rest.post_soft, {
             "type": "userFillsByTime", "user": addr, "startTime": int(max(0, since)), "aggregateByTime": True})
         if isinstance(page, list) and page:
             for x in sorted(page, key=lambda fl: fl["time"]):
                 self.process_fill(addr, x)
             self.db.commit()
-        self._save_cursor(addr)
-        self.db.commit()
 
 
 # ------------------------------------------------------------------------- loaders
