@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS profile (
     cur_leverage     REAL,                -- current account effective leverage (totalNtlPos/equity)
     liq_count        INTEGER DEFAULT 0,   -- # self-liquidation events in window (liquidatedUser==self)
     liq_worst_pct    REAL DEFAULT 0,      -- worst single self-liquidation loss as % of equity (<=0)
+    active_days      INTEGER DEFAULT 0,   -- v3: distinct days with a closed episode in the window
+    activity_ratio   REAL DEFAULT 0,      -- v3: active_days / lookback (regularity; gate >=0.5)
+    median_eps       REAL DEFAULT 0,      -- v3: median episodes per ACTIVE day (true daily frequency)
+    pos_day_ratio    REAL DEFAULT 0,      -- v3: fraction of active days that were net-positive
+    profit_conc      REAL DEFAULT 0,      -- v3: best single day's share of gross profit (1 = one-lucky-day)
+    hold_skew        REAL DEFAULT 0,      -- v3: median hold(losers)/hold(winners) (>1 = 扛单/disposition)
+    open_underwater  REAL DEFAULT 0,      -- v3: worst current open position underwater (fraction, <=0)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -134,8 +141,9 @@ PROFILE_COLS = (
     "median_hold_s,win_rate,net_pnl,roi_equity,roi_notional,total_notl,acct_value,perp_frac,"
     "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
+    "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 35 columns
+)  # 42 columns
 
 OBSERVE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_fills (

@@ -42,6 +42,16 @@ MAX_ADDS = 3                # follow the master's scale-ins up to this many adds
 # Applies to taker opens only (maker rests passively; exits are never blocked — always follow out).
 MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.5% worse than master
 
+# v3 score shape (interpretable, UI-tunable — NOT arbitrary quality cutoffs). The watchlist is
+# top-N by SCORE = Quality × Survival × FreqFit × Health; these tune the curves, not hard gates.
+SCORE_K = 5.0          # daily-stats confidence: w = active_days/(active_days+K). Low-freq → lean overall ROI
+SCORE_GAMMA = 2.0      # day-consistency strictness: consistency = pos_day_ratio^(w·GAMMA). Higher = stricter
+FREQ_STAR = 8.0        # frequency sweet-spot (median episodes/day) where FreqFit saturates (capital efficiency)
+UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine; vs liq_dist=1/MAX_LEV)
+SKEW_SPAN = 2.0        # disposition penalty span: hold_skew (loser/winner hold) from 1→1+SPAN drives Health→floor
+CONC_TOL = 0.40        # profit-concentration tolerance: a single day > this share of gross profit gets penalised
+HEALTH_FLOOR = 0.20    # min for the disposition/concentration factors (a soft penalty, never a hard zero)
+
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
 TAKER_FEE = 0.00045          # detection latency, so all three resolve to the same live-book price

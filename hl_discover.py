@@ -17,15 +17,12 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_gate_args(pr):
-        # quality gates applied on the reconstructed-from-fills profile (the REAL filters)
-        pr.add_argument("--min-win", type=float, default=0.80, help="min win rate (consistency — primary)")
-        pr.add_argument("--min-roi-eq", type=float, default=0.05, help="min realized 14d ROI on equity")
-        pr.add_argument("--max-dd-eq", type=float, default=0.08, help="max equity drawdown (variance cap)")
-        pr.add_argument("--max-tpd", type=float, default=5.0, help="max EPISODES/day (TRUE frequency)")
-        pr.add_argument("--min-trades", type=int, default=8, help="min episodes (so high win != luck)")
-        pr.add_argument("--min-hold-h", type=float, default=1.0)
-        pr.add_argument("--min-perp", type=float, default=0.6, help="min fraction of fills that are perp")
-        pr.add_argument("--inactive-days", type=float, default=3.0)
+        # v3 ELIGIBILITY gates (the few binary thresholds; QUALITY is the continuous score in
+        # metrics.score, shaped by config constants). No more hardcoded win/roi/dd cutoffs.
+        pr.add_argument("--min-perp", type=float, default=0.6, help="min copyable-perp share of fills")
+        pr.add_argument("--inactive-days", type=float, default=3.0, help="reject if no fill within N days")
+        pr.add_argument("--max-daily-eps", type=float, default=30.0, help="reject bots: max median episodes/active-day")
+        pr.add_argument("--min-activity", type=float, default=0.5, help="min active_days/lookback (regular trading)")
 
     s = sub.add_parser("scan", help="harvest + refresh actives + probe new -> update watchlist")
     s.add_argument("--days", type=int, default=14)

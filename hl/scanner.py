@@ -67,20 +67,30 @@ def _self_liquidations(fills, addr, acct):
 
 
 def _margin_snapshot(addr):
-    """(margin_type, current_account_leverage) from clearinghouseState. Snapshot only — flat
-    wallet -> ('flat', 0). Mixed positions -> 'mixed'. Returns (None, 0) on fetch failure."""
+    """(margin_type, current_account_leverage, worst_open_underwater) from clearinghouseState.
+    Snapshot only — flat wallet -> ('flat', 0, 0). worst_open_underwater = the most-negative
+    adverse price move across current open positions ((mark-entry)/entry × side), <=0; 0 if flat.
+    Returns (None, 0, 0) on fetch failure."""
     cs = rest.clearinghouse_state(addr)
     if not isinstance(cs, dict):
-        return None, 0.0
+        return None, 0.0, 0.0
     ms = cs.get("marginSummary", {})
     av = f(ms.get("accountValue")); ntl = f(ms.get("totalNtlPos"))
     pos = cs.get("assetPositions", []) or []
     if not pos:
-        return "flat", 0.0
-    types = {(pp.get("position", {}).get("leverage") or {}).get("type") for pp in pos}
+        return "flat", 0.0, 0.0
+    types, worst_uw = set(), 0.0
+    for pp in pos:
+        p_ = pp.get("position", {})
+        types.add((p_.get("leverage") or {}).get("type"))
+        szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
+        if entry and szi:
+            mark = pv / abs(szi)                                  # positionValue = |szi| × markPx
+            adverse = (mark - entry) / entry * (1 if szi > 0 else -1)   # <0 = underwater
+            worst_uw = min(worst_uw, adverse)
     types.discard(None)
     mt = next(iter(types)) if len(types) == 1 else ("mixed" if types else "flat")
-    return mt, (ntl / av if av else 0.0)
+    return mt, (ntl / av if av else 0.0), worst_uw
 
 
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
@@ -97,13 +107,14 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     perp = [x for x in raw if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
     perp_frac = (len(perp) / len(raw)) if raw else 0.0
     eps = build_episodes(perp)
-    m = metrics.compute_metrics(perp, eps, now_ms)
+    m = metrics.compute_metrics(perp, eps, now_ms, p.days)
     if m is None:
         m = {"n_fills": len(perp), "n_trades": 0, "window_days": 0, "trades_per_day": 0,
-             "taker_frac_notl": 0, "median_hold_s": 0, "win_rate": 0, "net_pnl": 0,
-             "roi_notional": 0, "total_notl": 0, "gross_pnl": 0, "total_fee": 0, "n_coins": 0,
-             "top_coin": None, "long_frac": 0, "max_drawdown": 0, "avg_notional": 0,
-             "last_fill_ms": raw[-1]["time"] if raw else 0}
+             "taker_frac_notl": 0, "median_hold_s": 0, "win_rate": 0, "net_pnl": 0, "gross_pnl": 0,
+             "roi_notional": 0, "total_notl": 0, "total_fee": 0, "n_coins": 0, "top_coin": None,
+             "long_frac": 0, "max_drawdown": 0, "avg_notional": 0, "hold_skew": 0,
+             "last_fill_ms": raw[-1]["time"] if raw else 0, "active_days": 0, "activity_ratio": 0,
+             "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0}
 
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
@@ -112,6 +123,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     m["times_active"] = (prior or {}).get("times_active", 0)
     m["lev_proxy"] = (m["avg_notional"] / acct_value) if acct_value else 0.0  # hist. eff. leverage
     m["liq_count"], m["liq_worst_pct"] = _self_liquidations(raw, addr, acct_value)
+    m["open_underwater"] = 0.0
 
     if m["n_trades"] == 0:
         ok, reason = False, "no_perp_trades"
@@ -130,16 +142,19 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
                     age_days = (now_ms - birth) / 86400_000.0
             except Exception:  # noqa: BLE001
                 pass
-        mt, cl = _margin_snapshot(addr)              # isolated/cross + current leverage (snapshot)
+        mt, cl, uw = _margin_snapshot(addr)          # margin type + current leverage + worst underwater
         if mt is not None:
-            m["margin_type"], m["cur_leverage"] = mt, cl
+            m["margin_type"], m["cur_leverage"], m["open_underwater"] = mt, cl, uw
     m["age_days"] = age_days
 
     prev_status = (prior or {}).get("status")
     status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
-    first_added = (prior or {}).get("first_added") or (stamp if ok else None)
     m["score"] = metrics.score(m) if ok else 0.0
-
+    row = dict(m)                                    # keys match column names -> robust positional build
+    row.update(addr=addr, status=status, reason=reason, last_refreshed=stamp,
+               first_added=(prior or {}).get("first_added") or (stamp if ok else None),
+               times_seen=(prior or {}).get("times_seen", 0) + 1)
+    cols = storage.PROFILE_COLS.split(",")
     with _db_lock:
         if ok:
             db.execute("DELETE FROM episode WHERE addr=?", (addr,))
@@ -148,15 +163,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 [(addr, e["coin"], e["side"], e["open_ms"], e["close_ms"], e["hold_s"], e["net_pnl"],
                   e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]) for e in eps])
-        db.execute(
-            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
-            (addr, status, reason, m["score"], m["n_fills"], m["n_trades"], m["window_days"],
-             m["trades_per_day"], m["taker_frac_notl"], m["median_hold_s"], m["win_rate"],
-             m["net_pnl"], m["roi_equity"], m["roi_notional"], m["total_notl"], m["acct_value"],
-             m["perp_frac"], m["gross_pnl"], m["total_fee"], m["n_coins"], m["top_coin"],
-             m["long_frac"], m["max_drawdown"], m["avg_notional"], m["age_days"], m["last_fill_ms"],
-             m["lev_proxy"], m["margin_type"], m["cur_leverage"], m["liq_count"], m["liq_worst_pct"],
-             first_added, stamp, (prior or {}).get("times_seen", 0) + 1, m["times_active"]))
+        db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
+                   f"VALUES ({','.join('?' * len(cols))})", [row.get(c) for c in cols])
         db.commit()
     return status, reason, m, hit_cap
 
@@ -201,17 +209,19 @@ def regate(db, p) -> int:
     now = int(time.time() * 1000)
     stamp = now_iso()
     rows = db.execute(
-        "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,win_rate,roi_equity,"
-        "max_drawdown,acct_value,trades_per_day,median_hold_s,age_days,times_active,liq_worst_pct "
-        "FROM profile").fetchall()
+        "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
+        "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
+        "pos_day_ratio,profit_conc,hold_skew,open_underwater FROM profile").fetchall()
     n_active = 0
     for r in rows:
-        (addr, old, n_tr, perp_frac, last_fill, net, win, roi_eq, mdd, acct, tpd, hold, age, ta, liqw) = r
+        (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
+         ad, ar, meps, pdr, conc, skew, uw) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
-             "net_pnl": net or 0.0, "win_rate": win or 0.0, "roi_equity": roi_eq or 0.0,
-             "max_drawdown": mdd or 0.0, "acct_value": acct or 0.0, "trades_per_day": tpd or 0.0,
-             "median_hold_s": hold or 0, "age_days": age, "times_active": ta or 0,
-             "liq_worst_pct": liqw or 0.0}
+             "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
+             "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
+             "liq_worst_pct": liqw or 0.0, "active_days": ad or 0, "activity_ratio": ar or 0.0,
+             "median_eps": meps or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
+             "hold_skew": skew or 0.0, "open_underwater": uw or 0.0}
         if m["n_trades"] == 0:
             ok, reason = False, "no_perp_trades"
         else:
