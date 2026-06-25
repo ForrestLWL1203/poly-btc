@@ -675,13 +675,13 @@ def report(db) -> None:
     h = ("  {:>4} {:10} {:5}|{:>10} {:>11} {:>6}|{:>7}|{:>11} {:>10} {:>6}|{:>11}".format(
         "编号", "coin", "side", "tgt_mgn", "tgt_px", "tgt_lv", "lag", "our_px", "our_mgn", "our_lv", "pnl$"))
     print(h + "\n  " + "-" * (len(h) - 2))
-    def s(v, fmt): return (fmt % v) if v is not None else "—"
+    def s(v, spec, pre="", suf=""): return (pre + format(v, spec) + suf) if v is not None else "—"
     for t in sorted(table, key=lambda r: -r[10]):
         num_s, coin, side, m_mgn, m_entry, m_lev, lag_ms, o_entry, o_mgn, o_lev, pnl, lbl = t
         lag = f"{lag_ms/1000:.1f}s" if lag_ms is not None else "—"
-        print("  {:>4} {:10} {:5}|{:>10} {:>11} {:>6}|{:>7}|{:>11} {:>10} {:>5}x|{:>+10,.1f}{}".format(
-            num_s, coin, side, s(m_mgn, "$%,.0f"), s(m_entry, "%g"), s(m_lev, "%.0fx"),
-            lag, ("%g" % o_entry), o_mgn, o_lev, pnl, lbl))
+        print("  {:>4} {:10} {:5}|{:>10} {:>11} {:>6}|{:>7}|{:>11} {:>10} {:>6}|{:>+10,.1f}{}".format(
+            num_s, coin, side, s(m_mgn, ",.0f", "$"), s(m_entry, "g"), s(m_lev, ".0f", "", "x"),
+            lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
     print(f"\n(margin {config.MARGIN_PCT*100:g}% open / {config.ADD_MARGIN_PCT*100:g}% per add of available, "
