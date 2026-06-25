@@ -37,10 +37,11 @@ def _log(msg: str):
 
 
 class Observer:
-    def __init__(self, db, addrs: list, seed_coins: dict):
+    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
+        self.top_n = top_n or config.MAX_TARGETS   # how many watchlist wallets to actually follow
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
@@ -127,7 +128,7 @@ class Observer:
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False):
-        addrs, seed = load_targets(self.db, config.MAX_TARGETS)
+        addrs, seed = load_targets(self.db, self.top_n)
         self.seed_coins = seed
         new = [a for a in addrs if a not in self.last_fill_ms]
         for a in new:

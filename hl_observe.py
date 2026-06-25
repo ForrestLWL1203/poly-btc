@@ -39,7 +39,7 @@ def main() -> int:
             return 1
         print(f"observing {len(addrs)} targets: {', '.join(a[:8] for a in addrs)}")
         try:
-            asyncio.run(observer.Observer(db, addrs, seed).run())
+            asyncio.run(observer.Observer(db, addrs, seed, top_n=n).run())
         except KeyboardInterrupt:
             print("stopped.")
     elif args.cmd == "report":
