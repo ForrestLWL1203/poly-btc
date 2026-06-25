@@ -101,10 +101,15 @@ def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
 
 
 
-def clearinghouse_state(addr: str):
+def clearinghouse_state(addr: str, dex: str = None):
     """Current account state — open positions with leverage {type isolated/cross, value} and
-    marginSummary (accountValue, totalNtlPos). Snapshot only (flat wallet -> no positions)."""
-    return post_soft({"type": "clearinghouseState", "user": addr})
+    marginSummary (accountValue, totalNtlPos). Snapshot only (flat wallet -> no positions).
+    Pass dex (e.g. 'xyz') for a builder/stock perp dex — the standard call only returns standard-
+    perp positions; builder-dex positions need their dex named explicitly."""
+    body = {"type": "clearinghouseState", "user": addr}
+    if dex:
+        body["dex"] = dex
+    return post_soft(body)
 
 
 def perp_universe() -> set:

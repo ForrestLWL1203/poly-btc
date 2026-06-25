@@ -625,13 +625,15 @@ def report(db) -> None:
             mark[coin] = ((ba[0] + ba[1]) / 2) if ba else None
     master = {}                                      # addr -> {coin -> live master position dict}
     for addr in {a for (a, _) in open_keys}:
-        cs = rest.clearinghouse_state(addr)
+        dexes = {c.split(":")[0] for (a2, c) in open_keys if a2 == addr and ":" in c}
         mp = {}
-        if isinstance(cs, dict):
-            for ap in cs.get("assetPositions", []):
-                p = ap.get("position", {}) or {}
-                if p.get("coin"):
-                    mp[p["coin"]] = p
+        for dex in [None] + sorted(dexes):           # standard perp + each builder/stock dex held
+            cs = rest.clearinghouse_state(addr, dex)
+            if isinstance(cs, dict):
+                for ap in cs.get("assetPositions", []):
+                    p = ap.get("position", {}) or {}
+                    if p.get("coin"):
+                        mp[p["coin"]] = p
         master[addr] = mp
 
     table, open_margin, total_unreal = [], 0.0, 0.0
@@ -647,7 +649,7 @@ def report(db) -> None:
             unreal = rem * (mk - our_entry) * (1 if side == "long" else -1)
             open_margin += our_mgn; total_unreal += unreal
             mp = master.get(addr, {}).get(coin, {})
-            m_entry = f(mp.get("entryPx"))
+            m_entry = f(mp.get("entryPx")) or None
             m_lev = (mp.get("leverage") or {}).get("value")
             m_mgn = f(mp.get("marginUsed")) or (f(mp.get("positionValue")) / m_lev if m_lev else None)
             lr = db.execute("SELECT recv_ms-ts FROM copy_action WHERE pos_id=? AND action='open' "
