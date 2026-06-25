@@ -37,11 +37,12 @@ def _log(msg: str):
 
 
 class Observer:
-    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None):
+    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
-        self.top_n = top_n or config.MAX_TARGETS   # how many watchlist wallets to actually follow
+        self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
+        self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
@@ -129,7 +130,7 @@ class Observer:
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False):
-        addrs, seed = load_targets(self.db, self.top_n)
+        addrs, seed = load_targets(self.db, self.top_n, self.min_score)
         self.seed_coins = seed
         # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
@@ -573,10 +574,11 @@ class Observer:
 
 
 # ------------------------------------------------------------------------- loaders
-def load_targets(db, n: int):
+def load_targets(db, n: int, min_score: float = 0.0):
     addrs = [r[0] for r in db.execute(
         "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-        "WHERE COALESCE(c.enabled,1)=1 ORDER BY w.rank LIMIT ?", (n,)).fetchall()]
+        "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? ORDER BY w.rank LIMIT ?",
+        (min_score, n)).fetchall()]
     seed = {a: {r[0] for r in db.execute("SELECT DISTINCT coin FROM episode WHERE addr=?", (a,)).fetchall()}
             for a in addrs}
     return addrs, seed

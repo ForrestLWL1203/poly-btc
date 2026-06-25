@@ -16,9 +16,10 @@ def main() -> int:
     ap.add_argument("--db", default=config.DEFAULT_DB)
     sub = ap.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("observe")
+    o.add_argument("--min-score", type=float, default=config.MIN_FOLLOW_SCORE,
+                   help=f"follow watchlist wallets with v3 score >= this (quality threshold, default {config.MIN_FOLLOW_SCORE})")
     o.add_argument("--top", type=int, default=config.MAX_TARGETS,
-                   help=f"poll top-N enabled watchlist wallets via REST (default {config.MAX_TARGETS}; "
-                        "no 10-user cap — that's WS-user-subs only, we signal via REST)")
+                   help=f"hard cap on followed wallets (REST-rate ceiling, default {config.MAX_TARGETS})")
     o.add_argument("--extra", action="append", default=[],
                    help="extra address(es) to monitor for debugging")
     sub.add_parser("report")
@@ -27,7 +28,7 @@ def main() -> int:
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
     if args.cmd == "observe":
         n = args.top
-        addrs, seed = observer.load_targets(db, n)
+        addrs, seed = observer.load_targets(db, n, args.min_score)
         merged = []                                   # extras first, then watchlist, capped at n
         for a in [x.lower() for x in args.extra] + addrs:
             if a not in merged:
@@ -37,9 +38,9 @@ def main() -> int:
         if not addrs:
             print("no enabled watchlist targets yet — run the scanner first.")
             return 1
-        print(f"observing {len(addrs)} targets: {', '.join(a[:8] for a in addrs)}")
+        print(f"observing {len(addrs)} targets (score>={args.min_score}, cap {n}): {', '.join(a[:8] for a in addrs)}")
         try:
-            asyncio.run(observer.Observer(db, addrs, seed, top_n=n).run())
+            asyncio.run(observer.Observer(db, addrs, seed, top_n=n, min_score=args.min_score).run())
         except KeyboardInterrupt:
             print("stopped.")
     elif args.cmd == "report":

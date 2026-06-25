@@ -20,7 +20,8 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MAX_TARGETS = 60            # max watchlist wallets the signal poller covers (bounds REST load)
+MIN_FOLLOW_SCORE = 1.2      # follow watchlist wallets with v3 score >= this (quality threshold, UI-tunable)
+MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's cursor (tid-dedup absorbs it)
 MAX_BACKFILL_S = 3600      # never look back further than this on a poll (forward-only, bounds stale cursors)
