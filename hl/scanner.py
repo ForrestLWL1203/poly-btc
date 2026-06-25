@@ -114,9 +114,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)  # Stage 2: full
     for x in raw:
         x["user"] = addr
-    # only COPYABLE activity counts: standard crypto perps. Spot AND builder/index perps
-    # (xyz:*, #NNNN) are excluded so builder-heavy wallets don't qualify on trades we can't
-    # copy / can't even identify. perp_frac is now the crypto-perp share of fills.
+    # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,
+    # e.g. xyz:AAPL — in `universe`). Spot is excluded (is_spot); opaque/private builder dexes are
+    # excluded by not being in `universe`. perp_frac = copyable-perp share of fills.
     perp = [x for x in raw if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
     perp_frac = (len(perp) / len(raw)) if raw else 0.0
     eps = build_episodes(perp)
@@ -255,7 +255,7 @@ def scan(db, p) -> None:
     stamp = now_iso()
     start_ms = now_ms - p.days * 86400_000
 
-    universe = rest.perp_universe()              # standard crypto perps only are copyable
+    universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)
     if not p.no_harvest:
         print("harvest leaderboard ...", flush=True)
         n_cand = harvest(db, p.min_acct, p.max_turnover, p)

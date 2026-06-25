@@ -105,9 +105,43 @@ def clearinghouse_state(addr: str):
 
 
 def perp_universe() -> set:
-    """Valid perp coin names (for the standard dex). Used to guard bbo subscriptions —
-    subscribing bbo for an unknown coin name closes the WS connection."""
+    """Standard crypto perp coin names. These price via WS bbo (subscribing bbo for a name NOT in
+    here — builder/stock coin or junk — closes the WS connection, so this guards bbo subs)."""
     m = post_soft({"type": "meta"})
     if isinstance(m, dict):
         return {u.get("name") for u in m.get("universe", []) if u.get("name")}
     return set()
+
+
+# Transparent real-asset builder dexes we copy (stocks/commodities/indices, fully-qualified names
+# like 'xyz:AAPL'). Verified 2026-06-25: these price via REST l2Book {"coin":"xyz:AAPL"} and
+# allMids {"dex":"xyz"} (WS bbo does NOT serve builder dexes). EXCLUDES vntl (SPACEX/OPENAI/ANTHROPIC
+# = private-company synthetics, no transparent market price) and crypto-duplicate dexes (hyna/para).
+BUILDER_DEXES = ("xyz",)
+
+
+def builder_universe(dexes=BUILDER_DEXES) -> set:
+    """Copyable builder-perp names (fully-qualified, e.g. 'xyz:AAPL') for the given transparent dexes."""
+    out: set = set()
+    for dex in dexes:
+        m = post_soft({"type": "meta", "dex": dex})
+        if isinstance(m, dict):
+            out |= {u.get("name") for u in m.get("universe", []) if u.get("name")}
+    return out
+
+
+def copyable_universe(builder_dexes=BUILDER_DEXES) -> set:
+    """Everything we can copy: standard crypto perps ∪ transparent builder perps (stocks/commodities).
+    Spot is still excluded upstream (is_spot). Used by the scanner to count copyable activity."""
+    return perp_universe() | builder_universe(builder_dexes)
+
+
+def book_top(coin: str):
+    """Best (bid, ask) for ANY coin incl builder/stock perps, via REST l2Book — works where WS bbo
+    doesn't (builder dexes). Returns (bid, ask) or None."""
+    b = post_soft({"type": "l2Book", "coin": coin})
+    lv = b.get("levels") if isinstance(b, dict) else None
+    if lv and len(lv) == 2 and lv[0] and lv[1]:
+        from .util import f as _f
+        return _f(lv[0][0]["px"]), _f(lv[1][0]["px"])
+    return None
