@@ -146,10 +146,12 @@ PROFILE_COLS = (
 )  # 42 columns
 
 OBSERVE_SCHEMA = """
+-- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
+-- both the tid-dedup table and the target's trade audit. Only the fields we actually use are kept;
+-- recv_ms/fee/is_liq/liq_method/hash were dropped as redundant.
 CREATE TABLE IF NOT EXISTS live_fills (
-    addr TEXT, tid INTEGER, time_ms INTEGER, recv_ms INTEGER,
-    coin TEXT, side TEXT, dir TEXT, px REAL, sz REAL, closed_pnl REAL,
-    fee REAL, crossed INTEGER, is_liq INTEGER, liq_method TEXT, hash TEXT,
+    addr TEXT, tid INTEGER, time_ms INTEGER,
+    coin TEXT, side TEXT, dir TEXT, px REAL, sz REAL, closed_pnl REAL, crossed INTEGER,
     PRIMARY KEY (addr, tid)
 );
 CREATE INDEX IF NOT EXISTS idx_lf_addr ON live_fills(addr, time_ms);

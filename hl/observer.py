@@ -344,14 +344,13 @@ class Observer:
         self._maybe_liquidate(coin, mid)           # isolated stop-out if price crossed liq_px
 
     def _record_fill(self, addr, x) -> bool:
-        """Insert the fill; True if NEW, False if this tid was already seen (dedup). This is what
-        makes process_fill idempotent so overlapping poll rounds can't double-copy."""
-        liq = x.get("liquidation")
+        """Insert the (aggregated, trade-level) fill; True if NEW, False if this tid was already seen
+        (dedup) — what makes process_fill idempotent so overlapping poll rounds can't double-copy."""
         cur = self.db.execute(
-            "INSERT OR IGNORE INTO live_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (addr, x.get("tid"), x.get("time"), now_ms(), x.get("coin"), x.get("side"), x.get("dir"),
-             f(x.get("px")), f(x.get("sz")), f(x.get("closedPnl")), f(x.get("fee")),
-             1 if x.get("crossed") else 0, 1 if liq else 0, (liq or {}).get("method"), x.get("hash")))
+            "INSERT OR IGNORE INTO live_fills (addr,tid,time_ms,coin,side,dir,px,sz,closed_pnl,crossed) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (addr, x.get("tid"), x.get("time"), x.get("coin"), x.get("side"), x.get("dir"),
+             f(x.get("px")), f(x.get("sz")), f(x.get("closedPnl")), 1 if x.get("crossed") else 0))
         return cur.rowcount > 0
 
     # -- core: master fills -> copy actions ----------------------------------
@@ -416,8 +415,7 @@ class Observer:
             self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
             self.db.commit()
             self.open_ep.pop((addr, coin), None)
-            _log(f"SKIP {addr[:10]} {coin} open: chase {chase:+.1f}bps > {config.MAX_ENTRY_CHASE_PCT}% (spike)")
-            return
+            return                                            # chase-skip (rare); recorded by absence
         lev = await asyncio.to_thread(self._target_leverage, addr, coin)   # master's leverage, capped
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * self.margin_pct)
@@ -434,9 +432,7 @@ class Observer:
         msz = ep["master_peak"] * ep["sign"]
         self._record_action(ep, addr, coin, t, "open", ep["open_maker"], ep["open_oid"], master_px,
                             msz, msz, size * ep["sign"], px, 0.0, chase)
-        self.db.commit()
-        _log(f"OPEN {addr[:10]} {coin} {ep['side']} ${margin:,.0f}m {lev:.0f}x notl=${notional:,.0f} "
-             f"@ {px:g} liq={liq_px:g} avail=${self._available():,.0f}")
+        self.db.commit()                                      # the open is in copy_position/copy_action
 
     async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, maker, oid):
         """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
@@ -477,9 +473,7 @@ class Observer:
                 "UPDATE copy_position SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,liq_px=?,"
                 "add_count=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
                 ep["rem_size"], ep["liq_px"], ep["add_count"], ep["pos_id"]))
-            self.db.commit()
-            _log(f"ADD {addr[:10]} {coin} #{ep['add_count']} +${add_margin:,.0f}m avg={ep['entry_px']:g} "
-                 f"liq={ep['liq_px']:g} avail=${self._available():,.0f}")
+            self.db.commit()                                  # the add is in copy_action
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker,
                             oid=None, gap=False, forced_px=None):
@@ -517,11 +511,9 @@ class Observer:
             self._save_account()
             self.db.commit()
             if closing:
-                self.open_ep.pop((addr, coin), None)
-                ret = (ep["realized_pnl"] / ep["margin"] * 100) if ep["margin"] else 0.0
-                _log(f"CLOSED {addr[:10]} {coin} {ep['side']} pnl=${ep['realized_pnl']:+,.1f} "
-                     f"({ret:+.0f}% on margin) bal=${self.balance:,.0f}"
-                     f"{' [GAP]' if gap else ''}{' [LIQ]' if liq else ''}")
+                self.open_ep.pop((addr, coin), None)         # normal closes are in copy_position; only
+                if liq:                                       # liquidation (our isolated stop-out) is logged
+                    _log(f"LIQUIDATED {addr[:10]} {coin} {ep['side']} -${ep['margin']:,.0f}  bal=${self.balance:,.0f}")
 
     async def _liquidate(self, addr, coin, ep):
         if ep.get("liquidating") or (addr, coin) not in self.open_ep:
@@ -565,10 +557,11 @@ class Observer:
                 (addr, lfm, now_iso()))
 
     async def backfill(self, addr: str, since: int):
-        """REST-fetch the wallet's fills since `since` and replay through the idempotent
-        process_fill (dedup by tid). This is the signal path AND the catch-up path — same code."""
-        page = await asyncio.to_thread(
-            rest.post_soft, {"type": "userFillsByTime", "user": addr, "startTime": int(max(0, since))})
+        """REST-fetch the wallet's fills since `since` and replay through the idempotent process_fill
+        (dedup by tid). aggregateByTime MERGES an order's partial fills into one TRADE-level row, so
+        (a) one sliced order = one record (not N), and (b) it isn't mis-counted as N scale-ins."""
+        page = await asyncio.to_thread(rest.post_soft, {
+            "type": "userFillsByTime", "user": addr, "startTime": int(max(0, since)), "aggregateByTime": True})
         if isinstance(page, list) and page:
             for x in sorted(page, key=lambda fl: fl["time"]):
                 self.process_fill(addr, x)

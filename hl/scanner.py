@@ -287,18 +287,13 @@ def scan(db, p) -> None:
             except Exception as exc:  # noqa: BLE001
                 print(f"  [{done}/{len(workset)}] FAIL: {exc}")
                 continue
-            if status == "active":
+            if status == "active":                # per-wallet detail is in the profile table, not the log
                 if (prior or {}).get("status") == "active":
                     kept += 1
                 else:
                     added += 1
-                    print(f"  + NEW  {addr}  roiEq={m['roi_equity']*100:+.1f}% net=${m['net_pnl']:,.0f} "
-                          f"trd={m['n_trades']} {m['trades_per_day']:.1f}/d taker={m['taker_frac_notl']*100:.0f}% "
-                          f"hold={m['median_hold_s']/3600:.1f}h win={m['win_rate']*100:.0f}% "
-                          f"perp={m['perp_frac']*100:.0f}% age={m.get('age_days') or 0:.0f}d{' [capped]' if hit_cap else ''}")
             elif status == "retired":
                 retired += 1
-                print(f"  - RETIRE {addr}  ({reason})")
             else:
                 rejected += 1
 
