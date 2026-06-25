@@ -1,33 +1,37 @@
-"""Live WS observer + paper-copy driver.
+"""Live copy-trade observer + paper-copy driver.
 
-Owns the stateful streaming: connect/reconnect/heartbeat/resubscribe, reconnect
-reconciliation (don't stay stranded when the master exits during a disconnect),
-per-coin bbo buffers, and a PARTIAL-AWARE copy state machine. Every master action
-on a tracked position (open / add / reduce / close) is persisted immediately to
-copy_action with full detail + our mirrored fill; each copied position lives in
-copy_position (open→closed), so nothing is held only in memory — it survives
-restarts (open positions are reloaded on startup).
+Two decoupled data planes, by design:
+  • SIGNAL (who traded what) — a continuous REST poll over the FULL watchlist (per-wallet
+    userFillsByTime, cursor + small overlap, idempotent by tid). REST has no 10-user cap, so we
+    can follow the whole watchlist; our targets are low-freq long-hold, so a few-seconds poll
+    latency is fine. This is the primary engine.
+  • PRICING (what we'd fill at) — a WS bbo subscription PER COIN (top-of-book). bbo subs are
+    per-coin, NOT subject to the 10-user cap (only the 1000-sub cap, and we touch a few dozen
+    coins). We price our copy off the LIVE book at detection: taker buy→best ask, sell→best bid;
+    maker buy→best bid, sell→best ask. (No user subscriptions on this WS, so no 10-user concern.)
 
-Sizing: fixed `NOTIONAL` per position, entered at the master's open. We do NOT add
-on scale-in; on scale-out we reduce our copy PROPORTIONALLY (|master pos| / peak).
-Primary copy = 2s latency (what copy_action records); pnl_05/2/5 on copy_position
-carry the 3-band latency sensitivity. Exit price comes from the live book at
-fill_time + latency (taker). Leverage is irrelevant to PnL (notional × move).
+A PARTIAL-AWARE copy state machine persists every master action (open/add/reduce/close) to
+copy_action with full detail + our mirrored fill; each copied position lives in copy_position
+(open→closed) and is reloaded on restart. Sizing: fixed NOTIONAL per position at the master's
+open; no scale-in add; proportional scale-out. Leverage is irrelevant to PnL (notional × move).
+
+The legacy 0.5/2/5s latency bands collapse to a single live-book price in REST mode (the columns
+are kept for schema/report compatibility, all three carry the same value).
 """
 import asyncio
 import json
 import logging
 import time
-from collections import deque
 
 import websockets
 
-from . import config, paper, rest, ws
+from . import config, rest, ws
 from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
 LAT = config.LATENCIES
 PRIMARY = 2.0 if 2.0 in LAT else LAT[len(LAT) // 2]
+STALE_MS = 30_000          # a detected fill older than this priced at master px (book unreliable)
 
 
 def _log(msg: str):
@@ -39,17 +43,28 @@ class Observer:
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
-        self.coin_hist: dict = {}        # coin -> deque[(ts_ms, bid, ask)]
-        self.sub_coins: set = set()
+        self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (live via WS)
+        self.sub_coins: set = set()      # coins we've sent a bbo subscription for (this connection)
         self.open_ep: dict = {}          # (addr,coin) -> position state
+        self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
         self.valid_coins: set = set()
-        self.last_msg_ms = now_ms()
-        self.connected_once = False
         self.ws = None
         self.stop = False
 
-    def _bbo_ok(self, coin: str) -> bool:
+    def _std_coin(self, coin: str) -> bool:
+        """Standard perp coin (we have a real book / can price). Subscribing bbo for an unknown
+        coin name (#NNNN builder, xyz:* stock) closes the WS — guard against it."""
         return bool(coin) and (not self.valid_coins or coin in self.valid_coins)
+
+    # -- pricing off the live book -------------------------------------------
+    def _fill_px(self, coin, is_buy, maker, fallback):
+        ba = self.bbo.get(coin)
+        if not ba or not ba[0] or not ba[1]:
+            return fallback                       # book not ready -> master px (slippage ~0 anyway)
+        bid, ask = ba
+        if maker:
+            return bid if is_buy else ask         # rest passively on our side of the book
+        return ask if is_buy else bid             # take across the spread
 
     # -- restart recovery: reload open copies from db ------------------------
     def _reload_open(self):
@@ -65,6 +80,7 @@ class Observer:
             self.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
+                "open_maker": False, "open_oid": None,
                 "entries": {0.5: e05, 2.0: e2, 5.0: e5} if e2 is not None else None,
                 "rem": {0.5: r05 or 0, 2.0: r2 or 0, 5.0: r5 or 0},
                 "pnl": {0.5: p05 or 0, 2.0: p2 or 0, 5.0: p5 or 0},
@@ -73,25 +89,36 @@ class Observer:
         if rows:
             _log(f"reloaded {len(rows)} open copy positions from db")
 
-    # -- subscriptions --------------------------------------------------------
+    # -- watchlist sync (the copy engine tracks rolling discovery) -----------
+    def _reload_targets(self, init=False):
+        addrs, seed = load_targets(self.db, config.MAX_TARGETS)
+        self.seed_coins = seed
+        new = [a for a in addrs if a not in self.last_fill_ms]
+        for a in new:
+            self.last_fill_ms[a] = now_ms()       # forward-only: don't copy a new wallet's old fills
+        dropped = [a for a in self.addrs if a not in addrs]
+        self.addrs = addrs
+        if init or new or dropped:
+            _log(f"watchlist: tracking {len(addrs)} wallets (+{len(new)} new, -{len(dropped)} dropped)")
+
+    # -- WS bbo (pricing only; no user subscriptions) ------------------------
     async def _sub(self, subscription: dict):
         await self.ws.send(ws.sub_msg(subscription))
         await asyncio.sleep(0.05)
 
-    async def subscribe_all(self):
+    async def subscribe_bbo(self):
+        self.sub_coins.clear()                    # subs are gone on a fresh connection — re-add
+        coins = {"BTC", "ETH", "SOL", "HYPE"}     # majors warm so most fills price off a live book
         for a in self.addrs:
-            await self._sub(ws.user_fills(a))
-        for a in self.addrs:
-            for c in self.seed_coins.get(a, set()):
-                await self.ensure_coin(c)
-        for (_, coin) in self.open_ep:          # reloaded positions need their book too
-            await self.ensure_coin(coin)
-        await self._sub(ws.bbo("BTC"))
+            coins |= self.seed_coins.get(a, set())
+        for (_, c) in self.open_ep:
+            coins.add(c)
+        for c in coins:
+            await self.ensure_coin(c)
 
     async def ensure_coin(self, coin: str):
-        if coin and coin not in self.sub_coins and self._bbo_ok(coin):
+        if coin and coin not in self.sub_coins and self._std_coin(coin) and self.ws is not None:
             self.sub_coins.add(coin)
-            self.coin_hist.setdefault(coin, deque())
             try:
                 await self._sub(ws.bbo(coin))
             except Exception:  # noqa: BLE001
@@ -113,13 +140,31 @@ class Observer:
             a = self.db.execute("SELECT count(*) FROM copy_action").fetchone()[0]
             _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
 
+    # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
+    async def poll_loop(self):
+        """Primary engine. Round-robin every watchlist wallet's recent fills (cursor − overlap,
+        capped at MAX_BACKFILL_S so a stale cursor can't replay ancient history), replaying each
+        through the idempotent process_fill. No fixed period — the REST pacer sets the cadence;
+        a full round over ~tens of wallets takes a few seconds. Re-reads the watchlist table
+        periodically so rolling discovery flows in without a restart."""
+        last_reload = now_ms()
+        while not self.stop:
+            if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
+                self._reload_targets()
+                last_reload = now_ms()
+            for addr in list(self.addrs):
+                floor = now_ms() - config.MAX_BACKFILL_S * 1000
+                since = max(self.last_fill_ms.get(addr, now_ms()), floor) - config.POLL_OVERLAP_MS
+                await self.backfill(addr, since)
+            await asyncio.sleep(1)                 # small breath between rounds
+
     # -- REST poll of targets' resting orders (limit ladders + TP/SL) --------
     async def poll_orders(self):
-        """Every ~5s, snapshot each target's open orders via frontendOpenOrders (REST, no
-        WS slot) and persist them to target_orders — their INTENTIONS (maker entries, take-
-        profit/stop levels) ahead of execution. Diff-based: orders that vanish flip to 'gone'."""
+        """Every ~5s, snapshot each target's open orders via frontendOpenOrders and persist to
+        target_orders — their INTENTIONS (maker entries, take-profit/stop levels) ahead of
+        execution. Diff-based: orders that vanish flip to 'gone'."""
         while not self.stop:
-            for addr in self.addrs:
+            for addr in list(self.addrs):
                 oo = await asyncio.to_thread(rest.post_soft, {"type": "frontendOpenOrders", "user": addr})
                 if not isinstance(oo, list):
                     continue
@@ -145,7 +190,7 @@ class Observer:
                         self.db.execute("UPDATE target_orders SET status='gone', last_seen=? "
                                         "WHERE addr=? AND oid=?", (now_iso(), addr, oid))
                 self.db.commit()
-                await asyncio.sleep(0.3)             # pace REST across wallets
+                await asyncio.sleep(0.3)            # pace REST across wallets
             await asyncio.sleep(5)
 
     @staticmethod
@@ -155,55 +200,36 @@ class Observer:
             return
         loop.default_exception_handler(context)
 
-    # -- run loop with reconnect ---------------------------------------------
+    # -- run: REST signal tasks + a WS connection for bbo pricing ------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
         self.valid_coins = rest.perp_universe()
         _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded)")
-        self._reload_open()                         # restore open copies from db (restart-safe)
-        self._load_cursors()                        # restore per-wallet REST cursors
+        self._reload_open()                        # restore open copies (restart-safe)
+        self._load_cursors()                       # restore per-wallet REST cursors
+        self._reload_targets(init=True)            # load watchlist + forward-only cursors for new
         asyncio.create_task(self._announce())
-        asyncio.create_task(self.poll_orders())     # REST poll resting orders (zero WS cost)
-        asyncio.create_task(self.poll_backfill())   # periodic REST reconcile (catch WS-dropped msgs)
-        while not self.stop:
+        asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
+        asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)
+        while not self.stop:                        # WS: PRICING only (per-coin bbo, no user subs)
             try:
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
                     self.ws = conn
                     hb = asyncio.create_task(self.heartbeat())
-                    sub = asyncio.create_task(self.subscribe_all())
-                    if self.connected_once:         # fast catch-up after a reconnect
-                        gap = self.last_msg_ms
-                        asyncio.create_task(self._backfill_all(gap - 60_000))
-                    self.connected_once = True
-                    _log(f"connected, monitoring {len(self.addrs)} wallets ({len(self.open_ep)} open copies)")
+                    asyncio.create_task(self.subscribe_bbo())
+                    _log(f"bbo ws connected ({len(self.addrs)} wallets polled, {len(self.open_ep)} open copies)")
                     async for raw in conn:
                         self.on_message(raw)
                     hb.cancel()
-                    sub.cancel()
             except Exception as exc:  # noqa: BLE001
-                _log(f"ws error: {exc}; reconnecting in 3s")
+                self.ws = None
+                _log(f"bbo ws error: {exc}; reconnecting in 3s")
                 await asyncio.sleep(3)
 
-    # -- message router -------------------------------------------------------
+    # -- WS message router (bbo only) ----------------------------------------
     def on_message(self, raw: str):
-        self.last_msg_ms = now_ms()
         m = json.loads(raw)
-        ch = m.get("channel")
-        if ch == "userFills":
-            d = m.get("data", {})
-            if d.get("isSnapshot"):
-                return                  # forward-only: ignore the on-subscribe history dump
-            a = (d.get("user") or "").lower()
-            fills = d.get("fills", []) or []
-            for x in fills:
-                self.process_fill(a, x)
-            if fills:
-                self.db.commit()
-        elif ch == "userEvents":
-            liq = (m.get("data") or {}).get("liquidation")
-            if liq:
-                _log(f"!! LIQUIDATION event: {json.dumps(liq)[:160]}")
-        elif ch == "bbo":
+        if m.get("channel") == "bbo":
             self.on_bbo(m.get("data", {}))
 
     def on_bbo(self, d: dict):
@@ -212,22 +238,17 @@ class Observer:
         if not coin or len(ba) < 2 or not ba[0] or not ba[1]:
             return
         bid, ask = f(ba[0].get("px")), f(ba[1].get("px"))
-        t = now_ms()
-        h = self.coin_hist.setdefault(coin, deque())
-        h.append((t, bid, ask))
-        cutoff = t - config.BOOK_HIST_S * 1000
-        while h and h[0][0] < cutoff:
-            h.popleft()
+        self.bbo[coin] = (bid, ask)
         mid = (bid + ask) / 2
-        for (a, c), ep in self.open_ep.items():
-            if c == coin:
+        for (a, c), ep in self.open_ep.items():    # track worst adverse excursion while open
+            if c == coin and ep["master_open_px"]:
                 adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
 
     def _record_fill(self, addr, x) -> bool:
-        """Insert the fill; returns True if NEW, False if this tid was already seen (dedup).
-        This is what makes process_fill idempotent so WS + periodic backfill can't double-copy."""
+        """Insert the fill; True if NEW, False if this tid was already seen (dedup). This is what
+        makes process_fill idempotent so overlapping poll rounds can't double-copy."""
         liq = x.get("liquidation")
         cur = self.db.execute(
             "INSERT OR IGNORE INTO live_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -242,7 +263,7 @@ class Observer:
         if not coin or x.get("tid") is None:
             return
         if not self._record_fill(addr, x):
-            return                          # already processed this tid (WS/backfill overlap) — idempotent
+            return                          # already processed this tid (poll overlap) — idempotent
         self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), x["time"])  # advance cursor
         t = x["time"]
         sz = f(x.get("sz"))
@@ -255,7 +276,7 @@ class Observer:
         maker = not bool(x.get("crossed"))   # crossed=False -> a resting-limit (maker) fill
         oid = x.get("oid")
         if coin not in self.sub_coins:
-            asyncio.create_task(self.ensure_coin(coin))
+            asyncio.create_task(self.ensure_coin(coin))   # make sure we have a book to price this
 
         ep = self.open_ep.get(key)
         if ep is None:
@@ -272,9 +293,8 @@ class Observer:
                                                    closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid))
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid):
-        if not self._bbo_ok(coin):
-            return              # only copy standard-universe coins (we have a real book to
-                                # price our fills); skip stock/builder perps (xyz:*, #NNNN)
+        if not self._std_coin(coin):
+            return              # only copy standard-universe coins (skip stock/builder perps)
         side = "long" if pos1 > 0 else "short"
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
@@ -289,26 +309,29 @@ class Observer:
         asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
 
     async def _resolve_entry(self, addr, coin, ep, t, master_px):
-        if ep["open_maker"] or (now_ms() - t) > 30_000:  # maker, OR backfilled-late (book gone)
-            entries = {L: master_px for L in LAT}    # -> fill at the master px (slippage ~0 anyway)
-        else:
-            await asyncio.sleep(max(LAT) + 0.3)      # taker: our market fill = book at t+latency
-            side_is_buy = ep["side"] == "long"
-            h = self.coin_hist.get(coin, deque())
-            entries = {}
-            for L in LAT:
-                ba = paper.book_at(h, t + int(L * 1000))
-                entries[L] = (ba[1] if side_is_buy else ba[0]) if ba else master_px  # buy@ask
+        is_buy = ep["side"] == "long"                # opening a long => we buy
+        stale = (now_ms() - t) > STALE_MS            # backfilled-late: book is no longer the fill's
+        px = master_px if stale else self._fill_px(coin, is_buy, ep["open_maker"], master_px)
+        chase = (px - master_px) / master_px * 1e4 * ep["sign"]   # bps worse than master (+ = worse)
+        # Chase guard (UI-tunable): on a spike the master eats the book with size and our taker fill
+        # lands worse — past the threshold we DON'T chase. Taker opens only; maker rests passively.
+        if (config.MAX_ENTRY_CHASE_PCT is not None and not ep["open_maker"]
+                and chase > config.MAX_ENTRY_CHASE_PCT * 100):
+            self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
+            self.db.commit()
+            self.open_ep.pop((addr, coin), None)
+            _log(f"SKIP {addr[:10]} {coin} open: chase {chase:+.1f}bps > {config.MAX_ENTRY_CHASE_PCT}% (spike)")
+            return
+        entries = {L: px for L in LAT}               # one live-book price (REST single latency)
         ep["entries"] = entries
-        ep["rem"] = {L: config.NOTIONAL / entries[L] for L in LAT}
+        ep["rem"] = {L: config.NOTIONAL / px for L in LAT}
         ep["entries_ready"].set()
         self.db.execute(
             "UPDATE copy_position SET entry_05=?,entry_2=?,entry_5=?,rem_05=?,rem_2=?,rem_5=? WHERE pos_id=?",
-            (entries[0.5], entries[2.0], entries[5.0], ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pos_id"]))
-        slip = (entries[PRIMARY] - master_px) / master_px * 1e4 * ep["sign"]
-        msz = ep["master_peak"] * ep["sign"]        # master's signed open size / position-after
+            (px, px, px, ep["rem"][0.5], ep["rem"][2.0], ep["rem"][5.0], ep["pos_id"]))
+        msz = ep["master_peak"] * ep["sign"]         # master's signed open size / position-after
         self._record_action(ep, addr, coin, t, "open", ep["open_maker"], ep["open_oid"], master_px,
-                            msz, msz, ep["rem"][PRIMARY] * ep["sign"], entries[PRIMARY], 0.0, slip)
+                            msz, msz, ep["rem"][PRIMARY] * ep["sign"], px, 0.0, chase)
         self.db.commit()
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker, oid=None, gap=False):
@@ -319,21 +342,14 @@ class Observer:
                 pass
             if ep.get("entries") is None:
                 return
-            late = (now_ms() - t) > 30_000           # backfilled fill: book buffer is long gone
-            if not maker and not late:               # taker needs the book at t+latency; maker /
-                await asyncio.sleep(max(LAT) + 0.3)  # late fills price at master px (no book wait)
-            side_is_buy = ep["side"] == "long"
-            h = self.coin_hist.get(coin, deque())
+            is_buy = ep["side"] == "short"           # closing a long => sell; closing a short => buy
+            stale = (now_ms() - t) > STALE_MS
+            exit_px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
             target_frac = 0.0 if closing else abs(pos1) / max(ep["master_peak"], 1e-12)
-            prim = {"qty": 0.0, "px": master_px, "pnl": 0.0}
+            prim = {"qty": 0.0, "px": exit_px, "pnl": 0.0}
             for L in LAT:
                 qty_total = config.NOTIONAL / ep["entries"][L]
                 close_qty = max(0.0, ep["rem"][L] - qty_total * target_frac)
-                if maker or late:
-                    exit_px = master_px              # mirror limit / late-priced -> at the master px
-                else:
-                    ba = paper.book_at(h, t + int(L * 1000))
-                    exit_px = (ba[0] if side_is_buy else ba[1]) if ba else master_px  # taker: sell@bid
                 pnl = close_qty * (exit_px - ep["entries"][L]) * ep["sign"]
                 ep["pnl"][L] += pnl
                 ep["rem"][L] -= close_qty
@@ -355,7 +371,7 @@ class Observer:
             if closing:
                 self.open_ep.pop((addr, coin), None)
                 pct = ep["pnl"][PRIMARY] / config.NOTIONAL * 100
-                _log(f"CLOSED {addr[:10]} {coin} {ep['side']} pnl(2s)={pct:+.2f}% "
+                _log(f"CLOSED {addr[:10]} {coin} {ep['side']} pnl={pct:+.2f}% "
                      f"mae={ep['mae']*100:.2f}% actions={ep['num_actions']}{' [GAP]' if gap else ''}"
                      f"{' [LIQ]' if liq else ''}")
 
@@ -371,7 +387,7 @@ class Observer:
         self.db.execute("UPDATE copy_position SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
 
-    # -- REST backfill safety net (WS is fast-but-lossy; reconcile authoritatively) ------
+    # -- per-wallet REST cursor ----------------------------------------------
     def _load_cursors(self):
         for addr, lfm in self.db.execute("SELECT addr, last_fill_ms FROM wallet_cursor").fetchall():
             if lfm:
@@ -387,8 +403,7 @@ class Observer:
 
     async def backfill(self, addr: str, since: int):
         """REST-fetch the wallet's fills since `since` and replay through the idempotent
-        process_fill (dedup by tid) — catches anything WS dropped. Late fills price at the
-        master px (book buffer is short-lived) which is fine since our slippage is ~0."""
+        process_fill (dedup by tid). This is the signal path AND the catch-up path — same code."""
         page = await asyncio.to_thread(
             rest.post_soft, {"type": "userFillsByTime", "user": addr, "startTime": int(max(0, since))})
         if isinstance(page, list) and page:
@@ -397,21 +412,6 @@ class Observer:
             self.db.commit()
         self._save_cursor(addr)
         self.db.commit()
-
-    async def _backfill_all(self, since: int):
-        for addr in self.addrs:
-            await self.backfill(addr, since)
-            await asyncio.sleep(0.3)
-
-    async def poll_backfill(self):
-        """Periodic authoritative reconcile: every few minutes pull each wallet's fills from its
-        cursor minus a small overlap, so silently-dropped WS messages get caught."""
-        while not self.stop:
-            await asyncio.sleep(180)
-            for addr in self.addrs:
-                cursor = self.last_fill_ms.get(addr, now_ms() - 6 * 3600_000)
-                await self.backfill(addr, cursor - 5000)    # 5s overlap; tid-dedup handles it
-                await asyncio.sleep(0.3)
 
 
 # ------------------------------------------------------------------------- loaders
@@ -429,15 +429,15 @@ def report(db) -> None:
     rows = db.execute(
         "SELECT addr, count(*) n, "
         "sum(CASE WHEN pnl_2>0 THEN 1 ELSE 0 END)*1.0/count(*) winr, "
-        "sum(pnl_05) p05, sum(pnl_2) p2, sum(pnl_5) p5, avg(pnl_2/our_notional)*100 avg2, "
+        "sum(pnl_2) p2, avg(pnl_2/our_notional)*100 avg2, "
         "avg(num_actions) acts FROM copy_position WHERE status!='open' GROUP BY addr ORDER BY p2 DESC").fetchall()
     op = db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
     if not rows:
         print(f"no closed copy positions yet ({op} open). Observer needs a target to complete a round-trip.")
         return
-    print(f"\nPAPER COPY RESULTS (notional ${config.NOTIONAL:g}/position; pnl by latency band)  [{op} still open]\n")
-    hdr = f"{'addr':42} {'closed':>6} {'win%':>5} {'pnl@0.5s':>9} {'pnl@2s':>9} {'pnl@5s':>9} {'avg2%':>7} {'acts':>5}"
+    print(f"\nPAPER COPY RESULTS (notional ${config.NOTIONAL:g}/position; live-book pricing)  [{op} still open]\n")
+    hdr = f"{'addr':42} {'closed':>6} {'win%':>5} {'pnl$':>10} {'avg%':>7} {'acts':>5}"
     print(hdr); print("-" * len(hdr))
-    for addr, n, winr, p05, p2, p5, avg2, acts in rows:
-        print(f"{addr:42} {n:>6} {winr*100:>4.0f}% {p05:>9,.1f} {p2:>9,.1f} {p5:>9,.1f} {avg2:>+6.2f}% {acts:>5.1f}")
-    print("\n(pnl@Xs = total $ if we'd copied at that reaction latency; primary copy = 2s)")
+    for addr, n, winr, p2, avg2, acts in rows:
+        print(f"{addr:42} {n:>6} {winr*100:>4.0f}% {p2:>10,.1f} {avg2:>+6.2f}% {acts:>5.1f}")
+    print("\n(pnl = total $ at our copy fills vs the master; fixed ${:g} notional/position)".format(config.NOTIONAL))

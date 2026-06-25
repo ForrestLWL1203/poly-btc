@@ -16,16 +16,17 @@ def main() -> int:
     ap.add_argument("--db", default=config.DEFAULT_DB)
     sub = ap.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("observe")
-    o.add_argument("--top", type=int, default=config.MAX_WS_USERS,
-                   help=f"WS-monitor top-N enabled watchlist (HL cap: {config.MAX_WS_USERS} users/IP)")
+    o.add_argument("--top", type=int, default=config.MAX_TARGETS,
+                   help=f"poll top-N enabled watchlist wallets via REST (default {config.MAX_TARGETS}; "
+                        "no 10-user cap — that's WS-user-subs only, we signal via REST)")
     o.add_argument("--extra", action="append", default=[],
-                   help="extra address(es) to monitor for debugging (still capped at the WS limit)")
+                   help="extra address(es) to monitor for debugging")
     sub.add_parser("report")
     args = ap.parse_args()
 
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
     if args.cmd == "observe":
-        n = min(args.top, config.MAX_WS_USERS)
+        n = args.top
         addrs, seed = observer.load_targets(db, n)
         merged = []                                   # extras first, then watchlist, capped at n
         for a in [x.lower() for x in args.extra] + addrs:
