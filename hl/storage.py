@@ -209,7 +209,9 @@ CREATE TABLE IF NOT EXISTS wallet_cursor (
 
 def connect(path: str, *schemas: str) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    db = sqlite3.connect(path, check_same_thread=False, timeout=30)  # used across the scanner's
+    db.execute("PRAGMA journal_mode=WAL")                            # worker threads (writes are
+    db.execute("PRAGMA busy_timeout=30000")                          # serialized by a lock)
     for s in schemas:
         db.executescript(s)
     return db

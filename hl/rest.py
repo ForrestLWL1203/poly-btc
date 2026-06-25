@@ -3,6 +3,7 @@
 Pure data access: no episode/metric logic (that lives in fills.py / metrics.py).
 """
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -10,6 +11,8 @@ import urllib.request
 from . import config
 
 _last_post = [0.0]
+_pace_lock = threading.Lock()   # serialize POST spacing across worker threads (the network call
+#                                 itself runs OUTSIDE the lock, so RTTs overlap = real concurrency)
 
 
 def _get(url: str, retries: int = 3):
@@ -29,11 +32,12 @@ def post(body: dict, retries: int = 7):
     data = json.dumps(body).encode()
     err = None
     for attempt in range(retries):
-        wait = config.MIN_POST_INTERVAL - (time.time() - _last_post[0])
-        if wait > 0:
-            time.sleep(wait)
-        _last_post[0] = time.time()
-        try:
+        with _pace_lock:                                   # only the spacing is serialized ...
+            wait = config.MIN_POST_INTERVAL - (time.time() - _last_post[0])
+            if wait > 0:
+                time.sleep(wait)
+            _last_post[0] = time.time()
+        try:                                               # ... the request below runs concurrently
             req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.loads(r.read().decode())

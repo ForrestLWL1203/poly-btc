@@ -4,11 +4,15 @@ harvest leaderboard -> coarse candidates -> profile work-set (actives + top-N ne
 over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
+import concurrent.futures
+import threading
 import time
 
 from . import metrics, rest, storage
 from .fills import build_episodes, is_spot
 from .util import f, now_iso
+
+_db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 
 
 # -------------------------------------------------------------------------- harvest
@@ -97,13 +101,14 @@ def _prescreen(addr, universe, p, now_ms):
 
 def _write_reject(db, addr, prior, stamp, reason):
     status = "retired" if (prior or {}).get("status") == "active" else "rejected"
-    db.execute(
-        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
-        (addr, status, reason, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 0,
-         (prior or {}).get("age_days"), 0, 0, None, 0, 0, 0,
-         (prior or {}).get("first_added"), stamp, (prior or {}).get("times_seen", 0) + 1,
-         (prior or {}).get("times_active", 0)))
-    db.commit()
+    with _db_lock:
+        db.execute(
+            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
+            (addr, status, reason, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 0,
+             (prior or {}).get("age_days"), 0, 0, None, 0, 0, 0,
+             (prior or {}).get("first_added"), stamp, (prior or {}).get("times_seen", 0) + 1,
+             (prior or {}).get("times_active", 0)))
+        db.commit()
     return status, reason, {"n_trades": 0, "score": 0.0}, False
 
 
@@ -163,23 +168,24 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     first_added = (prior or {}).get("first_added") or (stamp if ok else None)
     m["score"] = metrics.score(m) if ok else 0.0
 
-    if ok:
-        db.execute("DELETE FROM episode WHERE addr=?", (addr,))
-        db.executemany(
-            "INSERT OR REPLACE INTO episode (addr,coin,side,open_ms,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            [(addr, e["coin"], e["side"], e["open_ms"], e["close_ms"], e["hold_s"], e["net_pnl"],
-              e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]) for e in eps])
-    db.execute(
-        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
-        (addr, status, reason, m["score"], m["n_fills"], m["n_trades"], m["window_days"],
-         m["trades_per_day"], m["taker_frac_notl"], m["median_hold_s"], m["win_rate"],
-         m["net_pnl"], m["roi_equity"], m["roi_notional"], m["total_notl"], m["acct_value"],
-         m["perp_frac"], m["gross_pnl"], m["total_fee"], m["n_coins"], m["top_coin"],
-         m["long_frac"], m["max_drawdown"], m["avg_notional"], m["age_days"], m["last_fill_ms"],
-         m["lev_proxy"], m["margin_type"], m["cur_leverage"], m["liq_count"], m["liq_worst_pct"],
-         first_added, stamp, (prior or {}).get("times_seen", 0) + 1, m["times_active"]))
-    db.commit()
+    with _db_lock:
+        if ok:
+            db.execute("DELETE FROM episode WHERE addr=?", (addr,))
+            db.executemany(
+                "INSERT OR REPLACE INTO episode (addr,coin,side,open_ms,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(addr, e["coin"], e["side"], e["open_ms"], e["close_ms"], e["hold_s"], e["net_pnl"],
+                  e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]) for e in eps])
+        db.execute(
+            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
+            (addr, status, reason, m["score"], m["n_fills"], m["n_trades"], m["window_days"],
+             m["trades_per_day"], m["taker_frac_notl"], m["median_hold_s"], m["win_rate"],
+             m["net_pnl"], m["roi_equity"], m["roi_notional"], m["total_notl"], m["acct_value"],
+             m["perp_frac"], m["gross_pnl"], m["total_fee"], m["n_coins"], m["top_coin"],
+             m["long_frac"], m["max_drawdown"], m["avg_notional"], m["age_days"], m["last_fill_ms"],
+             m["lev_proxy"], m["margin_type"], m["cur_leverage"], m["liq_count"], m["liq_worst_pct"],
+             first_added, stamp, (prior or {}).get("times_seen", 0) + 1, m["times_active"]))
+        db.commit()
     return status, reason, m, hit_cap
 
 
@@ -271,33 +277,43 @@ def scan(db, p) -> None:
     workset = actives + new
     print(f"scan: refresh {len(actives)} active + probe {len(new)} new = {len(workset)} wallets, window {p.days}d\n")
 
+    # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
+    cols = storage.PROFILE_COLS.split(",")
+    priors = {r[0]: dict(zip(cols, r)) for r in
+              db.execute(f"SELECT {storage.PROFILE_COLS} FROM profile").fetchall()}
+    lbs = {a: {"account_value": av} for a, av in
+           db.execute("SELECT addr, account_value FROM leaderboard").fetchall()}
+
     added = retired = rejected = kept = 0
-    for i, addr in enumerate(workset, 1):
-        time.sleep(0.1)
-        row = db.execute(f"SELECT {storage.PROFILE_COLS} FROM profile WHERE addr=?", (addr,)).fetchone()
-        prior = dict(zip(storage.PROFILE_COLS.split(","), row)) if row else None
-        lbrow = db.execute("SELECT account_value, week_roi, mon_roi FROM leaderboard WHERE addr=?", (addr,)).fetchone()
-        lb = {"account_value": lbrow[0]} if lbrow else {}
-        try:
-            status, reason, m, hit_cap = _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  [{i}/{len(workset)}] {addr[:12]} FAIL: {exc}")
-            continue
-        was_active = (prior or {}).get("status") == "active"
-        if status == "active":
-            if was_active:
-                kept += 1
+    workers = max(1, getattr(p, "workers", 8))      # I/O-bound; the REST pacer still caps total rate
+
+    def _work(addr):
+        prior = priors.get(addr)
+        return addr, prior, _profile_one(db, addr, start_ms, now_ms, p, prior, lbs.get(addr, {}), stamp, universe)
+
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for fut in concurrent.futures.as_completed([ex.submit(_work, a) for a in workset]):
+            done += 1
+            try:
+                addr, prior, (status, reason, m, hit_cap) = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  [{done}/{len(workset)}] FAIL: {exc}")
+                continue
+            if status == "active":
+                if (prior or {}).get("status") == "active":
+                    kept += 1
+                else:
+                    added += 1
+                    print(f"  + NEW  {addr}  roiEq={m['roi_equity']*100:+.1f}% net=${m['net_pnl']:,.0f} "
+                          f"trd={m['n_trades']} {m['trades_per_day']:.1f}/d taker={m['taker_frac_notl']*100:.0f}% "
+                          f"hold={m['median_hold_s']/3600:.1f}h win={m['win_rate']*100:.0f}% "
+                          f"perp={m['perp_frac']*100:.0f}% age={m.get('age_days') or 0:.0f}d{' [capped]' if hit_cap else ''}")
+            elif status == "retired":
+                retired += 1
+                print(f"  - RETIRE {addr}  ({reason})")
             else:
-                added += 1
-                print(f"  + NEW  {addr}  roiEq={m['roi_equity']*100:+.1f}% net=${m['net_pnl']:,.0f} "
-                      f"trd={m['n_trades']} {m['trades_per_day']:.1f}/d taker={m['taker_frac_notl']*100:.0f}% "
-                      f"hold={m['median_hold_s']/3600:.1f}h win={m['win_rate']*100:.0f}% "
-                      f"perp={m['perp_frac']*100:.0f}% age={m.get('age_days') or 0:.0f}d{' [capped]' if hit_cap else ''}")
-        elif status == "retired":
-            retired += 1
-            print(f"  - RETIRE {addr}  ({reason})")
-        else:
-            rejected += 1
+                rejected += 1
 
     n_active = refresh_watchlist(db, stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
