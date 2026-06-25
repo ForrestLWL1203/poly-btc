@@ -8,7 +8,7 @@ import concurrent.futures
 import threading
 import time
 
-from . import metrics, rest, storage
+from . import config, metrics, rest, storage
 from .fills import build_episodes, is_spot
 from .util import f, now_iso
 
