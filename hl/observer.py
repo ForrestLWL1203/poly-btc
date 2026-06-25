@@ -131,13 +131,18 @@ class Observer:
     def _reload_targets(self, init=False):
         addrs, seed = load_targets(self.db, self.top_n)
         self.seed_coins = seed
+        # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
+        # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
+        held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
+        addrs = addrs + held_off
         new = [a for a in addrs if a not in self.last_fill_ms]
         for a in new:
             self.last_fill_ms[a] = now_ms()       # forward-only: don't copy a new wallet's old fills
         dropped = [a for a in self.addrs if a not in addrs]
         self.addrs = addrs
-        if init or new or dropped:
-            _log(f"watchlist: tracking {len(addrs)} wallets (+{len(new)} new, -{len(dropped)} dropped)")
+        if init or new or dropped or held_off:
+            extra = f", {len(held_off)} held-off-list" if held_off else ""
+            _log(f"watchlist: tracking {len(addrs)} wallets (+{len(new)} new, -{len(dropped)} dropped{extra})")
 
     # -- WS bbo (pricing only; no user subscriptions) ------------------------
     async def _sub(self, subscription: dict):
