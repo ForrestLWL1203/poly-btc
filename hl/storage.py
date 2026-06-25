@@ -194,6 +194,16 @@ CREATE TABLE IF NOT EXISTS target_orders (
     PRIMARY KEY (addr, oid)
 );
 CREATE INDEX IF NOT EXISTS idx_to_addr ON target_orders(addr, status);
+
+-- Per-wallet REST cursor for the periodic backfill safety net. WS is treated as a fast-but-
+-- lossy stream (it can silently drop messages); every few minutes we REST-reconcile each
+-- monitored wallet's fills from cursor - small overlap (dedup by tid) so nothing is missed.
+-- Persisted so it survives process restarts too.
+CREATE TABLE IF NOT EXISTS wallet_cursor (
+    addr         TEXT PRIMARY KEY,
+    last_fill_ms INTEGER,
+    updated_at   TEXT
+);
 """
 
 

@@ -161,16 +161,19 @@ class Observer:
         self.valid_coins = rest.perp_universe()
         _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded)")
         self._reload_open()                         # restore open copies from db (restart-safe)
+        self._load_cursors()                        # restore per-wallet REST cursors
         asyncio.create_task(self._announce())
         asyncio.create_task(self.poll_orders())     # REST poll resting orders (zero WS cost)
+        asyncio.create_task(self.poll_backfill())   # periodic REST reconcile (catch WS-dropped msgs)
         while not self.stop:
             try:
                 async with websockets.connect(config.WS_URL, ping_interval=None, max_size=None) as conn:
                     self.ws = conn
                     hb = asyncio.create_task(self.heartbeat())
                     sub = asyncio.create_task(self.subscribe_all())
-                    if self.connected_once and self.open_ep:
-                        asyncio.create_task(self.reconcile_gap(self.last_msg_ms))
+                    if self.connected_once:         # fast catch-up after a reconnect
+                        gap = self.last_msg_ms
+                        asyncio.create_task(self._backfill_all(gap - 60_000))
                     self.connected_once = True
                     _log(f"connected, monitoring {len(self.addrs)} wallets ({len(self.open_ep)} open copies)")
                     async for raw in conn:
@@ -222,20 +225,25 @@ class Observer:
                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
 
-    def _record_fill(self, addr, x):
+    def _record_fill(self, addr, x) -> bool:
+        """Insert the fill; returns True if NEW, False if this tid was already seen (dedup).
+        This is what makes process_fill idempotent so WS + periodic backfill can't double-copy."""
         liq = x.get("liquidation")
-        self.db.execute(
+        cur = self.db.execute(
             "INSERT OR IGNORE INTO live_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (addr, x.get("tid"), x.get("time"), now_ms(), x.get("coin"), x.get("side"), x.get("dir"),
              f(x.get("px")), f(x.get("sz")), f(x.get("closedPnl")), f(x.get("fee")),
              1 if x.get("crossed") else 0, 1 if liq else 0, (liq or {}).get("method"), x.get("hash")))
+        return cur.rowcount > 0
 
     # -- core: master fills -> copy actions ----------------------------------
     def process_fill(self, addr: str, x: dict):
         coin = x.get("coin")
         if not coin or x.get("tid") is None:
             return
-        self._record_fill(addr, x)
+        if not self._record_fill(addr, x):
+            return                          # already processed this tid (WS/backfill overlap) — idempotent
+        self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), x["time"])  # advance cursor
         t = x["time"]
         sz = f(x.get("sz"))
         signed = sz if x.get("side") == "B" else -sz
@@ -281,8 +289,8 @@ class Observer:
         asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
 
     async def _resolve_entry(self, addr, coin, ep, t, master_px):
-        if ep["open_maker"]:
-            entries = {L: master_px for L in LAT}    # mirror their resting limit -> fill at that px
+        if ep["open_maker"] or (now_ms() - t) > 30_000:  # maker, OR backfilled-late (book gone)
+            entries = {L: master_px for L in LAT}    # -> fill at the master px (slippage ~0 anyway)
         else:
             await asyncio.sleep(max(LAT) + 0.3)      # taker: our market fill = book at t+latency
             side_is_buy = ep["side"] == "long"
@@ -311,8 +319,9 @@ class Observer:
                 pass
             if ep.get("entries") is None:
                 return
-            if not maker:                            # taker needs the book at t+latency; maker fills
-                await asyncio.sleep(max(LAT) + 0.3)  # at their limit px, no book wait needed
+            late = (now_ms() - t) > 30_000           # backfilled fill: book buffer is long gone
+            if not maker and not late:               # taker needs the book at t+latency; maker /
+                await asyncio.sleep(max(LAT) + 0.3)  # late fills price at master px (no book wait)
             side_is_buy = ep["side"] == "long"
             h = self.coin_hist.get(coin, deque())
             target_frac = 0.0 if closing else abs(pos1) / max(ep["master_peak"], 1e-12)
@@ -320,10 +329,10 @@ class Observer:
             for L in LAT:
                 qty_total = config.NOTIONAL / ep["entries"][L]
                 close_qty = max(0.0, ep["rem"][L] - qty_total * target_frac)
-                if maker:
-                    exit_px = master_px              # mirror their resting limit -> fill at that px
+                if maker or late:
+                    exit_px = master_px              # mirror limit / late-priced -> at the master px
                 else:
-                    ba = paper.book_at(h, now_ms() if gap else t + int(L * 1000))
+                    ba = paper.book_at(h, t + int(L * 1000))
                     exit_px = (ba[0] if side_is_buy else ba[1]) if ba else master_px  # taker: sell@bid
                 pnl = close_qty * (exit_px - ep["entries"][L]) * ep["sign"]
                 ep["pnl"][L] += pnl
@@ -362,34 +371,47 @@ class Observer:
         self.db.execute("UPDATE copy_position SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
 
-    # -- reconnect reconciliation --------------------------------------------
-    async def reconcile_gap(self, gap_since: int):
-        margin = 60_000
-        tracked: dict = {}
-        for (addr, coin) in list(self.open_ep.keys()):
-            tracked.setdefault(addr, set()).add(coin)
-        if not tracked:
-            return
-        _log(f"reconnect: reconciling {(now_ms()-gap_since)/1000:.0f}s gap across "
-             f"{len(tracked)} wallet(s) with open copies")
-        for addr in tracked:
-            page = await asyncio.to_thread(
-                rest.post_soft, {"type": "userFillsByTime", "user": addr, "startTime": int(gap_since - margin)})
-            if not isinstance(page, list):
-                continue
+    # -- REST backfill safety net (WS is fast-but-lossy; reconcile authoritatively) ------
+    def _load_cursors(self):
+        for addr, lfm in self.db.execute("SELECT addr, last_fill_ms FROM wallet_cursor").fetchall():
+            if lfm:
+                self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), lfm)
+
+    def _save_cursor(self, addr):
+        lfm = self.last_fill_ms.get(addr)
+        if lfm:
+            self.db.execute(
+                "INSERT INTO wallet_cursor (addr,last_fill_ms,updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(addr) DO UPDATE SET last_fill_ms=excluded.last_fill_ms,updated_at=excluded.updated_at",
+                (addr, lfm, now_iso()))
+
+    async def backfill(self, addr: str, since: int):
+        """REST-fetch the wallet's fills since `since` and replay through the idempotent
+        process_fill (dedup by tid) — catches anything WS dropped. Late fills price at the
+        master px (book buffer is short-lived) which is fine since our slippage is ~0."""
+        page = await asyncio.to_thread(
+            rest.post_soft, {"type": "userFillsByTime", "user": addr, "startTime": int(max(0, since))})
+        if isinstance(page, list) and page:
             for x in sorted(page, key=lambda fl: fl["time"]):
-                key = (addr, x.get("coin"))
-                ep = self.open_ep.get(key)
-                if ep is None:
-                    continue
-                signed = f(x.get("sz")) * (1 if x.get("side") == "B" else -1)
-                pos1 = f(x.get("startPosition")) + signed
-                ep["master_peak"] = max(ep["master_peak"], abs(pos1))
-                if abs(pos1) < abs(f(x.get("startPosition"))) - config.FLAT:   # a reduce/close in the gap
-                    await self._apply_reduce(addr, x.get("coin"), ep, x["time"], f(x.get("px")), signed,
-                                             pos1, closing=abs(pos1) < config.FLAT,
-                                             liq=bool(x.get("liquidation")),
-                                             maker=not bool(x.get("crossed")), oid=x.get("oid"), gap=True)
+                self.process_fill(addr, x)
+            self.db.commit()
+        self._save_cursor(addr)
+        self.db.commit()
+
+    async def _backfill_all(self, since: int):
+        for addr in self.addrs:
+            await self.backfill(addr, since)
+            await asyncio.sleep(0.3)
+
+    async def poll_backfill(self):
+        """Periodic authoritative reconcile: every few minutes pull each wallet's fills from its
+        cursor minus a small overlap, so silently-dropped WS messages get caught."""
+        while not self.stop:
+            await asyncio.sleep(180)
+            for addr in self.addrs:
+                cursor = self.last_fill_ms.get(addr, now_ms() - 6 * 3600_000)
+                await self.backfill(addr, cursor - 5000)    # 5s overlap; tid-dedup handles it
+                await asyncio.sleep(0.3)
 
 
 # ------------------------------------------------------------------------- loaders
