@@ -22,6 +22,8 @@ def main() -> int:
     s.add_argument("--order", choices=["mon_roi", "week_roi", "mon_pnl"], default="mon_roi")
     s.add_argument("--min-acct", type=float, default=50000)
     s.add_argument("--max-turnover", type=float, default=5.0)
+    s.add_argument("--min-roi", type=float, default=0.20, help="modest 30d (month) ROI floor (coarse)")
+    s.add_argument("--min-crypto", type=float, default=0.3, help="pre-screen: min recent crypto-fill share")
     s.add_argument("--max-pages", type=int, default=15)
     s.add_argument("--max-tpd", type=float, default=10.0, help="max EPISODES/day")
     s.add_argument("--min-trades", type=int, default=4)
@@ -37,6 +39,7 @@ def main() -> int:
     h = sub.add_parser("harvest", help="refresh candidate pool only")
     h.add_argument("--min-acct", type=float, default=50000)
     h.add_argument("--max-turnover", type=float, default=5.0)
+    h.add_argument("--min-roi", type=float, default=0.20)
 
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA)
@@ -45,7 +48,7 @@ def main() -> int:
     elif args.cmd == "watchlist":
         scanner.watchlist(db, args.top)
     elif args.cmd == "harvest":
-        print(f"{scanner.harvest(db, args.min_acct, args.max_turnover)} candidates")
+        print(f"{scanner.harvest(db, args.min_acct, args.max_turnover, args)} candidates")
     db.close()
     return 0
 

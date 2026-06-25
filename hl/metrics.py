@@ -64,10 +64,10 @@ def gates(m: dict, now_ms: int, p) -> tuple:
         return False, "not_profitable"
     if m["trades_per_day"] > p.max_tpd:
         return False, "too_frequent"
-    if m["taker_frac_notl"] < p.min_taker:
-        return False, "maker_heavy"
     if m["median_hold_s"] < p.min_hold_h * 3600:
         return False, "hold_too_short"
+    # NB: no taker/maker gate — patient limit (maker) traders are followable now (we mirror
+    # their resting orders via the poller). MMs are excluded by the hold/frequency gates above.
     return True, "ok"
 
 
@@ -83,7 +83,7 @@ def score(m: dict) -> float:
     age = m.get("age_days") or 0
     survival = (0.4 + 0.3 * min(age, 365) / 365                # longevity (900d profitable = proven)
                 + 0.3 * min(m.get("times_active", 1), 10) / 10)  # + persistence across our scans
-    copyab = 0.5 + 0.5 * m["taker_frac_notl"]                  # copyability
+    # taker/maker is a STYLE (how we copy: market vs mirror-limit), not a quality factor — not scored.
     worst = abs(m.get("liq_worst_pct") or 0.0)                 # worst self-liquidation, % of equity
     liq_factor = 0.6 if worst >= 20 else (0.85 if worst >= 5 else 1.0)  # mild: only catastrophic bites
-    return rr * consistency * survival * copyab * liq_factor
+    return rr * consistency * survival * liq_factor

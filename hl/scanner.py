@@ -12,7 +12,12 @@ from .util import f, now_iso
 
 
 # -------------------------------------------------------------------------- harvest
-def harvest(db, min_acct: float, max_turnover: float) -> int:
+def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
+    """COARSE candidate funnel only — the leaderboard ROI is unrealized-inflated (account MTM,
+    incl held winners + builder/spot), so it's a weak floor, NOT the strength judge. Real
+    strength = our realized-crypto profile. Keep: real capital, not an MM (turnover), lifetime
+    profitable, a modest recent ROI floor, and active in the last 24h."""
+    min_mon = getattr(p, "min_roi", 0.20)        # modest 30d ROI floor (exclude weak/losing)
     rows = rest.get_leaderboard()
     now = now_iso()
     n_cand = 0
@@ -21,8 +26,10 @@ def harvest(db, min_acct: float, max_turnover: float) -> int:
         d, wk, mo, al = w.get("day", {}), w.get("week", {}), w.get("month", {}), w.get("allTime", {})
         acct = f(r.get("accountValue"))
         turnover = (f(mo.get("vlm")) / acct / 30.0) if acct > 0 else 0.0
-        cand = (acct >= min_acct and f(wk.get("pnl")) > 0 and f(mo.get("pnl")) > 0
-                and 0 < turnover <= max_turnover)
+        cand = (acct >= min_acct and 0 < turnover <= max_turnover
+                and f(al.get("roi")) > 0                       # lifetime profitable
+                and f(mo.get("roi")) > min_mon                 # modest 30d floor
+                and f(d.get("vlm")) > 0)                       # active last 24h
         db.execute(
             "INSERT OR REPLACE INTO leaderboard (addr,display_name,account_value,"
             "day_pnl,day_roi,day_vlm,week_pnl,week_roi,week_vlm,mon_pnl,mon_roi,mon_vlm,"
@@ -72,8 +79,39 @@ def _margin_snapshot(addr):
     return mt, (ntl / av if av else 0.0)
 
 
+def _prescreen(addr, universe, p, now_ms):
+    """Cheap Stage-1 (1 call, latest ~2000 fills): reject dormant / no-recent-crypto / builder-
+    dominant BEFORE the heavy full 14d fetch — so we only fully-profile likely-copyable wallets."""
+    latest = rest.user_fills_latest(addr)
+    if not isinstance(latest, list) or not latest:
+        return False, "no_fills"
+    crypto = [x for x in latest if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
+    if not crypto:
+        return False, "no_crypto"
+    if (now_ms - max(x["time"] for x in crypto)) / 86400_000.0 > p.inactive_days:
+        return False, "no_recent_crypto"          # no crypto trade in the last few days
+    if len(crypto) / len(latest) < getattr(p, "min_crypto", 0.3):
+        return False, "builder_dominant"          # recent activity is mostly non-crypto
+    return True, "ok"
+
+
+def _write_reject(db, addr, prior, stamp, reason):
+    status = "retired" if (prior or {}).get("status") == "active" else "rejected"
+    db.execute(
+        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * 35)})",
+        (addr, status, reason, 0.0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 0,
+         (prior or {}).get("age_days"), 0, 0, None, 0, 0, 0,
+         (prior or {}).get("first_added"), stamp, (prior or {}).get("times_seen", 0) + 1,
+         (prior or {}).get("times_active", 0)))
+    db.commit()
+    return status, reason, {"n_trades": 0, "score": 0.0}, False
+
+
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
-    raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)
+    pre_ok, pre_reason = _prescreen(addr, universe, p, now_ms)   # Stage 1: cheap
+    if not pre_ok:
+        return _write_reject(db, addr, prior, stamp, pre_reason)
+    raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)  # Stage 2: full
     for x in raw:
         x["user"] = addr
     # only COPYABLE activity counts: standard crypto perps. Spot AND builder/index perps
@@ -188,8 +226,9 @@ def scan(db, p) -> None:
     universe = rest.perp_universe()              # standard crypto perps only are copyable
     if not p.no_harvest:
         print("harvest leaderboard ...", flush=True)
-        n_cand = harvest(db, p.min_acct, p.max_turnover)
-        print(f"  {n_cand} candidates (acct>={p.min_acct:g}, turnover<={p.max_turnover:g}x, week&month pnl>0)", flush=True)
+        n_cand = harvest(db, p.min_acct, p.max_turnover, p)
+        print(f"  {n_cand} candidates (acct>={p.min_acct:g}, turnover<={p.max_turnover:g}x, "
+              f"mon_roi>{getattr(p,'min_roi',0.2):.0%}, all_roi>0, 24h-active)", flush=True)
 
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(p.order, "mon_roi")
     actives = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]

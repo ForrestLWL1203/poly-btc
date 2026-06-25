@@ -64,6 +64,11 @@ def user_fills_by_time(addr: str, start_ms: int):
     return post({"type": "userFillsByTime", "user": addr, "startTime": start_ms})
 
 
+def user_fills_latest(addr: str):
+    """Most recent ~2000 fills (1 call) — for the cheap pre-screen (recent crypto activity)."""
+    return post({"type": "userFills", "user": addr})
+
+
 def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
     """All fills for addr since start_ms, paginated forward. Caps at max_pages
     (order-slicing can explode fill counts). Returns (fills, hit_cap)."""
