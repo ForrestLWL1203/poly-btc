@@ -226,6 +226,9 @@ class Observer:
                                                    closing=abs(pos1) < config.FLAT, liq=liq))
 
     def _open_position(self, addr, coin, t, px, pos1):
+        if not self._bbo_ok(coin):
+            return              # only copy standard-universe coins (we have a real book to
+                                # price our fills); skip stock/builder perps (xyz:*, #NNNN)
         side = "long" if pos1 > 0 else "short"
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
