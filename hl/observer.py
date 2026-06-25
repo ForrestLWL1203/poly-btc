@@ -43,17 +43,19 @@ class Observer:
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
-        self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (live via WS)
-        self.sub_coins: set = set()      # coins we've sent a bbo subscription for (this connection)
+        self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
+        self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
+        self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
         self.open_ep: dict = {}          # (addr,coin) -> position state
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
-        self.valid_coins: set = set()
+        self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
+        self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
         self.ws = None
         self.stop = False
 
-    def _std_coin(self, coin: str) -> bool:
-        """Standard perp coin (we have a real book / can price). Subscribing bbo for an unknown
-        coin name (#NNNN builder, xyz:* stock) closes the WS — guard against it."""
+    def _copyable(self, coin: str) -> bool:
+        """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
+        Opaque/unknown names are skipped (and subscribing their bbo would close the WS anyway)."""
         return bool(coin) and (not self.valid_coins or coin in self.valid_coins)
 
     # -- pricing off the live book -------------------------------------------
@@ -117,12 +119,19 @@ class Observer:
             await self.ensure_coin(c)
 
     async def ensure_coin(self, coin: str):
-        if coin and coin not in self.sub_coins and self._std_coin(coin) and self.ws is not None:
-            self.sub_coins.add(coin)
-            try:
-                await self._sub(ws.bbo(coin))
-            except Exception:  # noqa: BLE001
-                self.sub_coins.discard(coin)
+        """Route a coin to its pricing source: crypto -> WS bbo subscription; transparent builder
+        (stock/commodity) -> the REST l2Book poll set (WS bbo can't serve builder dexes)."""
+        if not coin or coin in self.sub_coins or coin in self.stock_coins:
+            return
+        if coin in self.crypto_coins:
+            if self.ws is not None:
+                self.sub_coins.add(coin)
+                try:
+                    await self._sub(ws.bbo(coin))
+                except Exception:  # noqa: BLE001
+                    self.sub_coins.discard(coin)
+        elif self._copyable(coin):                 # builder/stock perp -> REST l2Book pricing
+            self.stock_coins.add(coin)
 
     async def heartbeat(self):
         while not self.stop:
@@ -193,6 +202,24 @@ class Observer:
                 await asyncio.sleep(0.3)            # pace REST across wallets
             await asyncio.sleep(5)
 
+    # -- PRICING for builder/stock perps (WS bbo can't serve builder dexes) ---
+    async def poll_stock_books(self):
+        """Keep self.bbo fresh for builder/stock coins we're tracking via REST l2Book (best bid/ask).
+        Only polls coins we've actually seen a fill on (added to stock_coins on first sight), so the
+        cost is a handful of calls — and zero when no stock positions are in play."""
+        while not self.stop:
+            for coin in list(self.stock_coins):
+                ba = await asyncio.to_thread(rest.book_top, coin)
+                if ba:
+                    self.bbo[coin] = ba
+                    mid = (ba[0] + ba[1]) / 2
+                    for (a, c), ep in self.open_ep.items():      # track adverse excursion while open
+                        if c == coin and ep["master_open_px"]:
+                            adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
+                                   else (mid - ep["master_open_px"])) / ep["master_open_px"]
+                            ep["mae"] = max(ep.get("mae", 0.0), adv)
+            await asyncio.sleep(2 if self.stock_coins else 5)
+
     @staticmethod
     def _quiet(loop, context):
         msg = str(context.get("exception") or context.get("message"))
@@ -203,13 +230,19 @@ class Observer:
     # -- run: REST signal tasks + a WS connection for bbo pricing ------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
-        self.valid_coins = rest.perp_universe()
-        _log(f"perp universe: {len(self.valid_coins)} coins (bbo subs guarded)")
+        self.crypto_coins = rest.perp_universe()           # price via WS bbo
+        self.valid_coins = self.crypto_coins | rest.builder_universe()  # + transparent stocks (l2Book)
+        _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
+             f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
         self._reload_open()                        # restore open copies (restart-safe)
+        for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
+            if coin not in self.crypto_coins and self._copyable(coin):
+                self.stock_coins.add(coin)
         self._load_cursors()                       # restore per-wallet REST cursors
         self._reload_targets(init=True)            # load watchlist + forward-only cursors for new
         asyncio.create_task(self._announce())
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
+        asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book)
         asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)
         while not self.stop:                        # WS: PRICING only (per-coin bbo, no user subs)
             try:
@@ -275,8 +308,8 @@ class Observer:
         liq = bool(x.get("liquidation"))
         maker = not bool(x.get("crossed"))   # crossed=False -> a resting-limit (maker) fill
         oid = x.get("oid")
-        if coin not in self.sub_coins:
-            asyncio.create_task(self.ensure_coin(coin))   # make sure we have a book to price this
+        if coin not in self.sub_coins and coin not in self.stock_coins:
+            asyncio.create_task(self.ensure_coin(coin))   # route to its pricing source (bbo / l2Book)
 
         ep = self.open_ep.get(key)
         if ep is None:
@@ -293,8 +326,8 @@ class Observer:
                                                    closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid))
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid):
-        if not self._std_coin(coin):
-            return              # only copy standard-universe coins (skip stock/builder perps)
+        if not self._copyable(coin):
+            return              # copy crypto + transparent builder (stocks); skip opaque/unknown
         side = "long" if pos1 > 0 else "short"
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
