@@ -8,10 +8,13 @@ UA = {"User-Agent": "hl-copytrade/0.3", "Accept": "application/json", "Content-T
 
 # numeric
 FLAT = 1e-6                 # |position| below this (coin units) counts as flat
-MIN_POST_INTERVAL = 0.8     # global REST pacing between POSTs. HL's /info limit is weight-based
-#                             (~1200 weight/min) and fill queries weigh ~20 => ~60 req/min; 0.8s
-#                             (75/min) stays under it. The 429 backoff self-regulates any overshoot,
-#                             and the thread-safe pacer means more workers fill RTT, not raise rate.
+MIN_POST_INTERVAL = 1.2     # global REST pace (s/POST). HL /info budget = 1200 WEIGHT/min/IP, and
+#                             our heavy calls (userFillsByTime, frontendOpenOrders) cost weight 20
+#                             each (+1 per 20 results) — so the real ceiling is ~60 weight-20/min,
+#                             NOT a request count. 1.2s = 50/min ≈ 1000 weight/min: safely under
+#                             1200, leaving headroom for the 8s-trickle scanner (~150 weight/min)
+#                             on the same IP. (l2Book/clearinghouseState are only weight 2.)
+#                             The scanner overrides this to --scan-interval in its own process.
 
 # HL WS hard limits (per IP, official): the binding one is unique users.
 MAX_WS_USERS = 10           # max unique users across user-specific subscriptions (WS only)
