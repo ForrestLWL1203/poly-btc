@@ -66,7 +66,6 @@ HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceil
 # top-N by SCORE = Quality × Survival × FreqFit × Health; these tune the curves, not hard gates.
 SCORE_K = 5.0          # daily-stats confidence: w = active_days/(active_days+K). Low-freq → lean overall ROI
 SCORE_GAMMA = 2.0      # day-consistency strictness: consistency = pos_day_ratio^(w·GAMMA). Higher = stricter
-FREQ_STAR = 8.0        # frequency sweet-spot (median episodes/day) where FreqFit saturates (capital efficiency)
 UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine; vs liq_dist=1/MAX_LEV)
 SKEW_SPAN = 2.0        # disposition penalty span: hold_skew (loser/winner hold) from 1→1+SPAN drives Health→floor
 CONC_TOL = 0.40        # profit-concentration tolerance: a single day > this share of gross profit gets penalised

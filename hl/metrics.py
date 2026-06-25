@@ -129,7 +129,10 @@ def score(m: dict) -> float:
     worst_liq = abs(m.get("liq_worst_pct") or 0.0)
     survival *= 0.6 if worst_liq >= 20 else (0.85 if worst_liq >= 5 else 1.0)
 
-    freqfit = 0.6 + 0.4 * min(m["median_eps"], config.FREQ_STAR) / config.FREQ_STAR  # prefer mid-freq (capital eff.)
+    # NO FreqFit factor: frequency is purely a GATE concern (inactive at the low end, >30 round-trips/
+    # day = bot at the high end). Inside that allowed band we want low-freq swing-holders and mid-freq
+    # scalpers EQUALLY — discounting low-freq here would fight our own "copy good traders of any
+    # cadence" thesis. Quality = returns × consistency × risk, NOT how often they trade.
 
     liq_dist = 1.0 / config.MAX_LEV
     uw = abs(min(0.0, m.get("open_underwater") or 0.0))        # current worst open underwater (fraction)
@@ -140,4 +143,4 @@ def score(m: dict) -> float:
                   config.HEALTH_FLOOR, 1.0)
     health = snap * disp * concf
 
-    return quality * survival * freqfit * health
+    return quality * survival * health
