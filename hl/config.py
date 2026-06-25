@@ -63,13 +63,10 @@ HARVEST_MON_ROI_MAX = 3.0       # anti-lottery: cut tiny-account high-leverage g
 HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceiling; >10x/day = market-maker
 
 # v3 score shape (interpretable, UI-tunable — NOT arbitrary quality cutoffs). The watchlist is
-# top-N by SCORE = Quality × Survival × FreqFit × Health; these tune the curves, not hard gates.
+# top-N by SCORE = Quality(RAR × day-consistency) × Survival × Health(current-underwater depth).
 SCORE_K = 5.0          # daily-stats confidence: w = active_days/(active_days+K). Low-freq → lean overall ROI
 SCORE_GAMMA = 2.0      # day-consistency strictness: consistency = pos_day_ratio^(w·GAMMA). Higher = stricter
 UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine; vs liq_dist=1/MAX_LEV)
-SKEW_SPAN = 2.0        # disposition penalty span: hold_skew (loser/winner hold) from 1→1+SPAN drives Health→floor
-CONC_TOL = 0.40        # profit-concentration tolerance: a single day > this share of gross profit gets penalised
-HEALTH_FLOOR = 0.20    # min for the disposition/concentration factors (a soft penalty, never a hard zero)
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one

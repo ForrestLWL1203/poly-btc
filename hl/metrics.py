@@ -52,7 +52,7 @@ def _hold_skew(eps: list) -> float:
     losers = [e["hold_s"] for e in eps if e["net_pnl"] < 0]
     winners = [e["hold_s"] for e in eps if e["net_pnl"] > 0]
     if not winners:
-        return config.SKEW_SPAN + 1.0          # only losers ever held -> worst
+        return 3.0                             # only losers ever held -> worst (display-only metric)
     if not losers:
         return 0.0                             # never holds losers -> ideal
     return statistics.median(losers) / max(statistics.median(winners), 1.0)
@@ -136,13 +136,16 @@ def score(m: dict) -> float:
     # scalpers EQUALLY — discounting low-freq here would fight our own "copy good traders of any
     # cadence" thesis. Quality = returns × consistency × risk, NOT how often they trade.
 
+    # Health = current loss-DEPTH only. Two factors were removed because their lens was wrong:
+    #  • hold_skew (loser-hold / winner-hold TIME): 扛单 risk is about how DEEP a loss you sit on, not
+    #    how long — cutting winners fast is GOOD discipline, and holding a few-% dip until it recovers
+    #    is fine. Depth is already captured by RAR (roi/max_drawdown, realized) + open_underwater below.
+    #  • profit_conc (one day's share of gross profit): a big day on top of otherwise-green days is a
+    #    GREAT wallet; the bad pattern (one big day, bleeding the rest) is just a LOW pos_day_ratio,
+    #    already crushed by `consistency`. profit_conc punished both alike — it mis-fired.
+    # Both stay in the profile as display-only metrics, out of the score.
     liq_dist = 1.0 / config.MAX_LEV
     uw = abs(min(0.0, m.get("open_underwater") or 0.0))        # current worst open underwater (fraction)
-    snap = 1.0 - _clip((uw - config.UW_TOL) / max(liq_dist - config.UW_TOL, 1e-6), 0.0, 1.0)
-    disp = _clip(1.0 - max(0.0, (m.get("hold_skew") or 0.0) - 1.0) / config.SKEW_SPAN,
-                 config.HEALTH_FLOOR, 1.0)
-    concf = _clip(1.0 - max(0.0, (m.get("profit_conc") or 0.0) - config.CONC_TOL) / max(1.0 - config.CONC_TOL, 1e-6),
-                  config.HEALTH_FLOOR, 1.0)
-    health = snap * disp * concf
+    health = 1.0 - _clip((uw - config.UW_TOL) / max(liq_dist - config.UW_TOL, 1e-6), 0.0, 1.0)
 
     return quality * survival * health
