@@ -17,19 +17,20 @@ _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker t
 
 # -------------------------------------------------------------------------- harvest
 def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
-    """STAGE-1 seed gate — three-window leaderboard cascade, ZERO per-wallet API. The leaderboard
-    carries each wallet's 24h/7d/30d/allTime perf in one bulk fetch, so we discriminate on all three
-    windows up front and hand the per-wallet profile only a concentrated, already-active+stable seed
-    set (39.5k → ~hundreds). Each window proves a different thing:
-      • 24h VOLUME (day_vlm, leveraged notional) → genuinely ACTIVE right now (not 'appeared once').
-      • 7d ROI (week_roi ≥ floor)                → meaningful RECENT return (not '+1%/week').
-      • 30d profitable (mon_pnl > 0)             → STABLE over the month, not a one-week fluke.
-      • lifetime profitable (all_roi > 0)        → real track record, not a lucky streak on a loser.
-      • turnover ceiling                         → not a market-maker; ROI ceiling → not a lottery punt.
-    Unrealized ROI is allowed as a positive signal here on purpose — the REALIZED/risk judgment (real
-    PnL, copyability, hold-skew, self-liquidation, current underwater) is the per-wallet profile's job."""
-    vol24_min = getattr(p, "vol24_min", config.HARVEST_VOL24_MIN)
+    """STAGE-1 seed gate — leaderboard windows only, ZERO per-wallet API. Pre-bias on what the
+    leaderboard CAN reliably say; defer true stability + copyability to the profile. Predicate:
+      • acct ≥ floor                 → real capital (we copy by %, not $).
+      • lifetime profitable (all_roi>0) → real track record, not a lucky streak on a loser.
+      • 7d VOLUME ≥ floor (week_vlm)  → ACTIVE over the week (NOT 24h — that kills mid-hold holders).
+      • 30d ROI ≥ floor AND ≤ ceiling → meaningful return (small capital needs %) + anti-lottery.
+      • 7d ROI ≥ floor                → recent week STILL earning; paired w/ the 30d floor this blocks
+                                        both '+50% day-1 then dormant' AND a one-lucky-week fluke.
+      • turnover ≤ ceiling           → not a market-maker.
+    Bots/grids are INVISIBLE to leaderboard aggregates (proven), so we DON'T filter them here — the
+    profile's grid/worst_loss gates do. Unrealized ROI allowed on purpose; realized judgment is profile."""
+    week_vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
     week_roi_min = getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN)
+    mon_roi_min = getattr(p, "mon_roi_min", config.HARVEST_MON_ROI_MIN)
     mon_roi_max = getattr(p, "mon_roi_max", config.HARVEST_MON_ROI_MAX)
     rows = rest.get_leaderboard()
     now = now_iso()
@@ -41,10 +42,9 @@ def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
         turnover = (f(mo.get("vlm")) / acct / 30.0) if acct > 0 else 0.0
         cand = (acct >= min_acct and 0 < turnover <= max_turnover  # real capital, not a market-maker
                 and f(al.get("roi")) > 0                       # lifetime profitable (track record)
-                and f(d.get("vlm")) >= vol24_min               # 24h activity (leveraged notional)
-                and f(wk.get("roi")) >= week_roi_min           # 7d meaningful recent return
-                and f(mo.get("pnl")) > 0                       # 30d still profitable (stable)
-                and f(mo.get("roi")) <= mon_roi_max)           # anti-lottery (no absurd 30d ROI)
+                and f(wk.get("vlm")) >= week_vlm_min           # 7d activity (keeps mid-hold holders)
+                and mon_roi_min <= f(mo.get("roi")) <= mon_roi_max  # 30d return: high enough + anti-lottery
+                and f(wk.get("roi")) >= week_roi_min)          # 7d also earning (blocks earn-then-dormant)
         db.execute(
             "INSERT OR REPLACE INTO leaderboard (addr,display_name,account_value,"
             "day_pnl,day_roi,day_vlm,week_pnl,week_roi,week_vlm,mon_pnl,mon_roi,mon_vlm,"
@@ -257,8 +257,9 @@ def scan(db, p) -> None:
         n_cand = harvest(db, p.min_acct, p.max_turnover, p)
         turn = "off" if p.max_turnover >= 1e8 else f"<={p.max_turnover:g}x"
         print(f"  {n_cand} candidates (acct>=${p.min_acct:g}, turnover {turn}, all_roi>0, "
-              f"vol24h>=${getattr(p,'vol24_min',config.HARVEST_VOL24_MIN):,.0f}, "
-              f"roi7d>={getattr(p,'week_roi_min',config.HARVEST_WEEK_ROI_MIN):.0%}, mon_pnl>0)", flush=True)
+              f"vol7d>=${getattr(p,'week_vlm_min',config.HARVEST_WEEK_VLM_MIN):,.0f}, "
+              f"roi30d>={getattr(p,'mon_roi_min',config.HARVEST_MON_ROI_MIN):.0%}, "
+              f"roi7d>={getattr(p,'week_roi_min',config.HARVEST_WEEK_ROI_MIN):.0%})", flush=True)
 
     # FULL sweep every cycle (now cheap): re-profile EVERY candidate fresh — so a wallet that was
     # rejected on a past bad window gets re-discovered when it improves, and degraded actives retire.

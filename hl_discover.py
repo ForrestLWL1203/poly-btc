@@ -36,10 +36,12 @@ def main() -> int:
                         help="real-capital noise guard (we copy by pct, not $)")
         pr.add_argument("--max-turnover", type=float, default=config.HARVEST_MAX_TURNOVER,
                         help="anti-MM: daily turnover (mon_vlm/acct/30) ceiling")
-        pr.add_argument("--vol24-min", type=float, default=config.HARVEST_VOL24_MIN,
-                        help="24h volume floor (leveraged notional) = active now")
+        pr.add_argument("--week-vlm-min", type=float, default=config.HARVEST_WEEK_VLM_MIN,
+                        help="7d volume floor = active over the WEEK (not 24h — keeps mid-hold holders)")
+        pr.add_argument("--mon-roi-min", type=float, default=config.HARVEST_MON_ROI_MIN,
+                        help="30d ROI FLOOR = meaningful return (small capital needs high %%)")
         pr.add_argument("--week-roi-min", type=float, default=config.HARVEST_WEEK_ROI_MIN,
-                        help="7d ROI floor = meaningful recent return")
+                        help="7d ROI floor — paired w/ 30d floor: recent week must ALSO earn")
         pr.add_argument("--mon-roi-max", type=float, default=config.HARVEST_MON_ROI_MAX,
                         help="anti-lottery: max 30d ROI (cut tiny-acct gamblers)")
 

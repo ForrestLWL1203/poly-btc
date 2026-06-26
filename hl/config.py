@@ -56,21 +56,24 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 # Applies to taker opens only (maker rests passively; exits are never blocked — always follow out).
 MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.5% worse than master
 
-# Stage-1 leaderboard prefilter (UI-tunable). The leaderboard gives each wallet's perf across
-# 24h/7d/30d/allTime in ONE bulk fetch — so we discriminate on THREE windows BEFORE any per-wallet
-# API profiling: 24h volume = active NOW, 7d/30d returns = recent + stable, allTime = lifetime track
-# record. ~hundreds survive → profile becomes a small confirmation step, not a multi-thousand sweep.
-# (Volume is leveraged notional, so the floors are large.) The expensive REALIZED/risk judgment —
-# realized PnL, perp-copyability, hold-skew, self-liquidation, current underwater — stays in the
-# per-wallet profile gates()+score(); this stage only buys a concentrated, active, stable seed set.
+# Stage-1 leaderboard prefilter (UI-tunable). The leaderboard carries each wallet's 24h/7d/30d/allTime
+# perf in ONE bulk fetch, so we pre-bias on what it CAN reliably say — multi-window profitability +
+# return magnitude + 7d activity — BEFORE any per-wallet API profiling. What it CANNOT say (true week-
+# to-week stability, copyability, loss-discipline) is the PROFILE stage's job (pos_day_ratio, grid gate,
+# worst_loss gate). Key lessons baked in: (1) bots/grids are INVISIBLE here (volume/turnover/efficiency
+# don't separate them from directional — proven), so don't try; profile catches them. (2) ACTIVITY uses
+# the 7d window, NOT 24h — a 24h floor kills the holders we want (low 24h volume mid-hold) and biases to
+# high-churn bots. (3) RETURN uses 30d magnitude + 7d magnitude TOGETHER: 30d alone can be one big early
+# day then dormant; requiring the 7d to ALSO be earning blocks that, while the 30d requirement stops a
+# single-week fluke. We copy by %/leverage so low-ROI wallets give us low returns (small capital).
 HARVEST_MIN_ACCT = 5000.0       # real capital (noise guard; we copy by %, not $)
-HARVEST_VOL24_MIN = 50_000.0    # 24h volume floor — LOW on purpose: just exclude dormant/dust wallets.
-#                                 NOT a quality/bot filter (volume can't separate grids from directional
-#                                 — proven: turnover/vlm-per-pnl don't discriminate). A high floor only
-#                                 biased toward high-churn bots AND missed modest-volume directional
-#                                 traders. Bot/grid exclusion is the PROFILE stage's job (grid gate).
-HARVEST_WEEK_ROI_MIN = 0.10     # 7d ROI floor = meaningful recent return (not "+1%/week")
-HARVEST_MON_ROI_MAX = 3.0       # anti-lottery: cut tiny-account high-leverage gamblers (absurd 30d ROI)
+HARVEST_WEEK_VLM_MIN = 100_000.0 # 7d volume floor = genuinely active over the WEEK (not the last 24h —
+#                                  that excludes mid-hold position/swing traders, exactly who we want)
+HARVEST_MON_ROI_MIN = 0.15      # 30d ROI FLOOR = meaningful return (small capital needs high % returns)
+HARVEST_MON_ROI_MAX = 3.0       # anti-lottery CEILING: cut tiny-account high-leverage gamblers
+HARVEST_WEEK_ROI_MIN = 0.02     # 7d ROI floor — paired with the 30d floor: the recent week must ALSO be
+#                                  earning (blocks "+50% on day 1 then dormant"); the 30d floor stops the
+#                                  inverse (one lucky week). Together = "good month AND still on pace".
 HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceiling; >10x/day = market-maker
 
 # v3 score shape (interpretable, UI-tunable — NOT arbitrary quality cutoffs). The watchlist is
