@@ -519,6 +519,7 @@ class Observer:
         #  lev = clip(1/(RISK_K·σ), MIN_LEV, MAX_LEV)   -> liquidation RISK_K daily-σ away on ANY coin
         #  margin = RF·RISK_K·available ;  notional = margin·lev = RF·available/σ (calm→big, wild→small)
         # We do NOT mirror the target's leverage (kept only for the report). σ is the regime-aware value.
+        await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         t_acct = self.target_acct.get(addr)
         conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.rf_min
