@@ -160,6 +160,18 @@ CREATE TABLE IF NOT EXISTS live_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_lf_addr ON live_fills(addr, time_ms);
 
+-- Per-coin realized volatility for risk-targeted sizing (one row/coin), refreshed periodically off
+-- the signal hot path. sigma = max(sigma_fast, sigma_slow) — regime-aware (de-risk fast, re-risk
+-- slow). The sizing code reads `sigma`; fast/slow/n are kept for inspection + tuning. n=0 + null
+-- fast/slow means the fallback σ was used (candles unavailable).
+CREATE TABLE IF NOT EXISTS coin_vol (
+    coin       TEXT PRIMARY KEY,
+    sigma      REAL,              -- used for sizing = max(fast, slow), daily realized vol
+    sigma_fast REAL, sigma_slow REAL,
+    n          INTEGER,           -- daily candles used
+    updated_at TEXT
+);
+
 -- Our paper account: ONE row. balance = realized equity (starts at initial_balance, += closed
 -- PnL); available = balance - sum(margin of open positions); each new copy locks margin_pct of
 -- available. Persisted so the simulated wallet survives restarts.

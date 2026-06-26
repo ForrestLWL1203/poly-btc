@@ -25,7 +25,7 @@ import time
 
 import websockets
 
-from . import config, rest, ws
+from . import config, rest, volatility, ws
 from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
@@ -44,11 +44,15 @@ class Observer:
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        # strategy sizing (UI-tunable): the OPEN is conviction-weighted between a floor and a cap (% of
-        # available); each follow-on add takes add_margin_pct of available.
-        self.open_min_pct = config.OPEN_MIN_PCT
-        self.open_max_pct = config.OPEN_MAX_PCT
+        # strategy sizing (UI-tunable): VOLATILITY-TARGETED. RF (per-position risk fraction) is mapped
+        # from the target's conviction, banded [rf_min, rf_max]; leverage comes from the coin's σ (NOT
+        # the target's leverage). margin = RF·RISK_K·available; each add takes add_margin_pct of available.
+        self.rf_min = config.RF_MIN
+        self.rf_max = config.RF_MAX
+        self.risk_k = config.RISK_K
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
+        self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
+        self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
@@ -220,11 +224,37 @@ class Observer:
         for c in coins:
             await self.ensure_coin(c)
 
+    # -- per-coin volatility (regime-aware σ for risk-targeted sizing) --------
+    def _sigma(self, coin: str) -> float:
+        """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
+        return self.vol.get(coin) or config.VOL_FALLBACK_SIGMA
+
+    async def _ensure_vol(self, coin: str):
+        """Track coin for the periodic σ refresh, and fetch it NOW if we have no fresh value (so a
+        first-seen coin gets a real σ within seconds; sizing uses the fallback only in the meantime)."""
+        if not coin:
+            return
+        self.vol_coins.add(coin)
+        if coin not in self.vol:
+            self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
+
+    async def vol_refresh_loop(self):
+        """Periodically re-compute σ for every tracked coin into coin_vol — OFF the signal hot path, so
+        sizing only ever reads the cache. Catches a calm→volatile regime change within VOL_REFRESH_S."""
+        while not self.stop:
+            await asyncio.sleep(config.VOL_REFRESH_S)
+            for coin in list(self.vol_coins):
+                try:
+                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def ensure_coin(self, coin: str):
         """Route a coin to its pricing source: crypto -> WS bbo subscription; transparent builder
         (stock/commodity) -> the REST l2Book poll set (WS bbo can't serve builder dexes)."""
         if not coin or coin in self.sub_coins or coin in self.stock_coins:
             return
+        asyncio.create_task(self._ensure_vol(coin))   # make sure we have this coin's σ for sizing
         if coin in self.crypto_coins:
             if self.ws is not None:
                 self.sub_coins.add(coin)
@@ -353,6 +383,7 @@ class Observer:
         _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
         self._load_account()                       # restore paper account balance (restart-safe)
+        self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)
         self._reload_open()                        # restore open copies (restart-safe)
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
@@ -360,6 +391,7 @@ class Observer:
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
         asyncio.create_task(self._announce())
+        asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
         asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book)
@@ -481,15 +513,19 @@ class Observer:
             self.db.commit()
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
-        lev, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master pos
-        # CONVICTION-WEIGHTED open: mirror how much of the target's OWN account they put behind this
-        # position (master_margin / target_account), floored + capped. A whale's small % is still a
-        # real bet (floor); a target's all-in is bounded (cap). Unknown conviction -> floor.
+        _cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
+        # VOLATILITY-TARGETED, available-anchored sizing (config: RISK_K / RF_MIN..RF_MAX / σ table):
+        #  RF = clip(conviction, rf_min, rf_max)   conviction = how much of THEIR account the target bet
+        #  lev = clip(1/(RISK_K·σ), MIN_LEV, MAX_LEV)   -> liquidation RISK_K daily-σ away on ANY coin
+        #  margin = RF·RISK_K·available ;  notional = margin·lev = RF·available/σ (calm→big, wild→small)
+        # We do NOT mirror the target's leverage (kept only for the report). σ is the regime-aware value.
+        sigma = self._sigma(coin)
         t_acct = self.target_acct.get(addr)
-        conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.open_min_pct
-        open_pct = max(self.open_min_pct, min(conviction, self.open_max_pct))
+        conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.rf_min
+        rf = max(self.rf_min, min(conviction, self.rf_max))
+        lev = max(config.MIN_LEV, min(1.0 / (self.risk_k * sigma), config.MAX_LEV)) if sigma > 0 else config.MIN_LEV
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * open_pct)
+            margin = max(0.0, self._available() * rf * self.risk_k)
             notional = margin * lev
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
@@ -713,6 +749,6 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(open margin {config.OPEN_MIN_PCT*100:g}–{config.OPEN_MAX_PCT*100:g}% conviction-weighted / "
-          f"{config.ADD_MARGIN_PCT*100:g}% per add (max {config.MAX_ADDS}) of available, "
-          f"master leverage capped {config.MAX_LEV:g}x, isolated, no stop)")
+    print(f"\n(vol-targeted: lev=1/({config.RISK_K:g}·σ) clip[{config.MIN_LEV:g},{config.MAX_LEV:g}]x, "
+          f"margin=RF·{config.RISK_K:g}·available RF∈[{config.RF_MIN*100:g}%,{config.RF_MAX*100:g}%] conviction-mapped, "
+          f"{config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated, no stop)")

@@ -112,6 +112,15 @@ def clearinghouse_state(addr: str, dex: str = None):
     return post_soft(body)
 
 
+def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
+    """OHLC candles for coin over the last `days` (for realized-volatility sizing). Returns a list of
+    {t,T,s,i,o,c,h,l,v,n} or None. Cheap (weight 2); callers cache + refresh off the signal hot path."""
+    now = int(time.time() * 1000)
+    return post_soft({"type": "candleSnapshot",
+                      "req": {"coin": coin, "interval": interval,
+                              "startTime": now - days * 86400_000, "endTime": now}})
+
+
 def perp_universe() -> set:
     """Standard crypto perp coin names. These price via WS bbo (subscribing bbo for a name NOT in
     here — builder/stock coin or junk — closes the WS connection, so this guards bbo subs).

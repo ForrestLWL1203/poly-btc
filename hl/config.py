@@ -33,22 +33,37 @@ LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup onl
 #                                window; the rest is audit) — keeps the only unbounded table bounded
 
 # Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
-# balance; each copy commits isolated margin = a CONVICTION-WEIGHTED fraction of CURRENT AVAILABLE
-# balance, at the master's leverage capped to MAX_LEV. The OPEN size mirrors how much of the target's
-# OWN account the target put behind the position (master_margin / target_account), floored + capped:
-# a whale's "small %" is still a real bet (floor), a target's all-in is bounded (cap). notional =
-# margin * leverage; isolated liquidation (loss = margin). No stop-loss in v1.
+# balance. Each copy commits isolated margin out of CURRENT AVAILABLE balance, sized by VOLATILITY
+# TARGETING (below) — never a fixed $ amount, always a fraction of available. notional = margin *
+# leverage; isolated liquidation (loss = margin). No stop-loss in v1.
 INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
-OPEN_MIN_PCT = 0.02         # FLOOR: every copy opens at >= this fraction of available (a whale's tiny
-#                             %-of-their-account is still a deliberate bet — don't open dust under this)
-OPEN_MAX_PCT = 0.05         # CAP: conviction-weighted open tops out here (target's all-in ≠ our all-in)
 ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available
-MAX_LEV = 30.0             # cap on the master's per-coin leverage we mirror. The target already
-#                            vol-adjusts leverage per coin (40x BTC = low vol, 5x a hot alt), so
-#                            mirroring IS volatility-aware for free; this is only a backstop against a
-#                            stale read / a target over-levering a dangerous coin. Isolated margin (=
-#                            the conviction-weighted % of available) caps our per-position downside.
 MAX_ADDS = 2                # follow the master's scale-ins up to this many adds/position (each ADD_MARGIN_PCT)
+
+# VOLATILITY-TARGETED sizing (the core of v2). We do NOT mirror the target's leverage. Instead, per
+# coin: leverage = clip(1/(RISK_K·σ), MIN_LEV, MAX_LEV) puts liquidation RISK_K daily-σ away on EVERY
+# coin (calm BTC → high lev, wild meme → low lev, SAME staying power); and margin = RF·RISK_K·available
+# so notional = margin·lev = RF·available/σ makes a calm coin a meaningful position and a wild one
+# appropriately small. Per-position RISK fraction RF (how much a 1σ daily move swings the position, as
+# a % of available) is mapped from the target's CONVICTION (their margin / their account), banded
+# [RF_MIN, RF_MAX] — a whale's small % is still a real bet (floor), an all-in is bounded (cap). Isolated
+# → max loss = margin. Everything anchored to AVAILABLE (account grows → sizes grow; positions open →
+# available shrinks → later sizes shrink = self-throttle). σ is regime-aware, see VOL_* + coin_vol table.
+RISK_K = 4.0                # liquidation buffer in daily-σ; also margin = RF·RISK_K·available
+RF_MIN = 0.005              # min per-position risk fraction (low-conviction / unknown target bet)
+RF_MAX = 0.02               # max per-position risk fraction (bounds a target's all-in)
+MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
+MAX_LEV = 30.0              # leverage BACKSTOP only (σ<0.83%/day to bind); guards a bad/stale σ estimate
+
+# Per-coin volatility (regime-aware) for the sizing above. A coin calm-then-erupting must NOT keep its
+# old low σ and get over-levered into a blow-up — so we use TWO horizons and take the MAX (de-risk fast
+# when vol rises, re-risk slowly when it falls). Refreshed periodically into the coin_vol TABLE off the
+# signal hot path; sizing just reads the row. σ_used = max(σ_fast, σ_slow), both daily realized vol.
+VOL_FAST_DAYS = 7           # recent window — catches a fresh volatility regime within ~a day
+VOL_SLOW_DAYS = 30          # long baseline — stable; the floor we hold until calm is sustained
+VOL_MIN_SAMPLES = 5         # need this many daily candles, else fall back
+VOL_REFRESH_S = 3600        # re-fetch each tracked coin's σ at most this often (1h) — vol drifts slowly
+VOL_FALLBACK_SIGMA = 0.10   # σ when candles unavailable (new/illiquid coin) → low lev, small notional
 
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
