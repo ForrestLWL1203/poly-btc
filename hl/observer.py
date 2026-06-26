@@ -38,15 +38,18 @@ def _log(msg: str):
 
 class Observer:
     def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None,
-                 margin_pct: float = None, add_margin_pct: float = None):
+                 add_margin_pct: float = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        # strategy sizing — dynamic (UI-tunable): margin on open vs each follow-on add, as % of available
-        self.margin_pct = config.MARGIN_PCT if margin_pct is None else margin_pct
+        # strategy sizing (UI-tunable): the OPEN is conviction-weighted between a floor and a cap (% of
+        # available); each follow-on add takes add_margin_pct of available.
+        self.open_min_pct = config.OPEN_MIN_PCT
+        self.open_max_pct = config.OPEN_MAX_PCT
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
+        self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
@@ -183,6 +186,8 @@ class Observer:
     def _reload_targets(self, init=False):
         addrs, seed = load_targets(self.db, self.top_n, self.min_score)
         self.seed_coins = seed
+        self.target_acct = {a: v for a, v in                 # conviction denominator (target's account)
+                            self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
         # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
         held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
@@ -465,8 +470,14 @@ class Observer:
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
         lev, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master pos
+        # CONVICTION-WEIGHTED open: mirror how much of the target's OWN account they put behind this
+        # position (master_margin / target_account), floored + capped. A whale's small % is still a
+        # real bet (floor); a target's all-in is bounded (cap). Unknown conviction -> floor.
+        t_acct = self.target_acct.get(addr)
+        conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.open_min_pct
+        open_pct = max(self.open_min_pct, min(conviction, self.open_max_pct))
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * self.margin_pct)
+            margin = max(0.0, self._available() * open_pct)
             notional = margin * lev
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
@@ -486,7 +497,7 @@ class Observer:
 
     async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, maker, oid):
         """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
-        another MARGIN_PCT of available at the current price; the avg entry + liq_px recompute.
+        another ADD_MARGIN_PCT of available at the current price; the avg entry + liq_px recompute.
         Past the cap we record his add but don't follow (the delta-based exit still mirrors him)."""
         async with ep["lock"]:
             try:
@@ -690,5 +701,6 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(margin {config.MARGIN_PCT*100:g}% open / {config.ADD_MARGIN_PCT*100:g}% per add of available, "
+    print(f"\n(open margin {config.OPEN_MIN_PCT*100:g}–{config.OPEN_MAX_PCT*100:g}% conviction-weighted / "
+          f"{config.ADD_MARGIN_PCT*100:g}% per add (max {config.MAX_ADDS}) of available, "
           f"master leverage capped {config.MAX_LEV:g}x, isolated, no stop)")

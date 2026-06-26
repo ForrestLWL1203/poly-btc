@@ -33,19 +33,22 @@ LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup onl
 #                                window; the rest is audit) — keeps the only unbounded table bounded
 
 # Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
-# balance; each copy commits MARGIN_PCT of CURRENT AVAILABLE balance as isolated margin, at the
-# master's leverage capped to MAX_LEV. notional = margin * leverage; liquidation when price crosses
-# the isolated liq level (loss = margin). No stop-loss in v1 (the 2% margin is the per-trade max loss).
+# balance; each copy commits isolated margin = a CONVICTION-WEIGHTED fraction of CURRENT AVAILABLE
+# balance, at the master's leverage capped to MAX_LEV. The OPEN size mirrors how much of the target's
+# OWN account the target put behind the position (master_margin / target_account), floored + capped:
+# a whale's "small %" is still a real bet (floor), a target's all-in is bounded (cap). notional =
+# margin * leverage; isolated liquidation (loss = margin). No stop-loss in v1.
 INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
-MARGIN_PCT = 0.02           # margin on the OPEN of a copy = fraction of available balance
-ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available (smaller
-#                             than the open so averaging-down doesn't bloat a single position)
+OPEN_MIN_PCT = 0.02         # FLOOR: every copy opens at >= this fraction of available (a whale's tiny
+#                             %-of-their-account is still a deliberate bet — don't open dust under this)
+OPEN_MAX_PCT = 0.05         # CAP: conviction-weighted open tops out here (target's all-in ≠ our all-in)
+ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available
 MAX_LEV = 30.0             # cap on the master's per-coin leverage we mirror. The target already
 #                            vol-adjusts leverage per coin (40x BTC = low vol, 5x a hot alt), so
 #                            mirroring IS volatility-aware for free; this is only a backstop against a
 #                            stale read / a target over-levering a dangerous coin. Isolated margin (=
-#                            MARGIN_PCT of available) caps our per-position downside regardless of lev.
-MAX_ADDS = 3                # follow the master's scale-ins up to this many adds/position (avg down)
+#                            the conviction-weighted % of available) caps our per-position downside.
+MAX_ADDS = 2                # follow the master's scale-ins up to this many adds/position (each ADD_MARGIN_PCT)
 
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
