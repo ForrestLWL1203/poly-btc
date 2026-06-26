@@ -144,8 +144,7 @@ def score(m: dict) -> float:
     #    GREAT wallet; the bad pattern (one big day, bleeding the rest) is just a LOW pos_day_ratio,
     #    already crushed by `consistency`. profit_conc punished both alike — it mis-fired.
     # Both stay in the profile as display-only metrics, out of the score.
-    liq_dist = 1.0 / config.MAX_LEV
     uw = abs(min(0.0, m.get("open_underwater") or 0.0))        # current worst open underwater (fraction)
-    health = 1.0 - _clip((uw - config.UW_TOL) / max(liq_dist - config.UW_TOL, 1e-6), 0.0, 1.0)
+    health = 1.0 - _clip((uw - config.UW_TOL) / max(config.UW_REF - config.UW_TOL, 1e-6), 0.0, 1.0)
 
     return quality * survival * health

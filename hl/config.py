@@ -40,7 +40,11 @@ INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
 MARGIN_PCT = 0.02           # margin on the OPEN of a copy = fraction of available balance
 ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available (smaller
 #                             than the open so averaging-down doesn't bloat a single position)
-MAX_LEV = 10.0              # cap on the master's leverage we mirror
+MAX_LEV = 30.0             # cap on the master's per-coin leverage we mirror. The target already
+#                            vol-adjusts leverage per coin (40x BTC = low vol, 5x a hot alt), so
+#                            mirroring IS volatility-aware for free; this is only a backstop against a
+#                            stale read / a target over-levering a dangerous coin. Isolated margin (=
+#                            MARGIN_PCT of available) caps our per-position downside regardless of lev.
 MAX_ADDS = 3                # follow the master's scale-ins up to this many adds/position (avg down)
 
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
@@ -66,7 +70,9 @@ HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceil
 # top-N by SCORE = Quality(RAR × day-consistency) × Survival × Health(current-underwater depth).
 SCORE_K = 5.0          # daily-stats confidence: w = active_days/(active_days+K). Low-freq → lean overall ROI
 SCORE_GAMMA = 2.0      # day-consistency strictness: consistency = pos_day_ratio^(w·GAMMA). Higher = stricter
-UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine; vs liq_dist=1/MAX_LEV)
+UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine)
+UW_REF = 0.10          # open-underwater treated as fully dangerous (Health snap → 0 here). Decoupled
+#                        from MAX_LEV (the copy cap) on purpose — this is a scoring-shape param.
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
