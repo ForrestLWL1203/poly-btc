@@ -82,21 +82,27 @@ class Observer:
         self.db.execute("UPDATE copy_account SET balance=?, updated_at=? WHERE id=1",
                         (self.balance, now_iso()))
 
-    def _target_leverage(self, addr, coin):
-        """The master's leverage for this coin (from clearinghouseState), capped to MAX_LEV. Falls
-        back to MAX_LEV if it can't be read (mirror-capped intent). MUST name the builder dex for
-        stock/builder perps (xyz:*) — the standard call returns [] for those, which silently fell
-        back to MAX_LEV and over-levered every stock-perp copy to 10x regardless of the master."""
+    def _target_snapshot(self, addr, coin):
+        """The master's CURRENT position on this coin from clearinghouseState — returns
+        (capped_leverage_we_mirror, raw_leverage, margin_used, entry_px). ONE call serves both our
+        sizing (capped lev) and the at-OPEN record we persist (the target's leverage/margin/entry so
+        the report never has to re-fetch and shows them even after the position closes). MUST name the
+        builder dex for stock/builder perps (xyz:*) — the standard call returns [] for those, which
+        silently fell back to MAX_LEV and over-levered every stock-perp copy to 10x. capped lev falls
+        back to MAX_LEV if unreadable (mirror-capped intent); raw/margin/entry are None if unreadable."""
         dex = coin.split(":")[0] if ":" in coin else None
         cs = rest.clearinghouse_state(addr, dex)
-        lev = None
+        raw_lev = margin = entry = None
         if isinstance(cs, dict):
             for ap in cs.get("assetPositions", []):
                 pos = ap.get("position", {})
                 if pos.get("coin") == coin:
-                    lev = f((pos.get("leverage") or {}).get("value"))
+                    raw_lev = f((pos.get("leverage") or {}).get("value"))
+                    entry = f(pos.get("entryPx"))
+                    margin = f(pos.get("marginUsed")) or (f(pos.get("positionValue")) / raw_lev
+                                                          if raw_lev else None)
                     break
-        return max(1.0, min(lev or config.MAX_LEV, config.MAX_LEV))
+        return max(1.0, min(raw_lev or config.MAX_LEV, config.MAX_LEV)), raw_lev, margin, entry
 
     def _copyable(self, coin: str) -> bool:
         """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
@@ -458,7 +464,7 @@ class Observer:
             self.db.commit()
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
-        lev = await asyncio.to_thread(self._target_leverage, addr, coin)   # master's leverage, capped
+        lev, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master pos
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * self.margin_pct)
             notional = margin * lev
@@ -466,9 +472,11 @@ class Observer:
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px,
                       size=size, rem_size=size, liq_px=liq_px)
-            self.db.execute(
+            self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 "UPDATE copy_position SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,"
-                "liq_px=? WHERE pos_id=?", (lev, margin, notional, px, size, size, liq_px, ep["pos_id"]))
+                "liq_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
+                "WHERE pos_id=?",
+                (lev, margin, notional, px, size, size, liq_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
             self.db.commit()
         ep["entries_ready"].set()
         msz = ep["master_peak"] * ep["sign"]
@@ -613,9 +621,9 @@ def load_targets(db, n: int, min_score: float = 0.0):
 # -------------------------------------------------------------------------- report
 def report(db) -> None:
     """On-demand snapshot. ONE table row per (followed-wallet, coin) — open + closed copies merged.
-    For OPEN rows the master's side (margin/entry/leverage) is fetched LIVE from clearinghouseState
-    (so it reflects where the target stands NOW), the PnL is live mark-to-market (tagged 浮); CLOSED
-    rows show realized PnL (tagged 实) and the master's entry as recorded at open (live state gone)."""
+    The target's side (margin/entry/leverage) is read from what we PERSISTED AT OPEN (so it shows
+    even after the position closes — no live re-fetch). OPEN rows mark-to-market the live book for
+    unrealized PnL (tagged 浮); CLOSED rows show realized PnL (tagged 实)."""
     from collections import defaultdict
     acct = db.execute("SELECT initial_balance, balance FROM copy_account WHERE id=1").fetchone()
     init, bal = acct if acct else (config.INITIAL_BALANCE, config.INITIAL_BALANCE)
@@ -624,27 +632,20 @@ def report(db) -> None:
     groups = defaultdict(list)                       # (addr,coin) -> [position rows]
     for row in db.execute(
             "SELECT pos_id,addr,coin,side,leverage,margin,entry_px,size,rem_size,realized_pnl,status,"
-            "master_open_px FROM copy_position").fetchall():
+            "master_open_px,master_leverage,master_margin FROM copy_position").fetchall():
         groups[(row[1], row[2])].append(row)
 
     open_keys = {(a, c) for (a, c), rs in groups.items() if any(x[10] == "open" for x in rs)}
-    mark = {}                                        # coin -> live mid (open positions only)
+    mark = {}                                        # coin -> live mid (open positions: unrealized PnL)
     for (_, coin) in open_keys:
         if coin not in mark:
             ba = rest.book_top(coin)
             mark[coin] = ((ba[0] + ba[1]) / 2) if ba else None
-    master = {}                                      # addr -> {coin -> live master position dict}
-    for addr in {a for (a, _) in open_keys}:
-        dexes = {c.split(":")[0] for (a2, c) in open_keys if a2 == addr and ":" in c}
-        mp = {}
-        for dex in [None] + sorted(dexes):           # standard perp + each builder/stock dex held
-            cs = rest.clearinghouse_state(addr, dex)
-            if isinstance(cs, dict):
-                for ap in cs.get("assetPositions", []):
-                    p = ap.get("position", {}) or {}
-                    if p.get("coin"):
-                        mp[p["coin"]] = p
-        master[addr] = mp
+
+    def lag_of(pos_id):
+        lr = db.execute("SELECT recv_ms-ts FROM copy_action WHERE pos_id=? AND action='open' "
+                        "ORDER BY act_id LIMIT 1", (pos_id,)).fetchone()
+        return lr[0] if lr else None
 
     table, open_margin, total_unreal = [], 0.0, 0.0
     for (addr, coin), rs in groups.items():
@@ -652,24 +653,19 @@ def report(db) -> None:
         opens = [x for x in rs if x[10] == "open"]
         num = rank_of.get(addr)
         num_s = f"#{num}" if num else addr[:6]
+        ref = opens[0] if opens else rs[-1]          # target side persisted at open (survives close)
+        m_entry, m_lev, m_mgn = ref[11], ref[12], ref[13]
         if opens:
             r = opens[0]
             our_lev, our_mgn, our_entry, rem, side = r[4], r[5], r[6], r[8], r[3]
             mk = mark.get(coin) or our_entry
             unreal = rem * (mk - our_entry) * (1 if side == "long" else -1)
             open_margin += our_mgn; total_unreal += unreal
-            mp = master.get(addr, {}).get(coin, {})
-            m_entry = f(mp.get("entryPx")) or None
-            m_lev = (mp.get("leverage") or {}).get("value")
-            m_mgn = f(mp.get("marginUsed")) or (f(mp.get("positionValue")) / m_lev if m_lev else None)
-            lr = db.execute("SELECT recv_ms-ts FROM copy_action WHERE pos_id=? AND action='open' "
-                            "ORDER BY act_id LIMIT 1", (r[0],)).fetchone()
-            lag_ms = lr[0] if lr else None
-            table.append((num_s, coin, side, m_mgn, m_entry, m_lev, lag_ms,
+            table.append((num_s, coin, side, m_mgn, m_entry, m_lev, lag_of(r[0]),
                           our_entry, our_mgn, our_lev, realized + unreal, "浮"))
-        else:                                        # fully closed (master live state gone)
+        else:
             r = rs[-1]
-            table.append((num_s, coin, r[3], None, r[11], None, None,
+            table.append((num_s, coin, r[3], m_mgn, m_entry, m_lev, lag_of(r[0]),
                           r[6], r[5], r[4], realized, "实"))
     equity = bal + total_unreal
 

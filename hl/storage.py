@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS copy_position (
     addr TEXT, coin TEXT, side TEXT,
     status         TEXT,                 -- open / closed / gap_closed / liquidated
     master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
+    master_leverage REAL, master_margin REAL,     -- target's leverage + margin captured AT OPEN
     leverage REAL, margin REAL, notional REAL,    -- our sizing (margin = 2% of available at open)
     entry_px REAL, size REAL, rem_size REAL,       -- our fill px, position size (coin), remaining
     liq_px REAL,                                   -- isolated liquidation price (loss = margin)
