@@ -53,6 +53,8 @@ class Observer:
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
+        self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
+        #                                  EXIT-ONLY: follow their reduce/close, never open a NEW position
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
@@ -200,6 +202,7 @@ class Observer:
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
         held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
         addrs = addrs + held_off
+        self.held_off = set(held_off)         # EXIT-ONLY set: poll them to unwind, but open nothing new
         new = [a for a in addrs if a not in self.last_fill_ms]
         for a in new:
             self.last_fill_ms[a] = now_ms()       # forward-only: don't copy a new wallet's old fills
@@ -482,7 +485,8 @@ class Observer:
 
         ep = self.open_ep.get(key)
         if ep is None:
-            if abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT:
+            if (abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT
+                    and addr not in self.held_off):   # held-off (off-watchlist) = exit-only, no new opens
                 self._open_position(addr, coin, t, px, pos1, maker, oid)
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
