@@ -77,31 +77,39 @@ def _self_liquidations(fills, addr, acct):
     return len(bycoin), (worst / acct * 100 if acct else 0.0)
 
 
-def _margin_snapshot(addr):
-    """(margin_type, current_account_leverage, worst_open_underwater) from clearinghouseState.
-    Snapshot only — flat wallet -> ('flat', 0, 0). worst_open_underwater = the most-negative
-    adverse price move across current open positions ((mark-entry)/entry × side), <=0; 0 if flat.
-    Returns (None, 0, 0) on fetch failure."""
-    cs = rest.clearinghouse_state(addr)
-    if not isinstance(cs, dict):
-        return None, 0.0, 0.0
-    ms = cs.get("marginSummary", {})
-    av = f(ms.get("accountValue")); ntl = f(ms.get("totalNtlPos"))
-    pos = cs.get("assetPositions", []) or []
-    if not pos:
-        return "flat", 0.0, 0.0
+def _margin_snapshot(addr, dexes):
+    """(margin_type, current_account_leverage, worst_open_underwater) aggregated across EVERY dex the
+    wallet traded. clearinghouseState is PER-DEX: the standard call omits builder/stock-perp (xyz:*)
+    positions, so a stock-heavy wallet's underwater would read 0 and inflate Health — we must query
+    each dex (None = standard crypto) and combine. worst_open_underwater = most-negative adverse move
+    ((mark-entry)/entry × side) across ALL open positions, <=0. Returns (None,0,0) if no dex answered;
+    ('flat',0,0) if every queried dex is flat."""
     types, worst_uw = set(), 0.0
-    for pp in pos:
-        p_ = pp.get("position", {})
-        types.add((p_.get("leverage") or {}).get("type"))
-        szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
-        if entry and szi:
-            mark = pv / abs(szi)                                  # positionValue = |szi| × markPx
-            adverse = (mark - entry) / entry * (1 if szi > 0 else -1)   # <0 = underwater
-            worst_uw = min(worst_uw, adverse)
+    tot_ntl, acct_val, answered, has_pos = 0.0, 0.0, False, False
+    for dex in dexes:
+        cs = rest.clearinghouse_state(addr, dex=dex)             # dex None -> standard perp dex
+        if not isinstance(cs, dict):
+            continue
+        answered = True
+        ms = cs.get("marginSummary", {})
+        acct_val = max(acct_val, f(ms.get("accountValue")))      # standard dex carries the real equity
+        tot_ntl += f(ms.get("totalNtlPos"))                      # notional sums across dexes
+        for pp in cs.get("assetPositions", []) or []:
+            has_pos = True
+            p_ = pp.get("position", {})
+            types.add((p_.get("leverage") or {}).get("type"))
+            szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
+            if entry and szi:
+                mark = pv / abs(szi)                              # positionValue = |szi| × markPx
+                adverse = (mark - entry) / entry * (1 if szi > 0 else -1)   # <0 = underwater
+                worst_uw = min(worst_uw, adverse)
+    if not answered:
+        return None, 0.0, 0.0
+    if not has_pos:
+        return "flat", 0.0, 0.0
     types.discard(None)
     mt = next(iter(types)) if len(types) == 1 else ("mixed" if types else "flat")
-    return mt, (ntl / av if av else 0.0), worst_uw
+    return mt, (tot_ntl / acct_val if acct_val else 0.0), worst_uw
 
 
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
@@ -139,7 +147,16 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     m["open_underwater"] = 0.0
 
     if m["n_trades"] == 0:
-        ok, reason = False, "no_perp_trades"
+        # split the old catch-all 'no_perp_trades' so the funnel explains itself: genuinely no
+        # copyable fills, vs. has fills but no flat->flat round-trip in-window (long-hold / inventory),
+        # vs. truncated at the page cap (too many slices to trust the episode reconstruction).
+        ok = False
+        if not perp:
+            reason = "no_copyable_perp_fills"
+        elif hit_cap:
+            reason = "hit_page_cap"
+        else:
+            reason = "no_closed_episode"
     else:
         ok, reason = metrics.gates(m, now_ms, p)
     m["times_active"] += 1 if ok else 0
@@ -147,7 +164,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     m["margin_type"] = (prior or {}).get("margin_type")
     m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
     if ok:
-        mt, cl, uw = _margin_snapshot(addr)          # margin type + current leverage + worst underwater
+        dexes = {(c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}}
+        mt, cl, uw = _margin_snapshot(addr, dexes)   # per-dex: standard + each builder dex traded
         if mt is not None:
             m["margin_type"], m["cur_leverage"], m["open_underwater"] = mt, cl, uw
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
@@ -219,11 +237,11 @@ def regate(db, p) -> int:
     rows = db.execute(
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
-        "pos_day_ratio,profit_conc,hold_skew,open_underwater FROM profile").fetchall()
+        "pos_day_ratio,profit_conc,hold_skew,open_underwater,reason FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
-         ad, ar, meps, pdr, conc, skew, uw) = r
+         ad, ar, meps, pdr, conc, skew, uw, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -231,7 +249,11 @@ def regate(db, p) -> int:
              "median_eps": meps or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0}
         if m["n_trades"] == 0:
-            ok, reason = False, "no_perp_trades"
+            # no fills/episode info stored to re-derive the split -> keep the refined reason the scan
+            # already recorded; map the legacy catch-all to the closest new bucket.
+            ok = False
+            reason = old_reason if old_reason in (
+                "no_copyable_perp_fills", "hit_page_cap", "no_closed_episode") else "no_closed_episode"
         else:
             ok, reason = metrics.gates(m, now, p)
         status = "active" if ok else ("retired" if old == "active" else "rejected")
