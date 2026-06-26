@@ -237,17 +237,19 @@ def regate(db, p) -> int:
     rows = db.execute(
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
-        "pos_day_ratio,profit_conc,hold_skew,open_underwater,reason FROM profile").fetchall()
+        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,reason "
+        "FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
-         ad, ar, meps, pdr, conc, skew, uw, old_reason) = r
+         ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
              "liq_worst_pct": liqw or 0.0, "active_days": ad or 0, "activity_ratio": ar or 0.0,
              "median_eps": meps or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
-             "hold_skew": skew or 0.0, "open_underwater": uw or 0.0}
+             "hold_skew": skew or 0.0, "open_underwater": uw or 0.0,
+             "max_adds_per_ep": mxadds or 0, "worst_loss_pct": wloss or 0.0}  # grid_dca / blowup_loss gates
         if m["n_trades"] == 0:
             # no fills/episode info stored to re-derive the split -> keep the refined reason the scan
             # already recorded; map the legacy catch-all to the closest new bucket.

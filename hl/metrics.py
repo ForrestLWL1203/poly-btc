@@ -113,8 +113,10 @@ def gates(m: dict, now_ms: int, p) -> tuple:
         return False, "not_profitable"                         # net realized loss over the window
     if m["median_eps"] > p.max_daily_eps:
         return False, "bot_frequency"                          # mid-freq OK; HFT/MM excluded
-    if m["activity_ratio"] < p.min_activity:
-        return False, "irregular"                              # one-day burst / sparse — not regular
+    if m["activity_ratio"] < p.min_activity:                   # MINIMAL floor (~3 active days) — only
+        return False, "irregular"                              # rejects one-shot noise; genuine low-freq
+    #                                                            traders pass and are ranked down by the
+    #                                                            evidence-shrink in score(), not killed here
     if (m.get("max_adds_per_ep") or 0) > p.grid_max_adds:      # grid/DCA: one round-trip stuffed with
         return False, "grid_dca"                               # dozens of laddered scale-ins — our
     #                                                            capped-add model can't replicate it (we
@@ -126,12 +128,18 @@ def gates(m: dict, now_ms: int, p) -> tuple:
 
 
 def score(m: dict) -> float:
-    """v3 continuous quality. SCORE = Quality × Survival × FreqFit × Health.
-      Quality = risk-adjusted return × frequency-scaled day-consistency (crushes one-lucky-day)
-      Health  = current-snapshot underwater × disposition (holds-losers) × profit-concentration
+    """v3 continuous quality. SCORE = Quality × Survival × Health.
+      Quality = (evidence-shrunk, capped) risk-adjusted return × frequency-scaled day-consistency
+      Health  = current-snapshot open-underwater depth
     Shape constants live in config (interpretable, UI-tunable — not arbitrary cutoffs)."""
     dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0)
-    rar = max(0.0, m["roi_equity"]) / (dd_eq + 0.05)           # risk-adjusted return (strength)
+    # EVIDENCE-aware risk-adjusted return: (1) shrink roi toward 0 by sample size — roi×n/(n+K) — so a
+    # lucky few-trade +100% doesn't read as edge; (2) CAP the ratio so a tiny low-sample drawdown can't
+    # produce an unbounded score. This buries low-evidence wallets below the follow line (still observed,
+    # promoted as round-trips accumulate) WITHOUT a hard activity gate that would kill low-freq traders.
+    n = m.get("n_trades") or 0
+    roi_eff = max(0.0, m["roi_equity"]) * n / (n + config.SCORE_SHRINK_K)
+    rar = min(config.SCORE_RAR_CAP, roi_eff / (dd_eq + 0.05))  # risk-adjusted return (strength)
     D = m["active_days"]
     w = D / (D + config.SCORE_K)                               # confidence in the daily series
     pos = max(m["pos_day_ratio"], 1e-6)

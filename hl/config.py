@@ -83,6 +83,16 @@ SCORE_GAMMA = 2.0      # day-consistency strictness: consistency = pos_day_ratio
 UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine)
 UW_REF = 0.10          # open-underwater treated as fully dangerous (Health snap → 0 here). Decoupled
 #                        from MAX_LEV (the copy cap) on purpose — this is a scoring-shape param.
+# EVIDENCE handling (paired with the now-soft activity gate). Relaxing `irregular` admits genuine
+# low-freq swing/trend traders, but a 3-trade +100% wallet must NOT rank like a proven one. So the
+# score discounts thin evidence AT THE SOURCE instead of via a hard gate: shrink roi toward 0 by
+# sample size, and cap the risk-adjusted ratio so no wallet rides one lucky low-drawdown streak to an
+# unbounded score. Low-evidence wallets then sit BELOW the follow line (observed by the scanner, not
+# yet copied) and climb as round-trips accumulate across re-scans — graduation with no tier machinery.
+SCORE_SHRINK_K = 10.0  # roi trusted as roi×n/(n+K) for n closed round-trips: a wallet needs ~K trades
+#                        for its return to be half-believed (n=10→×0.5, n=3→×0.23, n=100→×0.91)
+SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) — tiny observed drawdown at
+#                        low sample is not real safety, so one extreme ratio can't dominate the score
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
