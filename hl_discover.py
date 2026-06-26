@@ -26,6 +26,9 @@ def main() -> int:
         pr.add_argument("--grid-max-adds", type=float, default=5.0,
                         help="reject grid/DCA: max scale-in orders in a single round-trip we can copy "
                              "(our model = open + MAX_ADDS adds; far above that we only get the worst entries)")
+        pr.add_argument("--max-single-loss", type=float, default=0.10,
+                        help="reject 扛单到爆: worst single round-trip loss as fraction of account "
+                             "(cuts-losses-small wallets pass even at 50%% win; one disaster loss = out)")
 
     def add_harvest_args(pr):
         # STAGE-1 leaderboard prefilter (3-window cascade; 0 per-wallet API). Defaults in config.

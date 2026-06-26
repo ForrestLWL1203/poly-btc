@@ -93,6 +93,10 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         # (round-trips/day) can't see this — it all rolls into one episode. max = worst single episode.
         "max_adds_per_ep": max((e.get("n_adds", 0) for e in eps), default=0),
         "median_adds_per_ep": sorted(e.get("n_adds", 0) for e in eps)[len(eps) // 2],
+        # LOSS DISCIPLINE: the single worst losing round-trip ($, <=0). Caller divides by acct_value
+        # -> worst_loss_pct. Small = cuts losses promptly (followable even at 50% win); large = holds
+        # one loser to disaster (扛单到爆) — the thing to gate, distinct from cumulative max_drawdown.
+        "worst_loss": min((e["net_pnl"] for e in eps if e["net_pnl"] < 0), default=0.0),
     }
     m.update(_daily(eps, lookback_days))
     return m
@@ -115,6 +119,9 @@ def gates(m: dict, now_ms: int, p) -> tuple:
         return False, "grid_dca"                               # dozens of laddered scale-ins — our
     #                                                            capped-add model can't replicate it (we
     #                                                            get only the worst few entries) -> exclude
+    if (m.get("worst_loss_pct") or 0) < -p.max_single_loss:    # one round-trip lost > this % of equity
+        return False, "blowup_loss"                            # = 扛单到爆 / no stop-discipline; not the
+    #                                                            cut-losses-small wallet we want to copy
     return True, "ok"
 
 

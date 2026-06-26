@@ -126,12 +126,13 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
              "long_frac": 0, "max_drawdown": 0, "avg_notional": 0, "hold_skew": 0,
              "last_fill_ms": raw[-1]["time"] if raw else 0, "active_days": 0, "activity_ratio": 0,
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
-             "max_adds_per_ep": 0, "median_adds_per_ep": 0}
+             "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0}
 
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
     m["acct_value"] = acct_value
     m["roi_equity"] = (m["net_pnl"] / acct_value) if acct_value else 0.0
+    m["worst_loss_pct"] = (m["worst_loss"] / acct_value) if acct_value else 0.0  # loss discipline
     m["times_active"] = (prior or {}).get("times_active", 0)
     m["lev_proxy"] = (m["avg_notional"] / acct_value) if acct_value else 0.0  # hist. eff. leverage
     m["liq_count"], m["liq_worst_pct"] = _self_liquidations(raw, addr, acct_value)
@@ -319,22 +320,23 @@ def watchlist(db, top: int) -> None:
         "SELECT w.rank,w.addr,w.score,w.roi_equity,w.mon_roi,w.win_rate,w.max_drawdown,w.acct_value,"
         "w.lev_proxy,w.margin_type,w.cur_leverage,w.liq_worst_pct,w.taker_frac,w.median_hold_s,"
         "w.age_days,w.times_active,w.top_coin,w.display_name,COALESCE(c.enabled,1),"
-        "COALESCE(p.max_adds_per_ep,0) "
+        "COALESCE(p.max_adds_per_ep,0),COALESCE(p.worst_loss_pct,0) "
         "FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile p ON p.addr=w.addr ORDER BY w.rank LIMIT ?",
         (top,)).fetchall()
     print(f"\nWATCHLIST — {len(rows)} crypto-perp targets (core=consistent profit+survival; "
           f"lev/margin/liq are OBSERVED context, we copy isolated per-trade w/ our own cap)\n"
-          f"  grid = most scale-in orders in a single round-trip (>~10 = GRID/DCA wallet our model can't copy)\n")
+          f"  grid = most scale-ins in one round-trip (gated); wLoss = worst single round-trip loss "
+          f"(deep = 扛单到爆, shallow = 及时止损)\n")
     hdr = (f"{'#':>2} {'addr':42} {'on':>2} {'score':>6} {'roiEq':>7} {'monRoi':>7} {'win':>4} {'maxDD%':>6} "
-           f"{'lev':>5} {'margin':>7} {'worstLiq':>8} {'taker':>5} {'hold':>6} {'age':>5} {'seen':>4} {'grid':>5} {'coin':>6}")
+           f"{'lev':>5} {'taker':>5} {'hold':>6} {'age':>5} {'seen':>4} {'grid':>5} {'wLoss':>6} {'coin':>6}")
     print(hdr); print("-" * len(hdr))
     for (rank, addr, sc, roi_eq, mon_roi, win, dd, acct, lev, mtype, curlev, liqw, taker, hold,
-         age, ta, coin, name, on, grid) in rows:
+         age, ta, coin, name, on, grid, wloss) in rows:
         ddp = (dd / acct * 100) if acct else 0
         levshow = curlev if curlev else (lev or 0)
         flag = f"{grid:>4}!" if grid >= 10 else f"{grid:>5}"   # ! marks a likely grid/DCA wallet
         print(f"{rank:>2} {addr:42} {'Y' if on else 'n':>2} {sc:>6.1f} {roi_eq*100:>+6.1f}% "
               f"{(mon_roi or 0)*100:>+6.1f}% {win*100:>3.0f}% {ddp:>5.1f}% {levshow:>4.1f}x "
-              f"{(mtype or '?'):>7} {(liqw or 0):>+7.1f}% {taker*100:>4.0f}% {hold/3600:>5.1f}h "
-              f"{age or 0:>4.0f}d {ta:>4} {flag:>5} {coin or '':>6}  {name or ''}")
+              f"{taker*100:>4.0f}% {hold/3600:>5.1f}h "
+              f"{age or 0:>4.0f}d {ta:>4} {flag:>5} {(wloss or 0)*100:>+5.1f}% {coin or '':>6}  {name or ''}")

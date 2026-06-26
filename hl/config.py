@@ -64,7 +64,11 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # realized PnL, perp-copyability, hold-skew, self-liquidation, current underwater — stays in the
 # per-wallet profile gates()+score(); this stage only buys a concentrated, active, stable seed set.
 HARVEST_MIN_ACCT = 5000.0       # real capital (noise guard; we copy by %, not $)
-HARVEST_VOL24_MIN = 200_000.0   # 24h volume floor (leveraged notional) = genuinely active today
+HARVEST_VOL24_MIN = 50_000.0    # 24h volume floor — LOW on purpose: just exclude dormant/dust wallets.
+#                                 NOT a quality/bot filter (volume can't separate grids from directional
+#                                 — proven: turnover/vlm-per-pnl don't discriminate). A high floor only
+#                                 biased toward high-churn bots AND missed modest-volume directional
+#                                 traders. Bot/grid exclusion is the PROFILE stage's job (grid gate).
 HARVEST_WEEK_ROI_MIN = 0.10     # 7d ROI floor = meaningful recent return (not "+1%/week")
 HARVEST_MON_ROI_MAX = 3.0       # anti-lottery: cut tiny-account high-leverage gamblers (absurd 30d ROI)
 HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceiling; >10x/day = market-maker
