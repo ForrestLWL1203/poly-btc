@@ -508,8 +508,6 @@ class Observer:
     def _open_position(self, addr, coin, t, px, pos1, maker, oid):
         if not self._copyable(coin):
             return              # copy crypto + transparent builder (stocks); skip opaque/unknown
-        if self._available() < config.MIN_AVAILABLE_PCT * self.balance:
-            return              # insufficient free balance -> don't open NEW (existing still managed/exited)
         side = "long" if pos1 > 0 else "short"
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
@@ -550,6 +548,11 @@ class Observer:
         lev = max(config.MIN_LEV, min(1.0 / (self.risk_k * sigma), config.MAX_LEV)) if sigma > 0 else config.MIN_LEV
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * rf * self.risk_k)
+            if margin < config.MIN_OPEN_MARGIN_PCT * self.balance:   # free balance too low to fund a
+                self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # meaningful
+                self.db.commit()                                     # position -> skip this signal
+                self.open_ep.pop((addr, coin), None)
+                return
             notional = margin * lev
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin

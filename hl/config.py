@@ -53,10 +53,11 @@ RISK_K = 4.0                # liquidation buffer in daily-σ; also margin = RF·
 RF_MIN = 0.005              # min per-position risk fraction (low-conviction / unknown target bet)
 RF_MAX = 0.02               # max per-position risk fraction (bounds a target's all-in)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
-MIN_AVAILABLE_PCT = 0.05    # don't OPEN a new copy when free balance < this fraction of equity — keep a
-#                             reserve, stop piling on / opening dust when nearly fully deployed (existing
-#                             positions stay managed/exited). A simple floor, NOT the full portfolio
-#                             TOTAL-deployment cap (that's the deferred allocator) — UI-tunable.
+MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= rf·RISK_K·available) is below this
+#                             fraction of equity: once free balance is too low to fund a MEANINGFUL
+#                             position, just skip the signal (don't open dust). Existing positions stay
+#                             managed/exited. High-conviction signals (bigger rf) still open later than
+#                             low-conviction ones, which is intended. UI-tunable.
 MAX_LEV = 30.0              # leverage BACKSTOP only (σ<0.83%/day to bind); guards a bad/stale σ estimate
 
 # Per-coin volatility (regime-aware) for the sizing above. A coin calm-then-erupting must NOT keep its
