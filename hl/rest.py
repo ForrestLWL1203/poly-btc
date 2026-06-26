@@ -121,6 +121,26 @@ def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
                               "startTime": now - days * 86400_000, "endTime": now}})
 
 
+def asset_volumes(dex: str = None) -> dict:
+    """{coin: 24h notional volume} from metaAndAssetCtxs (optionally a builder dex). Used to pick the
+    most-traded coins to pre-warm σ for — the names match candleSnapshot + fill coin names exactly."""
+    body = {"type": "metaAndAssetCtxs"}
+    if dex:
+        body["dex"] = dex
+    m = post_soft(body)
+    if not (isinstance(m, list) and len(m) == 2 and isinstance(m[0], dict)):
+        return {}
+    out = {}
+    for u, c in zip(m[0].get("universe", []), m[1]):
+        name = u.get("name")
+        if name:
+            try:
+                out[name] = float((c or {}).get("dayNtlVlm") or 0)
+            except (TypeError, ValueError):
+                out[name] = 0.0
+    return out
+
+
 def perp_universe() -> set:
     """Standard crypto perp coin names. These price via WS bbo (subscribing bbo for a name NOT in
     here — builder/stock coin or junk — closes the WS connection, so this guards bbo subs).

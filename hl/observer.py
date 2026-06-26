@@ -238,6 +238,22 @@ class Observer:
         if coin not in self.vol:
             self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
 
+    async def prewarm_vol(self):
+        """Warm σ for the top-N-by-24h-volume crypto + each builder dex at startup (background, gentle):
+        the liquid coins our targets are likeliest to trade get σ before their first fill — no first-open
+        latency, warm restart. The long tail is still lazy-fetched on first fill. Skips already-warm coins."""
+        for dex in (None, *rest.BUILDER_DEXES):
+            vols = await asyncio.to_thread(rest.asset_volumes, dex)
+            for coin, _ in sorted(vols.items(), key=lambda kv: -kv[1])[:config.VOL_PREWARM_TOP]:
+                if coin in self.vol or self.stop:
+                    continue
+                self.vol_coins.add(coin)
+                try:
+                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
+                except Exception:  # noqa: BLE001
+                    pass
+        _log(f"vol prewarmed: {len(self.vol)} coins (top {config.VOL_PREWARM_TOP}/pool by 24h vol)")
+
     async def vol_refresh_loop(self):
         """Periodically re-compute σ for every tracked coin into coin_vol — OFF the signal hot path, so
         sizing only ever reads the cache. Catches a calm→volatile regime change within VOL_REFRESH_S."""
@@ -391,6 +407,7 @@ class Observer:
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
         asyncio.create_task(self._announce())
+        asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)

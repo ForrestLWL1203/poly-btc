@@ -64,6 +64,9 @@ VOL_SLOW_DAYS = 30          # long baseline — stable; the floor we hold until 
 VOL_MIN_SAMPLES = 5         # need this many daily candles, else fall back
 VOL_REFRESH_S = 3600        # re-fetch each tracked coin's σ at most this often (1h) — vol drifts slowly
 VOL_FALLBACK_SIGMA = 0.10   # σ when candles unavailable (new/illiquid coin) → low lev, small notional
+VOL_PREWARM_TOP = 30        # at startup, warm σ for the top-N by 24h volume in crypto + EACH builder dex
+#                             (the liquid coins our targets most likely trade) → no first-open latency,
+#                             warm restart. The long tail is still lazy-fetched on first fill.
 
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
