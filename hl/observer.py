@@ -140,7 +140,10 @@ class Observer:
                 "notional": notl or 0.0, "entry_px": epx, "size": sz or 0.0, "rem_size": rem or 0.0,
                 "liq_px": liq or 0.0, "realized_pnl": rpnl or 0.0, "add_count": adds or 0,
                 "entries_ready": ev, "lock": asyncio.Lock(), "mae": mae or 0.0, "num_actions": na or 0,
-                "gap": False}
+                "gap": False,
+                "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
+                    "SELECT DISTINCT master_oid FROM copy_action WHERE pos_id=? AND action IN "
+                    "('open','add')", (pid,)).fetchall() if o is not None}}
         if rows:
             _log(f"reloaded {len(rows)} open copy positions from db")
 
@@ -436,6 +439,13 @@ class Observer:
         if liq:
             ep["was_liq"] = 1
         if abs(pos1) >= abs(pos0) - config.FLAT and not abs(pos1) < config.FLAT:
+            # A scale-in is a NEW ORDER (new oid) growing the position. Same-oid continued fills are
+            # one resting order filling over time (slices) — aggregateByTime only merges same-INSTANT
+            # fills, so a limit order filling over several seconds reappears as same-oid fills; counting
+            # those as adds is the slice-as-add bug. Fold them in (peak already tracked above), no add.
+            if oid is not None and oid in ep.get("seen_oids", ()):
+                return
+            ep.setdefault("seen_oids", set()).add(oid)
             asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, maker, oid))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
@@ -454,7 +464,7 @@ class Observer:
               "open_maker": maker, "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
               "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
               "add_count": 0, "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
-              "num_actions": 0, "gap": False}
+              "num_actions": 0, "gap": False, "seen_oids": {oid}}   # orders consumed (open + real adds)
         self.open_ep[(addr, coin)] = ep
         asyncio.create_task(self._resolve_entry(addr, coin, ep, t, px))
 
