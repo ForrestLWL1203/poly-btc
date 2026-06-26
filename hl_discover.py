@@ -23,6 +23,9 @@ def main() -> int:
         pr.add_argument("--inactive-days", type=float, default=3.0, help="reject if no fill within N days")
         pr.add_argument("--max-daily-eps", type=float, default=30.0, help="reject bots: max median episodes/active-day")
         pr.add_argument("--min-activity", type=float, default=0.5, help="min active_days/lookback (regular trading)")
+        pr.add_argument("--grid-max-adds", type=float, default=5.0,
+                        help="reject grid/DCA: max scale-in orders in a single round-trip we can copy "
+                             "(our model = open + MAX_ADDS adds; far above that we only get the worst entries)")
 
     def add_harvest_args(pr):
         # STAGE-1 leaderboard prefilter (3-window cascade; 0 per-wallet API). Defaults in config.

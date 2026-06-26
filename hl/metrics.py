@@ -111,6 +111,10 @@ def gates(m: dict, now_ms: int, p) -> tuple:
         return False, "bot_frequency"                          # mid-freq OK; HFT/MM excluded
     if m["activity_ratio"] < p.min_activity:
         return False, "irregular"                              # one-day burst / sparse — not regular
+    if (m.get("max_adds_per_ep") or 0) > p.grid_max_adds:      # grid/DCA: one round-trip stuffed with
+        return False, "grid_dca"                               # dozens of laddered scale-ins — our
+    #                                                            capped-add model can't replicate it (we
+    #                                                            get only the worst few entries) -> exclude
     return True, "ok"
 
 
