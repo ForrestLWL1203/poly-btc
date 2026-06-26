@@ -56,6 +56,16 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 # Applies to taker opens only (maker rests passively; exits are never blocked — always follow out).
 MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.5% worse than master
 
+# Execution model (paper fidelity). We ALWAYS price off the CURRENT book at detection (never the
+# master's fill price — that's only a fallback when the book isn't ready). The only question is which
+# SIDE: a copy reacts seconds LATE (forward-only REST poll), so we can't retroactively have rested at
+# the master's maker price — to actually hold the position the master is in, we cross the spread (taker
+# catch-up). Pricing a late maker fill at the passive side silently assumes an instant, never-missed
+# rest = optimistic paper PnL. Default OFF = honest taker catch-up for ALL fills. Flip ON only once we
+# proactively mirror a target's resting order we saw AHEAD of its fill (target_orders) — then a maker
+# fill is legitimately reproducible. Until that exists, leave OFF so paper PnL doesn't flatter live.
+EXEC_MAKER_MIRROR = False     # True = price master-maker fills at the passive book side (assumes our rest fills)
+
 # Stage-1 leaderboard prefilter (UI-tunable). The leaderboard carries each wallet's 24h/7d/30d/allTime
 # perf in ONE bulk fetch, so we pre-bias on what it CAN reliably say — multi-window profitability +
 # return magnitude + 7d activity — BEFORE any per-wallet API profiling. What it CANNOT say (true week-

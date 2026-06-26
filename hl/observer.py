@@ -118,9 +118,10 @@ class Observer:
         if not ba or not ba[0] or not ba[1]:
             return fallback                       # book not ready -> master px (slippage ~0 anyway)
         bid, ask = ba
-        if maker:
-            return bid if is_buy else ask         # rest passively on our side of the book
-        return ask if is_buy else bid             # take across the spread
+        if maker and config.EXEC_MAKER_MIRROR:    # only rest passively if we proactively mirror the
+            return bid if is_buy else ask         # target's resting order (else assuming our rest fills
+        #                                           instantly = optimistic; see config.EXEC_MAKER_MIRROR)
+        return ask if is_buy else bid             # default: taker catch-up across the spread, CURRENT book
 
     # -- restart recovery: reload open copies from db ------------------------
     def _reload_open(self):
@@ -473,7 +474,8 @@ class Observer:
         stale = (now_ms() - t) > STALE_MS            # backfilled-late: book is no longer the fill's
         px = master_px if stale else self._fill_px(coin, is_buy, ep["open_maker"], master_px)
         chase = (px - master_px) / master_px * 1e4 * ep["sign"]   # bps worse than master (+ = worse)
-        if (config.MAX_ENTRY_CHASE_PCT is not None and not ep["open_maker"]
+        we_rest = ep["open_maker"] and config.EXEC_MAKER_MIRROR    # only a true maker-mirror rests (no chase)
+        if (config.MAX_ENTRY_CHASE_PCT is not None and not we_rest
                 and chase > config.MAX_ENTRY_CHASE_PCT * 100):     # spike too far past master -> skip
             self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
             self.db.commit()
