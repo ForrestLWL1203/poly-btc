@@ -508,6 +508,8 @@ class Observer:
     def _open_position(self, addr, coin, t, px, pos1, maker, oid):
         if not self._copyable(coin):
             return              # copy crypto + transparent builder (stocks); skip opaque/unknown
+        if self._available() < config.MIN_AVAILABLE_PCT * self.balance:
+            return              # insufficient free balance -> don't open NEW (existing still managed/exited)
         side = "long" if pos1 > 0 else "short"
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
