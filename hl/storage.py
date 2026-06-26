@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS profile (
     profit_conc      REAL DEFAULT 0,      -- v3: best single day's share of gross profit (1 = one-lucky-day)
     hold_skew        REAL DEFAULT 0,      -- v3: median hold(losers)/hold(winners) (>1 = 扛单/disposition)
     open_underwater  REAL DEFAULT 0,      -- v3: worst current open position underwater (fraction, <=0)
+    max_adds_per_ep    INTEGER DEFAULT 0, -- GRID signature: most scale-in ORDERS in a single round-trip
+    median_adds_per_ep INTEGER DEFAULT 0, -- typical scale-ins/round-trip (swing 0-few, grid dozens)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -142,8 +144,9 @@ PROFILE_COLS = (
     "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
+    "max_adds_per_ep,median_adds_per_ep,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 42 columns
+)  # 44 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as

@@ -88,6 +88,11 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         "long_frac": sum(1 for e in eps if e["side"] == "long") / len(eps),
         "max_drawdown": max_drawdown(curve), "avg_notional": total_notl / len(eps),
         "last_fill_ms": fills[-1]["time"], "hold_skew": _hold_skew(eps),
+        # GRID/DCA signature: distinct scale-in ORDERS per round-trip. A directional swing trader adds
+        # 0–few times; a grid/ladder trader stuffs one episode with dozens (e.g. 73 on SKHX). median_eps
+        # (round-trips/day) can't see this — it all rolls into one episode. max = worst single episode.
+        "max_adds_per_ep": max((e.get("n_adds", 0) for e in eps), default=0),
+        "median_adds_per_ep": sorted(e.get("n_adds", 0) for e in eps)[len(eps) // 2],
     }
     m.update(_daily(eps, lookback_days))
     return m
