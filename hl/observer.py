@@ -292,6 +292,37 @@ class Observer:
             except Exception:  # noqa: BLE001
                 return
 
+    def _write_stats(self):
+        """Snapshot the paper account into account_stats — the DASHBOARD time-series (equity curve, ROI,
+        win rate, hedge ratio = net/gross, fee drag). Mark-to-market open positions off the live book."""
+        init = config.INITIAL_BALANCE or 1.0
+        upnl = locked = gross = net = 0.0
+        for coin, side, rem, size, entry, margin, notional in self.db.execute(
+                "SELECT coin,side,rem_size,size,entry_px,margin,notional FROM copy_position "
+                "WHERE status='open' AND size>0").fetchall():
+            ba = self.bbo.get(coin)
+            mark = ((ba[0] + ba[1]) / 2) if (ba and ba[0] and ba[1]) else (entry or 0)
+            sgn = 1 if side == "long" else -1
+            upnl += rem * (mark - (entry or 0)) * sgn
+            locked += margin * rem / size
+            cur_notl = notional * rem / size
+            gross += cur_notl
+            net += cur_notl * sgn
+        open_n = self.db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
+        closed = [r[0] for r in self.db.execute(
+            "SELECT realized_pnl FROM copy_position WHERE status!='open'").fetchall()]
+        win_rate = (sum(1 for r in closed if r > 0) / len(closed)) if closed else 0.0
+        fees = self.db.execute("SELECT COALESCE(SUM(ABS(our_qty_delta*our_px))*?,0) FROM copy_action",
+                               (config.TAKER_FEE,)).fetchone()[0]
+        equity = self.balance + upnl
+        self.db.execute(
+            "INSERT INTO account_stats (ts,balance,unrealized_pnl,equity,realized_pnl_cum,roi,open_n,"
+            "closed_n,win_rate,locked_margin,available,gross_notional,net_notional,fees_cum) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (now_iso(), self.balance, upnl, equity, self.balance - init, equity / init - 1,
+             open_n, len(closed), win_rate, locked, self.balance - locked, gross, net, fees))
+        self.db.commit()
+
     async def _announce(self):
         while not self.stop:
             await asyncio.sleep(300)
@@ -299,6 +330,10 @@ class Observer:
             c = self.db.execute("SELECT count(*) FROM copy_position WHERE status!='open'").fetchone()[0]
             a = self.db.execute("SELECT count(*) FROM copy_action").fetchone()[0]
             _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
+            try:
+                self._write_stats()                # append a dashboard snapshot every 5 min
+            except Exception as exc:  # noqa: BLE001
+                _log(f"stats snapshot failed: {exc}")
 
     async def prune_live_fills(self):
         """Keep live_fills bounded on disk. tid-dedup only needs the last POLL_OVERLAP_MS of history

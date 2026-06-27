@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS profile (
     max_adds_per_ep    INTEGER DEFAULT 0, -- GRID signature: most scale-in ORDERS in a single round-trip
     median_adds_per_ep INTEGER DEFAULT 0, -- typical scale-ins/round-trip (swing 0-few, grid dozens)
     worst_loss_pct   REAL DEFAULT 0,      -- loss discipline: worst single round-trip loss / acct (<=0)
+    market_type      TEXT,                -- crypto / stock / mixed (by traded-notional crypto vs xyz: split)
+    crypto_frac      REAL DEFAULT 1,      -- share of traded notional on crypto perps (1=pure crypto, 0=pure stock)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -103,6 +105,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     max_drawdown   REAL,
     age_days       REAL,
     top_coin       TEXT,
+    market_type    TEXT,                 -- crypto / stock / mixed (denormalized from profile)
     perp_frac      REAL,
     lev_proxy      REAL,
     margin_type    TEXT,
@@ -145,9 +148,9 @@ PROFILE_COLS = (
     "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
-    "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,"
+    "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 45 columns
+)  # 47 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -181,6 +184,28 @@ CREATE TABLE IF NOT EXISTS copy_account (
     balance         REAL,
     updated_at      TEXT
 );
+
+-- Periodic account snapshot (one row per heartbeat) — the DASHBOARD time-series. Everything the
+-- overview cards/charts need, pre-computed so the UI just reads rows (equity curve, ROI, win rate,
+-- hedge ratio = net/gross, fee drag). Append-only; prune old rows later if it grows.
+CREATE TABLE IF NOT EXISTS account_stats (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               TEXT,
+    balance          REAL,    -- realized equity (= copy_account.balance)
+    unrealized_pnl   REAL,    -- mark-to-market of open positions
+    equity           REAL,    -- balance + unrealized
+    realized_pnl_cum REAL,    -- balance - initial_balance
+    roi              REAL,    -- equity / initial_balance - 1
+    open_n           INTEGER,
+    closed_n         INTEGER,
+    win_rate         REAL,    -- fraction of closed positions with realized_pnl > 0
+    locked_margin    REAL,    -- margin tied up in open positions
+    available        REAL,    -- balance - locked_margin
+    gross_notional   REAL,    -- sum of |notional| of open positions
+    net_notional     REAL,    -- long_notional - short_notional (hedge/direction)
+    fees_cum         REAL     -- cumulative est. taker fees across all copy actions
+);
+CREATE INDEX IF NOT EXISTS idx_stats_ts ON account_stats(ts);
 
 -- One row per copied position (our mirror of a master round-trip). UI "trades" list. Persisted on
 -- OPEN (status=open) and finalized on CLOSE/LIQUIDATION — never memory-only, survives restarts.
@@ -235,6 +260,15 @@ CREATE INDEX IF NOT EXISTS idx_to_addr ON target_orders(addr, status);
 """
 
 
+# Non-destructive column adds for EXISTING DBs (CREATE IF NOT EXISTS won't add columns to a table that
+# already exists). Idempotent: on a fresh DB the column is already in the CREATE → ALTER errors → ignored.
+_MIGRATIONS = (
+    "ALTER TABLE profile ADD COLUMN market_type TEXT",
+    "ALTER TABLE profile ADD COLUMN crypto_frac REAL DEFAULT 1",
+    "ALTER TABLE watchlist ADD COLUMN market_type TEXT",
+)
+
+
 def connect(path: str, *schemas: str) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, check_same_thread=False, timeout=30)  # used across the scanner's
@@ -242,4 +276,10 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout=30000")                          # serialized by a lock)
     for s in schemas:
         db.executescript(s)
+    for stmt in _MIGRATIONS:
+        try:
+            db.execute(stmt)
+        except sqlite3.OperationalError:
+            pass                          # column already exists (fresh DB or prior run) — fine
+    db.commit()
     return db

@@ -134,7 +134,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
              "long_frac": 0, "max_drawdown": 0, "avg_notional": 0, "hold_skew": 0,
              "last_fill_ms": raw[-1]["time"] if raw else 0, "active_days": 0, "activity_ratio": 0,
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
-             "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0}
+             "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0,
+             "market_type": None, "crypto_frac": None}
 
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
@@ -203,7 +204,7 @@ def refresh_watchlist(db, stamp) -> int:
     rows = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
         "p.n_trades, p.trades_per_day, p.taker_frac_notl, p.median_hold_s, p.win_rate, p.max_drawdown, "
-        "p.age_days, p.top_coin, p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
+        "p.age_days, p.top_coin, p.market_type, p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
         "p.times_active, p.first_added, p.last_fill_ms "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
         "WHERE p.status='active' ORDER BY p.score DESC").fetchall()
@@ -211,8 +212,8 @@ def refresh_watchlist(db, stamp) -> int:
         db.execute(
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
-            "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
+            "market_type,perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r[0], stamp))
     db.commit()

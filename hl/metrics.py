@@ -75,7 +75,13 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         cum += e["net_pnl"]
         curve.append(cum)
     total_notl = sum(e["max_notl"] for e in eps)
+    # market type by traded-NOTIONAL split: crypto perp (plain name) vs transparent builder (xyz:* stock/
+    # commodity). crypto_frac=1 pure crypto, 0 pure stock. Lets the watchlist/UI tag a wallet's battlefield.
+    crypto_notl = sum(e["max_notl"] for e in eps if ":" not in e["coin"])
+    crypto_frac = (crypto_notl / total_notl) if total_notl else 1.0
     m = {
+        "crypto_frac": crypto_frac,
+        "market_type": ("crypto" if crypto_frac >= 0.7 else "stock" if crypto_frac <= 0.3 else "mixed"),
         "n_fills": len(fills), "n_trades": len(eps), "window_days": window_days,
         "trades_per_day": len(eps) / window_days,
         "taker_frac_notl": (taker_notl / tot_notl) if tot_notl else 0.0,
