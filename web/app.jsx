@@ -247,7 +247,7 @@ function Positions({ confirm, toast, streamOpen }) {
         <table>
           <thead><tr>
             <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th>
-            <th className="num">现价</th><th className="num">浮动盈亏</th><th>钱包</th><th className="num">lag</th><th className="num">爆仓距离</th><th></th>
+            <th className="num">现价</th><th className="num">浮动盈亏</th><th>钱包</th><th className="num">lag</th><th className="num">爆仓价</th><th></th>
           </tr></thead>
           <tbody>
             {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
@@ -262,7 +262,7 @@ function Positions({ confirm, toast, streamOpen }) {
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} <span className="rankbadge">#{p.walletRank}</span></td>
                 <td className="num">{fNum(p.lagSec, 1)}s</td>
-                <td className={"num " + (p.liqDistancePct > -5 ? "down" : "")}>{fNum(p.liqDistancePct, 1)}%</td>
+                <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title={p.liqDistancePct != null ? "距现价 " + fNum(p.liqDistancePct, 1) + "%" : ""}>{fPrice(p.liqPx)}</td>
                 <td><button className="btn btn-danger" onClick={() => doClose(p)}>平仓</button></td>
               </tr>
             ))}

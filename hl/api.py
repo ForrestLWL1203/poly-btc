@@ -364,7 +364,7 @@ def ep_positions(db, qs):
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"],
-            "lagSec": r["open_lag_sec"], "liqDistancePct": liq_dist,
+            "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
 
