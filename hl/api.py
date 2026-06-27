@@ -318,7 +318,8 @@ def ep_positions(db, qs):
             if qs.get(key):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
-                        "cp.addr FROM copy_position cp WHERE " + " AND ".join(where) +
+                        "cp.addr,w.rank AS wrank FROM copy_position cp "
+                        "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
                         " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
         out = []
         for r in rows:
@@ -327,7 +328,7 @@ def ep_positions(db, qs):
             out.append({"id": f"cls_{r['pos_id']}", "coin": r["coin"], "side": r["side"],
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
-                        "closedAt": r["closed_at"]})
+                        "walletRank": r["wrank"], "closedAt": r["closed_at"]})   # wrank None = 已脱榜
         return {"positions": out}
 
     # status=open. Only RESOLVED positions (entry_px/size set) — a just-opened row sits unresolved for a

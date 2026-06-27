@@ -299,7 +299,9 @@ function Positions({ confirm, toast, streamOpen }) {
                       <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
                       <td className="num">{p.durationSec != null ? (p.durationSec / 3600).toFixed(1) + "h" : "—"}</td>
                       <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
-                      <td className="addr">{short(p.wallet)}</td>
+                      <td className="addr">{short(p.wallet)} {p.walletRank != null
+                        ? <span className="rankbadge">#{p.walletRank}</span>
+                        : <span className="tint tint-gray">已脱榜</span>}</td>
                     </tr>
                   ))}
                 </tbody>
