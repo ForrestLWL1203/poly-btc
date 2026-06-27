@@ -55,35 +55,43 @@ def score_from100(disp):
 
 
 class Auth:
-    """Single-user opaque-token auth. Password from $DASH_PASSWORD or secret/dash_password."""
+    """Single-user opaque-token auth. Username from $DASH_USER / secret/dash_user (default 'admin');
+    password from $DASH_PASSWORD / secret/dash_password."""
 
     def __init__(self):
+        self.username = os.environ.get("DASH_USER") or self._read("secret/dash_user") or "admin"
         self.password = self._load_password()
         self._tokens = {}            # token -> expiry_epoch
         self._lock = threading.Lock()
         self._fail_until = 0.0       # crude global login throttle after a failure
 
     @staticmethod
-    def _load_password():
+    def _read(path):
+        try:
+            with open(path) as fh:
+                return fh.read().strip() or None
+        except OSError:
+            return None
+
+    @classmethod
+    def _load_password(cls):
         pw = os.environ.get("DASH_PASSWORD")
         if pw:
             return pw
         for p in ("secret/dash_password", "secret/dashboard.txt"):
-            try:
-                with open(p) as fh:
-                    s = fh.read().strip()
-                    if s:
-                        return s
-            except OSError:
-                pass
+            s = cls._read(p)
+            if s:
+                return s
         print("WARN: no DASH_PASSWORD / secret/dash_password — using insecure default 'changeme'")
         return "changeme"
 
-    def login(self, password):
+    def login(self, username, password):
         now = time.time()
         if now < self._fail_until:
             return None, "rate_limited"
-        if not password or not secrets.compare_digest(str(password), self.password):
+        ok = (password and secrets.compare_digest(str(username or ""), self.username)
+              and secrets.compare_digest(str(password), self.password))
+        if not ok:
             self._fail_until = now + 1.5      # throttle brute force
             return None, "invalid_credentials"
         token = secrets.token_urlsafe(32)
@@ -585,8 +593,8 @@ def make_handler(db_path, auth, static_dir=None):
         def do_POST(self):
             path = urlparse(self.path).path
             if path == "/api/auth/login":
-                body = self._read_json()
-                token, err = auth.login((body or {}).get("password"))
+                body = self._read_json() or {}
+                token, err = auth.login(body.get("username"), body.get("password"))
                 if err:
                     code = 429 if err == "rate_limited" else 401
                     return self._send(code, {"error": err})

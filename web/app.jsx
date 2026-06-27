@@ -2,14 +2,15 @@
    Pages: Overview / Positions / Wallets (P0). Discovery / Settings are stubbed for now. */
 const { useState, useEffect, useRef, useCallback } = React;
 
-const DASH_PW = "mock123";                       // preview auto-login (matches launch.json env)
+const DASH_USER = "admin";                       // preview auto-login (matches launch.json env)
+const DASH_PW = "mock123";
 const TOK_KEY = "hl_dash_token";
 
 /* ----------------------------------------------------------------- api */
 const api = {
   token: localStorage.getItem(TOK_KEY) || null,
-  async login(pw) {
-    const r = await fetch("/api/auth/login", { method: "POST", body: JSON.stringify({ password: pw }) });
+  async login(username, pw) {
+    const r = await fetch("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password: pw }) });
     if (!r.ok) throw new Error("login_failed");
     const d = await r.json();
     api.token = d.token; localStorage.setItem(TOK_KEY, d.token); return d;
@@ -771,22 +772,23 @@ function Dashboard({ onLogout }) {
 function App() {
   const [authed, setAuthed] = useState(false);
   const [err, setErr] = useState(null);
-  const [pw, setPw] = useState("");          // login field starts empty (auto-login still tries DASH_PW for local preview)
+  const [user, setUser] = useState("admin");
+  const [pw, setPw] = useState("");          // empty by default (auto-login tries preview creds for local)
 
-  // On mount: validate any existing token; if invalid/missing, auto-login (preview). This survives a
-  // server restart that wiped in-memory tokens while a stale token still sits in localStorage.
+  // On mount: validate any existing token; if invalid/missing, auto-login (local preview creds only —
+  // harmless on prod where the password differs). Survives a server restart that wiped in-memory tokens.
   useEffect(() => {
     (async () => {
       try {
         if (api.token) { await api.get("/api/overview"); setAuthed(true); return; }
       } catch (_e) { /* stale token -> fall through to login */ }
-      try { await api.login(DASH_PW); setAuthed(true); } catch (_e) { setAuthed(false); }
+      try { await api.login(DASH_USER, DASH_PW); setAuthed(true); } catch (_e) { setAuthed(false); }
     })();
   }, []);
 
   const doLogin = async () => {
-    try { await api.login(pw); setAuthed(true); setErr(null); }
-    catch (_e) { setErr("密码错误"); }
+    try { await api.login(user, pw); setAuthed(true); setErr(null); }
+    catch (_e) { setErr("账号或密码错误"); }
   };
   const logout = () => { api.token = null; localStorage.removeItem(TOK_KEY); setAuthed(false); };
 
@@ -798,8 +800,10 @@ function App() {
         <h1>跟单监控台</h1>
         <p>COPY-TRADE OPS · 登录</p>
         {err && <p className="err">{err}</p>}
+        <input type="text" value={user} onChange={e => setUser(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && doLogin()} placeholder="账号" autoComplete="username" />
         <input type="password" value={pw} onChange={e => setPw(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && doLogin()} placeholder="密码" />
+          onKeyDown={e => e.key === "Enter" && doLogin()} placeholder="密码" autoComplete="current-password" />
         <button className="btn btn-accent" style={{ width: "100%" }} onClick={doLogin}>登录</button>
       </div>
     </div>
