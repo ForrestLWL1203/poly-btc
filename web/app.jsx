@@ -737,7 +737,7 @@ function Dashboard({ onLogout }) {
 function App() {
   const [authed, setAuthed] = useState(false);
   const [err, setErr] = useState(null);
-  const [pw, setPw] = useState(DASH_PW);
+  const [pw, setPw] = useState("");          // login field starts empty (auto-login still tries DASH_PW for local preview)
 
   // On mount: validate any existing token; if invalid/missing, auto-login (preview). This survives a
   // server restart that wiped in-memory tokens while a stale token still sits in localStorage.
