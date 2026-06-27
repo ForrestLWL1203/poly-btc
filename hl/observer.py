@@ -533,8 +533,8 @@ class Observer:
         last_reload = now_ms()
         while not self.stop:
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
-                self._reload_targets()
-                self._reload_params()              # pick up UI param edits (effect: next new copy)
+                self._reload_params()              # params FIRST (pick up UI edits) ...
+                self._reload_targets()             # ... then load targets with the fresh follow line
                 last_reload = now_ms()
             for addr in list(self.addrs):
                 since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS
@@ -618,8 +618,8 @@ class Observer:
             if coin not in self.crypto_coins and self._copyable(coin):
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
-        self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
-        self._reload_params()                      # load UI-tunable strategy params (config = fallback)
+        self._reload_params()                      # load UI-tunable strategy params FIRST (config = fallback)
+        self._reload_targets(init=True)            # then load watchlist with the live follow line (forward-only)
         try:
             self._write_proc_status("running")     # advertise liveness + state to the dashboard
         except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
