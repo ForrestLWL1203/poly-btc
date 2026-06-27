@@ -92,6 +92,11 @@ for addr, coin, side, pnl, dur in C:
     db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,realized_pnl,opened_at,closed_at) "
                "VALUES (?,?,?,?,?,?,?,?)", (addr, coin, side, "closed", 100, pnl, ago(dur + 1200), ago(1200)))
 
+# paper account: realized equity = initial + sum(closed realized) so overview live-derive is realistic
+realized_cum = sum(pnl for *_, pnl, _ in C)
+db.execute("INSERT OR REPLACE INTO copy_account (id,initial_balance,balance,updated_at) VALUES (1,10000,?,?)",
+           (10000 + realized_cum, now_iso()))
+
 for i in range(60):
     db.execute("INSERT INTO copy_action (pos_id,addr,coin,ts,action,our_qty_delta,our_px) "
                "VALUES (?,?,?,?,?,?,?)", (1, W[0][0], "BTC", now_ms(), "open", 0.35, 64000))

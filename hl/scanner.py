@@ -5,6 +5,8 @@ over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
+import json
+import os
 import threading
 import time
 
@@ -13,6 +15,30 @@ from .fills import build_episodes, is_spot
 from .util import f, now_iso
 
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
+
+
+# -- dashboard status (best-effort; a status write must never break a real scan) ----------
+def _set_scanner_proc(db, state, detail=None):
+    try:
+        db.execute("INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
+                   "('scanner',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
+                   "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
+                   (state, os.getpid(), now_iso(), json.dumps(detail or {})))
+        db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _set_scan_progress(db, **kw):
+    try:
+        cur = db.execute("SELECT id FROM scan_progress WHERE id=1").fetchone()
+        if cur is None:
+            db.execute("INSERT INTO scan_progress (id,state,updated_at) VALUES (1,'idle',?)", (now_iso(),))
+        sets = ",".join(f"{k}=?" for k in kw) + ",updated_at=?"
+        db.execute(f"UPDATE scan_progress SET {sets} WHERE id=1", tuple(kw.values()) + (now_iso(),))
+        db.commit()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # -------------------------------------------------------------------------- harvest
@@ -276,6 +302,16 @@ def scan(db, p) -> None:
     stamp = now_iso()
     start_ms = now_ms - p.days * 86400_000
 
+    # dashboard: advertise we're scanning + consume any operator-queued rescan command
+    rescan_ids = [r[0] for r in db.execute(
+        "SELECT id FROM commands WHERE status='pending' AND type='rescan'").fetchall()]
+    for cid in rescan_ids:
+        db.execute("UPDATE commands SET status='acked',acked_at=? WHERE id=?", (now_iso(), cid))
+    db.commit()
+    _set_scanner_proc(db, "scanning", {"phase": "harvest"})
+    _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
+                       candidates_scanned=0, candidates_total=0)
+
     universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)
     if not p.no_harvest:
         print("harvest leaderboard ...", flush=True)
@@ -296,6 +332,7 @@ def scan(db, p) -> None:
     off_active = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()
                   if r[0] not in seen]                 # actives that fell off the candidate list — recheck too
     workset = (cand + off_active)[:p.limit]
+    _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
     print(f"scan: FULL sweep {len(workset)} wallets ({len(cand)} candidates + {len(off_active)} off-list "
           f"actives), {p.days}d window, pace {getattr(p, 'scan_interval', 0.8):g}s/req\n")
 
@@ -331,12 +368,23 @@ def scan(db, p) -> None:
                 retired += 1
             else:
                 rejected += 1
+            if done % 10 == 0:
+                _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
 
+    _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
     n_active = refresh_watchlist(db, stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
+    _set_scan_progress(db, stage="persist")
     _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active)
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
           f"{rejected} rejected. watchlist now: {n_active} active.", flush=True)
+    # dashboard: scan finished -> idle + resolve queued rescan(s)
+    _set_scan_progress(db, state="idle", candidates_scanned=len(workset))
+    _set_scanner_proc(db, "idle", {"last_scan_at": now_iso(), "active": n_active})
+    for cid in rescan_ids:
+        db.execute("UPDATE commands SET status='done',done_at=?,result_json=? WHERE id=?",
+                   (now_iso(), json.dumps({"active": n_active}), cid))
+    db.commit()
 
 
 # ------------------------------------------------------------------------ watchlist

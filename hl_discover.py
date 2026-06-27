@@ -73,7 +73,7 @@ def main() -> int:
     add_gate_args(g)
 
     args = ap.parse_args()
-    db = storage.connect(args.db, storage.DISCOVERY_SCHEMA)
+    db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
     if args.cmd == "scan":
         config.MIN_POST_INTERVAL = args.scan_interval   # slow this PROCESS's REST pace (trickle);
         scanner.scan(db, args)                          # the observer process keeps its own fast pace

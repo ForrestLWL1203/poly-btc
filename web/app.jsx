@@ -42,7 +42,13 @@ const agoText = (iso) => {
   if (s < 86400) return Math.floor(s / 3600) + "h 前";
   return Math.floor(s / 86400) + "d 前";
 };
-const SCANNER_LABEL = { rolling: "滚动采集中", scanning: "全量重采中", stopped: "已停止", unknown: "未知" };
+const SCANNER_LABEL = { rolling: "滚动采集中", scanning: "采集扫描中", idle: "空闲", stopped: "已停止", unknown: "未上报" };
+const scannerColor = (mode, stale) => {
+  if (mode === "scanning") return "var(--amber)";
+  if (mode === "rolling" && !stale) return "var(--green-l)";
+  if (mode === "idle" && !stale) return "var(--t2)";        // healthy, waiting for next 6h cycle
+  return "var(--red-l)";                                     // stopped / unknown / stale
+};
 
 /* ----------------------------------------------------------------- icons */
 const Ico = ({ d }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
@@ -437,25 +443,28 @@ function Discovery({ scanning, startRescan, confirm }) {
   if (!d) return <div className="content"><div className="loading">加载中…</div></div>;
   const fn = d.funnel, h = d.scoreHistogram, maxBin = Math.max(...h.bins, 1);
   const sc = d.scanner || { mode: "unknown", detail: {} }, det = sc.detail || {};
-  const scMode = sc.mode, scColor = scMode === "scanning" ? "var(--amber)" : (scMode === "rolling" && !sc.stale) ? "var(--green-l)" : "var(--red-l)";
+  const scMode = sc.mode, scColor = scannerColor(scMode, sc.stale);
+  const rolling = det.cycle_total != null;                 // preview sim populates a rolling sweep
   const cyclePct = det.cycle_total ? Math.round(det.cycle_pos / det.cycle_total * 100) : 0;
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}><h2>采集进程 · 实时</h2>
         <button className="btn btn-accent" onClick={doRescan}><Ico d={IC.discovery} /> 触发全量重采</button></div>
       <div className="card">
-        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
           <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: scColor }}>
-            <span className="dot" style={{ background: scColor, animation: scMode === "rolling" ? "pulse 1.4s infinite" : "none" }} />
-            {SCANNER_LABEL[scMode] || scMode}{sc.stale ? " · 心跳超时 ⚠" : ""}</span>
-          <div><div className="muted">本轮进度</div><div className="mono" style={{ fontSize: 15 }}>{det.cycle_pos ?? "—"} / {det.cycle_total ?? "—"} <span className="muted">({cyclePct}%)</span></div></div>
-          <div><div className="muted">采集节奏</div><div className="mono" style={{ fontSize: 15 }}>每 ~{det.interval_s ?? "—"}s / 个</div></div>
-          <div><div className="muted">最近更新</div><div className="mono" style={{ fontSize: 15 }}>{short(det.last_addr)} · {agoText(det.last_at)}</div></div>
-          <div><div className="muted">心跳</div><div className="mono" style={{ fontSize: 15, color: sc.stale ? "var(--red-l)" : "var(--green-l)" }}>{agoText(sc.heartbeatAt)}</div></div>
-          <div><div className="muted">上次全量重采</div><div className="mono" style={{ fontSize: 15 }}>{agoText(d.lastScanAt)}</div></div>
+            <span className="dot" style={{ background: scColor, animation: (scMode === "rolling" || scMode === "scanning") ? "pulse 1.4s infinite" : "none" }} />
+            {SCANNER_LABEL[scMode] || scMode}{sc.stale && scMode !== "idle" ? " · 心跳超时 ⚠" : ""}</span>
+          {rolling && <div><div className="muted">本轮进度</div><div className="mono" style={{ fontSize: 15 }}>{det.cycle_pos} / {det.cycle_total} <span className="muted">({cyclePct}%)</span></div></div>}
+          {rolling && <div><div className="muted">采集节奏</div><div className="mono" style={{ fontSize: 15 }}>每 ~{det.interval_s ?? "—"}s / 个</div></div>}
+          {rolling && <div><div className="muted">最近更新</div><div className="mono" style={{ fontSize: 15 }}>{short(det.last_addr)} · {agoText(det.last_at)}</div></div>}
+          <div><div className="muted">上次扫描</div><div className="mono" style={{ fontSize: 15 }}>{agoText(d.lastScanAt)}</div></div>
+          {!rolling && <div><div className="muted">采集周期</div><div className="mono" style={{ fontSize: 15 }}>每 6h 自动</div></div>}
+          <div><div className="muted">被跟名单</div><div className="mono" style={{ fontSize: 15 }}>{fn.watchlist} 钱包</div></div>
+          <div><div className="muted">心跳</div><div className="mono" style={{ fontSize: 15, color: (sc.stale && scMode !== "idle") ? "var(--red-l)" : "var(--green-l)" }}>{agoText(sc.heartbeatAt)}</div></div>
         </div>
-        <div className="bar-track" style={{ marginTop: 14, height: 6 }}>
-          <div className="bar-fill" style={{ width: cyclePct + "%", background: "var(--accent-grad)" }} /></div>
+        {rolling && <div className="bar-track" style={{ marginTop: 14, height: 6 }}>
+          <div className="bar-fill" style={{ width: cyclePct + "%", background: "var(--accent-grad)" }} /></div>}
       </div>
 
       <div className="section-h"><h2>筛选漏斗</h2></div>
@@ -706,8 +715,7 @@ function Dashboard({ onLogout }) {
             <div className="chip"><div className="k">浮动</div><div className={"v " + cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</div></div>
             <div className="chip"><div className="k">Observer</div><div className="v" style={{ fontSize: 13, color: obs === "paused" ? "var(--red-l)" : "var(--green-l)" }}>{obs === "paused" ? "已暂停" : "运行中"}{ov.system.observerStale ? " ⚠" : ""}</div></div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
-              const color = (sc === "scanning") ? "var(--amber)" : (sc === "rolling" && !stale) ? "var(--green-l)" : "var(--red-l)";
-              return <div className="chip"><div className="k">采集</div><div className="v" style={{ fontSize: 13, color }}>{SCANNER_LABEL[sc] || sc}{stale ? " ⚠" : ""}</div></div>; })()}
+              return <div className="chip"><div className="k">采集</div><div className="v" style={{ fontSize: 13, color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</div></div>; })()}
           </div>
         )}
 

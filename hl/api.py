@@ -189,7 +189,11 @@ def _scanner_status(db):
     rolling sweep position / pace / last-touched wallet so the UI can show it's actively working."""
     r = q1(db, "SELECT state,heartbeat_at,detail_json FROM process_status WHERE name='scanner'")
     if not r:
-        return {"mode": "unknown", "stale": True, "heartbeatAt": None, "detail": {}}
+        # no status row yet (scanner runs as a 6h batch — hasn't written one this code-version). If scans
+        # have ever run, treat as idle-between-cycles (healthy), not a scary 'unknown'.
+        ran = q1(db, "SELECT COUNT(*) c FROM scan_runs")
+        return {"mode": "idle" if (ran and ran["c"]) else "unknown", "stale": False,
+                "heartbeatAt": None, "detail": {}}
     try:
         detail = json.loads(r["detail_json"]) if r["detail_json"] else {}
     except (ValueError, TypeError):
@@ -201,36 +205,58 @@ def _scanner_status(db):
 
 
 def ep_overview(db):
-    s = q1(db, "SELECT * FROM account_stats ORDER BY id DESC LIMIT 1")
-    if s is None:
+    # LIVE-DERIVE from copy_position + copy_account (fresh as of the observer's 25s mark refresh) rather
+    # than the 5-min account_stats snapshot row — so the cards aren't up to 5 minutes stale. account_stats
+    # is used only for the today baseline + the equity curve (ep_equity).
+    acct = q1(db, "SELECT initial_balance, balance FROM copy_account WHERE id=1")
+    if acct is None:
         base = {"equity": 0, "roiPct": 0, "todayPct": 0, "realizedPnl": 0, "unrealizedPnl": 0,
                 "winRatePct": 0, "openCount": 0, "availableBalance": 0, "availablePctOfEquity": 0,
                 "risk": {"gross": 0, "net": 0, "netGrossRatioPct": 0, "longPct": 0, "shortPct": 0},
                 "fees": {"cumulative": 0, "netPerGrossBp": 0}, "lastUpdate": None}
     else:
-        equity = s["equity"] or 0.0
-        gross = s["gross_notional"] or 0.0
-        net = s["net_notional"] or 0.0
+        init = acct["initial_balance"] or 1.0
+        balance = acct["balance"] or 0.0
+        upnl = locked = gross = net = 0.0
+        for r in qall(db, "SELECT side,rem_size,size,entry_px,mark_px,unrealized_pnl,margin,notional "
+                          "FROM copy_position WHERE status='open' AND size>0"):
+            sgn = 1 if r["side"] == "long" else -1
+            mark = r["mark_px"] if r["mark_px"] else (r["entry_px"] or 0)
+            u = r["unrealized_pnl"] if r["unrealized_pnl"] is not None else \
+                (r["rem_size"] or 0) * (mark - (r["entry_px"] or 0)) * sgn
+            upnl += u
+            frac = (r["rem_size"] / r["size"]) if r["size"] else 0
+            locked += (r["margin"] or 0) * frac
+            cur_notl = (r["notional"] or 0) * frac
+            gross += cur_notl
+            net += cur_notl * sgn
+        open_n = (q1(db, "SELECT COUNT(*) c FROM copy_position WHERE status='open'") or {"c": 0})["c"]
+        closed = [row["realized_pnl"] for row in qall(db,
+                  "SELECT realized_pnl FROM copy_position WHERE status!='open'")]
+        win_rate = (sum(1 for r in closed if (r or 0) > 0) / len(closed)) if closed else 0.0
+        gross_traded = (q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action")
+                        or {"g": 0})["g"] or 0.0
+        equity = balance + upnl
+        realized = balance - init
+        available = balance - locked
         long_n = (gross + net) / 2 if gross else 0.0
         short_n = (gross - net) / 2 if gross else 0.0
         eq24 = q1(db, "SELECT equity FROM account_stats WHERE ts<=? ORDER BY ts DESC LIMIT 1",
                   (_iso_ago(24 * 3600),))
         today = ((equity / eq24["equity"] - 1) * 100) if (eq24 and eq24["equity"]) else 0.0
-        gross_traded = (q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action")
-                        or {"g": 0})["g"] or 0.0
-        bp = ((s["realized_pnl_cum"] or 0.0) / gross_traded * 1e4) if gross_traded else 0.0
+        bp = (realized / gross_traded * 1e4) if gross_traded else 0.0
         base = {
-            "equity": equity, "roiPct": (s["roi"] or 0.0) * 100, "todayPct": today,
-            "realizedPnl": s["realized_pnl_cum"] or 0.0, "unrealizedPnl": s["unrealized_pnl"] or 0.0,
-            "winRatePct": (s["win_rate"] or 0.0) * 100, "openCount": s["open_n"] or 0,
-            "availableBalance": s["available"] or 0.0,
-            "availablePctOfEquity": ((s["available"] or 0.0) / equity * 100) if equity else 0.0,
+            "equity": equity, "roiPct": (equity / init - 1) * 100, "todayPct": today,
+            "realizedPnl": realized, "unrealizedPnl": upnl,
+            "winRatePct": win_rate * 100, "openCount": open_n,
+            "availableBalance": available,
+            "availablePctOfEquity": (available / equity * 100) if equity else 0.0,
             "risk": {"gross": gross, "net": net,
                      "netGrossRatioPct": (net / gross * 100) if gross else 0.0,
                      "longPct": (long_n / gross * 100) if gross else 0.0,
                      "shortPct": (short_n / gross * 100) if gross else 0.0},
-            "fees": {"cumulative": s["fees_cum"] or 0.0, "netPerGrossBp": bp},
-            "lastUpdate": s["ts"],
+            "fees": {"cumulative": gross_traded * config.TAKER_FEE, "netPerGrossBp": bp},
+            "lastUpdate": (q1(db, "SELECT MAX(ts) m FROM account_stats") or {"m": None})["m"],
         }
     # system block. process_status may be absent (pre-M2 db) -> sensible defaults; a stale heartbeat
     # (dead process) is flagged so the UI doesn't show a dead observer as "running".

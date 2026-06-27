@@ -331,6 +331,31 @@ class Observer:
              open_n, len(closed), win_rate, locked, self.balance - locked, gross, net, fees))
         self.db.commit()
 
+    def _refresh_marks(self):
+        """Mark-to-market open positions into copy_position (mark_px/unrealized_pnl) WITHOUT appending
+        an account_stats row. Lets the read-only dashboard show near-real-time浮盈 (account_stats stays
+        the 5-min equity-curve series). Cheap: one UPDATE per open position off the in-memory book."""
+        for pos_id, coin, side, rem, size, entry in self.db.execute(
+                "SELECT pos_id,coin,side,rem_size,size,entry_px FROM copy_position "
+                "WHERE status='open' AND size>0").fetchall():
+            ba = self.bbo.get(coin)
+            if not (ba and ba[0] and ba[1]):
+                continue
+            mark = (ba[0] + ba[1]) / 2
+            sgn = 1 if side == "long" else -1
+            self.db.execute("UPDATE copy_position SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
+                            (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
+        self.db.commit()
+
+    async def mark_refresh_loop(self):
+        """Frequent mark refresh for dashboard freshness (between the 5-min account_stats snapshots)."""
+        while not self.stop:
+            await asyncio.sleep(25)
+            try:
+                self._refresh_marks()
+            except Exception as exc:  # noqa: BLE001 — never let dashboard freshness kill the engine
+                _log(f"mark refresh failed: {exc}")
+
     async def _announce(self):
         while not self.stop:
             await asyncio.sleep(300)
@@ -564,8 +589,12 @@ class Observer:
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
-        self._write_proc_status("running")         # advertise liveness + state to the dashboard
+        try:
+            self._write_proc_status("running")     # advertise liveness + state to the dashboard
+        except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
+            _log(f"proc status init failed: {exc}")
         asyncio.create_task(self.consume_commands())  # dashboard control plane (pause/close/toggle)
+        asyncio.create_task(self.mark_refresh_loop())  # dashboard freshness (25s mark-to-market)
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
