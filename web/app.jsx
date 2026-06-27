@@ -33,6 +33,17 @@ const fUsd = (v, d = 0) => (v == null ? "—" : "$" + Number(v).toLocaleString("
 const fSign = (v, d = 0) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 const fPct = (v, d = 1) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(d) + "%");
 const fNum = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
+// price formatter with magnitude-adaptive decimals (BTC 60528 vs S 0.02221 vs FARTCOIN 0.1317)
+const fPrice = (v) => {
+  if (v == null) return "—";
+  const a = Math.abs(Number(v));
+  if (a === 0) return "0";
+  if (a >= 1000) return Number(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
+  if (a >= 1) return Number(v).toFixed(2);
+  if (a >= 0.01) return Number(v).toFixed(4);
+  if (a >= 0.0001) return Number(v).toFixed(6);
+  return Number(v).toPrecision(3);
+};
 const short = (a) => (a ? a.slice(0, 6) + "…" + a.slice(-4) : "—");
 const cls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
 const agoText = (iso) => {
@@ -245,9 +256,9 @@ function Positions({ confirm, toast, streamOpen }) {
               <tr key={p.id}>
                 <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b></td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
-                <td className="num">{fNum(p.entry, 1)} · {fNum(p.leverage, 0)}x</td>
+                <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x</td>
                 <td className="num">{fUsd(p.notional)}</td>
-                <td className="num">{fNum(p.mark, 1)}</td>
+                <td className="num">{fPrice(p.mark)}</td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} <span className="rankbadge">#{p.walletRank}</span></td>
                 <td className="num">{fNum(p.lagSec, 1)}s</td>
