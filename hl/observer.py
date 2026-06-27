@@ -745,6 +745,12 @@ class Observer:
         is_buy = ep["side"] == "long"                # opening a long => we buy
         stale = (now_ms() - t) > STALE_MS            # backfilled-late: book is no longer the fill's
         px = master_px if stale else self._fill_px(coin, is_buy, ep["open_maker"], master_px)
+        if not px or px <= 0 or not master_px or master_px <= 0:   # can't price it -> don't hold a 0-price
+            self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # position (also
+            self.db.commit()                                                              # avoids /0 below)
+            self.open_ep.pop((addr, coin), None)
+            _log(f"skip {coin}: unpriceable (px={px}, master_px={master_px}) — not followed")
+            return
         chase = (px - master_px) / master_px * 1e4 * ep["sign"]   # bps worse than master (+ = worse)
         we_rest = ep["open_maker"] and config.EXEC_MAKER_MIRROR    # only a true maker-mirror rests (no chase)
         if (self.max_entry_chase_pct is not None and not we_rest

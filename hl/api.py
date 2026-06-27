@@ -318,7 +318,7 @@ def ep_positions(db, qs):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                         "cp.addr FROM copy_position cp WHERE " + " AND ".join(where) +
-                        " ORDER BY cp.closed_at DESC LIMIT 500", tuple(args))
+                        " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
         out = []
         for r in rows:
             o, c = _iso_epoch(r["opened_at"]), _iso_epoch(r["closed_at"])
@@ -329,8 +329,9 @@ def ep_positions(db, qs):
                         "closedAt": r["closed_at"]})
         return {"positions": out}
 
-    # status=open
-    where, args = ["cp.status='open'"], []
+    # status=open. Only RESOLVED positions (entry_px/size set) — a just-opened row sits unresolved for a
+    # few seconds while its price/size are fetched; showing it would flash a 0.0 entry/mark.
+    where, args = ["cp.status='open'", "cp.size>0", "cp.entry_px IS NOT NULL", "cp.entry_px>0"], []
     for col, key in (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side"),
                      ("COALESCE(w.market_type,pr.market_type)", "type")):
         if qs.get(key):

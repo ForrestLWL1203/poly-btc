@@ -193,6 +193,7 @@ function Positions({ confirm, toast, streamOpen }) {
   const [polledOpen, setPolledOpen] = useState(null);
   const [closed, setClosed] = useState(null);
   const [filter, setFilter] = useState("all");
+  const [cpage, setCpage] = useState(0);             // closed-history page (25/page)
   const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
   const loadClosed = useCallback(() => { api.get("/api/positions?status=closed").then(setClosed).catch(() => {}); }, []);
   const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
@@ -227,19 +228,18 @@ function Positions({ confirm, toast, streamOpen }) {
       <div className="tbl-wrap">
         <table>
           <thead><tr>
-            <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th><th className="num">σ</th>
+            <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th>
             <th className="num">现价</th><th className="num">浮动盈亏</th><th>钱包</th><th className="num">lag</th><th className="num">爆仓距离</th><th></th>
           </tr></thead>
           <tbody>
-            {open === null && <tr><td colSpan="11" className="loading">加载中…</td></tr>}
-            {open && filt(open.positions).length === 0 && <tr><td colSpan="11" className="empty">无持仓</td></tr>}
+            {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
+            {open && filt(open.positions).length === 0 && <tr><td colSpan="10" className="empty">无持仓</td></tr>}
             {open && filt(open.positions).map(p => (
               <tr key={p.id}>
                 <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b></td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                 <td className="num">{fNum(p.entry, 1)} · {fNum(p.leverage, 0)}x</td>
                 <td className="num">{fUsd(p.notional)}</td>
-                <td className="num">{fNum(p.sigmaPct, 1)}%</td>
                 <td className="num">{fNum(p.mark, 1)}</td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} <span className="rankbadge">#{p.walletRank}</span></td>
@@ -252,26 +252,44 @@ function Positions({ confirm, toast, streamOpen }) {
         </table>
       </div>
 
-      <div className="section-h"><h2>已平仓历史</h2></div>
-      <div className="tbl-wrap">
-        <table>
-          <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>结果</th><th>钱包</th></tr></thead>
-          <tbody>
-            {closed === null && <tr><td colSpan="6" className="loading">加载中…</td></tr>}
-            {closed && closed.positions.length === 0 && <tr><td colSpan="6" className="empty">暂无</td></tr>}
-            {closed && closed.positions.map(p => (
-              <tr key={p.id}>
-                <td><b>{p.coin}</b></td>
-                <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
-                <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
-                <td className="num">{(p.durationSec / 3600).toFixed(1)}h</td>
-                <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
-                <td className="addr">{short(p.wallet)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {(() => {
+        const PER = 25;
+        const all = (closed && closed.positions) || [];
+        const pages = Math.max(1, Math.ceil(all.length / PER));
+        const page = Math.min(cpage, pages - 1);
+        const items = all.slice(page * PER, page * PER + PER);
+        return (
+          <React.Fragment>
+            <div className="section-h"><h2>已平仓历史 {all.length > 0 && <span className="muted">· 最近 {all.length} 笔</span>}</h2></div>
+            <div className="tbl-wrap">
+              <table>
+                <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>结果</th><th>钱包</th></tr></thead>
+                <tbody>
+                  {closed === null && <tr><td colSpan="6" className="loading">加载中…</td></tr>}
+                  {closed && all.length === 0 && <tr><td colSpan="6" className="empty">暂无</td></tr>}
+                  {items.map(p => (
+                    <tr key={p.id}>
+                      <td><b>{p.coin}</b></td>
+                      <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
+                      <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
+                      <td className="num">{p.durationSec != null ? (p.durationSec / 3600).toFixed(1) + "h" : "—"}</td>
+                      <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
+                      <td className="addr">{short(p.wallet)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {all.length > PER && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
+                <button className="btn" disabled={page <= 0} onClick={() => setCpage(page - 1)}>上一页</button>
+                <span className="muted mono">第 {page + 1} / {pages} 页</span>
+                <button className="btn" disabled={page >= pages - 1} onClick={() => setCpage(page + 1)}>下一页</button>
+              </div>
+            )}
+          </React.Fragment>
+        );
+      })()}
     </div>
   );
 }
