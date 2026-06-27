@@ -11,6 +11,9 @@ data/
 *.db-wal
 *.db-shm
 
+# preview-only vendored libs (build-free React/Babel; re-copyable, will go when we move to Vite)
+web/vendor/
+
 # python
 __pycache__/
 *.pyc
@@ -20,6 +23,7 @@ venv/
 .mypy_cache/
 
 # private strategy notes — remove this line if you want it public
+doc/
 btc5min-handoff.md
 monitor-plan.md
 findings.md

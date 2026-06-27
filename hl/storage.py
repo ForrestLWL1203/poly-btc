@@ -257,6 +257,62 @@ CREATE TABLE IF NOT EXISTS target_orders (
     PRIMARY KEY (addr, oid)
 );
 CREATE INDEX IF NOT EXISTS idx_to_addr ON target_orders(addr, status);
+
+-- ===== Dashboard layer (control plane) =====
+-- The dashboard NEVER writes business tables directly. All writes go here as commands consumed by
+-- Observer/Scanner (single-writer invariant). Read side: process_status / scan_progress / params.
+
+-- Command channel: the ONLY way the dashboard mutates trading state. Observer/Scanner poll this,
+-- execute, and flip status. owner+TTL lets a consumer self-heal a stuck flag if the issuer dies.
+CREATE TABLE IF NOT EXISTS commands (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    type            TEXT,                 -- pause|resume|close_position|close_all|wallet_toggle|rescan|patch_params
+    payload_json    TEXT,
+    idempotency_key TEXT UNIQUE,          -- client-supplied dedup key (optional)
+    owner           TEXT,                 -- issuing dashboard instance
+    status          TEXT DEFAULT 'pending', -- pending|acked|done|failed
+    result_json     TEXT,
+    error           TEXT,
+    created_at      TEXT, acked_at TEXT, done_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cmd_status ON commands(status);
+
+-- Liveness + state machine for the two background processes. Each upserts its own row per heartbeat;
+-- a stale heartbeat_at (vs now) signals a dead process for self-heal / UI "stale" badge.
+CREATE TABLE IF NOT EXISTS process_status (
+    name          TEXT PRIMARY KEY,       -- 'observer' | 'scanner'
+    state         TEXT,                   -- observer: running|pausing|paused|resuming ; scanner: idle|scanning
+    pid           INTEGER,
+    heartbeat_at  TEXT,
+    detail_json   TEXT
+);
+
+-- Live progress of a full rescan (single row, id=1). Scanner updates per stage; the UI full-screen
+-- mask reads it. elapsed/progressPct are derived by the API from started_at + scanned/total.
+CREATE TABLE IF NOT EXISTS scan_progress (
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    state              TEXT,              -- idle|scanning
+    started_at         TEXT,
+    stage              TEXT,              -- scan_leaderboard|fetch_history|score_filter|rebuild_watchlist|persist
+    candidates_scanned INTEGER DEFAULT 0,
+    candidates_total   INTEGER DEFAULT 0,
+    eta_sec            INTEGER,
+    updated_at         TEXT
+);
+
+-- UI-tunable strategy parameters. Seeded from code defaults (hl/params.py); the operator edits via
+-- the dashboard; Observer/Scanner read their category at run time (replacing config constants / CLI
+-- args). value is stored as TEXT and parsed by `type`. category: scanner(rescan) | follow(immediate).
+CREATE TABLE IF NOT EXISTS params (
+    key           TEXT PRIMARY KEY,
+    value         TEXT,                   -- parsed per `type`; NULL allowed for nullable
+    category      TEXT,                   -- scanner | follow
+    level         TEXT,                   -- green|yellow|blue|black
+    type          TEXT,                   -- usd|pct|x|int|float|nullable|bool|display
+    effect        TEXT,                   -- rescan | immediate
+    default_value TEXT,
+    updated_at    TEXT
+);
 """
 
 
@@ -266,6 +322,15 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN market_type TEXT",
     "ALTER TABLE profile ADD COLUMN crypto_frac REAL DEFAULT 1",
     "ALTER TABLE watchlist ADD COLUMN market_type TEXT",
+    # Dashboard: per-position realtime fields (Observer persists each heartbeat / at open) so the
+    # read-only API can serve mark/upnl/lag without its own live book.
+    "ALTER TABLE copy_position ADD COLUMN mark_px REAL",
+    "ALTER TABLE copy_position ADD COLUMN unrealized_pnl REAL",
+    "ALTER TABLE copy_position ADD COLUMN open_lag_sec REAL",
+    # Dashboard: denormalized onto watchlist by the scanner rebuild (API COALESCEs with profile until
+    # the next scan repopulates these).
+    "ALTER TABLE watchlist ADD COLUMN worst_single_loss_pct REAL",
+    "ALTER TABLE watchlist ADD COLUMN grid REAL",
 )
 
 

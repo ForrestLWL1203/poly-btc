@@ -1,0 +1,663 @@
+"""Dashboard read-only HTTP API (stdlib only — no extra runtime deps; matches the repo's minimalism).
+
+M1 scope: auth + all READ endpoints. Writes (command channel, param PATCH) land in M2/M4. The API
+opens a fresh read-only SQLite connection per request (WAL → never blocks the Observer's writes) and
+NEVER mutates business state. Response envelope: {"data": ..., "serverTime": ISO}. All amounts USD;
+ratios are percent numbers (28.45 == 28.45%) unless suffixed Pct.
+
+Run via hl_dashboard.py. Endpoints:
+  POST /api/auth/login            {password} -> {token, expiresAt}
+  GET  /api/overview
+  GET  /api/equity?range=1d|7d|all
+  GET  /api/positions?status=open|closed&coin=&wallet=&type=&side=
+  GET  /api/wallets
+  GET  /api/wallets/{address}
+  GET  /api/discovery
+  GET  /api/scan-runs?limit=20
+  GET  /api/params
+"""
+import calendar
+import json
+import os
+import secrets
+import sqlite3
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+from . import config
+from . import params as params_mod
+from .util import now_iso
+
+# ─────────────────────────────────────────────────────────────────────────── auth
+TOKEN_TTL_S = 24 * 3600
+
+# Score display scale. The v3 quality score is bounded [0, SCORE_RAR_CAP] (quality≤RAR_CAP, and
+# survival·health≤1), so we present it on a 0–100 ruler for the UI (engine/DB stay native — no
+# re-scoring). MIN_FOLLOW_SCORE=1.2 -> 40. Applied to wallet scores, the follow line, the histogram
+# axis, AND the MIN_FOLLOW_SCORE setting so the operator reads ONE ruler everywhere.
+RAW_SCORE_MAX = config.SCORE_RAR_CAP
+
+
+def score100(raw):
+    """Native v3 score -> 0–100 display."""
+    if raw is None:
+        return None
+    return round(min(max(raw, 0.0) / RAW_SCORE_MAX, 1.0) * 100, 1)
+
+
+def score_from100(disp):
+    """Inverse of score100 — for the M4 PATCH of MIN_FOLLOW_SCORE (UI 0–100 -> native before write)."""
+    if disp is None:
+        return None
+    return disp / 100.0 * RAW_SCORE_MAX
+
+
+class Auth:
+    """Single-user opaque-token auth. Password from $DASH_PASSWORD or secret/dash_password."""
+
+    def __init__(self):
+        self.password = self._load_password()
+        self._tokens = {}            # token -> expiry_epoch
+        self._lock = threading.Lock()
+        self._fail_until = 0.0       # crude global login throttle after a failure
+
+    @staticmethod
+    def _load_password():
+        pw = os.environ.get("DASH_PASSWORD")
+        if pw:
+            return pw
+        for p in ("secret/dash_password", "secret/dashboard.txt"):
+            try:
+                with open(p) as fh:
+                    s = fh.read().strip()
+                    if s:
+                        return s
+            except OSError:
+                pass
+        print("WARN: no DASH_PASSWORD / secret/dash_password — using insecure default 'changeme'")
+        return "changeme"
+
+    def login(self, password):
+        now = time.time()
+        if now < self._fail_until:
+            return None, "rate_limited"
+        if not password or not secrets.compare_digest(str(password), self.password):
+            self._fail_until = now + 1.5      # throttle brute force
+            return None, "invalid_credentials"
+        token = secrets.token_urlsafe(32)
+        exp = now + TOKEN_TTL_S
+        with self._lock:
+            self._tokens[token] = exp
+            self._prune(now)
+        return token, None
+
+    def valid(self, token):
+        if not token:
+            return False
+        with self._lock:
+            exp = self._tokens.get(token)
+            if exp is None:
+                return False
+            if exp < time.time():
+                self._tokens.pop(token, None)
+                return False
+            return True
+
+    def _prune(self, now):
+        for t, e in list(self._tokens.items()):
+            if e < now:
+                self._tokens.pop(t, None)
+
+
+# ─────────────────────────────────────────────────────────────────────── db helpers
+def ro_connect(path):
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False, timeout=5)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("PRAGMA query_only=ON")
+    except sqlite3.Error:
+        pass
+    return db
+
+
+def rw_connect(path):
+    """Read-WRITE connection — used ONLY to write the command channel / params (never business tables).
+    The DB is already WAL (storage.connect); busy_timeout lets a brief insert wait out the engine's commit."""
+    db = sqlite3.connect(path, timeout=10)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA busy_timeout=10000")
+    return db
+
+
+# commands the dashboard may enqueue. observer owns the first five; scanner owns rescan; patch_params
+# is reserved (M4 uses PATCH /api/params directly, but the type is accepted for completeness).
+ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle", "rescan", "patch_params"}
+PROC_STALE_SEC = 90       # heartbeat older than this -> the process is likely dead (UI shows stale)
+
+
+def insert_command(db_path, ctype, payload, idem):
+    db = rw_connect(db_path)
+    try:
+        if idem:
+            row = db.execute("SELECT id,status FROM commands WHERE idempotency_key=?", (idem,)).fetchone()
+            if row:
+                return row["id"], row["status"]            # idempotent replay -> same command
+        cur = db.execute(
+            "INSERT INTO commands (type,payload_json,idempotency_key,owner,status,created_at) "
+            "VALUES (?,?,?,?,'pending',?)",
+            (ctype, json.dumps(payload or {}), idem, "dashboard", now_iso()))
+        db.commit()
+        return cur.lastrowid, "pending"
+    finally:
+        db.close()
+
+
+def q1(db, sql, args=(), default=None):
+    """First row (or default). Tolerates a missing table (un-migrated db) -> default."""
+    try:
+        return db.execute(sql, args).fetchone()
+    except sqlite3.OperationalError:
+        return default
+
+
+def qall(db, sql, args=()):
+    try:
+        return db.execute(sql, args).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+def _iso_epoch(s):
+    if not s:
+        return None
+    try:
+        return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))   # ISO is UTC -> timegm (not mktime/local)
+    except (ValueError, TypeError):
+        return None
+
+
+def _iso_ago(seconds):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+
+
+# ─────────────────────────────────────────────────────────────────────── endpoints
+def _scanner_status(db):
+    """Live status of the CONTINUOUS rolling scanner (distinct from a stop-the-world full rescan).
+    mode: rolling (always-on trickle) | scanning (full rescan) | stopped | unknown. detail carries the
+    rolling sweep position / pace / last-touched wallet so the UI can show it's actively working."""
+    r = q1(db, "SELECT state,heartbeat_at,detail_json FROM process_status WHERE name='scanner'")
+    if not r:
+        return {"mode": "unknown", "stale": True, "heartbeatAt": None, "detail": {}}
+    try:
+        detail = json.loads(r["detail_json"]) if r["detail_json"] else {}
+    except (ValueError, TypeError):
+        detail = {}
+    hb = _iso_epoch(r["heartbeat_at"])
+    return {"mode": r["state"] or "unknown",
+            "stale": bool(hb and (time.time() - hb) > PROC_STALE_SEC),
+            "heartbeatAt": r["heartbeat_at"], "detail": detail}
+
+
+def ep_overview(db):
+    s = q1(db, "SELECT * FROM account_stats ORDER BY id DESC LIMIT 1")
+    if s is None:
+        base = {"equity": 0, "roiPct": 0, "todayPct": 0, "realizedPnl": 0, "unrealizedPnl": 0,
+                "winRatePct": 0, "openCount": 0, "availableBalance": 0, "availablePctOfEquity": 0,
+                "risk": {"gross": 0, "net": 0, "netGrossRatioPct": 0, "longPct": 0, "shortPct": 0},
+                "fees": {"cumulative": 0, "netPerGrossBp": 0}, "lastUpdate": None}
+    else:
+        equity = s["equity"] or 0.0
+        gross = s["gross_notional"] or 0.0
+        net = s["net_notional"] or 0.0
+        long_n = (gross + net) / 2 if gross else 0.0
+        short_n = (gross - net) / 2 if gross else 0.0
+        eq24 = q1(db, "SELECT equity FROM account_stats WHERE ts<=? ORDER BY ts DESC LIMIT 1",
+                  (_iso_ago(24 * 3600),))
+        today = ((equity / eq24["equity"] - 1) * 100) if (eq24 and eq24["equity"]) else 0.0
+        gross_traded = (q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action")
+                        or {"g": 0})["g"] or 0.0
+        bp = ((s["realized_pnl_cum"] or 0.0) / gross_traded * 1e4) if gross_traded else 0.0
+        base = {
+            "equity": equity, "roiPct": (s["roi"] or 0.0) * 100, "todayPct": today,
+            "realizedPnl": s["realized_pnl_cum"] or 0.0, "unrealizedPnl": s["unrealized_pnl"] or 0.0,
+            "winRatePct": (s["win_rate"] or 0.0) * 100, "openCount": s["open_n"] or 0,
+            "availableBalance": s["available"] or 0.0,
+            "availablePctOfEquity": ((s["available"] or 0.0) / equity * 100) if equity else 0.0,
+            "risk": {"gross": gross, "net": net,
+                     "netGrossRatioPct": (net / gross * 100) if gross else 0.0,
+                     "longPct": (long_n / gross * 100) if gross else 0.0,
+                     "shortPct": (short_n / gross * 100) if gross else 0.0},
+            "fees": {"cumulative": s["fees_cum"] or 0.0, "netPerGrossBp": bp},
+            "lastUpdate": s["ts"],
+        }
+    # system block. process_status may be absent (pre-M2 db) -> sensible defaults; a stale heartbeat
+    # (dead process) is flagged so the UI doesn't show a dead observer as "running".
+    obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
+    ss = _scanner_status(db)
+    last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
+    wl = q1(db, "SELECT COUNT(*) c FROM watchlist")
+
+    def _stale(row):
+        if not row or not row["heartbeat_at"]:
+            return False
+        hb = _iso_epoch(row["heartbeat_at"])
+        return bool(hb and (time.time() - hb) > PROC_STALE_SEC)
+
+    base["system"] = {
+        "observer": (obs["state"] if obs else "running"),
+        "observerStale": _stale(obs),
+        "observerHeartbeatAt": (obs["heartbeat_at"] if obs else None),
+        "scanner": ss["mode"],                  # rolling | scanning | stopped | unknown
+        "scannerStale": ss["stale"],
+        "scannerHeartbeatAt": ss["heartbeatAt"],
+        "scannerDetail": ss["detail"],          # rolling sweep position / pace / last wallet
+        "lastScanAt": (last_scan["m"] if last_scan else None),
+        "watchlistCount": (wl["c"] if wl else 0),
+        "mode": "paper",
+    }
+    return base
+
+
+def ep_equity(db, rng):
+    cutoff = {"1d": _iso_ago(86400), "7d": _iso_ago(7 * 86400)}.get(rng)
+    if cutoff:
+        rows = qall(db, "SELECT ts,equity FROM account_stats WHERE ts>=? ORDER BY ts", (cutoff,))
+    else:
+        rng = "all"
+        rows = qall(db, "SELECT ts,equity FROM account_stats ORDER BY ts")
+    pts = [{"t": r["ts"], "equity": r["equity"]} for r in rows]
+    max_pts = 300                                  # downsample by stride, always keep the last point
+    if len(pts) > max_pts:
+        stride = len(pts) // max_pts + 1
+        pts = pts[::stride] + ([pts[-1]] if (len(pts) - 1) % stride else [])
+    return {"range": rng, "points": pts}
+
+
+def ep_positions(db, qs):
+    status = (qs.get("status", ["open"])[0])
+    if status == "closed":
+        where, args = ["cp.status!='open'"], []
+        for col, key in (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")):
+            if qs.get(key):
+                where.append(f"{col}=?"); args.append(qs[key][0])
+        rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
+                        "cp.addr FROM copy_position cp WHERE " + " AND ".join(where) +
+                        " ORDER BY cp.closed_at DESC LIMIT 500", tuple(args))
+        out = []
+        for r in rows:
+            o, c = _iso_epoch(r["opened_at"]), _iso_epoch(r["closed_at"])
+            pnl = r["realized_pnl"] or 0.0
+            out.append({"id": f"cls_{r['pos_id']}", "coin": r["coin"], "side": r["side"],
+                        "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
+                        "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
+                        "closedAt": r["closed_at"]})
+        return {"positions": out}
+
+    # status=open
+    where, args = ["cp.status='open'"], []
+    for col, key in (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side"),
+                     ("COALESCE(w.market_type,pr.market_type)", "type")):
+        if qs.get(key):
+            where.append(f"{col}=?"); args.append(qs[key][0])
+    rows = qall(db,
+        "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
+        "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,"
+        "cv.sigma,w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
+        "FROM copy_position cp "
+        "LEFT JOIN coin_vol cv ON cv.coin=cp.coin "
+        "LEFT JOIN watchlist w ON w.addr=cp.addr "
+        "LEFT JOIN profile pr ON pr.addr=cp.addr "
+        "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple(args))
+    out, float_total = [], 0.0
+    for r in rows:
+        entry = r["entry_px"] or 0.0
+        mark = r["mark_px"] if r["mark_px"] else entry           # null until Observer persists (M2)
+        margin = r["margin"] or 0.0
+        upnl = r["unrealized_pnl"] if r["unrealized_pnl"] is not None else 0.0
+        float_total += upnl
+        liq = r["liq_px"]
+        # Distance-to-liquidation as a consistent NEGATIVE buffer regardless of side: the % adverse
+        # move from mark to liq_px (0 = at liquidation). -1.5 = 1.5% away (danger), -30 = comfortable.
+        liq_dist = (-abs(liq / mark - 1) * 100) if (liq and mark) else None
+        out.append({
+            "id": f"pos_{r['pos_id']}", "coin": r["coin"], "marketType": r["mtype"] or "crypto",
+            "side": r["side"], "entry": entry, "leverage": r["leverage"], "margin": margin,
+            "notional": r["notional"] or 0.0, "sigmaPct": (r["sigma"] or 0.0) * 100, "mark": mark,
+            "unrealizedPnl": upnl,
+            "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
+            "wallet": r["addr"], "walletRank": r["wrank"],
+            "lagSec": r["open_lag_sec"], "liqDistancePct": liq_dist,
+        })
+    return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
+
+
+def _wallet_trend(db, addr, n=8):
+    rows = qall(db, "SELECT realized_pnl FROM copy_position WHERE addr=? AND status!='open' "
+                    "ORDER BY closed_at LIMIT ?", (addr, n))
+    trend, cum = [], 0.0
+    for r in rows:
+        cum += r["realized_pnl"] or 0.0
+        trend.append(round(cum, 2))
+    return trend
+
+
+def ep_wallets(db):
+    follow_line = score100(params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9))   # 0–100 ruler
+    grid_max = params_mod.get(db, "grid_max_adds", 5) or 5
+    rows = qall(db,
+        "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.win_rate,w.top_coin,"
+        "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,"
+        "pr.worst_loss_pct,pr.median_adds_per_ep,"
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count "
+        "FROM watchlist w "
+        "LEFT JOIN target_controls c ON c.addr=w.addr "
+        "LEFT JOIN profile pr ON pr.addr=w.addr ORDER BY w.rank")
+    out = []
+    for r in rows:
+        grid = r["grid"]
+        if grid is None:                       # COALESCE: derive from profile until scanner backfills
+            grid = min((r["median_adds_per_ep"] or 0) / grid_max, 1.0)
+        worst = r["worst_single_loss_pct"]
+        if worst is None:
+            worst = (r["worst_loss_pct"] or 0.0) * 100
+        out.append({
+            "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
+            "score": score100(r["score"] or 0.0), "roiEqPct": (r["roi_equity"] or 0.0) * 100,
+            "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
+            "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
+            "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
+            "trend": _wallet_trend(db, r["addr"]),
+        })
+    return {"followLine": follow_line, "wallets": out}
+
+
+def ep_wallet_detail(db, addr):
+    w = q1(db, "SELECT addr,rank,market_type,score FROM watchlist WHERE addr=?", (addr,))
+    agg = q1(db, "SELECT COALESCE(SUM(realized_pnl),0) pnl, "
+                 "COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
+                 "FROM copy_position WHERE addr=? AND status!='open'", (addr,))
+    n = agg["n"] if agg else 0
+    recs = qall(db, "SELECT coin,side,realized_pnl,status FROM copy_position WHERE addr=? "
+                    "ORDER BY opened_at DESC LIMIT 100", (addr,))
+    return {
+        "address": addr, "rank": (w["rank"] if w else None),
+        "marketType": (w["market_type"] if w else None),
+        "score": score100(w["score"]) if w else None,
+        "cumulativePnl": (agg["pnl"] if agg else 0.0),
+        "winRatePct": (agg["wins"] / n * 100) if n else 0.0,
+        "records": [{"coin": r["coin"], "side": r["side"], "pnl": r["realized_pnl"] or 0.0,
+                     "status": r["status"]} for r in recs],
+    }
+
+
+# gate reason -> the 4 UI buckets (kept here so it's tweakable in one place)
+_REJECT_BUCKETS = [
+    ("不活跃 / 成交不足", {"inactive", "spot_dominant", "bot_frequency", "irregular"}),
+    ("网格度过高", {"grid_dca"}),
+    ("扛单 / 单笔大亏", {"blowup_loss", "not_profitable"}),
+]
+
+
+def ep_discovery(db):
+    candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
+    active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
+    watchlist = (q1(db, "SELECT COUNT(*) c FROM watchlist") or {"c": 0})["c"]
+    # reject reasons -> buckets
+    reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
+    counts = {row["reason"]: row["n"] for row in reason_rows}
+    total_rej = sum(counts.values()) or 0
+    buckets, used = [], set()
+    for label, keys in _REJECT_BUCKETS:
+        n = sum(counts.get(k, 0) for k in keys)
+        used |= keys
+        buckets.append([label, n])
+    other = sum(v for k, v in counts.items() if k not in used)
+    buckets.append(["其他", other])
+    reject_reasons = [{"label": lbl, "pct": round(n / total_rej * 100) if total_rej else 0}
+                      for lbl, n in buckets]
+    # score histogram over scored profiles. X-axis anchored to the score ceiling (RAW_SCORE_MAX) so
+    # the bins map onto the same 0–100 ruler as the wallet scores, with a stable follow-line position.
+    scores = [r["score"] for r in qall(db,
+              "SELECT score FROM profile WHERE score IS NOT NULL AND score>0")]
+    follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
+    nbins = 16
+    hi = RAW_SCORE_MAX or 1.0
+    bins = [0] * nbins
+    for sc in scores:
+        idx = min(int(max(sc, 0.0) / hi * nbins), nbins - 1)
+        bins[idx] += 1
+    follow_idx = min(int(follow_line / hi * nbins), nbins - 1)
+    last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
+    return {"funnel": {"candidates": candidates, "active": active, "watchlist": watchlist},
+            "rejectReasons": reject_reasons,
+            "scoreHistogram": {"bins": bins, "followLineBinIndex": follow_idx},
+            "scanner": _scanner_status(db),               # live rolling-scanner status for the page card
+            "lastScanAt": (last_scan["m"] if last_scan else None)}
+
+
+def ep_scan_runs(db, limit):
+    rows = qall(db, "SELECT started_at,finished_at,candidates,added,retired,kept,rejected,n_active "
+                    "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
+    return {"runs": [{"at": r["started_at"], "finishedAt": r["finished_at"],
+                      "candidates": r["candidates"], "added": r["added"], "retired": r["retired"],
+                      "kept": r["kept"], "rejected": r["rejected"], "active": r["n_active"]}
+                     for r in rows]}
+
+
+def ep_command(db, cmd_id):
+    r = q1(db, "SELECT id,type,status,result_json,error,created_at,acked_at,done_at "
+               "FROM commands WHERE id=?", (cmd_id,))
+    if not r:
+        return {"commandId": cmd_id, "status": "not_found"}
+    return {"commandId": r["id"], "type": r["type"], "status": r["status"],
+            "result": json.loads(r["result_json"]) if r["result_json"] else None,
+            "error": r["error"], "createdAt": r["created_at"],
+            "ackedAt": r["acked_at"], "doneAt": r["done_at"]}
+
+
+def ep_scan_status(db):
+    r = q1(db, "SELECT state,started_at,stage,candidates_scanned,candidates_total,eta_sec FROM scan_progress WHERE id=1")
+    if not r or (r["state"] or "idle") != "scanning":
+        return {"state": "idle"}
+    started = _iso_epoch(r["started_at"])
+    elapsed = int(time.time() - started) if started else 0
+    total, scanned, eta = r["candidates_total"] or 0, r["candidates_scanned"] or 0, r["eta_sec"] or 1200
+    pct = round(scanned / total * 100) if total else min(99, round(elapsed / eta * 100))
+    return {"state": "scanning", "startedAt": r["started_at"], "elapsedSec": elapsed, "etaSec": eta,
+            "progressPct": pct, "candidatesScanned": scanned, "candidatesTotal": total, "stage": r["stage"]}
+
+
+WRITABLE_LEVELS = {"green", "yellow", "blue"}     # black / display are read-only
+
+
+def patch_params(db_path, category, updates):
+    """Write UI param edits to the params table (the only place the dashboard writes besides commands).
+    Rejects read-only levels. MIN_FOLLOW_SCORE arrives on the 0–100 ruler -> inverted to native."""
+    db = rw_connect(db_path)
+    try:
+        out = {}
+        for key, val in (updates or {}).items():
+            row = db.execute("SELECT category,level,type FROM params WHERE key=?", (key,)).fetchone()
+            if not row:
+                continue
+            if row["category"] != category:
+                continue
+            if row["level"] not in WRITABLE_LEVELS or row["type"] == "display":
+                raise ValueError(f"{key} is read-only")
+            stored = val
+            if key == "MIN_FOLLOW_SCORE" and val is not None:
+                stored = score_from100(val)                       # UI 0–100 -> native ~0–3
+            sval = (None if stored is None else "true" if stored is True
+                    else "false" if stored is False else str(stored))
+            db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (sval, now_iso(), key))
+            out[key] = val
+        db.commit()
+        return out
+    finally:
+        db.close()
+
+
+def ep_params(db):
+    data = params_mod.get_all(db)
+    # MIN_FOLLOW_SCORE is on the score ruler -> present it on the same 0–100 scale as wallet scores
+    # (engine stores native ~0–3). The M4 PATCH must invert with score_from100() before writing.
+    for pr in data.get("follow", []):
+        if pr["key"] == "MIN_FOLLOW_SCORE":
+            pr["value"] = score100(pr["value"])
+            pr["default"] = score100(pr["default"])
+            pr["scaled"] = True            # hint to the frontend: 0–100 display ruler
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────── http handler
+def make_handler(db_path, auth, static_dir=None):
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        server_version = "hl-dashboard/0.1"
+
+        def log_message(self, fmt, *a):            # quieter logs
+            pass
+
+        def _send(self, code, obj):
+            body = json.dumps(obj, default=float).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _envelope(self, data):
+            self._send(200, {"data": data, "serverTime": now_iso()})
+
+        def _authed(self):
+            h = self.headers.get("Authorization", "")
+            token = h[7:] if h.startswith("Bearer ") else None
+            return auth.valid(token)
+
+        def do_OPTIONS(self):
+            self._send(204, {})
+
+        def do_POST(self):
+            path = urlparse(self.path).path
+            if path == "/api/auth/login":
+                body = self._read_json()
+                token, err = auth.login((body or {}).get("password"))
+                if err:
+                    code = 429 if err == "rate_limited" else 401
+                    return self._send(code, {"error": err})
+                return self._send(200, {"token": token,
+                                        "expiresAt": _iso_ago(-TOKEN_TTL_S)})
+            if path == "/api/commands":
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                body = self._read_json() or {}
+                ctype = body.get("type")
+                if ctype not in ALLOWED_COMMANDS:
+                    return self._send(400, {"error": "bad_command_type", "detail": ctype})
+                try:
+                    cmd_id, status = insert_command(db_path, ctype, body.get("payload"),
+                                                    body.get("idempotencyKey"))
+                    return self._send(202, {"commandId": cmd_id, "status": status})
+                except Exception as e:  # noqa: BLE001
+                    return self._send(500, {"error": "server_error", "detail": str(e)})
+            return self._send(404, {"error": "not_found"})
+
+        def do_PATCH(self):
+            path = urlparse(self.path).path
+            if not self._authed():
+                return self._send(401, {"error": "unauthorized"})
+            if path.startswith("/api/params/"):
+                cat = path.rsplit("/", 1)[1]
+                if cat not in ("follow", "scanner"):
+                    return self._send(400, {"error": "bad_category"})
+                try:
+                    updated = patch_params(db_path, cat, self._read_json() or {})
+                    resp = {"updated": updated}
+                    if cat == "scanner":
+                        resp["pendingRescan"] = True            # changes need a rescan to take effect
+                    return self._send(200, resp)
+                except ValueError as e:
+                    return self._send(422, {"error": str(e)})
+                except Exception as e:  # noqa: BLE001
+                    return self._send(500, {"error": "server_error", "detail": str(e)})
+            return self._send(404, {"error": "not_found"})
+
+        def _read_json(self):
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                return json.loads(self.rfile.read(n) or b"{}")
+            except (ValueError, json.JSONDecodeError):
+                return {}
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            path, qs = u.path, parse_qs(u.query)
+            if path in ("/", "/index.html") and static_dir:
+                return self._serve_static("index.html")
+            if not path.startswith("/api/"):
+                if static_dir:
+                    return self._serve_static(path.lstrip("/"))
+                return self._send(404, {"error": "not_found"})
+            if not self._authed():
+                return self._send(401, {"error": "unauthorized"})
+            db = ro_connect(db_path)
+            try:
+                if path == "/api/overview":
+                    return self._envelope(ep_overview(db))
+                if path == "/api/equity":
+                    return self._envelope(ep_equity(db, qs.get("range", ["all"])[0]))
+                if path == "/api/positions":
+                    return self._envelope(ep_positions(db, qs))
+                if path == "/api/wallets":
+                    return self._envelope(ep_wallets(db))
+                if path.startswith("/api/wallets/"):
+                    return self._envelope(ep_wallet_detail(db, path.rsplit("/", 1)[1]))
+                if path == "/api/discovery":
+                    return self._envelope(ep_discovery(db))
+                if path == "/api/scan-runs":
+                    return self._envelope(ep_scan_runs(db, int(qs.get("limit", [20])[0])))
+                if path == "/api/params":
+                    return self._envelope(ep_params(db))
+                if path == "/api/scan-status":
+                    return self._envelope(ep_scan_status(db))
+                if path.startswith("/api/commands/"):
+                    return self._envelope(ep_command(db, int(path.rsplit("/", 1)[1])))
+                return self._send(404, {"error": "not_found"})
+            except Exception as e:                          # noqa: BLE001 — never 500 the dashboard
+                return self._send(500, {"error": "server_error", "detail": str(e)})
+            finally:
+                db.close()
+
+        def _serve_static(self, rel):
+            import mimetypes
+            from pathlib import Path
+            base = Path(static_dir).resolve()
+            target = (base / rel).resolve()
+            if not str(target).startswith(str(base)) or not target.is_file():
+                target = base / "index.html"                # SPA fallback
+                if not target.is_file():
+                    return self._send(404, {"error": "not_found"})
+            data = target.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    return Handler
+
+
+def serve(db_path, host="127.0.0.1", port=8787, static_dir=None):
+    auth = Auth()
+    handler = make_handler(db_path, auth, static_dir)
+    httpd = ThreadingHTTPServer((host, port), handler)
+    print(f"dashboard API on http://{host}:{port}  (db={db_path}, static={static_dir or '-'})", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        httpd.shutdown()

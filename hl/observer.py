@@ -21,6 +21,7 @@ are kept for schema/report compatibility, all three carry the same value).
 import asyncio
 import json
 import logging
+import os
 import time
 
 import websockets
@@ -67,6 +68,9 @@ class Observer:
         self.acct_lock = asyncio.Lock()  # serialize margin allocation across concurrent opens
         self.ws = None
         self.stop = False
+        self.paused = False              # dashboard pause: stop opening NEW copies; existing keep to close
+        self._proc_state = "running"     # process_status state machine (running|pausing|paused|resuming)
+        self._proc_owner = f"observer:{os.getpid()}"
 
     # -- paper account ------------------------------------------------------
     def _available(self) -> float:
@@ -297,17 +301,21 @@ class Observer:
         win rate, hedge ratio = net/gross, fee drag). Mark-to-market open positions off the live book."""
         init = config.INITIAL_BALANCE or 1.0
         upnl = locked = gross = net = 0.0
-        for coin, side, rem, size, entry, margin, notional in self.db.execute(
-                "SELECT coin,side,rem_size,size,entry_px,margin,notional FROM copy_position "
+        for pos_id, coin, side, rem, size, entry, margin, notional in self.db.execute(
+                "SELECT pos_id,coin,side,rem_size,size,entry_px,margin,notional FROM copy_position "
                 "WHERE status='open' AND size>0").fetchall():
             ba = self.bbo.get(coin)
             mark = ((ba[0] + ba[1]) / 2) if (ba and ba[0] and ba[1]) else (entry or 0)
             sgn = 1 if side == "long" else -1
-            upnl += rem * (mark - (entry or 0)) * sgn
+            pos_upnl = rem * (mark - (entry or 0)) * sgn
+            upnl += pos_upnl
             locked += margin * rem / size
             cur_notl = notional * rem / size
             gross += cur_notl
             net += cur_notl * sgn
+            self.db.execute(                          # persist per-position realtime fields for the dashboard
+                "UPDATE copy_position SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
+                (mark, pos_upnl, pos_id))
         open_n = self.db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
         closed = [r[0] for r in self.db.execute(
             "SELECT realized_pnl FROM copy_position WHERE status!='open'").fetchall()]
@@ -346,6 +354,118 @@ class Observer:
             if n:
                 _log(f"pruned {n} live_fills older than {config.LIVE_FILLS_RETENTION_DAYS}d")
             await asyncio.sleep(6 * 3600)
+
+    # -- dashboard control plane (command channel) ---------------------------
+    def _write_proc_status(self, state):
+        """Upsert this process's liveness + state machine row for the dashboard. heartbeat_at lets the
+        UI flag a dead observer (stale) and lets the command channel self-heal."""
+        self._proc_state = state
+        self.db.execute(
+            "INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
+            "('observer',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
+            "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
+            (state, os.getpid(), now_iso(),
+             json.dumps({"paused": self.paused, "targets": len(self.addrs),
+                         "open": len(self.open_ep)})))
+        self.db.commit()
+
+    async def consume_commands(self):
+        """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
+        toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
+        refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
+        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle")
+        last_hb = 0.0
+        while not self.stop:
+            try:
+                rows = self.db.execute(
+                    "SELECT id,type,payload_json FROM commands WHERE status='pending' AND type IN "
+                    "(?,?,?,?,?) ORDER BY id", OWNED).fetchall()
+                for cmd_id, ctype, payload_json in rows:
+                    self.db.execute("UPDATE commands SET status='acked',acked_at=? WHERE id=?",
+                                    (now_iso(), cmd_id))
+                    self.db.commit()
+                    try:
+                        result = await self._dispatch_command(ctype, json.loads(payload_json or "{}"))
+                        self.db.execute(
+                            "UPDATE commands SET status='done',done_at=?,result_json=? WHERE id=?",
+                            (now_iso(), json.dumps(result), cmd_id))
+                        self.db.commit()
+                        _log(f"command #{cmd_id} {ctype} -> done {result}")
+                    except Exception as exc:  # noqa: BLE001 — a bad command must not kill the engine
+                        self.db.execute("UPDATE commands SET status='failed',done_at=?,error=? WHERE id=?",
+                                        (now_iso(), str(exc), cmd_id))
+                        self.db.commit()
+                        _log(f"command #{cmd_id} {ctype} -> FAILED {exc}")
+                if time.time() - last_hb > 15:        # refresh liveness heartbeat (throttled)
+                    self._write_proc_status(self._proc_state)
+                    last_hb = time.time()
+            except Exception as exc:  # noqa: BLE001
+                _log(f"command loop error: {exc}")
+            await asyncio.sleep(1.5)
+
+    async def _dispatch_command(self, ctype, payload):
+        if ctype == "pause":
+            self.paused = True
+            self._write_proc_status("paused")
+            return {"paused": True}
+        if ctype == "resume":
+            self.paused = False
+            self._write_proc_status("running")
+            return {"paused": False}
+        if ctype == "close_position":
+            return await self._cmd_close(int(payload["positionId"]))
+        if ctype == "close_all":
+            return await self._cmd_close_all()
+        if ctype == "wallet_toggle":
+            return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
+        raise ValueError(f"unhandled command type {ctype}")
+
+    def _ep_by_pos(self, pos_id):
+        for (addr, coin), ep in self.open_ep.items():
+            if ep.get("pos_id") == pos_id:
+                return addr, coin, ep
+        return None
+
+    async def _cmd_close(self, pos_id):
+        """Manual flatten of one live copy at the current book (operator emergency exit). Reuses the
+        normal close path so PnL/account/status finalize identically to a master-driven close."""
+        found = self._ep_by_pos(pos_id)
+        if not found:
+            raise ValueError(f"position {pos_id} not open/live")
+        addr, coin, ep = found
+        if ep.get("entry_px") is None:
+            raise ValueError(f"position {pos_id} still opening")
+        ba = self.bbo.get(coin)
+        mid = ((ba[0] + ba[1]) / 2) if (ba and ba[0] and ba[1]) else ep["entry_px"]
+        await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
+                                 closing=True, liq=False, maker=False, forced_px=mid)
+        _log(f"MANUAL-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
+             f"pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
+        return {"positionId": pos_id, "exit": mid, "realizedPnl": round(ep["realized_pnl"], 2)}
+
+    async def _cmd_close_all(self):
+        pos_ids = [ep["pos_id"] for ep in self.open_ep.values()]
+        closed = []
+        for pid in pos_ids:
+            try:
+                await self._cmd_close(pid)
+                closed.append(pid)
+            except Exception as exc:  # noqa: BLE001
+                _log(f"close_all: skip {pid}: {exc}")
+        return {"closed": closed, "count": len(closed)}
+
+    def _cmd_wallet_toggle(self, addr, enabled):
+        """Flip a target's enabled flag (Observer is the single writer of target_controls), then
+        re-sync targets so the effect lands now: disabled + we hold a copy -> exit-only (held_off);
+        disabled + flat -> dropped from polling; enabled -> back in the rotation."""
+        addr = addr.lower()
+        ts, e = now_iso(), 1 if enabled else 0
+        cur = self.db.execute("UPDATE target_controls SET enabled=?,updated_at=? WHERE addr=?", (e, ts, addr))
+        if cur.rowcount == 0:
+            self.db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES (?,?,?)", (addr, e, ts))
+        self.db.commit()
+        self._reload_targets()
+        return {"address": addr, "enabled": bool(enabled)}
 
     # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
     async def poll_loop(self):
@@ -444,6 +564,8 @@ class Observer:
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
+        self._write_proc_status("running")         # advertise liveness + state to the dashboard
+        asyncio.create_task(self.consume_commands())  # dashboard control plane (pause/close/toggle)
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
@@ -521,7 +643,8 @@ class Observer:
         ep = self.open_ep.get(key)
         if ep is None:
             if (abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT
-                    and addr not in self.held_off):   # held-off (off-watchlist) = exit-only, no new opens
+                    and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
+                    and not self.paused):               # dashboard pause = no new opens (existing keep to close)
                 self._open_position(addr, coin, t, px, pos1, maker, oid)
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
@@ -544,10 +667,11 @@ class Observer:
         if not self._copyable(coin):
             return              # copy crypto + transparent builder (stocks); skip opaque/unknown
         side = "long" if pos1 > 0 else "short"
+        lag_sec = max(0.0, (now_ms() - t) / 1000.0)   # copy latency: master fill -> our detection (dashboard)
         cur = self.db.execute(
             "INSERT INTO copy_position (addr,coin,side,status,master_open_ms,master_open_px,"
-            "master_peak_sz,opened_at,num_actions) VALUES (?,?,?,'open',?,?,?,?,0)",
-            (addr, coin, side, t, px, abs(pos1), now_iso()))
+            "master_peak_sz,opened_at,num_actions,open_lag_sec) VALUES (?,?,?,'open',?,?,?,?,0,?)",
+            (addr, coin, side, t, px, abs(pos1), now_iso(), lag_sec))
         ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
               "open_maker": maker, "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
