@@ -112,6 +112,61 @@ def get_all(db):
     return out
 
 
+# ── engine-side reads: convert the UI-facing stored value back to engine units ──
+# pct/nullable are stored as UI percent (0.5 == 0.5%) -> engine wants the fraction (÷100). Everything
+# else is stored in engine units already (incl MIN_FOLLOW_SCORE, stored NATIVE; the API does the 0–100
+# display conversion only at its boundary). So the rule is purely type-based.
+def _engine_val(spec, raw):
+    ptype = spec[3]
+    v = parse(raw, ptype)
+    if v is None:
+        return None
+    if ptype in ("pct", "nullable"):
+        return v / 100.0
+    return v
+
+
+def load_category(db, category):
+    """{KEY: engine-unit value} for a category, falling back to the seed default per key. Skips display."""
+    rows = {r[0]: r[1] for r in db.execute(
+        "SELECT key,value FROM params WHERE category=?", (category,)).fetchall()}
+    out = {}
+    for s in PARAM_SPEC:
+        if s[1] != category or s[3] == "display":
+            continue
+        key = s[0]
+        raw = rows[key] if key in rows else _to_text(s[5])      # s[5] = default (UI units)
+        try:
+            out[key] = _engine_val(s, raw)
+        except Exception:  # noqa: BLE001 — a bad stored value must not break the engine
+            out[key] = _engine_val(s, _to_text(s[5]))
+    return out
+
+
+def load_follow(db):
+    return load_category(db, "follow")
+
+
+# DB scanner-param key -> the scan args-namespace attribute the scanner/metrics actually read.
+SCANNER_ARG_MAP = {
+    "HARVEST_MIN_ACCT": "min_acct", "HARVEST_MAX_TURNOVER": "max_turnover",
+    "HARVEST_WEEK_VLM_MIN": "week_vlm_min", "HARVEST_MON_ROI_MIN": "mon_roi_min",
+    "HARVEST_MON_ROI_MAX": "mon_roi_max", "HARVEST_WEEK_ROI_MIN": "week_roi_min",
+    "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
+    "min_activity": "min_activity", "grid_max_adds": "grid_max_adds", "max_single_loss": "max_single_loss",
+}
+
+
+def apply_scanner_params(db, ns):
+    """Overlay DB scanner params (engine units) onto a scan args namespace so a scan uses UI-tuned gates.
+    (SCORE_*/UW_* shape constants stay in config for now — advanced/blue, rarely tuned.)"""
+    vals = load_category(db, "scanner")
+    for key, attr in SCANNER_ARG_MAP.items():
+        if vals.get(key) is not None:
+            setattr(ns, attr, vals[key])
+    return ns
+
+
 def get(db, key, fallback=None):
     """Read one parsed param value (for Observer/Scanner once they switch to DB-backed params)."""
     spec = _SPEC_BY_KEY.get(key)

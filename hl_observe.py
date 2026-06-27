@@ -8,7 +8,7 @@ hl/ (observer, paper, ws, rest, storage). Needs the venv (websockets).
 import argparse
 import asyncio
 
-from hl import config, observer, storage
+from hl import config, observer, params, storage
 
 
 def main() -> int:
@@ -29,6 +29,7 @@ def main() -> int:
     args = ap.parse_args()
 
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+    params.seed_params(db)                          # ensure UI-tunable params exist (idempotent)
     if args.cmd == "observe":
         n = args.top
         addrs, seed = observer.load_targets(db, n, args.min_score)

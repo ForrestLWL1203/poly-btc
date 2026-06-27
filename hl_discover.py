@@ -7,8 +7,35 @@ rest, fills, storage). Run from the repo root so `import hl` resolves.
   python3 hl_discover.py --db data/hl.db harvest
 """
 import argparse
+import time
+from types import SimpleNamespace
 
-from hl import config, scanner, storage
+from hl import config, params, scanner, storage
+
+
+def _scan_ns():
+    """A scan args-namespace with operational defaults (matches the `scan` subparser); gate/harvest
+    params get overlaid from the DB by params.apply_scanner_params."""
+    return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False,
+                           workers=4, scan_interval=8.0, max_pages=5, min_crypto=0.3)
+
+
+def _serve_rescan(db):
+    """Daemon: run a full stop-the-world scan ON DEMAND when the dashboard queues a `rescan` command.
+    scanner.scan() consumes the command(s) + writes scan_progress/status. Skips if a scan is running."""
+    config.MIN_POST_INTERVAL = 8.0                   # gentle REST pace; coexist with the observer
+    print("rescan trigger daemon: watching commands ...", flush=True)
+    while True:
+        try:
+            pend = db.execute("SELECT id FROM commands WHERE status='pending' AND type='rescan' LIMIT 1").fetchone()
+            sp = db.execute("SELECT state FROM scan_progress WHERE id=1").fetchone()
+            if pend and not (sp and sp[0] == "scanning"):
+                ns = params.apply_scanner_params(db, _scan_ns())
+                print(f"rescan command #{pend[0]} -> running full scan", flush=True)
+                scanner.scan(db, ns)                 # consumes pending rescan + writes progress/status
+        except Exception as exc:  # noqa: BLE001
+            print(f"rescan daemon error: {exc}", flush=True)
+        time.sleep(3)
 
 
 def main() -> int:
@@ -72,11 +99,17 @@ def main() -> int:
     g = sub.add_parser("regate", help="re-apply gate thresholds on STORED profiles (no re-fetch) + rebuild watchlist")
     add_gate_args(g)
 
+    sub.add_parser("serve-rescan", help="daemon: run a full scan on demand when a dashboard rescan command is queued")
+
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
+    params.seed_params(db)                               # ensure UI-tunable params exist (idempotent)
     if args.cmd == "scan":
         config.MIN_POST_INTERVAL = args.scan_interval   # slow this PROCESS's REST pace (trickle);
+        params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
         scanner.scan(db, args)                          # the observer process keeps its own fast pace
+    elif args.cmd == "serve-rescan":
+        _serve_rescan(db)
     elif args.cmd == "watchlist":
         scanner.watchlist(db, args.top)
     elif args.cmd == "harvest":

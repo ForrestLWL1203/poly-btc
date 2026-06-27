@@ -52,6 +52,13 @@ class Observer:
         self.rf_max = config.RF_MAX
         self.risk_k = config.RISK_K
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
+        # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
+        self.max_lev = config.MAX_LEV
+        self.min_lev = config.MIN_LEV
+        self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
+        self.max_adds = config.MAX_ADDS
+        self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
+        self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -115,7 +122,7 @@ class Observer:
                     margin = f(pos.get("marginUsed")) or (f(pos.get("positionValue")) / raw_lev
                                                           if raw_lev else None)
                     break
-        return max(1.0, min(raw_lev or config.MAX_LEV, config.MAX_LEV)), raw_lev, margin, entry
+        return max(1.0, min(raw_lev or self.max_lev, self.max_lev)), raw_lev, margin, entry
 
     def _copyable(self, coin: str) -> bool:
         """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
@@ -134,6 +141,28 @@ class Observer:
         return ask if is_buy else bid             # default: taker catch-up across the spread, CURRENT book
 
     # -- restart recovery: reload open copies from db ------------------------
+    def _reload_params(self):
+        """Refresh UI-tunable strategy params from the params table (engine units; config = fallback).
+        Called at startup + each watchlist reload so dashboard edits take effect on the NEXT new copy.
+        Fully defensive: any failure keeps the current values (never disrupts the live engine)."""
+        try:
+            from . import params as P
+            f = P.load_follow(self.db)
+            if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
+            if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
+            if f.get("RISK_K"): self.risk_k = f["RISK_K"]
+            if f.get("RF_MIN") is not None: self.rf_min = f["RF_MIN"]
+            if f.get("RF_MAX") is not None: self.rf_max = f["RF_MAX"]
+            if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
+            if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
+            if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
+            if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
+            if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
+            self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
+            if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
+        except Exception as exc:  # noqa: BLE001
+            _log(f"param reload failed (keeping current): {exc}")
+
     def _reload_open(self):
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
@@ -234,7 +263,7 @@ class Observer:
     # -- per-coin volatility (regime-aware σ for risk-targeted sizing) --------
     def _sigma(self, coin: str) -> float:
         """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
-        return self.vol.get(coin) or config.VOL_FALLBACK_SIGMA
+        return self.vol.get(coin) or self.vol_fallback_sigma
 
     async def _ensure_vol(self, coin: str):
         """Track coin for the periodic σ refresh, and fetch it NOW if we have no fresh value (so a
@@ -505,6 +534,7 @@ class Observer:
         while not self.stop:
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
                 self._reload_targets()
+                self._reload_params()              # pick up UI param edits (effect: next new copy)
                 last_reload = now_ms()
             for addr in list(self.addrs):
                 since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS
@@ -589,6 +619,7 @@ class Observer:
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_targets(init=True)            # load watchlist; every cursor starts at now (forward-only)
+        self._reload_params()                      # load UI-tunable strategy params (config = fallback)
         try:
             self._write_proc_status("running")     # advertise liveness + state to the dashboard
         except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
@@ -716,8 +747,8 @@ class Observer:
         px = master_px if stale else self._fill_px(coin, is_buy, ep["open_maker"], master_px)
         chase = (px - master_px) / master_px * 1e4 * ep["sign"]   # bps worse than master (+ = worse)
         we_rest = ep["open_maker"] and config.EXEC_MAKER_MIRROR    # only a true maker-mirror rests (no chase)
-        if (config.MAX_ENTRY_CHASE_PCT is not None and not we_rest
-                and chase > config.MAX_ENTRY_CHASE_PCT * 100):     # spike too far past master -> skip
+        if (self.max_entry_chase_pct is not None and not we_rest
+                and chase > self.max_entry_chase_pct * 100):       # spike too far past master -> skip
             self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
             self.db.commit()
             self.open_ep.pop((addr, coin), None)
@@ -733,10 +764,10 @@ class Observer:
         t_acct = self.target_acct.get(addr)
         conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.rf_min
         rf = max(self.rf_min, min(conviction, self.rf_max))
-        lev = max(config.MIN_LEV, min(1.0 / (self.risk_k * sigma), config.MAX_LEV)) if sigma > 0 else config.MIN_LEV
+        lev = max(self.min_lev, min(1.0 / (self.risk_k * sigma), self.max_lev)) if sigma > 0 else self.min_lev
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * rf * self.risk_k)
-            if margin < config.MIN_OPEN_MARGIN_PCT * self.balance:   # free balance too low to fund a
+            if margin < self.min_open_margin_pct * self.balance:     # free balance too low to fund a
                 self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # meaningful
                 self.db.commit()                                     # position -> skip this signal
                 self.open_ep.pop((addr, coin), None)
@@ -769,7 +800,7 @@ class Observer:
                 pass
             if ep.get("entry_px") is None or (addr, coin) not in self.open_ep:
                 return
-            if ep["add_count"] >= config.MAX_ADDS:    # cap reached — observe but don't follow
+            if ep["add_count"] >= self.max_adds:      # cap reached — observe but don't follow
                 self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                     0.0, master_px, 0.0, 0.0)
                 self.db.commit()
