@@ -370,6 +370,8 @@ def scan(db, p) -> None:
                 rejected += 1
             if done % 10 == 0:
                 _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
+                _set_scanner_proc(db, "scanning", {"stage": "score_filter",   # refresh heartbeat so the
+                                  "scanned": done, "total": len(workset)})    # dashboard isn't "心跳超时"
 
     _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
     n_active = refresh_watchlist(db, stamp)

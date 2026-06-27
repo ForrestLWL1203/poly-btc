@@ -271,7 +271,8 @@ def ep_overview(db):
     obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     ss = _scanner_status(db)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    wl = q1(db, "SELECT COUNT(*) c FROM watchlist")
+    _line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # "被跟" = wallets above the follow line
+    wl = q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?", (_line,))
 
     def _stale(row):
         if not row or not row["heartbeat_at"]:
@@ -378,9 +379,14 @@ def _wallet_trend(db, addr, n=8):
     return trend
 
 
-def ep_wallets(db):
-    follow_line = score100(params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9))   # 0–100 ruler
+def ep_wallets(db, qs=None):
+    qs = qs or {}
+    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # native ~0–3 scale
     grid_max = params_mod.get(db, "grid_max_adds", 5) or 5
+    page = max(0, int((qs.get("page", ["0"]))[0]))
+    size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
+    # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
+    # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
     rows = qall(db,
         "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.win_rate,w.top_coin,"
         "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,"
@@ -388,9 +394,10 @@ def ep_wallets(db):
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count "
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
-        "LEFT JOIN profile pr ON pr.addr=w.addr ORDER BY w.rank")
+        "LEFT JOIN profile pr ON pr.addr=w.addr WHERE w.score >= ? ORDER BY w.rank", (line_native,))
+    total = len(rows)
     out = []
-    for r in rows:
+    for r in rows[page * size:page * size + size]:
         grid = r["grid"]
         if grid is None:                       # COALESCE: derive from profile until scanner backfills
             grid = min((r["median_adds_per_ep"] or 0) / grid_max, 1.0)
@@ -405,7 +412,7 @@ def ep_wallets(db):
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
             "trend": _wallet_trend(db, r["addr"]),
         })
-    return {"followLine": follow_line, "wallets": out}
+    return {"followLine": score100(line_native), "total": total, "page": page, "size": size, "wallets": out}
 
 
 def ep_wallet_detail(db, addr):
@@ -438,7 +445,10 @@ _REJECT_BUCKETS = [
 def ep_discovery(db):
     candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
     active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
-    watchlist = (q1(db, "SELECT COUNT(*) c FROM watchlist") or {"c": 0})["c"]
+    # funnel's final stage = wallets ABOVE the follow line (the ones we actually copy), NOT the whole
+    # watchlist (which also holds many lower-score actives we only observe).
+    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
+    watchlist = (q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?", (line_native,)) or {"c": 0})["c"]
     # reject reasons -> buckets
     reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
     counts = {row["reason"]: row["n"] for row in reason_rows}
@@ -666,7 +676,7 @@ def make_handler(db_path, auth, static_dir=None):
                 if path == "/api/positions":
                     return self._envelope(ep_positions(db, qs))
                 if path == "/api/wallets":
-                    return self._envelope(ep_wallets(db))
+                    return self._envelope(ep_wallets(db, qs))
                 if path.startswith("/api/wallets/"):
                     return self._envelope(ep_wallet_detail(db, path.rsplit("/", 1)[1]))
                 if path == "/api/discovery":

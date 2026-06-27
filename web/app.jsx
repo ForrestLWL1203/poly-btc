@@ -193,6 +193,7 @@ function Positions({ confirm, toast, streamOpen }) {
   const [polledOpen, setPolledOpen] = useState(null);
   const [closed, setClosed] = useState(null);
   const [filter, setFilter] = useState("all");
+  const [opage, setOpage] = useState(0);             // open positions page (20/page)
   const [cpage, setCpage] = useState(0);             // closed-history page (25/page)
   const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
   const loadClosed = useCallback(() => { api.get("/api/positions?status=closed").then(setClosed).catch(() => {}); }, []);
@@ -216,6 +217,12 @@ function Positions({ confirm, toast, streamOpen }) {
     filter === "all" ? true : filter === "crypto" ? p.marketType === "crypto" :
     filter === "stock" ? p.marketType === "stock" : filter === "long" ? p.side === "long" : p.side === "short");
 
+  const OPER = 20;
+  const openRows = open ? filt(open.positions) : [];
+  const opages = Math.max(1, Math.ceil(openRows.length / OPER));
+  const opg = Math.min(opage, opages - 1);
+  const openItems = openRows.slice(opg * OPER, opg * OPER + OPER);
+
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
@@ -233,8 +240,8 @@ function Positions({ confirm, toast, streamOpen }) {
           </tr></thead>
           <tbody>
             {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
-            {open && filt(open.positions).length === 0 && <tr><td colSpan="10" className="empty">无持仓</td></tr>}
-            {open && filt(open.positions).map(p => (
+            {open && openRows.length === 0 && <tr><td colSpan="10" className="empty">无持仓</td></tr>}
+            {openItems.map(p => (
               <tr key={p.id}>
                 <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b></td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
@@ -251,6 +258,13 @@ function Positions({ confirm, toast, streamOpen }) {
           </tbody>
         </table>
       </div>
+      {openRows.length > OPER && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
+          <button className="btn" disabled={opg <= 0} onClick={() => setOpage(opg - 1)}>上一页</button>
+          <span className="muted mono">第 {opg + 1} / {opages} 页 · 共 {openRows.length} 笔</span>
+          <button className="btn" disabled={opg >= opages - 1} onClick={() => setOpage(opg + 1)}>下一页</button>
+        </div>
+      )}
 
       {(() => {
         const PER = 25;
@@ -298,7 +312,8 @@ function Positions({ confirm, toast, streamOpen }) {
 function Wallets({ confirm, toast }) {
   const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
-  const load = useCallback(() => { api.get("/api/wallets").then(setData).catch(() => {}); }, []);
+  const [wpage, setWpage] = useState(0);             // 30/page
+  const load = useCallback(() => { api.get("/api/wallets?page=" + wpage + "&size=30").then(setData).catch(() => {}); }, [wpage]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
 
   const toggle = (w) => {
@@ -312,7 +327,7 @@ function Wallets({ confirm, toast }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>被跟名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分</span>}</h2>
+        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · 共 {data.total} 个</span>}</h2>
       </div>
       <div className="tbl-wrap">
         <table>
@@ -341,6 +356,13 @@ function Wallets({ confirm, toast }) {
           </tbody>
         </table>
       </div>
+      {data && data.total > data.size && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
+          <button className="btn" disabled={wpage <= 0} onClick={() => setWpage(wpage - 1)}>上一页</button>
+          <span className="muted mono">第 {data.page + 1} / {Math.ceil(data.total / data.size)} 页</span>
+          <button className="btn" disabled={(wpage + 1) * data.size >= data.total} onClick={() => setWpage(wpage + 1)}>下一页</button>
+        </div>
+      )}
       {drawer && <WalletDrawer address={drawer} onClose={() => setDrawer(null)} />}
     </div>
   );
@@ -649,10 +671,10 @@ function Settings({ startRescan, confirm, toast }) {
 
 /* ----------------------------------------------------------------- shell */
 const NAV = [
-  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓", IC.positions], ["wallets", "跟单钱包", IC.wallets]]],
+  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓", IC.positions], ["wallets", "跟踪钱包", IC.wallets]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览 Overview", positions: "持仓 Positions", wallets: "跟单钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const TITLES = { overview: "总览 Overview", positions: "持仓 Positions", wallets: "跟踪钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");

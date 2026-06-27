@@ -27,9 +27,12 @@ def _serve_rescan(db):
     print("rescan trigger daemon: watching commands ...", flush=True)
     while True:
         try:
-            pend = db.execute("SELECT id FROM commands WHERE status='pending' AND type='rescan' LIMIT 1").fetchone()
             sp = db.execute("SELECT state FROM scan_progress WHERE id=1").fetchone()
-            if pend and not (sp and sp[0] == "scanning"):
+            scanning = bool(sp and sp[0] == "scanning")
+            if not scanning:
+                scanner._set_scanner_proc(db, "idle", {"watching": True})   # keep heartbeat fresh (alive)
+            pend = db.execute("SELECT id FROM commands WHERE status='pending' AND type='rescan' LIMIT 1").fetchone()
+            if pend and not scanning:
                 ns = params.apply_scanner_params(db, _scan_ns())
                 print(f"rescan command #{pend[0]} -> running full scan", flush=True)
                 scanner.scan(db, ns)                 # consumes pending rescan + writes progress/status
