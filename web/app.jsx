@@ -188,15 +188,21 @@ function Overview({ ov }) {
 }
 
 /* ----------------------------------------------------------------- positions */
-function Positions({ confirm, toast }) {
-  const [open, setOpen] = useState(null);
+function Positions({ confirm, toast, streamOpen }) {
+  const [polledOpen, setPolledOpen] = useState(null);
   const [closed, setClosed] = useState(null);
   const [filter, setFilter] = useState("all");
-  const load = useCallback(() => {
-    api.get("/api/positions?status=open").then(setOpen).catch(() => {});
-    api.get("/api/positions?status=closed").then(setClosed).catch(() => {});
-  }, []);
-  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [load]);
+  const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
+  const loadClosed = useCallback(() => { api.get("/api/positions?status=closed").then(setClosed).catch(() => {}); }, []);
+  const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
+  const load = useCallback(() => { loadOpen(); loadClosed(); }, [loadOpen, loadClosed]);
+  // closed positions change rarely -> slow poll; open positions come from the stream (fallback-poll only
+  // when the stream isn't delivering).
+  useEffect(() => {
+    loadClosed(); const tc = setInterval(loadClosed, 15000);
+    if (!streamOpen) { loadOpen(); var to = setInterval(loadOpen, 6000); }
+    return () => { clearInterval(tc); if (to) clearInterval(to); };
+  }, [loadClosed, loadOpen, streamOpen]);
 
   const doClose = (p) => confirm({
     title: "确认平仓", danger: true, ok: "平仓",
@@ -631,7 +637,9 @@ const TITLES = { overview: "总览 Overview", positions: "持仓 Positions", wal
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
-  const [ov, setOv] = useState(null);
+  const [polledOv, setPolledOv] = useState(null);
+  const [live, setLive] = useState(null);            // SSE fast bundle {overview, positions, serverTime}
+  const [streamOk, setStreamOk] = useState(false);
   const [confirmCfg, setConfirmCfg] = useState(null);
   const [toastMsg, setToastMsg] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -639,8 +647,30 @@ function Dashboard({ onLogout }) {
   const [scanStatus, setScanStatus] = useState(null);
   const toast = (m) => { setToastMsg(m); setTimeout(() => setToastMsg(null), 2600); };
 
-  const loadOv = useCallback(() => { api.get("/api/overview").then(setOv).catch(() => {}); }, []);
-  useEffect(() => { loadOv(); const t = setInterval(loadOv, 7000); return () => clearInterval(t); }, [loadOv]);
+  const ov = (streamOk && live && live.overview) || polledOv;    // prefer live stream; fall back to polled
+
+  // SSE live stream (replaces polling when connected). EventSource auto-reconnects; on error we flip
+  // streamOk off so the polling fallback below resumes until the stream recovers.
+  useEffect(() => {
+    if (!api.token || typeof EventSource === "undefined") return;
+    let es;
+    try {
+      es = new EventSource("/api/stream?token=" + encodeURIComponent(api.token));
+      es.onmessage = (e) => { try { setLive(JSON.parse(e.data)); setStreamOk(true); } catch (_e) {} };
+      es.onerror = () => setStreamOk(false);
+    } catch (_e) { setStreamOk(false); }
+    return () => { if (es) es.close(); };
+  }, []);
+
+  // Polling fallback for overview: only while the stream is NOT delivering. One immediate load on mount
+  // paints before the stream's first push.
+  const loadOv = useCallback(() => { api.get("/api/overview").then(setPolledOv).catch(() => {}); }, []);
+  useEffect(() => {
+    loadOv();
+    if (streamOk) return;
+    const t = setInterval(loadOv, 7000);
+    return () => clearInterval(t);
+  }, [loadOv, streamOk]);
 
   const startRescan = useCallback(async () => { await api.cmd("rescan", {}); setScanning(true); }, []);
   useEffect(() => {                                  // poll scan progress while a rescan runs (mask)
@@ -697,6 +727,10 @@ function Dashboard({ onLogout }) {
             <div className="title">{TITLES[page]}</div>
           </div>
           <div className="topbar-right">
+            <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: streamOk ? "var(--green-l)" : "var(--t3)" }}
+              title={streamOk ? "SSE 实时推送已连接" : "轮询兜底(SSE 未连接)"}>
+              <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
+              {streamOk ? "实时" : "轮询"}</span>
             <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
             {obs === "paused"
               ? <button className="btn btn-green" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "var(--green)" }} />} {pausing ? "恢复中…" : "恢复跟单"}</button>
@@ -720,7 +754,7 @@ function Dashboard({ onLogout }) {
         )}
 
         {page === "overview" && <Overview ov={ov} />}
-        {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} />}
+        {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} streamOpen={streamOk ? (live && live.positions) : null} />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} toast={toast} />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} toast={toast} />}

@@ -497,6 +497,20 @@ def ep_scan_status(db):
 
 WRITABLE_LEVELS = {"green", "yellow", "blue"}     # black / display are read-only
 
+# ── SSE live stream (replaces polling for the fast-changing bundle) ──
+STREAM_MAX = 8                # cap concurrent stream connections (single-user; guards a reconnect storm)
+STREAM_TICK = 1.0            # server-side read cadence; we push only on CHANGE (+ heartbeat)
+STREAM_HEARTBEAT = 15.0
+_stream_lock = threading.Lock()
+_stream_clients = 0
+
+
+def _fast_bundle(db):
+    """The fast-changing slice pushed over SSE: overview (cards/ticker/system) + open positions.
+    Slow data (wallets/discovery/params/scan-runs) stays on-demand GET."""
+    return {"overview": ep_overview(db), "positions": ep_positions(db, {"status": ["open"]}),
+            "serverTime": now_iso()}
+
 
 def patch_params(db_path, category, updates):
     """Write UI param edits to the params table (the only place the dashboard writes besides commands).
@@ -629,6 +643,9 @@ def make_handler(db_path, auth, static_dir=None):
                 if static_dir:
                     return self._serve_static(path.lstrip("/"))
                 return self._send(404, {"error": "not_found"})
+            if path == "/api/stream":
+                # SSE: EventSource can't send an Authorization header -> token via query param.
+                return self._serve_stream(qs.get("token", [None])[0])
             if not self._authed():
                 return self._send(401, {"error": "unauthorized"})
             db = ro_connect(db_path)
@@ -658,6 +675,48 @@ def make_handler(db_path, auth, static_dir=None):
                 return self._send(500, {"error": "server_error", "detail": str(e)})
             finally:
                 db.close()
+
+        def _serve_stream(self, token):
+            global _stream_clients
+            if not auth.valid(token):
+                return self._send(401, {"error": "unauthorized"})
+            with _stream_lock:
+                if _stream_clients >= STREAM_MAX:
+                    return self._send(503, {"error": "too_many_streams"})
+                _stream_clients += 1
+            db = None
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "keep-alive")
+                self.send_header("X-Accel-Buffering", "no")          # don't let a proxy buffer the stream
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                db = ro_connect(db_path)
+                prev, last_hb = None, 0.0
+                while True:
+                    try:
+                        body = json.dumps(_fast_bundle(db), default=float)
+                    except Exception:  # noqa: BLE001 — a transient query error shouldn't drop the stream
+                        body = None
+                    now = time.time()
+                    if body is not None and body != prev:
+                        self.wfile.write(b"data: " + body.encode() + b"\n\n")
+                        self.wfile.flush()
+                        prev, last_hb = body, now
+                    elif now - last_hb >= STREAM_HEARTBEAT:
+                        self.wfile.write(b": ping\n\n")              # keep-alive comment
+                        self.wfile.flush()
+                        last_hb = now
+                    time.sleep(STREAM_TICK)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+                return                                               # client went away
+            finally:
+                if db is not None:
+                    db.close()
+                with _stream_lock:
+                    _stream_clients -= 1
 
         def _serve_static(self, rel):
             import mimetypes
