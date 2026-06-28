@@ -17,7 +17,8 @@ def _scan_ns():
     """A scan args-namespace with operational defaults (matches the `scan` subparser); gate/harvest
     params get overlaid from the DB by params.apply_scanner_params."""
     return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False,
-                           workers=4, scan_interval=8.0, max_pages=5, min_crypto=0.3)
+                           workers=4, scan_interval=8.0, max_pages=5, min_crypto=0.3,
+                           exclude_hft=True, hft_min_hold_min=3.0)
 
 
 def _serve_rescan(db):
@@ -62,6 +63,11 @@ def main() -> int:
         pr.add_argument("--max-single-loss", type=float, default=0.10,
                         help="reject 扛单到爆: worst single round-trip loss as fraction of account "
                              "(cuts-losses-small wallets pass even at 50%% win; one disaster loss = out)")
+        pr.add_argument("--no-exclude-hft", dest="exclude_hft", action="store_false", default=True,
+                        help="by default reject sub-minute HFT scalpers (uncopyable at our latency); "
+                             "pass this to allow them (only once a high-freq feed exists)")
+        pr.add_argument("--hft-min-hold-min", type=float, default=3.0,
+                        help="when excluding HFT: min median hold time in MINUTES (below = HFT, rejected)")
 
     def add_harvest_args(pr):
         # STAGE-1 leaderboard prefilter (3-window cascade; 0 per-wallet API). Defaults in config.
@@ -118,6 +124,7 @@ def main() -> int:
     elif args.cmd == "harvest":
         print(f"{scanner.harvest(db, args.min_acct, args.max_turnover, args)} candidates")
     elif args.cmd == "regate":
+        params.apply_scanner_params(db, args)            # honor UI-tuned gates (incl HFT switch) on regate
         scanner.regate(db, args)
     db.close()
     return 0

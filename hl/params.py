@@ -30,6 +30,8 @@ PARAM_SPEC = [
     ("min_activity",         "scanner", "blue",   "float",   "rescan", 0.21),  # hl_discover --min-activity
     ("grid_max_adds",        "scanner", "blue",   "int",     "rescan", 5),     # hl_discover --grid-max-adds
     ("max_single_loss",      "scanner", "yellow", "pct",     "rescan", 10),    # hl_discover --max-single-loss 0.10
+    ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True),  # filter out sub-minute HFT scalpers (uncopyable at our latency)
+    ("HFT_MIN_HOLD_MIN",     "scanner", "blue",   "float",   "rescan", 3),     # min median hold (minutes) when EXCLUDE_HFT on
     ("SCORE_SHRINK_K",       "scanner", "blue",   "int",     "rescan", int(config.SCORE_SHRINK_K)),
     ("SCORE_RAR_CAP",        "scanner", "blue",   "float",   "rescan", config.SCORE_RAR_CAP),
     ("SCORE_K",              "scanner", "blue",   "int",     "rescan", int(config.SCORE_K)),
@@ -154,6 +156,7 @@ SCANNER_ARG_MAP = {
     "HARVEST_MON_ROI_MAX": "mon_roi_max", "HARVEST_WEEK_ROI_MIN": "week_roi_min",
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
     "min_activity": "min_activity", "grid_max_adds": "grid_max_adds", "max_single_loss": "max_single_loss",
+    "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
 }
 
 

@@ -119,6 +119,12 @@ def gates(m: dict, now_ms: int, p) -> tuple:
         return False, "not_profitable"                         # net realized loss over the window
     if m["median_eps"] > p.max_daily_eps:
         return False, "bot_frequency"                          # mid-freq OK; HFT/MM excluded
+    # HFT switch: sub-minute-hold scalpers (e.g. 2s round-trips) are PROFITABLE but UNcopyable at our
+    # ~seconds REST latency (the trade is closed before we detect it). Excluded while we lack sub-second
+    # execution; flip EXCLUDE_HFT off once a high-freq feed (HyperRPC WS) makes them copyable.
+    if getattr(p, "exclude_hft", True) and m.get("median_hold_s") is not None \
+            and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
+        return False, "hft_uncopyable"
     if m["activity_ratio"] < p.min_activity:                   # MINIMAL floor (~3 active days) — only
         return False, "irregular"                              # rejects one-shot noise; genuine low-freq
     #                                                            traders pass and are ranked down by the

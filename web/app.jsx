@@ -508,6 +508,8 @@ const PARAM_META = {
   min_activity: { name: "最低活跃度", desc: "≈活跃天/14", range: "—" },
   grid_max_adds: { name: "单笔最多加仓次数", desc: "反网格", range: "—" },
   max_single_loss: { name: "单笔最大亏损容忍", desc: "单笔亏超此%判扛单", range: "5%–15%", up: "更宽容大亏", dn: "更严筛扛单" },
+  EXCLUDE_HFT: { name: "过滤高频HFT(开关)", desc: "剔除秒级快炒钱包——他们赚钱但我们延迟太大抄不了;接入高频WS后可关掉", range: "—" },
+  HFT_MIN_HOLD_MIN: { name: "HFT最短中位持仓", desc: "开关开启时,中位持仓低于此分钟数判为HFT剔除", range: "2–5 分钟" },
   SCORE_SHRINK_K: { name: "样本不足惩罚强度", desc: "低样本收益打折", range: "—" },
   SCORE_RAR_CAP: { name: "收益评分上限", desc: "风险调整收益封顶", range: "—" },
   SCORE_K: { name: "评分置信度参数", desc: "日序列置信", range: "—" },
