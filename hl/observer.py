@@ -62,13 +62,9 @@ class Observer:
         self.max_adds = config.MAX_ADDS
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
-        # 扛单 copy-side stop (cut a losing copy at a MULTIPLE of the target's own take-profit move
-        # rather than waiting for our far isolated liquidation). UI-tunable via _reload_params.
+        # 扛单 copy-side stop: flat adverse-price cut (isolated tail guard). UI-tunable via _reload_params.
         self.copy_stop_enable = config.COPY_STOP_ENABLE
-        self.copy_stop_tp_mult = config.COPY_STOP_TP_MULT
-        self.copy_stop_min_pct = config.COPY_STOP_MIN_PCT
-        self.copy_stop_max_pct = config.COPY_STOP_MAX_PCT
-        self.target_tp: dict = {}        # addr -> target's tp_move_pct (take-profit signature; copy-stop base)
+        self.copy_stop_pct = config.COPY_STOP_PCT
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -174,9 +170,7 @@ class Observer:
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
-            if f.get("COPY_STOP_TP_MULT"): self.copy_stop_tp_mult = f["COPY_STOP_TP_MULT"]
-            if f.get("COPY_STOP_MIN_PCT") is not None: self.copy_stop_min_pct = f["COPY_STOP_MIN_PCT"]
-            if f.get("COPY_STOP_MAX_PCT") is not None: self.copy_stop_max_pct = f["COPY_STOP_MAX_PCT"]
+            if f.get("COPY_STOP_PCT"): self.copy_stop_pct = f["COPY_STOP_PCT"]
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
@@ -248,8 +242,6 @@ class Observer:
         self.seed_coins = seed
         self.target_acct = {a: v for a, v in                 # conviction denominator (target's account)
                             self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
-        self.target_tp = {a: tp for a, tp in                 # take-profit signature -> copy-stop distance
-                          self.db.execute("SELECT addr, tp_move_pct FROM watchlist").fetchall()}
         # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
         held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
@@ -299,18 +291,13 @@ class Observer:
         k = max(0.1, (klo - b * slo) + b * sigma)       # buffer at THIS coin's σ (guard k>0)
         return max(self.min_lev, min(1.0 / (k * sigma), self.max_lev))
 
-    def _stop_pct(self, addr: str) -> float:
-        """Copy-side stop DISTANCE (adverse price-move fraction) for a target: a multiple of its own
-        take-profit signature (tp_move_pct), clamped to [min,max]. A tight-scalp wallet (~1.7% TP) →
-        tight stop; a wide-TP trend wallet → wide stop (no whipsaw). Unknown TP → MIN×fallback."""
-        tp = self.target_tp.get(addr) or config.COPY_STOP_TP_FALLBACK
-        return max(self.copy_stop_min_pct, min(self.copy_stop_tp_mult * tp, self.copy_stop_max_pct))
-
-    def _stop_px_for(self, addr: str, entry_px: float, is_buy: bool) -> float:
-        """Stop PRICE from entry: adverse = down for a long, up for a short (same geometry as liq_px)."""
-        if not self.copy_stop_enable or not entry_px:
+    def _stop_px_for(self, entry_px: float, is_buy: bool) -> float:
+        """Stop PRICE from entry: a flat COPY_STOP_PCT adverse move (down for a long, up for a short —
+        same geometry as liq_px). 0 = disabled. If wider than the liquidation distance (1/lev) it just
+        never fires before liq, which is the intended 'high value ≈ off' behaviour."""
+        if not self.copy_stop_enable or not entry_px or not self.copy_stop_pct:
             return 0.0
-        d = self._stop_pct(addr)
+        d = self.copy_stop_pct
         return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
 
     async def _ensure_vol(self, coin: str):
@@ -835,7 +822,7 @@ class Observer:
             notional = margin * lev
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
-            stop_px = self._stop_px_for(addr, px, is_buy)   # 扛单 cut, target-TP-relative (0 = disabled)
+            stop_px = self._stop_px_for(px, is_buy)         # 扛单 cut at flat COPY_STOP_PCT adverse (0 = off)
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px,
                       size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px)
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
@@ -881,7 +868,7 @@ class Observer:
             ep["margin"] += add_margin
             ep["notional"] += add_margin * lev
             ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / lev) if is_buy else ep["entry_px"] * (1 + 1.0 / lev)
-            ep["stop_px"] = self._stop_px_for(addr, ep["entry_px"], is_buy)   # re-anchor stop to new avg entry
+            ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy)   # re-anchor stop to new avg entry
             ep["add_count"] += 1
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,

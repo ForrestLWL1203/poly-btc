@@ -151,22 +151,17 @@ DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score
 DISP_WR_FREE   = 0.90  # win rate at/below this is "honest"; only the excess above feeds the penalty
 DISP_SKEW_FREE = 2.0   # hold_skew (loser-hold / winner-hold time) at/below this is fine; excess feeds it
 
-# COPY-SIDE STOP — OFF BY DEFAULT (built + tunable, but contraindicated for our current targets).
-# Mechanism: cut at stop = STOP_TP_MULT × the target's OWN median take-profit move, clamped to
-# [MIN,MAX], so a tight-scalp wallet gets a tight stop and a wide-TP trend wallet a wide one.
-# WHY OFF: empirical winner-MAE (5m candles, the twins #16/#4) shows their EDGE IS bag-holding through
-# deep heat — winners take a MEDIAN 1.7% adverse but p75≈4.8%, p90≈12%, p95≈17% (some revert from
-# 20-53% underwater and STILL close green; ~33% of winners dip >3%, ~17% dip >8%). Any stop tight
-# enough to cap the MANTA-type tail (~21%) also knifes a large share of eventual winners → net loss of
-# the very edge we copy. The MANTA liquidation was a LEVERAGE bug (our 6x vs the master's 3x; liq at
-# +16.5%), now fixed by capping our leverage at the master's (see _resolve_entry) — which gives us the
-# master's staying power instead of a premature stop. Leave OFF unless a target's winner-MAE is
-# genuinely tight (a fast-cut trend follower); then enable per the tunable below.
-COPY_STOP_ENABLE  = False
-COPY_STOP_TP_MULT = 1.6     # stop distance (adverse price move) = this × target's median take-profit move
-COPY_STOP_MIN_PCT = 0.02    # never tighter than this adverse move (noise/whipsaw floor)
-COPY_STOP_MAX_PCT = 0.12    # never wider than this (tail cap even for very wide-TP / trend wallets)
-COPY_STOP_TP_FALLBACK = 0.02  # assumed take-profit move when the target's tp_move_pct is unknown
+# COPY-SIDE STOP — a flat ADVERSE-PRICE cut, our isolated-account tail guard. Cut a copy when price
+# runs COPY_STOP_PCT against entry. Calibrated WIDE on purpose (default 18%) from the twins' winner-MAE
+# (5m candles): the normal reverting winners — the actual edge — take a median 1.7% / quick heat and
+# recover in <1-4h, so an 18% line NEVER touches them. It only governs the deep-bag minority (>10% MAE:
+# ~8% of winners), which on an ISOLATED small account is exactly where the damage is — those bags lock
+# our margin 12h-to-4-DAYS while risking the 3x liquidation (+33%). The master rides them on $40k cross
+# + patience; we can't, so we cap the tail: realize a bounded ~COPY_STOP_PCT×lev margin loss and free
+# the capital, instead of bag-holding to liquidation. Paired with the master-leverage cap (which
+# already removed the 6x premature-liq bug). UI-tunable (set very high to effectively disable).
+COPY_STOP_ENABLE = True
+COPY_STOP_PCT    = 0.18     # adverse price move from entry that triggers a cut (≈ this × lev of margin)
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one

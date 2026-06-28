@@ -64,6 +64,8 @@ PARAM_SPEC = [
         "单仓最大投入", "目标重仓时,每笔最多投入多少(占可用余额)。调高=跟得更重、赚亏放大;调低=更稳"),
     ("MAX_ADDS",             "follow",  "yellow", "int",     "immediate", config.MAX_ADDS,
         "最多加仓次数", "一笔最多跟几次加仓(防被网格拖死)。调高=跟更多加仓、单仓变重;调低=更克制"),
+    ("COPY_STOP_PCT",        "follow",  "yellow", "pct",     "immediate", config.COPY_STOP_PCT * 100,
+        "止损线(逆向幅度)", "价格逆向跑这么多就提前平仓,不陪目标死扛(逐仓兜底)。3x下18%价格≈亏54%保证金。调低=砍得更早、少扛但会误杀慢回本的赢单;调高=给更多回旋、接近不止损(设很大≈关闭)"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("RISK_K",               "follow",  "hidden", "float",   "immediate", config.RISK_K, "保证金倍数", ""),
     ("RF_MIN",               "follow",  "hidden", "pct",     "immediate", config.RF_MIN * 100, "单仓最小投入", ""),
@@ -77,10 +79,7 @@ PARAM_SPEC = [
     ("VOL_FAST_DAYS",        "follow",  "hidden", "display", "immediate",
         f"{config.VOL_FAST_DAYS} / {config.VOL_SLOW_DAYS} 天", "波动率快/慢窗口", ""),
     ("VOL_FALLBACK_SIGMA",   "follow",  "hidden", "pct",     "immediate", config.VOL_FALLBACK_SIGMA * 100, "默认波动率", ""),
-    ("COPY_STOP_ENABLE",     "follow",  "hidden", "bool",    "immediate", config.COPY_STOP_ENABLE, "扛单止损开关(默认关)", ""),
-    ("COPY_STOP_TP_MULT",    "follow",  "hidden", "x",       "immediate", config.COPY_STOP_TP_MULT, "扛单止损倍数", ""),
-    ("COPY_STOP_MIN_PCT",    "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_MIN_PCT * 100, "止损最小幅度", ""),
-    ("COPY_STOP_MAX_PCT",    "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_MAX_PCT * 100, "止损最大幅度", ""),
+    ("COPY_STOP_ENABLE",     "follow",  "hidden", "bool",    "immediate", config.COPY_STOP_ENABLE, "扛单止损开关", ""),
 ]
 
 _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
