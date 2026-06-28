@@ -224,7 +224,10 @@ function Positions({ confirm, toast, streamOpen }) {
   const [polledOpen, setPolledOpen] = useState(null);
   const [filter, setFilter] = useState("all");
   const [opage, setOpage] = useState(0);             // open positions page (20/page)
+  const [pnlSort, setPnlSort] = useState(null);      // null = 默认(新开在前) | "asc" 浮亏在前 | "desc" 浮盈在前
   const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
+  // 浮动盈亏 表头点击循环:默认(新开在前) → 浮亏在前 → 浮盈在前 → 默认
+  const cyclePnlSort = () => { setPnlSort(d => d === null ? "asc" : d === "asc" ? "desc" : null); setOpage(0); };
   const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
   const load = loadOpen;                              // doClose refreshes the open list after a manual close
   // open positions come from the SSE stream; fallback-poll only when the stream isn't delivering.
@@ -244,7 +247,9 @@ function Positions({ confirm, toast, streamOpen }) {
     filter === "stock" ? p.marketType === "stock" : filter === "long" ? p.side === "long" : p.side === "short");
 
   const OPER = 20;
-  const openRows = open ? filt(open.positions) : [];
+  let openRows = open ? filt(open.positions) : [];   // API delivers newest-first; that's the default order
+  if (pnlSort) openRows = [...openRows].sort((a, b) =>
+    pnlSort === "asc" ? (a.unrealizedPnl - b.unrealizedPnl) : (b.unrealizedPnl - a.unrealizedPnl));
   const opages = Math.max(1, Math.ceil(openRows.length / OPER));
   const opg = Math.min(opage, opages - 1);
   const openItems = openRows.slice(opg * OPER, opg * OPER + OPER);
@@ -262,7 +267,11 @@ function Positions({ confirm, toast, streamOpen }) {
         <table>
           <thead><tr>
             <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th>
-            <th className="num">现价</th><th className="num">浮动盈亏</th><th>钱包</th><th className="num">lag</th><th className="num">爆仓价</th><th></th>
+            <th className="num">现价</th>
+            <th className="num sortable" onClick={cyclePnlSort} title="点击按浮动盈亏排序(浮亏在前 / 浮盈在前 / 默认新开在前)">
+              浮动盈亏 <span className={"sort-ind" + (pnlSort ? " active" : "")}>{pnlSort === "asc" ? "▲" : pnlSort === "desc" ? "▼" : "⇅"}</span>
+            </th>
+            <th>钱包</th><th className="num">lag</th><th className="num">爆仓价</th><th></th>
           </tr></thead>
           <tbody>
             {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
