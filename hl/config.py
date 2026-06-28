@@ -139,17 +139,17 @@ SCORE_SHRINK_K = 10.0  # roi trusted as roi×n/(n+K) for n closed round-trips: a
 SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) — tiny observed drawdown at
 #                        low sample is not real safety, so one extreme ratio can't dominate the score
 
-# 扛单 (disposition-effect) SOFT demote. A realized win rate is only credible up to a point: beyond
-# ~90% it is almost always MANUFACTURED by refusing to realize losses (never closing losers, or
-# holding them far longer than winners — the FARTCOIN/MANTA bag-hold signature). closed-trade metrics
-# (RAR / worst_loss / max_drawdown) are blind to it because the loss is deferred, never a closed
-# round-trip. We penalize the EXCESS win rate + loser-hold skew, amplified by how deep the wallet is
-# currently underwater. SOFT: it sinks the worst offenders toward/below the follow line but never
-# zeroes a genuinely profitable wallet (the realized profit is real). 0 = off. Tunable via dashboard
-# (apply_scanner_params pushes it onto config so scan + regate both honor it).
-DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disp)
-DISP_WR_FREE   = 0.90  # win rate at/below this is "honest"; only the excess above feeds the penalty
-DISP_SKEW_FREE = 2.0   # hold_skew (loser-hold / winner-hold time) at/below this is fine; excess feeds it
+# LOSS-DISCIPLINE demote ("扛单降权"). Measures NOT cutting losses DIRECTLY — never via win rate. The
+# score multiplies by 1/(1+K·disc), where disc = 5×(current losing-bag burden: depth×count×duration) +
+# 1×(historical forced liquidations). A clean fast-cutter (no open loss, never liquidated) is untouched
+# however high its win rate; a wallet sitting on several deep bags for days, or that's been force-closed,
+# is demoted. SOFT: sinks the worst toward/below the follow line, never zeroes a profitable wallet. 0 =
+# off. Tunable via dashboard (apply_scanner_params pushes it onto config so scan + regate both honor it).
+DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disc)
+
+# TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
+# trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).
+TREND_OPEN_MIN = 0.05
 
 # COPY-SIDE STOP — a flat ADVERSE-PRICE cut, our isolated-account tail guard. Cut a copy when price
 # runs COPY_STOP_PCT against entry. Calibrated WIDE on purpose (default 18%) from the twins' winner-MAE

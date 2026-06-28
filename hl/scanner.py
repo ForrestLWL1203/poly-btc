@@ -103,15 +103,22 @@ def _self_liquidations(fills, addr, acct):
     return len(bycoin), (worst / acct * 100 if acct else 0.0)
 
 
-def _margin_snapshot(addr, dexes):
-    """(margin_type, current_account_leverage, worst_open_underwater) aggregated across EVERY dex the
-    wallet traded. clearinghouseState is PER-DEX: the standard call omits builder/stock-perp (xyz:*)
-    positions, so a stock-heavy wallet's underwater would read 0 and inflate Health — we must query
-    each dex (None = standard crypto) and combine. worst_open_underwater = most-negative adverse move
-    ((mark-entry)/entry × side) across ALL open positions, <=0. Returns (None,0,0) if no dex answered;
-    ('flat',0,0) if every queried dex is flat."""
+_DAY_MS = 86400_000.0
+
+
+def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
+    """Current OPEN-POSITION character across EVERY dex the wallet traded — the data that un-blinds the
+    funnel to live positions (a trend trader's winning holds AND a 扛单's losing holds). clearinghouse-
+    State is PER-DEX (standard call omits builder/stock xyz:* positions), so we query each dex and
+    combine. Returns a dict (None if no dex answered):
+      margin_type, cur_leverage, worst_underwater (<=0, most-negative adverse — kept for Health),
+      open_unrealized (total signed $), open_loss_frac / open_win_frac (underwater / winning unrealized
+      ÷ acct), bag_count (# underwater positions), max_bag_days / max_win_days (longest hold, from the
+      in-window open episodes' open_ms). Durations are a LOWER bound for positions opened pre-window."""
+    open_ms = {e["coin"]: e["open_ms"] for e in (open_eps or [])}    # coin -> when the live run started
     types, worst_uw = set(), 0.0
     tot_ntl, acct_val, answered, has_pos = 0.0, 0.0, False, False
+    up_loss, up_win, bag_n, max_bag_d, max_win_d = 0.0, 0.0, 0, 0.0, 0.0
     for dex in dexes:
         cs = rest.clearinghouse_state(addr, dex=dex)             # dex None -> standard perp dex
         if not isinstance(cs, dict):
@@ -119,23 +126,32 @@ def _margin_snapshot(addr, dexes):
         answered = True
         ms = cs.get("marginSummary", {})
         acct_val = max(acct_val, f(ms.get("accountValue")))      # standard dex carries the real equity
-        tot_ntl += f(ms.get("totalNtlPos"))                      # notional sums across dexes
+        tot_ntl += f(ms.get("totalNtlPos"))
         for pp in cs.get("assetPositions", []) or []:
             has_pos = True
             p_ = pp.get("position", {})
+            coin = p_.get("coin")
             types.add((p_.get("leverage") or {}).get("type"))
             szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
+            upnl = f(p_.get("unrealizedPnl"))                    # HL's authoritative current unrealized
+            days = (now_ms - open_ms[coin]) / _DAY_MS if coin in open_ms else 0.0
             if entry and szi:
-                mark = pv / abs(szi)                              # positionValue = |szi| × markPx
-                adverse = (mark - entry) / entry * (1 if szi > 0 else -1)   # <0 = underwater
-                worst_uw = min(worst_uw, adverse)
+                mark = pv / abs(szi)
+                worst_uw = min(worst_uw, (mark - entry) / entry * (1 if szi > 0 else -1))
+            if upnl < 0:
+                up_loss += upnl;  bag_n += 1;  max_bag_d = max(max_bag_d, days)   # a carried LOSS = a bag
+            elif upnl > 0:
+                up_win += upnl;   max_win_d = max(max_win_d, days)               # a carried WIN = trend value
     if not answered:
-        return None, 0.0, 0.0
-    if not has_pos:
-        return "flat", 0.0, 0.0
+        return None
     types.discard(None)
     mt = next(iter(types)) if len(types) == 1 else ("mixed" if types else "flat")
-    return mt, (tot_ntl / acct_val if acct_val else 0.0), worst_uw
+    a = acct or acct_val or 1.0
+    return {"margin_type": mt if has_pos else "flat",
+            "cur_leverage": (tot_ntl / acct_val if acct_val else 0.0),
+            "worst_underwater": worst_uw, "open_unrealized": up_loss + up_win,
+            "open_loss_frac": up_loss / a, "open_win_frac": up_win / a,
+            "bag_count": bag_n, "max_bag_days": max_bag_d, "max_win_days": max_win_d}
 
 
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
@@ -151,7 +167,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # excluded by not being in `universe`. perp_frac = copyable-perp share of fills.
     perp = [x for x in raw if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
     perp_frac = (len(perp) / len(raw)) if raw else 0.0
-    eps = build_episodes(perp)
+    eps, open_eps = build_episodes(perp)
     m = metrics.compute_metrics(perp, eps, now_ms, p.days)
     if m is None:
         m = {"n_fills": len(perp), "n_trades": 0, "window_days": 0, "trades_per_day": 0,
@@ -161,40 +177,50 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
              "last_fill_ms": raw[-1]["time"] if raw else 0, "active_days": 0, "activity_ratio": 0,
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
              "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0,
-             "market_type": None, "crypto_frac": None}
+             "tp_move_pct": 0.0, "market_type": None, "crypto_frac": None}
 
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
     m["acct_value"] = acct_value
     m["roi_equity"] = (m["net_pnl"] / acct_value) if acct_value else 0.0
-    m["worst_loss_pct"] = (m["worst_loss"] / acct_value) if acct_value else 0.0  # loss discipline
+    m["worst_loss_pct"] = (m["worst_loss"] / acct_value) if acct_value else 0.0  # loss discipline (realized)
     m["times_active"] = (prior or {}).get("times_active", 0)
     m["lev_proxy"] = (m["avg_notional"] / acct_value) if acct_value else 0.0  # hist. eff. leverage
     m["liq_count"], m["liq_worst_pct"] = _self_liquidations(raw, addr, acct_value)
-    m["open_underwater"] = 0.0
-
-    if m["n_trades"] == 0:
-        # split the old catch-all 'no_perp_trades' so the funnel explains itself: genuinely no
-        # copyable fills, vs. has fills but no flat->flat round-trip in-window (long-hold / inventory),
-        # vs. truncated at the page cap (too many slices to trust the episode reconstruction).
-        ok = False
-        if not perp:
-            reason = "no_copyable_perp_fills"
-        elif hit_cap:
-            reason = "hit_page_cap"
-        else:
-            reason = "no_closed_episode"
-    else:
-        ok, reason = metrics.gates(m, now_ms, p)
-    m["times_active"] += 1 if ok else 0
-
+    # open-position character defaults (filled by the live snapshot in stage B). roi_total starts as the
+    # realized-only roi and is upgraded to realized+unrealized once we read the wallet's live positions.
+    m.update(open_underwater=0.0, open_unrealized=0.0, open_loss_frac=0.0, open_win_frac=0.0,
+             bag_count=0, max_bag_days=0.0, max_win_days=0.0, roi_total=m["roi_equity"])
     m["margin_type"] = (prior or {}).get("margin_type")
     m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
+
+    # STAGE A — cheap structural copyability (NO api). Front-of-funnel rejects (MM/HFT/grid/spot) that do
+    # NOT kill a genuine trend trader. n_trades==0 (pure-hold) skips the episode-based checks → judged on
+    # live positions in stage B. (Old behaviour auto-rejected n_trades==0 as 'no_closed_episode'.)
+    if not perp:
+        ok, reason = False, "no_copyable_perp_fills"
+    elif hit_cap:
+        ok, reason = False, "hit_page_cap"
+    else:
+        ok, reason = metrics.gates_structural(m, p)
+
+    # STAGE B — fetch the LIVE open-position snapshot (un-blinds the funnel to held positions), fold in
+    # realized+unrealized roi, then re-judge: held position = ACTIVE, 扛单 bags drag roi_total negative,
+    # trend holders kept. Only structural survivors pay the extra clearinghouse call.
     if ok:
         dexes = {(c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}}
-        mt, cl, uw = _margin_snapshot(addr, dexes)   # per-dex: standard + each builder dex traded
-        if mt is not None:
-            m["margin_type"], m["cur_leverage"], m["open_underwater"] = mt, cl, uw
+        snap = _open_snapshot(addr, dexes, open_eps, now_ms, acct_value)
+        if snap is not None:
+            m["margin_type"] = snap["margin_type"]
+            m["cur_leverage"] = snap["cur_leverage"]
+            m["open_underwater"] = snap["worst_underwater"]
+            for k in ("open_unrealized", "open_loss_frac", "open_win_frac",
+                      "bag_count", "max_bag_days", "max_win_days"):
+                m[k] = snap[k]
+            m["roi_total"] = ((m["net_pnl"] + snap["open_unrealized"]) / acct_value) if acct_value else 0.0
+        ok, reason = metrics.gates_state(m, now_ms, p)
+    m["times_active"] += 1 if ok else 0
+
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
     # new wallet with strong recent performance). Survival now leans on times_active (our own observed
     # cross-scan persistence), not age. Keep any age a prior run already had; never fetch a new one.
@@ -230,7 +256,8 @@ def refresh_watchlist(db, stamp) -> int:
     rows = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
         "p.n_trades, p.trades_per_day, p.taker_frac_notl, p.median_hold_s, p.win_rate, p.max_drawdown, "
-        "p.age_days, p.top_coin, p.market_type, p.tp_move_pct, p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
+        "p.age_days, p.top_coin, p.market_type, p.tp_move_pct, p.roi_total, p.open_loss_frac, p.open_win_frac, "
+        "p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
         "p.times_active, p.first_added, p.last_fill_ms "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
         "WHERE p.status='active' ORDER BY p.score DESC").fetchall()
@@ -238,8 +265,9 @@ def refresh_watchlist(db, stamp) -> int:
         db.execute(
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
-            "market_type,tp_move_pct,perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
+            "market_type,tp_move_pct,roi_total,open_loss_frac,open_win_frac,"
+            "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r[0], stamp))
     db.commit()
@@ -264,28 +292,28 @@ def regate(db, p) -> int:
     rows = db.execute(
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
-        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,reason "
+        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
+        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,reason "
         "FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
-         ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, mhold, wr, old_reason) = r
+         ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, mhold, wr,
+         roi_tot, oloss, owin, bagn, bagd, liqc, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
              "liq_worst_pct": liqw or 0.0, "active_days": ad or 0, "activity_ratio": ar or 0.0,
              "median_eps": meps or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
-             "win_rate": wr or 0.0,  # 扛单 disposition penalty in score()
-             "max_adds_per_ep": mxadds or 0, "worst_loss_pct": wloss or 0.0}  # grid_dca / blowup_loss / hft gates
-        if m["n_trades"] == 0:
-            # no fills/episode info stored to re-derive the split -> keep the refined reason the scan
-            # already recorded; map the legacy catch-all to the closest new bucket.
-            ok = False
-            reason = old_reason if old_reason in (
-                "no_copyable_perp_fills", "hit_page_cap", "no_closed_episode") else "no_closed_episode"
-        else:
-            ok, reason = metrics.gates(m, now, p)
+             "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "worst_loss_pct": wloss or 0.0,
+             # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
+             "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
+             "open_loss_frac": oloss or 0.0, "open_win_frac": owin or 0.0,
+             "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0}
+        ok, reason = metrics.gates_structural(m, p)
+        if ok:
+            ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
         status = "active" if ok else ("retired" if old == "active" else "rejected")
         score = metrics.score(m) if ok else 0.0
         db.execute("UPDATE profile SET status=?,reason=?,score=? WHERE addr=?", (status, reason, score, addr))

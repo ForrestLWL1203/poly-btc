@@ -113,49 +113,60 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
     return m
 
 
-def gates(m: dict, now_ms: int, p) -> tuple:
-    """ELIGIBILITY — can we follow this wallet at all? Minimal binary checks; everything about HOW
-    GOOD it is lives in score(). `p` carries the (few, interpretable) gate thresholds."""
+def gates_structural(m: dict, p) -> tuple:
+    """COPYABILITY structure — checks that need only the CLOSED-trade record, no live-position/API data.
+    Run BEFORE fetching the open-position snapshot (cheap reject of MM/HFT/grid). A genuine trend trader
+    passes all of these. Episode-based checks are skipped when there are no closed trades (n_trades==0,
+    e.g. a pure-hold trend trader) — judged on open positions in gates_state instead."""
     if m["perp_frac"] < p.min_perp:
         return False, "spot_dominant"                          # not copyable enough
-    if (now_ms - m["last_fill_ms"]) / DAY_MS > p.inactive_days:
-        return False, "inactive"                               # stopped trading / rotated away
-    if m["net_pnl"] <= 0:
-        return False, "not_profitable"                         # net realized loss over the window
-    if m["median_eps"] > p.max_daily_eps:
-        return False, "bot_frequency"                          # mid-freq OK; HFT/MM excluded
-    # HFT switch: sub-minute-hold scalpers (e.g. 2s round-trips) are PROFITABLE but UNcopyable at our
-    # ~seconds REST latency (the trade is closed before we detect it). Excluded while we lack sub-second
-    # execution; flip EXCLUDE_HFT off once a high-freq feed (HyperRPC WS) makes them copyable.
-    if getattr(p, "exclude_hft", True) and m.get("median_hold_s") is not None \
-            and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
-        return False, "hft_uncopyable"
-    if m["activity_ratio"] < p.min_activity:                   # MINIMAL floor (~3 active days) — only
-        return False, "irregular"                              # rejects one-shot noise; genuine low-freq
-    #                                                            traders pass and are ranked down by the
-    #                                                            evidence-shrink in score(), not killed here
-    if (m.get("max_adds_per_ep") or 0) > p.grid_max_adds:      # grid/DCA: one round-trip stuffed with
-        return False, "grid_dca"                               # dozens of laddered scale-ins — our
-    #                                                            capped-add model can't replicate it (we
-    #                                                            get only the worst few entries) -> exclude
-    if (m.get("worst_loss_pct") or 0) < -p.max_single_loss:    # one round-trip lost > this % of equity
-        return False, "blowup_loss"                            # = 扛单到爆 / no stop-discipline; not the
-    #                                                            cut-losses-small wallet we want to copy
+    if (m.get("n_trades") or 0) > 0:                           # structure from closed round-trips
+        if m["median_eps"] > p.max_daily_eps:
+            return False, "bot_frequency"                      # mid-freq OK; HFT/MM excluded
+        # HFT: sub-minute-hold scalpers are PROFITABLE but UNcopyable at our ~seconds REST latency.
+        if getattr(p, "exclude_hft", True) and m.get("median_hold_s") is not None \
+                and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
+            return False, "hft_uncopyable"
+        if (m.get("max_adds_per_ep") or 0) > p.grid_max_adds:  # grid/DCA: one round-trip stuffed with
+            return False, "grid_dca"                           # dozens of laddered scale-ins — uncopyable
+    return True, "ok"
+
+
+def gates_state(m: dict, now_ms: int, p) -> tuple:
+    """STATE eligibility — uses LIVE positions (open_*) + realized+unrealized performance. This is where
+    a held-position trader is treated as ACTIVE (not 'inactive'), profit is judged on realized+unrealized
+    (so a 扛单 carrying deep bags reads as not-profitable while a trend trader's winning holds count),
+    and a low-frequency wallet is kept when it holds a real WINNING position."""
+    has_open = (m.get("bag_count") or 0) > 0 or (m.get("open_win_frac") or 0.0) > 1e-9
+    trend = (m.get("open_win_frac") or 0.0) >= config.TREND_OPEN_MIN     # a real winning hold = trend value
+    if (now_ms - m["last_fill_ms"]) / DAY_MS > p.inactive_days and not has_open:
+        return False, "inactive"                               # no recent fills AND no live position
+    if (m.get("roi_total") if m.get("roi_total") is not None else m.get("net_pnl", 0)) <= 0:
+        return False, "not_profitable"                         # realized + UNREALIZED net loss (catches 扛单)
+    if m["activity_ratio"] < p.min_activity and not trend:     # low-freq noise — but a genuine trend
+        return False, "irregular"                              # holder (winning open) is exempt
+    if (m.get("worst_loss_pct") or 0) < -p.max_single_loss:    # one CLOSED round-trip lost > this % equity
+        return False, "blowup_loss"                            # = 扛到爆并已实现; the cut-losses gate
     return True, "ok"
 
 
 def score(m: dict) -> float:
-    """v3 continuous quality. SCORE = Quality × Survival × Health.
-      Quality = (evidence-shrunk, capped) risk-adjusted return × frequency-scaled day-consistency
-      Health  = current-snapshot open-underwater depth
+    """v4 continuous quality. SCORE = Quality × Survival × Discipline.
+      Quality    = (evidence-shrunk, capped) risk-adjusted return on REALIZED+UNREALIZED roi
+                   × frequency-scaled day-consistency
+      Discipline = does the wallet CUT losses? penalizes currently-carried losing bags (depth×count×
+                   duration) + historical forced liquidations. (Replaces the old win-rate proxy.)
     Shape constants live in config (interpretable, UI-tunable — not arbitrary cutoffs)."""
     dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0)
-    # EVIDENCE-aware risk-adjusted return: (1) shrink roi toward 0 by sample size — roi×n/(n+K) — so a
-    # lucky few-trade +100% doesn't read as edge; (2) CAP the ratio so a tiny low-sample drawdown can't
-    # produce an unbounded score. This buries low-evidence wallets below the follow line (still observed,
-    # promoted as round-trips accumulate) WITHOUT a hard activity gate that would kill low-freq traders.
-    n = m.get("n_trades") or 0
-    roi_eff = max(0.0, m["roi_equity"]) * n / (n + config.SCORE_SHRINK_K)
+    # EVIDENCE-aware risk-adjusted return on REALIZED+UNREALIZED roi (roi_total): a trend trader's
+    # winning HOLDS count toward return, a 扛单's losing holds drag it down. n_eff counts live positions
+    # as evidence too, so a low-frequency holder isn't shrunk to nothing for having few CLOSED trades.
+    roi = m.get("roi_total")
+    if roi is None:
+        roi = m.get("roi_equity", 0.0)
+    n_eff = (m.get("n_trades") or 0) + (m.get("bag_count") or 0) \
+        + (1 if (m.get("open_win_frac") or 0.0) > 1e-9 else 0)
+    roi_eff = max(0.0, roi) * n_eff / (n_eff + config.SCORE_SHRINK_K)
     rar = min(config.SCORE_RAR_CAP, roi_eff / (dd_eq + 0.05))  # risk-adjusted return (strength)
     D = m["active_days"]
     w = D / (D + config.SCORE_K)                               # confidence in the daily series
@@ -163,40 +174,21 @@ def score(m: dict) -> float:
     consistency = pos ** (w * config.SCORE_GAMMA)             # high-freq must be green MOST days; low-freq lenient
     quality = rar * consistency
 
-    # survival = a SMALL cross-scan persistence bonus only. times_active (how many of OUR scans this
-    # wallet has stayed eligible) is a mild DURABILITY REWARD, not a penalty: brand-new-to-us = 0.9,
-    # proven-across-10-scans = 1.0 — so a strong recent performer isn't crushed for being newly found.
-    # NO self-liquidation penalty: a blow-up's damage is ALREADY in net_pnl / roi_equity (RAR) /
-    # max_drawdown / hold_skew (double-counting it here was redundant), it's rare (74% of actives have
-    # zero), and on isolated per-trade copy a target's account blow-up doesn't transfer to us anyway.
-    # liq_count/liq_worst_pct stay in the profile as a human-readable flag, out of the score.
+    # survival = a SMALL cross-scan persistence bonus (brand-new=0.9, proven-across-10-scans=1.0).
     survival = 0.9 + 0.1 * min(m.get("times_active", 1), 10) / 10
 
-    # NO FreqFit factor: frequency is purely a GATE concern (inactive at the low end, >30 round-trips/
-    # day = bot at the high end). Inside that allowed band we want low-freq swing-holders and mid-freq
-    # scalpers EQUALLY — discounting low-freq here would fight our own "copy good traders of any
-    # cadence" thesis. Quality = returns × consistency × risk, NOT how often they trade.
+    # LOSS-DISCIPLINE penalty — measures NOT cutting losses DIRECTLY, never via win rate (a clean
+    # fast-cutter with a 95% win rate and no open loss is untouched). Two evidences:
+    #   • bag = how bad the CURRENTLY carried LOSING positions are — total depth (open_loss_frac) amplified
+    #     by how MANY (bag_count) and how LONG (max_bag_days). One shallow brief dip ≈ 0; several deep bags
+    #     held for days = unambiguous 扛单 (depth×breadth×duration, not single-snapshot noise).
+    #   • liq = historical FORCED liquidations (the system closed them = demonstrably didn't stop loss).
+    # WINNING long holds are NOT here (open_loss_frac counts only negative unrealized) — a trend trader
+    # holding deep green is rewarded via roi_total above, not punished here.
+    bag_depth = abs(min(0.0, m.get("open_loss_frac") or 0.0))
+    bag = bag_depth * (1.0 + 0.5 * max(0, (m.get("bag_count") or 0) - 1)) \
+        * (1.0 + min((m.get("max_bag_days") or 0.0) / 3.0, 1.0))
+    disc = 5.0 * bag + 1.0 * (m.get("liq_count") or 0)
+    discipline = 1.0 / (1.0 + config.DISP_PENALTY_K * disc)
 
-    # Health = current loss-DEPTH only. Two factors were removed because their lens was wrong:
-    #  • hold_skew (loser-hold / winner-hold TIME): 扛单 risk is about how DEEP a loss you sit on, not
-    #    how long — cutting winners fast is GOOD discipline, and holding a few-% dip until it recovers
-    #    is fine. Depth is already captured by RAR (roi/max_drawdown, realized) + open_underwater below.
-    #  • profit_conc (one day's share of gross profit): a big day on top of otherwise-green days is a
-    #    GREAT wallet; the bad pattern (one big day, bleeding the rest) is just a LOW pos_day_ratio,
-    #    already crushed by `consistency`. profit_conc punished both alike — it mis-fired.
-    # Both stay in the profile as display-only metrics, out of the score.
-    uw = abs(min(0.0, m.get("open_underwater") or 0.0))        # current worst open underwater (fraction)
-    health = 1.0 - _clip((uw - config.UW_TOL) / max(config.UW_REF - config.UW_TOL, 1e-6), 0.0, 1.0)
-
-    # 扛单 SOFT demote — see config.DISP_*. A realized win rate above DISP_WR_FREE is usually
-    # MANUFACTURED by deferring losses (the bag-hold signature closed-trade metrics can't see, since
-    # the loss never becomes a closed round-trip); hold_skew above DISP_SKEW_FREE catches the "holds
-    # losers far longer than winners" variant. We penalize the EXCESS of each, amplified by current
-    # open-underwater depth (a wallet sitting on no bag right now gets the benefit of the doubt). Soft:
-    # demotes toward/below the follow line but never zeroes a profitable wallet. 0 disables.
-    wr_excess = max(0.0, (m.get("win_rate") or 0.0) - config.DISP_WR_FREE)
-    skew_excess = max(0.0, (m.get("hold_skew") or 0.0) - config.DISP_SKEW_FREE)
-    disp = (10.0 * wr_excess + skew_excess) * (1.0 + 4.0 * uw)
-    disp_penalty = 1.0 / (1.0 + config.DISP_PENALTY_K * disp)
-
-    return quality * survival * health * disp_penalty
+    return quality * survival * discipline

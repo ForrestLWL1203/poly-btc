@@ -35,19 +35,28 @@ def _finalize(ep):
     return ep
 
 
-def build_episodes(fills: list) -> list:
+def build_episodes(fills: list):
+    """Reconstruct round-trips from fills. Returns (closed, open):
+      closed = finalized flat->flat (or flip) episodes with realized PnL (the historical record).
+      open   = the still-held position per coin at the end of the window (entry run not yet closed) —
+               {coin, side, open_ms, open_px, cur_size}. These were previously DROPPED, which made the
+               whole pipeline blind to a wallet's live positions (a trend trader's winning holds AND a
+               扛单's losing holds). Caller marks them to current price via clearinghouseState.
+    """
     fills = sorted(fills, key=lambda x: x["time"])
     by_coin: dict = {}
     for x in fills:
         by_coin.setdefault(x["coin"], []).append(x)
-    episodes = []
+    episodes, open_eps = [], []
     for coin, fs in by_coin.items():
         ep = None
+        cur_pos = 0.0                                   # signed position after the latest fill (for open size)
         for x in fs:
             sz = f(x["sz"])
             signed = sz if x["side"] == "B" else -sz
             pos0 = f(x.get("startPosition"))
             pos1 = pos0 + signed
+            cur_pos = pos1
             px = f(x["px"])
             # Open an episode whenever a position is involved and we aren't tracking one — covers a
             # normal flat->open AND a position already open before the window (pos0 non-flat), incl. the
@@ -76,4 +85,7 @@ def build_episodes(fills: list) -> list:
                     ep["n_fills"] = 1                    # the flip fill opened it (its closedPnl already
                     ep["max_notl"] = abs(pos1) * px      # counted to the old side; don't double-count)
                     ep["_grow_oids"].add(x.get("oid"))
-    return episodes
+        if ep is not None and abs(cur_pos) >= config.FLAT:   # window ended with the position STILL OPEN
+            open_eps.append({"coin": coin, "side": ep["side"], "open_ms": ep["open_ms"],
+                             "open_px": ep["open_px"], "cur_size": abs(cur_pos)})
+    return episodes, open_eps

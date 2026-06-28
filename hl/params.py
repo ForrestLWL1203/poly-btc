@@ -32,7 +32,7 @@ PARAM_SPEC = [
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
         "最长不活跃天数", "超过此天数没交易=失活淘汰。调高=容忍更久没动的;调低=只留近期活跃的"),
     ("DISP_PENALTY_K",       "scanner", "yellow", "float",   "rescan", config.DISP_PENALTY_K,
-        "扛单降权强度", "对'高胜率却靠死扛不止损'的钱包打分降权(>90%胜率+死扛亏单=可疑)。调高=这类钱包更易跌出跟单线、候选更干净;调低/0=不降权,只看已实现盈利"),
+        "扛单降权强度", "直接量'不止损'行为:当前扛着的浮亏单(几笔×多深×多久)+ 历史被强平次数。止损干脆的钱包(没浮亏bag、没被强平)不受影响,跟胜率无关。调高=扛单狗更易跌出跟单线;调低/0=不降权"),
     # —— hidden 采集底层(评分形状/细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_MAX_TURNOVER", "scanner", "hidden", "x",       "rescan", config.HARVEST_MAX_TURNOVER, "日换手上限", ""),
     ("HARVEST_WEEK_VLM_MIN", "scanner", "hidden", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN, "7天成交量下限", ""),
