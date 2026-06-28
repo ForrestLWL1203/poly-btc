@@ -31,6 +31,7 @@ const api = {
 /* ----------------------------------------------------------------- format */
 const fUsd = (v, d = 0) => (v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 const fSign = (v, d = 0) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
+const fTime = (ep) => (ep == null ? "—" : new Date(ep * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }));  // epoch(UTC) -> UTC+8
 const fPct = (v, d = 1) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(d) + "%");
 const fNum = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
 // price formatter with magnitude-adaptive decimals (BTC 60528 vs S 0.02221 vs FARTCOIN 0.1317)
@@ -392,15 +393,16 @@ function History() {
           </div>
           <div className="tbl-wrap">
             <table>
-              <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>结果</th><th>钱包</th></tr></thead>
+              <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>结果</th><th>钱包</th></tr></thead>
               <tbody>
-                {rows.length === 0 && <tr><td colSpan="6" className="empty">暂无</td></tr>}
+                {rows.length === 0 && <tr><td colSpan="7" className="empty">暂无</td></tr>}
                 {items.map(p => (
                   <tr key={p.id}>
                     <td><b>{p.coin}</b></td>
                     <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                     <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
                     <td className="num">{fDur(p.durationSec)}</td>
+                    <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(p.closedAt)}</td>
                     <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
                     <td className="addr">{short(p.wallet)} {p.walletRank != null
                       ? <span className="rankbadge">#{p.walletRank}</span>
@@ -648,7 +650,7 @@ function Discovery({ scanning, startRescan, confirm }) {
 
   const doRescan = () => confirm({
     title: "触发全量重采", danger: true, ok: "开始重采",
-    body: "将重新拉取排行榜并重建被跟名单(约 20 分钟,期间页面锁定)。占用资源,确认执行?",
+    body: "将重新拉取排行榜并重建被跟名单(慢速约 2 小时,期间按钮锁定)。全程让跟单优先、不抢其速率。确认执行?",
     onConfirm: startRescan,
   });
 
@@ -658,10 +660,13 @@ function Discovery({ scanning, startRescan, confirm }) {
   const scMode = sc.mode, scColor = scannerColor(scMode, sc.stale);
   const rolling = det.cycle_total != null;                 // preview sim populates a rolling sweep
   const cyclePct = det.cycle_total ? Math.round(det.cycle_pos / det.cycle_total * 100) : 0;
+  const busy = scMode === "scanning" || scanning;          // a scan (manual OR 24h auto) is running -> lock the button
+  const lastScanH = d.lastScanAt ? (Date.now() - new Date(d.lastScanAt).getTime()) / 3.6e6 : 1e9;
+  const overdue = lastScanH > 26;                          // auto cadence is 24h -> >26h means the daily scan is stuck
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}><h2>采集进程 · 实时</h2>
-        <button className="btn btn-accent" onClick={doRescan}><Ico d={IC.discovery} /> 触发全量重采</button></div>
+        <button className="btn btn-accent" disabled={busy} onClick={doRescan}><Ico d={IC.discovery} /> {busy ? "采集进行中…" : "触发全量重采"}</button></div>
       <div className="card">
         <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
           <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: scColor }}>
@@ -670,8 +675,8 @@ function Discovery({ scanning, startRescan, confirm }) {
           {rolling && <div><div className="muted">本轮进度</div><div className="mono" style={{ fontSize: 15 }}>{det.cycle_pos} / {det.cycle_total} <span className="muted">({cyclePct}%)</span></div></div>}
           {rolling && <div><div className="muted">采集节奏</div><div className="mono" style={{ fontSize: 15 }}>每 ~{det.interval_s ?? "—"}s / 个</div></div>}
           {rolling && <div><div className="muted">最近更新</div><div className="mono" style={{ fontSize: 15 }}>{short(det.last_addr)} · {agoText(det.last_at)}</div></div>}
-          <div><div className="muted">上次扫描</div><div className="mono" style={{ fontSize: 15 }}>{agoText(d.lastScanAt)}</div></div>
-          {!rolling && <div><div className="muted">采集周期</div><div className="mono" style={{ fontSize: 15 }}>每 6h 自动</div></div>}
+          <div><div className="muted">上次扫描</div><div className="mono" style={{ fontSize: 15, color: overdue ? "var(--red-l)" : undefined }}>{agoText(d.lastScanAt)}{overdue ? " ⚠超期" : ""}</div></div>
+          {!rolling && <div><div className="muted">采集周期</div><div className="mono" style={{ fontSize: 15 }}>每 24h 自动</div></div>}
           <div><div className="muted">被跟名单</div><div className="mono" style={{ fontSize: 15 }}>{fn.watchlist} 钱包</div></div>
           <div><div className="muted">心跳</div><div className="mono" style={{ fontSize: 15, color: (sc.stale && scMode !== "idle") ? "var(--red-l)" : "var(--green-l)" }}>{agoText(sc.heartbeatAt)}</div></div>
         </div>

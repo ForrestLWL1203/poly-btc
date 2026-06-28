@@ -354,6 +354,7 @@ def ep_positions(db, qs):
             pnl = r["realized_pnl"] or 0.0
             out.append({"id": f"cls_{r['pos_id']}", "coin": r["coin"], "side": r["side"],
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
+                        "closedAt": c,   # epoch sec (UTC); frontend renders in UTC+8
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
                         "walletRank": r["wrank"]})   # wrank None = 已脱榜
         # all-time stats over the FULL closed set (not just the recent-100 list above), honoring any filter
