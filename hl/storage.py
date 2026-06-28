@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS profile (
     worst_loss_pct   REAL DEFAULT 0,      -- loss discipline: worst single round-trip loss / acct (<=0)
     market_type      TEXT,                -- crypto / stock / mixed (by traded-notional crypto vs xyz: split)
     crypto_frac      REAL DEFAULT 1,      -- share of traded notional on crypto perps (1=pure crypto, 0=pure stock)
+    tp_move_pct      REAL DEFAULT 0,      -- take-profit signature: median favorable price move on wins (copy-stop base)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
     age_days       REAL,
     top_coin       TEXT,
     market_type    TEXT,                 -- crypto / stock / mixed (denormalized from profile)
+    tp_move_pct    REAL DEFAULT 0,       -- take-profit signature (median favorable move on wins); copy-stop base
     perp_frac      REAL,
     lev_proxy      REAL,
     margin_type    TEXT,
@@ -148,9 +150,9 @@ PROFILE_COLS = (
     "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
-    "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,"
+    "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 47 columns
+)  # 48 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -220,9 +222,10 @@ CREATE TABLE IF NOT EXISTS copy_position (
     leverage REAL, margin REAL, notional REAL,    -- our sizing (margin = 2% of available at open)
     entry_px REAL, size REAL, rem_size REAL,       -- our fill px, position size (coin), remaining
     liq_px REAL,                                   -- isolated liquidation price (loss = margin)
+    stop_px REAL,                                  -- copy-side stop price (target-TP-relative); cut before liq
     realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
     add_count INTEGER DEFAULT 0,                   -- follow-on adds taken (capped at MAX_ADDS)
-    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
+    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, was_stopped INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
     opened_at TEXT, closed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cp_status ON copy_position(status);
@@ -331,6 +334,11 @@ _MIGRATIONS = (
     # the next scan repopulates these).
     "ALTER TABLE watchlist ADD COLUMN worst_single_loss_pct REAL",
     "ALTER TABLE watchlist ADD COLUMN grid REAL",
+    # 扛单 copy-side stop + take-profit signature (non-destructive on existing DBs).
+    "ALTER TABLE profile ADD COLUMN tp_move_pct REAL DEFAULT 0",
+    "ALTER TABLE watchlist ADD COLUMN tp_move_pct REAL DEFAULT 0",
+    "ALTER TABLE copy_position ADD COLUMN stop_px REAL",
+    "ALTER TABLE copy_position ADD COLUMN was_stopped INTEGER DEFAULT 0",
 )
 
 

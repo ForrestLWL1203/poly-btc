@@ -31,6 +31,8 @@ PARAM_SPEC = [
         "排除高频交易", "过滤持仓数秒的高频/量化盘(我们延迟跟不上)。开=只留人能跟的;关=高频也进候选"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
         "最长不活跃天数", "超过此天数没交易=失活淘汰。调高=容忍更久没动的;调低=只留近期活跃的"),
+    ("DISP_PENALTY_K",       "scanner", "yellow", "float",   "rescan", config.DISP_PENALTY_K,
+        "扛单降权强度", "对'高胜率却靠死扛不止损'的钱包打分降权(>90%胜率+死扛亏单=可疑)。调高=这类钱包更易跌出跟单线、候选更干净;调低/0=不降权,只看已实现盈利"),
     # —— hidden 采集底层(评分形状/细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_MAX_TURNOVER", "scanner", "hidden", "x",       "rescan", config.HARVEST_MAX_TURNOVER, "日换手上限", ""),
     ("HARVEST_WEEK_VLM_MIN", "scanner", "hidden", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN, "7天成交量下限", ""),
@@ -75,6 +77,10 @@ PARAM_SPEC = [
     ("VOL_FAST_DAYS",        "follow",  "hidden", "display", "immediate",
         f"{config.VOL_FAST_DAYS} / {config.VOL_SLOW_DAYS} 天", "波动率快/慢窗口", ""),
     ("VOL_FALLBACK_SIGMA",   "follow",  "hidden", "pct",     "immediate", config.VOL_FALLBACK_SIGMA * 100, "默认波动率", ""),
+    ("COPY_STOP_ENABLE",     "follow",  "hidden", "bool",    "immediate", config.COPY_STOP_ENABLE, "扛单止损开关(默认关)", ""),
+    ("COPY_STOP_TP_MULT",    "follow",  "hidden", "x",       "immediate", config.COPY_STOP_TP_MULT, "扛单止损倍数", ""),
+    ("COPY_STOP_MIN_PCT",    "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_MIN_PCT * 100, "止损最小幅度", ""),
+    ("COPY_STOP_MAX_PCT",    "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_MAX_PCT * 100, "止损最大幅度", ""),
 ]
 
 _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
@@ -190,6 +196,10 @@ def apply_scanner_params(db, ns):
     for key, attr in SCANNER_ARG_MAP.items():
         if vals.get(key) is not None:
             setattr(ns, attr, vals[key])
+    # score-shape constants live in config (score() reads them directly, not via ns) — push the few
+    # UI-tunable ones onto config so a scan/regate honors the dashboard value.
+    if vals.get("DISP_PENALTY_K") is not None:
+        config.DISP_PENALTY_K = vals["DISP_PENALTY_K"]
     return ns
 
 

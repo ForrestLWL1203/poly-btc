@@ -230,7 +230,7 @@ def refresh_watchlist(db, stamp) -> int:
     rows = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
         "p.n_trades, p.trades_per_day, p.taker_frac_notl, p.median_hold_s, p.win_rate, p.max_drawdown, "
-        "p.age_days, p.top_coin, p.market_type, p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
+        "p.age_days, p.top_coin, p.market_type, p.tp_move_pct, p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
         "p.times_active, p.first_added, p.last_fill_ms "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
         "WHERE p.status='active' ORDER BY p.score DESC").fetchall()
@@ -238,8 +238,8 @@ def refresh_watchlist(db, stamp) -> int:
         db.execute(
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
-            "market_type,perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
+            "market_type,tp_move_pct,perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r[0], stamp))
     db.commit()
@@ -264,18 +264,19 @@ def regate(db, p) -> int:
     rows = db.execute(
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
-        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,median_hold_s,reason "
+        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,reason "
         "FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
-         ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, mhold, old_reason) = r
+         ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, mhold, wr, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
              "liq_worst_pct": liqw or 0.0, "active_days": ad or 0, "activity_ratio": ar or 0.0,
              "median_eps": meps or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
+             "win_rate": wr or 0.0,  # 扛单 disposition penalty in score()
              "max_adds_per_ep": mxadds or 0, "worst_loss_pct": wloss or 0.0}  # grid_dca / blowup_loss / hft gates
         if m["n_trades"] == 0:
             # no fills/episode info stored to re-derive the split -> keep the refined reason the scan

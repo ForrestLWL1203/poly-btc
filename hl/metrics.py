@@ -103,6 +103,11 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         # -> worst_loss_pct. Small = cuts losses promptly (followable even at 50% win); large = holds
         # one loser to disaster (扛单到爆) — the thing to gate, distinct from cumulative max_drawdown.
         "worst_loss": min((e["net_pnl"] for e in eps if e["net_pnl"] < 0), default=0.0),
+        # TAKE-PROFIT SIGNATURE: median favorable price move on WINNING round-trips (|close-open|/open).
+        # This is the target's own thesis horizon — a tight-scalp wallet ~1.5-2%, a trend wallet much
+        # wider. The copy-side stop sets our cut at a MULTIPLE of this in the adverse direction.
+        "tp_move_pct": statistics.median([abs(e["close_px"] - e["open_px"]) / e["open_px"]
+                                          for e in eps if e["net_pnl"] > 0 and e.get("open_px")] or [0.0]),
     }
     m.update(_daily(eps, lookback_days))
     return m
@@ -183,4 +188,15 @@ def score(m: dict) -> float:
     uw = abs(min(0.0, m.get("open_underwater") or 0.0))        # current worst open underwater (fraction)
     health = 1.0 - _clip((uw - config.UW_TOL) / max(config.UW_REF - config.UW_TOL, 1e-6), 0.0, 1.0)
 
-    return quality * survival * health
+    # 扛单 SOFT demote — see config.DISP_*. A realized win rate above DISP_WR_FREE is usually
+    # MANUFACTURED by deferring losses (the bag-hold signature closed-trade metrics can't see, since
+    # the loss never becomes a closed round-trip); hold_skew above DISP_SKEW_FREE catches the "holds
+    # losers far longer than winners" variant. We penalize the EXCESS of each, amplified by current
+    # open-underwater depth (a wallet sitting on no bag right now gets the benefit of the doubt). Soft:
+    # demotes toward/below the follow line but never zeroes a profitable wallet. 0 disables.
+    wr_excess = max(0.0, (m.get("win_rate") or 0.0) - config.DISP_WR_FREE)
+    skew_excess = max(0.0, (m.get("hold_skew") or 0.0) - config.DISP_SKEW_FREE)
+    disp = (10.0 * wr_excess + skew_excess) * (1.0 + 4.0 * uw)
+    disp_penalty = 1.0 / (1.0 + config.DISP_PENALTY_K * disp)
+
+    return quality * survival * health * disp_penalty

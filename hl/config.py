@@ -139,6 +139,35 @@ SCORE_SHRINK_K = 10.0  # roi trusted as roi×n/(n+K) for n closed round-trips: a
 SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) — tiny observed drawdown at
 #                        low sample is not real safety, so one extreme ratio can't dominate the score
 
+# 扛单 (disposition-effect) SOFT demote. A realized win rate is only credible up to a point: beyond
+# ~90% it is almost always MANUFACTURED by refusing to realize losses (never closing losers, or
+# holding them far longer than winners — the FARTCOIN/MANTA bag-hold signature). closed-trade metrics
+# (RAR / worst_loss / max_drawdown) are blind to it because the loss is deferred, never a closed
+# round-trip. We penalize the EXCESS win rate + loser-hold skew, amplified by how deep the wallet is
+# currently underwater. SOFT: it sinks the worst offenders toward/below the follow line but never
+# zeroes a genuinely profitable wallet (the realized profit is real). 0 = off. Tunable via dashboard
+# (apply_scanner_params pushes it onto config so scan + regate both honor it).
+DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disp)
+DISP_WR_FREE   = 0.90  # win rate at/below this is "honest"; only the excess above feeds the penalty
+DISP_SKEW_FREE = 2.0   # hold_skew (loser-hold / winner-hold time) at/below this is fine; excess feeds it
+
+# COPY-SIDE STOP — OFF BY DEFAULT (built + tunable, but contraindicated for our current targets).
+# Mechanism: cut at stop = STOP_TP_MULT × the target's OWN median take-profit move, clamped to
+# [MIN,MAX], so a tight-scalp wallet gets a tight stop and a wide-TP trend wallet a wide one.
+# WHY OFF: empirical winner-MAE (5m candles, the twins #16/#4) shows their EDGE IS bag-holding through
+# deep heat — winners take a MEDIAN 1.7% adverse but p75≈4.8%, p90≈12%, p95≈17% (some revert from
+# 20-53% underwater and STILL close green; ~33% of winners dip >3%, ~17% dip >8%). Any stop tight
+# enough to cap the MANTA-type tail (~21%) also knifes a large share of eventual winners → net loss of
+# the very edge we copy. The MANTA liquidation was a LEVERAGE bug (our 6x vs the master's 3x; liq at
+# +16.5%), now fixed by capping our leverage at the master's (see _resolve_entry) — which gives us the
+# master's staying power instead of a premature stop. Leave OFF unless a target's winner-MAE is
+# genuinely tight (a fast-cut trend follower); then enable per the tunable below.
+COPY_STOP_ENABLE  = False
+COPY_STOP_TP_MULT = 1.6     # stop distance (adverse price move) = this × target's median take-profit move
+COPY_STOP_MIN_PCT = 0.02    # never tighter than this adverse move (noise/whipsaw floor)
+COPY_STOP_MAX_PCT = 0.12    # never wider than this (tail cap even for very wide-TP / trend wallets)
+COPY_STOP_TP_FALLBACK = 0.02  # assumed take-profit move when the target's tp_move_pct is unknown
+
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
 TAKER_FEE = 0.00045          # detection latency, so all three resolve to the same live-book price
