@@ -351,17 +351,18 @@ function Wallets({ confirm, toast }) {
           <tbody>
             {data === null && <tr><td colSpan="12" className="loading">加载中…</td></tr>}
             {data && data.wallets.map(w => (
-              <tr key={w.address} className={w.enabled ? "" : "row-off"}>
+              <tr key={w.address} className={w.enabled ? "" : "row-off"}
+                style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                 <td><span className="rankbadge">{w.rank}</span></td>
-                <td className="addr" style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>{short(w.address)}</td>
+                <td className="addr">{short(w.address)}</td>
                 <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
                 <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                 <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
                 <td className="num">{fNum(w.winRatePct, 0)}%
-                  {w.forwardWinRatePct != null && (() => {
-                    const lag = w.closedN >= 5 && w.forwardWinRatePct < w.winRatePct - 10;
-                    return <div className="muted" style={{ fontSize: 10, color: lag ? "var(--red-l)" : "var(--t3)" }}>
-                      实盘 {fNum(w.forwardWinRatePct, 0)}%{lag ? " ⚠" : ""}</div>;
+                  {(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0) && (() => {
+                    const net = w.forwardNetPnl || 0;
+                    return <div style={{ fontSize: 10, color: net < 0 ? "var(--red-l)" : "var(--green-l)" }}>
+                      实盘 {fSign(net, 0)}{net < -5 ? " ⚠" : ""}</div>;
                   })()}
                 </td>
                 <td className="num">{fNum(w.grid, 2)}</td>
@@ -369,7 +370,7 @@ function Wallets({ confirm, toast }) {
                 <td><b>{w.mainCoin}</b></td>
                 <td className="num">{w.followCount}</td>
                 <td><Spark data={w.trend} /></td>
-                <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={() => toggle(w)}><div className="knob" /></div></td>
+                <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
               </tr>
             ))}
           </tbody>
@@ -387,47 +388,70 @@ function Wallets({ confirm, toast }) {
   );
 }
 
+const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平", liquidated: "爆仓" };
+
 function WalletDrawer({ address, onClose }) {
   const [d, setD] = useState(null);
-  useEffect(() => { api.get("/api/wallets/" + address).then(setD).catch(() => {}); }, [address]);
+  const [recPage, setRecPage] = useState(0);
+  const [exp, setExp] = useState({});
+  useEffect(() => { setRecPage(0); setExp({}); }, [address]);
+  useEffect(() => { api.get(`/api/wallets/${address}?recPage=${recPage}&recSize=20`).then(setD).catch(() => {}); }, [address, recPage]);
+  const net = d && (d.netPnl || 0);
+  const losing = d && net < -5;          // ⚠ only when we're actually losing money on it (not low win%)
+  const recPages = d ? Math.max(1, Math.ceil(d.recordsTotal / d.recSize)) : 1;
   return (
     <React.Fragment>
       <div className="scrim" onClick={onClose} />
       <div className="drawer">
         <h3>{short(address)}</h3>
-        <div className="muted" style={{ marginBottom: 18 }}>排名 #{d ? d.rank : "—"} · {d ? d.marketType : ""}</div>
+        <div className="muted" style={{ marginBottom: 18 }}>排名 #{d ? (d.rank != null ? d.rank : "—") : "—"} · {d ? d.marketType : ""}</div>
         {!d ? <div className="loading">加载中…</div> : (
           <React.Fragment>
-            {(() => {
-              const lag = d.closedN >= 5 && d.forwardWinRatePct != null && d.scoredWinRatePct != null
-                && d.forwardWinRatePct < d.scoredWinRatePct - 10;
-              return (
-                <div className="card" style={{ marginBottom: 14 }}>
-                  <div className="card-lbl" style={{ marginBottom: 10 }}>历史评分 vs 实盘对账 {lag && <span style={{ color: "var(--red-l)" }}>· ⚠ 名不副实</span>}</div>
-                  <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
-                    <div><div className="muted">评分</div><div className="mono" style={{ fontSize: 18 }}>{fNum(d.score, 1)}</div></div>
-                    <div><div className="muted">历史胜率</div><div className="mono" style={{ fontSize: 18 }}>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.scoredTrades || 0}笔</span></div></div>
-                    <div><div className="muted">实盘胜率</div><div className="mono" style={{ fontSize: 18, color: lag ? "var(--red-l)" : "var(--green-l)" }}>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.closedN}笔</span></div></div>
-                  </div>
-                  <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 14, borderTop: "1px solid var(--glass-border)", paddingTop: 12 }}>
-                    <div><div className="muted">实盘战绩</div><div className="mono" style={{ fontSize: 15 }}><span className="up">{d.winN}胜</span> / <span className="down">{d.lossN}负</span></div></div>
-                    <div><div className="muted">已实现</div><div className={"mono " + cls(d.realizedPnl)} style={{ fontSize: 15 }}>{fSign(d.realizedPnl, 1)}</div></div>
-                    <div><div className="muted">在持({d.openN})浮动</div><div className={"mono " + cls(d.openUnrealized)} style={{ fontSize: 15 }}>{fSign(d.openUnrealized, 1)}</div></div>
-                    <div><div className="muted">净盈亏</div><div className={"mono " + cls(d.netPnl)} style={{ fontSize: 15 }}>{fSign(d.netPnl, 1)}</div></div>
-                  </div>
-                </div>
-              );
-            })()}
-            <div className="card-lbl" style={{ marginBottom: 8 }}>跟单记录</div>
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="card-lbl" style={{ marginBottom: 10 }}>历史评分 vs 实盘对账 {losing && <span style={{ color: "var(--red-l)" }}>· ⚠ 实盘亏损</span>}</div>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+                <div><div className="muted">评分</div><div className="mono" style={{ fontSize: 18 }}>{fNum(d.score, 1)}</div></div>
+                <div><div className="muted">历史胜率</div><div className="mono" style={{ fontSize: 18 }}>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.scoredTrades || 0}笔</span></div></div>
+                <div><div className="muted">实盘胜率</div><div className="mono" style={{ fontSize: 18, color: "var(--t1)" }}>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.closedN}笔</span></div></div>
+              </div>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 14, borderTop: "1px solid var(--glass-border)", paddingTop: 12 }}>
+                <div><div className="muted">实盘战绩</div><div className="mono" style={{ fontSize: 15 }}><span className="up">{d.winN}胜</span> / <span className="down">{d.lossN}负</span></div></div>
+                <div><div className="muted">已实现</div><div className={"mono " + cls(d.realizedPnl)} style={{ fontSize: 15 }}>{fSign(d.realizedPnl, 1)}</div></div>
+                <div><div className="muted">在持({d.openN})浮动</div><div className={"mono " + cls(d.openUnrealized)} style={{ fontSize: 15 }}>{fSign(d.openUnrealized, 1)}</div></div>
+                <div><div className="muted">净盈亏</div><div className={"mono " + cls(d.netPnl)} style={{ fontSize: 16, fontWeight: 700 }}>{fSign(d.netPnl, 1)}</div></div>
+              </div>
+            </div>
+
+            <div className="card-lbl" style={{ marginBottom: 8 }}>跟单记录 <span className="muted">· 共 {d.recordsTotal} 笔(点击展开)</span></div>
             <div className="tbl-wrap">
-              <table><thead><tr><th>币种</th><th>方向</th><th className="num">盈亏</th><th>状态</th></tr></thead>
-                <tbody>{d.records.map((r, i) => (
-                  <tr key={i}><td><b>{r.coin}</b></td>
-                    <td><span className={"tint " + (r.side === "long" ? "tint-green" : "tint-red")}>{r.side === "long" ? "多" : "空"}</span></td>
-                    <td className={"num " + cls(r.pnl)}>{fSign(r.pnl, 1)}</td>
-                    <td className="muted">{r.status}</td></tr>
+              <table><thead><tr><th>币种</th><th>方向</th><th className="num">盈亏</th><th className="num">时间</th><th>状态</th></tr></thead>
+                <tbody>{d.records.map(r => (
+                  <React.Fragment key={r.id}>
+                    <tr style={{ cursor: "pointer" }} onClick={() => setExp(e => ({ ...e, [r.id]: !e[r.id] }))}>
+                      <td><b>{r.coin}</b> <span className="muted" style={{ fontSize: 10 }}>{exp[r.id] ? "▴" : "▾"}</span></td>
+                      <td><span className={"tint " + (r.side === "long" ? "tint-green" : "tint-red")}>{r.side === "long" ? "多" : "空"}</span></td>
+                      <td className={"num " + cls(r.pnl)}>{fSign(r.pnl, 1)}{r.status === "open" ? <span className="muted" style={{ fontSize: 10 }}> 浮</span> : ""}</td>
+                      <td className="num muted">{agoText(r.openedAt)}</td>
+                      <td className="muted">{STATUS_LABEL[r.status] || r.status}</td>
+                    </tr>
+                    {exp[r.id] && (
+                      <tr><td colSpan="5" style={{ background: "rgba(255,255,255,.02)", fontFamily: "var(--mono)", fontSize: 11.5, lineHeight: 1.9, color: "var(--t2)" }}>
+                        开仓价 <b>{fPrice(r.entry)}</b> → {r.status === "open" ? "现价" : "平仓价"} <b>{fPrice(r.exit)}</b>
+                        　杠杆 {fNum(r.leverage, 0)}x　保证金 {fUsd(r.margin)}　名义额 {fUsd(r.notional)}<br />
+                        主力开仓价 {fPrice(r.masterEntry)}{r.addCount ? `　加仓 ${r.addCount} 次` : ""}
+                        {r.closedAt ? `　平于 ${agoText(r.closedAt)}` : ""}
+                      </td></tr>
+                    )}
+                  </React.Fragment>
                 ))}</tbody></table>
             </div>
+            {d.recordsTotal > d.recSize && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
+                <button className="btn" disabled={recPage <= 0} onClick={() => setRecPage(recPage - 1)}>上一页</button>
+                <span className="muted mono">第 {recPage + 1} / {recPages} 页</span>
+                <button className="btn" disabled={recPage >= recPages - 1} onClick={() => setRecPage(recPage + 1)}>下一页</button>
+              </div>
+            )}
           </React.Fragment>
         )}
       </div>

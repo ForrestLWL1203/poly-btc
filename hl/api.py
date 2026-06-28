@@ -394,7 +394,9 @@ def ep_wallets(db, qs=None):
         "pr.worst_loss_pct,pr.median_adds_per_ep,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open' AND cp.realized_pnl>0) AS win_n "
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open' AND cp.realized_pnl>0) AS win_n,"
+        "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS realized,"
+        "(SELECT COALESCE(SUM(unrealized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status='open') AS unreal "
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr WHERE w.score >= ? ORDER BY w.rank", (line_native,))
@@ -415,12 +417,13 @@ def ep_wallets(db, qs=None):
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
             "closedN": r["closed_n"],                              # our forward (real copy) results
             "forwardWinRatePct": (r["win_n"] / r["closed_n"] * 100) if r["closed_n"] else None,
+            "forwardNetPnl": (r["realized"] or 0) + (r["unreal"] or 0),   # PnL is the real verdict, not win%
             "trend": _wallet_trend(db, r["addr"]),
         })
     return {"followLine": score100(line_native), "total": total, "page": page, "size": size, "wallets": out}
 
 
-def ep_wallet_detail(db, addr):
+def ep_wallet_detail(db, addr, qs=None):
     w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
     # SCORED (historical 14d, the basis of the score) — from profile
     pr = q1(db, "SELECT score,win_rate,roi_equity,n_trades,market_type FROM profile WHERE addr=?", (addr,))
@@ -434,8 +437,15 @@ def ep_wallet_detail(db, addr):
     win_n = (agg["wins"] if agg else 0) or 0
     realized = (agg["pnl"] if agg else 0.0) or 0.0
     open_u = (op["u"] if op else 0.0) or 0.0
-    recs = qall(db, "SELECT coin,side,realized_pnl,status FROM copy_position WHERE addr=? "
-                    "ORDER BY opened_at DESC LIMIT 100", (addr,))
+    total_recs = (q1(db, "SELECT COUNT(*) c FROM copy_position WHERE addr=?", (addr,)) or {"c": 0})["c"]
+    rp = max(0, int((qs.get("recPage", ["0"]))[0])) if qs else 0
+    rs = min(50, max(1, int((qs.get("recSize", ["20"]))[0]))) if qs else 20
+    recs = qall(db,
+        "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at,cp.closed_at,"
+        "cp.entry_px,cp.mark_px,cp.leverage,cp.margin,cp.notional,cp.master_open_px,cp.add_count,"
+        "(SELECT our_px FROM copy_action ca WHERE ca.pos_id=cp.pos_id AND ca.action='close' ORDER BY ca.act_id DESC LIMIT 1) AS exit_px "
+        "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
+        (addr, rs, rp * rs))
     return {
         "address": addr, "rank": (w["rank"] if w else None),
         "marketType": (pr["market_type"] if pr else None),
@@ -449,10 +459,16 @@ def ep_wallet_detail(db, addr):
         "closedN": n, "winN": win_n, "lossN": n - win_n,
         "realizedPnl": realized, "openN": (op["n"] if op else 0), "openUnrealized": open_u,
         "netPnl": realized + open_u,
-        "cumulativePnl": realized,                              # back-compat
-        "winRatePct": (win_n / n * 100) if n else 0.0,         # back-compat (= forward)
-        "records": [{"coin": r["coin"], "side": r["side"], "pnl": r["realized_pnl"] or 0.0,
-                     "status": r["status"]} for r in recs],
+        "cumulativePnl": realized, "winRatePct": (win_n / n * 100) if n else 0.0,   # back-compat
+        "recordsTotal": total_recs, "recPage": rp, "recSize": rs,
+        "records": [{
+            "id": r["pos_id"], "coin": r["coin"], "side": r["side"], "status": r["status"],
+            "pnl": (r["realized_pnl"] or 0.0) if r["status"] != "open" else (r["unrealized_pnl"] or 0.0),
+            "openedAt": r["opened_at"], "closedAt": r["closed_at"],
+            "entry": r["entry_px"], "exit": (r["exit_px"] if r["status"] != "open" else r["mark_px"]),
+            "masterEntry": r["master_open_px"], "leverage": r["leverage"], "margin": r["margin"],
+            "notional": r["notional"], "addCount": r["add_count"],
+        } for r in recs],
     }
 
 
@@ -700,7 +716,7 @@ def make_handler(db_path, auth, static_dir=None):
                 if path == "/api/wallets":
                     return self._envelope(ep_wallets(db, qs))
                 if path.startswith("/api/wallets/"):
-                    return self._envelope(ep_wallet_detail(db, path.rsplit("/", 1)[1]))
+                    return self._envelope(ep_wallet_detail(db, path.rsplit("/", 1)[1], qs))
                 if path == "/api/discovery":
                     return self._envelope(ep_discovery(db))
                 if path == "/api/scan-runs":
