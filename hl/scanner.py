@@ -119,6 +119,7 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
     types, worst_uw = set(), 0.0
     tot_ntl, acct_val, answered, has_pos = 0.0, 0.0, False, False
     up_loss, up_win, bag_n, max_bag_d, max_win_d = 0.0, 0.0, 0, 0.0, 0.0
+    perp_short, perp_notl = {}, 0.0                              # for spot-hedge detection
     for dex in dexes:
         cs = rest.clearinghouse_state(addr, dex=dex)             # dex None -> standard perp dex
         if not isinstance(cs, dict):
@@ -135,6 +136,9 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
             upnl = f(p_.get("unrealizedPnl"))                    # HL's authoritative current unrealized
             days = (now_ms - open_ms[coin]) / _DAY_MS if coin in open_ms else 0.0
+            perp_notl += abs(pv)
+            if szi < 0:                                          # a SHORT — candidate hedge of a spot long
+                perp_short[(coin or "").upper()] = perp_short.get((coin or "").upper(), 0.0) + abs(pv)
             if entry and szi:
                 mark = pv / abs(szi)
                 worst_uw = min(worst_uw, (mark - entry) / entry * (1 if szi > 0 else -1))
@@ -144,6 +148,21 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
                 up_win += upnl;   max_win_d = max(max_win_d, days)               # a carried WIN = trend value
     if not answered:
         return None
+    # SPOT-HEDGE ratio: a perp SHORT offset by a spot LONG of the same token is a hedge (its perp PnL is
+    # cancelled by spot → the naked perp leg we'd copy is a loss). Only fetch spot when there ARE shorts.
+    hedge_ratio = 0.0
+    if perp_short and perp_notl:
+        ss = rest.spot_clearinghouse_state(addr)
+        spot_val = {}
+        for b in (ss.get("balances") if isinstance(ss, dict) else []) or []:
+            tok, v = (b.get("coin") or "").upper(), f(b.get("entryNtl"))
+            if v <= 0:
+                continue
+            spot_val[tok] = spot_val.get(tok, 0.0) + v
+            if tok.startswith("U") and len(tok) > 1:            # Unit-wrapped major: UBTC->BTC, UETH->ETH
+                spot_val[tok[1:]] = spot_val.get(tok[1:], 0.0) + v
+        hedged = sum(min(notl, spot_val.get(c, 0.0)) for c, notl in perp_short.items())
+        hedge_ratio = hedged / perp_notl
     types.discard(None)
     mt = next(iter(types)) if len(types) == 1 else ("mixed" if types else "flat")
     a = acct or acct_val or 1.0
@@ -151,7 +170,8 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             "cur_leverage": (tot_ntl / acct_val if acct_val else 0.0),
             "worst_underwater": worst_uw, "open_unrealized": up_loss + up_win,
             "open_loss_frac": up_loss / a, "open_win_frac": up_win / a,
-            "bag_count": bag_n, "max_bag_days": max_bag_d, "max_win_days": max_win_d}
+            "bag_count": bag_n, "max_bag_days": max_bag_d, "max_win_days": max_win_d,
+            "hedge_ratio": hedge_ratio}
 
 
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
@@ -190,7 +210,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # open-position character defaults (filled by the live snapshot in stage B). roi_total starts as the
     # realized-only roi and is upgraded to realized+unrealized once we read the wallet's live positions.
     m.update(open_underwater=0.0, open_unrealized=0.0, open_loss_frac=0.0, open_win_frac=0.0,
-             bag_count=0, max_bag_days=0.0, max_win_days=0.0, roi_total=m["roi_equity"])
+             bag_count=0, max_bag_days=0.0, max_win_days=0.0, hedge_ratio=0.0, roi_total=m["roi_equity"])
     m["margin_type"] = (prior or {}).get("margin_type")
     m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
 
@@ -215,7 +235,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
             m["cur_leverage"] = snap["cur_leverage"]
             m["open_underwater"] = snap["worst_underwater"]
             for k in ("open_unrealized", "open_loss_frac", "open_win_frac",
-                      "bag_count", "max_bag_days", "max_win_days"):
+                      "bag_count", "max_bag_days", "max_win_days", "hedge_ratio"):
                 m[k] = snap[k]
             m["roi_total"] = ((m["net_pnl"] + snap["open_unrealized"]) / acct_value) if acct_value else 0.0
         ok, reason = metrics.gates_state(m, now_ms, p)
@@ -293,13 +313,13 @@ def regate(db, p) -> int:
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
         "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
-        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,reason "
+        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,reason "
         "FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
          ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, mhold, wr,
-         roi_tot, oloss, owin, bagn, bagd, liqc, old_reason) = r
+         roi_tot, oloss, owin, bagn, bagd, liqc, hedge, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -310,7 +330,8 @@ def regate(db, p) -> int:
              # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
              "open_loss_frac": oloss or 0.0, "open_win_frac": owin or 0.0,
-             "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0}
+             "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0,
+             "hedge_ratio": hedge or 0.0}
         ok, reason = metrics.gates_structural(m, p)
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics

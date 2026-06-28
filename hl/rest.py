@@ -112,6 +112,13 @@ def clearinghouse_state(addr: str, dex: str = None):
     return post_soft(body)
 
 
+def spot_clearinghouse_state(addr: str):
+    """Spot token balances (for SPOT-HEDGE detection): {balances:[{coin,total,hold,entryNtl}]}. A wallet
+    that shorts a perp while holding the same token in spot is hedging — its perp 'profit' is offset by
+    spot, so copying the naked perp leg is a losing trade for us. Snapshot only."""
+    return post_soft({"type": "spotClearinghouseState", "user": addr})
+
+
 def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
     """OHLC candles for coin over the last `days` (for realized-volatility sizing). Returns a list of
     {t,T,s,i,o,c,h,l,v,n} or None. Cheap (weight 2); callers cache + refresh off the signal hot path."""

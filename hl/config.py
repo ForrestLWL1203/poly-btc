@@ -151,6 +151,11 @@ DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).
 TREND_OPEN_MIN = 0.05
 
+# SPOT-HEDGE exclusion: if more than this fraction of a wallet's perp-short notional is offset by a spot
+# long of the same token, it's hedging spot (market-neutral), not trading directionally — reject. Its
+# perp 'profit' is cancelled by spot, so copying the naked perp leg is a loss for us.
+HEDGE_MAX_FRAC = 0.5
+
 # COPY-SIDE STOP — a flat ADVERSE-PRICE cut, our isolated-account tail guard. Cut a copy when price
 # runs COPY_STOP_PCT against entry. Calibrated WIDE on purpose (default 18%) from the twins' winner-MAE
 # (5m candles): the normal reverting winners — the actual edge — take a median 1.7% / quick heat and

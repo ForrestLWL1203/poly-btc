@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS profile (
     bag_count        INTEGER DEFAULT 0,   -- v4: # of currently-underwater positions
     max_bag_days     REAL DEFAULT 0,      -- v4: longest-held underwater position (days)
     max_win_days     REAL DEFAULT 0,      -- v4: longest-held winning position (days)
+    hedge_ratio      REAL DEFAULT 0,      -- v4: frac of perp-short notional offset by spot long (spot-hedge)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -161,9 +162,9 @@ PROFILE_COLS = (
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
     "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
-    "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,"
+    "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 55 columns
+)  # 56 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -361,6 +362,7 @@ _MIGRATIONS = (
     "ALTER TABLE watchlist ADD COLUMN roi_total REAL DEFAULT 0",
     "ALTER TABLE watchlist ADD COLUMN open_loss_frac REAL DEFAULT 0",
     "ALTER TABLE watchlist ADD COLUMN open_win_frac REAL DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN hedge_ratio REAL DEFAULT 0",
 )
 
 

@@ -147,6 +147,10 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "irregular"                              # holder (winning open) is exempt
     if (m.get("worst_loss_pct") or 0) < -p.max_single_loss:    # one CLOSED round-trip lost > this % equity
         return False, "blowup_loss"                            # = 扛到爆并已实现; the cut-losses gate
+    if (m.get("hedge_ratio") or 0.0) > config.HEDGE_MAX_FRAC:  # perp shorts offset by spot longs of the
+        return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
+    #                                                            directional trade — copying the naked perp
+    #                                                            leg loses what their spot leg offsets.
     return True, "ok"
 
 
