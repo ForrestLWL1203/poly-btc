@@ -357,7 +357,13 @@ function Wallets({ confirm, toast }) {
                 <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
                 <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                 <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
-                <td className="num">{fNum(w.winRatePct, 0)}%</td>
+                <td className="num">{fNum(w.winRatePct, 0)}%
+                  {w.forwardWinRatePct != null && (() => {
+                    const lag = w.closedN >= 5 && w.forwardWinRatePct < w.winRatePct - 10;
+                    return <div className="muted" style={{ fontSize: 10, color: lag ? "var(--red-l)" : "var(--t3)" }}>
+                      实盘 {fNum(w.forwardWinRatePct, 0)}%{lag ? " ⚠" : ""}</div>;
+                  })()}
+                </td>
                 <td className="num">{fNum(w.grid, 2)}</td>
                 <td className="num down">{fNum(w.worstSingleLossPct, 0)}%</td>
                 <td><b>{w.mainCoin}</b></td>
@@ -392,11 +398,26 @@ function WalletDrawer({ address, onClose }) {
         <div className="muted" style={{ marginBottom: 18 }}>排名 #{d ? d.rank : "—"} · {d ? d.marketType : ""}</div>
         {!d ? <div className="loading">加载中…</div> : (
           <React.Fragment>
-            <div className="grid2" style={{ gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 18 }}>
-              <div className="card"><div className="card-lbl">累计盈亏</div><div className={"mono " + cls(d.cumulativePnl)} style={{ fontSize: 18, marginTop: 6 }}>{fSign(d.cumulativePnl, 0)}</div></div>
-              <div className="card"><div className="card-lbl">胜率</div><div className="mono" style={{ fontSize: 18, marginTop: 6 }}>{fNum(d.winRatePct, 0)}%</div></div>
-              <div className="card"><div className="card-lbl">评分</div><div className="mono" style={{ fontSize: 18, marginTop: 6 }}>{fNum(d.score, 1)}</div></div>
-            </div>
+            {(() => {
+              const lag = d.closedN >= 5 && d.forwardWinRatePct != null && d.scoredWinRatePct != null
+                && d.forwardWinRatePct < d.scoredWinRatePct - 10;
+              return (
+                <div className="card" style={{ marginBottom: 14 }}>
+                  <div className="card-lbl" style={{ marginBottom: 10 }}>历史评分 vs 实盘对账 {lag && <span style={{ color: "var(--red-l)" }}>· ⚠ 名不副实</span>}</div>
+                  <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+                    <div><div className="muted">评分</div><div className="mono" style={{ fontSize: 18 }}>{fNum(d.score, 1)}</div></div>
+                    <div><div className="muted">历史胜率</div><div className="mono" style={{ fontSize: 18 }}>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.scoredTrades || 0}笔</span></div></div>
+                    <div><div className="muted">实盘胜率</div><div className="mono" style={{ fontSize: 18, color: lag ? "var(--red-l)" : "var(--green-l)" }}>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.closedN}笔</span></div></div>
+                  </div>
+                  <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 14, borderTop: "1px solid var(--glass-border)", paddingTop: 12 }}>
+                    <div><div className="muted">实盘战绩</div><div className="mono" style={{ fontSize: 15 }}><span className="up">{d.winN}胜</span> / <span className="down">{d.lossN}负</span></div></div>
+                    <div><div className="muted">已实现</div><div className={"mono " + cls(d.realizedPnl)} style={{ fontSize: 15 }}>{fSign(d.realizedPnl, 1)}</div></div>
+                    <div><div className="muted">在持({d.openN})浮动</div><div className={"mono " + cls(d.openUnrealized)} style={{ fontSize: 15 }}>{fSign(d.openUnrealized, 1)}</div></div>
+                    <div><div className="muted">净盈亏</div><div className={"mono " + cls(d.netPnl)} style={{ fontSize: 15 }}>{fSign(d.netPnl, 1)}</div></div>
+                  </div>
+                </div>
+              );
+            })()}
             <div className="card-lbl" style={{ marginBottom: 8 }}>跟单记录</div>
             <div className="tbl-wrap">
               <table><thead><tr><th>币种</th><th>方向</th><th className="num">盈亏</th><th>状态</th></tr></thead>

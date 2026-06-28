@@ -392,7 +392,9 @@ def ep_wallets(db, qs=None):
         "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.win_rate,w.top_coin,"
         "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,"
         "pr.worst_loss_pct,pr.median_adds_per_ep,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count "
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open' AND cp.realized_pnl>0) AS win_n "
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr WHERE w.score >= ? ORDER BY w.rank", (line_native,))
@@ -411,25 +413,44 @@ def ep_wallets(db, qs=None):
             "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
+            "closedN": r["closed_n"],                              # our forward (real copy) results
+            "forwardWinRatePct": (r["win_n"] / r["closed_n"] * 100) if r["closed_n"] else None,
             "trend": _wallet_trend(db, r["addr"]),
         })
     return {"followLine": score100(line_native), "total": total, "page": page, "size": size, "wallets": out}
 
 
 def ep_wallet_detail(db, addr):
-    w = q1(db, "SELECT addr,rank,market_type,score FROM watchlist WHERE addr=?", (addr,))
-    agg = q1(db, "SELECT COALESCE(SUM(realized_pnl),0) pnl, "
-                 "COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
+    w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
+    # SCORED (historical 14d, the basis of the score) — from profile
+    pr = q1(db, "SELECT score,win_rate,roi_equity,n_trades,market_type FROM profile WHERE addr=?", (addr,))
+    # FORWARD (our real copy results)
+    agg = q1(db, "SELECT COALESCE(SUM(realized_pnl),0) pnl, COUNT(*) n, "
+                 "SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
                  "FROM copy_position WHERE addr=? AND status!='open'", (addr,))
-    n = agg["n"] if agg else 0
+    op = q1(db, "SELECT COUNT(*) n, COALESCE(SUM(unrealized_pnl),0) u "
+                "FROM copy_position WHERE addr=? AND status='open'", (addr,))
+    n = (agg["n"] if agg else 0) or 0
+    win_n = (agg["wins"] if agg else 0) or 0
+    realized = (agg["pnl"] if agg else 0.0) or 0.0
+    open_u = (op["u"] if op else 0.0) or 0.0
     recs = qall(db, "SELECT coin,side,realized_pnl,status FROM copy_position WHERE addr=? "
                     "ORDER BY opened_at DESC LIMIT 100", (addr,))
     return {
         "address": addr, "rank": (w["rank"] if w else None),
-        "marketType": (w["market_type"] if w else None),
-        "score": score100(w["score"]) if w else None,
-        "cumulativePnl": (agg["pnl"] if agg else 0.0),
-        "winRatePct": (agg["wins"] / n * 100) if n else 0.0,
+        "marketType": (pr["market_type"] if pr else None),
+        "score": score100(pr["score"]) if pr else None,
+        # 历史(评分依据)
+        "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
+        "scoredRoiPct": (pr["roi_equity"] * 100) if (pr and pr["roi_equity"] is not None) else None,
+        "scoredTrades": (pr["n_trades"] if pr else None),
+        # 实盘(我们跟出来)
+        "forwardWinRatePct": (win_n / n * 100) if n else None,
+        "closedN": n, "winN": win_n, "lossN": n - win_n,
+        "realizedPnl": realized, "openN": (op["n"] if op else 0), "openUnrealized": open_u,
+        "netPnl": realized + open_u,
+        "cumulativePnl": realized,                              # back-compat
+        "winRatePct": (win_n / n * 100) if n else 0.0,         # back-compat (= forward)
         "records": [{"coin": r["coin"], "side": r["side"], "pnl": r["realized_pnl"] or 0.0,
                      "status": r["status"]} for r in recs],
     }
