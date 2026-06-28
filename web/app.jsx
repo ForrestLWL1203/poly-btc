@@ -162,20 +162,21 @@ function Overview({ ov }) {
         </div>
       </div>
 
-      <div className="card chart-card">
-        <div className="section-h" style={{ margin: "0 0 8px" }}>
-          <h2>权益曲线</h2>
-          <div className="range-tabs">
-            {["1d", "7d", "all"].map(x => <button key={x} className={range === x ? "on" : ""} onClick={() => setRange(x)}>{x.toUpperCase()}</button>)}
+      {/* left: equity curve (half width) | right: merged 持仓敞口 + 手续费 — fits without vertical scroll */}
+      <div className="grid2" style={{ marginTop: 14, alignItems: "stretch" }}>
+        <div className="card chart-card" style={{ marginTop: 0, display: "flex", flexDirection: "column" }}>
+          <div className="section-h" style={{ margin: "0 0 8px" }}>
+            <h2>权益曲线</h2>
+            <div className="range-tabs">
+              {["1d", "7d", "all"].map(x => <button key={x} className={range === x ? "on" : ""} onClick={() => setRange(x)}>{x.toUpperCase()}</button>)}
+            </div>
           </div>
+          <div style={{ flex: 1, display: "flex", alignItems: "center" }}><EquityChart points={eq && eq.points} /></div>
         </div>
-        <EquityChart points={eq && eq.points} />
-      </div>
 
-      <div className="grid2" style={{ marginTop: 14 }}>
         <div className="card">
           <div className="card-lbl">持仓敞口</div>
-          <div style={{ display: "flex", gap: 26, margin: "12px 0 14px" }}>
+          <div style={{ display: "flex", gap: 24, margin: "12px 0 14px", flexWrap: "wrap" }}>
             <div title="所有在持仓位的名义额相加(多+空),衡量你在市场上铺了多大的盘">
               <div className="muted">总持仓规模</div><div className="mono" style={{ fontSize: 18 }}>{fUsd(r.gross)}</div>
               <div className="muted" style={{ fontSize: 10 }}>多+空 名义额</div></div>
@@ -192,15 +193,16 @@ function Overview({ ov }) {
           <div className="bar-row"><div className="bl">空头</div>
             <div className="bar-track"><div className="bar-fill" style={{ width: r.shortPct + "%", background: "var(--red)" }} /></div>
             <div className="bv">{fNum(r.shortPct, 0)}%</div></div>
-        </div>
-        <div className="card">
-          <div className="card-lbl">手续费 / 赚钱效率</div>
-          <div style={{ display: "flex", gap: 40, marginTop: 14 }}>
-            <div title="至今所有跟单成交累计付出的手续费">
-              <div className="muted">累计手续费</div><div className="mono" style={{ fontSize: 22, marginTop: 6 }}>{fUsd(f.cumulative, 0)}</div></div>
-            <div title="净利润 ÷ 总成交额。bp=基点=万分之一,16.7bp=0.167%,即每成交 $1万 净赚约 $16.7">
-              <div className="muted">成交净赚率</div><div className="mono" style={{ fontSize: 22, marginTop: 6 }}>{fNum(f.netPerGrossBp, 1)} bp</div>
-              <div className="muted" style={{ fontSize: 10 }}>≈每 $1万 成交净赚 ${fNum(f.netPerGrossBp, 1)}</div></div>
+
+          <div style={{ borderTop: "1px solid var(--glass-border)", marginTop: 16, paddingTop: 14 }}>
+            <div className="card-lbl">手续费 / 赚钱效率</div>
+            <div style={{ display: "flex", gap: 40, marginTop: 12 }}>
+              <div title="至今所有跟单成交累计付出的手续费">
+                <div className="muted">累计手续费</div><div className="mono" style={{ fontSize: 20, marginTop: 4 }}>{fUsd(f.cumulative, 0)}</div></div>
+              <div title="净利润 ÷ 总成交额。bp=基点=万分之一,16.7bp=0.167%,即每成交 $1万 净赚约 $16.7">
+                <div className="muted">成交净赚率</div><div className="mono" style={{ fontSize: 20, marginTop: 4 }}>{fNum(f.netPerGrossBp, 1)} bp</div>
+                <div className="muted" style={{ fontSize: 10 }}>≈每 $1万 成交净赚 ${fNum(f.netPerGrossBp, 1)}</div></div>
+            </div>
           </div>
         </div>
       </div>
