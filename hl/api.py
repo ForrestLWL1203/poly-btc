@@ -329,7 +329,7 @@ def ep_positions(db, qs):
             out.append({"id": f"cls_{r['pos_id']}", "coin": r["coin"], "side": r["side"],
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
-                        "walletRank": r["wrank"], "closedAt": r["closed_at"]})   # wrank None = 已脱榜
+                        "walletRank": r["wrank"]})   # wrank None = 已脱榜
         # all-time stats over the FULL closed set (not just the recent-100 list above), honoring any filter
         sw = "cp.status!='open'" + ("".join(f" AND {c}=?" for c, k in
              (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")) if qs.get(k)))
@@ -369,9 +369,8 @@ def ep_positions(db, qs):
     rows = qall(db,
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,"
-        "cv.sigma,w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
+        "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
         "FROM copy_position cp "
-        "LEFT JOIN coin_vol cv ON cv.coin=cp.coin "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
         "LEFT JOIN profile pr ON pr.addr=cp.addr "
         "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple(args))
@@ -388,8 +387,8 @@ def ep_positions(db, qs):
         liq_dist = (-abs(liq / mark - 1) * 100) if (liq and mark) else None
         out.append({
             "id": f"pos_{r['pos_id']}", "coin": r["coin"], "marketType": r["mtype"] or "crypto",
-            "side": r["side"], "entry": entry, "leverage": r["leverage"], "margin": margin,
-            "notional": r["notional"] or 0.0, "sigmaPct": (r["sigma"] or 0.0) * 100, "mark": mark,
+            "side": r["side"], "entry": entry, "leverage": r["leverage"],
+            "notional": r["notional"] or 0.0, "mark": mark,
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"],
@@ -423,7 +422,6 @@ def ep_wallets(db, qs=None):
         "pr.worst_loss_pct,pr.median_adds_per_ep,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open' AND cp.realized_pnl>0) AS win_n,"
         "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS realized,"
         "(SELECT COALESCE(SUM(unrealized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status='open') AS unreal "
         "FROM watchlist w "
@@ -446,7 +444,6 @@ def ep_wallets(db, qs=None):
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
             "closedN": r["closed_n"],                              # our forward (real copy) results
-            "forwardWinRatePct": (r["win_n"] / r["closed_n"] * 100) if r["closed_n"] else None,
             "forwardNetPnl": (r["realized"] or 0) + (r["unreal"] or 0),   # PnL is the real verdict, not win%
             "trend": _wallet_trend(db, r["addr"]),
         })
@@ -456,7 +453,7 @@ def ep_wallets(db, qs=None):
 def ep_wallet_detail(db, addr, qs=None):
     w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
     # SCORED (historical 14d, the basis of the score) — from profile
-    pr = q1(db, "SELECT score,win_rate,roi_equity,n_trades,market_type FROM profile WHERE addr=?", (addr,))
+    pr = q1(db, "SELECT score,win_rate,n_trades,market_type FROM profile WHERE addr=?", (addr,))
     # FORWARD (our real copy results)
     agg = q1(db, "SELECT COALESCE(SUM(realized_pnl),0) pnl, COUNT(*) n, "
                  "SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
@@ -482,14 +479,12 @@ def ep_wallet_detail(db, addr, qs=None):
         "score": score100(pr["score"]) if pr else None,
         # 历史(评分依据)
         "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
-        "scoredRoiPct": (pr["roi_equity"] * 100) if (pr and pr["roi_equity"] is not None) else None,
         "scoredTrades": (pr["n_trades"] if pr else None),
         # 实盘(我们跟出来)
         "forwardWinRatePct": (win_n / n * 100) if n else None,
         "closedN": n, "winN": win_n, "lossN": n - win_n,
         "realizedPnl": realized, "openN": (op["n"] if op else 0), "openUnrealized": open_u,
         "netPnl": realized + open_u,
-        "cumulativePnl": realized, "winRatePct": (win_n / n * 100) if n else 0.0,   # back-compat
         "recordsTotal": total_recs, "recPage": rp, "recSize": rs,
         "records": [{
             "id": r["pos_id"], "coin": r["coin"], "side": r["side"], "status": r["status"],
