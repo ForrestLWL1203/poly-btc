@@ -7,25 +7,45 @@ rest, fills, storage). Run from the repo root so `import hl` resolves.
   python3 hl_discover.py --db data/hl.db harvest
 """
 import argparse
+import calendar
 import time
 from types import SimpleNamespace
 
 from hl import config, params, scanner, storage
 
 
+AUTO_SCAN_EVERY_H = 24.0          # self-scheduled cadence (no systemd timer); reference = last scan_runs
+
+
 def _scan_ns():
     """A scan args-namespace with operational defaults (matches the `scan` subparser); gate/harvest
-    params get overlaid from the DB by params.apply_scanner_params."""
+    params get overlaid from the DB by params.apply_scanner_params. scan_interval 10s = conservative
+    pace that leaves HL rate headroom for the always-running observer (the priority)."""
     return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False,
-                           workers=4, scan_interval=8.0, max_pages=5, min_crypto=0.3,
+                           workers=4, scan_interval=10.0, max_pages=5, min_crypto=0.3,
                            exclude_hft=True, hft_min_hold_min=3.0)
 
 
+def _hours_since_last_scan(db):
+    """Hours since the last COMPLETED scan (scan_runs.finished_at, UTC). Survives daemon restarts ->
+    a restart never re-triggers a scan that already ran recently. 1e9 if never scanned."""
+    r = db.execute("SELECT MAX(finished_at) m FROM scan_runs").fetchone()
+    if not r or not r[0]:
+        return 1e9
+    try:
+        return (time.time() - calendar.timegm(time.strptime(r[0], "%Y-%m-%dT%H:%M:%SZ"))) / 3600.0
+    except (ValueError, TypeError):
+        return 1e9
+
+
 def _serve_rescan(db):
-    """Daemon: run a full stop-the-world scan ON DEMAND when the dashboard queues a `rescan` command.
-    scanner.scan() consumes the command(s) + writes scan_progress/status. Skips if a scan is running."""
-    config.MIN_POST_INTERVAL = 8.0                   # gentle REST pace; coexist with the observer
-    print("rescan trigger daemon: watching commands ...", flush=True)
+    """Always-on scan executor: runs a full stop-the-world scan when the dashboard queues a `rescan`
+    command OR when AUTO_SCAN_EVERY_H has elapsed since the last completed scan. SINGLE executor (never
+    two scans at once) -> the observer's HL rate budget is never double-hit. No systemd timeout ->
+    a ~2h slow scan can't be killed mid-run. scanner.scan() writes progress/status + absorbs any rescan
+    queued during the scan (no redundant back-to-back run)."""
+    config.MIN_POST_INTERVAL = 10.0                  # conservative pace: observer is priority, scan takes the slack
+    print("scan daemon: on-demand rescans + 24h auto-schedule ...", flush=True)
     while True:
         try:
             sp = db.execute("SELECT state FROM scan_progress WHERE id=1").fetchone()
@@ -33,12 +53,14 @@ def _serve_rescan(db):
             if not scanning:
                 scanner._set_scanner_proc(db, "idle", {"watching": True})   # keep heartbeat fresh (alive)
             pend = db.execute("SELECT id FROM commands WHERE status='pending' AND type='rescan' LIMIT 1").fetchone()
-            if pend and not scanning:
+            due = _hours_since_last_scan(db) >= AUTO_SCAN_EVERY_H
+            if (pend or due) and not scanning:
                 ns = params.apply_scanner_params(db, _scan_ns())
-                print(f"rescan command #{pend[0]} -> running full scan", flush=True)
-                scanner.scan(db, ns)                 # consumes pending rescan + writes progress/status
+                why = f"command #{pend[0]}" if pend else f"auto ({AUTO_SCAN_EVERY_H:g}h elapsed)"
+                print(f"-> running full scan [{why}]", flush=True)
+                scanner.scan(db, ns)                 # consumes pending rescan(s) + writes progress/status
         except Exception as exc:  # noqa: BLE001
-            print(f"rescan daemon error: {exc}", flush=True)
+            print(f"scan daemon error: {exc}", flush=True)
         time.sleep(3)
 
 

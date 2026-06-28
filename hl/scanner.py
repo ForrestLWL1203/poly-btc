@@ -380,12 +380,14 @@ def scan(db, p) -> None:
     _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active)
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
           f"{rejected} rejected. watchlist now: {n_active} active.", flush=True)
-    # dashboard: scan finished -> idle + resolve queued rescan(s)
+    # dashboard: scan finished -> idle + resolve ALL queued rescan(s), INCLUDING any clicked DURING this
+    # scan: a full sweep just completed so they're already satisfied -> absorb them instead of triggering
+    # a redundant back-to-back scan.
     _set_scan_progress(db, state="idle", candidates_scanned=len(workset))
     _set_scanner_proc(db, "idle", {"last_scan_at": now_iso(), "active": n_active})
-    for cid in rescan_ids:
-        db.execute("UPDATE commands SET status='done',done_at=?,result_json=? WHERE id=?",
-                   (now_iso(), json.dumps({"active": n_active}), cid))
+    db.execute("UPDATE commands SET status='done',done_at=?,result_json=? "
+               "WHERE type='rescan' AND status IN ('pending','acked')",
+               (now_iso(), json.dumps({"active": n_active})))
     db.commit()
 
 
