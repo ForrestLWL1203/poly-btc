@@ -15,49 +15,66 @@ black=read-only. type: usd|pct|x|int|float|nullable|bool|display.
 from . import config
 from .util import now_iso
 
-# (key, category, level, type, effect, default)  — default already in UI-facing units.
+# (key, category, level, type, effect, default, name, desc) — default in UI-facing units; name = 中文显示名,
+# desc = 一句话影响说明(UI 在参数后以灰色字体直接展示). level "hidden" = 底层参数,UI 不渲染(引擎仍读取).
+# ONLY green/yellow render in the UI (the 12 high-impact). Everything else is "hidden" — kept here so the
+# engine wiring (apply_scanner_params / _reload_params) still resolves them, but the operator never sees them.
 PARAM_SPEC = [
-    # ── ① Scanner / watchlist params (effect = rescan) ──────────────────────────────────
-    ("HARVEST_MIN_ACCT",     "scanner", "yellow", "usd",     "rescan", config.HARVEST_MIN_ACCT),
-    ("HARVEST_MAX_TURNOVER", "scanner", "yellow", "x",       "rescan", config.HARVEST_MAX_TURNOVER),
-    ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN),
-    ("HARVEST_MON_ROI_MIN",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_MON_ROI_MIN * 100),
-    ("HARVEST_MON_ROI_MAX",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_MON_ROI_MAX * 100),
-    ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct",     "rescan", config.HARVEST_WEEK_ROI_MIN * 100),
-    ("min_perp",             "scanner", "blue",   "pct",     "rescan", 60),    # hl_discover --min-perp 0.6
-    ("inactive_days",        "scanner", "green",  "int",     "rescan", 3),     # hl_discover --inactive-days
-    ("max_daily_eps",        "scanner", "blue",   "int",     "rescan", 30),    # hl_discover --max-daily-eps
-    ("min_activity",         "scanner", "blue",   "float",   "rescan", 0.21),  # hl_discover --min-activity
-    ("grid_max_adds",        "scanner", "blue",   "int",     "rescan", 5),     # hl_discover --grid-max-adds
-    ("max_single_loss",      "scanner", "yellow", "pct",     "rescan", 10),    # hl_discover --max-single-loss 0.10
-    ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True),  # filter out sub-minute HFT scalpers (uncopyable at our latency)
-    ("HFT_MIN_HOLD_MIN",     "scanner", "blue",   "float",   "rescan", 3),     # min median hold (minutes) when EXCLUDE_HFT on
-    ("SCORE_SHRINK_K",       "scanner", "blue",   "int",     "rescan", int(config.SCORE_SHRINK_K)),
-    ("SCORE_RAR_CAP",        "scanner", "blue",   "float",   "rescan", config.SCORE_RAR_CAP),
-    ("SCORE_K",              "scanner", "blue",   "int",     "rescan", int(config.SCORE_K)),
-    ("SCORE_GAMMA",          "scanner", "blue",   "float",   "rescan", config.SCORE_GAMMA),
-    ("UW_TOL",               "scanner", "blue",   "display", "rescan", "2% / 10%"),  # UW_TOL / UW_REF (read-only)
+    # ── ① 采集 watchlist 参数 (effect = rescan) ──────────────────────────────────
+    ("HARVEST_MIN_ACCT",     "scanner", "yellow", "usd",     "rescan", config.HARVEST_MIN_ACCT,
+        "钱包最低资金", "只看账户资金≥此的钱包(过滤噪音小号)。调高=只跟大资金、候选更少;调低=纳入小资金、候选更多更杂"),
+    ("HARVEST_MON_ROI_MIN",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_MON_ROI_MIN * 100,
+        "近30天最低收益", "近30天收益≥此才入选。调高=只要赚得多的、候选少;调低=放进收益平平的"),
+    ("max_single_loss",      "scanner", "yellow", "pct",     "rescan", 10,
+        "单笔最大亏损容忍", "钱包历史单笔亏损超过权益此比例=扛单到爆,淘汰。调高=容忍止损不干脆的;调低=只留止损极严的"),
+    ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
+        "排除高频交易", "过滤持仓数秒的高频/量化盘(我们延迟跟不上)。开=只留人能跟的;关=高频也进候选"),
+    ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
+        "最长不活跃天数", "超过此天数没交易=失活淘汰。调高=容忍更久没动的;调低=只留近期活跃的"),
+    # —— hidden 采集底层(评分形状/细门槛/次要预筛,引擎读取,UI 不显示)——
+    ("HARVEST_MAX_TURNOVER", "scanner", "hidden", "x",       "rescan", config.HARVEST_MAX_TURNOVER, "日换手上限", ""),
+    ("HARVEST_WEEK_VLM_MIN", "scanner", "hidden", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN, "7天成交量下限", ""),
+    ("HARVEST_MON_ROI_MAX",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_MON_ROI_MAX * 100, "30天收益上限", ""),
+    ("HARVEST_WEEK_ROI_MIN", "scanner", "hidden", "pct",     "rescan", config.HARVEST_WEEK_ROI_MIN * 100, "7天收益下限", ""),
+    ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
+    ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
+    ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
+    ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 5, "单笔加仓上限(防网格)", ""),
+    ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
+    ("SCORE_SHRINK_K",       "scanner", "hidden", "int",     "rescan", int(config.SCORE_SHRINK_K), "样本不足惩罚强度", ""),
+    ("SCORE_RAR_CAP",        "scanner", "hidden", "float",   "rescan", config.SCORE_RAR_CAP, "收益评分上限", ""),
+    ("SCORE_K",              "scanner", "hidden", "int",     "rescan", int(config.SCORE_K), "评分置信度", ""),
+    ("SCORE_GAMMA",          "scanner", "hidden", "float",   "rescan", config.SCORE_GAMMA, "稳定性严格度", ""),
+    ("UW_TOL",               "scanner", "hidden", "display", "rescan", "2% / 10%", "浮亏容忍/危险线", ""),
 
-    # ── ② Follow / copy-strategy params (effect = immediate) ────────────────────────────
-    ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE),
-    ("MIN_TIMES_ACTIVE",     "follow",  "green",  "int",     "immediate", 2),   # only follow wallets proven across >=N scans (1 = off)
-    ("MAX_TARGETS",          "follow",  "green",  "int",     "immediate", config.MAX_TARGETS),
-    ("RISK_K",               "follow",  "yellow", "float",   "immediate", config.RISK_K),
-    ("RF_MIN",               "follow",  "green",  "pct",     "immediate", config.RF_MIN * 100),
-    ("RF_MAX",               "follow",  "green",  "pct",     "immediate", config.RF_MAX * 100),
-    ("LEV_LOWVOL_X",         "follow",  "yellow", "x",       "immediate", config.LEV_LOWVOL_X),
-    ("LEV_HIGHVOL_X",        "follow",  "yellow", "x",       "immediate", config.LEV_HIGHVOL_X),
-    ("MAX_LEV",              "follow",  "yellow", "x",       "immediate", config.MAX_LEV),
-    ("MIN_LEV",              "follow",  "blue",   "x",       "immediate", config.MIN_LEV),
-    ("MIN_OPEN_MARGIN_PCT",  "follow",  "green",  "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100),
-    ("ADD_MARGIN_PCT",       "follow",  "yellow", "pct",     "immediate", config.ADD_MARGIN_PCT * 100),
-    ("MAX_ADDS",             "follow",  "yellow", "int",     "immediate", config.MAX_ADDS),
-    ("MAX_ENTRY_CHASE_PCT",  "follow",  "green",  "nullable","immediate",
-        (config.MAX_ENTRY_CHASE_PCT * 100) if config.MAX_ENTRY_CHASE_PCT is not None else None),
-    ("EXEC_MAKER_MIRROR",    "follow",  "black",  "bool",    "immediate", config.EXEC_MAKER_MIRROR),
-    ("VOL_FAST_DAYS",        "follow",  "blue",   "display", "immediate",
-        f"{config.VOL_FAST_DAYS} / {config.VOL_SLOW_DAYS} 天"),  # VOL_FAST/SLOW window (read-only)
-    ("VOL_FALLBACK_SIGMA",   "follow",  "blue",   "pct",     "immediate", config.VOL_FALLBACK_SIGMA * 100),
+    # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
+    ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
+        "跟单评分线", "只跟评分≥此的钱包。调高=只跟最强的、少而精;调低=跟更多、纳入次一档、质量略降"),
+    ("MIN_TIMES_ACTIVE",     "follow",  "green",  "int",     "immediate", 2,
+        "钱包验证轮数", "只跟连续通过≥N轮采集验证的钱包(1=关闭)。调高=只跟久经考验的、更稳更少;调低=新发现的也跟"),
+    ("MAX_TARGETS",          "follow",  "green",  "int",     "immediate", config.MAX_TARGETS,
+        "最多跟单钱包数", "同时最多跟几个钱包。调高=更分散但每个轮询更慢;调低=更集中"),
+    ("LEV_LOWVOL_X",         "follow",  "yellow", "x",       "immediate", config.LEV_LOWVOL_X,
+        "稳定币最高杠杆", "BTC这类低波动币的杠杆上限(全场最高档)。调高=BTC/指数/蓝筹放大收益、但爆仓线更近;调低=全场更保守"),
+    ("LEV_HIGHVOL_X",        "follow",  "yellow", "x",       "immediate", config.LEV_HIGHVOL_X,
+        "Meme最高杠杆", "最颠的meme/山寨的杠杆上限(全场最低档)。调高=颠的币也上杠杆、易被插针扫爆;调低=颠的币压更死、更安全但仓位更小"),
+    ("RF_MAX",               "follow",  "green",  "pct",     "immediate", config.RF_MAX * 100,
+        "单仓最大投入", "目标重仓时,每笔最多投入多少(占可用余额)。调高=跟得更重、赚亏放大;调低=更稳"),
+    ("MAX_ADDS",             "follow",  "yellow", "int",     "immediate", config.MAX_ADDS,
+        "最多加仓次数", "一笔最多跟几次加仓(防被网格拖死)。调高=跟更多加仓、单仓变重;调低=更克制"),
+    # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
+    ("RISK_K",               "follow",  "hidden", "float",   "immediate", config.RISK_K, "保证金倍数", ""),
+    ("RF_MIN",               "follow",  "hidden", "pct",     "immediate", config.RF_MIN * 100, "单仓最小投入", ""),
+    ("MAX_LEV",              "follow",  "hidden", "x",       "immediate", config.MAX_LEV, "杠杆硬上限", ""),
+    ("MIN_LEV",              "follow",  "hidden", "x",       "immediate", config.MIN_LEV, "杠杆硬下限", ""),
+    ("MIN_OPEN_MARGIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100, "单笔最小开仓额", ""),
+    ("ADD_MARGIN_PCT",       "follow",  "hidden", "pct",     "immediate", config.ADD_MARGIN_PCT * 100, "每次加仓比例", ""),
+    ("MAX_ENTRY_CHASE_PCT",  "follow",  "hidden", "nullable","immediate",
+        (config.MAX_ENTRY_CHASE_PCT * 100) if config.MAX_ENTRY_CHASE_PCT is not None else None, "追价保护阈值", ""),
+    ("EXEC_MAKER_MIRROR",    "follow",  "hidden", "bool",    "immediate", config.EXEC_MAKER_MIRROR, "镜像挂单(未就绪)", ""),
+    ("VOL_FAST_DAYS",        "follow",  "hidden", "display", "immediate",
+        f"{config.VOL_FAST_DAYS} / {config.VOL_SLOW_DAYS} 天", "波动率快/慢窗口", ""),
+    ("VOL_FALLBACK_SIGMA",   "follow",  "hidden", "pct",     "immediate", config.VOL_FALLBACK_SIGMA * 100, "默认波动率", ""),
 ]
 
 _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
@@ -92,7 +109,7 @@ def parse(value, ptype):
 def seed_params(db):
     """Insert any missing params from PARAM_SPEC (idempotent — never overwrites operator edits)."""
     stamp = now_iso()
-    for key, category, level, ptype, effect, default in PARAM_SPEC:
+    for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
         db.execute(
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "
@@ -106,11 +123,14 @@ def get_all(db):
     rows = {r["key"]: r for r in db.execute(
         "SELECT key,value,category,level,type,effect,default_value FROM params").fetchall()}
     out = {"scanner": [], "follow": []}
-    for key, category, level, ptype, effect, default in PARAM_SPEC:
+    for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
+        if level == "hidden":           # 底层参数:引擎仍读取,但不暴露给 UI
+            continue
         r = rows.get(key)
         raw = r["value"] if r else _to_text(default)
         out[category].append({
-            "key": key, "category": category, "level": level, "type": ptype, "effect": effect,
+            "key": key, "name": name, "desc": desc,         # 中文名 + 灰字影响说明(UI 直接展示)
+            "category": category, "level": level, "type": ptype, "effect": effect,
             "value": parse(raw, ptype),
             "default": parse(_to_text(default), ptype),
         })
