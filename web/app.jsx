@@ -174,11 +174,17 @@ function Overview({ ov }) {
 
       <div className="grid2" style={{ marginTop: 14 }}>
         <div className="card">
-          <div className="card-lbl">风险敞口</div>
+          <div className="card-lbl">持仓敞口</div>
           <div style={{ display: "flex", gap: 26, margin: "12px 0 14px" }}>
-            <div><div className="muted">毛敞口</div><div className="mono" style={{ fontSize: 18 }}>{fUsd(r.gross)}</div></div>
-            <div><div className="muted">净敞口</div><div className="mono" style={{ fontSize: 18 }}>{fUsd(r.net)}</div></div>
-            <div><div className="muted">净·毛比</div><div className="mono" style={{ fontSize: 18 }}>{fNum(r.netGrossRatioPct, 0)}%</div></div>
+            <div title="所有在持仓位的名义额相加(多+空),衡量你在市场上铺了多大的盘">
+              <div className="muted">总持仓规模</div><div className="mono" style={{ fontSize: 18 }}>{fUsd(r.gross)}</div>
+              <div className="muted" style={{ fontSize: 10 }}>多+空 名义额</div></div>
+            <div title="多头名义额 − 空头名义额。正=整体偏多,负=偏空">
+              <div className="muted">净方向</div><div className="mono" style={{ fontSize: 18 }}>{fUsd(r.net)}</div>
+              <div className="muted" style={{ fontSize: 10 }}>{r.net > 50 ? "整体偏多" : r.net < -50 ? "整体偏空" : "多空均衡"}</div></div>
+            <div title="净敞口 ÷ 总持仓。越接近 0 = 多空越对冲、方向风险越低;越接近 ±100% = 越单边重押">
+              <div className="muted">方向性</div><div className="mono" style={{ fontSize: 18 }}>{fNum(r.netGrossRatioPct, 0)}%</div>
+              <div className="muted" style={{ fontSize: 10 }}>{Math.abs(r.netGrossRatioPct) < 25 ? "多空基本对冲" : Math.abs(r.netGrossRatioPct) < 60 ? "略偏单边" : "明显单边"}</div></div>
           </div>
           <div className="bar-row"><div className="bl">多头</div>
             <div className="bar-track"><div className="bar-fill" style={{ width: r.longPct + "%", background: "var(--green)" }} /></div>
@@ -188,10 +194,13 @@ function Overview({ ov }) {
             <div className="bv">{fNum(r.shortPct, 0)}%</div></div>
         </div>
         <div className="card">
-          <div className="card-lbl">手续费 / 效率</div>
+          <div className="card-lbl">手续费 / 赚钱效率</div>
           <div style={{ display: "flex", gap: 40, marginTop: 14 }}>
-            <div><div className="muted">累计手续费</div><div className="mono" style={{ fontSize: 22, marginTop: 6 }}>{fUsd(f.cumulative, 0)}</div></div>
-            <div><div className="muted">净利 / 毛成交额</div><div className="mono" style={{ fontSize: 22, marginTop: 6 }}>{fNum(f.netPerGrossBp, 1)} bp</div></div>
+            <div title="至今所有跟单成交累计付出的手续费">
+              <div className="muted">累计手续费</div><div className="mono" style={{ fontSize: 22, marginTop: 6 }}>{fUsd(f.cumulative, 0)}</div></div>
+            <div title="净利润 ÷ 总成交额。bp=基点=万分之一,16.7bp=0.167%,即每成交 $1万 净赚约 $16.7">
+              <div className="muted">成交净赚率</div><div className="mono" style={{ fontSize: 22, marginTop: 6 }}>{fNum(f.netPerGrossBp, 1)} bp</div>
+              <div className="muted" style={{ fontSize: 10 }}>≈每 $1万 成交净赚 ${fNum(f.netPerGrossBp, 1)}</div></div>
           </div>
         </div>
       </div>
