@@ -55,6 +55,8 @@ class Observer:
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
+        self.lev_lowvol_x = config.LEV_LOWVOL_X    # fat-tail leverage anchors: target lev at BTC-like σ
+        self.lev_highvol_x = config.LEV_HIGHVOL_X   # ...and at meme-like σ (buffer grows with vol)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.max_adds = config.MAX_ADDS
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
@@ -156,6 +158,8 @@ class Observer:
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
+            if f.get("LEV_LOWVOL_X"): self.lev_lowvol_x = f["LEV_LOWVOL_X"]
+            if f.get("LEV_HIGHVOL_X"): self.lev_highvol_x = f["LEV_HIGHVOL_X"]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
@@ -264,6 +268,21 @@ class Observer:
     def _sigma(self, coin: str) -> float:
         """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
         return self.vol.get(coin) or self.vol_fallback_sigma
+
+    def _lev_for_sigma(self, sigma: float) -> float:
+        """FAT-TAIL-AWARE leverage. The liquidation buffer (in σ) GROWS with the coin's volatility, so a
+        calm coin (BTC) gets high leverage and a wild meme gets low — fixing 'equal σ-buffer ≠ equal liq
+        risk' (memes have fat tails). Back-solved from two intuitive anchors: lev_lowvol_x at LEV_SIGMA_LOW
+        and lev_highvol_x at LEV_SIGMA_HIGH give a linear buffer k(σ)=a+b·σ; lev=clip(1/(k·σ),min,max).
+        This is the SAME math the dashboard preview runs to show 'BTC≈Nx / meme≈Mx' as the user drags."""
+        if sigma <= 0:
+            return self.min_lev
+        slo, shi = config.LEV_SIGMA_LOW, config.LEV_SIGMA_HIGH
+        klo = 1.0 / (self.lev_lowvol_x * slo)          # buffer (σ-multiples) at the calm anchor
+        khi = 1.0 / (self.lev_highvol_x * shi)          # ...and at the wild anchor
+        b = (khi - klo) / (shi - slo) if shi != slo else 0.0
+        k = max(0.1, (klo - b * slo) + b * sigma)       # buffer at THIS coin's σ (guard k>0)
+        return max(self.min_lev, min(1.0 / (k * sigma), self.max_lev))
 
     async def _ensure_vol(self, coin: str):
         """Track coin for the periodic σ refresh, and fetch it NOW if we have no fresh value (so a
@@ -762,15 +781,15 @@ class Observer:
         _cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
         # VOLATILITY-TARGETED, available-anchored sizing (config: RISK_K / RF_MIN..RF_MAX / σ table):
         #  RF = clip(conviction, rf_min, rf_max)   conviction = how much of THEIR account the target bet
-        #  lev = clip(1/(RISK_K·σ), MIN_LEV, MAX_LEV)   -> liquidation RISK_K daily-σ away on ANY coin
-        #  margin = RF·RISK_K·available ;  notional = margin·lev = RF·available/σ (calm→big, wild→small)
+        #  lev = fat-tail buffer (two anchors, _lev_for_sigma): calm→high lev, wild meme→low lev
+        #  margin = RF·RISK_K·available ;  notional = margin·lev (calm coin → big position, wild → small)
         # We do NOT mirror the target's leverage (kept only for the report). σ is the regime-aware value.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         t_acct = self.target_acct.get(addr)
         conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.rf_min
         rf = max(self.rf_min, min(conviction, self.rf_max))
-        lev = max(self.min_lev, min(1.0 / (self.risk_k * sigma), self.max_lev)) if sigma > 0 else self.min_lev
+        lev = self._lev_for_sigma(sigma)             # fat-tail-aware: buffer grows with σ (anchors UI-tunable)
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * rf * self.risk_k)
             if margin < self.min_open_margin_pct * self.balance:     # free balance too low to fund a

@@ -44,6 +44,8 @@ PARAM_SPEC = [
     ("RISK_K",               "follow",  "yellow", "float",   "immediate", config.RISK_K),
     ("RF_MIN",               "follow",  "green",  "pct",     "immediate", config.RF_MIN * 100),
     ("RF_MAX",               "follow",  "green",  "pct",     "immediate", config.RF_MAX * 100),
+    ("LEV_LOWVOL_X",         "follow",  "yellow", "x",       "immediate", config.LEV_LOWVOL_X),
+    ("LEV_HIGHVOL_X",        "follow",  "yellow", "x",       "immediate", config.LEV_HIGHVOL_X),
     ("MAX_LEV",              "follow",  "yellow", "x",       "immediate", config.MAX_LEV),
     ("MIN_LEV",              "follow",  "blue",   "x",       "immediate", config.MIN_LEV),
     ("MIN_OPEN_MARGIN_PCT",  "follow",  "green",  "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100),

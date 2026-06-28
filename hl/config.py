@@ -49,7 +49,19 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 # [RF_MIN, RF_MAX] — a whale's small % is still a real bet (floor), an all-in is bounded (cap). Isolated
 # → max loss = margin. Everything anchored to AVAILABLE (account grows → sizes grow; positions open →
 # available shrinks → later sizes shrink = self-throttle). σ is regime-aware, see VOL_* + coin_vol table.
-RISK_K = 4.0                # liquidation buffer in daily-σ; also margin = RF·RISK_K·available
+RISK_K = 4.0                # MARGIN multiplier only: margin = RF·RISK_K·available (capital committed /
+#                             isolated max-loss per position). Leverage is NOT this anymore — see the
+#                             two-anchor fat-tail buffer below.
+# FAT-TAIL-AWARE leverage (the safety buffer in σ GROWS with the coin's volatility, so a calm coin gets
+# high leverage and a wild meme low — fixing "equal σ-buffer ≠ equal liquidation risk" since memes have
+# fat tails). Defined by TWO INTUITIVE ANCHORS (UI-tunable, also the dashboard preview inputs):
+#   LEV_LOWVOL_X  = target leverage at a BTC-like vol (LEV_SIGMA_LOW)
+#   LEV_HIGHVOL_X = target leverage at a meme-like vol (LEV_SIGMA_HIGH)
+# from which buffer k(σ)=a+b·σ is back-solved; lev = clip(1/(k·σ), MIN_LEV, MAX_LEV).
+LEV_LOWVOL_X = 20.0         # BTC-level (σ≈2.3%/day) target max leverage
+LEV_HIGHVOL_X = 2.0         # meme-level (σ≈9%/day) target max leverage (wildest memes ≤ this)
+LEV_SIGMA_LOW = 0.023       # reference "calm" daily σ (BTC-like) for the low-vol anchor
+LEV_SIGMA_HIGH = 0.09       # reference "wild" daily σ (meme-like) for the high-vol anchor
 RF_MIN = 0.005              # min per-position risk fraction (low-conviction / unknown target bet)
 RF_MAX = 0.02               # max per-position risk fraction (bounds a target's all-in)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
@@ -58,7 +70,7 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= rf·RISK_
 #                             position, just skip the signal (don't open dust). Existing positions stay
 #                             managed/exited. High-conviction signals (bigger rf) still open later than
 #                             low-conviction ones, which is intended. UI-tunable.
-MAX_LEV = 30.0              # leverage BACKSTOP only (σ<0.83%/day to bind); guards a bad/stale σ estimate
+MAX_LEV = 20.0              # hard leverage cap (BTC + anything calmer pin here); also a stale-σ backstop
 
 # Per-coin volatility (regime-aware) for the sizing above. A coin calm-then-erupting must NOT keep its
 # old low σ and get over-levered into a blow-up — so we use TWO horizons and take the MAX (de-risk fast
