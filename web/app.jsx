@@ -44,6 +44,14 @@ const fPrice = (v) => {
   if (a >= 0.0001) return Number(v).toFixed(6);
   return Number(v).toPrecision(3);
 };
+// duration: seconds for scalps, minutes/hours/days as it grows (was always "X.Xh" -> 5s showed "0.0h")
+const fDur = (s) => {
+  if (s == null) return "—";
+  if (s < 60) return Math.round(s) + "s";
+  if (s < 3600) return (s / 60).toFixed(s < 600 ? 1 : 0) + "m";
+  if (s < 86400) return (s / 3600).toFixed(1) + "h";
+  return (s / 86400).toFixed(1) + "d";
+};
 const short = (a) => (a ? a.slice(0, 6) + "…" + a.slice(-4) : "—");
 const cls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
 const agoText = (iso) => {
@@ -308,7 +316,7 @@ function Positions({ confirm, toast, streamOpen }) {
                       <td><b>{p.coin}</b></td>
                       <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                       <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
-                      <td className="num">{p.durationSec != null ? (p.durationSec / 3600).toFixed(1) + "h" : "—"}</td>
+                      <td className="num">{fDur(p.durationSec)}</td>
                       <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
                       <td className="addr">{short(p.wallet)} {p.walletRank != null
                         ? <span className="rankbadge">#{p.walletRank}</span>
