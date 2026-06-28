@@ -330,7 +330,34 @@ def ep_positions(db, qs):
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
                         "walletRank": r["wrank"], "closedAt": r["closed_at"]})   # wrank None = 已脱榜
-        return {"positions": out}
+        # all-time stats over the FULL closed set (not just the recent-100 list above), honoring any filter
+        sw = "cp.status!='open'" + ("".join(f" AND {c}=?" for c, k in
+             (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")) if qs.get(k)))
+        s = q1(db,
+            "SELECT COUNT(*) n, "
+            "SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins, "
+            "COALESCE(SUM(realized_pnl),0) total, AVG(realized_pnl) avg_pnl, "
+            "MAX(realized_pnl) best, MIN(realized_pnl) worst, "
+            "COALESCE(SUM(CASE WHEN realized_pnl>0 THEN realized_pnl ELSE 0 END),0) gwin, "
+            "COALESCE(SUM(CASE WHEN realized_pnl<0 THEN realized_pnl ELSE 0 END),0) gloss, "
+            "AVG(CASE WHEN realized_pnl>0 THEN realized_pnl END) avg_win, "
+            "AVG(CASE WHEN realized_pnl<0 THEN realized_pnl END) avg_loss, "
+            "AVG((julianday(closed_at)-julianday(opened_at))*86400.0) avg_hold "
+            "FROM copy_position cp WHERE " + sw, tuple(args))
+        n = (s["n"] if s else 0) or 0
+        wins = (s["wins"] if s else 0) or 0
+        gloss = (s["gloss"] if s else 0.0) or 0.0
+        stats = {
+            "total": n, "wins": wins, "losses": n - wins,
+            "winRatePct": (wins / n * 100) if n else None,
+            "totalPnl": (s["total"] if s else 0.0) or 0.0,
+            "avgPnl": s["avg_pnl"] if s else None,
+            "bestPnl": s["best"] if s else None, "worstPnl": s["worst"] if s else None,
+            "avgWin": s["avg_win"] if s else None, "avgLoss": s["avg_loss"] if s else None,
+            "profitFactor": ((s["gwin"] or 0.0) / abs(gloss)) if gloss else None,
+            "avgHoldSec": s["avg_hold"] if s else None,
+        }
+        return {"positions": out, "stats": stats}
 
     # status=open. Only RESOLVED positions (entry_px/size set) — a just-opened row sits unresolved for a
     # few seconds while its price/size are fetched; showing it would flash a 0.0 entry/mark.

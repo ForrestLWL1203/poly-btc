@@ -75,6 +75,7 @@ const Ico = ({ d }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 const IC = {
   overview: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z",
   positions: "M3 3v18h18M7 16l4-4 3 3 5-6",
+  history: "M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8M12 7v5l4 2",
   wallets: "M3 7h18v12H3zM3 7l2-3h14l2 3M16 13h2",
   discovery: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm10 2-4.3-4.3",
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1l-.4-2.6H9.6l-.4 2.6a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L5.1 11a7 7 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 2.6h4.8l.4-2.6a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1z",
@@ -221,21 +222,16 @@ function Overview({ ov }) {
 /* ----------------------------------------------------------------- positions */
 function Positions({ confirm, toast, streamOpen }) {
   const [polledOpen, setPolledOpen] = useState(null);
-  const [closed, setClosed] = useState(null);
   const [filter, setFilter] = useState("all");
   const [opage, setOpage] = useState(0);             // open positions page (20/page)
-  const [cpage, setCpage] = useState(0);             // closed-history page (25/page)
   const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
-  const loadClosed = useCallback(() => { api.get("/api/positions?status=closed").then(setClosed).catch(() => {}); }, []);
   const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
-  const load = useCallback(() => { loadOpen(); loadClosed(); }, [loadOpen, loadClosed]);
-  // closed positions change rarely -> slow poll; open positions come from the stream (fallback-poll only
-  // when the stream isn't delivering).
+  const load = loadOpen;                              // doClose refreshes the open list after a manual close
+  // open positions come from the SSE stream; fallback-poll only when the stream isn't delivering.
   useEffect(() => {
-    loadClosed(); const tc = setInterval(loadClosed, 15000);
     if (!streamOpen) { loadOpen(); var to = setInterval(loadOpen, 6000); }
-    return () => { clearInterval(tc); if (to) clearInterval(to); };
-  }, [loadClosed, loadOpen, streamOpen]);
+    return () => { if (to) clearInterval(to); };
+  }, [loadOpen, streamOpen]);
 
   const doClose = (p) => confirm({
     title: "确认平仓", danger: true, ok: "平仓",
@@ -295,47 +291,91 @@ function Positions({ confirm, toast, streamOpen }) {
           <button className="btn" disabled={opg >= opages - 1} onClick={() => setOpage(opg + 1)}>下一页</button>
         </div>
       )}
+    </div>
+  );
+}
 
-      {(() => {
-        const PER = 25;
-        const all = (closed && closed.positions) || [];
-        const pages = Math.max(1, Math.ceil(all.length / PER));
-        const page = Math.min(cpage, pages - 1);
-        const items = all.slice(page * PER, page * PER + PER);
-        return (
-          <React.Fragment>
-            <div className="section-h"><h2>已平仓历史 {all.length > 0 && <span className="muted">· 最近 {all.length} 笔</span>}</h2></div>
-            <div className="tbl-wrap">
-              <table>
-                <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>结果</th><th>钱包</th></tr></thead>
-                <tbody>
-                  {closed === null && <tr><td colSpan="6" className="loading">加载中…</td></tr>}
-                  {closed && all.length === 0 && <tr><td colSpan="6" className="empty">暂无</td></tr>}
-                  {items.map(p => (
-                    <tr key={p.id}>
-                      <td><b>{p.coin}</b></td>
-                      <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
-                      <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
-                      <td className="num">{fDur(p.durationSec)}</td>
-                      <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
-                      <td className="addr">{short(p.wallet)} {p.walletRank != null
-                        ? <span className="rankbadge">#{p.walletRank}</span>
-                        : <span className="tint tint-gray">已脱榜</span>}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+/* ----------------------------------------------------------------- history (closed positions + stats) */
+function History() {
+  const [data, setData] = useState(null);
+  const [filter, setFilter] = useState("all");        // all | win | loss
+  const [page, setPage] = useState(0);                // 25/page
+  useEffect(() => {
+    const load = () => api.get("/api/positions?status=closed").then(setData).catch(() => {});
+    load(); const t = setInterval(load, 15000); return () => clearInterval(t);
+  }, []);
+  const PER = 25;
+  const st = data && data.stats;
+  const all = (data && data.positions) || [];
+  const rows = all.filter(p => filter === "all" ? true : filter === "win" ? p.result === "win" : p.result === "loss");
+  const pages = Math.max(1, Math.ceil(rows.length / PER));
+  const pg = Math.min(page, pages - 1);
+  const items = rows.slice(pg * PER, pg * PER + PER);
+  return (
+    <div className="content">
+      <div className="section-h" style={{ marginTop: 6 }}>
+        <h2>历史持仓 {st && <span className="muted">· 累计 {st.total} 笔已平仓</span>}</h2>
+      </div>
+      {data === null ? <div className="loading">加载中…</div> : st && st.total === 0 ? <div className="empty">暂无已平仓记录</div> : (
+        <React.Fragment>
+          <div className="grid4">
+            <div className="card">
+              <div className="card-lbl">胜率</div>
+              <div className="kpi">{fNum(st.winRatePct, 1)}%</div>
+              <div className="kpi-sub"><span className="up">{st.wins} 胜</span><span className="down">{st.losses} 负</span></div>
             </div>
-            {all.length > PER && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
-                <button className="btn" disabled={page <= 0} onClick={() => setCpage(page - 1)}>上一页</button>
-                <span className="muted mono">第 {page + 1} / {pages} 页</span>
-                <button className="btn" disabled={page >= pages - 1} onClick={() => setCpage(page + 1)}>下一页</button>
-              </div>
-            )}
-          </React.Fragment>
-        );
-      })()}
+            <div className="card">
+              <div className="card-lbl">累计已实现盈亏</div>
+              <div className={"kpi " + cls(st.totalPnl)}>{fSign(st.totalPnl, 0)}</div>
+              <div className="kpi-sub"><span>平均每笔 <span className={cls(st.avgPnl)}>{fSign(st.avgPnl, 1)}</span></span></div>
+            </div>
+            <div className="card">
+              <div className="card-lbl">盈利因子</div>
+              <div className="kpi">{st.profitFactor == null ? "∞" : fNum(st.profitFactor, 2)}</div>
+              <div className="kpi-sub"><span>总盈 ÷ 总亏(&gt;1 为正期望)</span></div>
+            </div>
+            <div className="card">
+              <div className="card-lbl">平均持仓时长</div>
+              <div className="kpi">{fDur(st.avgHoldSec)}</div>
+              <div className="kpi-sub"><span>平均盈 <span className="up">{fSign(st.avgWin, 0)}</span> · 亏 <span className="down">{fSign(st.avgLoss, 0)}</span></span></div>
+            </div>
+          </div>
+          <div className="section-h" style={{ marginTop: 16 }}>
+            <h2>明细 <span className="muted">· 最近 {all.length} 笔 · 最佳 <span className="up">{fSign(st.bestPnl, 0)}</span> / 最差 <span className="down">{fSign(st.worstPnl, 0)}</span></span></h2>
+            <div className="range-tabs">
+              {[["all", "全部"], ["win", "盈利"], ["loss", "亏损"]].map(([k, l]) =>
+                <button key={k} className={filter === k ? "on" : ""} onClick={() => { setFilter(k); setPage(0); }}>{l}</button>)}
+            </div>
+          </div>
+          <div className="tbl-wrap">
+            <table>
+              <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>结果</th><th>钱包</th></tr></thead>
+              <tbody>
+                {rows.length === 0 && <tr><td colSpan="6" className="empty">暂无</td></tr>}
+                {items.map(p => (
+                  <tr key={p.id}>
+                    <td><b>{p.coin}</b></td>
+                    <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
+                    <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
+                    <td className="num">{fDur(p.durationSec)}</td>
+                    <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
+                    <td className="addr">{short(p.wallet)} {p.walletRank != null
+                      ? <span className="rankbadge">#{p.walletRank}</span>
+                      : <span className="tint tint-gray">已脱榜</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {rows.length > PER && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
+              <button className="btn" disabled={pg <= 0} onClick={() => setPage(pg - 1)}>上一页</button>
+              <span className="muted mono">第 {pg + 1} / {pages} 页</span>
+              <button className="btn" disabled={pg >= pages - 1} onClick={() => setPage(pg + 1)}>下一页</button>
+            </div>
+          )}
+        </React.Fragment>
+      )}
     </div>
   );
 }
@@ -751,10 +791,10 @@ function Settings({ startRescan, confirm, toast }) {
 
 /* ----------------------------------------------------------------- shell */
 const NAV = [
-  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓", IC.positions], ["wallets", "跟踪钱包", IC.wallets]]],
+  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览 Overview", positions: "持仓 Positions", wallets: "跟踪钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
@@ -876,6 +916,7 @@ function Dashboard({ onLogout }) {
 
         {page === "overview" && <Overview ov={ov} />}
         {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} streamOpen={streamOk ? (live && live.positions) : null} />}
+        {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} toast={toast} />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} toast={toast} />}
