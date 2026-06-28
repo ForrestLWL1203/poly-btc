@@ -9,6 +9,7 @@ Run via hl_dashboard.py. Endpoints:
   POST /api/auth/login            {password} -> {token, expiresAt}
   GET  /api/overview
   GET  /api/equity?range=1d|7d|all
+  GET  /api/insights
   GET  /api/positions?status=open|closed&coin=&wallet=&type=&side=
   GET  /api/wallets
   GET  /api/wallets/{address}
@@ -309,6 +310,31 @@ def ep_equity(db, rng):
         stride = len(pts) // max_pts + 1
         pts = pts[::stride] + ([pts[-1]] if (len(pts) - 1) % stride else [])
     return {"range": rng, "points": pts}
+
+
+def _top_bottom(rows, key, top=5, bottom=3):
+    """Sorted-by-`key`-desc winners + losers, no overlap. <=top+bottom rows -> return all."""
+    s = sorted(rows, key=lambda r: r[key], reverse=True)
+    if len(s) <= top + bottom:
+        return s
+    return s[:top] + s[-bottom:]
+
+
+def ep_insights(db):
+    """Forward-performance breakdowns for the Overview home page: which followed WALLETS and which
+    COINS actually make/lose us money (net = realized on closed + unrealized on open copies)."""
+    NET = "COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0)"
+    wallets = [{
+        "address": r["addr"], "rank": r["rank"], "netPnl": r["net"] or 0.0, "closedN": r["cn"] or 0,
+        "winRatePct": (r["wn"] / r["cn"] * 100) if r["cn"] else None,
+    } for r in qall(db,
+        f"SELECT cp.addr, {NET} net, w.rank, "
+        "SUM(CASE WHEN cp.status!='open' THEN 1 ELSE 0 END) cn, "
+        "SUM(CASE WHEN cp.status!='open' AND cp.realized_pnl>0 THEN 1 ELSE 0 END) wn "
+        "FROM copy_position cp LEFT JOIN watchlist w ON w.addr=cp.addr GROUP BY cp.addr")]
+    coins = [{"coin": r["coin"], "netPnl": r["net"] or 0.0, "n": r["n"]} for r in qall(db,
+        f"SELECT cp.coin, {NET} net, COUNT(*) n FROM copy_position cp GROUP BY cp.coin")]
+    return {"walletContrib": _top_bottom(wallets, "netPnl"), "coinPnl": _top_bottom(coins, "netPnl")}
 
 
 def ep_positions(db, qs):
@@ -738,6 +764,8 @@ def make_handler(db_path, auth, static_dir=None):
                     return self._envelope(ep_overview(db))
                 if path == "/api/equity":
                     return self._envelope(ep_equity(db, qs.get("range", ["all"])[0]))
+                if path == "/api/insights":
+                    return self._envelope(ep_insights(db))
                 if path == "/api/positions":
                     return self._envelope(ep_positions(db, qs))
                 if path == "/api/wallets":

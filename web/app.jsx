@@ -142,7 +142,9 @@ function Confirm({ cfg, onClose }) {
 function Overview({ ov }) {
   const [range, setRange] = useState("7d");
   const [eq, setEq] = useState(null);
+  const [ins, setIns] = useState(null);
   useEffect(() => { api.get("/api/equity?range=" + range).then(setEq).catch(() => {}); }, [range]);
+  useEffect(() => { const f = () => api.get("/api/insights").then(setIns).catch(() => {}); f(); const t = setInterval(f, 15000); return () => clearInterval(t); }, []);
   if (!ov) return <div className="loading">加载中…</div>;
   const r = ov.risk, f = ov.fees;
   return (
@@ -213,6 +215,38 @@ function Overview({ ov }) {
                 <div className="muted" style={{ fontSize: 10 }}>≈每 $1万 成交净赚 ${fNum(f.netPerGrossBp, 1)}</div></div>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* forward-performance breakdowns: which followed wallets / coins actually earn us money */}
+      <div className="grid2" style={{ marginTop: 14, alignItems: "stretch" }}>
+        <div className="card">
+          <div className="card-lbl" style={{ marginBottom: 8 }}>跟单钱包贡献榜 <span className="muted">· 实盘净盈亏(已实现+浮动)</span></div>
+          {!ins ? <div className="loading">加载中…</div> : ins.walletContrib.length === 0 ? <div className="empty">暂无</div> : (
+            <div className="tbl-wrap"><table>
+              <thead><tr><th>#</th><th>地址</th><th className="num">净盈亏</th><th className="num">实盘胜率</th><th className="num">笔数</th></tr></thead>
+              <tbody>{ins.walletContrib.map(w => (
+                <tr key={w.address}>
+                  <td>{w.rank != null ? <span className="rankbadge">{w.rank}</span> : <span className="tint tint-gray">脱榜</span>}</td>
+                  <td className="addr">{short(w.address)}</td>
+                  <td className={"num " + cls(w.netPnl)}>{fSign(w.netPnl, 1)}</td>
+                  <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
+                  <td className="num">{w.closedN}</td>
+                </tr>))}</tbody>
+            </table></div>)}
+        </div>
+        <div className="card">
+          <div className="card-lbl" style={{ marginBottom: 8 }}>币种盈亏 <span className="muted">· 实盘净盈亏</span></div>
+          {!ins ? <div className="loading">加载中…</div> : ins.coinPnl.length === 0 ? <div className="empty">暂无</div> : (
+            <div className="tbl-wrap"><table>
+              <thead><tr><th>币种</th><th className="num">净盈亏</th><th className="num">笔数</th></tr></thead>
+              <tbody>{ins.coinPnl.map(c => (
+                <tr key={c.coin}>
+                  <td><b>{c.coin}</b></td>
+                  <td className={"num " + cls(c.netPnl)}>{fSign(c.netPnl, 1)}</td>
+                  <td className="num">{c.n}</td>
+                </tr>))}</tbody>
+            </table></div>)}
         </div>
       </div>
     </div>
