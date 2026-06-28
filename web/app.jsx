@@ -484,6 +484,8 @@ const PARAM_META = {
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "评分≥此线才跟单(最常调)", range: "27–67", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
   MIN_TIMES_ACTIVE: { name: "最少验证轮次", desc: "钱包需在≥N轮扫描中合格才跟(剔除单轮运气;1=关闭)", range: "1–5", up: "只跟久经验证的", dn: "纳入新发现" },
   MAX_TARGETS: { name: "最多跟单钱包数", desc: "同时跟单的钱包上限", range: "10–60", up: "更分散", dn: "更集中" },
+  LEV_LOWVOL_X: { name: "稳定币最高杠杆", range: "10–25" },
+  LEV_HIGHVOL_X: { name: "Meme最高杠杆", range: "1.5–4" },
   RISK_K: { name: "风险保守度", desc: "爆仓安全垫(影响每一笔)", range: "3–6", up: "更保守、仓更小", dn: "更激进、更易爆" },
   RF_MIN: { name: "单仓最小下注比例", desc: "低信心仓位的下注下限", range: "—", up: "底仓更大", dn: "底仓更小" },
   RF_MAX: { name: "单仓最大下注比例", desc: "全押钱包的下注上限", range: "—", up: "重仓更大", dn: "封顶更小" },
@@ -701,11 +703,9 @@ function Settings({ startRescan, confirm, toast }) {
             <div key={p.key}>
               <div className={"prow" + (dirty[p.key] ? " dirty" : "")}>
                 <span className={"lvl-dot lvl-" + lvl} title={lvl} />
-                <div className="pn"><b>{m.name || p.key}</b><div className="pk">{p.key}</div></div>
-                <div className="pd">{m.desc}
+                <div className="pn"><b>{p.name || m.name || p.key}</b><div className="pk">{p.key}</div></div>
+                <div className="pd">{p.desc || m.desc}
                   {m.range && m.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {m.range}</span>}
-                  {(m.up || m.dn) && <span onClick={() => setExpanded(expanded === p.key ? null : p.key)}
-                    style={{ marginLeft: 8, color: "var(--blue-l)", cursor: "pointer", fontSize: 11 }}>影响 {expanded === p.key ? "▴" : "▾"}</span>}
                 </div>
                 <div className="pctl">
                   {p.type === "bool" ? (
