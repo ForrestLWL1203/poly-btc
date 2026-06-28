@@ -120,7 +120,7 @@ body {
 /* ticker */
 .ticker { display: flex; gap: 10px; padding: 0 26px 14px; flex-wrap: wrap; }
 .chip { background: var(--glass); border: 1px solid var(--glass-border); border-radius: 13px; padding: 8px 14px;
-  backdrop-filter: blur(20px); min-width: 116px; }
+  backdrop-filter: blur(20px); flex: 1 1 116px; min-width: 116px; }   /* stretch to fill the row, no trailing gap */
 .chip .k { font-size: 10px; color: var(--t3); text-transform: uppercase; letter-spacing: .5px; }
 .chip .v { font-family: var(--mono); font-size: 16px; font-weight: 600; margin-top: 3px; }
 
