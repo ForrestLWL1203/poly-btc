@@ -272,7 +272,8 @@ def ep_overview(db):
     ss = _scanner_status(db)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     _line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # "被跟" = wallets above the follow line
-    wl = q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?", (_line,))
+    _ta = int(params_mod.get(db, "MIN_TIMES_ACTIVE", 1) or 1)    # ...AND proven across >=N scans (matches observer)
+    wl = q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=? AND COALESCE(times_active,0)>=?", (_line, _ta))
 
     def _stale(row):
         if not row or not row["heartbeat_at"]:
@@ -383,6 +384,7 @@ def _wallet_trend(db, addr, n=8):
 def ep_wallets(db, qs=None):
     qs = qs or {}
     line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # native ~0–3 scale
+    min_ta = int(params_mod.get(db, "MIN_TIMES_ACTIVE", 1) or 1)       # proof gate (mirror observer's load_targets)
     grid_max = params_mod.get(db, "grid_max_adds", 5) or 5
     page = max(0, int((qs.get("page", ["0"]))[0]))
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
@@ -399,7 +401,8 @@ def ep_wallets(db, qs=None):
         "(SELECT COALESCE(SUM(unrealized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status='open') AS unreal "
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
-        "LEFT JOIN profile pr ON pr.addr=w.addr WHERE w.score >= ? ORDER BY w.rank", (line_native,))
+        "LEFT JOIN profile pr ON pr.addr=w.addr "
+        "WHERE w.score >= ? AND COALESCE(w.times_active,0) >= ? ORDER BY w.rank", (line_native, min_ta))
     total = len(rows)
     out = []
     for r in rows[page * size:page * size + size]:
@@ -486,7 +489,9 @@ def ep_discovery(db):
     # funnel's final stage = wallets ABOVE the follow line (the ones we actually copy), NOT the whole
     # watchlist (which also holds many lower-score actives we only observe).
     line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
-    watchlist = (q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?", (line_native,)) or {"c": 0})["c"]
+    min_ta = int(params_mod.get(db, "MIN_TIMES_ACTIVE", 1) or 1)
+    watchlist = (q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=? AND COALESCE(times_active,0)>=?",
+                    (line_native, min_ta)) or {"c": 0})["c"]
     # reject reasons -> buckets
     reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
     counts = {row["reason"]: row["n"] for row in reason_rows}
