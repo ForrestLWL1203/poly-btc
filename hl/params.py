@@ -40,6 +40,7 @@ PARAM_SPEC = [
 
     # ── ② Follow / copy-strategy params (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE),
+    ("MIN_TIMES_ACTIVE",     "follow",  "green",  "int",     "immediate", 2),   # only follow wallets proven across >=N scans (1 = off)
     ("MAX_TARGETS",          "follow",  "green",  "int",     "immediate", config.MAX_TARGETS),
     ("RISK_K",               "follow",  "yellow", "float",   "immediate", config.RISK_K),
     ("RF_MIN",               "follow",  "green",  "pct",     "immediate", config.RF_MIN * 100),

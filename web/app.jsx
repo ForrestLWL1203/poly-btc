@@ -482,6 +482,7 @@ function WalletDrawer({ address, onClose }) {
 const PARAM_META = {
   // follow
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "评分≥此线才跟单(最常调)", range: "27–67", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
+  MIN_TIMES_ACTIVE: { name: "最少验证轮次", desc: "钱包需在≥N轮扫描中合格才跟(剔除单轮运气;1=关闭)", range: "1–5", up: "只跟久经验证的", dn: "纳入新发现" },
   MAX_TARGETS: { name: "最多跟单钱包数", desc: "同时跟单的钱包上限", range: "10–60", up: "更分散", dn: "更集中" },
   RISK_K: { name: "风险保守度", desc: "爆仓安全垫(影响每一笔)", range: "3–6", up: "更保守、仓更小", dn: "更激进、更易爆" },
   RF_MIN: { name: "单仓最小下注比例", desc: "低信心仓位的下注下限", range: "—", up: "底仓更大", dn: "底仓更小" },
