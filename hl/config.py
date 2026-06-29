@@ -44,44 +44,30 @@ INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
 ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available
 MAX_ADDS = 2                # follow the master's scale-ins up to this many adds/position (each ADD_MARGIN_PCT)
 
-# VOLATILITY-TARGETED sizing (the core of v2). We do NOT mirror the target's leverage. Instead, per
-# coin: leverage = clip(1/(RISK_K·σ), MIN_LEV, MAX_LEV) puts liquidation RISK_K daily-σ away on EVERY
-# coin (calm BTC → high lev, wild meme → low lev, SAME staying power); and margin = RF·RISK_K·available
-# so notional = margin·lev = RF·available/σ makes a calm coin a meaningful position and a wild one
-# appropriately small. Per-position RISK fraction RF (how much a 1σ daily move swings the position, as
-# a % of available) is mapped from the target's CONVICTION (their margin / their account), banded
-# [RF_MIN, RF_MAX] — a whale's small % is still a real bet (floor), an all-in is bounded (cap). Isolated
-# → max loss = margin. Everything anchored to AVAILABLE (account grows → sizes grow; positions open →
-# available shrinks → later sizes shrink = self-throttle). σ is regime-aware, see VOL_* + coin_vol table.
-RISK_K = 4.0                # MARGIN multiplier only: margin = RF·RISK_K·available (capital committed /
-#                             isolated max-loss per position). Leverage is NOT this anymore — see the
-#                             two-anchor fat-tail buffer below. v6 (2026-06-30): 6→4 — each trade commits
-#                             LESS margin (RF_MAX×4 = 10% of available, was 15%) so the account funds MORE
-#                             concurrent copies; notional is held up instead by the stable-coin lev boost
-#                             below. (Our notional still never exceeds the master's — moot at our size vs
-#                             the $13k–$3.5M targets, but kept as a harmless conservative safety.)
-# v6 LEVERAGE (2026-06-30, simplified — no σ-interpolation curve). We MIRROR the master's own leverage,
-# then class-adjust by the coin's volatility (σ only CLASSIFIES stable vs volatile, doesn't set the lev):
-#   stable coins (σ ≤ STABLE_SIGMA_MAX, BTC/ETH/majors): lev = floor(min(master_lev × STABLE_LEV_BOOST,
-#       STABLE_LEV_CAP, MAX_LEV)) — may exceed the master to hold notional up with less margin (RISK_K↓).
-#       Example: master 5x → 5×1.5=7.5 → floor 7x; $1000 margin → $7000 notional.
-#   volatile coins (σ above the threshold, meme/山寨): lev = floor(min(master_lev, VOLATILE_LEV_CAP,
-#       MAX_LEV)) — NEVER out-levered, hard-capped low (pin-wick buffer). (Leverage is an INTEGER on HL.)
+# v6 SIZING (2026-06-30). MARGIN scales with the target's CONVICTION; LEVERAGE mirrors the master,
+# σ-class-adjusted. Anchored to AVAILABLE (account grows → sizes grow; positions open → available
+# shrinks → later sizes shrink = self-throttle). σ is regime-aware (see VOL_* + coin_vol).
+#   margin   = available × MAX_MARGIN_PCT × clip(conviction, MARGIN_FLOOR_FRAC, 1.0)
+#              conviction = master_position_margin / master_account (0–1). A near-all-in target hits our
+#              max margin; a light probe sizes down to the floor → per-trade size VARIES (not all pinned
+#              at max). No cross→isolated divisor: MAX_MARGIN_PCT already bounds the isolated risk.
+#   leverage = mirror master, σ-class: stable coins (σ ≤ STABLE_SIGMA_MAX, BTC/ETH/majors) boost
+#              ×STABLE_LEV_BOOST capped STABLE_LEV_CAP (may exceed master, e.g. 5x→7x, 15x→20x); volatile
+#              coins (meme/山寨) mirror master capped VOLATILE_LEV_CAP, never out-levered. INTEGER (floor).
+#   notional = margin × leverage. (Never exceeds the master's — moot at our size, kept as safety.)
+MAX_MARGIN_PCT = 0.10       # per-trade MARGIN ceiling = this fraction of available (at full conviction).
+#                             $10k available → ≤$1000/trade → account funds ~10 concurrent copies. This is
+#                             the single "每单最大保证金" knob (folds in the old RISK_K × RF_MAX product).
+MARGIN_FLOOR_FRAC = 0.20    # a light-conviction copy still commits ≥ this fraction of the max (anti-dust;
+#                             margin floor = MAX_MARGIN_PCT × this). conviction in between scales linearly.
 STABLE_SIGMA_MAX = 0.04     # σ ceiling for "stable" treatment (BTC≈2.3%, ETH≈3% qualify; memes ~9% don't)
 STABLE_LEV_BOOST = 1.5      # stable coins: our leverage = this × the master's (then capped + floored)
-STABLE_LEV_CAP = 15.0       # hard ceiling on the stable-coin boosted leverage (≤ MAX_LEV)
-VOLATILE_LEV_CAP = 3.0      # volatile coins: mirror the master's leverage but never above this (≤ MAX_LEV)
-# CROSS→ISOLATED conviction adjustment: the target's account-fraction (cross, whole-account-backed) is
-# divided by this before mapping to our RF, because our isolated margin is fully at risk where their
-# cross bet has the rest of the account as cushion. Higher = treat their bets as "lighter" → smaller copies.
-CONVICTION_DIVISOR = 5.0
-RF_MIN = 0.012              # min per-position risk fraction (floor lifted 0.5→1.2% so low-conviction
-#                             copies aren't dust; with RISK_K=6 → ≥7.2% of available margin)
-RF_MAX = 0.025              # max per-position risk fraction (bounds a target's all-in; ×RISK_K → ≤15%)
+STABLE_LEV_CAP = 20.0       # hard ceiling on the stable-coin boosted leverage (≤ MAX_LEV)
+VOLATILE_LEV_CAP = 5.0      # volatile coins: mirror the master's leverage but never above this (≤ MAX_LEV)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 COIN_MARGIN_CAP_PCT = 0.20  # per-COIN cap: total margin across all our open positions on ONE coin ≤ this
 #                             fraction of the account (stops N wallets piling into the same coin/direction)
-MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= rf·RISK_K·available) is below this
+MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGIN_PCT·scale·available) is below this
 #                             fraction of equity: once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay
 #                             managed/exited. High-conviction signals (bigger rf) still open later than

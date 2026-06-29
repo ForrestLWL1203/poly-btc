@@ -53,10 +53,8 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
         "跟单评分线", "只跟评分≥此的钱包。调高=只跟最强的、少而精;调低=跟更多、纳入次一档、质量略降"),
-    ("RISK_K",               "follow",  "yellow", "float",   "immediate", config.RISK_K,
-        "每单保证金倍数", "每单保证金 = 此倍数 × 单仓下注比例 × 可用余额。这是控制「每单占多少保证金」的主旋钮:调高=每单更重、但很快占满可用、能跟的单更少;调低=每单更轻、能同时跟更多单(配合下方稳定币杠杆放大保住名义额)。实际每单保证金区间见顶部「模拟下单」"),
-    ("RF_MAX",               "follow",  "yellow", "pct",     "immediate", config.RF_MAX * 100,
-        "单仓下注比例上限", "目标重仓(押了自己一大笔)时,我们这单的下注比例封顶(×保证金倍数=占可用余额的%)。调高=允许重仓单更重;调低=封得更平。具体折算见顶部「模拟下单」"),
+    ("MAX_MARGIN_PCT",       "follow",  "yellow", "pct",     "immediate", config.MAX_MARGIN_PCT * 100,
+        "每单最大保证金", "单笔最多投入多少保证金(占可用余额%),目标满仓信心时达到此值。每单实际保证金按目标押注力度在 此值×下限~此值 间浮动(押得越狠越接近上限)。调高=每单更重、占满更快、能同时跟的单更少;调低=每单更轻、能跟更多单。区间见顶部「模拟下单」"),
     ("STABLE_LEV_BOOST",     "follow",  "yellow", "float",   "immediate", config.STABLE_LEV_BOOST,
         "稳定币杠杆放大", "BTC/ETH这类稳定币:照抄目标杠杆再放大此倍数(可超过目标,封顶见下),用更少保证金保住名义额。例:目标5x×1.5=7.5→向下取整7x。调高=名义额更大、爆仓线更近;调低=更贴近目标"),
     ("STABLE_LEV_CAP",       "follow",  "yellow", "x",       "immediate", config.STABLE_LEV_CAP,
@@ -70,7 +68,7 @@ PARAM_SPEC = [
     ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
         "单币最大占用", "同一个币上所有仓位的保证金合计上限(占账户)。防止一波行情下 N 个钱包都开同一个币、我们全跟导致过度集中。满了就缩小或不跟。调低=更分散、单币风险更小;调高=允许在单个币上压更重"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
-    ("RF_MIN",               "follow",  "hidden", "pct",     "immediate", config.RF_MIN * 100, "单仓最小投入", ""),
+    ("MARGIN_FLOOR_FRAC",    "follow",  "hidden", "pct",     "immediate", config.MARGIN_FLOOR_FRAC * 100, "轻仓保证金下限(占上限%)", ""),
     ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定币σ阈值", ""),
     ("MAX_LEV",              "follow",  "hidden", "x",       "immediate", config.MAX_LEV, "杠杆硬上限", ""),
     ("MIN_LEV",              "follow",  "hidden", "x",       "immediate", config.MIN_LEV, "杠杆硬下限", ""),

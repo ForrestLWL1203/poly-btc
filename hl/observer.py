@@ -45,13 +45,10 @@ class Observer:
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        # strategy sizing (UI-tunable): VOLATILITY-TARGETED. RF (per-position risk fraction) is mapped
-        # from the target's conviction, banded [rf_min, rf_max]; leverage comes from the coin's σ (NOT
-        # the target's leverage). margin = RF·RISK_K·available; each add takes add_margin_pct of available.
-        self.rf_min = config.RF_MIN
-        self.rf_max = config.RF_MAX
-        self.conviction_divisor = config.CONVICTION_DIVISOR   # cross→isolated conviction haircut
-        self.risk_k = config.RISK_K
+        # strategy sizing (UI-tunable): margin = available × MAX_MARGIN_PCT × clip(conviction, floor, 1);
+        # conviction = master_position_margin / master_account. Leverage mirrors the master (σ-classed).
+        self.max_margin_pct = config.MAX_MARGIN_PCT       # per-trade margin ceiling (frac of available)
+        self.margin_floor_frac = config.MARGIN_FLOOR_FRAC  # light-conviction floor (frac of the ceiling)
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
@@ -159,10 +156,8 @@ class Observer:
             f = P.load_follow(self.db)
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
-            if f.get("RISK_K"): self.risk_k = f["RISK_K"]
-            if f.get("RF_MIN") is not None: self.rf_min = f["RF_MIN"]
-            if f.get("RF_MAX") is not None: self.rf_max = f["RF_MAX"]
-            if f.get("CONVICTION_DIVISOR"): self.conviction_divisor = f["CONVICTION_DIVISOR"]
+            if f.get("MAX_MARGIN_PCT") is not None: self.max_margin_pct = f["MAX_MARGIN_PCT"]
+            if f.get("MARGIN_FLOOR_FRAC") is not None: self.margin_floor_frac = f["MARGIN_FLOOR_FRAC"]
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
@@ -812,9 +807,8 @@ class Observer:
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
-        # available-anchored sizing (config: RISK_K / RF_MIN..RF_MAX) + v6 mirror-master leverage:
-        #  RF = clip(conviction, rf_min, rf_max)   conviction = how much of THEIR account the target bet
-        #  margin = RF·RISK_K·available
+        # available-anchored sizing (config: MAX_MARGIN_PCT / MARGIN_FLOOR_FRAC) + v6 mirror-master leverage:
+        #  margin = available × MAX_MARGIN_PCT × clip(conviction, floor, 1)   conviction = master pos margin/account
         #  lev = _lev_for(σ, master_cap): stable coins boost above master (cap), volatile mirror+cap (σ only
         #        classifies). Volatile is never out-levered — a coin calm at open but breaking regime could
         #        blow our ISOLATED liq before the master's (MANTA: 6x→liq +16.5% wiped while master's 3x survived).
@@ -822,19 +816,15 @@ class Observer:
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         t_acct = self.target_acct.get(addr)
-        # conviction = how much of THEIR account the target committed as margin to this position. But
-        # they trade CROSS (the whole account backs the position — a 20%-margin bet still has the other
-        # 80% as cushion before liquidation) and we trade ISOLATED (this margin IS our max loss). So
-        # their account-fraction OVERSTATES the risk-equivalent bet for us → divide by CONVICTION_DIVISOR
-        # before mapping into our RF band. (Their cross gives ~the whole account as backstop vs our
-        # isolated margin; ÷5 ≈ that gap.)
-        if m_mgn and t_acct:
-            rf = max(self.rf_min, min((m_mgn / t_acct) / self.conviction_divisor, self.rf_max))
-        else:
-            rf = self.rf_min                         # unknown target sizing -> conservative floor
+        # conviction = how much of THEIR account that position's margin is (0–1) → scales our margin between
+        # the floor and the MAX_MARGIN_PCT ceiling, so a near-all-in target hits our max and a light probe
+        # sizes down (per-trade size VARIES, not pinned at max). No cross→isolated divisor: MAX_MARGIN_PCT
+        # already bounds our isolated risk. Unknown target sizing -> conservative floor.
+        conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.margin_floor_frac
+        scale = max(self.margin_floor_frac, min(conviction, 1.0))
         lev = self._lev_for(sigma, master_cap)       # v6: mirror master, stable×boost(cap) / volatile cap
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * rf * self.risk_k)
+            margin = max(0.0, self._available() * self.max_margin_pct * scale)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
             # COIN_MARGIN_CAP_PCT of the account. Stops a single move making N wallets pile the SAME way
             # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
@@ -1110,6 +1100,6 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(vol-targeted: lev=1/({config.RISK_K:g}·σ) clip[{config.MIN_LEV:g},{config.MAX_LEV:g}]x, "
-          f"margin=RF·{config.RISK_K:g}·available RF∈[{config.RF_MIN*100:g}%,{config.RF_MAX*100:g}%] conviction-mapped, "
-          f"{config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated, no stop)")
+    print(f"\n(sizing: margin=available×{config.MAX_MARGIN_PCT*100:g}%×conviction(floor {config.MARGIN_FLOOR_FRAC*100:g}%), "
+          f"lev=mirror-master[stable×{config.STABLE_LEV_BOOST:g}≤{config.STABLE_LEV_CAP:g}x / volatile≤{config.VOLATILE_LEV_CAP:g}x], "
+          f"{config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated)")
