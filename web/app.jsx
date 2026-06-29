@@ -314,6 +314,10 @@ function Positions({ confirm, toast, streamOpen }) {
             {openItems.map(p => (
               <tr key={p.id}>
                 <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b>
+                  <a className="ext-link" href={"https://app.hyperliquid.xyz/trade/" + (p.coin.includes(":") ? p.coin.split(":")[1] : p.coin)}
+                     target="_blank" rel="noopener noreferrer" title="在 Hyperliquid 看K线" onClick={e => e.stopPropagation()}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg></a>
                   {p.addCount > 0 && <span className="tint tint-gray" title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                 <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x

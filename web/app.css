@@ -74,6 +74,9 @@ body {
 .nav-item:hover { background: rgba(255, 255, 255, 0.04); color: var(--t1); }
 .nav-item.active { background: var(--accent-grad); color: #fff; font-weight: 600; box-shadow: 0 6px 18px rgba(255, 80, 40, .25); }
 .nav-item svg { width: 17px; height: 17px; opacity: .9; }
+.ext-link { display: inline-flex; vertical-align: middle; margin-left: 6px; color: var(--t3); opacity: .6; transition: color .15s, opacity .15s; }
+.ext-link:hover { color: var(--accent); opacity: 1; }
+.ext-link svg { width: 12px; height: 12px; }
 .nav-count { margin-left: auto; font-size: 12px; font-weight: 600; line-height: 1; min-width: 18px;
   text-align: center; padding: 3px 7px; border-radius: 9px; background: rgba(255, 255, 255, .08); color: var(--t2); }
 .nav-item:hover .nav-count { color: var(--t1); }
