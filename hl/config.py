@@ -146,6 +146,14 @@ SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) —
 # is demoted. SOFT: sinks the worst toward/below the follow line, never zeroes a profitable wallet. 0 =
 # off. Tunable via dashboard (apply_scanner_params pushes it onto config so scan + regate both honor it).
 DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disc)
+# REALIZED-asymmetry sub-term of disc — catches "小赚大亏 / 不及时止损" wallets (the twins) WITHOUT
+# punishing high win rate per se. Fires only when BOTH: realized-loss RATE is below LOSS_RATE_REF
+# (the wallet defers losses) AND |worst realized loss| exceeds TAIL_FREE× the median win.
+LOSS_RATE_REF = 0.15   # a wallet realizing losses on ≥15% of trades "cuts normally" → no asym penalty
+TAIL_FREE     = 1.5    # worst loss up to this × median win is fine; beyond = asymmetric (小赚大亏)
+ASYM_W        = 0.8    # weight of the asymmetry term inside disc
+PAIN_MIN_TRADES = 15   # ≥ this many closed trades with ZERO realized losses = extreme deferrer
+PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet over a large sample
 
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).

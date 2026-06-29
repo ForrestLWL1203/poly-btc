@@ -332,12 +332,17 @@ def regate(db, p) -> int:
              "open_loss_frac": oloss or 0.0, "open_win_frac": owin or 0.0,
              "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0,
              "hedge_ratio": hedge or 0.0}
+        # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
+        # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
+        m["loss_pain"] = metrics.loss_pain(
+            [r0 for (r0,) in db.execute("SELECT net_pnl FROM episode WHERE addr=?", (addr,)).fetchall()])
         ok, reason = metrics.gates_structural(m, p)
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
         status = "active" if ok else ("retired" if old == "active" else "rejected")
         score = metrics.score(m) if ok else 0.0
-        db.execute("UPDATE profile SET status=?,reason=?,score=? WHERE addr=?", (status, reason, score, addr))
+        db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=? WHERE addr=?",
+                   (status, reason, score, m["loss_pain"], addr))
         n_active += 1 if ok else 0
     db.commit()
     n = refresh_watchlist(db, stamp)

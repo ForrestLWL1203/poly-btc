@@ -46,6 +46,21 @@ def _daily(eps: list, lookback_days: float) -> dict:
     }
 
 
+def loss_pain(pnls: list) -> float:
+    """REALIZED loss-vs-win asymmetry = |worst realized loss| / median realized win. >1 means the worst
+    loss dwarfs a typical win (小赚大亏 — the bag-hold-then-割肉 signature). A wallet that NEVER realizes a
+    loss over a large sample is the extreme deferrer → assigned PAIN_NOLOSS. Returns 0 when there's not
+    enough evidence. Used (gated by loss-RATE in score) to catch wallets that don't cut losses."""
+    wins = sorted(p for p in pnls if p > 0)
+    med_win = wins[len(wins) // 2] if wins else 0.0
+    worst = min((p for p in pnls if p < 0), default=0.0)
+    if med_win > 0 and worst < 0:
+        return abs(worst) / med_win
+    if worst == 0 and len(pnls) >= config.PAIN_MIN_TRADES:      # many trades, never realized a loss
+        return config.PAIN_NOLOSS
+    return 0.0
+
+
 def _hold_skew(eps: list) -> float:
     """median hold of LOSING episodes / median hold of WINNING episodes. >1 ⇒ holds losers longer
     than winners (disposition effect / 扛单 — the chronic-unrealized-loss behaviour)."""
@@ -108,6 +123,7 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         # wider. The copy-side stop sets our cut at a MULTIPLE of this in the adverse direction.
         "tp_move_pct": statistics.median([abs(e["close_px"] - e["open_px"]) / e["open_px"]
                                           for e in eps if e["net_pnl"] > 0 and e.get("open_px")] or [0.0]),
+        "loss_pain": loss_pain([e["net_pnl"] for e in eps]),   # |worst loss| / median win (小赚大亏 signal)
     }
     m.update(_daily(eps, lookback_days))
     return m
@@ -197,7 +213,16 @@ def score(m: dict) -> float:
     bag_depth = abs(min(0.0, m.get("open_loss_frac") or 0.0))
     bag = bag_depth * (1.0 + 0.5 * max(0, (m.get("bag_count") or 0) - 1)) \
         * (1.0 + min((m.get("max_bag_days") or 0.0) / 3.0, 1.0))
-    disc = 5.0 * bag + 1.0 * (m.get("liq_count") or 0)
+    # REALIZED-asymmetry term (小赚大亏 / 不及时止损) — fires ONLY when a wallet BOTH rarely realizes
+    # losses (defers them) AND its rare losses dwarf its wins. defer = how far below LOSS_RATE_REF its
+    # realized-loss rate sits (a normal cutter realizing losses ≥REF gets 0 here, untouched at ANY win
+    # rate); tail = how much |worst loss| exceeds TAIL_FREE× the median win. A clean fast-cutter with
+    # small symmetric losses has tail≈0 → no penalty; the twins (99% win + a -$213 vs +$13 tail) light
+    # both up and sink below the line.
+    loss_rate = 1.0 - (m.get("win_rate") or 0.0)
+    defer = max(0.0, 1.0 - loss_rate / config.LOSS_RATE_REF)
+    asym = defer * max(0.0, (m.get("loss_pain") or 0.0) - config.TAIL_FREE)
+    disc = 5.0 * bag + 1.0 * (m.get("liq_count") or 0) + config.ASYM_W * asym
     discipline = 1.0 / (1.0 + config.DISP_PENALTY_K * disc)
 
     return quality * survival * discipline
