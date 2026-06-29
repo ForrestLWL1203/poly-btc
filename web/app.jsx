@@ -927,11 +927,17 @@ function Dashboard({ onLogout }) {
         {NAV.map(([grp, items]) => (
           <div key={grp}>
             <div className="nav-group">{grp}</div>
-            {items.map(([k, label, d]) => (
-              <div key={k} className={"nav-item" + (page === k ? " active" : "")} onClick={() => setPage(k)}>
-                <Ico d={d} />{label}
-              </div>
-            ))}
+            {items.map(([k, label, d]) => {
+              const cnt = (ov && ov.system)
+                ? (k === "positions" ? ov.openCount : k === "wallets" ? ov.system.watchlistCount : null)
+                : null;
+              return (
+                <div key={k} className={"nav-item" + (page === k ? " active" : "")} onClick={() => setPage(k)}>
+                  <Ico d={d} />{label}
+                  {cnt != null && <span className="nav-count">{cnt}</span>}
+                </div>
+              );
+            })}
           </div>
         ))}
         <div className="spacer" />
