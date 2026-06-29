@@ -455,6 +455,26 @@ def ep_wallets(db, qs=None):
     grid_max = params_mod.get(db, "grid_max_adds", 5) or 5
     page = max(0, int((qs.get("page", ["0"]))[0]))
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
+    # DROPPED tab: wallets that WERE on the follow line (follow_history stamped) but are now below it or
+    # no longer active — "recently demoted for poor performance". Recovers automatically if it climbs back.
+    if (qs.get("tab", ["followed"]))[0] == "dropped":
+        rows = qall(db,
+            "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,p.score,p.status,p.reason,"
+            "p.market_type,p.win_rate,p.roi_equity,p.roi_total,p.top_coin,w.rank AS rank "
+            "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
+            "LEFT JOIN watchlist w ON w.addr=fh.addr "
+            "WHERE NOT (p.status='active' AND p.score >= ?) ORDER BY fh.last_followed_at DESC", (line_native,))
+        out = [{
+            "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
+            "score": score100(r["score"] or 0.0), "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
+            "lastFollowedAt": _iso_epoch(r["last_followed_at"]),
+            "dropReason": ("掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
+                "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
+                "bot_frequency": "高频", "hft_uncopyable": "高频", "spot_dominant": "现货为主"}.get(r["reason"], r["reason"] or "淘汰")),
+            "winRatePct": (r["win_rate"] or 0.0) * 100, "roiEqPct": (r["roi_equity"] or 0.0) * 100,
+            "mainCoin": r["top_coin"],
+        } for r in rows]
+        return {"followLine": score100(line_native), "total": len(out), "tab": "dropped", "wallets": out}
     # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
     # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
     cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d

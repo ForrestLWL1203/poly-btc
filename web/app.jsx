@@ -443,8 +443,10 @@ function Wallets({ confirm, toast }) {
   const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);             // 30/page
-  const load = useCallback(() => { api.get("/api/wallets?page=" + wpage + "&size=30").then(setData).catch(() => {}); }, [wpage]);
+  const [tab, setTab] = useState("followed");        // followed(在跟) | dropped(已掉线)
+  const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&page=" + wpage + "&size=30").then(setData).catch(() => {}); }, [wpage, tab]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
+  const dropped = tab === "dropped";
 
   const toggle = (w) => {
     const next = !w.enabled;
@@ -457,43 +459,73 @@ function Wallets({ confirm, toast }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · 共 {data.total} 个</span>}</h2>
+        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {dropped ? "掉线" : "在跟"} {data.total} 个</span>}</h2>
+        <div className="range-tabs">
+          <button className={!dropped ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>在跟</button>
+          <button className={dropped ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>已掉线</button>
+        </div>
       </div>
       <div className="tbl-wrap">
-        <table>
-          <thead><tr>
-            <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th><th className="num">ROI</th><th className="num">胜率</th>
-            <th className="num" title="目标钱包自己最近7天平掉的回合数(活跃度)">近7天</th>
-            <th className="num">网格</th><th className="num">最差亏</th><th>主力</th><th className="num">被跟</th><th>趋势</th><th>启用</th>
-          </tr></thead>
-          <tbody>
-            {data === null && <tr><td colSpan="13" className="loading">加载中…</td></tr>}
-            {data && data.wallets.map(w => (
-              <tr key={w.address} className={w.enabled ? "" : "row-off"}
-                style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
-                <td><span className="rankbadge">{w.rank}</span></td>
-                <td className="addr">{short(w.address)}</td>
-                <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
-                <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
-                <td className="num">{fNum(w.winRatePct, 0)}%
-                  {(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0) && (() => {
-                    const net = w.forwardNetPnl || 0;
-                    return <div style={{ fontSize: 10, color: net < 0 ? "var(--red-l)" : "var(--green-l)" }}>
-                      实盘 {fSign(net, 0)}{net < -5 ? " ⚠" : ""}</div>;
-                  })()}
-                </td>
-                <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
-                <td className="num">{fNum(w.grid, 2)}</td>
-                <td className="num down">{fNum(w.worstSingleLossPct, 0)}%</td>
-                <td><b>{w.mainCoin}</b></td>
-                <td className="num">{w.followCount}</td>
-                <td><Spark data={w.trend} /></td>
-                <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {dropped ? (
+          <table>
+            <thead><tr>
+              <th>地址</th><th>市场</th><th className="num">当前分</th><th className="num">曾在线</th><th className="num">ROI</th>
+              <th className="num">胜率</th><th>主力</th><th>掉线原因</th><th>掉线时间</th>
+            </tr></thead>
+            <tbody>
+              {data === null && <tr><td colSpan="9" className="loading">加载中…</td></tr>}
+              {data && data.wallets.length === 0 && <tr><td colSpan="9" className="empty">暂无掉线钱包 —— 都还在线上 👍</td></tr>}
+              {data && data.wallets.map(w => (
+                <tr key={w.address} style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
+                  <td className="addr">{short(w.address)}</td>
+                  <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
+                  <td className="num"><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                  <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
+                  <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
+                  <td className="num">{fNum(w.winRatePct, 0)}%</td>
+                  <td><b>{w.mainCoin}</b></td>
+                  <td><span className="tint tint-red">{w.dropReason}</span></td>
+                  <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.lastFollowedAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <table>
+            <thead><tr>
+              <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th><th className="num">ROI</th><th className="num">胜率</th>
+              <th className="num" title="目标钱包自己最近7天平掉的回合数(活跃度)">近7天</th>
+              <th className="num">网格</th><th className="num">最差亏</th><th>主力</th><th className="num">被跟</th><th>趋势</th><th>启用</th>
+            </tr></thead>
+            <tbody>
+              {data === null && <tr><td colSpan="13" className="loading">加载中…</td></tr>}
+              {data && data.wallets.map(w => (
+                <tr key={w.address} className={w.enabled ? "" : "row-off"}
+                  style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
+                  <td><span className="rankbadge">{w.rank}</span></td>
+                  <td className="addr">{short(w.address)}</td>
+                  <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
+                  <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                  <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
+                  <td className="num">{fNum(w.winRatePct, 0)}%
+                    {(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0) && (() => {
+                      const net = w.forwardNetPnl || 0;
+                      return <div style={{ fontSize: 10, color: net < 0 ? "var(--red-l)" : "var(--green-l)" }}>
+                        实盘 {fSign(net, 0)}{net < -5 ? " ⚠" : ""}</div>;
+                    })()}
+                  </td>
+                  <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
+                  <td className="num">{fNum(w.grid, 2)}</td>
+                  <td className="num down">{fNum(w.worstSingleLossPct, 0)}%</td>
+                  <td><b>{w.mainCoin}</b></td>
+                  <td className="num">{w.followCount}</td>
+                  <td><Spark data={w.trend} /></td>
+                  <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
       {data && data.total > data.size && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>

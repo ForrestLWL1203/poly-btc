@@ -131,6 +131,15 @@ CREATE TABLE IF NOT EXISTS watchlist (
     updated_at     TEXT
 );
 
+-- Follow-status history: last time each wallet was AT/ABOVE the follow line. Updated each scan/regate
+-- for the currently-followed set; a wallet that drops below the line keeps its old timestamp, so the UI
+-- can show "was followed, recently dropped". A recovered wallet climbing back re-stamps and leaves the list.
+CREATE TABLE IF NOT EXISTS follow_history (
+    addr                TEXT PRIMARY KEY,
+    last_followed_at    TEXT,
+    last_followed_score REAL
+);
+
 -- Operator controls, set via UI; persist across scans (NOT wiped on watchlist rebuild).
 CREATE TABLE IF NOT EXISTS target_controls (
     addr        TEXT PRIMARY KEY,

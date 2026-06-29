@@ -10,7 +10,7 @@ import os
 import threading
 import time
 
-from . import config, metrics, rest, storage
+from . import config, metrics, params, rest, storage
 from .fills import build_episodes, is_spot
 from .util import f, now_iso
 
@@ -290,6 +290,15 @@ def refresh_watchlist(db, stamp) -> int:
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r[0], stamp))
+    # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
+    # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
+    line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+    db.executemany(
+        "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) VALUES (?,?,?) "
+        "ON CONFLICT(addr) DO UPDATE SET last_followed_at=excluded.last_followed_at, "
+        "last_followed_score=excluded.last_followed_score",
+        [(a, stamp, s) for (a, s) in
+         db.execute("SELECT addr, score FROM watchlist WHERE score >= ?", (line,)).fetchall()])
     db.commit()
     return len(rows)
 
