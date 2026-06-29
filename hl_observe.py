@@ -32,10 +32,9 @@ def main() -> int:
     params.seed_params(db)                          # ensure UI-tunable params exist (idempotent)
     if args.cmd == "observe":
         n = args.top
-        f = params.load_follow(db)                     # UI-tuned follow line + proof gate (params win over CLI)
+        f = params.load_follow(db)                     # UI-tuned follow line (params win over CLI)
         min_score = f.get("MIN_FOLLOW_SCORE") if f.get("MIN_FOLLOW_SCORE") is not None else args.min_score
-        min_ta = int(f["MIN_TIMES_ACTIVE"]) if f.get("MIN_TIMES_ACTIVE") is not None else 1
-        addrs, seed = observer.load_targets(db, n, min_score, min_ta)
+        addrs, seed = observer.load_targets(db, n, min_score)
         merged = []                                   # extras first, then watchlist, capped at n
         for a in [x.lower() for x in args.extra] + addrs:
             if a not in merged:
@@ -45,10 +44,10 @@ def main() -> int:
         if not addrs:
             print("no enabled watchlist targets yet — run the scanner first.")
             return 1
-        print(f"observing {len(addrs)} targets (score>={min_score}, seen>={min_ta}, cap {n}): {', '.join(a[:8] for a in addrs)}")
+        print(f"observing {len(addrs)} targets (score>={min_score}, cap {n}): {', '.join(a[:8] for a in addrs)}")
         try:
             asyncio.run(observer.Observer(db, addrs, seed, top_n=n, min_score=min_score,
-                                          add_margin_pct=args.add_margin_pct, min_times_active=min_ta).run())
+                                          add_margin_pct=args.add_margin_pct).run())
         except KeyboardInterrupt:
             print("stopped.")
     elif args.cmd == "report":

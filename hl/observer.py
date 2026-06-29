@@ -39,13 +39,12 @@ def _log(msg: str):
 
 class Observer:
     def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None,
-                 add_margin_pct: float = None, min_times_active: int = None):
+                 add_margin_pct: float = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        self.min_times_active = 1 if min_times_active is None else min_times_active   # require N scans of proof (1 = off)
         # strategy sizing (UI-tunable): VOLATILITY-TARGETED. RF (per-position risk fraction) is mapped
         # from the target's conviction, banded [rf_min, rf_max]; leverage comes from the coin's σ (NOT
         # the target's leverage). margin = RF·RISK_K·available; each add takes add_margin_pct of available.
@@ -157,7 +156,6 @@ class Observer:
             from . import params as P
             f = P.load_follow(self.db)
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
-            if f.get("MIN_TIMES_ACTIVE") is not None: self.min_times_active = int(f["MIN_TIMES_ACTIVE"])
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
             if f.get("RISK_K"): self.risk_k = f["RISK_K"]
             if f.get("RF_MIN") is not None: self.rf_min = f["RF_MIN"]
@@ -254,7 +252,7 @@ class Observer:
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False):
-        addrs, seed = load_targets(self.db, self.top_n, self.min_score, self.min_times_active)
+        addrs, seed = load_targets(self.db, self.top_n, self.min_score)
         self.seed_coins = seed
         self.target_acct = {a: v for a, v in                 # conviction denominator (target's account)
                             self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
@@ -1031,12 +1029,12 @@ class Observer:
 
 
 # ------------------------------------------------------------------------- loaders
-def load_targets(db, n: int, min_score: float = 0.0, min_times_active: int = 1):
+def load_targets(db, n: int, min_score: float = 0.0):
     addrs = [r[0] for r in db.execute(
         "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-        "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? AND COALESCE(w.times_active,0) >= ? "
+        "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? "
         "ORDER BY w.rank LIMIT ?",
-        (min_score, min_times_active, n)).fetchall()]
+        (min_score, n)).fetchall()]
     seed = {a: {r[0] for r in db.execute("SELECT DISTINCT coin FROM episode WHERE addr=?", (a,)).fetchall()}
             for a in addrs}
     return addrs, seed

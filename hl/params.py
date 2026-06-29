@@ -53,8 +53,6 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
         "跟单评分线", "只跟评分≥此的钱包。调高=只跟最强的、少而精;调低=跟更多、纳入次一档、质量略降"),
-    ("MIN_TIMES_ACTIVE",     "follow",  "green",  "int",     "immediate", 2,
-        "钱包验证轮数", "只跟连续通过≥N轮采集验证的钱包(1=关闭)。调高=只跟久经考验的、更稳更少;调低=新发现的也跟"),
     ("MAX_TARGETS",          "follow",  "green",  "int",     "immediate", config.MAX_TARGETS,
         "最多跟单钱包数", "同时最多跟几个钱包。调高=更分散但每个轮询更慢;调低=更集中"),
     ("LEV_LOWVOL_X",         "follow",  "yellow", "x",       "immediate", config.LEV_LOWVOL_X,
