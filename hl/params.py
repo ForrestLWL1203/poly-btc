@@ -66,6 +66,8 @@ PARAM_SPEC = [
         "最多加仓次数", "一笔最多跟几次加仓(防被网格拖死)。调高=跟更多加仓、单仓变重;调低=更克制"),
     ("COPY_STOP_PCT",        "follow",  "yellow", "pct",     "immediate", config.COPY_STOP_PCT * 100,
         "止损线(逆向幅度)", "价格逆向跑这么多就提前平仓,不陪目标死扛(逐仓兜底)。3x下18%价格≈亏54%保证金。调低=砍得更早、少扛但会误杀慢回本的赢单;调高=给更多回旋、接近不止损(设很大≈关闭)"),
+    ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
+        "单币最大占用", "同一个币上所有仓位的保证金合计上限(占账户)。防止一波行情下 N 个钱包都开同一个币、我们全跟导致过度集中。满了就缩小或不跟。调低=更分散、单币风险更小;调高=允许在单个币上压更重"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("RISK_K",               "follow",  "hidden", "float",   "immediate", config.RISK_K, "保证金倍数", ""),
     ("RF_MIN",               "follow",  "hidden", "pct",     "immediate", config.RF_MIN * 100, "单仓最小投入", ""),

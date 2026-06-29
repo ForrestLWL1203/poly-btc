@@ -68,6 +68,8 @@ RF_MIN = 0.012              # min per-position risk fraction (floor lifted 0.5�
 #                             copies aren't dust; with RISK_K=6 → ≥7.2% of available margin)
 RF_MAX = 0.025              # max per-position risk fraction (bounds a target's all-in; ×RISK_K → ≤15%)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
+COIN_MARGIN_CAP_PCT = 0.20  # per-COIN cap: total margin across all our open positions on ONE coin ≤ this
+#                             fraction of the account (stops N wallets piling into the same coin/direction)
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= rf·RISK_K·available) is below this
 #                             fraction of equity: once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay

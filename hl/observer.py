@@ -59,6 +59,7 @@ class Observer:
         self.lev_lowvol_x = config.LEV_LOWVOL_X    # fat-tail leverage anchors: target lev at BTC-like σ
         self.lev_highvol_x = config.LEV_HIGHVOL_X   # ...and at meme-like σ (buffer grows with vol)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
+        self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.max_adds = config.MAX_ADDS
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
@@ -166,6 +167,7 @@ class Observer:
             if f.get("LEV_LOWVOL_X"): self.lev_lowvol_x = f["LEV_LOWVOL_X"]
             if f.get("LEV_HIGHVOL_X"): self.lev_highvol_x = f["LEV_HIGHVOL_X"]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
+            if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
@@ -814,9 +816,17 @@ class Observer:
         lev = max(self.min_lev, lev)                 # keep the floor (master_cap is already ≥1, ≤MAX_LEV)
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * rf * self.risk_k)
-            if margin < self.min_open_margin_pct * self.balance:     # free balance too low to fund a
-                self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # meaningful
-                self.db.commit()                                     # position -> skip this signal
+            # PER-COIN cap: total margin across ALL our open positions on this coin ≤ COIN_MARGIN_CAP_PCT
+            # of the account. Stops a single market move (e.g. BTC ripping → many wallets short it) from
+            # stacking N copies onto one coin/direction. Shrink the new copy to the remaining room; if
+            # the coin is already full, skip (we don't pile in beyond the cap).
+            existing_coin = sum(e.get("margin", 0.0) for (a2, c2), e in self.open_ep.items()
+                                if c2 == coin and e is not ep)
+            room = max(0.0, self.coin_margin_cap_pct * self.balance - existing_coin)
+            margin = min(margin, room)
+            if margin < self.min_open_margin_pct * self.balance:     # free balance too low OR coin full
+                self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # -> skip
+                self.db.commit()
                 self.open_ep.pop((addr, coin), None)
                 return
             notional = margin * lev
