@@ -64,6 +64,10 @@ LEV_LOWVOL_X = 20.0         # BTC-level (σ≈2.3%/day) target max leverage
 LEV_HIGHVOL_X = 2.0         # meme-level (σ≈9%/day) target max leverage (wildest memes ≤ this)
 LEV_SIGMA_LOW = 0.023       # reference "calm" daily σ (BTC-like) for the low-vol anchor
 LEV_SIGMA_HIGH = 0.09       # reference "wild" daily σ (meme-like) for the high-vol anchor
+# CROSS→ISOLATED conviction adjustment: the target's account-fraction (cross, whole-account-backed) is
+# divided by this before mapping to our RF, because our isolated margin is fully at risk where their
+# cross bet has the rest of the account as cushion. Higher = treat their bets as "lighter" → smaller copies.
+CONVICTION_DIVISOR = 5.0
 RF_MIN = 0.012              # min per-position risk fraction (floor lifted 0.5→1.2% so low-conviction
 #                             copies aren't dust; with RISK_K=6 → ≥7.2% of available margin)
 RF_MAX = 0.025              # max per-position risk fraction (bounds a target's all-in; ×RISK_K → ≤15%)

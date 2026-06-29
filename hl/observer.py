@@ -51,6 +51,7 @@ class Observer:
         # the target's leverage). margin = RF·RISK_K·available; each add takes add_margin_pct of available.
         self.rf_min = config.RF_MIN
         self.rf_max = config.RF_MAX
+        self.conviction_divisor = config.CONVICTION_DIVISOR   # cross→isolated conviction haircut
         self.risk_k = config.RISK_K
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
@@ -161,6 +162,7 @@ class Observer:
             if f.get("RISK_K"): self.risk_k = f["RISK_K"]
             if f.get("RF_MIN") is not None: self.rf_min = f["RF_MIN"]
             if f.get("RF_MAX") is not None: self.rf_max = f["RF_MAX"]
+            if f.get("CONVICTION_DIVISOR"): self.conviction_divisor = f["CONVICTION_DIVISOR"]
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
@@ -810,8 +812,16 @@ class Observer:
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         t_acct = self.target_acct.get(addr)
-        conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.rf_min
-        rf = max(self.rf_min, min(conviction, self.rf_max))
+        # conviction = how much of THEIR account the target committed as margin to this position. But
+        # they trade CROSS (the whole account backs the position — a 20%-margin bet still has the other
+        # 80% as cushion before liquidation) and we trade ISOLATED (this margin IS our max loss). So
+        # their account-fraction OVERSTATES the risk-equivalent bet for us → divide by CONVICTION_DIVISOR
+        # before mapping into our RF band. (Their cross gives ~the whole account as backstop vs our
+        # isolated margin; ÷5 ≈ that gap.)
+        if m_mgn and t_acct:
+            rf = max(self.rf_min, min((m_mgn / t_acct) / self.conviction_divisor, self.rf_max))
+        else:
+            rf = self.rf_min                         # unknown target sizing -> conservative floor
         lev = min(self._lev_for_sigma(sigma), master_cap)   # fat-tail formula, NEVER above the master's own lev
         lev = max(self.min_lev, lev)                 # keep the floor (master_cap is already ≥1, ≤MAX_LEV)
         async with self.acct_lock:                   # serialize margin allocation across opens

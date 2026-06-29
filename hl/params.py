@@ -62,6 +62,8 @@ PARAM_SPEC = [
         "Meme最高杠杆", "最颠的meme/山寨的杠杆上限(全场最低档)。调高=颠的币也上杠杆、易被插针扫爆;调低=颠的币压更死、更安全但仓位更小"),
     ("RF_MAX",               "follow",  "green",  "pct",     "immediate", config.RF_MAX * 100,
         "单仓最大投入", "目标重仓时,每笔最多投入多少(占可用余额)。调高=跟得更重、赚亏放大;调低=更稳"),
+    ("CONVICTION_DIVISOR",   "follow",  "yellow", "float",   "immediate", config.CONVICTION_DIVISOR,
+        "信心折算(全仓→逐仓)", "目标'押了自己账户百分之几'要先除以此值再映射成我们的下注比例。因为他们全仓(整个账户兜底)、我们逐仓(这笔保证金就是全部风险)。调高=把他们的下注当得更轻、我们跟得更小更稳;调低(趋近1)=越接近1:1照搬他们的仓位比例"),
     ("MAX_ADDS",             "follow",  "yellow", "int",     "immediate", config.MAX_ADDS,
         "最多加仓次数", "一笔最多跟几次加仓(防被网格拖死)。调高=跟更多加仓、单仓变重;调低=更克制"),
     ("COPY_STOP_PCT",        "follow",  "yellow", "pct",     "immediate", config.COPY_STOP_PCT * 100,
