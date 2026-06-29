@@ -42,22 +42,25 @@ def _set_scan_progress(db, **kw):
 
 
 # -------------------------------------------------------------------------- harvest
-def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
-    """STAGE-1 seed gate — leaderboard windows only, ZERO per-wallet API. Pre-bias on what the
-    leaderboard CAN reliably say; defer true stability + copyability to the profile. Predicate:
-      • acct ≥ floor                 → real capital (we copy by %, not $).
-      • lifetime profitable (all_roi>0) → real track record, not a lucky streak on a loser.
-      • 7d VOLUME ≥ floor (week_vlm)  → ACTIVE over the week (NOT 24h — that kills mid-hold holders).
-      • 30d ROI ≥ floor AND ≤ ceiling → meaningful return (small capital needs %) + anti-lottery.
-      • 7d ROI ≥ floor                → recent week STILL earning; paired w/ the 30d floor this blocks
-                                        both '+50% day-1 then dormant' AND a one-lucky-week fluke.
-      • turnover ≤ ceiling           → not a market-maker.
-    Bots/grids are INVISIBLE to leaderboard aggregates (proven), so we DON'T filter them here — the
-    profile's grid/worst_loss gates do. Unrealized ROI allowed on purpose; realized judgment is profile."""
-    week_vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
-    week_roi_min = getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN)
-    mon_roi_min = getattr(p, "mon_roi_min", config.HARVEST_MON_ROI_MIN)
-    mon_roi_max = getattr(p, "mon_roi_max", config.HARVEST_MON_ROI_MAX)
+def harvest(db, p) -> int:
+    """STAGE-1 leaderboard BOX (v5) — leaderboard windows only, ZERO per-wallet API. Gate ONLY on what
+    the leaderboard can HONESTLY say; defer ALL profit JUDGMENT to the profile (real fills). Predicate:
+      • acct ≥ floor                         → real capital (we copy by %, not $).
+      • vlm_min ≤ 7d VOLUME ≤ vlm_max        → genuinely trading this week, but NOT a market-maker
+                                               (billion-$/wk bots sit above the ceiling).
+      • 7d & 30d & all-time PnL all > 0      → MULTI-WINDOW consistency: profitable across three
+                                               horizons, not a one-window fluke (cheap robustness).
+      • pv_min ≤ 7d pnl/volume ≤ pv_max      → profit is a PLAUSIBLE fraction of traded volume: below =
+                                               razor-thin MM, above = profit too big for the volume =
+                                               NOT trading (deposit/spot/airdrop ghost; real = 0.2-4%).
+    Leaderboard ROI/PnL MAGNITUDE is deliberately NOT a gate — it's contaminated (top-ROI wallets are
+    $0-volume HODLers/ghosts) and return magnitude belongs in the SCORE, not eligibility. Bots/grids are
+    INVISIBLE to leaderboard aggregates (proven), so the profile's grid/worst_loss gates handle them."""
+    min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
+    vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
+    vlm_max = getattr(p, "week_vlm_max", config.HARVEST_WEEK_VLM_MAX)
+    pv_min = getattr(p, "pnl_vol_min", config.HARVEST_PNL_VOL_MIN)
+    pv_max = getattr(p, "pnl_vol_max", config.HARVEST_PNL_VOL_MAX)
     rows = rest.get_leaderboard()
     now = now_iso()
     n_cand = 0
@@ -65,12 +68,13 @@ def harvest(db, min_acct: float, max_turnover: float, p=None) -> int:
         w = {name: perf for name, perf in r.get("windowPerformances", [])}
         d, wk, mo, al = w.get("day", {}), w.get("week", {}), w.get("month", {}), w.get("allTime", {})
         acct = f(r.get("accountValue"))
-        turnover = (f(mo.get("vlm")) / acct / 30.0) if acct > 0 else 0.0
-        cand = (acct >= min_acct and 0 < turnover <= max_turnover  # real capital, not a market-maker
-                and f(al.get("roi")) > 0                       # lifetime profitable (track record)
-                and f(wk.get("vlm")) >= week_vlm_min           # 7d activity (keeps mid-hold holders)
-                and mon_roi_min <= f(mo.get("roi")) <= mon_roi_max  # 30d return: high enough + anti-lottery
-                and f(wk.get("roi")) >= week_roi_min)          # 7d also earning (blocks earn-then-dormant)
+        turnover = (f(mo.get("vlm")) / acct / 30.0) if acct > 0 else 0.0   # stored for display only
+        wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
+        pnl_vol = (wk_pnl / wk_vlm) if wk_vlm > 0 else 0.0
+        cand = (acct >= min_acct
+                and vlm_min <= wk_vlm <= vlm_max                # trading this week, not an MM/bot
+                and wk_pnl > 0 and f(mo.get("pnl")) > 0 and f(al.get("pnl")) > 0  # 3-window consistency
+                and pv_min <= pnl_vol <= pv_max)               # profit plausible for the volume (not ghost)
         db.execute(
             "INSERT OR REPLACE INTO leaderboard (addr,display_name,account_value,"
             "day_pnl,day_roi,day_vlm,week_pnl,week_roi,week_vlm,mon_pnl,mon_roi,mon_vlm,"
@@ -379,12 +383,13 @@ def scan(db, p) -> None:
     universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)
     if not p.no_harvest:
         print("harvest leaderboard ...", flush=True)
-        n_cand = harvest(db, p.min_acct, p.max_turnover, p)
-        turn = "off" if p.max_turnover >= 1e8 else f"<={p.max_turnover:g}x"
-        print(f"  {n_cand} candidates (acct>=${p.min_acct:g}, turnover {turn}, all_roi>0, "
-              f"vol7d>=${getattr(p,'week_vlm_min',config.HARVEST_WEEK_VLM_MIN):,.0f}, "
-              f"roi30d>={getattr(p,'mon_roi_min',config.HARVEST_MON_ROI_MIN):.0%}, "
-              f"roi7d>={getattr(p,'week_roi_min',config.HARVEST_WEEK_ROI_MIN):.0%})", flush=True)
+        n_cand = harvest(db, p)
+        print(f"  {n_cand} candidates (acct>=${getattr(p,'min_acct',config.HARVEST_MIN_ACCT):,.0f}, "
+              f"vol7d ${getattr(p,'week_vlm_min',config.HARVEST_WEEK_VLM_MIN):,.0f}.."
+              f"${getattr(p,'week_vlm_max',config.HARVEST_WEEK_VLM_MAX):,.0f}, "
+              f"pnl/vol {getattr(p,'pnl_vol_min',config.HARVEST_PNL_VOL_MIN):.1%}.."
+              f"{getattr(p,'pnl_vol_max',config.HARVEST_PNL_VOL_MAX):.1%}, "
+              f"7d&30d&all PnL>0)", flush=True)
 
     # FULL sweep every cycle (now cheap): re-profile EVERY candidate fresh — so a wallet that was
     # rejected on a past bad window gets re-discovered when it improves, and degraded actives retire.

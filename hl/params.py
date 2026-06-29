@@ -23,8 +23,12 @@ PARAM_SPEC = [
     # ── ① 采集 watchlist 参数 (effect = rescan) ──────────────────────────────────
     ("HARVEST_MIN_ACCT",     "scanner", "yellow", "usd",     "rescan", config.HARVEST_MIN_ACCT,
         "钱包最低资金", "只看账户资金≥此的钱包(过滤噪音小号)。调高=只跟大资金、候选更少;调低=纳入小资金、候选更多更杂"),
-    ("HARVEST_MON_ROI_MIN",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_MON_ROI_MIN * 100,
-        "近30天最低收益", "近30天收益≥此才入选。调高=只要赚得多的、候选少;调低=放进收益平平的"),
+    ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
+        "周成交量下限", "近7天成交额≥此才入选(证明真在交易,不是囤币/空投幽灵)。调高=只跟活跃度高的、候选少;调低=纳入低频小量的"),
+    ("HARVEST_WEEK_VLM_MAX", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MAX,
+        "周成交量上限", "近7天成交额≤此才入选(超过=做市商/高频机器人,我们延迟跟不上)。调低=更排斥大资金高频;调高=放进更大体量的"),
+    ("HARVEST_PNL_VOL_MAX",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_PNL_VOL_MAX * 100,
+        "盈利/成交量上限", "周盈利占周成交量比例≤此才入选。真交易者盈利只是成交量的零头(0.2-4%);远超此=盈利非交易所得(充值/现货/空投幽灵),剔除。调低=只留薄利真交易;调高=放松幽灵过滤"),
     ("max_single_loss",      "scanner", "yellow", "pct",     "rescan", 10,
         "单笔最大亏损容忍", "钱包历史单笔亏损超过权益此比例=扛单到爆,淘汰。调高=容忍止损不干脆的;调低=只留止损极严的"),
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
@@ -34,10 +38,7 @@ PARAM_SPEC = [
     ("DISP_PENALTY_K",       "scanner", "yellow", "float",   "rescan", config.DISP_PENALTY_K,
         "扛单降权强度", "直接量'不止损'行为打分降权:① 当前扛着的浮亏单(几笔×多深×多久)② 历史被强平次数 ③ 小赚大亏(很少认亏、却一笔亏吃掉很多笔赢)。跟胜率无关——止损干脆的高胜率钱包不受影响。调高=扛单/小赚大亏的更易跌出跟单线、候选更干净;调低/0=不降权"),
     # —— hidden 采集底层(评分形状/细门槛/次要预筛,引擎读取,UI 不显示)——
-    ("HARVEST_MAX_TURNOVER", "scanner", "hidden", "x",       "rescan", config.HARVEST_MAX_TURNOVER, "日换手上限", ""),
-    ("HARVEST_WEEK_VLM_MIN", "scanner", "hidden", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN, "7天成交量下限", ""),
-    ("HARVEST_MON_ROI_MAX",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_MON_ROI_MAX * 100, "30天收益上限", ""),
-    ("HARVEST_WEEK_ROI_MIN", "scanner", "hidden", "pct",     "rescan", config.HARVEST_WEEK_ROI_MIN * 100, "7天收益下限", ""),
+    ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
     ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
@@ -183,9 +184,9 @@ def load_follow(db):
 
 # DB scanner-param key -> the scan args-namespace attribute the scanner/metrics actually read.
 SCANNER_ARG_MAP = {
-    "HARVEST_MIN_ACCT": "min_acct", "HARVEST_MAX_TURNOVER": "max_turnover",
-    "HARVEST_WEEK_VLM_MIN": "week_vlm_min", "HARVEST_MON_ROI_MIN": "mon_roi_min",
-    "HARVEST_MON_ROI_MAX": "mon_roi_max", "HARVEST_WEEK_ROI_MIN": "week_roi_min",
+    "HARVEST_MIN_ACCT": "min_acct",
+    "HARVEST_WEEK_VLM_MIN": "week_vlm_min", "HARVEST_WEEK_VLM_MAX": "week_vlm_max",
+    "HARVEST_PNL_VOL_MIN": "pnl_vol_min", "HARVEST_PNL_VOL_MAX": "pnl_vol_max",
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
     "min_activity": "min_activity", "grid_max_adds": "grid_max_adds", "max_single_loss": "max_single_loss",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",

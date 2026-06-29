@@ -23,7 +23,10 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MIN_FOLLOW_SCORE = 1.2      # follow watchlist wallets with v3 score >= this (quality threshold, UI-tunable)
+MIN_FOLLOW_SCORE = 0.85     # follow watchlist wallets with score >= this (quality threshold, UI-tunable).
+#                             v5 (2026-06-29): 1.2→0.85 — recalibrated for the new harvest box + de-bugged
+#                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
+
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
@@ -125,15 +128,27 @@ EXEC_MAKER_MIRROR = False     # True = price master-maker fills at the passive b
 # high-churn bots. (3) RETURN uses 30d magnitude + 7d magnitude TOGETHER: 30d alone can be one big early
 # day then dormant; requiring the 7d to ALSO be earning blocks that, while the 30d requirement stops a
 # single-week fluke. We copy by %/leverage so low-ROI wallets give us low returns (small capital).
-HARVEST_MIN_ACCT = 5000.0       # real capital (noise guard; we copy by %, not $)
-HARVEST_WEEK_VLM_MIN = 100_000.0 # 7d volume floor = genuinely active over the WEEK (not the last 24h —
-#                                  that excludes mid-hold position/swing traders, exactly who we want)
-HARVEST_MON_ROI_MIN = 0.15      # 30d ROI FLOOR = meaningful return (small capital needs high % returns)
-HARVEST_MON_ROI_MAX = 3.0       # anti-lottery CEILING: cut tiny-account high-leverage gamblers
-HARVEST_WEEK_ROI_MIN = 0.02     # 7d ROI floor — paired with the 30d floor: the recent week must ALSO be
-#                                  earning (blocks "+50% on day 1 then dormant"); the 30d floor stops the
-#                                  inverse (one lucky week). Together = "good month AND still on pace".
-HARVEST_MAX_TURNOVER = 10.0     # anti-MM: daily turnover (mon_vlm/acct/30) ceiling; >10x/day = market-maker
+# STAGE-1 leaderboard BOX (v5, 2026-06-29). Gate ONLY on what the leaderboard can HONESTLY say —
+# real capital + genuine recent VOLUME + internal consistency. ROI/PnL MAGNITUDE is NOT a gate:
+# leaderboard ROI is contaminated (deposits/withdrawals/spot/airdrop), empirically the top-ROI wallets
+# are $0-volume HODLers/ghosts. The one field that can't be faked by holding is VOLUME. Profit
+# JUDGMENT is deferred to the profile (real fills). Thresholds calibrated against 20 followed anchors +
+# a clean-strength cohort (see memory hl-copytrade.md): strong wallets sit at $0.5–30M wk vol, pnl/vol
+# 0.2–4%; ghosts pnl/vol >>8%; MMs vol >$100M & pnl/vol <0.1%.
+HARVEST_MIN_ACCT = 10000.0          # real-capital floor (5k→10k; <10k mostly noise, but our proven
+#                                     small-account %-traders sit at ~$11-20k so don't raise further)
+HARVEST_WEEK_VLM_MIN = 500_000.0    # 7d VOLUME floor — genuinely trading this week (strong density is
+#                                     thin below $1M, but $0.5-1M still holds real talent → floor $0.5M)
+HARVEST_WEEK_VLM_MAX = 30_000_000.0 # 7d VOLUME ceiling — above ~$30M = market-maker/HFT-bot (billion-$
+#                                     /wk, razor pnl/vol); 90% of strong wallets sit under $15M
+HARVEST_PNL_VOL_MIN = 0.001         # 7d pnl/volume FLOOR (0.1%) — below = razor-thin MM, not directional
+HARVEST_PNL_VOL_MAX = 0.08          # 7d pnl/volume CEILING (8%) — above = profit too big for the volume
+#                                     = NOT from trading (deposit/spot/airdrop ghost); real traders 0.2-4%
+# RETIRED (leaderboard ROI contaminated; daily turnover doesn't separate MMs from our high-churn keeps):
+HARVEST_MON_ROI_MIN = 0.0           # was 0.15 — return magnitude is now a SCORE input, not a gate
+HARVEST_MON_ROI_MAX = 1e9           # was 3.0
+HARVEST_WEEK_ROI_MIN = 0.0          # was 0.02
+HARVEST_MAX_TURNOVER = 1e9          # was 10.0 — volume ceiling + pnl/vol band handle MMs instead
 
 # v3 score shape (interpretable, UI-tunable — NOT arbitrary quality cutoffs). The watchlist is
 # top-N by SCORE = Quality(RAR × day-consistency) × Survival × Health(current-underwater depth).
@@ -160,14 +175,21 @@ SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) —
 # is demoted. SOFT: sinks the worst toward/below the follow line, never zeroes a profitable wallet. 0 =
 # off. Tunable via dashboard (apply_scanner_params pushes it onto config so scan + regate both honor it).
 DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disc)
-# REALIZED-asymmetry sub-term of disc — catches "小赚大亏 / 不及时止损" wallets (the twins) WITHOUT
-# punishing high win rate per se. Fires only when BOTH: realized-loss RATE is below LOSS_RATE_REF
-# (the wallet defers losses) AND |worst realized loss| exceeds TAIL_FREE× the median win.
-LOSS_RATE_REF = 0.15   # a wallet realizing losses on ≥15% of trades "cuts normally" → no asym penalty
+# REALIZED-asymmetry sub-term of disc — catches "小赚大亏 / 不及时止损" (the twins, #17, RESOLV) by the
+# tail directly: |worst realized loss| vs the median win. v5 (2026-06-29): the OLD win-rate gate
+# (defer = 1-loss_rate/LOSS_RATE_REF) is REMOVED — it zeroed this penalty for any wallet with win<85%,
+# so a 60%-win churner with a 4× tail loss sailed through. loss_pain now bites at ANY win rate; a clean
+# fast-cutter (small symmetric losses) has loss_pain≤TAIL_FREE → still untouched.
 TAIL_FREE     = 1.5    # worst loss up to this × median win is fine; beyond = asymmetric (小赚大亏)
-ASYM_W        = 0.8    # weight of the asymmetry term inside disc
+ASYM_W        = 1.5    # weight of the asymmetry term inside disc (0.8→1.5: 小赚大亏 sinks below the line)
+LOSS_RATE_REF = 0.15   # (retired — the asym win-rate gate is gone; kept only so stale refs don't break)
 PAIN_MIN_TRADES = 15   # ≥ this many closed trades with ZERO realized losses = extreme deferrer
 PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet over a large sample
+# HOLD-SKEW sub-term of disc — 扛单 by DURATION: median losing-hold / median winning-hold. >1 = holds
+# losers longer than winners (disposition effect). Only EXTREME skew is penalized (the dangerous combo is
+# high skew WITH a big tail loss, already caught by loss_pain); moderate skew on small losses is benign.
+HOLD_SKEW_FREE = 3.0   # skew up to 3× is tolerated (holding small losers a bit longer ≠ blow-up risk)
+HOLD_SKEW_W    = 0.5   # weight of the (hold_skew - FREE) term inside disc
 
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).

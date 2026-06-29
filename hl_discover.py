@@ -92,19 +92,18 @@ def main() -> int:
                         help="when excluding HFT: min median hold time in MINUTES (below = HFT, rejected)")
 
     def add_harvest_args(pr):
-        # STAGE-1 leaderboard prefilter (3-window cascade; 0 per-wallet API). Defaults in config.
+        # STAGE-1 leaderboard BOX (v5; 0 per-wallet API). Gate on HONEST fields only (capital + volume +
+        # consistency + plausible pnl/volume); profit magnitude judged in the profile. Defaults in config.
         pr.add_argument("--min-acct", type=float, default=config.HARVEST_MIN_ACCT,
-                        help="real-capital noise guard (we copy by pct, not $)")
-        pr.add_argument("--max-turnover", type=float, default=config.HARVEST_MAX_TURNOVER,
-                        help="anti-MM: daily turnover (mon_vlm/acct/30) ceiling")
+                        help="real-capital floor (we copy by pct, not $)")
         pr.add_argument("--week-vlm-min", type=float, default=config.HARVEST_WEEK_VLM_MIN,
-                        help="7d volume floor = active over the WEEK (not 24h — keeps mid-hold holders)")
-        pr.add_argument("--mon-roi-min", type=float, default=config.HARVEST_MON_ROI_MIN,
-                        help="30d ROI FLOOR = meaningful return (small capital needs high %%)")
-        pr.add_argument("--week-roi-min", type=float, default=config.HARVEST_WEEK_ROI_MIN,
-                        help="7d ROI floor — paired w/ 30d floor: recent week must ALSO earn")
-        pr.add_argument("--mon-roi-max", type=float, default=config.HARVEST_MON_ROI_MAX,
-                        help="anti-lottery: max 30d ROI (cut tiny-acct gamblers)")
+                        help="7d VOLUME floor — genuinely trading this week")
+        pr.add_argument("--week-vlm-max", type=float, default=config.HARVEST_WEEK_VLM_MAX,
+                        help="7d VOLUME ceiling — above = market-maker/HFT-bot, uncopyable")
+        pr.add_argument("--pnl-vol-min", type=float, default=config.HARVEST_PNL_VOL_MIN,
+                        help="7d pnl/volume floor — below = razor-thin MM, not directional")
+        pr.add_argument("--pnl-vol-max", type=float, default=config.HARVEST_PNL_VOL_MAX,
+                        help="7d pnl/volume ceiling — above = profit too big for volume = ghost (not trading)")
 
     s = sub.add_parser("scan", help="full sweep: re-profile ALL candidates -> rebuild watchlist")
     s.add_argument("--days", type=int, default=14)
@@ -144,7 +143,7 @@ def main() -> int:
     elif args.cmd == "watchlist":
         scanner.watchlist(db, args.top)
     elif args.cmd == "harvest":
-        print(f"{scanner.harvest(db, args.min_acct, args.max_turnover, args)} candidates")
+        print(f"{scanner.harvest(db, args)} candidates")
     elif args.cmd == "regate":
         params.apply_scanner_params(db, args)            # honor UI-tuned gates (incl HFT switch) on regate
         scanner.regate(db, args)

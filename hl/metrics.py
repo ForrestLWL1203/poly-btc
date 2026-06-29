@@ -213,16 +213,16 @@ def score(m: dict) -> float:
     bag_depth = abs(min(0.0, m.get("open_loss_frac") or 0.0))
     bag = bag_depth * (1.0 + 0.5 * max(0, (m.get("bag_count") or 0) - 1)) \
         * (1.0 + min((m.get("max_bag_days") or 0.0) / 3.0, 1.0))
-    # REALIZED-asymmetry term (小赚大亏 / 不及时止损) — fires ONLY when a wallet BOTH rarely realizes
-    # losses (defers them) AND its rare losses dwarf its wins. defer = how far below LOSS_RATE_REF its
-    # realized-loss rate sits (a normal cutter realizing losses ≥REF gets 0 here, untouched at ANY win
-    # rate); tail = how much |worst loss| exceeds TAIL_FREE× the median win. A clean fast-cutter with
-    # small symmetric losses has tail≈0 → no penalty; the twins (99% win + a -$213 vs +$13 tail) light
-    # both up and sink below the line.
-    loss_rate = 1.0 - (m.get("win_rate") or 0.0)
-    defer = max(0.0, 1.0 - loss_rate / config.LOSS_RATE_REF)
-    asym = defer * max(0.0, (m.get("loss_pain") or 0.0) - config.TAIL_FREE)
-    disc = 5.0 * bag + 1.0 * (m.get("liq_count") or 0) + config.ASYM_W * asym
+    # REALIZED-asymmetry term (小赚大亏 / 不及时止损 — the twins, #17, RESOLV). Measured by the TAIL
+    # directly: how much |worst realized loss| exceeds TAIL_FREE× the median win. v5: NO win-rate gate
+    # (the old `defer` zeroed this for win<85%, letting a 60%-win 4×-tail churner pass) — loss_pain bites
+    # at ANY win rate. A clean fast-cutter with small symmetric losses has loss_pain≤TAIL_FREE → asym=0.
+    asym = max(0.0, (m.get("loss_pain") or 0.0) - config.TAIL_FREE)
+    # HOLD-SKEW term (扛单 by duration): holds losers longer than winners. Only EXTREME skew penalized —
+    # moderate skew on SMALL losses is benign (and the dangerous combo is already caught by loss_pain).
+    skew = max(0.0, (m.get("hold_skew") or 0.0) - config.HOLD_SKEW_FREE)
+    disc = (5.0 * bag + 1.0 * (m.get("liq_count") or 0)
+            + config.ASYM_W * asym + config.HOLD_SKEW_W * skew)
     discipline = 1.0 / (1.0 + config.DISP_PENALTY_K * disc)
 
     return quality * survival * discipline
