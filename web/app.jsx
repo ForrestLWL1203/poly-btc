@@ -929,7 +929,20 @@ function Dashboard({ onLogout }) {
   }, [loadOv, streamOk]);
 
   const startRescan = useCallback(async () => { await api.cmd("rescan", {}); setScanning(true); }, []);
-  useEffect(() => {                                  // poll scan progress while a rescan runs (mask)
+  // The SERVER is the source of truth for "a full scan is running" (scan_progress / process_status,
+  // surfaced as system.scanner). Driving the mask off this — not just a click in this tab — means the
+  // mask survives a page refresh/reopen AND catches the 24h auto-scan, so you can't refresh past it and
+  // double-click 重采. (Backend is already single-executor + absorbs duplicate rescans; this closes the UX gap.)
+  const serverScanning = !!(ov && ov.system && ov.system.scanner === "scanning");
+  useEffect(() => { if (serverScanning) setScanning(true); }, [serverScanning]);
+  // one-shot on mount: if a scan is already in flight, raise the mask IMMEDIATELY (before the first
+  // overview/stream push arrives), so a refresh during a scan never briefly exposes the page.
+  useEffect(() => {
+    api.get("/api/scan-status").then((s) => {
+      if (s && s.state === "scanning") { setScanning(true); setScanStatus(s); }
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {                                  // poll scan progress while the mask is up
     if (!scanning) return;
     let alive = true, started = Date.now(), seen = false;
     const tick = async () => {
@@ -937,14 +950,16 @@ function Dashboard({ onLogout }) {
         const s = await api.get("/api/scan-status");
         if (!alive) return;
         if (s.state === "scanning") { seen = true; setScanStatus(s); }
-        else if (seen || Date.now() - started > 8000) {   // grace: wait for the scanner to pick it up
+        // clear ONLY when BOTH the progress poll AND the overview agree the scan is done (avoids a
+        // premature un-mask from API timing skew); 8s grace covers the click→daemon-pickup window.
+        else if ((seen || Date.now() - started > 8000) && !serverScanning) {
           setScanning(false); setScanStatus(null);
         }
       } catch (_e) {}
     };
     tick(); const t = setInterval(tick, 1200);
     return () => { alive = false; clearInterval(t); };
-  }, [scanning]);
+  }, [scanning, serverScanning]);
 
   const obs = ov && ov.system ? ov.system.observer : "running";
   const pausing = busy;
@@ -1023,7 +1038,7 @@ function Dashboard({ onLogout }) {
         {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} toast={toast} />}
       </main>
 
-      {scanning && <ScanMask status={scanStatus} />}
+      {(scanning || serverScanning) && <ScanMask status={scanStatus} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
       {toastMsg && <div style={{ position: "fixed", top: 18, right: 18, zIndex: 50, background: "rgba(20,20,24,.96)", border: "1px solid var(--glass-border)", padding: "11px 16px", borderRadius: 12, fontSize: 13 }}>{toastMsg}</div>}
     </div>
