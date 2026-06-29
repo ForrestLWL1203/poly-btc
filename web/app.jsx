@@ -1024,11 +1024,11 @@ function Dashboard({ onLogout }) {
             <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
             {!(ov && ov.system) ? null : !obsUp
               ? /* 进程未运行 → 只有「启动跟单」(绿) */
-                <button className="btn btn-green" onClick={toggleObserver} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "var(--green)" }} />} {pausing ? "启动中…" : "启动跟单"}</button>
+                <button className="btn btn-go" onClick={toggleObserver} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "启动中…" : "启动跟单"}</button>
               : /* 运行中 → 软暂停/恢复(绿/珊瑚) + 停止整个进程(红) */
                 <>
                   {obs === "paused"
-                    ? <button className="btn btn-green" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "var(--green)" }} />} {pausing ? "恢复中…" : "恢复跟单"}</button>
+                    ? <button className="btn btn-go" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "恢复中…" : "恢复跟单"}</button>
                     : <button className="btn btn-accent" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "暂停中…" : "暂停跟单"}</button>}
                   <button className="btn btn-danger" onClick={toggleObserver} disabled={pausing} title="停止整个 Observer 进程">停止跟单</button>
                 </>}

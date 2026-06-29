@@ -116,6 +116,10 @@ body {
 .btn svg { width: 15px; height: 15px; flex-shrink: 0; }
 .btn-accent { background: var(--accent-grad); border: none; color: #fff; box-shadow: 0 6px 18px rgba(255, 80, 40, .28); }
 .btn-accent:hover { filter: brightness(1.08); }
+/* prominent GREEN primary (same treatment as btn-accent, green instead of coral) — the "go/启动" action.
+   gradient + shadow per the design handoff applyBtnStyle, so 启动/恢复 carry 暂停's weight, not a weak tint. */
+.btn-go { background: linear-gradient(135deg, #3FCF8E, #2BA56C); border: none; color: #fff; box-shadow: 0 6px 18px rgba(63, 207, 142, .28); }
+.btn-go:hover { filter: brightness(1.08); }
 .btn-green { background: rgba(63, 207, 142, .16); border-color: rgba(63,207,142,.3); color: var(--green-l); }
 .btn-danger { background: rgba(255, 92, 92, .14); border-color: rgba(255, 92, 92, .3); color: var(--red-l); padding: 6px 12px; font-size: 12px; }
 .btn-danger:hover { background: rgba(255, 92, 92, .22); }
