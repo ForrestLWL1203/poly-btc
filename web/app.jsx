@@ -961,15 +961,28 @@ function Dashboard({ onLogout }) {
     return () => { alive = false; clearInterval(t); };
   }, [scanning, serverScanning]);
 
-  const obs = ov && ov.system ? ov.system.observer : "running";
+  const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
+  const obsUp = obs === "running" || obs === "paused";            // process is alive (vs not started)
   const pausing = busy;
+  const cmdThen = (type, msg) => { setBusy(true); api.cmd(type, {}).then(() => { toast(msg); setTimeout(() => { loadOv(); setBusy(false); }, 2000); }); };
+  // PROCESS lifecycle (启动/停止整个 observer 进程) — routed through the scan-trigger supervisor via systemctl.
+  const toggleObserver = () => {
+    if (!obsUp) {                                   // not running -> start the whole process
+      cmdThen("observer_start", "已下发启动跟单指令(进程启动中…)");
+    } else {                                        // running -> stop the whole process (positions unmanaged)
+      setConfirmCfg({ title: "停止跟单", danger: true, ok: "停止整个进程",
+        body: "将停止整个 Observer 进程:不再开新仓,且存量持仓也不再被管理(进程重启后会自动重新接管)。若只想停开新仓、让存量继续跟到平仓,请改用「暂停跟单」。",
+        onConfirm: () => cmdThen("observer_stop", "已下发停止跟单指令") });
+    }
+  };
+  // SOFT pause (停开新仓、存量跟到平仓,进程保持运行) — only meaningful while the process is up.
   const togglePause = () => {
     if (obs === "running") {
       setConfirmCfg({ title: "暂停跟单", danger: false, ok: "暂停",
-        body: "暂停后 Observer 停止开新仓,存量持仓继续跟到平仓。",
-        onConfirm: async () => { setBusy(true); await api.cmd("pause", {}); toast("已下发暂停指令"); setTimeout(() => { loadOv(); setBusy(false); }, 2000); } });
-    } else {
-      (async () => { setBusy(true); await api.cmd("resume", {}); toast("已下发恢复指令"); setTimeout(() => { loadOv(); setBusy(false); }, 2000); })();
+        body: "暂停后 Observer 停止开新仓,存量持仓继续跟到平仓(进程保持运行)。",
+        onConfirm: () => cmdThen("pause", "已下发暂停指令") });
+    } else if (obs === "paused") {
+      cmdThen("resume", "已下发恢复指令");
     }
   };
 
@@ -1009,9 +1022,16 @@ function Dashboard({ onLogout }) {
               <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
               {streamOk ? "实时" : "轮询"}</span>
             <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
-            {obs === "paused"
-              ? <button className="btn btn-green" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "var(--green)" }} />} {pausing ? "恢复中…" : "恢复跟单"}</button>
-              : <button className="btn btn-accent" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "暂停中…" : "暂停跟单"}</button>}
+            {!(ov && ov.system) ? null : !obsUp
+              ? /* 进程未运行 → 只有「启动跟单」(绿) */
+                <button className="btn btn-green" onClick={toggleObserver} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "var(--green)" }} />} {pausing ? "启动中…" : "启动跟单"}</button>
+              : /* 运行中 → 软暂停/恢复(绿/珊瑚) + 停止整个进程(红) */
+                <>
+                  {obs === "paused"
+                    ? <button className="btn btn-green" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "var(--green)" }} />} {pausing ? "恢复中…" : "恢复跟单"}</button>
+                    : <button className="btn btn-accent" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "暂停中…" : "暂停跟单"}</button>}
+                  <button className="btn btn-danger" onClick={toggleObserver} disabled={pausing} title="停止整个 Observer 进程">停止跟单</button>
+                </>}
           </div>
         </div>
 

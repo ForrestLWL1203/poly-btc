@@ -28,6 +28,7 @@ MIN_FOLLOW_SCORE = 0.85     # follow watchlist wallets with score >= this (quali
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
+OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
 #                            it) so a fill landing between poll rounds isn't missed. This is the ONLY

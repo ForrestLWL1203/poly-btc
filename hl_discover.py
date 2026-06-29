@@ -8,10 +8,13 @@ rest, fills, storage). Run from the repo root so `import hl` resolves.
 """
 import argparse
 import calendar
+import json
+import subprocess
 import time
 from types import SimpleNamespace
 
 from hl import config, params, scanner, storage
+from hl.util import now_iso
 
 
 AUTO_SCAN_EVERY_H = 24.0          # self-scheduled cadence (no systemd timer); reference = last scan_runs
@@ -38,6 +41,33 @@ def _hours_since_last_scan(db):
         return 1e9
 
 
+def _serve_observer_cmds(db):
+    """SUPERVISOR role: consume observer_start / observer_stop commands the dashboard queued and drive the
+    observer PROCESS via systemctl (the observer can't start itself, and once stopped can't consume a stop).
+    On stop, immediately write process_status(observer)='stopped' so the dashboard flips without waiting for
+    the heartbeat to go stale; on start, the observer writes its own 'running' on boot."""
+    rows = db.execute("SELECT id,type FROM commands WHERE status='pending' "
+                      "AND type IN ('observer_start','observer_stop') ORDER BY id").fetchall()
+    for cid, ctype in rows:
+        action = "start" if ctype == "observer_start" else "stop"
+        try:
+            r = subprocess.run(["systemctl", action, config.OBSERVER_UNIT],
+                               capture_output=True, text=True, timeout=30)
+            ok, detail = r.returncode == 0, (r.stderr or r.stdout or "").strip()[:300]
+        except Exception as exc:  # noqa: BLE001
+            ok, detail = False, str(exc)[:300]
+        if action == "stop":           # killed observer can't write its own down-state -> do it here
+            db.execute("INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
+                       "('observer','stopped',NULL,?,?) ON CONFLICT(name) DO UPDATE SET state='stopped',"
+                       "pid=NULL,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
+                       (now_iso(), json.dumps({"by": "supervisor"})))
+        db.execute("UPDATE commands SET status=?,done_at=?,result_json=? WHERE id=?",
+                   ("done" if ok else "error", now_iso(),
+                    json.dumps({"action": action, "ok": ok, "detail": detail}), cid))
+        db.commit()
+        print(f"observer {action}: {'ok' if ok else 'FAIL ' + detail}", flush=True)
+
+
 def _serve_rescan(db):
     """Always-on scan executor: runs a full stop-the-world scan when the dashboard queues a `rescan`
     command OR when AUTO_SCAN_EVERY_H has elapsed since the last completed scan. SINGLE executor (never
@@ -45,9 +75,10 @@ def _serve_rescan(db):
     a ~2h slow scan can't be killed mid-run. scanner.scan() writes progress/status + absorbs any rescan
     queued during the scan (no redundant back-to-back run)."""
     config.MIN_POST_INTERVAL = 10.0                  # conservative pace: observer is priority, scan takes the slack
-    print("scan daemon: on-demand rescans + 24h auto-schedule ...", flush=True)
+    print("scan daemon: on-demand rescans + 24h auto-schedule + observer lifecycle ...", flush=True)
     while True:
         try:
+            _serve_observer_cmds(db)                 # process-level start/stop of the observer (supervisor role)
             sp = db.execute("SELECT state FROM scan_progress WHERE id=1").fetchone()
             scanning = bool(sp and sp[0] == "scanning")
             if not scanning:

@@ -142,7 +142,11 @@ def rw_connect(path):
 
 # commands the dashboard may enqueue. observer owns the first five; scanner owns rescan; patch_params
 # is reserved (M4 uses PATCH /api/params directly, but the type is accepted for completeness).
-ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle", "rescan", "patch_params"}
+# observer owns pause/resume/close/toggle (soft, in-process); the scan-trigger SUPERVISOR owns
+# observer_start/observer_stop (process lifecycle via systemctl — the observer can't start itself);
+# scanner owns rescan; patch_params is reserved (M4 uses PATCH /api/params directly).
+ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
+                    "observer_start", "observer_stop", "rescan", "patch_params"}
 PROC_STALE_SEC = 90       # heartbeat older than this -> the process is likely dead (UI shows stale)
 
 
@@ -281,8 +285,14 @@ def ep_overview(db):
         hb = _iso_epoch(row["heartbeat_at"])
         return bool(hb and (time.time() - hb) > PROC_STALE_SEC)
 
+    # observer is a 3-state PROCESS now: stopped (down — no row / supervisor wrote 'stopped' / heartbeat
+    # gone dead) vs running vs paused (soft). The dashboard's on/off control drives the process via the
+    # supervisor; the pause/resume control only applies while it's up.
+    obs_state = ("stopped" if (not obs or obs["state"] == "stopped" or _stale(obs))
+                 else (obs["state"] or "running"))
+
     base["system"] = {
-        "observer": (obs["state"] if obs else "running"),
+        "observer": obs_state,
         "observerStale": _stale(obs),
         "observerHeartbeatAt": (obs["heartbeat_at"] if obs else None),
         "scanner": ss["mode"],                  # rolling | scanning | stopped | unknown
