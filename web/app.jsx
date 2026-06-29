@@ -681,6 +681,19 @@ function ScanMask({ status }) {
   );
 }
 
+/* observer 进程控制过渡遮罩 — 启动/停止/暂停/恢复期间锁页面,直到引擎真正到达目标状态(running/
+   stopped/paused)才消失。进程级启停要 ~5-10s(supervisor 轮询→systemctl→boot),软暂停略快。 */
+function ObsMask({ label }) {
+  return (
+    <div className="mask">
+      <span className="spin" style={{ width: 34, height: 34, borderWidth: 3 }} />
+      <h2 style={{ marginTop: 22 }}>{label}</h2>
+      <div className="sub">正在等待引擎确认…</div>
+      <div className="mask-lock">⚠ 页面已锁定 · 操作进行中</div>
+    </div>
+  );
+}
+
 /* ----------------------------------------------------------------- discovery */
 function Discovery({ scanning, startRescan, confirm }) {
   const [d, setD] = useState(null);
