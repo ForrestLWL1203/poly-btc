@@ -807,7 +807,8 @@ function SizingPreview({ vals }) {
       padding: "10px 0", borderTop: "0.5px solid var(--glass-border)" }}>
       <div><span className={"pill " + tint} style={{ whiteSpace: "nowrap" }}>{tag}</span>
         <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>{sub}</div></div>
-      <div>{numIn(master, setMaster)}<span className="punit" style={{ marginLeft: 4 }}>x目标</span></div>
+      <div><div className="muted" style={{ fontSize: 11 }}>目标杠杆</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 3 }}>{numIn(master, setMaster, 52)}<span className="punit">x</span></div></div>
       <div><div className="muted" style={{ fontSize: 11 }}>每单保证金 · 轻→满仓</div><div className="mono">{usd(mLo)}–{usd(mHi)}</div></div>
       <div><div className="muted" style={{ fontSize: 11 }}>我们杠杆 · 强平</div><div className="mono">{lev}x · ±{(100 / lev).toFixed(1)}%</div></div>
       <div><div className="muted" style={{ fontSize: 11 }}>名义额{note ? " " + note : ""}</div><div className="mono">{usd(mLo * lev)}–{usd(mHi * lev)}</div></div>
