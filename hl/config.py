@@ -151,6 +151,11 @@ DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).
 TREND_OPEN_MIN = 0.05
 
+# Unrealized gains are return NOT yet locked (can reverse) → count this fraction of a wallet's winning
+# open position as RISK in the score denominator, so an unproven unrealized pump can't top the board
+# over wallets that actually realized the same return. Trend traders stay included, just ranked behind.
+UNREAL_RISK_W = 0.5
+
 # SPOT-HEDGE exclusion: if more than this fraction of a wallet's perp-short notional is offset by a spot
 # long of the same token, it's hedging spot (market-neutral), not trading directionally — reject. Its
 # perp 'profit' is cancelled by spot, so copying the naked perp leg is a loss for us.

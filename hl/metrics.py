@@ -161,7 +161,12 @@ def score(m: dict) -> float:
       Discipline = does the wallet CUT losses? penalizes currently-carried losing bags (depth×count×
                    duration) + historical forced liquidations. (Replaces the old win-rate proxy.)
     Shape constants live in config (interpretable, UI-tunable — not arbitrary cutoffs)."""
-    dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0)
+    # risk denominator = realized drawdown PLUS unrealized-win-at-risk. Unrealized gains (open_win_frac)
+    # are return NOT yet locked — they can reverse — so a wallet riding a huge open winner (e.g. +215% of
+    # account on 0 closed trades) is UNPROVEN, not elite. Counting that as risk keeps genuine trend
+    # traders included (their roi_total still counts) but ranks them BEHIND wallets that actually REALIZED
+    # the same return, and stops a single unrealized pump from topping the board.
+    dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0) + config.UNREAL_RISK_W * (m.get("open_win_frac") or 0.0)
     # EVIDENCE-aware risk-adjusted return on REALIZED+UNREALIZED roi (roi_total): a trend trader's
     # winning HOLDS count toward return, a 扛单's losing holds drag it down. n_eff counts live positions
     # as evidence too, so a low-frequency holder isn't shrunk to nothing for having few CLOSED trades.
