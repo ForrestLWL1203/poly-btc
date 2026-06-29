@@ -457,10 +457,12 @@ def ep_wallets(db, qs=None):
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
     # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
     # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
+    cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
     rows = qall(db,
         "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.win_rate,w.top_coin,"
         "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,"
         "pr.worst_loss_pct,pr.median_adds_per_ep,"
+        "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr AND e.close_ms >= ?) AS closed_7d,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
         "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS realized,"
@@ -468,7 +470,7 @@ def ep_wallets(db, qs=None):
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
-        "WHERE w.score >= ? AND COALESCE(w.times_active,0) >= ? ORDER BY w.rank", (line_native, min_ta))
+        "WHERE w.score >= ? AND COALESCE(w.times_active,0) >= ? ORDER BY w.rank", (cutoff7d, line_native, min_ta))
     total = len(rows)
     out = []
     for r in rows[page * size:page * size + size]:
@@ -484,6 +486,7 @@ def ep_wallets(db, qs=None):
             "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
+            "closed7d": r["closed_7d"],                            # target's OWN round-trips closed in 7d (活跃度)
             "closedN": r["closed_n"],                              # our forward (real copy) results
             "forwardNetPnl": (r["realized"] or 0) + (r["unreal"] or 0),   # PnL is the real verdict, not win%
             "trend": _wallet_trend(db, r["addr"]),

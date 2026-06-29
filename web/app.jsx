@@ -459,10 +459,11 @@ function Wallets({ confirm, toast }) {
         <table>
           <thead><tr>
             <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th><th className="num">ROI</th><th className="num">胜率</th>
+            <th className="num" title="目标钱包自己最近7天平掉的回合数(活跃度)">近7天</th>
             <th className="num">网格</th><th className="num">最差亏</th><th>主力</th><th className="num">被跟</th><th>趋势</th><th>启用</th>
           </tr></thead>
           <tbody>
-            {data === null && <tr><td colSpan="12" className="loading">加载中…</td></tr>}
+            {data === null && <tr><td colSpan="13" className="loading">加载中…</td></tr>}
             {data && data.wallets.map(w => (
               <tr key={w.address} className={w.enabled ? "" : "row-off"}
                 style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
@@ -478,6 +479,7 @@ function Wallets({ confirm, toast }) {
                       实盘 {fSign(net, 0)}{net < -5 ? " ⚠" : ""}</div>;
                   })()}
                 </td>
+                <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
                 <td className="num">{fNum(w.grid, 2)}</td>
                 <td className="num down">{fNum(w.worstSingleLossPct, 0)}%</td>
                 <td><b>{w.mainCoin}</b></td>
