@@ -345,6 +345,7 @@ def ep_positions(db, qs):
             if qs.get(key):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
+                        "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,"
                         "cp.addr,w.rank AS wrank FROM copy_position cp "
                         "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
                         " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
@@ -356,7 +357,10 @@ def ep_positions(db, qs):
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "closedAt": c,   # epoch sec (UTC); frontend renders in UTC+8
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
-                        "walletRank": r["wrank"]})   # wrank None = 已脱榜
+                        "walletRank": r["wrank"],   # wrank None = 已脱榜
+                        "entry": r["entry_px"], "leverage": r["leverage"], "notional": r["notional"] or 0.0,
+                        "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
+                        "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0)})
         # all-time stats over the FULL closed set (not just the recent-100 list above), honoring any filter
         sw = "cp.status!='open'" + ("".join(f" AND {c}=?" for c, k in
              (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")) if qs.get(k)))
@@ -396,6 +400,7 @@ def ep_positions(db, qs):
     rows = qall(db,
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,"
+        "cp.master_open_px,cp.master_leverage,cp.master_margin,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
         "FROM copy_position cp "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
@@ -420,6 +425,8 @@ def ep_positions(db, qs):
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"],
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
+            "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
+            "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0),
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
 

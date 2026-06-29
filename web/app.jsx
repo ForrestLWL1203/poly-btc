@@ -315,8 +315,10 @@ function Positions({ confirm, toast, streamOpen }) {
               <tr key={p.id}>
                 <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b></td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
-                <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x</td>
-                <td className="num">{fUsd(p.notional)}</td>
+                <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
+                  <div className="muted" title="目标钱包的开仓价 · 杠杆">主 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
+                <td className="num">{fUsd(p.notional)}
+                  <div className="muted" title="目标钱包这一单的名义额(我们 ≤ 它)">主 {fUsd(p.masterNotional)}</div></td>
                 <td className="num">{fPrice(p.mark)}</td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} <span className="rankbadge">#{p.walletRank}</span></td>
@@ -393,13 +395,17 @@ function History() {
           </div>
           <div className="tbl-wrap">
             <table>
-              <thead><tr><th>币种</th><th>方向</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>结果</th><th>钱包</th></tr></thead>
+              <thead><tr><th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>结果</th><th>钱包</th></tr></thead>
               <tbody>
-                {rows.length === 0 && <tr><td colSpan="7" className="empty">暂无</td></tr>}
+                {rows.length === 0 && <tr><td colSpan="9" className="empty">暂无</td></tr>}
                 {items.map(p => (
                   <tr key={p.id}>
                     <td><b>{p.coin}</b></td>
                     <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
+                    <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
+                      <div className="muted" title="目标钱包的开仓价 · 杠杆">主 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
+                    <td className="num">{fUsd(p.notional)}
+                      <div className="muted" title="目标钱包这一单的名义额">主 {fUsd(p.masterNotional)}</div></td>
                     <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
                     <td className="num">{fDur(p.durationSec)}</td>
                     <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(p.closedAt)}</td>
