@@ -816,19 +816,23 @@ class Observer:
         lev = max(self.min_lev, lev)                 # keep the floor (master_cap is already ≥1, ≤MAX_LEV)
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * rf * self.risk_k)
-            # PER-COIN cap: total margin across ALL our open positions on this coin ≤ COIN_MARGIN_CAP_PCT
-            # of the account. Stops a single market move (e.g. BTC ripping → many wallets short it) from
-            # stacking N copies onto one coin/direction. Shrink the new copy to the remaining room; if
-            # the coin is already full, skip (we don't pile in beyond the cap).
+            # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
+            # COIN_MARGIN_CAP_PCT of the account. Stops a single move making N wallets pile the SAME way
+            # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
+            # (a wallet flips long while we hold shorts) OFFSETS our exposure, it doesn't stack it, so it
+            # must NOT be blocked. Shrink to the remaining room; skip if that side of the coin is full.
             existing_coin = sum(e.get("margin", 0.0) for (a2, c2), e in self.open_ep.items()
-                                if c2 == coin and e is not ep)
+                                if c2 == coin and e.get("side") == ep["side"] and e is not ep)
             room = max(0.0, self.coin_margin_cap_pct * self.balance - existing_coin)
-            margin = min(margin, room)
-            if margin < self.min_open_margin_pct * self.balance:     # free balance too low OR coin full
+            capped = min(margin, room)
+            if capped < self.min_open_margin_pct * self.balance:     # free balance too low OR side full
+                why = "coin_full" if room < margin else "margin_too_small"
+                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / want ${margin:,.0f})")
                 self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # -> skip
                 self.db.commit()
                 self.open_ep.pop((addr, coin), None)
                 return
+            margin = capped
             notional = margin * lev
             # NEVER exceed the MASTER's own notional on this coin — we're a small isolated account
             # copying them; a position bigger than the source's is more exposed than the thing we're
