@@ -91,6 +91,11 @@ VOL_MIN_SAMPLES = 5         # need this many daily candles, else fall back
 VOL_REFRESH_S = 3600        # re-fetch each tracked coin's σ at most this often (1h) — vol drifts slowly
 VOL_FALLBACK_SIGMA = 0.10   # σ when candles unavailable (new/illiquid coin) → low lev, small notional
 VOL_PREWARM_TOP = 30        # at startup, warm σ for the top-N by 24h volume in crypto + EACH builder dex
+
+# PERIODIC orphan reconcile: forward-only polling normally catches a master's close in real time, but a
+# missed fill (poll gap / aggregation quirk / blip) would leave us dumb-holding a position the master
+# already exited. Re-run the startup reconcile this often so an orphan is closed within minutes.
+RECONCILE_INTERVAL_S = 300  # 5 min
 #                             (the liquid coins our targets most likely trade) → no first-open latency,
 #                             warm restart. The long tail is still lazy-fetched on first fill.
 

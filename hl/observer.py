@@ -238,7 +238,19 @@ class Observer:
                 await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
                                          closing=True, liq=False, maker=False, gap=True, forced_px=mid)
                 _log(f"RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
-                     f"pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f} (master flat at restart)")
+                     f"pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f} (master no longer holds it)")
+
+    async def reconcile_loop(self):
+        """Periodic safety net for the startup reconcile. Forward polling should catch a master's close
+        live, but a missed fill would orphan-hold; this re-checks every held wallet's CURRENT positions
+        every RECONCILE_INTERVAL_S and closes any copy whose master has gone flat/flipped. Runs even when
+        paused (an orphan whose master already left is pure risk with no copy value)."""
+        while not self.stop:
+            await asyncio.sleep(config.RECONCILE_INTERVAL_S)
+            try:
+                await self._reconcile_open()
+            except Exception as exc:  # noqa: BLE001
+                _log(f"reconcile loop error: {exc}")
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False):
@@ -669,6 +681,7 @@ class Observer:
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
+        asyncio.create_task(self.reconcile_loop())    # periodic orphan-check: close copies whose master exited
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
         asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book)
