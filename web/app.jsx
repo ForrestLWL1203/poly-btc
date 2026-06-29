@@ -459,10 +459,10 @@ function Wallets({ confirm, toast }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {dropped ? "掉线" : "在跟"} {data.total} 个</span>}</h2>
+        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {dropped ? "降级" : "跟单中"} {data.total} 个</span>}</h2>
         <div className="range-tabs">
-          <button className={!dropped ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>在跟</button>
-          <button className={dropped ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>已掉线</button>
+          <button className={!dropped ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中</button>
+          <button className={dropped ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
         </div>
       </div>
       <div className="tbl-wrap">
@@ -470,11 +470,11 @@ function Wallets({ confirm, toast }) {
           <table>
             <thead><tr>
               <th>地址</th><th>市场</th><th className="num">当前分</th><th className="num">曾在线</th><th className="num">ROI</th>
-              <th className="num">胜率</th><th>主力</th><th>掉线原因</th><th>掉线时间</th>
+              <th className="num">胜率</th><th>主力</th><th>降级原因</th><th>降级时间</th>
             </tr></thead>
             <tbody>
               {data === null && <tr><td colSpan="9" className="loading">加载中…</td></tr>}
-              {data && data.wallets.length === 0 && <tr><td colSpan="9" className="empty">暂无掉线钱包 —— 都还在线上 👍</td></tr>}
+              {data && data.wallets.length === 0 && <tr><td colSpan="9" className="empty">暂无降级钱包 —— 都在跟单中 👍</td></tr>}
               {data && data.wallets.map(w => (
                 <tr key={w.address} style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                   <td className="addr">{short(w.address)}</td>
