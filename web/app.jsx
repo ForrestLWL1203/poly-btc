@@ -965,6 +965,7 @@ function Dashboard({ onLogout }) {
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState(null);
   const [obsPending, setObsPending] = useState(null);   // observer 控制过渡 {label, target} → 显示遮罩
+  const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
   const toast = (m) => { setToastMsg(m); setTimeout(() => setToastMsg(null), 2600); };
 
   const ov = (streamOk && live && live.overview) || polledOv;    // prefer live stream; fall back to polled
@@ -1049,26 +1050,23 @@ function Dashboard({ onLogout }) {
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
   const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
-  // PROCESS lifecycle (启动/停止整个 observer 进程) — routed through the scan-trigger supervisor via systemctl.
-  const toggleObserver = () => {
-    if (!obsUp) {                                   // not running -> start the whole process
-      ctl("observer_start", "正在启动跟单…", "running");
-    } else {                                        // running -> stop the whole process (positions unmanaged)
-      setConfirmCfg({ title: "停止跟单", danger: true, ok: "停止整个进程",
-        body: "将停止整个 Observer 进程:不再开新仓,且存量持仓也不再被管理(进程重启后会自动重新接管)。若只想停开新仓、让存量继续跟到平仓,请改用「暂停跟单」。",
+  // SMART start (shown when not actively opening): process alive but paused → just resume opening new
+  // orders; process gone/hung (stopped) → restart the whole observer via the supervisor.
+  const smartStart = () => obs === "paused"
+    ? ctl("resume", "正在恢复开单…", "running")
+    : ctl("observer_start", "正在启动跟单…", "running");
+  // RUNNING control: default = soft pause (停开新仓、存量继续管); arm the in-button checkbox to ESCALATE to
+  // a full process stop. One button, FIXED size — only label/color change between 暂停开单 ↔ 彻底停止跟单.
+  const pauseOrStop = () => {
+    if (stopChecked) {
+      setConfirmCfg({ title: "彻底停止跟单", danger: true, ok: "彻底停止整个进程",
+        body: "将停止整个 Observer 进程:不再开新仓,且存量持仓也不再被管理(下次启动会自动重新接管)。只想停开新仓、让存量继续跟到平仓的话,取消勾选即可。",
         onConfirm: () => ctl("observer_stop", "正在停止跟单…", "stopped") });
+    } else {
+      ctl("pause", "正在暂停开单…", "paused");
     }
   };
-  // SOFT pause (停开新仓、存量跟到平仓,进程保持运行) — only meaningful while the process is up.
-  const togglePause = () => {
-    if (obs === "running") {
-      setConfirmCfg({ title: "暂停跟单", danger: false, ok: "暂停",
-        body: "暂停后 Observer 停止开新仓,存量持仓继续跟到平仓(进程保持运行)。",
-        onConfirm: () => ctl("pause", "正在暂停跟单…", "paused") });
-    } else if (obs === "paused") {
-      ctl("resume", "正在恢复跟单…", "running");
-    }
-  };
+  useEffect(() => { if (obs !== "running") setStopChecked(false); }, [obs]);  // reset escalation off-running
 
   return (
     <div className="shell">
@@ -1106,16 +1104,20 @@ function Dashboard({ onLogout }) {
               <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
               {streamOk ? "实时" : "轮询"}</span>
             <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
-            {!(ov && ov.system) ? null : !obsUp
-              ? /* 进程未运行 → 只有「启动跟单」(绿) */
-                <button className="btn btn-go" onClick={toggleObserver} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "启动中…" : "启动跟单"}</button>
-              : /* 运行中 → 软暂停/恢复(绿/珊瑚) + 停止整个进程(红) */
-                <>
-                  {obs === "paused"
-                    ? <button className="btn btn-go" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "恢复中…" : "恢复跟单"}</button>
-                    : <button className="btn btn-accent" onClick={togglePause} disabled={pausing}>{pausing ? <span className="spin" /> : <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} />} {pausing ? "暂停中…" : "暂停跟单"}</button>}
-                  <button className="btn btn-danger" onClick={toggleObserver} disabled={pausing} title="停止整个 Observer 进程">停止跟单</button>
-                </>}
+            {/* fixed-width control (minWidth 150, centered) so changing the label never resizes the button.
+                stopped → 启动跟单(restart) · paused → 恢复开单(resume) · running → 暂停开单 + in-button
+                「彻底停止」checkbox that escalates to a full process stop (red). */}
+            {!(ov && ov.system) ? null : obs === "stopped"
+              ? <button className="btn btn-go" style={{ minWidth: 150, justifyContent: "center" }} onClick={smartStart} disabled={pausing}>
+                  <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} /> 启动跟单</button>
+              : obs === "paused"
+              ? <button className="btn btn-go" style={{ minWidth: 150, justifyContent: "center" }} onClick={smartStart} disabled={pausing}>
+                  <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} /> 恢复开单</button>
+              : <button className={"btn " + (stopChecked ? "btn-stop" : "btn-accent")} style={{ minWidth: 150, justifyContent: "center" }} disabled={pausing} onClick={pauseOrStop}>
+                  <span onClick={(e) => { e.stopPropagation(); setStopChecked(v => !v); }} title="勾选后升级为彻底停止整个进程"
+                    style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 15, height: 15, borderRadius: 4, border: "1.5px solid rgba(255,255,255,.75)", fontSize: 10, lineHeight: 1, cursor: "pointer", flexShrink: 0 }}>
+                    {stopChecked ? "✓" : ""}</span>
+                  {stopChecked ? "彻底停止跟单" : "暂停开单"}</button>}
           </div>
         </div>
 
@@ -1128,7 +1130,7 @@ function Dashboard({ onLogout }) {
             <div className="chip"><div className="k">可用</div><div className="v">{fUsd(ov.availableBalance)}</div></div>
             <div className="chip"><div className="k">被跟</div><div className="v">{ov.system.watchlistCount}</div></div>
             <div className="chip"><div className="k">浮动</div><div className={"v " + cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</div></div>
-            <div className="chip"><div className="k">Observer</div><div className="v" style={{ fontSize: 13, color: obs === "paused" ? "var(--red-l)" : "var(--green-l)" }}>{obs === "paused" ? "已暂停" : "运行中"}{ov.system.observerStale ? " ⚠" : ""}</div></div>
+            <div className="chip"><div className="k">Observer</div><div className="v" style={{ fontSize: 13, color: obs === "stopped" ? "var(--t3)" : obs === "paused" ? "var(--amber)" : "var(--green-l)" }}>{obs === "stopped" ? "已停止" : obs === "paused" ? "已暂停" : "运行中"}</div></div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
               return <div className="chip"><div className="k">采集</div><div className="v" style={{ fontSize: 13, color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</div></div>; })()}
           </div>

@@ -120,6 +120,10 @@ body {
    gradient + shadow per the design handoff applyBtnStyle, so 启动/恢复 carry 暂停's weight, not a weak tint. */
 .btn-go { background: linear-gradient(135deg, #3FCF8E, #2BA56C); border: none; color: #fff; box-shadow: 0 6px 18px rgba(63, 207, 142, .28); }
 .btn-go:hover { filter: brightness(1.08); }
+/* prominent solid RED (same base size as btn-accent/btn-go — NOT the small tinted btn-danger) for the
+   armed 彻底停止 state, so toggling the checkbox swaps color, never size. */
+.btn-stop { background: linear-gradient(135deg, #E2524A, #A32D2D); border: none; color: #fff; box-shadow: 0 6px 18px rgba(226, 82, 74, .3); }
+.btn-stop:hover { filter: brightness(1.08); }
 .btn-green { background: rgba(63, 207, 142, .16); border-color: rgba(63,207,142,.3); color: var(--green-l); }
 .btn-danger { background: rgba(255, 92, 92, .14); border-color: rgba(255, 92, 92, .3); color: var(--red-l); padding: 6px 12px; font-size: 12px; }
 .btn-danger:hover { background: rgba(255, 92, 92, .22); }
