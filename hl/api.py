@@ -353,12 +353,18 @@ def ep_positions(db, qs):
         for r in rows:
             o, c = _iso_epoch(r["opened_at"]), _iso_epoch(r["closed_at"])
             pnl = r["realized_pnl"] or 0.0
+            # avg exit price, derived from realized PnL (exact in the fee-less paper model):
+            # pnl = size·(exit−entry)·sign  →  exit = entry + sign·pnl/size,  size = notional/entry.
+            entry = r["entry_px"]; notl = r["notional"] or 0.0
+            size = (notl / entry) if entry else 0.0
+            close_px = (entry + (1 if r["side"] == "long" else -1) * pnl / size) if size else None
             out.append({"id": f"cls_{r['pos_id']}", "coin": r["coin"], "side": r["side"],
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "closedAt": c,   # epoch sec (UTC); frontend renders in UTC+8
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
                         "walletRank": r["wrank"],   # wrank None = 已脱榜
-                        "entry": r["entry_px"], "leverage": r["leverage"], "notional": r["notional"] or 0.0,
+                        "entry": r["entry_px"], "closePx": close_px,
+                        "leverage": r["leverage"], "notional": r["notional"] or 0.0,
                         "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
                         "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0)})
         # all-time stats over the FULL closed set (not just the recent-100 list above), honoring any filter
