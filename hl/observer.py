@@ -820,6 +820,14 @@ class Observer:
                 self.open_ep.pop((addr, coin), None)
                 return
             notional = margin * lev
+            # NEVER exceed the MASTER's own notional on this coin — we're a small isolated account
+            # copying them; a position bigger than the source's is more exposed than the thing we're
+            # copying (the twins-style small-notional scalpers especially). Cap notional, shrink margin
+            # to match (margin stays = notional/lev so the isolated loss bound tracks the real size).
+            master_notl = (m_mgn or 0.0) * (m_lev or 0.0)        # master_margin × master_leverage = their notional
+            if master_notl > 0 and notional > master_notl:
+                notional = master_notl
+                margin = notional / lev if lev else margin
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
             stop_px = self._stop_px_for(px, is_buy)         # 扛单 cut at flat COPY_STOP_PCT adverse (0 = off)

@@ -49,9 +49,11 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 # [RF_MIN, RF_MAX] — a whale's small % is still a real bet (floor), an all-in is bounded (cap). Isolated
 # → max loss = margin. Everything anchored to AVAILABLE (account grows → sizes grow; positions open →
 # available shrinks → later sizes shrink = self-throttle). σ is regime-aware, see VOL_* + coin_vol table.
-RISK_K = 4.0                # MARGIN multiplier only: margin = RF·RISK_K·available (capital committed /
+RISK_K = 6.0                # MARGIN multiplier only: margin = RF·RISK_K·available (capital committed /
 #                             isolated max-loss per position). Leverage is NOT this anymore — see the
-#                             two-anchor fat-tail buffer below.
+#                             two-anchor fat-tail buffer below. Sized up 4→6 (2026-06-29) for meaningful
+#                             per-trade size; bounded by the available-balance auto-throttle AND by the
+#                             master-notional cap in _resolve_entry (our notional never exceeds theirs).
 # FAT-TAIL-AWARE leverage (the safety buffer in σ GROWS with the coin's volatility, so a calm coin gets
 # high leverage and a wild meme low — fixing "equal σ-buffer ≠ equal liquidation risk" since memes have
 # fat tails). Defined by TWO INTUITIVE ANCHORS (UI-tunable, also the dashboard preview inputs):
@@ -62,8 +64,9 @@ LEV_LOWVOL_X = 20.0         # BTC-level (σ≈2.3%/day) target max leverage
 LEV_HIGHVOL_X = 2.0         # meme-level (σ≈9%/day) target max leverage (wildest memes ≤ this)
 LEV_SIGMA_LOW = 0.023       # reference "calm" daily σ (BTC-like) for the low-vol anchor
 LEV_SIGMA_HIGH = 0.09       # reference "wild" daily σ (meme-like) for the high-vol anchor
-RF_MIN = 0.005              # min per-position risk fraction (low-conviction / unknown target bet)
-RF_MAX = 0.02               # max per-position risk fraction (bounds a target's all-in)
+RF_MIN = 0.012              # min per-position risk fraction (floor lifted 0.5→1.2% so low-conviction
+#                             copies aren't dust; with RISK_K=6 → ≥7.2% of available margin)
+RF_MAX = 0.025              # max per-position risk fraction (bounds a target's all-in; ×RISK_K → ≤15%)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= rf·RISK_K·available) is below this
 #                             fraction of equity: once free balance is too low to fund a MEANINGFUL
