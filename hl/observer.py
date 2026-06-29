@@ -56,8 +56,10 @@ class Observer:
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
-        self.lev_lowvol_x = config.LEV_LOWVOL_X    # fat-tail leverage anchors: target lev at BTC-like σ
-        self.lev_highvol_x = config.LEV_HIGHVOL_X   # ...and at meme-like σ (buffer grows with vol)
+        self.volatile_lev_cap = config.VOLATILE_LEV_CAP  # v6: volatile coins mirror master, capped here
+        self.stable_sigma_max = config.STABLE_SIGMA_MAX   # v6 stable-coin boost: σ ceiling for "stable"
+        self.stable_lev_boost = config.STABLE_LEV_BOOST   # ...our lev = boost × master's (stable coins)
+        self.stable_lev_cap = config.STABLE_LEV_CAP       # ...hard ceiling on the boosted leverage
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.max_adds = config.MAX_ADDS
@@ -164,8 +166,10 @@ class Observer:
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
-            if f.get("LEV_LOWVOL_X"): self.lev_lowvol_x = f["LEV_LOWVOL_X"]
-            if f.get("LEV_HIGHVOL_X"): self.lev_highvol_x = f["LEV_HIGHVOL_X"]
+            if f.get("VOLATILE_LEV_CAP"): self.volatile_lev_cap = f["VOLATILE_LEV_CAP"]
+            if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
+            if f.get("STABLE_LEV_BOOST"): self.stable_lev_boost = f["STABLE_LEV_BOOST"]
+            if f.get("STABLE_LEV_CAP"): self.stable_lev_cap = f["STABLE_LEV_CAP"]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
@@ -290,20 +294,16 @@ class Observer:
         """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
         return self.vol.get(coin) or self.vol_fallback_sigma
 
-    def _lev_for_sigma(self, sigma: float) -> float:
-        """FAT-TAIL-AWARE leverage. The liquidation buffer (in σ) GROWS with the coin's volatility, so a
-        calm coin (BTC) gets high leverage and a wild meme gets low — fixing 'equal σ-buffer ≠ equal liq
-        risk' (memes have fat tails). Back-solved from two intuitive anchors: lev_lowvol_x at LEV_SIGMA_LOW
-        and lev_highvol_x at LEV_SIGMA_HIGH give a linear buffer k(σ)=a+b·σ; lev=clip(1/(k·σ),min,max).
-        This is the SAME math the dashboard preview runs to show 'BTC≈Nx / meme≈Mx' as the user drags."""
-        if sigma <= 0:
-            return self.min_lev
-        slo, shi = config.LEV_SIGMA_LOW, config.LEV_SIGMA_HIGH
-        klo = 1.0 / (self.lev_lowvol_x * slo)          # buffer (σ-multiples) at the calm anchor
-        khi = 1.0 / (self.lev_highvol_x * shi)          # ...and at the wild anchor
-        b = (khi - klo) / (shi - slo) if shi != slo else 0.0
-        k = max(0.1, (klo - b * slo) + b * sigma)       # buffer at THIS coin's σ (guard k>0)
-        return max(self.min_lev, min(1.0 / (k * sigma), self.max_lev))
+    def _lev_for(self, sigma: float, master_cap: float) -> float:
+        """v6 leverage (no σ-interpolation): MIRROR the master's leverage, class-adjusted by volatility.
+        σ only CLASSIFIES the coin; it does not set the lev. Stable (calm) coins may exceed the master
+        (boost, capped) to hold notional up with less margin; volatile coins mirror the master, capped low.
+        HL leverage is an INTEGER → floor. master_cap = the master's own lev (≤MAX_LEV; MAX_LEV if unknown)."""
+        if sigma <= self.stable_sigma_max:
+            lev = min(master_cap * self.stable_lev_boost, self.stable_lev_cap, self.max_lev)
+        else:
+            lev = min(master_cap, self.volatile_lev_cap, self.max_lev)
+        return max(self.min_lev, float(int(lev)))      # floor to integer (7.5 → 7), keep the ≥MIN_LEV floor
 
     def _stop_px_for(self, entry_px: float, is_buy: bool) -> float:
         """Stop PRICE from entry: a flat COPY_STOP_PCT adverse move (down for a long, up for a short —
@@ -812,14 +812,13 @@ class Observer:
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
-        # VOLATILITY-TARGETED, available-anchored sizing (config: RISK_K / RF_MIN..RF_MAX / σ table):
+        # available-anchored sizing (config: RISK_K / RF_MIN..RF_MAX) + v6 mirror-master leverage:
         #  RF = clip(conviction, rf_min, rf_max)   conviction = how much of THEIR account the target bet
-        #  lev = min( fat-tail buffer (two anchors, _lev_for_sigma), the MASTER's OWN leverage )
-        #  margin = RF·RISK_K·available ;  notional = margin·lev (calm coin → big position, wild → small)
-        # We NEVER lever above the master: our σ is backward-looking, so a coin whose realized vol was
-        # calm AT OPEN (→ high formula lev) but then breaks regime can blow through our ISOLATED liq
-        # before the master's (MANTA: σ 5.3%→6x→liq +16.5%, pumped, we got wiped while the master's 3x
-        # at +33% survived). Capping at the master's leverage gives us at least their staying power.
+        #  margin = RF·RISK_K·available
+        #  lev = _lev_for(σ, master_cap): stable coins boost above master (cap), volatile mirror+cap (σ only
+        #        classifies). Volatile is never out-levered — a coin calm at open but breaking regime could
+        #        blow our ISOLATED liq before the master's (MANTA: 6x→liq +16.5% wiped while master's 3x survived).
+        #  notional = margin·lev
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         t_acct = self.target_acct.get(addr)
@@ -833,8 +832,7 @@ class Observer:
             rf = max(self.rf_min, min((m_mgn / t_acct) / self.conviction_divisor, self.rf_max))
         else:
             rf = self.rf_min                         # unknown target sizing -> conservative floor
-        lev = min(self._lev_for_sigma(sigma), master_cap)   # fat-tail formula, NEVER above the master's own lev
-        lev = max(self.min_lev, lev)                 # keep the floor (master_cap is already ≥1, ≤MAX_LEV)
+        lev = self._lev_for(sigma, master_cap)       # v6: mirror master, stable×boost(cap) / volatile cap
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * rf * self.risk_k)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤

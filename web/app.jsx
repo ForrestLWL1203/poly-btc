@@ -784,6 +784,56 @@ function Discovery({ scanning, startRescan, confirm }) {
 }
 
 /* ----------------------------------------------------------------- settings */
+/* 模拟下单预览 — 用真实 sizing 公式(镜像 observer v6)实时换算:给定参考可用余额 + 各类币的目标杠杆,
+   显示每单保证金区间 / 我们的杠杆 / 名义额区间 / 强平距离 / 可用余额够开几笔。参数一改即时刷新。
+   RF_MIN(1.2%)、MAX_LEV(20)是隐藏底层常量,这里写死(很少改);其余全部读自上方正在编辑的旋钮 vals。 */
+function SizingPreview({ vals }) {
+  const [bal, setBal] = React.useState(10000);
+  const [btcM, setBtcM] = React.useState(5);
+  const [memeM, setMemeM] = React.useState(3);
+  const RF_MIN = 0.012, MAX_LEV = 20, MIN_LEV = 1;
+  const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
+  const riskK = n("RISK_K", 4), rfMax = n("RF_MAX", 2.5) / 100;
+  const stB = n("STABLE_LEV_BOOST", 1.5), stC = n("STABLE_LEV_CAP", 15), volC = n("VOLATILE_LEV_CAP", 3);
+  const coinCap = n("COIN_MARGIN_CAP_PCT", 20) / 100;
+  const mLo = Math.min(bal * RF_MIN * riskK, coinCap * bal);
+  const mHi = Math.min(bal * rfMax * riskK, coinCap * bal);
+  const flr = x => Math.max(MIN_LEV, Math.floor(x));
+  const stableLev = flr(Math.min(btcM * stB, stC, MAX_LEV));
+  const volLev = flr(Math.min(memeM, volC, MAX_LEV));
+  const conc = mHi > 0 ? Math.floor(bal / mHi) : 0;
+  const usd = x => "$" + Math.round(x).toLocaleString();
+  const numIn = (v, setV, w) => <input className="pinput" type="number" value={v}
+    onChange={e => setV(Number(e.target.value) || 0)} style={{ width: w || 84, height: 30 }} />;
+  const Row = ({ tag, sub, tint, lev, master, setMaster, note }) => (
+    <div style={{ display: "grid", gridTemplateColumns: "96px 92px 1fr 1fr 1fr", gap: 12, alignItems: "center",
+      padding: "10px 0", borderTop: "0.5px solid var(--glass-border)" }}>
+      <div><span className={"pill " + tint} style={{ whiteSpace: "nowrap" }}>{tag}</span>
+        <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>{sub}</div></div>
+      <div>{numIn(master, setMaster)}<span className="punit" style={{ marginLeft: 4 }}>x目标</span></div>
+      <div><div className="muted" style={{ fontSize: 11 }}>每单保证金</div><div className="mono">{usd(mLo)}–{usd(mHi)}</div></div>
+      <div><div className="muted" style={{ fontSize: 11 }}>我们杠杆 · 强平</div><div className="mono">{lev}x · ±{(100 / lev).toFixed(1)}%</div></div>
+      <div><div className="muted" style={{ fontSize: 11 }}>名义额{note ? " " + note : ""}</div><div className="mono">{usd(mLo * lev)}–{usd(mHi * lev)}</div></div>
+    </div>
+  );
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+        <div className="card-lbl">模拟下单预览 <span className="muted">· 改下方参数即时换算(真实公式)</span></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span className="muted" style={{ fontSize: 12 }}>参考可用余额</span>{numIn(bal, setBal, 110)}
+        </div>
+      </div>
+      <Row tag="稳定币" sub="BTC/ETH" tint="tint-green" lev={stableLev} master={btcM} setMaster={setBtcM} />
+      <Row tag="波动币" sub="meme/股票" tint="tint-amber" lev={volLev} master={memeM} setMaster={setMemeM} note="(不放大)" />
+      <div style={{ borderTop: "0.5px solid var(--glass-border)", paddingTop: 10, marginTop: 4, fontSize: 12, color: "var(--t2)" }}>
+        每单最大保证金 <b className="mono">{usd(mHi)}</b> → 参考可用余额约可同时开 <b className="mono">{conc}</b> 笔
+        <span className="muted">（保证金占满即跳过新信号,存量继续管)</span>
+      </div>
+    </div>
+  );
+}
+
 function Settings({ startRescan, confirm, toast }) {
   const [params, setParams] = useState(null);
   const [tab, setTab] = useState("scanner");
@@ -828,6 +878,8 @@ function Settings({ startRescan, confirm, toast }) {
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
         <label className="devmode"><input type="checkbox" checked={dev} onChange={e => setDev(e.target.checked)} /> 开发者模式(解锁进阶)</label>
       </div>
+
+      {tab === "follow" && <SizingPreview vals={vals} />}
 
       <div className="tbl-wrap">
         {list.map(p => {

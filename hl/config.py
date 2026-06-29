@@ -53,21 +53,24 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 # [RF_MIN, RF_MAX] — a whale's small % is still a real bet (floor), an all-in is bounded (cap). Isolated
 # → max loss = margin. Everything anchored to AVAILABLE (account grows → sizes grow; positions open →
 # available shrinks → later sizes shrink = self-throttle). σ is regime-aware, see VOL_* + coin_vol table.
-RISK_K = 6.0                # MARGIN multiplier only: margin = RF·RISK_K·available (capital committed /
+RISK_K = 4.0                # MARGIN multiplier only: margin = RF·RISK_K·available (capital committed /
 #                             isolated max-loss per position). Leverage is NOT this anymore — see the
-#                             two-anchor fat-tail buffer below. Sized up 4→6 (2026-06-29) for meaningful
-#                             per-trade size; bounded by the available-balance auto-throttle AND by the
-#                             master-notional cap in _resolve_entry (our notional never exceeds theirs).
-# FAT-TAIL-AWARE leverage (the safety buffer in σ GROWS with the coin's volatility, so a calm coin gets
-# high leverage and a wild meme low — fixing "equal σ-buffer ≠ equal liquidation risk" since memes have
-# fat tails). Defined by TWO INTUITIVE ANCHORS (UI-tunable, also the dashboard preview inputs):
-#   LEV_LOWVOL_X  = target leverage at a BTC-like vol (LEV_SIGMA_LOW)
-#   LEV_HIGHVOL_X = target leverage at a meme-like vol (LEV_SIGMA_HIGH)
-# from which buffer k(σ)=a+b·σ is back-solved; lev = clip(1/(k·σ), MIN_LEV, MAX_LEV).
-LEV_LOWVOL_X = 20.0         # BTC-level (σ≈2.3%/day) target max leverage
-LEV_HIGHVOL_X = 2.0         # meme-level (σ≈9%/day) target max leverage (wildest memes ≤ this)
-LEV_SIGMA_LOW = 0.023       # reference "calm" daily σ (BTC-like) for the low-vol anchor
-LEV_SIGMA_HIGH = 0.09       # reference "wild" daily σ (meme-like) for the high-vol anchor
+#                             two-anchor fat-tail buffer below. v6 (2026-06-30): 6→4 — each trade commits
+#                             LESS margin (RF_MAX×4 = 10% of available, was 15%) so the account funds MORE
+#                             concurrent copies; notional is held up instead by the stable-coin lev boost
+#                             below. (Our notional still never exceeds the master's — moot at our size vs
+#                             the $13k–$3.5M targets, but kept as a harmless conservative safety.)
+# v6 LEVERAGE (2026-06-30, simplified — no σ-interpolation curve). We MIRROR the master's own leverage,
+# then class-adjust by the coin's volatility (σ only CLASSIFIES stable vs volatile, doesn't set the lev):
+#   stable coins (σ ≤ STABLE_SIGMA_MAX, BTC/ETH/majors): lev = floor(min(master_lev × STABLE_LEV_BOOST,
+#       STABLE_LEV_CAP, MAX_LEV)) — may exceed the master to hold notional up with less margin (RISK_K↓).
+#       Example: master 5x → 5×1.5=7.5 → floor 7x; $1000 margin → $7000 notional.
+#   volatile coins (σ above the threshold, meme/山寨): lev = floor(min(master_lev, VOLATILE_LEV_CAP,
+#       MAX_LEV)) — NEVER out-levered, hard-capped low (pin-wick buffer). (Leverage is an INTEGER on HL.)
+STABLE_SIGMA_MAX = 0.04     # σ ceiling for "stable" treatment (BTC≈2.3%, ETH≈3% qualify; memes ~9% don't)
+STABLE_LEV_BOOST = 1.5      # stable coins: our leverage = this × the master's (then capped + floored)
+STABLE_LEV_CAP = 15.0       # hard ceiling on the stable-coin boosted leverage (≤ MAX_LEV)
+VOLATILE_LEV_CAP = 3.0      # volatile coins: mirror the master's leverage but never above this (≤ MAX_LEV)
 # CROSS→ISOLATED conviction adjustment: the target's account-fraction (cross, whole-account-backed) is
 # divided by this before mapping to our RF, because our isolated margin is fully at risk where their
 # cross bet has the rest of the account as cushion. Higher = treat their bets as "lighter" → smaller copies.
