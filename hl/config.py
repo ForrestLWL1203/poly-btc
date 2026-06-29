@@ -44,26 +44,26 @@ INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
 ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available
 MAX_ADDS = 2                # follow the master's scale-ins up to this many adds/position (each ADD_MARGIN_PCT)
 
-# v6 SIZING (2026-06-30). MARGIN scales with the target's CONVICTION; LEVERAGE mirrors the master,
-# σ-class-adjusted. Anchored to AVAILABLE (account grows → sizes grow; positions open → available
-# shrinks → later sizes shrink = self-throttle). σ is regime-aware (see VOL_* + coin_vol).
-#   margin   = available × MAX_MARGIN_PCT × clip(conviction, MARGIN_FLOOR_FRAC, 1.0)
-#              conviction = master_position_margin / master_account (0–1). A near-all-in target hits our
-#              max margin; a light probe sizes down to the floor → per-trade size VARIES (not all pinned
-#              at max). No cross→isolated divisor: MAX_MARGIN_PCT already bounds the isolated risk.
-#   leverage = mirror master, σ-class: stable coins (σ ≤ STABLE_SIGMA_MAX, BTC/ETH/majors) boost
-#              ×STABLE_LEV_BOOST capped STABLE_LEV_CAP (may exceed master, e.g. 5x→7x, 15x→20x); volatile
-#              coins (meme/山寨) mirror master capped VOLATILE_LEV_CAP, never out-levered. INTEGER (floor).
+# v7 SIZING (2026-06-30). MARGIN = risk-parity by VOLATILITY (low-σ coin → bigger margin, high-σ → smaller,
+# so each trade carries ~equal $ risk per 1σ move). LEVERAGE mirrors the master, capped by σ-class. Anchored
+# to AVAILABLE (account grows → sizes grow; positions open → available shrinks → later sizes shrink = self-
+# throttle). σ is regime-aware (see VOL_* + coin_vol).
+#   margin   = available × MAX_MARGIN_PCT × clip(MARGIN_SIGMA_REF / σ, MARGIN_FLOOR_FRAC, 1.0)
+#              coins at/below MARGIN_SIGMA_REF get full margin; above, scaled DOWN by the vol ratio (e.g.
+#              σ=10% vs ref 5% → ½ margin). Floor caps the smallest. NO conviction (the target's account-
+#              fraction wrongly shrank big-account signals and made sizes erratic).
+#   leverage = floor(min(master_lev, σ-class cap)) — MIRROR the master (their call), we only CAP: stable
+#              coins (σ ≤ STABLE_SIGMA_MAX) ≤ STABLE_LEV_CAP, volatile coins ≤ VOLATILE_LEV_CAP. No boost.
 #   notional = margin × leverage. (Never exceeds the master's — moot at our size, kept as safety.)
-MAX_MARGIN_PCT = 0.10       # per-trade MARGIN ceiling = this fraction of available (at full conviction).
-#                             $10k available → ≤$1000/trade → account funds ~10 concurrent copies. This is
-#                             the single "每单最大保证金" knob (folds in the old RISK_K × RF_MAX product).
-MARGIN_FLOOR_FRAC = 0.20    # a light-conviction copy still commits ≥ this fraction of the max (anti-dust;
-#                             margin floor = MAX_MARGIN_PCT × this). conviction in between scales linearly.
-STABLE_SIGMA_MAX = 0.04     # σ ceiling for "stable" treatment (BTC≈2.3%, ETH≈3% qualify; memes ~9% don't)
-STABLE_LEV_BOOST = 1.5      # stable coins: our leverage = this × the master's (then capped + floored)
-STABLE_LEV_CAP = 20.0       # hard ceiling on the stable-coin boosted leverage (≤ MAX_LEV)
-VOLATILE_LEV_CAP = 5.0      # volatile coins: mirror the master's leverage but never above this (≤ MAX_LEV)
+MAX_MARGIN_PCT = 0.10       # per-trade MARGIN base = this fraction of available (at/below the σ ref). The
+#                             "每单最大保证金" knob. $10k available → $1000 base for a low-vol coin.
+MARGIN_SIGMA_REF = 0.05     # vol reference: coins with daily σ ≤ this get the FULL base margin; above, margin
+#                             scales by ref/σ (risk-parity). Higher ref = more coins at full size.
+MARGIN_FLOOR_FRAC = 0.30    # margin never below this fraction of the base (anti-dust): floor = MAX_MARGIN_PCT
+#                             × this = 3% of available. A coin with σ > ref/FLOOR (≈17%) pins to this floor.
+STABLE_SIGMA_MAX = 0.04     # σ ceiling for "stable" LEVERAGE class (≤ this → STABLE_LEV_CAP, else VOLATILE)
+STABLE_LEV_CAP = 20.0       # stable coins (BTC/ETH/majors): mirror master leverage capped at this (≤ MAX_LEV)
+VOLATILE_LEV_CAP = 4.0      # volatile coins (meme/山寨/stock): mirror master leverage capped at this
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 COIN_MARGIN_CAP_PCT = 0.20  # per-COIN cap: total margin across all our open positions on ONE coin ≤ this
 #                             fraction of the account (stops N wallets piling into the same coin/direction)

@@ -45,18 +45,18 @@ class Observer:
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        # strategy sizing (UI-tunable): margin = available × MAX_MARGIN_PCT × clip(conviction, floor, 1);
-        # conviction = master_position_margin / master_account. Leverage mirrors the master (σ-classed).
-        self.max_margin_pct = config.MAX_MARGIN_PCT       # per-trade margin ceiling (frac of available)
-        self.margin_floor_frac = config.MARGIN_FLOOR_FRAC  # light-conviction floor (frac of the ceiling)
+        # strategy sizing (UI-tunable): margin = available × MAX_MARGIN_PCT × clip(σ_ref/σ, floor, 1) — risk
+        # parity by volatility (low-σ bigger, high-σ smaller). self-throttles as available shrinks.
+        self.max_margin_pct = config.MAX_MARGIN_PCT       # per-trade margin base = this frac of available
+        self.margin_sigma_ref = config.MARGIN_SIGMA_REF   # σ at/below which a coin gets the FULL base margin
+        self.margin_floor_frac = config.MARGIN_FLOOR_FRAC  # margin never below this frac of base (anti-dust)
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
-        self.volatile_lev_cap = config.VOLATILE_LEV_CAP  # v6: volatile coins mirror master, capped here
-        self.stable_sigma_max = config.STABLE_SIGMA_MAX   # v6 stable-coin boost: σ ceiling for "stable"
-        self.stable_lev_boost = config.STABLE_LEV_BOOST   # ...our lev = boost × master's (stable coins)
-        self.stable_lev_cap = config.STABLE_LEV_CAP       # ...hard ceiling on the boosted leverage
+        self.volatile_lev_cap = config.VOLATILE_LEV_CAP  # volatile coins: mirror master, capped here
+        self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ ceiling for the stable LEVERAGE class
+        self.stable_lev_cap = config.STABLE_LEV_CAP       # stable coins: mirror master, capped here
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.max_adds = config.MAX_ADDS
@@ -157,13 +157,13 @@ class Observer:
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
             if f.get("MAX_MARGIN_PCT") is not None: self.max_margin_pct = f["MAX_MARGIN_PCT"]
+            if f.get("MARGIN_SIGMA_REF"): self.margin_sigma_ref = f["MARGIN_SIGMA_REF"]
             if f.get("MARGIN_FLOOR_FRAC") is not None: self.margin_floor_frac = f["MARGIN_FLOOR_FRAC"]
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("VOLATILE_LEV_CAP"): self.volatile_lev_cap = f["VOLATILE_LEV_CAP"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
-            if f.get("STABLE_LEV_BOOST"): self.stable_lev_boost = f["STABLE_LEV_BOOST"]
             if f.get("STABLE_LEV_CAP"): self.stable_lev_cap = f["STABLE_LEV_CAP"]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
@@ -290,15 +290,11 @@ class Observer:
         return self.vol.get(coin) or self.vol_fallback_sigma
 
     def _lev_for(self, sigma: float, master_cap: float) -> float:
-        """v6 leverage (no σ-interpolation): MIRROR the master's leverage, class-adjusted by volatility.
-        σ only CLASSIFIES the coin; it does not set the lev. Stable (calm) coins may exceed the master
-        (boost, capped) to hold notional up with less margin; volatile coins mirror the master, capped low.
-        HL leverage is an INTEGER → floor. master_cap = the master's own lev (≤MAX_LEV; MAX_LEV if unknown)."""
-        if sigma <= self.stable_sigma_max:
-            lev = min(master_cap * self.stable_lev_boost, self.stable_lev_cap, self.max_lev)
-        else:
-            lev = min(master_cap, self.volatile_lev_cap, self.max_lev)
-        return max(self.min_lev, float(int(lev)))      # floor to integer (7.5 → 7), keep the ≥MIN_LEV floor
+        """v7 leverage: MIRROR the master's leverage (their call), we only CAP by σ-class — stable coins
+        (σ ≤ STABLE_SIGMA_MAX) ≤ STABLE_LEV_CAP, volatile coins ≤ VOLATILE_LEV_CAP. No boost (we never lever
+        above the master). HL leverage is an INTEGER → floor. master_cap = master's lev (≤MAX_LEV)."""
+        cap = self.stable_lev_cap if sigma <= self.stable_sigma_max else self.volatile_lev_cap
+        return max(self.min_lev, float(int(min(master_cap, cap, self.max_lev))))
 
     def _stop_px_for(self, entry_px: float, is_buy: bool) -> float:
         """Stop PRICE from entry: a flat COPY_STOP_PCT adverse move (down for a long, up for a short —
@@ -807,24 +803,22 @@ class Observer:
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
-        # available-anchored sizing (config: MAX_MARGIN_PCT / MARGIN_FLOOR_FRAC) + v6 mirror-master leverage:
-        #  margin = available × MAX_MARGIN_PCT × clip(conviction, floor, 1)   conviction = master pos margin/account
-        #  lev = _lev_for(σ, master_cap): stable coins boost above master (cap), volatile mirror+cap (σ only
-        #        classifies). Volatile is never out-levered — a coin calm at open but breaking regime could
-        #        blow our ISOLATED liq before the master's (MANTA: 6x→liq +16.5% wiped while master's 3x survived).
+        # v7 sizing (config: MAX_MARGIN_PCT / MARGIN_SIGMA_REF / MARGIN_FLOOR_FRAC + σ-class lev caps):
+        #  margin = available × MAX_MARGIN_PCT × clip(σ_ref/σ, floor, 1)   risk-parity by vol (low-σ bigger)
+        #  lev = _lev_for(σ, master_cap): MIRROR master, capped by σ-class (stable≤STABLE_LEV_CAP / volatile
+        #        ≤VOLATILE_LEV_CAP). Never out-levered — a coin calm at open but breaking regime could blow
+        #        our ISOLATED liq before the master's (MANTA: 6x→liq +16.5% wiped while master's 3x survived).
         #  notional = margin·lev
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
-        t_acct = self.target_acct.get(addr)
-        # conviction = how much of THEIR account that position's margin is (0–1) → scales our margin between
-        # the floor and the MAX_MARGIN_PCT ceiling, so a near-all-in target hits our max and a light probe
-        # sizes down (per-trade size VARIES, not pinned at max). No cross→isolated divisor: MAX_MARGIN_PCT
-        # already bounds our isolated risk. Unknown target sizing -> conservative floor.
-        conviction = (m_mgn / t_acct) if (m_mgn and t_acct) else self.margin_floor_frac
-        scale = max(self.margin_floor_frac, min(conviction, 1.0))
-        lev = self._lev_for(sigma, master_cap)       # v6: mirror master, stable×boost(cap) / volatile cap
+        # v7 RISK-PARITY margin by volatility: coins at/below MARGIN_SIGMA_REF get the full base (MAX_MARGIN_
+        # PCT of available); above, margin scales DOWN by ref/σ (a 2×-as-volatile coin → ½ margin), floored.
+        # So a calm BTC takes a big position and a wild meme a small one — each ~equal $ risk per 1σ move.
+        # NOT scaled by the target's conviction (account-fraction wrongly shrank big-account signals).
+        vol_scale = max(self.margin_floor_frac, min(self.margin_sigma_ref / sigma, 1.0)) if sigma > 0 else 1.0
+        lev = self._lev_for(sigma, master_cap)       # mirror master, capped by σ-class (no boost)
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * self.max_margin_pct * scale)
+            margin = max(0.0, self._available() * self.max_margin_pct * vol_scale)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
             # COIN_MARGIN_CAP_PCT of the account. Stops a single move making N wallets pile the SAME way
             # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
@@ -1100,6 +1094,6 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(sizing: margin=available×{config.MAX_MARGIN_PCT*100:g}%×conviction(floor {config.MARGIN_FLOOR_FRAC*100:g}%), "
-          f"lev=mirror-master[stable×{config.STABLE_LEV_BOOST:g}≤{config.STABLE_LEV_CAP:g}x / volatile≤{config.VOLATILE_LEV_CAP:g}x], "
+    print(f"\n(sizing: margin=available×{config.MAX_MARGIN_PCT*100:g}%×clip({config.MARGIN_SIGMA_REF*100:g}%/σ,{config.MARGIN_FLOOR_FRAC:g},1), "
+          f"lev=mirror-master capped[stable≤{config.STABLE_LEV_CAP:g}x / volatile≤{config.VOLATILE_LEV_CAP:g}x], "
           f"{config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated)")

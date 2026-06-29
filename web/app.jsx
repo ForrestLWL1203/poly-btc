@@ -614,8 +614,8 @@ function WalletDrawer({ address, onClose }) {
 const PARAM_META = {
   // follow
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "评分≥此线才跟单(最常调)", range: "27–67", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
-  MAX_MARGIN_PCT: { name: "每单最大保证金", desc: "满仓信心时单笔投入(占可用%)", range: "5–15", up: "每单更重、能跟更少单", dn: "每单更轻、能跟更多单" },
-  STABLE_LEV_BOOST: { name: "稳定币杠杆放大", range: "1–2", up: "名义额更大、爆仓近", dn: "更贴近目标杠杆" },
+  MAX_MARGIN_PCT: { name: "每单基础保证金", desc: "低波动币单笔投入(占可用%)", range: "5–15", up: "每单更重、能跟更少单", dn: "每单更轻、能跟更多单" },
+  MARGIN_SIGMA_REF: { name: "满仓波动率基准", desc: "σ≤此的币拿满,更颠的按比例缩小", range: "3–6", up: "更多币拿满额", dn: "高波动币压更小" },
   STABLE_LEV_CAP: { name: "稳定币杠杆上限", range: "10–20" },
   VOLATILE_LEV_CAP: { name: "波动币杠杆上限", range: "2–5" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
@@ -794,52 +794,57 @@ function Discovery({ scanning, startRescan, confirm }) {
 }
 
 /* ----------------------------------------------------------------- settings */
-/* 模拟下单预览 — 用真实 sizing 公式(镜像 observer v6)实时换算:给定参考可用余额 + 各类币的目标杠杆,
-   显示每单保证金区间(随目标押注力度浮动) / 我们的杠杆 / 名义额区间 / 强平距离 / 可用余额够开几笔。
-   MARGIN_FLOOR_FRAC(20%)、MAX_LEV(20)是隐藏底层常量,这里写死;其余全部读自上方正在编辑的旋钮 vals。 */
+/* 模拟下单预览 — 用真实 v7 公式(风险平价)实时换算:每类币输入日波动σ + 目标杠杆,显示我们的保证金
+   (按 σ_ref/σ 缩放)/ 我们的杠杆(镜像目标、按σ类封顶)/ 名义额 / 强平距离。
+   FLOOR(30%)、MAX_LEV(20)、稳定σ阈值(4%)是隐藏底层常量写死;其余读自正在编辑的旋钮 vals。 */
 function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
-  const [btcM, setBtcM] = React.useState(5);
-  const [memeM, setMemeM] = React.useState(3);
-  const FLOOR = 0.20, MAX_LEV = 20, MIN_LEV = 1;
+  const [stSig, setStSig] = React.useState(2.3);   /* 稳定币 σ% */
+  const [stM, setStM] = React.useState(20);         /* 稳定币 目标杠杆 */
+  const [voSig, setVoSig] = React.useState(6.0);    /* 波动币 σ% */
+  const [voM, setVoM] = React.useState(8);
+  const MAX_LEV = 20, MIN_LEV = 1, FLOOR = 0.30, STAB = 4.0;   /* hidden 底层常量 */
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
-  const maxPct = n("MAX_MARGIN_PCT", 10) / 100;
-  const stB = n("STABLE_LEV_BOOST", 1.5), stC = n("STABLE_LEV_CAP", 20), volC = n("VOLATILE_LEV_CAP", 5);
-  const coinCap = n("COIN_MARGIN_CAP_PCT", 20) / 100;
-  const mHi = Math.min(bal * maxPct, coinCap * bal);   /* 满仓信心 → 上限(再受单币 cap) */
-  const mLo = mHi * FLOOR;                              /* 轻仓信心 → 下限 */
-  const flr = x => Math.max(MIN_LEV, Math.floor(x));
-  const stableLev = flr(Math.min(btcM * stB, stC, MAX_LEV));
-  const volLev = flr(Math.min(memeM, volC, MAX_LEV));
-  const conc = mHi > 0 ? Math.floor(bal / mHi) : 0;
+  const maxPct = n("MAX_MARGIN_PCT", 10) / 100, sref = n("MARGIN_SIGMA_REF", 5);
+  const stC = n("STABLE_LEV_CAP", 20), volC = n("VOLATILE_LEV_CAP", 5), coinCap = n("COIN_MARGIN_CAP_PCT", 20) / 100;
   const usd = x => "$" + Math.round(x).toLocaleString();
+  const calc = (sigPct, master) => {
+    const s = Math.max(0.1, sigPct);
+    const vs = Math.max(FLOOR, Math.min(sref / s, 1.0));            /* 风险平价: σ_ref/σ, 封顶1、下限FLOOR */
+    const margin = Math.min(bal * maxPct * vs, coinCap * bal);
+    const lev = Math.max(MIN_LEV, Math.floor(Math.min(master, s <= STAB ? stC : volC, MAX_LEV)));  /* 镜像+封顶 */
+    return { margin, lev, notl: margin * lev };
+  };
   const numIn = (v, setV, w) => <input className="pinput" type="number" value={v}
-    onChange={e => setV(Number(e.target.value) || 0)} style={{ width: w || 84, height: 30 }} />;
-  const Row = ({ tag, sub, tint, lev, master, setMaster, note }) => (
-    <div style={{ display: "grid", gridTemplateColumns: "96px 92px 1fr 1fr 1fr", gap: 12, alignItems: "center",
-      padding: "10px 0", borderTop: "0.5px solid var(--glass-border)" }}>
-      <div><span className={"pill " + tint} style={{ whiteSpace: "nowrap" }}>{tag}</span>
-        <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>{sub}</div></div>
-      <div><div className="muted" style={{ fontSize: 11 }}>目标杠杆</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 3 }}>{numIn(master, setMaster, 52)}<span className="punit">x</span></div></div>
-      <div><div className="muted" style={{ fontSize: 11 }}>每单保证金 · 轻→满仓</div><div className="mono">{usd(mLo)}–{usd(mHi)}</div></div>
-      <div><div className="muted" style={{ fontSize: 11 }}>我们杠杆 · 强平</div><div className="mono">{lev}x · ±{(100 / lev).toFixed(1)}%</div></div>
-      <div><div className="muted" style={{ fontSize: 11 }}>名义额{note ? " " + note : ""}</div><div className="mono">{usd(mLo * lev)}–{usd(mHi * lev)}</div></div>
-    </div>
-  );
+    onChange={e => setV(Number(e.target.value) || 0)} style={{ width: w || 56, height: 30 }} />;
+  const Row = ({ tag, sub, tint, sig, setSig, master, setMaster }) => {
+    const r = calc(sig, master);
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "92px 74px 74px 1fr 1fr", gap: 10, alignItems: "center",
+        padding: "10px 0", borderTop: "0.5px solid var(--glass-border)" }}>
+        <div><span className={"pill " + tint} style={{ whiteSpace: "nowrap" }}>{tag}</span>
+          <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>{sub}</div></div>
+        <div><div className="muted" style={{ fontSize: 11 }}>日波动σ</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>{numIn(sig, setSig)}<span className="punit">%</span></div></div>
+        <div><div className="muted" style={{ fontSize: 11 }}>目标杠杆</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>{numIn(master, setMaster)}<span className="punit">x</span></div></div>
+        <div><div className="muted" style={{ fontSize: 11 }}>保证金 · 我们杠杆</div><div className="mono">{usd(r.margin)} · {r.lev}x</div></div>
+        <div><div className="muted" style={{ fontSize: 11 }}>名义额 · 强平</div><div className="mono">{usd(r.notl)} · ±{(100 / r.lev).toFixed(1)}%</div></div>
+      </div>
+    );
+  };
   return (
     <div className="card" style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <div className="card-lbl">模拟下单预览 <span className="muted">· 改下方参数即时换算(真实公式)</span></div>
+        <div className="card-lbl">模拟下单预览 <span className="muted">· 改参数即时换算(真实公式 · 风险平价)</span></div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span className="muted" style={{ fontSize: 12 }}>参考可用余额</span>{numIn(bal, setBal, 110)}
+          <span className="muted" style={{ fontSize: 12 }}>参考可用余额</span>{numIn(bal, setBal, 100)}
         </div>
       </div>
-      <Row tag="稳定币" sub="BTC/ETH" tint="tint-green" lev={stableLev} master={btcM} setMaster={setBtcM} />
-      <Row tag="波动币" sub="meme/股票" tint="tint-amber" lev={volLev} master={memeM} setMaster={setMemeM} note="(不放大)" />
+      <Row tag="稳定币" sub="BTC/ETH" tint="tint-green" sig={stSig} setSig={setStSig} master={stM} setMaster={setStM} />
+      <Row tag="波动币" sub="meme/股票" tint="tint-amber" sig={voSig} setSig={setVoSig} master={voM} setMaster={setVoM} />
       <div style={{ borderTop: "0.5px solid var(--glass-border)", paddingTop: 10, marginTop: 4, fontSize: 12, color: "var(--t2)" }}>
-        每单最大保证金 <b className="mono">{usd(mHi)}</b> → 参考可用余额约可同时开 <b className="mono">{conc}</b> 笔
-        <span className="muted">（保证金占满即跳过新信号,存量继续管)</span>
+        满额保证金 <b className="mono">{usd(bal * maxPct)}</b>（日波动σ≤{sref}% 的币拿满）· 更颠的按 σ_ref/σ 自动缩小,下限 {(FLOOR * 100).toFixed(0)}%×可用 · 占满可用即跳过新信号
       </div>
     </div>
   );
