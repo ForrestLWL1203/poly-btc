@@ -964,6 +964,7 @@ function Dashboard({ onLogout }) {
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState(null);
+  const [obsPending, setObsPending] = useState(null);   // observer 控制过渡 {label, target} → 显示遮罩
   const toast = (m) => { setToastMsg(m); setTimeout(() => setToastMsg(null), 2600); };
 
   const ov = (streamOk && live && live.overview) || polledOv;    // prefer live stream; fall back to polled
@@ -1024,18 +1025,38 @@ function Dashboard({ onLogout }) {
     return () => { alive = false; clearInterval(t); };
   }, [scanning, serverScanning]);
 
+  // observer-control transition: poll overview while the mask is up, clear it when the engine reaches the
+  // target state (running/stopped/paused) — start/stop take ~5-10s (supervisor+systemctl+boot). 30s safety.
+  useEffect(() => {
+    if (!obsPending) return;
+    let alive = true, started = Date.now();
+    const tick = async () => {
+      try {
+        const o = await api.get("/api/overview");
+        if (!alive) return;
+        setPolledOv(o);
+        const st = o && o.system ? o.system.observer : null;
+        if (st === obsPending.target || Date.now() - started > 30000) setObsPending(null);
+      } catch (_e) {}
+    };
+    tick(); const t = setInterval(tick, 1500);
+    return () => { alive = false; clearInterval(t); };
+  }, [obsPending]);
+
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const obsUp = obs === "running" || obs === "paused";            // process is alive (vs not started)
-  const pausing = busy;
-  const cmdThen = (type, msg) => { setBusy(true); api.cmd(type, {}).then(() => { toast(msg); setTimeout(() => { loadOv(); setBusy(false); }, 2000); }); };
+  const pausing = busy || !!obsPending;
+  // fire an observer-control command + raise the transition mask until the engine reaches `target`
+  // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
+  const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
   // PROCESS lifecycle (启动/停止整个 observer 进程) — routed through the scan-trigger supervisor via systemctl.
   const toggleObserver = () => {
     if (!obsUp) {                                   // not running -> start the whole process
-      cmdThen("observer_start", "已下发启动跟单指令(进程启动中…)");
+      ctl("observer_start", "正在启动跟单…", "running");
     } else {                                        // running -> stop the whole process (positions unmanaged)
       setConfirmCfg({ title: "停止跟单", danger: true, ok: "停止整个进程",
         body: "将停止整个 Observer 进程:不再开新仓,且存量持仓也不再被管理(进程重启后会自动重新接管)。若只想停开新仓、让存量继续跟到平仓,请改用「暂停跟单」。",
-        onConfirm: () => cmdThen("observer_stop", "已下发停止跟单指令") });
+        onConfirm: () => ctl("observer_stop", "正在停止跟单…", "stopped") });
     }
   };
   // SOFT pause (停开新仓、存量跟到平仓,进程保持运行) — only meaningful while the process is up.
@@ -1043,9 +1064,9 @@ function Dashboard({ onLogout }) {
     if (obs === "running") {
       setConfirmCfg({ title: "暂停跟单", danger: false, ok: "暂停",
         body: "暂停后 Observer 停止开新仓,存量持仓继续跟到平仓(进程保持运行)。",
-        onConfirm: () => cmdThen("pause", "已下发暂停指令") });
+        onConfirm: () => ctl("pause", "正在暂停跟单…", "paused") });
     } else if (obs === "paused") {
-      cmdThen("resume", "已下发恢复指令");
+      ctl("resume", "正在恢复跟单…", "running");
     }
   };
 
@@ -1122,6 +1143,7 @@ function Dashboard({ onLogout }) {
       </main>
 
       {(scanning || serverScanning) && <ScanMask status={scanStatus} />}
+      {obsPending && <ObsMask label={obsPending.label} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
       {toastMsg && <div style={{ position: "fixed", top: 18, right: 18, zIndex: 50, background: "rgba(20,20,24,.96)", border: "1px solid var(--glass-border)", padding: "11px 16px", borderRadius: 12, fontSize: 13 }}>{toastMsg}</div>}
     </div>
