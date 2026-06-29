@@ -399,7 +399,7 @@ def ep_positions(db, qs):
             where.append(f"{col}=?"); args.append(qs[key][0])
     rows = qall(db,
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
-        "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,"
+        "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
         "cp.master_open_px,cp.master_leverage,cp.master_margin,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
         "FROM copy_position cp "
@@ -427,6 +427,7 @@ def ep_positions(db, qs):
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
             "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0),
+            "addCount": r["add_count"] or 0,
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
 

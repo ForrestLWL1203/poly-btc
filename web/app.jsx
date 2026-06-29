@@ -313,12 +313,13 @@ function Positions({ confirm, toast, streamOpen }) {
             {open && openRows.length === 0 && <tr><td colSpan="10" className="empty">无持仓</td></tr>}
             {openItems.map(p => (
               <tr key={p.id}>
-                <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b></td>
+                <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b>
+                  {p.addCount > 0 && <span className="tint tint-gray" title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                 <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
-                  <div className="muted" title="目标钱包的开仓价 · 杠杆">主 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
+                  <div className="muted" title="源(目标钱包)的开仓价 · 杠杆">源 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
                 <td className="num">{fUsd(p.notional)}
-                  <div className="muted" title="目标钱包这一单的名义额(我们 ≤ 它)">主 {fUsd(p.masterNotional)}</div></td>
+                  <div className="muted" title="源(目标钱包)这一单的名义额(我们 ≤ 它)">源 {fUsd(p.masterNotional)}</div></td>
                 <td className="num">{fPrice(p.mark)}</td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} <span className="rankbadge">#{p.walletRank}</span></td>
@@ -403,9 +404,9 @@ function History() {
                     <td><b>{p.coin}</b></td>
                     <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                     <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
-                      <div className="muted" title="目标钱包的开仓价 · 杠杆">主 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
+                      <div className="muted" title="源(目标钱包)的开仓价 · 杠杆">源 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
                     <td className="num">{fUsd(p.notional)}
-                      <div className="muted" title="目标钱包这一单的名义额">主 {fUsd(p.masterNotional)}</div></td>
+                      <div className="muted" title="源(目标钱包)这一单的名义额">源 {fUsd(p.masterNotional)}</div></td>
                     <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
                     <td className="num">{fDur(p.durationSec)}</td>
                     <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(p.closedAt)}</td>
