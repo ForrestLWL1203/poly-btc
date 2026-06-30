@@ -257,6 +257,7 @@ function Overview({ ov }) {
 /* ----------------------------------------------------------------- positions */
 function Positions({ confirm, toast, streamOpen }) {
   const [polledOpen, setPolledOpen] = useState(null);
+  const [closing, setClosing] = useState({});        // positionId -> true while its 平仓 command is in flight
   const [filter, setFilter] = useState("all");
   const [opage, setOpage] = useState(0);             // open positions page (20/page)
   const [pnlSort, setPnlSort] = useState(null);      // null = 默认(新开在前) | "asc" 浮亏在前 | "desc" 浮盈在前
@@ -274,7 +275,14 @@ function Positions({ confirm, toast, streamOpen }) {
   const doClose = (p) => confirm({
     title: "确认平仓", danger: true, ok: "平仓",
     body: `将手动平掉 ${p.coin} ${p.side === "long" ? "多" : "空"}(名义额 ${fUsd(p.notional)})。此操作高危且不可撤销。`,
-    onConfirm: async () => { await api.cmd("close_position", { positionId: Number(p.id.replace("pos_", "")) }); toast("已下发平仓指令 " + p.coin); setTimeout(load, 1800); },
+    onConfirm: async () => {                          // button shows inline loading until done — no toast
+      const pid = Number(p.id.replace("pos_", ""));
+      setClosing(c => ({ ...c, [pid]: true }));
+      try { await api.cmd("close_position", { positionId: pid }); } catch (_e) {}
+      await new Promise(r => setTimeout(r, 1800));
+      load();
+      setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
+    },
   });
 
   const filt = (rows) => !rows ? [] : rows.filter(p =>
@@ -330,7 +338,9 @@ function Positions({ confirm, toast, streamOpen }) {
                 <td className="num" title="跟单延迟:目标开仓 → 我们检测并跟开的秒数(旧仓未记录显示 —)">{p.lagSec != null ? fNum(p.lagSec, 1) + "s" : "—"}</td>
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
-                <td><button className="btn btn-danger" onClick={() => doClose(p)}>平仓</button></td>
+                <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
+                  return <button className="btn btn-danger" disabled={busy} onClick={() => doClose(p)}>
+                    {busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span className="spin" />平仓中</span> : "平仓"}</button>; })()}</td>
               </tr>
             ))}
           </tbody>
@@ -804,69 +814,59 @@ function Discovery({ scanning, startRescan, confirm }) {
 }
 
 /* ----------------------------------------------------------------- settings */
-/* 模拟下单预览 — 用真实 v7 公式(风险平价)实时换算:每类币输入日波动σ + 目标杠杆,显示我们的保证金
-   档由 σ 决定: σ≤稳定上界=稳定档, σ≥剧烈下界=剧烈档, 其余中档。每档有自己的保证金%与杠杆封顶,
-   档内杠杆按公式 floor(稳定杠杆×稳定σ / σ) 连续缩放、再封顶。读自正在编辑的旋钮 vals(单位均为%)。 */
+/* 下单沙盘 — 用真实 v9 公式实时换算:杠杆 = floor(clip(RISK_BUDGET/σ, 档帽));止损 = K×σ 逆向。
+   只读展示(无可调目标杠杆),紧凑液态玻璃风。σ 为实采日内最高-最低振幅均值。读自正在编辑的 vals。 */
 function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
   const MAXL = n("MAX_LEV", 20), MINL = Math.max(1, n("MIN_LEV", 1));
-  const RB = n("RISK_BUDGET", 60);                                      /* 风险预算%(1σ亏损) */
-  const K = n("STOP_SIGMA_MULT", 1);                                    /* 止损 = K×σ */
+  const RB = n("RISK_BUDGET", 60), K = n("STOP_SIGMA_MULT", 1);
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;
-  const tier = sig => sig <= stMax ? "stable" : (sig >= hiMin ? "high" : "mid");
+  const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"], mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
-  const TINT = { stable: "tint-green", mid: "tint-amber", high: "tint-red" };
-  const TNAME = { stable: "稳定", mid: "中", high: "剧烈" };
+  const DOT = { stable: "var(--green)", mid: "var(--amber)", high: "var(--red)" };
   const dft = { STABLE_MARGIN_PCT: 10, STABLE_LEV_CAP: 20, MID_MARGIN_PCT: 8, MID_LEV_CAP: 10, HIGH_MARGIN_PCT: 6, HIGH_LEV_CAP: 5 };
-  const usd = x => "$" + Math.round(x).toLocaleString();
-  const calc = sigPct => {
-    const s = Math.max(0.1, sigPct), t = tier(s);
+  const usd = x => x >= 1000 ? "$" + (x / 1000).toFixed(x >= 10000 ? 0 : 1) + "k" : "$" + Math.round(x);
+  const calc = s0 => {
+    const s = Math.max(0.1, s0), t = tier(s);
     const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
-    const lev = Math.max(MINL, Math.floor(Math.min(RB / s, cap, MAXL)));  /* v9: 杠杆 = 风险预算 / σ,再封顶 */
+    const lev = Math.max(MINL, Math.floor(Math.min(RB / s, cap, MAXL)));
     const margin = bal * mPct;
-    const stopDist = K * s;                                              /* 止损逆向距离(%)= K×σ */
-    const stopLoss = Math.min(stopDist / 100 * lev, 1);                  /* 止损硬亏(占保证金)= 距离×杠杆 */
+    const stopDist = K * s, stopLoss = Math.min(stopDist / 100 * lev, 1);
     return { t, margin, lev, notl: margin * lev, stopDist, stopLoss };
   };
-  const COINS = [                                                        /* 实采 σ(高-低日内幅度均值) */
-    ["BTC", 3.9], ["GOLD", 1.6], ["ETH", 5.3], ["SOL", 7.1], ["HYPE", 9.6],
-    ["ZEC", 14.6], ["FARTCOIN", 11.7], ["HMSTR", 11.9],
-  ];
-  const numIn = (v, setV, w) => <input className="pinput" type="number" value={v}
-    onChange={e => setV(Number(e.target.value) || 0)} style={{ width: w || 56, height: 30 }} />;
-  const COLS = "1fr 58px 52px 1fr 1fr 1fr";
+  const COINS = [["BTC", 3.9], ["ETH", 5.3], ["ZEC", 14.6]];   /* 每档一个代表:稳定 / 中 / 剧烈 */
   return (
-    <div className="card" style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div className="card-lbl">模拟下单预览 <span className="muted">· 改上面参数即时换算(真实公式)</span></div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span className="muted" style={{ fontSize: 12 }}>参考可用余额</span>{numIn(bal, setBal, 100)}
-        </div>
+    <div className="sz">
+      <div className="sz-hd">
+        <div className="sz-ttl">下单沙盘<span>· 按当前参数实时换算</span></div>
+        <div className="sz-bal"><label>可用余额</label>
+          <input type="number" value={bal} onChange={e => setBal(Number(e.target.value) || 0)} /></div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: COLS, gap: 8,
-        fontSize: 11, color: "var(--t3)", padding: "0 0 6px" }}>
-        <span>币种</span><span>日波动σ</span><span>档</span><span>保证金 · 杠杆</span><span>名义额 · 强平距</span><span>止损@ · 硬亏</span>
+      <div className="sz-grid">
+        <div className="sz-hdr">币种</div><div className="sz-hdr sz-num">σ</div>
+        <div className="sz-hdr sz-num">杠杆</div><div className="sz-hdr sz-num">保证金 / 名义</div>
+        <div className="sz-hdr sz-num">止损 / 硬亏</div>
+        {COINS.map(([sym, sig]) => {
+          const r = calc(sig);
+          return (
+            <div className="sz-row" key={sym}>
+              <div className="sz-cell sz-coin"><span className="sz-dot" style={{ color: DOT[r.t] }} />{sym}</div>
+              <div className="sz-cell sz-num">{sig.toFixed(1)}%</div>
+              <div className="sz-cell sz-lev">{r.lev}x</div>
+              <div className="sz-cell sz-num">{usd(r.margin)}<span className="sz-sub"> / {usd(r.notl)}</span></div>
+              <div className="sz-cell sz-num">{stopOn
+                ? <React.Fragment>−{r.stopDist.toFixed(1)}%<span className="sz-sub"> / 亏{Math.round(r.stopLoss * 100)}%</span></React.Fragment>
+                : <span className="sz-sub">已关</span>}</div>
+            </div>
+          );
+        })}
       </div>
-      {COINS.map(([sym, sig]) => {
-        const r = calc(sig);
-        return (
-          <div key={sym} style={{ display: "grid", gridTemplateColumns: COLS, gap: 8,
-            alignItems: "center", padding: "8px 0", borderTop: "0.5px solid var(--glass-border)" }}>
-            <span className="mono"><b>{sym}</b></span>
-            <span className="mono" style={{ color: "var(--t2)" }}>{sig.toFixed(1)}%</span>
-            <span><span className={"pill " + TINT[r.t]}>{TNAME[r.t]}</span></span>
-            <span className="mono">{usd(r.margin)} · {r.lev}x</span>
-            <span className="mono">{usd(r.notl)} · ±{(100 / r.lev).toFixed(1)}%</span>
-            <span className="mono">{stopOn ? `−${r.stopDist.toFixed(1)}% · 亏${Math.round(r.stopLoss * 100)}%` : "关"}</span>
-          </div>
-        );
-      })}
-      <div style={{ borderTop: "0.5px solid var(--glass-border)", paddingTop: 10, marginTop: 4, fontSize: 12, color: "var(--t2)" }}>
-        杠杆 = floor(风险预算 {RB}% / σ) 再按档封顶 · 保证金 = 可用×档位% · {stopOn
-          ? `止损 = 逆向 ${K}×σ(自适应:大饼≈${(K * 3.9).toFixed(1)}%、ZEC≈${(K * 14.6).toFixed(1)}%),单次硬亏≈${Math.round(K * RB)}% 保证金`
-          : "止损已关闭(仅靠强平兜底)"} · 占满可用即跳过新信号
+      <div className="sz-foot">
+        杠杆 = <b>风险预算 {RB}% ÷ σ</b>(按档封顶)· 保证金 = 可用 × 档位%{stopOn
+          ? <React.Fragment> · 止损 = 逆向 <b>{K}×σ</b>(大饼≈{(K * 3.9).toFixed(1)}% / ZEC≈{(K * 14.6).toFixed(1)}%),单次硬亏 ≈ <b>{Math.round(K * RB)}%</b> 保证金</React.Fragment>
+          : <React.Fragment> · <b>止损已关闭</b>,仅靠强平兜底</React.Fragment>}
       </div>
     </div>
   );

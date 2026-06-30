@@ -276,6 +276,32 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .peffect { font-size: 11.5px; color: var(--t3); padding: 4px 0 10px 240px; line-height: 1.6; }
 .eff-up { color: var(--green-l); } .eff-dn { color: var(--red-l); }
 
+/* ---------- sizing sandbox (compact glass) ---------- */
+.sz { background: var(--glass-2); border: 1px solid var(--glass-border); border-radius: 14px;
+  padding: 14px 16px; margin-bottom: 16px; backdrop-filter: blur(14px) saturate(130%); -webkit-backdrop-filter: blur(14px) saturate(130%); }
+.sz-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.sz-ttl { font-size: 12.5px; font-weight: 600; color: var(--t1); }
+.sz-ttl span { font-weight: 400; color: var(--t3); font-size: 11px; margin-left: 6px; }
+.sz-bal { display: flex; align-items: center; gap: 8px; }
+.sz-bal label { font-size: 11px; color: var(--t3); }
+.sz-bal input { width: 92px; height: 30px; padding: 0 10px; border-radius: 9px; text-align: right;
+  background: rgba(0,0,0,.28); border: 1px solid var(--glass-border); color: var(--t1);
+  font-family: var(--mono); font-size: 12.5px; outline: none; }
+.sz-bal input:focus { border-color: var(--accent); }
+.sz-grid { display: grid; grid-template-columns: 1.25fr .7fr .7fr 1.1fr 1.25fr; gap: 8px; align-items: center; }
+.sz-grid > * { min-width: 0; }
+.sz-hdr { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--t4); padding-bottom: 4px; }
+.sz-row { display: contents; }
+.sz-cell { padding: 7.5px 0; border-top: 1px solid rgba(255,255,255,.045); font-size: 12.5px; }
+.sz-coin { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--t1); }
+.sz-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; box-shadow: 0 0 6px currentColor; }
+.sz-num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; color: var(--t2); }
+.sz-lev { font-family: var(--mono); font-weight: 600; color: var(--t1); text-align: right; }
+.sz-sub { font-size: 10px; color: var(--t4); }
+.sz-foot { margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--glass-border);
+  font-size: 11px; color: var(--t3); line-height: 1.6; }
+.sz-foot b { color: var(--t2); font-weight: 600; }
+
 .apply-bar { position: sticky; bottom: 0; margin: 16px -26px -40px; padding: 14px 26px;
   background: rgba(18,18,22,.95); border-top: 1px solid var(--glass-border); backdrop-filter: blur(20px);
   display: flex; align-items: center; justify-content: space-between; animation: rise .25s; }
