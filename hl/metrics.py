@@ -5,6 +5,7 @@ a single continuous SCORE; the watchlist is the top-N by score — no scattered 
 thresholds. The score is built on the DAILY PnL series (consistency), not just window totals, so it
 separates a steady grinder from a one-lucky-day wallet and from a chronic loss-holder (扛单/浮亏).
 """
+import math
 import statistics
 
 from . import config
@@ -172,19 +173,10 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "not_profitable"                         # realized + UNREALIZED net loss (catches 扛单)
     if m["activity_ratio"] < p.min_activity and not trend:     # low-freq noise — but a genuine trend
         return False, "irregular"                              # holder (winning open) is exempt
-    if (m.get("worst_loss_pct") or 0) < -p.max_single_loss:    # one CLOSED round-trip lost > this % equity
-        return False, "blowup_loss"                            # = 扛到爆并已实现; the cut-losses gate
-    # ── DISCIPLINE GATES (2026-06-30): hard floors on the behaviours we used to only SOFT-demote in score
-    # (promotes 赌徒-rejection from "ranked low" to "never in the watchlist"). Each 0 = disabled.
-    lp_max = getattr(p, "gate_loss_pain_max", config.GATE_LOSS_PAIN_MAX)
-    if lp_max and (m.get("loss_pain") or 0) >= lp_max:
-        return False, "asym_loss"                              # 小赚大亏: worst loss dwarfs median win
-    sk_max = getattr(p, "gate_hold_skew_max", config.GATE_HOLD_SKEW_MAX)
-    if sk_max and (m.get("hold_skew") or 0) >= sk_max:
-        return False, "holds_losers"                           # 抗单: holds losers far longer than winners
-    pc_max = getattr(p, "gate_profit_conc_max", config.GATE_PROFIT_CONC_MAX)
-    if pc_max and (m.get("profit_conc") or 0) >= pc_max:
-        return False, "one_window"                             # 一把行情: one day = most of the profit
+    # NOTE (v5 2026-06-30): the loss_pain/hold_skew/profit_conc/blow-up HARD gates were REMOVED — they
+    # double-counted and FOUGHT the composite score (a score-63 wallet vetoed while score-20 ones stayed).
+    # Those behaviours are now SMOOTH factors inside score(): 反噬→g_frag, 深度抗单/爆仓→g_deep. The only
+    # remaining hard floors are COPYABILITY (above) + NET>0 (below) — unambiguous, score-independent.
     # LIFETIME / 30d realized net (the full-history datum). Skipped when absent (old profiles) so `regate`
     # is safe BEFORE a re-profile populates net_life — the gate activates once the scan refetches.
     if config.GATE_REQUIRE_LIFETIME_NET and m.get("net_life") is not None and m["net_life"] <= 0:
@@ -199,58 +191,38 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
 
 
 def score(m: dict) -> float:
-    """v4 continuous quality. SCORE = Quality × Survival × Discipline.
-      Quality    = (evidence-shrunk, capped) risk-adjusted return on REALIZED+UNREALIZED roi
-                   × frequency-scaled day-consistency
-      Discipline = does the wallet CUT losses? penalizes currently-carried losing bags (depth×count×
-                   duration) + historical forced liquidations. (Replaces the old win-rate proxy.)
-    Shape constants live in config (interpretable, UI-tunable — not arbitrary cutoffs)."""
-    # risk denominator = realized drawdown PLUS unrealized-win-at-risk. Unrealized gains (open_win_frac)
-    # are return NOT yet locked — they can reverse — so a wallet riding a huge open winner (e.g. +215% of
-    # account on 0 closed trades) is UNPROVEN, not elite. Counting that as risk keeps genuine trend
-    # traders included (their roi_total still counts) but ranks them BEHIND wallets that actually REALIZED
-    # the same return, and stops a single unrealized pump from topping the board.
-    dd_eq = m["max_drawdown"] / (m["acct_value"] + 1.0) + config.UNREAL_RISK_W * (m.get("open_win_frac") or 0.0)
-    # EVIDENCE-aware risk-adjusted return on REALIZED+UNREALIZED roi (roi_total): a trend trader's
-    # winning HOLDS count toward return, a 扛单's losing holds drag it down. n_eff counts live positions
-    # as evidence too, so a low-frequency holder isn't shrunk to nothing for having few CLOSED trades.
-    roi = m.get("roi_total")
-    if roi is None:
-        roi = m.get("roi_equity", 0.0)
-    n_eff = (m.get("n_trades") or 0) + (m.get("bag_count") or 0) \
-        + (1 if (m.get("open_win_frac") or 0.0) > 1e-9 else 0)
-    roi_eff = max(0.0, roi) * n_eff / (n_eff + config.SCORE_SHRINK_K)
-    rar = min(config.SCORE_RAR_CAP, roi_eff / (dd_eq + 0.05))  # risk-adjusted return (strength)
-    D = m["active_days"]
-    w = D / (D + config.SCORE_K)                               # confidence in the daily series
-    pos = max(m["pos_day_ratio"], 1e-6)
-    consistency = pos ** (w * config.SCORE_GAMMA)             # high-freq must be green MOST days; low-freq lenient
-    quality = rar * consistency
+    """v5 SMOOTH BLENDED QUALITY ∈ [0,1] (display = ×100). The follow-quality is an ADDITIVE weighted
+    blend of the user's roots — 胜率 / 风险调整ROI / 逐日稳定性 — then a gentle 活跃度(样本) multiplier and
+    two SMOOTH risk guards (反噬/twins, 深度抗单/爆仓). No hard vetoes here (those that remain in gates are
+    pure copyability + net>0); the temp loss_pain/hold_skew/profit_conc gates are folded in as guards.
+    Smooth by construction → no 90→20 cliff; a single flaw discounts, never zeroes."""
+    g = lambda k, d=0.0: (m.get(k) if m.get(k) is not None else d)
 
-    # survival = a SMALL cross-scan persistence bonus (brand-new=0.9, proven-across-10-scans=1.0).
-    survival = 0.9 + 0.1 * min(m.get("times_active", 1), 10) / 10
+    # ── core positives, each ∈ [0,1] ──
+    win = _clip(g("win_rate"), 0.0, 1.0)                                   # 胜率(根本)
+    roi = g("roi_total", g("roi_equity"))                                  # realized + unrealized return
+    dd_eq = g("max_drawdown") / (g("acct_value") + 1.0) + config.UNREAL_RISK_W * g("open_win_frac")
+    roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效收益
+    roi_s = 1.0 - math.exp(-roi_adj / config.SCORE_ROI_SCALE)             # 平滑饱和 [0,1)
+    stab = _clip(g("pos_day_ratio"), 0.0, 1.0)                           # 逐日为正比例(稳定性)
+    wsum = config.SCORE_W_WIN + config.SCORE_W_ROI + config.SCORE_W_STAB or 1.0   # relative weights (UI-safe)
+    core = (config.SCORE_W_WIN * win + config.SCORE_W_ROI * roi_s + config.SCORE_W_STAB * stab) / wsum
 
-    # LOSS-DISCIPLINE penalty — measures NOT cutting losses DIRECTLY, never via win rate (a clean
-    # fast-cutter with a 95% win rate and no open loss is untouched). Two evidences:
-    #   • bag = how bad the CURRENTLY carried LOSING positions are — total depth (open_loss_frac) amplified
-    #     by how MANY (bag_count) and how LONG (max_bag_days). One shallow brief dip ≈ 0; several deep bags
-    #     held for days = unambiguous 扛单 (depth×breadth×duration, not single-snapshot noise).
-    #   • liq = historical FORCED liquidations (the system closed them = demonstrably didn't stop loss).
-    # WINNING long holds are NOT here (open_loss_frac counts only negative unrealized) — a trend trader
-    # holding deep green is rewarded via roi_total above, not punished here.
-    bag_depth = abs(min(0.0, m.get("open_loss_frac") or 0.0))
-    bag = bag_depth * (1.0 + 0.5 * max(0, (m.get("bag_count") or 0) - 1)) \
-        * (1.0 + min((m.get("max_bag_days") or 0.0) / 3.0, 1.0))
-    # REALIZED-asymmetry term (小赚大亏 / 不及时止损 — the twins, #17, RESOLV). Measured by the TAIL
-    # directly: how much |worst realized loss| exceeds TAIL_FREE× the median win. v5: NO win-rate gate
-    # (the old `defer` zeroed this for win<85%, letting a 60%-win 4×-tail churner pass) — loss_pain bites
-    # at ANY win rate. A clean fast-cutter with small symmetric losses has loss_pain≤TAIL_FREE → asym=0.
-    asym = max(0.0, (m.get("loss_pain") or 0.0) - config.TAIL_FREE)
-    # HOLD-SKEW term (扛单 by duration): holds losers longer than winners. Only EXTREME skew penalized —
-    # moderate skew on SMALL losses is benign (and the dangerous combo is already caught by loss_pain).
-    skew = max(0.0, (m.get("hold_skew") or 0.0) - config.HOLD_SKEW_FREE)
-    disc = (5.0 * bag + 1.0 * (m.get("liq_count") or 0)
-            + config.ASYM_W * asym + config.HOLD_SKEW_W * skew)
-    discipline = 1.0 / (1.0 + config.DISP_PENALTY_K * disc)
+    # ── evidence/活跃度: gentle confidence multiplier (sample size → trust), floored so低频好钱包不被碾压 ──
+    n_eff = g("n_trades") + g("bag_count")
+    samp = 0.6 * min(1.0, n_eff / config.SCORE_EV_TRADES) + 0.4 * min(1.0, g("active_days") / config.SCORE_EV_DAYS)
+    ev = config.SCORE_EV_FLOOR + (1.0 - config.SCORE_EV_FLOOR) * samp
 
-    return quality * survival * discipline
+    # ── 反噬/双胞胎守卫: |最惨单笔| ÷ 净利润 (= |worst_loss_pct|/roi_equity). 高胜率也救不了"一笔亏吞掉所有利润". ──
+    roi_eq = g("roi_equity")
+    wl = abs(g("worst_loss_pct"))                                         # worst single round-trip loss / acct (≥0)
+    frag = (wl / roi_eq) if roi_eq > 1e-6 else 0.0                        # net≤0 已被 gates 挡;此处记 0
+    g_frag = _clip(1.0 - max(0.0, frag - config.SCORE_FRAG_FREE) / config.SCORE_FRAG_SPAN,
+                   config.SCORE_GUARD_FLOOR, 1.0)
+
+    # ── 深度抗单/爆仓守卫: 按深度(当前浮亏 / 历史最惨单笔),不按持仓时间 ──
+    deep = max(abs(min(0.0, g("open_loss_frac"))) / config.SCORE_BAG_REF, wl / config.SCORE_BLOW_REF)
+    g_deep = _clip(1.0 - max(0.0, deep - 1.0) * config.SCORE_DEEP_SLOPE, config.SCORE_GUARD_FLOOR, 1.0)
+
+    survival = 0.9 + 0.1 * min(g("times_active", 1), 10) / 10             # cross-scan persistence (tiny)
+    return _clip(core * ev * g_frag * g_deep * survival, 0.0, 1.0)

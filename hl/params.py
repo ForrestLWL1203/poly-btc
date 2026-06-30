@@ -29,31 +29,24 @@ PARAM_SPEC = [
         "周成交量上限", "近7天成交额 ≤ 此(超过=做市/高频机器人,跟不上)"),
     ("HARVEST_PNL_VOL_MAX",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_PNL_VOL_MAX * 100,
         "盈利/成交量上限", "周盈利 ÷ 周成交量 ≤ 此(过高=非交易所得的幽灵号)"),
-    ("max_single_loss",      "scanner", "yellow", "pct",     "rescan", 10,
-        "单笔最大亏损容忍", "历史单笔亏损 > 账户此% = 扛单到爆,淘汰"),
-    ("gate_loss_pain_max",   "scanner", "yellow", "float",   "rescan", config.GATE_LOSS_PAIN_MAX,
-        "小亏大赚门槛", "最惨一单亏损 ÷ 中位盈利 ≥ 此 = 小赚大亏,淘汰"),
-    ("gate_hold_skew_max",   "scanner", "yellow", "float",   "rescan", config.GATE_HOLD_SKEW_MAX,
-        "抗单门槛", "亏单持仓时长 ÷ 赢单 ≥ 此 = 抗单,淘汰"),
-    ("gate_profit_conc_max", "scanner", "yellow", "pct",     "rescan", config.GATE_PROFIT_CONC_MAX * 100,
-        "一把行情门槛", "单日盈利占比 ≥ 此 = 利润全靠一把行情,淘汰"),
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
         "最长不活跃天数", "超此天数没成交且无持仓 = 失活淘汰"),
-    ("DISP_PENALTY_K",       "scanner", "yellow", "float",   "rescan", config.DISP_PENALTY_K,
-        "扛单降权强度", "扛单/小赚大亏 的评分降权强度(0 = 不降权)"),
-    # —— hidden 采集底层(评分形状/细门槛/次要预筛,引擎读取,UI 不显示)——
+    # 评分权重(v5:综合评分 = 胜率·ROI·稳定性 加权 → 平滑分布;小赚大亏/抗单/一把行情 已折叠为评分内的平滑因子,不再单设门槛)
+    ("SCORE_W_WIN",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_WIN * 100),
+        "评分·胜率权重", "综合评分里胜率的占比(三个权重相对生效,无需凑100)"),
+    ("SCORE_W_ROI",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_ROI * 100),
+        "评分·收益权重", "综合评分里风险调整收益的占比"),
+    ("SCORE_W_STAB",         "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_STAB * 100),
+        "评分·稳定性权重", "综合评分里逐日为正比例(稳定性)的占比"),
+    # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
     ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
     ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 5, "单笔加仓上限(防网格)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
-    ("SCORE_SHRINK_K",       "scanner", "hidden", "int",     "rescan", int(config.SCORE_SHRINK_K), "样本不足惩罚强度", ""),
-    ("SCORE_RAR_CAP",        "scanner", "hidden", "float",   "rescan", config.SCORE_RAR_CAP, "收益评分上限", ""),
-    ("SCORE_K",              "scanner", "hidden", "int",     "rescan", int(config.SCORE_K), "评分置信度", ""),
-    ("SCORE_GAMMA",          "scanner", "hidden", "float",   "rescan", config.SCORE_GAMMA, "稳定性严格度", ""),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
@@ -197,24 +190,21 @@ SCANNER_ARG_MAP = {
     "HARVEST_WEEK_VLM_MIN": "week_vlm_min", "HARVEST_WEEK_VLM_MAX": "week_vlm_max",
     "HARVEST_PNL_VOL_MIN": "pnl_vol_min", "HARVEST_PNL_VOL_MAX": "pnl_vol_max",
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
-    "min_activity": "min_activity", "grid_max_adds": "grid_max_adds", "max_single_loss": "max_single_loss",
+    "min_activity": "min_activity", "grid_max_adds": "grid_max_adds",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
-    "gate_loss_pain_max": "gate_loss_pain_max", "gate_hold_skew_max": "gate_hold_skew_max",
-    "gate_profit_conc_max": "gate_profit_conc_max",
 }
 
 
 def apply_scanner_params(db, ns):
-    """Overlay DB scanner params (engine units) onto a scan args namespace so a scan uses UI-tuned gates.
-    (SCORE_*/UW_* shape constants stay in config for now — advanced/blue, rarely tuned.)"""
+    """Overlay DB scanner params (engine units) onto a scan args namespace so a scan uses UI-tuned gates,
+    and push the v5 score weights onto config (score() reads config directly, not via ns)."""
     vals = load_category(db, "scanner")
     for key, attr in SCANNER_ARG_MAP.items():
         if vals.get(key) is not None:
             setattr(ns, attr, vals[key])
-    # score-shape constants live in config (score() reads them directly, not via ns) — push the few
-    # UI-tunable ones onto config so a scan/regate honors the dashboard value.
-    if vals.get("DISP_PENALTY_K") is not None:
-        config.DISP_PENALTY_K = vals["DISP_PENALTY_K"]
+    for key, cfg in (("SCORE_W_WIN", "SCORE_W_WIN"), ("SCORE_W_ROI", "SCORE_W_ROI"), ("SCORE_W_STAB", "SCORE_W_STAB")):
+        if vals.get(key) is not None:                     # stored as pct → load_category already ÷100
+            setattr(config, cfg, vals[key])
     return ns
 
 

@@ -23,10 +23,10 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MIN_FOLLOW_SCORE = 0.6      # follow watchlist wallets with score >= this (quality threshold, UI-tunable).
-#                             v6 (2026-06-30): 0.85→0.6 — the discipline GATES now keep 赌徒 out of the
-#                             watchlist itself, so the score line can open up to admit more clean low/mid-
-#                             freq strong traders (more copy signals) without re-admitting blow-up risk.
+MIN_FOLLOW_SCORE = 0.45     # follow watchlist wallets with score >= this. v5 (2026-06-30): score is now
+#                             native [0,1] (display ×100); 0.45 = display 45. Tuned against the re-scored
+#                             distribution to keep ~20-28 followable; the smooth blend means the line is a
+#                             real quality cut now (not a cliff). UI-tunable (0–100 ruler).
 #                             v5 (2026-06-29): 1.2→0.85 — recalibrated for the new harvest box + de-bugged
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
@@ -164,6 +164,31 @@ SCORE_SHRINK_K = 10.0  # roi trusted as roi×n/(n+K) for n closed round-trips: a
 #                        for its return to be half-believed (n=10→×0.5, n=3→×0.23, n=100→×0.91)
 SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) — tiny observed drawdown at
 #                        low sample is not real safety, so one extreme ratio can't dominate the score
+
+# ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
+# that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);
+# the temp hard gates (loss_pain/hold_skew/profit_conc) are FOLDED IN as smooth factors, not vetoes:
+#   score01 = (W_WIN·win + W_ROI·roiS + W_STAB·stab) × evidence × g_frag × g_deep × survival      ∈ [0,1]
+#   display = round(score01 × 100).  Native scale is now [0,1] (was [0,3]); score100 = ×100.
+# Smooth because the core is an ADDITIVE weighted blend of [0,1] factors (no capped ratio, no power law),
+# and the guards/evidence are gentle multipliers with floors (a single flaw discounts, never zeroes).
+SCORE_W_WIN  = 0.40    # 胜率权重(用户:胜率是根本)。win = win_rate ∈ [0,1]
+SCORE_W_ROI  = 0.35    # 风险调整收益权重
+SCORE_W_STAB = 0.25    # 逐日为正比例(pos_day_ratio)权重 —— W_* 之和 = 1
+SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效收益越低
+SCORE_ROI_SCALE   = 0.25  # roiS = 1 − exp(−roi_adj/此):平滑饱和(25%调整收益→0.63,50%→0.86),无悬崖
+SCORE_EV_TRADES = 20      # 达此回合数=证据充分
+SCORE_EV_DAYS   = 10      # 达此活跃天数=证据充分
+SCORE_EV_FLOOR  = 0.6     # 证据乘子下限:样本再少也保留 60% core(不碾压低频好钱包)
+# 反噬/双胞胎守卫 —— 最惨单笔 ÷ 净利润 = |worst_loss_pct|/roi_equity。抓"n笔小赚+1笔大亏吞掉所有收益"的高胜率欺骗手;
+# 用户的良性例(5赢@5%+1亏@7.5% → 7.5/17.5=0.43)在 FREE 内、不罚。
+SCORE_FRAG_FREE = 0.5     # 最惨单笔 ≤ 净利润此比例 → 不罚
+SCORE_FRAG_SPAN = 1.0     # 超出 FREE 后再涨此幅 → 守卫降到下限(frag≥1.5≈被压到底)
+# 深度抗单/爆仓守卫 —— 按【深度】不按持仓时间(用户:小幅逆向抗回盈利很正常、且我们有自己的止损):
+SCORE_BAG_REF  = 0.10     # 当前浮亏达账户此比例 → 深度=1(开始扣)
+SCORE_BLOW_REF = 0.15     # 历史最惨单笔亏达账户此比例 → 深度=1
+SCORE_DEEP_SLOPE = 0.5    # 深度每超出 1,守卫线性下降斜率
+SCORE_GUARD_FLOOR = 0.25  # 守卫乘子下限(最差也保留 25%,靠分数线把它压在线下,而非硬杀)
 
 # LOSS-DISCIPLINE demote ("扛单降权"). Measures NOT cutting losses DIRECTLY — never via win rate. The
 # score multiplies by 1/(1+K·disc), where disc = 5×(current losing-bag burden: depth×count×duration) +

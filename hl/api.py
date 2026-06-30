@@ -34,25 +34,21 @@ from .util import now_iso
 # ─────────────────────────────────────────────────────────────────────────── auth
 TOKEN_TTL_S = 24 * 3600
 
-# Score display scale. The v3 quality score is bounded [0, SCORE_RAR_CAP] (quality≤RAR_CAP, and
-# survival·health≤1), so we present it on a 0–100 ruler for the UI (engine/DB stay native — no
-# re-scoring). MIN_FOLLOW_SCORE=1.2 -> 40. Applied to wallet scores, the follow line, the histogram
-# axis, AND the MIN_FOLLOW_SCORE setting so the operator reads ONE ruler everywhere.
-RAW_SCORE_MAX = config.SCORE_RAR_CAP
-
-
+# Score display scale. v5 native score is already [0,1], so display is a plain ×100 (engine/DB stay
+# native). MIN_FOLLOW_SCORE=0.50 -> 50. Applied to wallet scores, the follow line, AND the
+# MIN_FOLLOW_SCORE setting so the operator reads ONE 0–100 ruler everywhere.
 def score100(raw):
-    """Native v3 score -> 0–100 display."""
+    """Native v5 score [0,1] -> 0–100 display."""
     if raw is None:
         return None
-    return round(min(max(raw, 0.0) / RAW_SCORE_MAX, 1.0) * 100, 1)
+    return round(min(max(raw, 0.0), 1.0) * 100, 1)
 
 
 def score_from100(disp):
-    """Inverse of score100 — for the M4 PATCH of MIN_FOLLOW_SCORE (UI 0–100 -> native before write)."""
+    """Inverse of score100 — UI 0–100 -> native [0,1] before writing MIN_FOLLOW_SCORE."""
     if disp is None:
         return None
-    return disp / 100.0 * RAW_SCORE_MAX
+    return disp / 100.0
 
 
 class Auth:
