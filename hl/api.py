@@ -650,6 +650,15 @@ def ep_scan_status(db):
             "progressPct": pct, "candidatesScanned": scanned, "candidatesTotal": total, "stage": r["stage"]}
 
 
+def ep_score_dist(db):
+    """All watchlist (active) wallets' DISPLAY scores (0–100), sorted desc — lets the Settings UI show,
+    live, how many wallets a given MIN_FOLLOW_SCORE would actually follow (the number is the real guide,
+    not an abstract range). Tiny payload (~dozens of floats)."""
+    scores = [round(score100(r["score"] or 0.0), 1)
+              for r in qall(db, "SELECT score FROM watchlist ORDER BY score DESC")]
+    return {"scores": scores, "total": len(scores)}
+
+
 WRITABLE_LEVELS = {"green", "yellow", "blue"}     # black / display are read-only
 
 # ── SSE live stream (replaces polling for the fast-changing bundle) ──
@@ -825,6 +834,8 @@ def make_handler(db_path, auth, static_dir=None):
                     return self._envelope(ep_params(db))
                 if path == "/api/scan-status":
                     return self._envelope(ep_scan_status(db))
+                if path == "/api/score-dist":
+                    return self._envelope(ep_score_dist(db))
                 if path.startswith("/api/commands/"):
                     return self._envelope(ep_command(db, int(path.rsplit("/", 1)[1])))
                 return self._send(404, {"error": "not_found"})

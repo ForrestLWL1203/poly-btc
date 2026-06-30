@@ -623,7 +623,7 @@ function WalletDrawer({ address, onClose }) {
 /* ----------------------------------------------------------------- param metadata (UI-side) */
 const PARAM_META = {
   // follow
-  MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "评分≥此线才跟单(最常调)", range: "27–67", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
+  MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "watchlist 里评分≥此线的钱包才实际跟单(0–100 标准化分,见下方实时达标数)", range: "—", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
   RISK_BUDGET: { name: "风险预算(1σ亏损)", desc: "核心:逆向1个σ该亏多少保证金;杠杆=此值÷σ,也=单次止损硬亏", range: "50–70%", up: "杠杆更大、止损更肉", dn: "更保守、止损更小" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
@@ -877,7 +877,8 @@ function Settings({ startRescan, confirm, toast }) {
   const [vals, setVals] = useState({});
   const [dirty, setDirty] = useState({});
   const [expanded, setExpanded] = useState(null);
-  const [openTiers, setOpenTiers] = useState({ stable: true });   // 档位折叠(默认展开稳定档)
+  const [openTiers, setOpenTiers] = useState({});                 // 档位折叠(默认全部收起)
+  const [scoreDist, setScoreDist] = useState(null);               // watchlist 全体显示分(0-100),供跟单线实时计数
 
   useEffect(() => {
     api.get("/api/params").then(p => {
@@ -885,6 +886,7 @@ function Settings({ startRescan, confirm, toast }) {
       const v = {}; [...p.scanner, ...p.follow].forEach(x => { v[x.key] = x.value; });
       setVals(v);
     }).catch(() => {});
+    api.get("/api/score-dist").then(setScoreDist).catch(() => {});
   }, []);
 
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
@@ -961,7 +963,25 @@ function Settings({ startRescan, confirm, toast }) {
       {tab === "follow" && <SizingPreview vals={vals} />}
 
       <div className="tbl-wrap">
-        {list.filter(p => !(tab === "follow" && tierKeys.has(p.key))).map(Prow)}
+        {list.filter(p => !(tab === "follow" && tierKeys.has(p.key))).map(p => {
+          if (tab === "follow" && p.key === "MIN_FOLLOW_SCORE") {
+            const v = Number(vals.MIN_FOLLOW_SCORE);
+            const n = scoreDist ? scoreDist.scores.filter(s => s >= v).length : null;
+            return (
+              <React.Fragment key={p.key}>
+                {Prow(p)}
+                <div className="score-hint">
+                  {n == null ? "加载钱包分布…" : <React.Fragment>
+                    评分 ≥ <b>{isFinite(v) ? v : "—"}</b> 时,当前 watchlist 有 <b style={{ color: "var(--accent)" }}>{n}</b> 个钱包达标会被跟单
+                    <span className="muted"> / 共 {scoreDist.total} 个候选</span></React.Fragment>}
+                </div>
+              </React.Fragment>
+            );
+          }
+          return Prow(p);
+        })}
+        {tab === "follow" && <div className="psec-h">保证金与杠杆 · 按波动率 σ 分档
+          <span>杠杆由「风险预算 ÷ σ」自动算,这里设各档的单笔保证金% 与杠杆上限(封顶)</span></div>}
         {tab === "follow" && TIER_GROUPS.map(g => {
           const open = openTiers[g.key];
           const rows = g.keys.map(k => list.find(p => p.key === k)).filter(Boolean);

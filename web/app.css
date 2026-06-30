@@ -276,6 +276,16 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .peffect { font-size: 11.5px; color: var(--t3); padding: 4px 0 10px 240px; line-height: 1.6; }
 .eff-up { color: var(--green-l); } .eff-dn { color: var(--red-l); }
 
+/* follow-line live wallet-count hint */
+.score-hint { font-size: 12px; color: var(--t2); padding: 8px 16px 12px 42px;
+  background: rgba(255, 106, 43, .05); border-bottom: 1px solid rgba(255,255,255,.04); }
+.score-hint b { color: var(--t1); font-variant-numeric: tabular-nums; }
+/* sub-section heading inside the params list */
+.psec-h { display: flex; flex-direction: column; gap: 2px; padding: 16px 4px 8px;
+  border-top: 1px solid var(--glass-border); margin-top: 6px;
+  font-size: 12.5px; font-weight: 600; color: var(--t1); }
+.psec-h span { font-weight: 400; font-size: 11px; color: var(--t3); }
+
 /* ---------- sizing sandbox (compact glass) ---------- */
 .sz { background: var(--glass-2); border: 1px solid var(--glass-border); border-radius: 14px;
   padding: 14px 16px; margin-bottom: 16px; backdrop-filter: blur(14px) saturate(130%); -webkit-backdrop-filter: blur(14px) saturate(130%); }
