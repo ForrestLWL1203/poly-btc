@@ -614,10 +614,12 @@ function WalletDrawer({ address, onClose }) {
 const PARAM_META = {
   // follow
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "评分≥此线才跟单(最常调)", range: "27–67", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
-  MAX_MARGIN_PCT: { name: "每单基础保证金", desc: "低波动币单笔投入(占可用%)", range: "5–15", up: "每单更重、能跟更少单", dn: "每单更轻、能跟更多单" },
-  MARGIN_SIGMA_REF: { name: "满仓波动率基准", desc: "σ≤此的币拿满,更颠的按比例缩小", range: "3–6", up: "更多币拿满额", dn: "高波动币压更小" },
-  STABLE_LEV_CAP: { name: "稳定币杠杆上限", range: "10–20" },
-  VOLATILE_LEV_CAP: { name: "波动币杠杆上限", range: "2–5" },
+  STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
+  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
+  MID_MARGIN_PCT: { name: "中档·保证金", desc: "σ 4–10%(ETH/SOL/HYPE)单笔投入(占可用%)", range: "6–10", up: "每单更重", dn: "每单更轻" },
+  MID_LEV_CAP: { name: "中档·杠杆上限", desc: "σ 4–10%的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
+  HIGH_MARGIN_PCT: { name: "剧烈档·保证金", desc: "σ≥10%(meme/野币)单笔投入(占可用%)", range: "4–8", up: "每单更重", dn: "每单更轻" },
+  HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥10%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
@@ -795,56 +797,61 @@ function Discovery({ scanning, startRescan, confirm }) {
 
 /* ----------------------------------------------------------------- settings */
 /* 模拟下单预览 — 用真实 v7 公式(风险平价)实时换算:每类币输入日波动σ + 目标杠杆,显示我们的保证金
-   (按 σ_ref/σ 缩放)/ 我们的杠杆(镜像目标、按σ类封顶)/ 名义额 / 强平距离。
-   FLOOR(30%)、MAX_LEV(20)、稳定σ阈值(4%)是隐藏底层常量写死;其余读自正在编辑的旋钮 vals。 */
+   档由 σ 决定: σ≤稳定上界=稳定档, σ≥剧烈下界=剧烈档, 其余中档。每档有自己的保证金%与杠杆封顶,
+   档内杠杆按公式 floor(稳定杠杆×稳定σ / σ) 连续缩放、再封顶。读自正在编辑的旋钮 vals(单位均为%)。 */
 function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
-  const [stSig, setStSig] = React.useState(2.3);   /* 稳定币 σ% */
-  const [stM, setStM] = React.useState(20);         /* 稳定币 目标杠杆 */
-  const [voSig, setVoSig] = React.useState(6.0);    /* 波动币 σ% */
-  const [voM, setVoM] = React.useState(8);
-  const MAX_LEV = 20, MIN_LEV = 1, FLOOR = 0.30, STAB = 4.0;   /* hidden 底层常量 */
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
-  const maxPct = n("MAX_MARGIN_PCT", 10) / 100, sref = n("MARGIN_SIGMA_REF", 5);
-  const stC = n("STABLE_LEV_CAP", 20), volC = n("VOLATILE_LEV_CAP", 5), coinCap = n("COIN_MARGIN_CAP_PCT", 20) / 100;
+  const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
+  const MAXL = n("MAX_LEV", 20), MINL = Math.max(1, n("MIN_LEV", 1));
+  const stLevC = n("STABLE_LEV_CAP", 20);
+  const tier = sig => sig <= stMax ? "stable" : (sig >= hiMin ? "high" : "mid");
+  const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"], mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
+  const TINT = { stable: "tint-green", mid: "tint-amber", high: "tint-red" };
+  const TNAME = { stable: "稳定", mid: "中", high: "剧烈" };
+  const dft = { STABLE_MARGIN_PCT: 10, STABLE_LEV_CAP: 20, MID_MARGIN_PCT: 8, MID_LEV_CAP: 10, HIGH_MARGIN_PCT: 6, HIGH_LEV_CAP: 5 };
   const usd = x => "$" + Math.round(x).toLocaleString();
-  const calc = (sigPct, master) => {
-    const s = Math.max(0.1, sigPct);
-    const vs = Math.max(FLOOR, Math.min(sref / s, 1.0));            /* 风险平价: σ_ref/σ, 封顶1、下限FLOOR */
-    const margin = Math.min(bal * maxPct * vs, coinCap * bal);
-    const lev = Math.max(MIN_LEV, Math.floor(Math.min(master, s <= STAB ? stC : volC, MAX_LEV)));  /* 镜像+封顶 */
-    return { margin, lev, notl: margin * lev };
+  const calc = sigPct => {
+    const s = Math.max(0.1, sigPct), t = tier(s);
+    const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
+    const levRaw = stLevC * stMax / s;                                   /* 连续缩放: 稳定杠杆×稳定σ / σ */
+    const lev = Math.max(MINL, Math.floor(Math.min(levRaw, cap, MAXL)));
+    const margin = bal * mPct;
+    return { t, margin, lev, notl: margin * lev };
   };
+  const COINS = [                                                        /* 实采 σ(高-低日内幅度均值) */
+    ["BTC", 3.8], ["GOLD", 2.1], ["ETH", 5.3], ["SOL", 7.0], ["HYPE", 9.6],
+    ["ZEC", 14.6], ["FARTCOIN", 11.2], ["HMSTR", 19.7],
+  ];
   const numIn = (v, setV, w) => <input className="pinput" type="number" value={v}
     onChange={e => setV(Number(e.target.value) || 0)} style={{ width: w || 56, height: 30 }} />;
-  const Row = ({ tag, sub, tint, sig, setSig, master, setMaster }) => {
-    const r = calc(sig, master);
-    return (
-      <div style={{ display: "grid", gridTemplateColumns: "92px 74px 74px 1fr 1fr", gap: 10, alignItems: "center",
-        padding: "10px 0", borderTop: "0.5px solid var(--glass-border)" }}>
-        <div><span className={"pill " + tint} style={{ whiteSpace: "nowrap" }}>{tag}</span>
-          <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>{sub}</div></div>
-        <div><div className="muted" style={{ fontSize: 11 }}>日波动σ</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>{numIn(sig, setSig)}<span className="punit">%</span></div></div>
-        <div><div className="muted" style={{ fontSize: 11 }}>目标杠杆</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>{numIn(master, setMaster)}<span className="punit">x</span></div></div>
-        <div><div className="muted" style={{ fontSize: 11 }}>保证金 · 我们杠杆</div><div className="mono">{usd(r.margin)} · {r.lev}x</div></div>
-        <div><div className="muted" style={{ fontSize: 11 }}>名义额 · 强平</div><div className="mono">{usd(r.notl)} · ±{(100 / r.lev).toFixed(1)}%</div></div>
-      </div>
-    );
-  };
   return (
     <div className="card" style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-        <div className="card-lbl">模拟下单预览 <span className="muted">· 改参数即时换算(真实公式 · 风险平价)</span></div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+        <div className="card-lbl">模拟下单预览 <span className="muted">· 改上面分档参数即时换算(真实公式)</span></div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span className="muted" style={{ fontSize: 12 }}>参考可用余额</span>{numIn(bal, setBal, 100)}
         </div>
       </div>
-      <Row tag="稳定币" sub="BTC/ETH" tint="tint-green" sig={stSig} setSig={setStSig} master={stM} setMaster={setStM} />
-      <Row tag="波动币" sub="meme/股票" tint="tint-amber" sig={voSig} setSig={setVoSig} master={voM} setMaster={setVoM} />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 64px 64px 1fr 1fr", gap: 8,
+        fontSize: 11, color: "var(--t3)", padding: "0 0 6px" }}>
+        <span>币种</span><span>日波动σ</span><span>档位</span><span>保证金 · 杠杆</span><span>名义额 · 强平距</span>
+      </div>
+      {COINS.map(([sym, sig]) => {
+        const r = calc(sig);
+        return (
+          <div key={sym} style={{ display: "grid", gridTemplateColumns: "1fr 64px 64px 1fr 1fr", gap: 8,
+            alignItems: "center", padding: "8px 0", borderTop: "0.5px solid var(--glass-border)" }}>
+            <span className="mono"><b>{sym}</b></span>
+            <span className="mono" style={{ color: "var(--t2)" }}>{sig.toFixed(1)}%</span>
+            <span><span className={"pill " + TINT[r.t]}>{TNAME[r.t]}</span></span>
+            <span className="mono">{usd(r.margin)} · {r.lev}x</span>
+            <span className="mono">{usd(r.notl)} · ±{(100 / r.lev).toFixed(1)}%</span>
+          </div>
+        );
+      })}
       <div style={{ borderTop: "0.5px solid var(--glass-border)", paddingTop: 10, marginTop: 4, fontSize: 12, color: "var(--t2)" }}>
-        满额保证金 <b className="mono">{usd(bal * maxPct)}</b>（日波动σ≤{sref}% 的币拿满）· 更颠的按 σ_ref/σ 自动缩小,下限 {(FLOOR * 100).toFixed(0)}%×可用 · 占满可用即跳过新信号
+        档位由 σ 自动判定（≤{stMax}% 稳定 · {stMax}–{hiMin}% 中 · ≥{hiMin}% 剧烈）· 保证金=可用×档位% · 杠杆=floor({stLevC}×{stMax}%/σ) 再按档封顶 · 占满可用即跳过新信号
       </div>
     </div>
   );
@@ -857,6 +864,7 @@ function Settings({ startRescan, confirm, toast }) {
   const [vals, setVals] = useState({});
   const [dirty, setDirty] = useState({});
   const [expanded, setExpanded] = useState(null);
+  const [openTiers, setOpenTiers] = useState({ stable: true });   // 档位折叠(默认展开稳定档)
 
   useEffect(() => {
     api.get("/api/params").then(p => {
@@ -872,6 +880,48 @@ function Settings({ startRescan, confirm, toast }) {
     (p.level !== "blue" || dev);
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
   const tabDirty = list.filter(p => dirty[p.key]);
+
+  const Prow = (p) => {
+    const m = PARAM_META[p.key] || {}; const ed = editable(p); const lvl = p.level;
+    return (
+      <div key={p.key}>
+        <div className={"prow" + (dirty[p.key] ? " dirty" : "")}>
+          <span className={"lvl-dot lvl-" + lvl} title={lvl} />
+          <div className="pn"><b>{p.name || m.name || p.key}</b><div className="pk">{p.key}</div></div>
+          <div className="pd">{p.desc || m.desc}{m.range && m.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {m.range}</span>}</div>
+          <div className="pctl">
+            {p.type === "bool" ? (
+              <div className={"toggle " + (vals[p.key] ? "on" : "")} onClick={() => ed && set(p.key, !vals[p.key])} style={{ opacity: ed ? 1 : .5 }}><div className="knob" /></div>
+            ) : p.type === "display" ? (
+              <span className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{p.value}</span>
+            ) : (
+              <React.Fragment>
+                <input className="pinput" type={p.type === "nullable" ? "text" : "number"} disabled={!ed}
+                  value={vals[p.key] == null ? "" : vals[p.key]} placeholder={p.type === "nullable" ? "关闭" : ""}
+                  onChange={e => set(p.key, e.target.value === "" ? null : Number(e.target.value))} />
+                <span className="punit">{UNIT[p.type] || ""}</span>
+              </React.Fragment>
+            )}
+            {!ed && lvl === "blue" && <span className="plock" title="开发者模式解锁">🔒</span>}
+            {(lvl === "black" || p.type === "display") && <span className="plock">只读</span>}
+          </div>
+        </div>
+        {expanded === p.key && (m.up || m.dn) && (
+          <div className="peffect">
+            {m.up && <span><span className="eff-up">调高↑</span> {m.up}　</span>}
+            {m.dn && <span><span className="eff-dn">调低↓</span> {m.dn}</span>}
+          </div>
+        )}
+      </div>
+    );
+  };
+  /* v8 三档保证金/杠杆折叠分组(否则页面太高) */
+  const TIER_GROUPS = [
+    { key: "stable", label: "稳定档", sub: "σ ≤ 4% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"] },
+    { key: "mid", label: "中档", sub: "σ 4–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP"] },
+    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] },
+  ];
+  const tierKeys = new Set(TIER_GROUPS.flatMap(g => g.keys));
 
   const apply = async () => {
     const body = {}; tabDirty.forEach(p => { body[p.key] = vals[p.key]; });
@@ -898,42 +948,21 @@ function Settings({ startRescan, confirm, toast }) {
       {tab === "follow" && <SizingPreview vals={vals} />}
 
       <div className="tbl-wrap">
-        {list.map(p => {
-          const m = PARAM_META[p.key] || {};
-          const ed = editable(p);
-          const lvl = p.level;
+        {list.filter(p => !(tab === "follow" && tierKeys.has(p.key))).map(Prow)}
+        {tab === "follow" && TIER_GROUPS.map(g => {
+          const open = openTiers[g.key];
+          const rows = g.keys.map(k => list.find(p => p.key === k)).filter(Boolean);
           return (
-            <div key={p.key}>
-              <div className={"prow" + (dirty[p.key] ? " dirty" : "")}>
-                <span className={"lvl-dot lvl-" + lvl} title={lvl} />
-                <div className="pn"><b>{p.name || m.name || p.key}</b><div className="pk">{p.key}</div></div>
-                <div className="pd">{p.desc || m.desc}
-                  {m.range && m.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {m.range}</span>}
-                </div>
-                <div className="pctl">
-                  {p.type === "bool" ? (
-                    <div className={"toggle " + (vals[p.key] ? "on" : "")} onClick={() => ed && set(p.key, !vals[p.key])} style={{ opacity: ed ? 1 : .5 }}><div className="knob" /></div>
-                  ) : p.type === "display" ? (
-                    <span className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{p.value}</span>
-                  ) : (
-                    <React.Fragment>
-                      <input className="pinput" type={p.type === "nullable" ? "text" : "number"} disabled={!ed}
-                        value={vals[p.key] == null ? "" : vals[p.key]}
-                        placeholder={p.type === "nullable" ? "关闭" : ""}
-                        onChange={e => set(p.key, e.target.value === "" ? null : Number(e.target.value))} />
-                      <span className="punit">{UNIT[p.type] || ""}</span>
-                    </React.Fragment>
-                  )}
-                  {!ed && lvl === "blue" && <span className="plock" title="开发者模式解锁">🔒</span>}
-                  {(lvl === "black" || p.type === "display") && <span className="plock">只读</span>}
-                </div>
+            <div key={g.key} style={{ borderTop: "0.5px solid var(--glass-border)" }}>
+              <div onClick={() => setOpenTiers(o => ({ ...o, [g.key]: !o[g.key] }))}
+                style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 4px", cursor: "pointer" }}>
+                <span style={{ color: "var(--t3)", width: 12 }}>{open ? "▾" : "▸"}</span>
+                <span className={"pill " + g.tint}>{g.label}</span>
+                <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
+                {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
+                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x</span>}
               </div>
-              {expanded === p.key && (m.up || m.dn) && (
-                <div className="peffect">
-                  {m.up && <span><span className="eff-up">调高↑</span> {m.up}　</span>}
-                  {m.dn && <span><span className="eff-dn">调低↓</span> {m.dn}</span>}
-                </div>
-              )}
+              {open && rows.map(Prow)}
             </div>
           );
         })}

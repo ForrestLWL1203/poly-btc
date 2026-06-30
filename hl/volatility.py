@@ -6,36 +6,35 @@ asymmetric on purpose: de-risk FAST when recent vol rises above the baseline, re
 once calm is sustained into the long window). σ lives in the coin_vol TABLE (one row/coin), refreshed
 periodically off the signal hot path; the sizing code just reads the latest value.
 """
-import math
-
 from . import config, rest
 from .util import f, now_iso
 
 
-def _realized_sigma(closes: list):
-    """Std-dev of daily log returns over `closes` (chronological). None if too few points."""
-    closes = [c for c in closes if c > 0]
-    if len(closes) < 3:
+def _daily_range(candles: list):
+    """Mean daily HIGH→LOW range = avg of (high-low)/low over `candles` — the typical INTRADAY swing a
+    position actually rides (not close-to-close std, which understates the real bumpiness). None if too few."""
+    rs = []
+    for c in candles:
+        h, l = f(c.get("h")), f(c.get("l"))
+        if h > 0 and l > 0 and h >= l:
+            rs.append((h - l) / l)
+    if len(rs) < 3:
         return None
-    rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
-    if len(rets) < 2:
-        return None
-    mean = sum(rets) / len(rets)
-    return math.sqrt(sum((r - mean) ** 2 for r in rets) / (len(rets) - 1))
+    return sum(rs) / len(rs)
 
 
 def compute(coin: str):
-    """Fetch daily candles and return (sigma_used, sigma_fast, sigma_slow, n) or None.
-    sigma_used = max(fast, slow): catches a fresh volatility regime fast, holds the baseline slowly."""
+    """Fetch daily candles and return (sigma_used, sigma_fast, sigma_slow, n) or None. σ = mean daily
+    high-low range. sigma_used = max(fast, slow): catches a fresh vol regime fast, holds the baseline slowly."""
     cs = rest.candle_snapshot(coin, "1d", config.VOL_SLOW_DAYS)
     if not isinstance(cs, list) or len(cs) < config.VOL_MIN_SAMPLES + 1:
         return None
-    closes = [f(c.get("c")) for c in sorted(cs, key=lambda c: c.get("t", 0))]
-    slow = _realized_sigma(closes)
+    cs = sorted(cs, key=lambda c: c.get("t", 0))
+    slow = _daily_range(cs)
     if slow is None:
         return None
-    fast = _realized_sigma(closes[-(config.VOL_FAST_DAYS + 1):]) or slow
-    return max(fast, slow), fast, slow, len(closes)
+    fast = _daily_range(cs[-config.VOL_FAST_DAYS:]) or slow
+    return max(fast, slow), fast, slow, len(cs)
 
 
 def refresh(db, coin: str):

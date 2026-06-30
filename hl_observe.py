@@ -22,7 +22,7 @@ def main() -> int:
                    help=f"hard cap on followed wallets (REST-rate ceiling, default {config.MAX_TARGETS})")
     o.add_argument("--add-margin-pct", type=float, default=config.ADD_MARGIN_PCT,
                    help=f"margin on each scale-in ADD as fraction of available (default {config.ADD_MARGIN_PCT}); "
-                        f"OPEN margin = available * MAX_MARGIN_PCT * (sigma_ref/sigma), lev mirrors master capped (tune in config)")
+                        f"OPEN sizing is volatility-TIERED: margin = available * <tier>_MARGIN_PCT, leverage = stable_cap * stable_sigma/sigma capped per tier (tune per-tier in config/dashboard)")
     o.add_argument("--extra", action="append", default=[],
                    help="extra address(es) to monitor for debugging")
     sub.add_parser("report")

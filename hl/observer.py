@@ -45,18 +45,16 @@ class Observer:
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        # strategy sizing (UI-tunable): margin = available × MAX_MARGIN_PCT × clip(σ_ref/σ, floor, 1) — risk
-        # parity by volatility (low-σ bigger, high-σ smaller). self-throttles as available shrinks.
-        self.max_margin_pct = config.MAX_MARGIN_PCT       # per-trade margin base = this frac of available
-        self.margin_sigma_ref = config.MARGIN_SIGMA_REF   # σ at/below which a coin gets the FULL base margin
-        self.margin_floor_frac = config.MARGIN_FLOOR_FRAC  # margin never below this frac of base (anti-dust)
+        # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap; leverage scales ∝1/σ within the
+        # tier (full at σ=stable_sigma_max), capped by the tier. margin = available × <tier>_margin_pct.
         self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
+        self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ≤this → stable tier (also lev-formula σ ref)
+        self.high_sigma_min = config.HIGH_SIGMA_MIN       # σ≥this → high-vol tier; between → mid tier
+        self.tier_margin = {"stable": config.STABLE_MARGIN_PCT, "mid": config.MID_MARGIN_PCT, "high": config.HIGH_MARGIN_PCT}
+        self.tier_lev_cap = {"stable": config.STABLE_LEV_CAP, "mid": config.MID_LEV_CAP, "high": config.HIGH_LEV_CAP}
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
-        self.volatile_lev_cap = config.VOLATILE_LEV_CAP  # volatile coins: mirror master, capped here
-        self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ ceiling for the stable LEVERAGE class
-        self.stable_lev_cap = config.STABLE_LEV_CAP       # stable coins: mirror master, capped here
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.max_adds = config.MAX_ADDS
@@ -156,15 +154,16 @@ class Observer:
             f = P.load_follow(self.db)
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
-            if f.get("MAX_MARGIN_PCT") is not None: self.max_margin_pct = f["MAX_MARGIN_PCT"]
-            if f.get("MARGIN_SIGMA_REF"): self.margin_sigma_ref = f["MARGIN_SIGMA_REF"]
-            if f.get("MARGIN_FLOOR_FRAC") is not None: self.margin_floor_frac = f["MARGIN_FLOOR_FRAC"]
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
-            if f.get("VOLATILE_LEV_CAP"): self.volatile_lev_cap = f["VOLATILE_LEV_CAP"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
-            if f.get("STABLE_LEV_CAP"): self.stable_lev_cap = f["STABLE_LEV_CAP"]
+            if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
+            for tier, mk, lk in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"),
+                                 ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP"),
+                                 ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP")):
+                if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
+                if f.get(lk): self.tier_lev_cap[tier] = f[lk]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
@@ -289,12 +288,20 @@ class Observer:
         """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
         return self.vol.get(coin) or self.vol_fallback_sigma
 
-    def _lev_for(self, sigma: float, master_cap: float) -> float:
-        """v7 leverage: MIRROR the master's leverage (their call), we only CAP by σ-class — stable coins
-        (σ ≤ STABLE_SIGMA_MAX) ≤ STABLE_LEV_CAP, volatile coins ≤ VOLATILE_LEV_CAP. No boost (we never lever
-        above the master). HL leverage is an INTEGER → floor. master_cap = master's lev (≤MAX_LEV)."""
-        cap = self.stable_lev_cap if sigma <= self.stable_sigma_max else self.volatile_lev_cap
-        return max(self.min_lev, float(int(min(master_cap, cap, self.max_lev))))
+    def _tier(self, sigma: float) -> str:
+        """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between)."""
+        if sigma <= self.stable_sigma_max:
+            return "stable"
+        return "high" if sigma >= self.high_sigma_min else "mid"
+
+    def _sizing_for(self, sigma: float):
+        """v8 (margin_pct, leverage) for a coin's σ. margin% by tier; leverage = continuous ∝1/σ
+        (full at σ=stable_sigma_max) capped by the tier's lev cap. INTEGER leverage (floor). NOT mirrored."""
+        tier = self._tier(sigma)
+        cap = self.tier_lev_cap[tier]
+        lev_raw = (self.tier_lev_cap["stable"] * self.stable_sigma_max / sigma) if sigma > 0 else cap
+        lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
+        return self.tier_margin[tier], lev
 
     def _stop_px_for(self, entry_px: float, is_buy: bool) -> float:
         """Stop PRICE from entry: a flat COPY_STOP_PCT adverse move (down for a long, up for a short —
@@ -803,22 +810,16 @@ class Observer:
             self.open_ep.pop((addr, coin), None)
             return                                            # chase-skip (rare); recorded by absence
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
-        # v7 sizing (config: MAX_MARGIN_PCT / MARGIN_SIGMA_REF / MARGIN_FLOOR_FRAC + σ-class lev caps):
-        #  margin = available × MAX_MARGIN_PCT × clip(σ_ref/σ, floor, 1)   risk-parity by vol (low-σ bigger)
-        #  lev = _lev_for(σ, master_cap): MIRROR master, capped by σ-class (stable≤STABLE_LEV_CAP / volatile
-        #        ≤VOLATILE_LEV_CAP). Never out-levered — a coin calm at open but breaking regime could blow
-        #        our ISOLATED liq before the master's (MANTA: 6x→liq +16.5% wiped while master's 3x survived).
-        #  notional = margin·lev
+        # v8 sizing: σ → tier (stable/mid/high) → margin% + lev cap; leverage scales ∝1/σ within the tier
+        #  margin = available × <tier>_margin_pct
+        #  lev    = floor(clip( STABLE_LEV_CAP × STABLE_SIGMA_MAX/σ , MIN_LEV , <tier>_lev_cap ))
+        #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
+        #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
-        # v7 RISK-PARITY margin by volatility: coins at/below MARGIN_SIGMA_REF get the full base (MAX_MARGIN_
-        # PCT of available); above, margin scales DOWN by ref/σ (a 2×-as-volatile coin → ½ margin), floored.
-        # So a calm BTC takes a big position and a wild meme a small one — each ~equal $ risk per 1σ move.
-        # NOT scaled by the target's conviction (account-fraction wrongly shrank big-account signals).
-        vol_scale = max(self.margin_floor_frac, min(self.margin_sigma_ref / sigma, 1.0)) if sigma > 0 else 1.0
-        lev = self._lev_for(sigma, master_cap)       # mirror master, capped by σ-class (no boost)
+        margin_pct, lev = self._sizing_for(sigma)    # v8: tier margin% + σ-scaled-capped leverage
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * self.max_margin_pct * vol_scale)
+            margin = max(0.0, self._available() * margin_pct)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
             # COIN_MARGIN_CAP_PCT of the account. Stops a single move making N wallets pile the SAME way
             # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
@@ -1094,6 +1095,6 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(sizing: margin=available×{config.MAX_MARGIN_PCT*100:g}%×clip({config.MARGIN_SIGMA_REF*100:g}%/σ,{config.MARGIN_FLOOR_FRAC:g},1), "
-          f"lev=mirror-master capped[stable≤{config.STABLE_LEV_CAP:g}x / volatile≤{config.VOLATILE_LEV_CAP:g}x], "
-          f"{config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated)")
+    print(f"\n(sizing: σ-tiers margin/lev-cap [stable σ≤{config.STABLE_SIGMA_MAX*100:g}%: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
+          f"mid: {config.MID_MARGIN_PCT*100:g}%/{config.MID_LEV_CAP:g}x · high σ≥{config.HIGH_SIGMA_MIN*100:g}%: {config.HIGH_MARGIN_PCT*100:g}%/{config.HIGH_LEV_CAP:g}x], "
+          f"lev=cap×{config.STABLE_SIGMA_MAX*100:g}%/σ, {config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated)")
