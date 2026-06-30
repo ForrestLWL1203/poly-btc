@@ -270,14 +270,13 @@ th.sortable:hover .sort-ind { opacity: .85; }
   box-shadow: 0 -2px 10px rgba(255,80,40,.18); }
 .devmode { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--t2); margin: 0 0 6px auto; }
 
-.prow { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.04); }
+.prow { display: flex; align-items: center; gap: 14px; padding: 7px 16px; border-bottom: 1px solid rgba(255,255,255,.04); }
 .prow:last-child { border-bottom: none; }
 .prow.dirty { background: rgba(255,106,43,.07); }
 .lvl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .lvl-green { background: var(--green); } .lvl-yellow { background: var(--amber); } .lvl-blue { background: var(--blue); } .lvl-black { background: var(--gray); }
 .prow .pn { width: 220px; }
 .prow .pn b { font-size: 13.5px; font-weight: 600; }
-.prow .pn .pk { font-family: var(--mono); font-size: 10.5px; color: var(--t4); }
 .prow .pd { flex: 1; font-size: 12px; color: var(--t3); }
 .prow .pctl { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .pinput { width: 64px; height: 30px; padding: 0 9px; border-radius: 8px; background: rgba(0,0,0,.25);

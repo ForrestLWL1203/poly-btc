@@ -935,7 +935,7 @@ function Settings({ startRescan, confirm, toast }) {
       <div key={p.key}>
         <div className={"prow" + (dirty[p.key] ? " dirty" : "")}>
           <span className="lvl-dot lvl-green" />
-          <div className="pn"><b>{p.name || m.name || p.key}</b><div className="pk">{p.key}</div></div>
+          <div className="pn"><b>{p.name || m.name || p.key}</b></div>
           <div className="pd">{p.desc || m.desc}{m.range && m.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {m.range}</span>}</div>
           <div className="pctl">
             {p.type === "bool" ? (
