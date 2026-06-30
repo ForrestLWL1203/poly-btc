@@ -614,8 +614,9 @@ function WalletDrawer({ address, onClose }) {
 const PARAM_META = {
   // follow
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "评分≥此线才跟单(最常调)", range: "27–67", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
+  RISK_BUDGET: { name: "风险预算(1σ亏损)", desc: "核心:逆向1个σ该亏多少保证金;杠杆=此值÷σ,也=单次止损硬亏", range: "50–70%", up: "杠杆更大、止损更肉", dn: "更保守、止损更小" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
-  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
+  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MARGIN_PCT: { name: "中档·保证金", desc: "σ 4–10%(ETH/SOL/HYPE)单笔投入(占可用%)", range: "6–10", up: "每单更重", dn: "每单更轻" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "σ 4–10%的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
   HIGH_MARGIN_PCT: { name: "剧烈档·保证金", desc: "σ≥10%(meme/野币)单笔投入(占可用%)", range: "4–8", up: "每单更重", dn: "每单更轻" },
@@ -625,6 +626,8 @@ const PARAM_META = {
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
   ADD_MARGIN_PCT: { name: "每次加仓比例", desc: "跟随加仓每次投入(占可用)", range: "—", up: "加仓更猛", dn: "加仓更轻" },
   MAX_ADDS: { name: "最多加仓次数", desc: "跟随主力加仓的次数上限", range: "—", up: "跟更多加仓", dn: "更早停跟加仓" },
+  COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
+  STOP_SIGMA_MULT: { name: "止损=σ的倍数", desc: "止损距离=此倍数×该币σ;1.0=逆向跑满一个日内振幅(大饼≈4%、ZEC≈15%)", range: "0.8–1.5", up: "更宽容、接近不止损", dn: "砍更早、亏更少但易误杀" },
   DORMANT_DAYS: { name: "沉睡判定天数", desc: "超此天数没成交则暂停开新单(留名单、自动复活)", range: "5–10 天", up: "容忍更久没动", dn: "更快搁置冷却的" },
   OPEN_BAG_MAX_FRAC: { name: "在扛深亏暂停线", desc: "目标当前浮亏超账户此%则暂停跟它开新单", range: "2%–5%", up: "容忍更深浮亏", dn: "更早回避扛单" },
   MAX_ENTRY_CHASE_PCT: { name: "追价保护阈值", desc: "开仓价偏离超此%则放弃(空=关闭)", range: "0.3–1", up: "更宽容追价", dn: "更严防滑点" },
@@ -809,7 +812,9 @@ function SizingPreview({ vals }) {
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
   const MAXL = n("MAX_LEV", 20), MINL = Math.max(1, n("MIN_LEV", 1));
-  const stLevC = n("STABLE_LEV_CAP", 20);
+  const RB = n("RISK_BUDGET", 60);                                      /* 风险预算%(1σ亏损) */
+  const K = n("STOP_SIGMA_MULT", 1);                                    /* 止损 = K×σ */
+  const stopOn = vals["COPY_STOP_ENABLE"] !== false;
   const tier = sig => sig <= stMax ? "stable" : (sig >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"], mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
   const TINT = { stable: "tint-green", mid: "tint-amber", high: "tint-red" };
@@ -819,44 +824,49 @@ function SizingPreview({ vals }) {
   const calc = sigPct => {
     const s = Math.max(0.1, sigPct), t = tier(s);
     const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
-    const levRaw = stLevC * stMax / s;                                   /* 连续缩放: 稳定杠杆×稳定σ / σ */
-    const lev = Math.max(MINL, Math.floor(Math.min(levRaw, cap, MAXL)));
+    const lev = Math.max(MINL, Math.floor(Math.min(RB / s, cap, MAXL)));  /* v9: 杠杆 = 风险预算 / σ,再封顶 */
     const margin = bal * mPct;
-    return { t, margin, lev, notl: margin * lev };
+    const stopDist = K * s;                                              /* 止损逆向距离(%)= K×σ */
+    const stopLoss = Math.min(stopDist / 100 * lev, 1);                  /* 止损硬亏(占保证金)= 距离×杠杆 */
+    return { t, margin, lev, notl: margin * lev, stopDist, stopLoss };
   };
   const COINS = [                                                        /* 实采 σ(高-低日内幅度均值) */
-    ["BTC", 3.8], ["GOLD", 2.1], ["ETH", 5.3], ["SOL", 7.0], ["HYPE", 9.6],
-    ["ZEC", 14.6], ["FARTCOIN", 11.2], ["HMSTR", 19.7],
+    ["BTC", 3.9], ["GOLD", 1.6], ["ETH", 5.3], ["SOL", 7.1], ["HYPE", 9.6],
+    ["ZEC", 14.6], ["FARTCOIN", 11.7], ["HMSTR", 11.9],
   ];
   const numIn = (v, setV, w) => <input className="pinput" type="number" value={v}
     onChange={e => setV(Number(e.target.value) || 0)} style={{ width: w || 56, height: 30 }} />;
+  const COLS = "1fr 58px 52px 1fr 1fr 1fr";
   return (
     <div className="card" style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <div className="card-lbl">模拟下单预览 <span className="muted">· 改上面分档参数即时换算(真实公式)</span></div>
+        <div className="card-lbl">模拟下单预览 <span className="muted">· 改上面参数即时换算(真实公式)</span></div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span className="muted" style={{ fontSize: 12 }}>参考可用余额</span>{numIn(bal, setBal, 100)}
         </div>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 64px 64px 1fr 1fr", gap: 8,
+      <div style={{ display: "grid", gridTemplateColumns: COLS, gap: 8,
         fontSize: 11, color: "var(--t3)", padding: "0 0 6px" }}>
-        <span>币种</span><span>日波动σ</span><span>档位</span><span>保证金 · 杠杆</span><span>名义额 · 强平距</span>
+        <span>币种</span><span>日波动σ</span><span>档</span><span>保证金 · 杠杆</span><span>名义额 · 强平距</span><span>止损@ · 硬亏</span>
       </div>
       {COINS.map(([sym, sig]) => {
         const r = calc(sig);
         return (
-          <div key={sym} style={{ display: "grid", gridTemplateColumns: "1fr 64px 64px 1fr 1fr", gap: 8,
+          <div key={sym} style={{ display: "grid", gridTemplateColumns: COLS, gap: 8,
             alignItems: "center", padding: "8px 0", borderTop: "0.5px solid var(--glass-border)" }}>
             <span className="mono"><b>{sym}</b></span>
             <span className="mono" style={{ color: "var(--t2)" }}>{sig.toFixed(1)}%</span>
             <span><span className={"pill " + TINT[r.t]}>{TNAME[r.t]}</span></span>
             <span className="mono">{usd(r.margin)} · {r.lev}x</span>
             <span className="mono">{usd(r.notl)} · ±{(100 / r.lev).toFixed(1)}%</span>
+            <span className="mono">{stopOn ? `−${r.stopDist.toFixed(1)}% · 亏${Math.round(r.stopLoss * 100)}%` : "关"}</span>
           </div>
         );
       })}
       <div style={{ borderTop: "0.5px solid var(--glass-border)", paddingTop: 10, marginTop: 4, fontSize: 12, color: "var(--t2)" }}>
-        档位由 σ 自动判定（≤{stMax}% 稳定 · {stMax}–{hiMin}% 中 · ≥{hiMin}% 剧烈）· 保证金=可用×档位% · 杠杆=floor({stLevC}×{stMax}%/σ) 再按档封顶 · 占满可用即跳过新信号
+        杠杆 = floor(风险预算 {RB}% / σ) 再按档封顶 · 保证金 = 可用×档位% · {stopOn
+          ? `止损 = 逆向 ${K}×σ(自适应:大饼≈${(K * 3.9).toFixed(1)}%、ZEC≈${(K * 14.6).toFixed(1)}%),单次硬亏≈${Math.round(K * RB)}% 保证金`
+          : "止损已关闭(仅靠强平兜底)"} · 占满可用即跳过新信号
       </div>
     </div>
   );

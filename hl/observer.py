@@ -62,7 +62,9 @@ class Observer:
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
         # 扛单 copy-side stop: flat adverse-price cut (isolated tail guard). UI-tunable via _reload_params.
         self.copy_stop_enable = config.COPY_STOP_ENABLE
-        self.copy_stop_pct = config.COPY_STOP_PCT
+        self.copy_stop_pct = config.COPY_STOP_PCT            # legacy flat-% fallback (σ unavailable)
+        self.risk_budget = config.RISK_BUDGET                # v9: lev = RISK_BUDGET/σ (margin loss per 1σ)
+        self.stop_sigma_mult = config.STOP_SIGMA_MULT        # v9: σ-stop cut = this × σ adverse
         # follow-time STATE bench (not a watchlist gate): skip NEW copies of a dormant or 扛深亏 master.
         self.dormant_days = config.DORMANT_DAYS
         self.open_bag_max = config.OPEN_BAG_MAX_FRAC
@@ -176,6 +178,8 @@ class Observer:
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
             if f.get("COPY_STOP_PCT"): self.copy_stop_pct = f["COPY_STOP_PCT"]
+            if f.get("RISK_BUDGET"): self.risk_budget = f["RISK_BUDGET"]
+            if f.get("STOP_SIGMA_MULT") is not None: self.stop_sigma_mult = f["STOP_SIGMA_MULT"]
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
@@ -301,21 +305,25 @@ class Observer:
         return "high" if sigma >= self.high_sigma_min else "mid"
 
     def _sizing_for(self, sigma: float):
-        """v8 (margin_pct, leverage) for a coin's σ. margin% by tier; leverage = continuous ∝1/σ
-        (full at σ=stable_sigma_max) capped by the tier's lev cap. INTEGER leverage (floor). NOT mirrored."""
+        """v9 (margin_pct, leverage) for a coin's σ. margin% by tier; leverage = floor(clip(RISK_BUDGET/σ,
+        MIN_LEV, tier cap)). RISK_BUDGET = the margin loss a 1σ move should cost (so lev·σ ≈ RISK_BUDGET);
+        ties directly to the σ-stop. INTEGER leverage (floor). NOT mirrored from the master."""
         tier = self._tier(sigma)
         cap = self.tier_lev_cap[tier]
-        lev_raw = (self.tier_lev_cap["stable"] * self.stable_sigma_max / sigma) if sigma > 0 else cap
+        lev_raw = (self.risk_budget / sigma) if sigma > 0 else cap
         lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
         return self.tier_margin[tier], lev
 
-    def _stop_px_for(self, entry_px: float, is_buy: bool) -> float:
-        """Stop PRICE from entry: a flat COPY_STOP_PCT adverse move (down for a long, up for a short —
-        same geometry as liq_px). 0 = disabled. If wider than the liquidation distance (1/lev) it just
-        never fires before liq, which is the intended 'high value ≈ off' behaviour."""
-        if not self.copy_stop_enable or not entry_px or not self.copy_stop_pct:
+    def _stop_px_for(self, entry_px: float, is_buy: bool, sigma: float = 0.0) -> float:
+        """Stop PRICE from entry: a σ-ADAPTIVE adverse move = STOP_SIGMA_MULT × σ (down for a long, up for
+        a short — same geometry as liq_px). σ = the coin's daily high-low range, so BTC cuts at ~4% and ZEC
+        at ~15% — never noise-stopped, always before liq (lev=RISK_BUDGET/σ ⇒ liq at σ/RISK_BUDGET > σ).
+        Falls back to the legacy flat COPY_STOP_PCT only when σ is unavailable. 0 = disabled."""
+        if not self.copy_stop_enable or not entry_px:
             return 0.0
-        d = self.copy_stop_pct
+        d = (self.stop_sigma_mult * sigma) if sigma and sigma > 0 else self.copy_stop_pct
+        if not d:
+            return 0.0
         return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
 
     async def _ensure_vol(self, coin: str):
@@ -818,7 +826,7 @@ class Observer:
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
         # v8 sizing: σ → tier (stable/mid/high) → margin% + lev cap; leverage scales ∝1/σ within the tier
         #  margin = available × <tier>_margin_pct
-        #  lev    = floor(clip( STABLE_LEV_CAP × STABLE_SIGMA_MAX/σ , MIN_LEV , <tier>_lev_cap ))
+        #  lev    = floor(clip( RISK_BUDGET/σ , MIN_LEV , <tier>_lev_cap ))   (v9: RISK_BUDGET = margin/1σ)
         #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
@@ -854,7 +862,7 @@ class Observer:
                 margin = notional / lev if lev else margin
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
-            stop_px = self._stop_px_for(px, is_buy)         # 扛单 cut at flat COPY_STOP_PCT adverse (0 = off)
+            stop_px = self._stop_px_for(px, is_buy, sigma)  # 扛单 cut at STOP_SIGMA_MULT×σ adverse (0 = off)
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px,
                       size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px)
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
@@ -900,7 +908,7 @@ class Observer:
             ep["margin"] += add_margin
             ep["notional"] += add_margin * lev
             ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / lev) if is_buy else ep["entry_px"] * (1 + 1.0 / lev)
-            ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy)   # re-anchor stop to new avg entry
+            ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, self._sigma(coin))  # re-anchor σ-stop to new avg entry
             ep["add_count"] += 1
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,

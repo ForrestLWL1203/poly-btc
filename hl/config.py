@@ -54,12 +54,16 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 #   mid     STABLE_SIGMA_MAX < σ < HIGH_SIGMA_MIN  (ETH/SOL/HYPE/majors)
 #   high    σ ≥ HIGH_SIGMA_MIN          (ZEC/memes/wild) → small
 #   margin   = available × <tier>_MARGIN_PCT
-#   leverage = floor(clip( STABLE_LEV_CAP × STABLE_SIGMA_MAX/σ , MIN_LEV , <tier>_LEV_CAP ))
-#              the σ-ratio gives a continuous gradient (full at σ=STABLE_SIGMA_MAX, declining ∝1/σ); the
-#              tier cap is the hard ceiling. So within mid, ETH(σ5.3%) hits the 10x cap while HYPE(σ9.6%)
-#              gets ~8x. NOT mirrored from the master (their leverage choice no longer sizes us).
+#   leverage = floor(clip( RISK_BUDGET / σ , MIN_LEV , <tier>_LEV_CAP ))   ← v9 (2026-06-30)
+#              RISK_BUDGET = the margin loss a 1σ adverse move should cost (so lev·σ ≈ RISK_BUDGET). This
+#              REPLACES the old hardcoded `STABLE_LEV_CAP×STABLE_SIGMA_MAX` (= 20×4% = 80%) anchor — same
+#              shape, but the knob now MEANS something and ties directly to the σ-stop: a 1×σ stop costs
+#              exactly RISK_BUDGET of margin (constant across coins). Absolute-vol targeting (σ rises →
+#              lev drops), NOT relative-to-BTC. Tier cap is the hard ceiling (binds only for very-low-σ
+#              coins). So RISK_BUDGET=60%: BTC(σ3.9%)→15x, ETH→10x(cap), HYPE→6x, ZEC→4x.
 #   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
-STABLE_SIGMA_MAX = 0.04     # σ ≤ this → STABLE tier; also the leverage-formula reference (full lev at this σ)
+RISK_BUDGET = 0.60          # v9: margin loss target on a 1σ move; lev = RISK_BUDGET/σ. = single σ-stop loss.
+STABLE_SIGMA_MAX = 0.04     # σ ≤ this → STABLE tier (margin%/cap selector only; no longer the lev anchor)
 HIGH_SIGMA_MIN   = 0.10     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
 STABLE_MARGIN_PCT = 0.10    # per-trade margin = this × available, for STABLE-tier coins
 MID_MARGIN_PCT    = 0.08    # ...for MID-tier coins
@@ -223,17 +227,18 @@ UNREAL_RISK_W = 0.5
 # perp 'profit' is cancelled by spot, so copying the naked perp leg is a loss for us.
 HEDGE_MAX_FRAC = 0.5
 
-# COPY-SIDE STOP — a flat ADVERSE-PRICE cut, our isolated-account tail guard. Cut a copy when price
-# runs COPY_STOP_PCT against entry. Calibrated WIDE on purpose (default 18%) from the twins' winner-MAE
-# (5m candles): the normal reverting winners — the actual edge — take a median 1.7% / quick heat and
-# recover in <1-4h, so an 18% line NEVER touches them. It only governs the deep-bag minority (>10% MAE:
-# ~8% of winners), which on an ISOLATED small account is exactly where the damage is — those bags lock
-# our margin 12h-to-4-DAYS while risking the 3x liquidation (+33%). The master rides them on $40k cross
-# + patience; we can't, so we cap the tail: realize a bounded ~COPY_STOP_PCT×lev margin loss and free
-# the capital, instead of bag-holding to liquidation. Paired with the master-leverage cap (which
-# already removed the 6x premature-liq bug). UI-tunable (set very high to effectively disable).
+# COPY-SIDE STOP — our isolated-account tail guard: cut a copy when price runs against entry by more than
+# the coin's own daily volatility. v9 (2026-06-30): σ-ADAPTIVE — the cut distance = STOP_SIGMA_MULT × σ
+# (σ = daily high-low range), NOT a flat % anymore. So BTC(σ~4%) cuts at ~4% adverse, ZEC(σ~15%) at ~15%:
+# never noise-stopped (a 1σ adverse move from a mid-range entry is already a tail event), always fires
+# BEFORE liquidation (since lev = RISK_BUDGET/σ ⇒ liq at 1/lev = σ/RISK_BUDGET > σ for RISK_BUDGET<1).
+# By construction a 1×σ stop realizes exactly RISK_BUDGET of the position's margin — uniform across coins.
+# We can't bag-hold like the master ($40k cross + patience) so we cap the tail and free the capital.
+# COPY_STOP_ENABLE = the master toggle (default ON; UI-tunable). COPY_STOP_PCT is the legacy flat-% stop,
+# retained only as a fallback when a coin's σ is unavailable.
 COPY_STOP_ENABLE = True
-COPY_STOP_PCT    = 0.18     # adverse price move from entry that triggers a cut (≈ this × lev of margin)
+STOP_SIGMA_MULT  = 1.0      # cut at this × σ adverse move (1.0 = a full daily high-low range). K in the design.
+COPY_STOP_PCT    = 0.18     # LEGACY flat-% fallback (used only if σ unavailable); σ-stop is primary now
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one

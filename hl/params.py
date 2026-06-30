@@ -59,8 +59,10 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
         "跟单评分线", "只跟评分≥此的钱包。调高=只跟最强的、少而精;调低=跟更多、纳入次一档、质量略降"),
+    ("RISK_BUDGET",          "follow",  "green",  "pct",     "immediate", config.RISK_BUDGET * 100,
+        "风险预算(1σ亏损)", "核心旋钮:一次「逆向1个波动率σ」该亏掉多少保证金。杠杆=此值÷σ(再按档封顶),所以它同时决定杠杆和单次止损硬亏。调高=杠杆更大、名义额更猛、单次止损更肉;调低=更保守、单次止损更小。60%→大饼≈15x"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,
-        "稳定档·保证金", "稳定档(σ≤4%,BTC及更稳的如GOLD)每单保证金(占可用%)。档内杠杆按 上限×4%/σ 连续缩放"),
+        "稳定档·保证金", "稳定档(σ≤4%,BTC及更稳的如GOLD)每单保证金(占可用%)。杠杆由风险预算÷σ算、不在这设"),
     ("STABLE_LEV_CAP",       "follow",  "yellow", "x",       "immediate", config.STABLE_LEV_CAP,
         "稳定档·杠杆上限", "稳定档杠杆上限(σ=4%时拿满此值,更稳的币也封在此)"),
     ("MID_MARGIN_PCT",       "follow",  "yellow", "pct",     "immediate", config.MID_MARGIN_PCT * 100,
@@ -73,8 +75,10 @@ PARAM_SPEC = [
         "剧烈档·杠杆上限", "剧烈档杠杆上限(给插针留缓冲)。档内越颠杠杆越低"),
     ("MAX_ADDS",             "follow",  "yellow", "int",     "immediate", config.MAX_ADDS,
         "最多加仓次数", "一笔最多跟几次加仓(防被网格拖死)。调高=跟更多加仓、单仓变重;调低=更克制"),
-    ("COPY_STOP_PCT",        "follow",  "yellow", "pct",     "immediate", config.COPY_STOP_PCT * 100,
-        "止损线(逆向幅度)", "价格逆向跑这么多就提前平仓,不陪目标死扛(逐仓兜底)。3x下18%价格≈亏54%保证金。调低=砍得更早、少扛但会误杀慢回本的赢单;调高=给更多回旋、接近不止损(设很大≈关闭)"),
+    ("COPY_STOP_ENABLE",     "follow",  "green",  "bool",    "immediate", config.COPY_STOP_ENABLE,
+        "启用止损", "总开关:打开后,价格逆向超过该币波动率时自动平仓,不陪目标死扛(逐仓兜底)。默认开。关掉=只靠爆仓兜底(不建议)"),
+    ("STOP_SIGMA_MULT",      "follow",  "yellow", "float",   "immediate", config.STOP_SIGMA_MULT,
+        "止损=σ的倍数", "止损距离 = 此倍数 × 该币日波动率σ(最高-最低振幅)。1.0=逆向跑满一个完整日内振幅才平(大饼≈4%、ZEC≈15%,自适应)。配合风险预算,单次止损硬亏=此倍数×风险预算。调低=砍更早、亏更少但易被噪音误杀;调高=更宽容、接近不止损"),
     ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
         "单币最大占用", "同一个币上所有仓位的保证金合计上限(占账户)。防止一波行情下 N 个钱包都开同一个币、我们全跟导致过度集中。满了就缩小或不跟。调低=更分散、单币风险更小;调高=允许在单个币上压更重"),
     ("DORMANT_DAYS",         "follow",  "green",  "float",   "immediate", config.DORMANT_DAYS,
@@ -82,7 +86,8 @@ PARAM_SPEC = [
     ("OPEN_BAG_MAX_FRAC",    "follow",  "yellow", "pct",     "immediate", config.OPEN_BAG_MAX_FRAC * 100,
         "在扛深亏暂停线", "目标当前正扛着的浮亏超过其账户此比例=暂停跟它开新单(别在它死扛深亏时进场)。调低=更敏感、更早回避扛单的;调高=容忍它带更深的浮亏"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
-    ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定档σ上界(也是杠杆满档基准)", ""),
+    ("COPY_STOP_PCT",        "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_PCT * 100, "止损兜底(σ缺失时用的固定%)", ""),
+    ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定档σ上界(档位选择器)", ""),
     ("HIGH_SIGMA_MIN",       "follow",  "hidden", "pct",     "immediate", config.HIGH_SIGMA_MIN * 100, "剧烈档σ下界", ""),
     ("MAX_LEV",              "follow",  "hidden", "x",       "immediate", config.MAX_LEV, "杠杆硬上限", ""),
     ("MIN_LEV",              "follow",  "hidden", "x",       "immediate", config.MIN_LEV, "杠杆硬下限", ""),
@@ -94,7 +99,6 @@ PARAM_SPEC = [
     ("VOL_FAST_DAYS",        "follow",  "hidden", "display", "immediate",
         f"{config.VOL_FAST_DAYS} / {config.VOL_SLOW_DAYS} 天", "波动率快/慢窗口", ""),
     ("VOL_FALLBACK_SIGMA",   "follow",  "hidden", "pct",     "immediate", config.VOL_FALLBACK_SIGMA * 100, "默认波动率", ""),
-    ("COPY_STOP_ENABLE",     "follow",  "hidden", "bool",    "immediate", config.COPY_STOP_ENABLE, "扛单止损开关", ""),
 ]
 
 _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
