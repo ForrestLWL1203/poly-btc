@@ -877,6 +877,7 @@ function Settings({ startRescan, confirm, toast }) {
   const [vals, setVals] = useState({});
   const [dirty, setDirty] = useState({});
   const [expanded, setExpanded] = useState(null);
+  const [saving, setSaving] = useState(false);                    // 保存时的短暂全页 loading(替代右上角 toast)
   const [openTiers, setOpenTiers] = useState({});                 // 档位折叠(默认全部收起)
   const [scoreDist, setScoreDist] = useState(null);               // watchlist 全体显示分(0-100),供跟单线实时计数
 
@@ -944,10 +945,13 @@ function Settings({ startRescan, confirm, toast }) {
   const apply = async () => {
     const body = {}; tabDirty.forEach(p => { body[p.key] = vals[p.key]; });
     const doIt = async () => {
-      await fetch("/api/params/" + tab, { method: "PATCH", headers: { Authorization: "Bearer " + api.token }, body: JSON.stringify(body) });
+      setSaving(true);                                  // 短暂全页 loading 代替右上角 tooltip
+      const t0 = Date.now();
+      try { await fetch("/api/params/" + tab, { method: "PATCH", headers: { Authorization: "Bearer " + api.token }, body: JSON.stringify(body) }); } catch (_e) {}
       setDirty({});
-      if (tab === "scanner") { toast("已保存,触发重采以生效"); startRescan(); }
-      else toast("已保存,即时生效");
+      await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));   // 让 loading 可感知
+      setSaving(false);
+      if (tab === "scanner") startRescan();             // 重采有自己的整页遮罩接管
     };
     if (tab === "scanner") confirm({ title: "应用并重采", danger: false, ok: "应用并重采", body: "采集参数改动需重采才生效,将立即触发全量重采。", onConfirm: doIt });
     else if (tabDirty.some(p => p.level === "yellow")) confirm({ title: "保存跟单参数", danger: false, ok: "保存",
@@ -957,6 +961,7 @@ function Settings({ startRescan, confirm, toast }) {
 
   return (
     <div className="content">
+      {saving && <div className="mask"><span className="spin" style={{ width: 34, height: 34, borderWidth: 3 }} /><h2 style={{ marginTop: 22 }}>保存中…</h2></div>}
       <div className="tabs">
         <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>采集 watchlist 参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
@@ -1030,13 +1035,12 @@ function Dashboard({ onLogout }) {
   const [live, setLive] = useState(null);            // SSE fast bundle {overview, positions, serverTime}
   const [streamOk, setStreamOk] = useState(false);
   const [confirmCfg, setConfirmCfg] = useState(null);
-  const [toastMsg, setToastMsg] = useState(null);
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState(null);
   const [obsPending, setObsPending] = useState(null);   // observer 控制过渡 {label, target} → 显示遮罩
   const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
-  const toast = (m) => { setToastMsg(m); setTimeout(() => setToastMsg(null), 2600); };
+  const toast = () => {};   // 右上角 tooltip 已废弃 — 各动作改用整页/按钮内联 loading 反馈
 
   const ov = (streamOk && live && live.overview) || polledOv;    // prefer live stream; fall back to polled
 
@@ -1217,7 +1221,6 @@ function Dashboard({ onLogout }) {
       {(scanning || serverScanning) && <ScanMask status={scanStatus} />}
       {obsPending && <ObsMask label={obsPending.label} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
-      {toastMsg && <div style={{ position: "fixed", top: 18, right: 18, zIndex: 50, background: "rgba(20,20,24,.96)", border: "1px solid var(--glass-border)", padding: "11px 16px", borderRadius: 12, fontSize: 13 }}>{toastMsg}</div>}
     </div>
   );
 }
