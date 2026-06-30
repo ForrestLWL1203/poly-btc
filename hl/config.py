@@ -23,10 +23,10 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MIN_FOLLOW_SCORE = 0.45     # follow watchlist wallets with score >= this. v5 (2026-06-30): score is now
-#                             native [0,1] (display ×100); 0.45 = display 45. Tuned against the re-scored
-#                             distribution to keep ~20-28 followable; the smooth blend means the line is a
-#                             real quality cut now (not a cliff). UI-tunable (0–100 ruler).
+MIN_FOLLOW_SCORE = 0.55     # follow watchlist wallets with score >= this. v5 (2026-06-30): score is now
+#                             native [0,1] (display ×100); 0.55 = display 55 → ~36 followable on the current
+#                             smooth distribution (top≈77), comfortably above the 20+ floor. The smooth blend
+#                             makes this a real quality cut (not a cliff). UI-tunable (0–100 ruler).
 #                             v5 (2026-06-29): 1.2→0.85 — recalibrated for the new harvest box + de-bugged
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
