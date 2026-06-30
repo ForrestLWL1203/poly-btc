@@ -964,7 +964,7 @@ function Settings({ startRescan, confirm, toast }) {
     <div className="content">
       {saving && <div className="mask"><span className="spin" style={{ width: 34, height: 34, borderWidth: 3 }} /><h2 style={{ marginTop: 22 }}>保存中…</h2></div>}
       <div className="tabs">
-        <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>采集 watchlist 参数</div>
+        <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
         <label className="devmode"><input type="checkbox" checked={dev} onChange={e => setDev(e.target.checked)} /> 开发者模式(解锁进阶)</label>
       </div>
