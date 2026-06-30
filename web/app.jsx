@@ -906,7 +906,10 @@ function Settings({ startRescan, confirm, toast }) {
           <div className="pd">{p.desc || m.desc}{m.range && m.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {m.range}</span>}</div>
           <div className="pctl">
             {p.type === "bool" ? (
-              <div className={"toggle " + (vals[p.key] ? "on" : "")} onClick={() => ed && set(p.key, !vals[p.key])} style={{ opacity: ed ? 1 : .5 }}><div className="knob" /></div>
+              <React.Fragment>
+                <div className={"toggle " + (vals[p.key] ? "on" : "")} onClick={() => ed && set(p.key, !vals[p.key])} style={{ opacity: ed ? 1 : .5 }}><div className="knob" /></div>
+                <span className="punit" />
+              </React.Fragment>
             ) : p.type === "display" ? (
               <span className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{p.value}</span>
             ) : (
