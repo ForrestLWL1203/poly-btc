@@ -596,13 +596,13 @@ def ep_discovery(db):
     buckets.append(["其他", other])
     reject_reasons = [{"label": lbl, "pct": round(n / total_rej * 100) if total_rej else 0}
                       for lbl, n in buckets]
-    # score histogram over scored profiles. X-axis anchored to the score ceiling (RAW_SCORE_MAX) so
-    # the bins map onto the same 0–100 ruler as the wallet scores, with a stable follow-line position.
+    # score histogram over scored profiles. X-axis anchored to the native score ceiling (v5 score is
+    # native [0,1]; display = ×100) so the bins map onto the same 0–100 ruler as the wallet scores.
     scores = [r["score"] for r in qall(db,
               "SELECT score FROM profile WHERE score IS NOT NULL AND score>0")]
     follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
     nbins = 16
-    hi = RAW_SCORE_MAX or 1.0
+    hi = 1.0
     bins = [0] * nbins
     for sc in scores:
         idx = min(int(max(sc, 0.0) / hi * nbins), nbins - 1)
