@@ -220,9 +220,16 @@ def score(m: dict) -> float:
     g_frag = _clip(1.0 - max(0.0, frag - config.SCORE_FRAG_FREE) / config.SCORE_FRAG_SPAN,
                    config.SCORE_GUARD_FLOOR, 1.0)
 
-    # ── 深度抗单/爆仓守卫: 按深度(当前浮亏 / 历史最惨单笔),不按持仓时间 ──
-    deep = max(abs(min(0.0, g("open_loss_frac"))) / config.SCORE_BAG_REF, wl / config.SCORE_BLOW_REF)
+    # ── 深度抗单/爆仓守卫: 按深度,不按持仓时间. 用 open_underwater(单仓最惨浮亏 = 真实扛单深度),
+    #    不用 open_loss_frac(总浮亏÷账户,会被大账户稀释 → 深扛单单仓看着像没事=“无限保证金熬过来”的假象). ──
+    bag = max(abs(min(0.0, g("open_underwater"))), abs(min(0.0, g("open_loss_frac"))))   # 单仓深度优先, 账户总额兜底
+    deep = max(bag / config.SCORE_BAG_REF, wl / config.SCORE_BLOW_REF)
     g_deep = _clip(1.0 - max(0.0, deep - 1.0) * config.SCORE_DEEP_SLOPE, config.SCORE_GUARD_FLOOR, 1.0)
 
+    # ── 刷胜率守卫: 高胜率 + 几乎从不兑现亏损 = 靠扛单藏亏刷假胜率(双胞胎本质). 真会止损的高胜率钱包(wl≥LOSS_REF)不罚. ──
+    manuf = (_clip((win - config.SCORE_MANUF_WIN_FLOOR) / (1.0 - config.SCORE_MANUF_WIN_FLOOR), 0.0, 1.0)
+             * _clip(1.0 - wl / config.SCORE_MANUF_LOSS_REF, 0.0, 1.0))
+    g_manuf = _clip(1.0 - manuf * config.SCORE_MANUF_PEN, config.SCORE_GUARD_FLOOR, 1.0)
+
     survival = 0.9 + 0.1 * min(g("times_active", 1), 10) / 10             # cross-scan persistence (tiny)
-    return _clip(core * ev * g_frag * g_deep * survival, 0.0, 1.0)
+    return _clip(core * ev * g_frag * g_deep * g_manuf * survival, 0.0, 1.0)
