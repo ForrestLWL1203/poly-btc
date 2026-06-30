@@ -183,13 +183,21 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # pre-screen call: gates() already rejects dormant ("inactive"), spot/opaque-dominant
     # ("spot_dominant") and no-trades ("no_perp_trades") on this same data — the old two-stage
     # split only existed to avoid a heavy raw fetch, which aggregation made cheap.
-    raw, hit_cap = rest.fetch_window(addr, start_ms, p.max_pages)
-    for x in raw:
+    # ONE call fetches the LATEST ~2000 aggregated fills — for our (non-HFT, gated) cohort that single
+    # page spans the wallet's FULL history (proven: a 287-day record came back in one call). We slice the
+    # 14d window for the existing scoring metrics (behaviour unchanged) AND keep the full set for the
+    # multi-window / lifetime nets — no extra request. hit_cap = the 2000-row page filled (≥2000 recent
+    # fills) → too active to fully profile, rejected below exactly as the old fetch-page-cap did.
+    raw_full = rest.user_fills_latest(addr) or []
+    hit_cap = len(raw_full) >= 2000
+    for x in raw_full:
         x["user"] = addr
     # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,
     # e.g. xyz:AAPL — in `universe`). Spot is excluded (is_spot); opaque/private builder dexes are
     # excluded by not being in `universe`. perp_frac = copyable-perp share of fills.
-    perp = [x for x in raw if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
+    perp_full = [x for x in raw_full if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
+    raw = [x for x in raw_full if x["time"] >= start_ms]          # 14d window slice (scoring metrics)
+    perp = [x for x in perp_full if x["time"] >= start_ms]
     perp_frac = (len(perp) / len(raw)) if raw else 0.0
     eps, open_eps = build_episodes(perp)
     m = metrics.compute_metrics(perp, eps, now_ms, p.days)
@@ -202,6 +210,11 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
              "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0,
              "tp_move_pct": 0.0, "market_type": None, "crypto_frac": None}
+    # multi-window / lifetime realized nets from the FULL history (in-memory, no extra fetch) — the
+    # long-term stability cross-check + the net_life datum the 14d window can't see. Computed even when
+    # the 14d window is empty (dormant-but-historically-profitable wallets still get a true net_life).
+    eps_full, _ = build_episodes(perp_full)
+    m.update(metrics.window_nets(eps_full, now_ms))
 
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
@@ -326,13 +339,13 @@ def regate(db, p) -> int:
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
         "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
-        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,reason "
+        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason "
         "FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
          ad, ar, meps, pdr, conc, skew, uw, mxadds, wloss, mhold, wr,
-         roi_tot, oloss, owin, bagn, bagd, liqc, hedge, old_reason) = r
+         roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -344,7 +357,9 @@ def regate(db, p) -> int:
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
              "open_loss_frac": oloss or 0.0, "open_win_frac": owin or 0.0,
              "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0,
-             "hedge_ratio": hedge or 0.0}
+             "hedge_ratio": hedge or 0.0,
+             # v6 nets: None when scanned before this datum existed → net gates skip (safe pre-rescan)
+             "net_30d": net30, "net_life": netlife}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
         m["loss_pain"] = metrics.loss_pain(

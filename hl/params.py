@@ -31,6 +31,12 @@ PARAM_SPEC = [
         "盈利/成交量上限", "周盈利占周成交量比例≤此才入选。真交易者盈利只是成交量的零头(0.2-4%);远超此=盈利非交易所得(充值/现货/空投幽灵),剔除。调低=只留薄利真交易;调高=放松幽灵过滤"),
     ("max_single_loss",      "scanner", "yellow", "pct",     "rescan", 10,
         "单笔最大亏损容忍", "钱包历史单笔亏损超过权益此比例=扛单到爆,淘汰。调高=容忍止损不干脆的;调低=只留止损极严的"),
+    ("gate_loss_pain_max",   "scanner", "yellow", "float",   "rescan", config.GATE_LOSS_PAIN_MAX,
+        "小亏大赚门槛", "硬门槛:|最惨一单亏损|÷中位盈利 ≥ 此值=小赚大亏,直接挡在 watchlist 外(不是只降分)。<1=赢的比亏的大。调低=只留亏得更小的;调高/0=放松或关闭"),
+    ("gate_hold_skew_max",   "scanner", "yellow", "float",   "rescan", config.GATE_HOLD_SKEW_MAX,
+        "抗单门槛", "硬门槛:亏单平均持仓÷赢单持仓 ≥ 此值=抗单(亏了死扛、赢了早跑),淘汰。调低=只留止损更干脆的;调高/0=放松或关闭"),
+    ("gate_profit_conc_max", "scanner", "yellow", "pct",     "rescan", config.GATE_PROFIT_CONC_MAX * 100,
+        "一把行情门槛", "硬门槛:单日盈利占总盈利 ≥ 此比例=利润全靠一把行情、未经验证,淘汰。调低=要求盈利更分散更稳;调高/0=放松或关闭"),
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(我们延迟跟不上)。开=只留人能跟的;关=高频也进候选"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
@@ -71,6 +77,10 @@ PARAM_SPEC = [
         "止损线(逆向幅度)", "价格逆向跑这么多就提前平仓,不陪目标死扛(逐仓兜底)。3x下18%价格≈亏54%保证金。调低=砍得更早、少扛但会误杀慢回本的赢单;调高=给更多回旋、接近不止损(设很大≈关闭)"),
     ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
         "单币最大占用", "同一个币上所有仓位的保证金合计上限(占账户)。防止一波行情下 N 个钱包都开同一个币、我们全跟导致过度集中。满了就缩小或不跟。调低=更分散、单币风险更小;调高=允许在单个币上压更重"),
+    ("DORMANT_DAYS",         "follow",  "green",  "float",   "immediate", config.DORMANT_DAYS,
+        "沉睡判定天数", "钱包超过此天数没成交=暂停跟它开新单(仍留在名单、继续管已有仓),它一恢复交易就自动满血跟回。调低=更快把冷却的搁置;调高=容忍更久没动的"),
+    ("OPEN_BAG_MAX_FRAC",    "follow",  "yellow", "pct",     "immediate", config.OPEN_BAG_MAX_FRAC * 100,
+        "在扛深亏暂停线", "目标当前正扛着的浮亏超过其账户此比例=暂停跟它开新单(别在它死扛深亏时进场)。调低=更敏感、更早回避扛单的;调高=容忍它带更深的浮亏"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定档σ上界(也是杠杆满档基准)", ""),
     ("HIGH_SIGMA_MIN",       "follow",  "hidden", "pct",     "immediate", config.HIGH_SIGMA_MIN * 100, "剧烈档σ下界", ""),
@@ -190,6 +200,8 @@ SCANNER_ARG_MAP = {
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
     "min_activity": "min_activity", "grid_max_adds": "grid_max_adds", "max_single_loss": "max_single_loss",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
+    "gate_loss_pain_max": "gate_loss_pain_max", "gate_hold_skew_max": "gate_hold_skew_max",
+    "gate_profit_conc_max": "gate_profit_conc_max",
 }
 
 

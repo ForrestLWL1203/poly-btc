@@ -26,7 +26,10 @@ def _scan_ns():
     pace that leaves HL rate headroom for the always-running observer (the priority)."""
     return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False,
                            workers=4, scan_interval=10.0, max_pages=5, min_crypto=0.3,
-                           exclude_hft=True, hft_min_hold_min=3.0)
+                           exclude_hft=True, hft_min_hold_min=3.0,
+                           gate_loss_pain_max=config.GATE_LOSS_PAIN_MAX,
+                           gate_hold_skew_max=config.GATE_HOLD_SKEW_MAX,
+                           gate_profit_conc_max=config.GATE_PROFIT_CONC_MAX)
 
 
 def _hours_since_last_scan(db):
@@ -116,6 +119,12 @@ def main() -> int:
         pr.add_argument("--max-single-loss", type=float, default=0.10,
                         help="reject 扛单到爆: worst single round-trip loss as fraction of account "
                              "(cuts-losses-small wallets pass even at 50%% win; one disaster loss = out)")
+        pr.add_argument("--gate-loss-pain-max", type=float, default=config.GATE_LOSS_PAIN_MAX,
+                        help="reject 小赚大亏: worst loss / median win at or above this (0 = off)")
+        pr.add_argument("--gate-hold-skew-max", type=float, default=config.GATE_HOLD_SKEW_MAX,
+                        help="reject 抗单: losing-hold / winning-hold at or above this (0 = off)")
+        pr.add_argument("--gate-profit-conc-max", type=float, default=config.GATE_PROFIT_CONC_MAX,
+                        help="reject 一把行情: best day share of gross profit at or above this (0 = off)")
         pr.add_argument("--no-exclude-hft", dest="exclude_hft", action="store_false", default=True,
                         help="by default reject sub-minute HFT scalpers (uncopyable at our latency); "
                              "pass this to allow them (only once a high-freq feed exists)")

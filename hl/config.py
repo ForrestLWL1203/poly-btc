@@ -23,7 +23,10 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MIN_FOLLOW_SCORE = 0.85     # follow watchlist wallets with score >= this (quality threshold, UI-tunable).
+MIN_FOLLOW_SCORE = 0.6      # follow watchlist wallets with score >= this (quality threshold, UI-tunable).
+#                             v6 (2026-06-30): 0.85→0.6 — the discipline GATES now keep 赌徒 out of the
+#                             watchlist itself, so the score line can open up to admit more clean low/mid-
+#                             freq strong traders (more copy signals) without re-admitting blow-up risk.
 #                             v5 (2026-06-29): 1.2→0.85 — recalibrated for the new harvest box + de-bugged
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
@@ -180,6 +183,26 @@ PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet ov
 # high skew WITH a big tail loss, already caught by loss_pain); moderate skew on small losses is benign.
 HOLD_SKEW_FREE = 3.0   # skew up to 3× is tolerated (holding small losers a bit longer ≠ blow-up risk)
 HOLD_SKEW_W    = 0.5   # weight of the (hold_skew - FREE) term inside disc
+
+# ── DISCIPLINE GATES (2026-06-30) — promote the SOFT score sub-terms above to HARD watchlist-entry
+# gates, so a 赌徒 never enters the watchlist at all (not merely ranked low). These use metrics ALREADY
+# stored on the profile (loss_pain / hold_skew / profit_conc) → `regate` applies them instantly with no
+# re-fetch. Plus a LIFETIME-net check (the one new datum, from the full-history fetch) that catches a
+# wallet whose blow-up is OLDER than the 14d scoring window (e.g. #47: clean 14d, but -123k over 287d).
+# All UI-tunable (params.py → apply_scanner_params overlays onto the scan/regate namespace).
+GATE_LOSS_PAIN_MAX   = 1.5   # reject if |worst realized loss| / median win ≥ this (小赚大亏). 0 = off.
+GATE_HOLD_SKEW_MAX   = 1.5   # reject if median losing-hold / winning-hold ≥ this (抗单). 0 = off.
+GATE_PROFIT_CONC_MAX = 0.8   # reject if one day ≥ this share of gross profit (一把行情/未经验证). 0 = off.
+GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
+#                                    net_life field is absent (old profiles) so regate is safe pre-rescan.
+GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月在走下坡). Same absent-skip.
+
+# ── FOLLOW-TIME STATE FILTER (observer, not a watchlist gate) — a high-quality wallet that is currently
+# un-followable is BENCHED (kept in watchlist, marked dormant), not dropped, so it revives instantly when
+# it trades again (no re-harvest, no lost history). Tunable in the follow params.
+DORMANT_DAYS       = 7.0     # no fill within N days → bench (no NEW copies; existing copies still managed)
+OPEN_BAG_MAX_FRAC  = 0.03    # currently carrying an unrealized loss worse than this fraction of account →
+#                              bench (don't open a fresh copy of a wallet that is right now 扛深亏单)
 
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).

@@ -82,6 +82,11 @@ CREATE TABLE IF NOT EXISTS profile (
     max_win_days     REAL DEFAULT 0,      -- v4: longest-held winning position (days)
     hedge_ratio      REAL DEFAULT 0,      -- v4: frac of perp-short notional offset by spot long (spot-hedge)
     loss_pain        REAL DEFAULT 0,      -- v4: |worst realized loss| / median win (小赚大亏 / no-stop signal)
+    net_7d           REAL,                -- v6: realized net over last 7d (full-history slice; multi-window)
+    net_14d          REAL,                -- v6: realized net over last 14d
+    net_30d          REAL,                -- v6: realized net over last 30d (gate: >0 = not cooling off)
+    net_life         REAL,                -- v6: realized net over FULL history (gate: >0 = long-term profitable)
+    life_trades      INTEGER DEFAULT 0,   -- v6: total closed round-trips in full history (evidence depth)
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -173,8 +178,9 @@ PROFILE_COLS = (
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
     "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
+    "net_7d,net_14d,net_30d,net_life,life_trades,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 57 columns
+)  # 62 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -374,6 +380,12 @@ _MIGRATIONS = (
     "ALTER TABLE watchlist ADD COLUMN open_win_frac REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN hedge_ratio REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN loss_pain REAL DEFAULT 0",
+    # v6 multi-window / lifetime realized nets (full-history slice; discipline gates net_30d>0 & net_life>0).
+    "ALTER TABLE profile ADD COLUMN net_7d REAL",
+    "ALTER TABLE profile ADD COLUMN net_14d REAL",
+    "ALTER TABLE profile ADD COLUMN net_30d REAL",
+    "ALTER TABLE profile ADD COLUMN net_life REAL",
+    "ALTER TABLE profile ADD COLUMN life_trades INTEGER DEFAULT 0",
 )
 
 

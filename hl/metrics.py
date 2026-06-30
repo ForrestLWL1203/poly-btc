@@ -61,6 +61,17 @@ def loss_pain(pnls: list) -> float:
     return 0.0
 
 
+def window_nets(eps_full: list, now_ms: int) -> dict:
+    """Realized net PnL over rolling windows from FULL-history closed episodes — multi-window stability
+    cross-check (7/14/30/lifetime). Cheap (in-memory) once the full fill history is fetched. `net_life`
+    is the long-term truth that the 14d scoring window can't see (catches a blow-up older than 14d)."""
+    def net(days):
+        cut = now_ms - days * DAY_MS
+        return sum(e["net_pnl"] for e in eps_full if e.get("close_ms", 0) >= cut)
+    return {"net_7d": net(7), "net_14d": net(14), "net_30d": net(30),
+            "net_life": sum(e["net_pnl"] for e in eps_full), "life_trades": len(eps_full)}
+
+
 def _hold_skew(eps: list) -> float:
     """median hold of LOSING episodes / median hold of WINNING episodes. >1 ⇒ holds losers longer
     than winners (disposition effect / 扛单 — the chronic-unrealized-loss behaviour)."""
@@ -163,6 +174,23 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "irregular"                              # holder (winning open) is exempt
     if (m.get("worst_loss_pct") or 0) < -p.max_single_loss:    # one CLOSED round-trip lost > this % equity
         return False, "blowup_loss"                            # = 扛到爆并已实现; the cut-losses gate
+    # ── DISCIPLINE GATES (2026-06-30): hard floors on the behaviours we used to only SOFT-demote in score
+    # (promotes 赌徒-rejection from "ranked low" to "never in the watchlist"). Each 0 = disabled.
+    lp_max = getattr(p, "gate_loss_pain_max", config.GATE_LOSS_PAIN_MAX)
+    if lp_max and (m.get("loss_pain") or 0) >= lp_max:
+        return False, "asym_loss"                              # 小赚大亏: worst loss dwarfs median win
+    sk_max = getattr(p, "gate_hold_skew_max", config.GATE_HOLD_SKEW_MAX)
+    if sk_max and (m.get("hold_skew") or 0) >= sk_max:
+        return False, "holds_losers"                           # 抗单: holds losers far longer than winners
+    pc_max = getattr(p, "gate_profit_conc_max", config.GATE_PROFIT_CONC_MAX)
+    if pc_max and (m.get("profit_conc") or 0) >= pc_max:
+        return False, "one_window"                             # 一把行情: one day = most of the profit
+    # LIFETIME / 30d realized net (the full-history datum). Skipped when absent (old profiles) so `regate`
+    # is safe BEFORE a re-profile populates net_life — the gate activates once the scan refetches.
+    if config.GATE_REQUIRE_LIFETIME_NET and m.get("net_life") is not None and m["net_life"] <= 0:
+        return False, "lifetime_loss"                          # 长期净亏 (#47: clean 14d, -123k over 287d)
+    if config.GATE_REQUIRE_30D_NET and m.get("net_30d") is not None and m["net_30d"] <= 0:
+        return False, "cooling_off"                            # 近30天净亏 — recent edge has decayed
     if (m.get("hedge_ratio") or 0.0) > config.HEDGE_MAX_FRAC:  # perp shorts offset by spot longs of the
         return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
     #                                                            directional trade — copying the naked perp
