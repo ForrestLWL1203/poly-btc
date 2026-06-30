@@ -68,7 +68,9 @@ MAX_ADDS = 2                # follow the master's scale-ins up to this many adds
 #              coins). So RISK_BUDGET=60%: BTC(σ3.9%)→15x, ETH→10x(cap), HYPE→6x, ZEC→4x.
 #   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
 RISK_BUDGET = 0.60          # v9: margin loss target on a 1σ move; lev = RISK_BUDGET/σ. = single σ-stop loss.
-STABLE_SIGMA_MAX = 0.04     # σ ≤ this → STABLE tier (margin%/cap selector only; no longer the lev anchor)
+STABLE_SIGMA_MAX = 0.05     # σ ≤ this → STABLE tier. 4%→5% (2026-07-01) so BTC (σ≈4.2%, our benchmark) lands
+#                             in STABLE, not MID. STABLE coins now trade at the FULL STABLE_LEV_CAP (not
+#                             σ-throttled) — see _sizing_for. (user: "BTC 作为基准就该 20x")
 HIGH_SIGMA_MIN   = 0.10     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
 STABLE_MARGIN_PCT = 0.10    # per-trade margin = this × available, for STABLE-tier coins
 MID_MARGIN_PCT    = 0.08    # ...for MID-tier coins

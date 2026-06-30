@@ -313,8 +313,14 @@ class Observer:
         ties directly to the σ-stop. INTEGER leverage (floor). NOT mirrored from the master."""
         tier = self._tier(sigma, coin)
         cap = self.tier_lev_cap[tier]
-        lev_raw = (self.risk_budget / sigma) if sigma > 0 else cap
-        lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
+        if tier == "stable":
+            # benchmark/calm tier (BTC etc.) trades at the FULL cap — NOT σ-throttled (user: BTC 就该 20x).
+            # Trade-off: at 20x a BTC 1σ move (~4.2%) costs ~84% of margin vs the 60% risk-budget, and the
+            # σ-stop (4.2%) sits just under liq (5%) — accepted for our most-liquid benchmark asset.
+            lev = max(self.min_lev, float(int(min(cap, self.max_lev))))
+        else:
+            lev_raw = (self.risk_budget / sigma) if sigma > 0 else cap
+            lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
         return self.tier_margin[tier], lev
 
     def _stop_px_for(self, entry_px: float, is_buy: bool, sigma: float = 0.0) -> float:
