@@ -183,13 +183,12 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # pre-screen call: gates() already rejects dormant ("inactive"), spot/opaque-dominant
     # ("spot_dominant") and no-trades ("no_perp_trades") on this same data — the old two-stage
     # split only existed to avoid a heavy raw fetch, which aggregation made cheap.
-    # ONE call fetches the LATEST ~2000 aggregated fills — for our (non-HFT, gated) cohort that single
-    # page spans the wallet's FULL history (proven: a 287-day record came back in one call). We slice the
-    # 14d window for the existing scoring metrics (behaviour unchanged) AND keep the full set for the
-    # multi-window / lifetime nets — no extra request. hit_cap = the 2000-row page filled (≥2000 recent
-    # fills) → too active to fully profile, rejected below exactly as the old fetch-page-cap did.
-    raw_full = rest.user_fills_latest(addr) or []
-    hit_cap = len(raw_full) >= 2000
+    # Fetch a LONG window (PROFILE_FETCH_DAYS) via the paginated fetch_window — it sorts ASCENDING and
+    # caps at max_pages*2000 fills (NOT a single 2000-row page: user_fills_latest truncated active wallets
+    # at 2000 AND returned newest-first unsorted, which broke window_days/trades_per_day/last_fill_ms and
+    # over-rejected as hit_page_cap). We slice the 14d window for the existing scoring metrics (behaviour
+    # unchanged) and use the full fetch for the multi-window / lifetime nets — still ONE fetch per wallet.
+    raw_full, hit_cap = rest.fetch_window(addr, now_ms - config.PROFILE_FETCH_DAYS * 86400_000, p.max_pages)
     for x in raw_full:
         x["user"] = addr
     # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,
