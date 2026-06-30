@@ -196,10 +196,11 @@ GATE_PROFIT_CONC_MAX = 0.8   # reject if one day ≥ this share of gross profit 
 GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
 #                                    net_life field is absent (old profiles) so regate is safe pre-rescan.
 GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月在走下坡). Same absent-skip.
-# How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). Covers the 14d
-# scoring slice + the 7/14/30d multi-window nets + a ~6-month "long-term" net_life. Longer = catches
-# older blow-ups but more pages/wallet (slower); shorter = faster but net_life sees less history.
-PROFILE_FETCH_DAYS = 180
+# How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
+# RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
+# target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. 30d exactly
+# covers the 14d scoring slice + the 7/14/30d multi-window nets (net_life ≡ net over this 30d window).
+PROFILE_FETCH_DAYS = 30
 
 # ── FOLLOW-TIME STATE FILTER (observer, not a watchlist gate) — a high-quality wallet that is currently
 # un-followable is BENCHED (kept in watchlist, marked dormant), not dropped, so it revives instantly when
