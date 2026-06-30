@@ -949,6 +949,7 @@ function Settings({ startRescan, confirm, toast }) {
       const t0 = Date.now();
       try { await fetch("/api/params/" + tab, { method: "PATCH", headers: { Authorization: "Bearer " + api.token }, body: JSON.stringify(body) }); } catch (_e) {}
       setDirty({});
+      if (tab === "follow") { try { await api.cmd("reload_params", {}); } catch (_e) {} }  // 运行中的 observer ~1.5s 内按新参数/新线生效
       await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));   // 让 loading 可感知
       setSaving(false);
       if (tab === "scanner") startRescan();             // 重采有自己的整页遮罩接管

@@ -482,13 +482,13 @@ class Observer:
         """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
         toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
-        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle")
+        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle", "reload_params")
         last_hb = 0.0
         while not self.stop:
             try:
                 rows = self.db.execute(
                     "SELECT id,type,payload_json FROM commands WHERE status='pending' AND type IN "
-                    "(?,?,?,?,?) ORDER BY id", OWNED).fetchall()
+                    "(" + ",".join("?" * len(OWNED)) + ") ORDER BY id", OWNED).fetchall()
                 for cmd_id, ctype, payload_json in rows:
                     self.db.execute("UPDATE commands SET status='acked',acked_at=? WHERE id=?",
                                     (now_iso(), cmd_id))
@@ -527,6 +527,10 @@ class Observer:
             return await self._cmd_close_all()
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
+        if ctype == "reload_params":               # UI saved follow params → apply NOW (incl. follow line)
+            self._reload_params()                  # re-read sizing/stop/line from params table
+            self._reload_targets()                 # rebuild the follow set with the fresh line
+            return {"reloaded": True, "score_line": self.min_score, "targets": len(self.addrs)}
         raise ValueError(f"unhandled command type {ctype}")
 
     def _ep_by_pos(self, pos_id):

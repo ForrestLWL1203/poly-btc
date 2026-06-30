@@ -146,7 +146,7 @@ def rw_connect(path):
 # observer_start/observer_stop (process lifecycle via systemctl — the observer can't start itself);
 # scanner owns rescan; patch_params is reserved (M4 uses PATCH /api/params directly).
 ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
-                    "observer_start", "observer_stop", "rescan", "patch_params"}
+                    "observer_start", "observer_stop", "rescan", "patch_params", "reload_params"}
 PROC_STALE_SEC = 90       # heartbeat older than this -> the process is likely dead (UI shows stale)
 
 
