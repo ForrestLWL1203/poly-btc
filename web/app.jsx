@@ -476,7 +476,7 @@ function Wallets({ confirm, toast }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {dropped ? "降级" : "跟单中"} {data.total} 个</span>}</h2>
+        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {dropped ? "降级 " + data.total + " 个" : "实跟 " + (data.followed != null ? data.followed : data.total) + " / 达标 " + data.total + " 个"}</span>}</h2>
         <div className="range-tabs">
           <button className={!dropped ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中</button>
           <button className={dropped ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
@@ -522,7 +522,9 @@ function Wallets({ confirm, toast }) {
                   <td><span className="rankbadge">{w.rank}</span></td>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                  <td className="num"><b style={{ color: w.evidenceHeld ? "var(--t2)" : (w.score >= data.followLine ? "var(--green-l)" : "var(--t2)") }}>{fNum(w.score, 1)}</b>
+                    {w.evidenceHeld && <div style={{ fontSize: 10, color: "var(--amber-l, #e0a23a)" }} title="评分达标,但成交笔数/活跃天数未到证据门槛,仅观察不跟单">样本观察</div>}
+                  </td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
                   <td className="num">{fNum(w.winRatePct, 0)}%
                     {(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0) && (() => {

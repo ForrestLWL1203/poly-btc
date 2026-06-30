@@ -213,6 +213,19 @@ def _scanner_status(db):
             "heartbeatAt": r["heartbeat_at"], "detail": detail}
 
 
+def _followed_count(db, line):
+    """Count of wallets we ACTUALLY copy — mirrors observer.load_targets: score ≥ line AND the evidence
+    floor (n_trades ≥ FOLLOW_MIN_TRADES, active_days ≥ FOLLOW_MIN_ACTIVE_DAYS), enabled. (NOT just
+    score ≥ line — that overstates by the thin-sample wallets the floor holds back.)"""
+    r = q1(db, "SELECT COUNT(*) cnt FROM watchlist w "
+               "LEFT JOIN target_controls tc ON tc.addr=w.addr "
+               "LEFT JOIN profile p ON p.addr=w.addr "
+               "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? "
+               "AND COALESCE(w.n_trades,0)>=? AND COALESCE(p.active_days,0)>=?",
+               (line, config.FOLLOW_MIN_TRADES, config.FOLLOW_MIN_ACTIVE_DAYS))
+    return (r["cnt"] if r else 0)
+
+
 def ep_overview(db):
     # LIVE-DERIVE from copy_position + copy_account (fresh as of the observer's 25s mark refresh) rather
     # than the 5-min account_stats snapshot row — so the cards aren't up to 5 minutes stale. account_stats
@@ -272,8 +285,8 @@ def ep_overview(db):
     obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     ss = _scanner_status(db)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    _line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # "被跟" = wallets above the follow line
-    wl = q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?", (_line,))
+    _line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # "被跟" = wallets we actually copy
+    wl = {"c": _followed_count(db, _line)}                        # score≥line AND evidence floor (real set)
 
     def _stale(row):
         if not row or not row["heartbeat_at"]:
@@ -486,8 +499,8 @@ def ep_wallets(db, qs=None):
     cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
     rows = qall(db,
         "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.win_rate,w.top_coin,"
-        "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,"
-        "pr.worst_loss_pct,pr.median_adds_per_ep,"
+        "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,w.n_trades,"
+        "pr.worst_loss_pct,pr.median_adds_per_ep,pr.active_days,"
         "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr AND e.close_ms >= ?) AS closed_7d,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
@@ -498,6 +511,10 @@ def ep_wallets(db, qs=None):
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
     total = len(rows)
+    # evidence floor (mirrors observer.load_targets): score≥line wallets that DON'T clear it are tracked
+    # but NOT copied — flag them so the list is honest (vs silently counting them as followed).
+    held = sum(1 for r in rows if (r["n_trades"] or 0) < config.FOLLOW_MIN_TRADES
+               or (r["active_days"] or 0) < config.FOLLOW_MIN_ACTIVE_DAYS)
     out = []
     for r in rows[page * size:page * size + size]:
         grid = r["grid"]
@@ -506,7 +523,10 @@ def ep_wallets(db, qs=None):
         worst = r["worst_single_loss_pct"]
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
+        evidence_held = ((r["n_trades"] or 0) < config.FOLLOW_MIN_TRADES
+                         or (r["active_days"] or 0) < config.FOLLOW_MIN_ACTIVE_DAYS)
         out.append({
+            "evidenceHeld": evidence_held,   # score-qualified but below the trade/active-day floor → observed, not copied
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0), "roiEqPct": (r["roi_equity"] or 0.0) * 100,
             "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
@@ -517,7 +537,8 @@ def ep_wallets(db, qs=None):
             "forwardNetPnl": (r["realized"] or 0) + (r["unreal"] or 0),   # PnL is the real verdict, not win%
             "trend": _wallet_trend(db, r["addr"]),
         })
-    return {"followLine": score100(line_native), "total": total, "page": page, "size": size, "wallets": out}
+    return {"followLine": score100(line_native), "total": total, "followed": total - held,
+            "page": page, "size": size, "wallets": out}
 
 
 def ep_wallet_detail(db, addr, qs=None):
@@ -581,8 +602,7 @@ def ep_discovery(db):
     # funnel's final stage = wallets ABOVE the follow line (the ones we actually copy), NOT the whole
     # watchlist (which also holds many lower-score actives we only observe).
     line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
-    watchlist = (q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?",
-                    (line_native,)) or {"c": 0})["c"]
+    watchlist = _followed_count(db, line_native)   # funnel's final stage = wallets we actually copy
     # reject reasons -> buckets
     reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
     counts = {row["reason"]: row["n"] for row in reason_rows}
