@@ -655,7 +655,7 @@ const PARAM_META = {
   min_activity: { name: "最低活跃度", desc: "≈活跃天/14", range: "—" },
   grid_max_adds: { name: "单笔最多加仓次数", desc: "反网格", range: "—" },
   max_single_loss: { name: "单笔最大亏损容忍", desc: "单笔亏超此%判扛单", range: "5%–15%", up: "更宽容大亏", dn: "更严筛扛单" },
-  gate_loss_pain_max: { name: "小亏大赚门槛", desc: "最惨一单亏损÷中位盈利≥此值=小赚大亏,挡在名单外", range: "1.2–2.0", up: "更宽容", dn: "只留亏得更小的" },
+  gate_loss_pain_max: { name: "小亏大赚门槛", desc: "最惨一单亏损÷中位盈利≥此值=小赚大亏,挡在名单外", range: "0.8–1.0", up: "更宽容", dn: "只留亏得更小的" },
   gate_hold_skew_max: { name: "抗单门槛", desc: "亏单持仓÷赢单持仓≥此值=抗单,淘汰", range: "1.2–2.0", up: "更宽容", dn: "止损更干脆才留" },
   gate_profit_conc_max: { name: "一把行情门槛", desc: "单日盈利占比≥此%=利润全靠一把,淘汰", range: "70%–90%", up: "更宽容", dn: "要求盈利更分散" },
   EXCLUDE_HFT: { name: "过滤高频HFT(开关)", desc: "剔除秒级快炒钱包——他们赚钱但我们延迟太大抄不了;接入高频WS后可关掉", range: "—" },
@@ -870,10 +870,36 @@ function SizingPreview({ vals }) {
   );
 }
 
+/* 行内编辑值:平时是一段带轻微底色的文本(值+单位),点击变成输入框,失焦/回车提交并复原成文本。
+   提交只更新暂存(vals/dirty),实际落库仍由底部 apply-bar(确认/重采)。Esc 取消。 */
+function EditableValue({ value, unit, ptype, disabled, onCommit }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef(null);
+  useEffect(() => { setDraft(value); }, [value]);                       // 外部值变化(保存后)时同步
+  useEffect(() => { if (editing && ref.current) { ref.current.focus(); ref.current.select(); } }, [editing]);
+  const commit = () => {
+    setEditing(false);
+    const v = draft === "" || draft == null ? null : Number(draft);
+    if (v !== value && !(v == null && value == null)) onCommit(v);
+  };
+  if (disabled) return <span className="ev ev-ro">{value == null ? "—" : value}{unit && <i className="ev-u">{unit}</i>}</span>;
+  if (editing) return (
+    <input ref={ref} className="ev-input" type={ptype === "nullable" ? "text" : "number"} value={draft == null ? "" : draft}
+      placeholder={ptype === "nullable" ? "关闭" : ""}
+      onChange={e => setDraft(e.target.value)} onBlur={commit}
+      onKeyDown={e => { if (e.key === "Enter") commit(); else if (e.key === "Escape") { setDraft(value); setEditing(false); } }} />
+  );
+  return (
+    <span className="ev" title="点击编辑" onClick={() => { setDraft(value); setEditing(true); }}>
+      {value == null ? <span className="ev-empty">关闭</span> : value}{value != null && unit && <i className="ev-u">{unit}</i>}
+    </span>
+  );
+}
+
 function Settings({ startRescan, confirm, toast }) {
   const [params, setParams] = useState(null);
   const [tab, setTab] = useState("scanner");
-  const [dev, setDev] = useState(false);
   const [vals, setVals] = useState({});
   const [dirty, setDirty] = useState({});
   const [expanded, setExpanded] = useState(null);
@@ -892,8 +918,7 @@ function Settings({ startRescan, confirm, toast }) {
 
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
   const list = params[tab];
-  const editable = (p) => !(p.type === "display" || p.level === "black") &&
-    (p.level !== "blue" || dev);
+  const editable = (p) => !(p.type === "display" || p.level === "black");
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
   const tabDirty = list.filter(p => dirty[p.key]);
 
@@ -902,26 +927,18 @@ function Settings({ startRescan, confirm, toast }) {
     return (
       <div key={p.key}>
         <div className={"prow" + (dirty[p.key] ? " dirty" : "")}>
-          <span className={"lvl-dot lvl-" + lvl} title={lvl} />
+          <span className="lvl-dot lvl-green" />
           <div className="pn"><b>{p.name || m.name || p.key}</b><div className="pk">{p.key}</div></div>
           <div className="pd">{p.desc || m.desc}{m.range && m.range !== "—" && <span style={{ color: "var(--t4)" }}> · 建议 {m.range}</span>}</div>
           <div className="pctl">
             {p.type === "bool" ? (
-              <React.Fragment>
-                <div className={"toggle " + (vals[p.key] ? "on" : "")} onClick={() => ed && set(p.key, !vals[p.key])} style={{ opacity: ed ? 1 : .5 }}><div className="knob" /></div>
-                <span className="punit" />
-              </React.Fragment>
+              <div className={"toggle " + (vals[p.key] ? "on" : "")} onClick={() => ed && set(p.key, !vals[p.key])} style={{ opacity: ed ? 1 : .5 }}><div className="knob" /></div>
             ) : p.type === "display" ? (
               <span className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{p.value}</span>
             ) : (
-              <React.Fragment>
-                <input className="pinput" type={p.type === "nullable" ? "text" : "number"} disabled={!ed}
-                  value={vals[p.key] == null ? "" : vals[p.key]} placeholder={p.type === "nullable" ? "关闭" : ""}
-                  onChange={e => set(p.key, e.target.value === "" ? null : Number(e.target.value))} />
-                <span className="punit">{UNIT[p.type] || ""}</span>
-              </React.Fragment>
+              <EditableValue value={vals[p.key]} unit={UNIT[p.type] || ""} ptype={p.type}
+                disabled={!ed} onCommit={v => set(p.key, v)} />
             )}
-            {!ed && lvl === "blue" && <span className="plock" title="开发者模式解锁">🔒</span>}
             {(lvl === "black" || p.type === "display") && <span className="plock">只读</span>}
           </div>
         </div>
@@ -966,7 +983,6 @@ function Settings({ startRescan, confirm, toast }) {
       <div className="tabs">
         <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
-        <label className="devmode"><input type="checkbox" checked={dev} onChange={e => setDev(e.target.checked)} /> 开发者模式(解锁进阶)</label>
       </div>
 
       {tab === "follow" && <SizingPreview vals={vals} />}

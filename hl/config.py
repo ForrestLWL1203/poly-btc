@@ -194,7 +194,7 @@ HOLD_SKEW_W    = 0.5   # weight of the (hold_skew - FREE) term inside disc
 # re-fetch. Plus a LIFETIME-net check (the one new datum, from the full-history fetch) that catches a
 # wallet whose blow-up is OLDER than the 14d scoring window (e.g. #47: clean 14d, but -123k over 287d).
 # All UI-tunable (params.py → apply_scanner_params overlays onto the scan/regate namespace).
-GATE_LOSS_PAIN_MAX   = 1.5   # reject if |worst realized loss| / median win ≥ this (小赚大亏). 0 = off.
+GATE_LOSS_PAIN_MAX   = 1.0   # reject if |worst realized loss| / median win ≥ this (要求小亏大赚:worst<median win). 0 = off.
 GATE_HOLD_SKEW_MAX   = 1.5   # reject if median losing-hold / winning-hold ≥ this (抗单). 0 = off.
 GATE_PROFIT_CONC_MAX = 0.8   # reject if one day ≥ this share of gross profit (一把行情/未经验证). 0 = off.
 GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
