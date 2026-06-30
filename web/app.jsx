@@ -630,6 +630,8 @@ function WalletDrawer({ address, onClose }) {
 const PARAM_META = {
   // follow
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "watchlist 里评分≥此线的钱包才实际跟单(0–100 标准化分,见下方实时达标数)", range: "—", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
+  FOLLOW_MIN_TRADES: { name: "跟单·最低成交笔数", desc: "证据门槛:近30天平掉回合数<此=样本太薄,留在名单观察但不跟单", range: "5–10", up: "只跟履历厚的、更稳", dn: "放进薄样本、信号更多" },
+  FOLLOW_MIN_ACTIVE_DAYS: { name: "跟单·最低活跃天数", desc: "证据门槛:活跃天数<此=履历太短,留在名单观察但不跟单", range: "3–5", up: "只跟交易天数多的", dn: "放进新钱包" },
   RISK_BUDGET: { name: "风险预算(1σ亏损)", desc: "核心:逆向1个σ该亏多少保证金;杠杆=此值÷σ,也=单次止损硬亏", range: "50–70%", up: "杠杆更大、止损更肉", dn: "更保守、止损更小" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },

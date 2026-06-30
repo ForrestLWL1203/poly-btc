@@ -31,6 +31,11 @@ MIN_FOLLOW_SCORE = 0.55     # follow watchlist wallets with score >= this. v5 (2
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
+FOLLOW_MIN_TRADES = 8       # follow-set evidence floor: a wallet must have ≥ this many closed trades in the
+FOLLOW_MIN_ACTIVE_DAYS = 4  # 30d profile AND ≥ this many active days to be COPIED — independent of score.
+#                             A 100%-win-on-3-trades wallet scores low (evidence multiplier) but still clears
+#                             the line; this floor keeps it OUT of the follow set until it has real history.
+#                             It stays on the watchlist (observed) — promoted automatically once it qualifies.
 OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs

@@ -156,6 +156,9 @@ class Observer:
             f = P.load_follow(self.db)
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
+            # evidence floor read by load_targets() via config (module fn, not a method) -> push onto config
+            if f.get("FOLLOW_MIN_TRADES") is not None: config.FOLLOW_MIN_TRADES = int(f["FOLLOW_MIN_TRADES"])
+            if f.get("FOLLOW_MIN_ACTIVE_DAYS") is not None: config.FOLLOW_MIN_ACTIVE_DAYS = int(f["FOLLOW_MIN_ACTIVE_DAYS"])
             if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
@@ -1025,15 +1028,20 @@ class Observer:
 
 # ------------------------------------------------------------------------- loaders
 def load_targets(db, n: int, min_score: float = 0.0):
-    """Followable set = enabled watchlist wallets with score ≥ line, top-n by rank. (Dormancy is already
-    handled at the watchlist level by the scanner's `inactive` gate; per-trade risk by the σ-stop +
-    isolated margin — so no observer-side dormant/open-bag bench. Wallets we still hold a copy on are
-    re-added EXIT-ONLY by the caller's held_off safeguard.)"""
+    """Followable set = enabled watchlist wallets with score ≥ line, that also clear the EVIDENCE FLOOR
+    (≥ FOLLOW_MIN_TRADES closed trades AND ≥ FOLLOW_MIN_ACTIVE_DAYS active days), top-n by rank. The
+    floor keeps thin-sample wallets (e.g. 100%-win-on-3-trades) OUT of the copy set even though they
+    clear the score line — they stay on the watchlist and are promoted automatically once they have real
+    history. (Dormancy is handled at the watchlist level by the scanner's `inactive` gate; per-trade risk
+    by the σ-stop + isolated margin. Wallets we still hold a copy on are re-added EXIT-ONLY by the
+    caller's held_off safeguard.)"""
     addrs = [r[0] for r in db.execute(
         "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
+        "LEFT JOIN profile p ON p.addr=w.addr "
         "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? "
+        "AND COALESCE(w.n_trades,0) >= ? AND COALESCE(p.active_days,0) >= ? "
         "ORDER BY w.rank LIMIT ?",
-        (min_score, n)).fetchall()]
+        (min_score, config.FOLLOW_MIN_TRADES, config.FOLLOW_MIN_ACTIVE_DAYS, n)).fetchall()]
     seed = {a: {r[0] for r in db.execute("SELECT DISTINCT coin FROM episode WHERE addr=?", (a,)).fetchall()}
             for a in addrs}
     return addrs, seed

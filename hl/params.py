@@ -51,6 +51,10 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
         "跟单评分线", "评分 ≥ 此线的钱包才实际跟单(见下方实时达标数)"),
+    ("FOLLOW_MIN_TRADES",    "follow",  "green",  "int",     "immediate", config.FOLLOW_MIN_TRADES,
+        "跟单·最低成交笔数", "证据门槛:近30天平掉的回合数 < 此 = 样本太薄,留在名单观察但不跟单"),
+    ("FOLLOW_MIN_ACTIVE_DAYS","follow", "green",  "int",     "immediate", config.FOLLOW_MIN_ACTIVE_DAYS,
+        "跟单·最低活跃天数", "证据门槛:活跃天数 < 此 = 履历太短,留在名单观察但不跟单"),
     ("RISK_BUDGET",          "follow",  "green",  "pct",     "immediate", config.RISK_BUDGET * 100,
         "风险预算(1σ亏损)", "核心:逆向 1 个 σ 该亏多少保证金。杠杆 = 此值 ÷ σ,也定单次止损硬亏"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,
