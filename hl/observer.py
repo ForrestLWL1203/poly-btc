@@ -65,6 +65,7 @@ class Observer:
         self.copy_stop_pct = config.COPY_STOP_PCT            # legacy flat-% fallback (σ unavailable)
         self.risk_budget = config.RISK_BUDGET                # v9: lev = RISK_BUDGET/σ (margin loss per 1σ)
         self.stop_sigma_mult = config.STOP_SIGMA_MULT        # v9: σ-stop cut = this × σ adverse
+        self.stock_force_high = config.STOCK_FORCE_HIGH_TIER # builder/stock perps → high tier (gap risk)
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -178,6 +179,7 @@ class Observer:
             if f.get("COPY_STOP_PCT"): self.copy_stop_pct = f["COPY_STOP_PCT"]
             if f.get("RISK_BUDGET"): self.risk_budget = f["RISK_BUDGET"]
             if f.get("STOP_SIGMA_MULT") is not None: self.stop_sigma_mult = f["STOP_SIGMA_MULT"]
+            if f.get("STOCK_FORCE_HIGH_TIER") is not None: self.stock_force_high = bool(f["STOCK_FORCE_HIGH_TIER"])
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
@@ -295,17 +297,21 @@ class Observer:
         """Latest σ for coin from the read-cache (mirrors coin_vol); fallback if not refreshed yet."""
         return self.vol.get(coin) or self.vol_fallback_sigma
 
-    def _tier(self, sigma: float) -> str:
-        """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between)."""
+    def _tier(self, sigma: float, coin: str = None) -> str:
+        """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between). Builder/stock
+        perps (xyz:* — single-name equities/commodities) are FLOORED to 'high' when STOCK_FORCE_HIGH_TIER:
+        their daily-high-low σ under-states gap + market-hours-concentrated risk (see config)."""
+        if coin and ":" in coin and self.stock_force_high:
+            return "high"
         if sigma <= self.stable_sigma_max:
             return "stable"
         return "high" if sigma >= self.high_sigma_min else "mid"
 
-    def _sizing_for(self, sigma: float):
+    def _sizing_for(self, sigma: float, coin: str = None):
         """v9 (margin_pct, leverage) for a coin's σ. margin% by tier; leverage = floor(clip(RISK_BUDGET/σ,
         MIN_LEV, tier cap)). RISK_BUDGET = the margin loss a 1σ move should cost (so lev·σ ≈ RISK_BUDGET);
         ties directly to the σ-stop. INTEGER leverage (floor). NOT mirrored from the master."""
-        tier = self._tier(sigma)
+        tier = self._tier(sigma, coin)
         cap = self.tier_lev_cap[tier]
         lev_raw = (self.risk_budget / sigma) if sigma > 0 else cap
         lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
@@ -832,7 +838,7 @@ class Observer:
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
-        margin_pct, lev = self._sizing_for(sigma)    # v8: tier margin% + σ-scaled-capped leverage
+        margin_pct, lev = self._sizing_for(sigma, coin)  # v9: tier margin% + σ-scaled-capped leverage (stocks floored to high tier)
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * margin_pct)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
