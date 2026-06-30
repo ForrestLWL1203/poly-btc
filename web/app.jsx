@@ -459,9 +459,9 @@ function History() {
 function Wallets({ confirm, toast }) {
   const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
-  const [wpage, setWpage] = useState(0);             // 30/page
+  const [wpage, setWpage] = useState(0);             // 10/page
   const [tab, setTab] = useState("followed");        // followed(在跟) | dropped(已掉线)
-  const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&page=" + wpage + "&size=30").then(setData).catch(() => {}); }, [wpage, tab]);
+  const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&page=" + wpage + "&size=10").then(setData).catch(() => {}); }, [wpage, tab]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
   const dropped = tab === "dropped";
 
