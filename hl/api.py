@@ -355,7 +355,7 @@ def ep_positions(db, qs):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                         "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,"
-                        "cp.addr,w.rank AS wrank FROM copy_position cp "
+                        "cp.was_stopped,cp.was_liq,cp.addr,w.rank AS wrank FROM copy_position cp "
                         "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
                         " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
         out = []
@@ -371,6 +371,8 @@ def ep_positions(db, qs):
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "closedAt": c,   # epoch sec (UTC); frontend renders in UTC+8
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
+                        # 结算类型: liq=爆仓 / stop=我们主动σ止损 / mirror=镜像跟随目标平仓
+                        "closeType": "liq" if r["was_liq"] else ("stop" if r["was_stopped"] else "mirror"),
                         "walletRank": r["wrank"],   # wrank None = 已脱榜
                         "entry": r["entry_px"], "closePx": close_px,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,

@@ -358,9 +358,11 @@ function Positions({ confirm, toast, streamOpen }) {
 }
 
 /* ----------------------------------------------------------------- history (closed positions + stats) */
+const CLOSE_TYPE = { mirror: { label: "镜像", tint: "tint-blue" }, stop: { label: "止损", tint: "tint-amber" }, liq: { label: "爆仓", tint: "tint-red" } };
 function History() {
   const [data, setData] = useState(null);
   const [filter, setFilter] = useState("all");        // all | win | loss
+  const [ctype, setCtype] = useState("all");          // all | mirror | stop | liq
   const [page, setPage] = useState(0);                // 25/page
   useEffect(() => {
     const load = () => api.get("/api/positions?status=closed").then(setData).catch(() => {});
@@ -369,7 +371,7 @@ function History() {
   const PER = 25;
   const st = data && data.stats;
   const all = (data && data.positions) || [];
-  const rows = all.filter(p => filter === "all" ? true : filter === "win" ? p.result === "win" : p.result === "loss");
+  const rows = all.filter(p => (filter === "all" || p.result === filter) && (ctype === "all" || p.closeType === ctype));
   const pages = Math.max(1, Math.ceil(rows.length / PER));
   const pg = Math.min(page, pages - 1);
   const items = rows.slice(pg * PER, pg * PER + PER);
@@ -404,16 +406,20 @@ function History() {
           </div>
           <div className="section-h" style={{ marginTop: 16 }}>
             <h2>明细 <span className="muted">· 最近 {all.length} 笔 · 最佳 <span className="up">{fSign(st.bestPnl, 0)}</span> / 最差 <span className="down">{fSign(st.worstPnl, 0)}</span></span></h2>
-            <div className="range-tabs">
-              {[["all", "全部"], ["win", "盈利"], ["loss", "亏损"]].map(([k, l]) =>
-                <button key={k} className={filter === k ? "on" : ""} onClick={() => { setFilter(k); setPage(0); }}>{l}</button>)}
+            <div className="hfilters">
+              <select className="fdrop" value={filter} onChange={e => { setFilter(e.target.value); setPage(0); }}>
+                <option value="all">盈亏 · 全部</option><option value="win">仅盈利</option><option value="loss">仅亏损</option>
+              </select>
+              <select className="fdrop" value={ctype} onChange={e => { setCtype(e.target.value); setPage(0); }}>
+                <option value="all">平仓类型 · 全部</option><option value="mirror">镜像跟随</option><option value="stop">主动止损</option><option value="liq">爆仓</option>
+              </select>
             </div>
           </div>
           <div className="tbl-wrap">
             <table>
-              <thead><tr><th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">平仓价</th><th className="num">名义额</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>结果</th><th>钱包</th></tr></thead>
+              <thead><tr><th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">平仓价</th><th className="num">名义额</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>结算类型</th><th>结果</th><th>钱包</th></tr></thead>
               <tbody>
-                {rows.length === 0 && <tr><td colSpan="10" className="empty">暂无</td></tr>}
+                {rows.length === 0 && <tr><td colSpan="11" className="empty">暂无</td></tr>}
                 {items.map(p => (
                   <tr key={p.id}>
                     <td><b>{p.coin}</b></td>
@@ -426,6 +432,7 @@ function History() {
                     <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
                     <td className="num">{fDur(p.durationSec)}</td>
                     <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(p.closedAt)}</td>
+                    <td>{(() => { const t = CLOSE_TYPE[p.closeType] || CLOSE_TYPE.mirror; return <span className={"tint " + t.tint}>{t.label}</span>; })()}</td>
                     <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
                     <td className="addr">{short(p.wallet)} {p.walletRank != null
                       ? <span className="rankbadge">#{p.walletRank}</span>
