@@ -65,9 +65,6 @@ class Observer:
         self.copy_stop_pct = config.COPY_STOP_PCT            # legacy flat-% fallback (σ unavailable)
         self.risk_budget = config.RISK_BUDGET                # v9: lev = RISK_BUDGET/σ (margin loss per 1σ)
         self.stop_sigma_mult = config.STOP_SIGMA_MULT        # v9: σ-stop cut = this × σ adverse
-        # follow-time STATE bench (not a watchlist gate): skip NEW copies of a dormant or 扛深亏 master.
-        self.dormant_days = config.DORMANT_DAYS
-        self.open_bag_max = config.OPEN_BAG_MAX_FRAC
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -172,8 +169,6 @@ class Observer:
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
-            if f.get("DORMANT_DAYS") is not None: self.dormant_days = f["DORMANT_DAYS"]
-            if f.get("OPEN_BAG_MAX_FRAC") is not None: self.open_bag_max = f["OPEN_BAG_MAX_FRAC"]
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
@@ -259,8 +254,7 @@ class Observer:
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False):
-        addrs, seed = load_targets(self.db, self.top_n, self.min_score,
-                                   self.dormant_days, self.open_bag_max)
+        addrs, seed = load_targets(self.db, self.top_n, self.min_score)
         self.seed_coins = seed
         self.target_acct = {a: v for a, v in                 # conviction denominator (target's account)
                             self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
@@ -1026,24 +1020,16 @@ class Observer:
 
 
 # ------------------------------------------------------------------------- loaders
-def load_targets(db, n: int, min_score: float = 0.0,
-                 dormant_days: float = None, open_bag_max: float = None):
-    """Followable set = enabled watchlist wallets with score≥line that are NOT benched. Benched (state,
-    not a watchlist gate): dormant (no fill within `dormant_days`) or currently carrying an unrealized
-    loss worse than `open_bag_max` of account. Benched wallets stay in the watchlist (revive on next
-    activity) but drop out of the followable set, so we open no NEW copies of them. (Wallets we still
-    hold an open copy on are re-added EXIT-ONLY by the caller's held_off safeguard — never stranded.)"""
-    dormant_days = config.DORMANT_DAYS if dormant_days is None else dormant_days
-    open_bag_max = config.OPEN_BAG_MAX_FRAC if open_bag_max is None else open_bag_max
-    dorm_cut = (now_ms() - dormant_days * 86400_000) if dormant_days else 0
-    bag_floor = -abs(open_bag_max) if open_bag_max else -1e30
+def load_targets(db, n: int, min_score: float = 0.0):
+    """Followable set = enabled watchlist wallets with score ≥ line, top-n by rank. (Dormancy is already
+    handled at the watchlist level by the scanner's `inactive` gate; per-trade risk by the σ-stop +
+    isolated margin — so no observer-side dormant/open-bag bench. Wallets we still hold a copy on are
+    re-added EXIT-ONLY by the caller's held_off safeguard.)"""
     addrs = [r[0] for r in db.execute(
         "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
         "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? "
-        "AND (? = 0 OR COALESCE(w.last_fill_ms,0) >= ?) "          # not dormant (no fill within N days)
-        "AND COALESCE(w.open_loss_frac,0) >= ? "                   # not currently 扛深亏单
         "ORDER BY w.rank LIMIT ?",
-        (min_score, dorm_cut, dorm_cut, bag_floor, n)).fetchall()]
+        (min_score, n)).fetchall()]
     seed = {a: {r[0] for r in db.execute("SELECT DISTINCT coin FROM episode WHERE addr=?", (a,)).fetchall()}
             for a in addrs}
     return addrs, seed

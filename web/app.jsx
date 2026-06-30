@@ -638,8 +638,6 @@ const PARAM_META = {
   MAX_ADDS: { name: "最多加仓次数", desc: "跟随主力加仓的次数上限", range: "—", up: "跟更多加仓", dn: "更早停跟加仓" },
   COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
   STOP_SIGMA_MULT: { name: "止损=σ的倍数", desc: "止损距离=此倍数×该币σ;1.0=逆向跑满一个日内振幅(大饼≈4%、ZEC≈15%)", range: "0.8–1.5", up: "更宽容、接近不止损", dn: "砍更早、亏更少但易误杀" },
-  DORMANT_DAYS: { name: "沉睡判定天数", desc: "超此天数没成交则暂停开新单(留名单、自动复活)", range: "5–10 天", up: "容忍更久没动", dn: "更快搁置冷却的" },
-  OPEN_BAG_MAX_FRAC: { name: "在扛深亏暂停线", desc: "目标当前浮亏超账户此%则暂停跟它开新单", range: "2%–5%", up: "容忍更深浮亏", dn: "更早回避扛单" },
   MAX_ENTRY_CHASE_PCT: { name: "追价保护阈值", desc: "开仓价偏离超此%则放弃(空=关闭)", range: "0.3–1", up: "更宽容追价", dn: "更严防滑点" },
   EXEC_MAKER_MIRROR: { name: "镜像挂单模式", desc: "暂不开放", range: "—" },
   VOL_FAST_DAYS: { name: "波动率快/慢窗口", desc: "σ 计算窗口(只读)", range: "—" },

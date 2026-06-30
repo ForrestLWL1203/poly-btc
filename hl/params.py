@@ -81,10 +81,6 @@ PARAM_SPEC = [
         "止损=σ的倍数", "止损距离 = 此倍数 × 该币日波动率σ(最高-最低振幅)。1.0=逆向跑满一个完整日内振幅才平(大饼≈4%、ZEC≈15%,自适应)。配合风险预算,单次止损硬亏=此倍数×风险预算。调低=砍更早、亏更少但易被噪音误杀;调高=更宽容、接近不止损"),
     ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
         "单币最大占用", "同一个币上所有仓位的保证金合计上限(占账户)。防止一波行情下 N 个钱包都开同一个币、我们全跟导致过度集中。满了就缩小或不跟。调低=更分散、单币风险更小;调高=允许在单个币上压更重"),
-    ("DORMANT_DAYS",         "follow",  "green",  "float",   "immediate", config.DORMANT_DAYS,
-        "沉睡判定天数", "钱包超过此天数没成交=暂停跟它开新单(仍留在名单、继续管已有仓),它一恢复交易就自动满血跟回。调低=更快把冷却的搁置;调高=容忍更久没动的"),
-    ("OPEN_BAG_MAX_FRAC",    "follow",  "yellow", "pct",     "immediate", config.OPEN_BAG_MAX_FRAC * 100,
-        "在扛深亏暂停线", "目标当前正扛着的浮亏超过其账户此比例=暂停跟它开新单(别在它死扛深亏时进场)。调低=更敏感、更早回避扛单的;调高=容忍它带更深的浮亏"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("COPY_STOP_PCT",        "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_PCT * 100, "止损兜底(σ缺失时用的固定%)", ""),
     ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定档σ上界(档位选择器)", ""),

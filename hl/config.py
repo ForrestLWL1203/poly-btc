@@ -206,13 +206,6 @@ GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月
 # covers the 14d scoring slice + the 7/14/30d multi-window nets (net_life ≡ net over this 30d window).
 PROFILE_FETCH_DAYS = 30
 
-# ── FOLLOW-TIME STATE FILTER (observer, not a watchlist gate) — a high-quality wallet that is currently
-# un-followable is BENCHED (kept in watchlist, marked dormant), not dropped, so it revives instantly when
-# it trades again (no re-harvest, no lost history). Tunable in the follow params.
-DORMANT_DAYS       = 7.0     # no fill within N days → bench (no NEW copies; existing copies still managed)
-OPEN_BAG_MAX_FRAC  = 0.03    # currently carrying an unrealized loss worse than this fraction of account →
-#                              bench (don't open a fresh copy of a wallet that is right now 扛深亏单)
-
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).
 TREND_OPEN_MIN = 0.05
