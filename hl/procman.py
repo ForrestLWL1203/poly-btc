@@ -208,7 +208,34 @@ def observer_running(db_path):
     return is_running(db_path, OBSERVER)
 
 
+# ── observer desired-state (want-marker) → auto-resume, replacing systemd Restart=always/boot-start ──
+def _wantfile(db_path):
+    return os.path.join(_run_dir(db_path), f"{OBSERVER}.want")
+
+
+def _set_want(db_path, want):
+    """Persist whether the observer SHOULD be running. reconcile() re-starts it whenever want=1 but the
+    process is dead (crash / dashboard restart / VPS reboot); a deliberate stop clears it so we never
+    resurrect an observer the operator turned off."""
+    if want:
+        try:
+            with open(_wantfile(db_path), "w") as f:
+                f.write("1")
+        except OSError:
+            pass
+    else:
+        try:
+            os.remove(_wantfile(db_path))
+        except OSError:
+            pass
+
+
+def _get_want(db_path):
+    return os.path.exists(_wantfile(db_path))
+
+
 def start_observer(db_path):
+    _set_want(db_path, True)         # desired-state = running → reconcile auto-resumes after any death
     argv = [PYTHON, os.path.join(REPO, "hl_observe.py"), "--db", db_path, "observe"]
     pid, started = _spawn(db_path, OBSERVER, argv)
     if started:                     # optimistic 'running' so the UI flips instantly; the observer then
@@ -217,6 +244,7 @@ def start_observer(db_path):
 
 
 def stop_observer(db_path):
+    _set_want(db_path, False)        # deliberate stop → do NOT auto-resume
     stopped = _stop(db_path, OBSERVER)
     _set_proc_status(db_path, "observer", "stopped", None)      # a killed observer can't write its own down-state
     return {"running": False, "stopped": stopped}
@@ -250,6 +278,12 @@ def reconcile(db_path):
             _clear_pid(db_path, name)
             if name == OBSERVER:
                 _set_proc_status(db_path, "observer", "stopped", None)
+    # AUTO-RESUME (replaces systemd Restart=always + boot-start): if the observer is DESIRED running but
+    # its process is gone (crash / dashboard restart / VPS reboot), bring it back. Called on dashboard boot
+    # AND every ticker cycle (~60s), so a crashed observer self-heals within a cycle. Crash-loop-safe:
+    # at most one (re)start per reconcile.
+    if _get_want(db_path) and not is_running(db_path, OBSERVER):
+        start_observer(db_path)
 
 
 def auto_scan_tick(db_path):
