@@ -653,6 +653,7 @@ const PARAM_META = {
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
   ADD_MARGIN_PCT: { name: "每次加仓比例", desc: "跟随加仓每次投入(占可用)", range: "—", up: "加仓更猛", dn: "加仓更轻" },
   MAX_ADDS: { name: "最多加仓次数", desc: "跟随主力加仓的次数上限", range: "—", up: "跟更多加仓", dn: "更早停跟加仓" },
+  MIN_COPY_NOTIONAL: { name: "最小跟单名义额", desc: "封顶到主力名义额后若低于此金额=残渣单直接不开(如主力$4的探针仓)", range: "$30–100", up: "过滤更多小单", dn: "连很小的也跟" },
   COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
   STOP_SIGMA_MULT: { name: "止损=σ的倍数", desc: "止损距离=此倍数×该币σ;1.0=逆向跑满一个日内振幅(大饼≈4%、ZEC≈15%)", range: "0.8–1.5", up: "更宽容、接近不止损", dn: "砍更早、亏更少但易误杀" },
   MAX_ENTRY_CHASE_PCT: { name: "追价保护阈值", desc: "开仓价偏离超此%则放弃(空=关闭)", range: "0.3–1", up: "更宽容追价", dn: "更严防滑点" },

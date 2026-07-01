@@ -77,6 +77,8 @@ PARAM_SPEC = [
         "止损=σ的倍数", "止损距离 = 此倍 × 该币σ(1.0 = 一个日内振幅:大饼≈4% / ZEC≈15%)"),
     ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
         "单币最大占用", "同一币所有仓位保证金合计上限(占账户),防过度集中"),
+    ("MIN_COPY_NOTIONAL",    "follow",  "green",  "usd",     "immediate", config.MIN_COPY_NOTIONAL,
+        "最小跟单名义额", "封顶到主力名义额后若低于此金额=残渣单,直接不开(如主力$4的探针仓)"),
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("COPY_STOP_PCT",        "follow",  "hidden", "pct",     "immediate", config.COPY_STOP_PCT * 100, "止损兜底(σ缺失时用的固定%)", ""),
     ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定档σ上界(档位选择器)", ""),

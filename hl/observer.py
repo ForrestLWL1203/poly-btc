@@ -56,6 +56,7 @@ class Observer:
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
+        self.min_copy_notional = config.MIN_COPY_NOTIONAL   # post-cap dust floor (skip scrap positions)
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.max_adds = config.MAX_ADDS
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
@@ -170,6 +171,7 @@ class Observer:
                 if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
                 if f.get(lk): self.tier_lev_cap[tier] = f[lk]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
+            if f.get("MIN_COPY_NOTIONAL") is not None: self.min_copy_notional = f["MIN_COPY_NOTIONAL"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
@@ -875,6 +877,13 @@ class Observer:
             if master_notl > 0 and notional > master_notl:
                 notional = master_notl
                 margin = notional / lev if lev else margin
+            if notional < self.min_copy_notional:     # DUST after the master-notl cap (master had a scrap
+                why = f"dust notl ${notional:,.2f} < ${self.min_copy_notional:g} (master notl ${master_notl:,.0f})"
+                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why}")   # position) → don't open scrap
+                self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
+                self.db.commit()
+                self.open_ep.pop((addr, coin), None)
+                return
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
             stop_px = self._stop_px_for(px, is_buy, sigma)  # 扛单 cut at STOP_SIGMA_MULT×σ adverse (0 = off)

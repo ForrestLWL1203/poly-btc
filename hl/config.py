@@ -88,6 +88,10 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGI
 #                             position, just skip the signal (don't open dust). Existing positions stay
 #                             managed/exited. High-conviction signals (bigger rf) still open later than
 #                             low-conviction ones, which is intended. UI-tunable.
+MIN_COPY_NOTIONAL = 50.0    # skip a copy whose FINAL notional (after the master-notional cap) is below this $.
+#                             MIN_OPEN_MARGIN_PCT is checked on our FORMULA margin BEFORE the master-notl cap,
+#                             so a master with a dust position (e.g. a $4 AVGO probe) slips through — we cap to
+#                             the master's $4 and open a scrap position. This post-cap floor kills that dust.
 MAX_LEV = 20.0              # hard leverage cap (BTC + anything calmer pin here); also a stale-σ backstop
 
 # Per-coin volatility (regime-aware) for the sizing above. A coin calm-then-erupting must NOT keep its
