@@ -186,13 +186,22 @@ def builder_universe(dexes=BUILDER_DEXES) -> set:
     return set()
 
 
-def copyable_universe(builder_dexes=BUILDER_DEXES) -> set:
+_UNIVERSE_CACHE = {"u": None, "ts": 0.0}   # process-level cache; the tradeable-coin set barely changes
+UNIVERSE_CACHE_S = 86400                    # re-fetch at most once/day (new listings are rare)
+
+
+def copyable_universe(builder_dexes=BUILDER_DEXES, force=False) -> set:
     """Everything we can copy: standard crypto perps ∪ transparent builder perps (stocks/commodities).
-    Spot is still excluded upstream (is_spot). HARD-FAILS if EITHER set is empty: a partial universe
-    silently drops one whole class of fills and corrupts the sweep. A crypto-less universe would drop
-    every crypto trade; a BUILDER-less one falsely retires every stock/commodity trader as spot_dominant
-    (was previously mis-labelled "safe to degrade to crypto-only" — it is NOT). Aborting (→ daemon retries
-    the scan) beats writing corrupt profiles."""
+    CACHED for UNIVERSE_CACHE_S (the coin set barely changes — no need to re-fetch it every scan; pass
+    force=True to refresh). Spot is still excluded upstream (is_spot). HARD-FAILS if EITHER set is empty:
+    a partial universe silently drops one whole class of fills and corrupts the sweep. A crypto-less
+    universe would drop every crypto trade; a BUILDER-less one falsely retires every stock/commodity
+    trader as spot_dominant (was previously mis-labelled "safe to degrade to crypto-only" — it is NOT).
+    Aborting (→ daemon retries the scan) beats writing corrupt profiles, and a bad fetch never overwrites
+    a good cache."""
+    now = time.time()
+    if not force and _UNIVERSE_CACHE["u"] is not None and (now - _UNIVERSE_CACHE["ts"]) < UNIVERSE_CACHE_S:
+        return _UNIVERSE_CACHE["u"]
     crypto = perp_universe()
     if not crypto:
         raise RuntimeError("perp_universe() empty after retries — refusing a crypto-less universe")
@@ -200,7 +209,9 @@ def copyable_universe(builder_dexes=BUILDER_DEXES) -> set:
     if builder_dexes and not builder:
         raise RuntimeError("builder_universe() empty after retries — refusing a builder-less universe "
                            "(would falsely retire every stock/commodity trader as spot_dominant)")
-    return crypto | builder
+    u = crypto | builder
+    _UNIVERSE_CACHE["u"], _UNIVERSE_CACHE["ts"] = u, now
+    return u
 
 
 def book_top(coin: str):
