@@ -334,7 +334,9 @@ function Positions({ confirm, toast, streamOpen }) {
                   <div className="muted" title="源(目标钱包)这一单的名义额(我们 ≤ 它)">源 {fUsd(p.masterNotional)}</div></td>
                 <td className="num">{fPrice(p.mark)}</td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
-                <td className="addr">{short(p.wallet)} <span className="rankbadge">#{p.walletRank}</span></td>
+                <td className="addr">{short(p.wallet)} {p.followPos != null
+                  ? <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
+                  : <span className="tint tint-gray" title="当前不在跟单集(仅平仓)">脱榜</span>}</td>
                 <td className="num" title="跟单延迟:目标开仓 → 我们检测并跟开的秒数(旧仓未记录显示 —)">{p.lagSec != null ? fNum(p.lagSec, 1) + "s" : "—"}</td>
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
@@ -434,9 +436,9 @@ function History() {
                     <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(p.closedAt)}</td>
                     <td>{(() => { const t = CLOSE_TYPE[p.closeType] || CLOSE_TYPE.mirror; return <span className={"tint " + t.tint}>{t.label}</span>; })()}</td>
                     <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
-                    <td className="addr">{short(p.wallet)} {p.walletRank != null
-                      ? <span className="rankbadge">#{p.walletRank}</span>
-                      : <span className="tint tint-gray">已脱榜</span>}</td>
+                    <td className="addr">{short(p.wallet)} {p.followPos != null
+                      ? <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
+                      : <span className="tint tint-gray" title="当时/现在不在跟单集">脱榜</span>}</td>
                   </tr>
                 ))}
               </tbody>

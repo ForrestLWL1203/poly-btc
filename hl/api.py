@@ -226,6 +226,17 @@ def _followed_count(db, line):
     return (r["cnt"] if r else 0)
 
 
+def _follow_positions(db):
+    """{addr: 1-based position in the copy set} — same filter+order as observer.load_targets. Lets position/
+    history badges show the follow-序号 (1..N) instead of the confusing global watchlist rank (#29 > 25)."""
+    line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
+    rows = qall(db, "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+                    "LEFT JOIN profile p ON p.addr=w.addr WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? "
+                    "AND COALESCE(w.n_trades,0)>=? AND COALESCE(p.active_days,0)>=? ORDER BY w.rank",
+                    (line, config.FOLLOW_MIN_TRADES, config.FOLLOW_MIN_ACTIVE_DAYS))
+    return {r["addr"]: i + 1 for i, r in enumerate(rows)}
+
+
 def ep_overview(db):
     # LIVE-DERIVE from copy_position + copy_account (fresh as of the observer's 25s mark refresh) rather
     # than the 5-min account_stats snapshot row — so the cards aren't up to 5 minutes stale. account_stats
@@ -367,6 +378,7 @@ def ep_positions(db, qs):
                         "cp.was_stopped,cp.was_liq,cp.addr,w.rank AS wrank FROM copy_position cp "
                         "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
                         " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
+        fpos = _follow_positions(db)
         out = []
         for r in rows:
             o, c = _iso_epoch(r["opened_at"]), _iso_epoch(r["closed_at"])
@@ -383,6 +395,7 @@ def ep_positions(db, qs):
                         # 结算类型: liq=爆仓 / stop=我们主动σ止损 / mirror=镜像跟随目标平仓
                         "closeType": "liq" if r["was_liq"] else ("stop" if r["was_stopped"] else "mirror"),
                         "walletRank": r["wrank"],   # wrank None = 已脱榜
+                        "followPos": fpos.get(r["addr"]),   # 1..N in the copy set (None = 现在不在跟单集)
                         "entry": r["entry_px"], "closePx": close_px,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,
                         "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
@@ -432,6 +445,7 @@ def ep_positions(db, qs):
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
         "LEFT JOIN profile pr ON pr.addr=cp.addr "
         "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple(args))
+    fpos = _follow_positions(db)
     out, float_total = [], 0.0
     for r in rows:
         entry = r["entry_px"] or 0.0
@@ -449,7 +463,7 @@ def ep_positions(db, qs):
             "notional": r["notional"] or 0.0, "mark": mark,
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
-            "wallet": r["addr"], "walletRank": r["wrank"],
+            "wallet": r["addr"], "walletRank": r["wrank"], "followPos": fpos.get(r["addr"]),
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
             "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0),
