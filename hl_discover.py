@@ -116,9 +116,10 @@ def main() -> int:
                         help="MINIMAL floor on active_days/lookback (~3 of 14d) — just rejects one-shot "
                              "noise. Low-freq-but-real traders are NOT killed here; the evidence-shrink "
                              "in score() ranks them DOWN until round-trips accumulate (soft, not hard)")
-        pr.add_argument("--grid-max-adds", type=float, default=5.0,
-                        help="reject grid/DCA: max scale-in orders in a single round-trip we can copy "
-                             "(our model = open + MAX_ADDS adds; far above that we only get the worst entries)")
+        pr.add_argument("--grid-max-adds", type=float, default=3.0,
+                        help="reject grid/DCA: MEDIAN scale-ins per round-trip above this = habitual "
+                             "averaging-down. Our model = open + MAX_ADDS adds, so a wallet that TYPICALLY "
+                             "ladders 4+ times we only get the worst pre-average entries on → uncopyable")
         pr.add_argument("--max-single-loss", type=float, default=0.10,
                         help="reject 扛单到爆: worst single round-trip loss as fraction of account "
                              "(cuts-losses-small wallets pass even at 50%% win; one disaster loss = out)")

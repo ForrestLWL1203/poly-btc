@@ -45,7 +45,7 @@ PARAM_SPEC = [
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
     ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
-    ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 5, "单笔加仓上限(防网格)", ""),
+    ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 3, "网格判定:中位加仓上限(超过=习惯性均摊,跟不动)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
