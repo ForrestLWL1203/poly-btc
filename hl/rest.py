@@ -171,24 +171,36 @@ BUILDER_DEXES = ("xyz",)
 
 
 def builder_universe(dexes=BUILDER_DEXES) -> set:
-    """Copyable builder-perp names (fully-qualified, e.g. 'xyz:AAPL') for the given transparent dexes."""
-    out: set = set()
-    for dex in dexes:
-        m = post_soft({"type": "meta", "dex": dex})
-        if isinstance(m, dict):
-            out |= {u.get("name") for u in m.get("universe", []) if u.get("name")}
-    return out
+    """Copyable builder-perp names (fully-qualified, e.g. 'xyz:AAPL'). RETRIES — a transient empty fetch
+    would drop ALL stock/commodity fills from perp_frac and falsely retire every stock trader as
+    'spot_dominant', silently shrinking the follow set."""
+    for _ in range(4):
+        out: set = set()
+        for dex in dexes:
+            m = post_soft({"type": "meta", "dex": dex})
+            if isinstance(m, dict):
+                out |= {u.get("name") for u in m.get("universe", []) if u.get("name")}
+        if out:
+            return out
+        time.sleep(0.5)
+    return set()
 
 
 def copyable_universe(builder_dexes=BUILDER_DEXES) -> set:
     """Everything we can copy: standard crypto perps ∪ transparent builder perps (stocks/commodities).
-    Spot is still excluded upstream (is_spot). HARD-FAILS if the crypto set is empty: a partial
-    (stock-only) universe would silently drop every crypto trade and corrupt the whole sweep — far
-    worse than aborting. (A failed builder fetch just degrades to crypto-only, which is safe.)"""
+    Spot is still excluded upstream (is_spot). HARD-FAILS if EITHER set is empty: a partial universe
+    silently drops one whole class of fills and corrupts the sweep. A crypto-less universe would drop
+    every crypto trade; a BUILDER-less one falsely retires every stock/commodity trader as spot_dominant
+    (was previously mis-labelled "safe to degrade to crypto-only" — it is NOT). Aborting (→ daemon retries
+    the scan) beats writing corrupt profiles."""
     crypto = perp_universe()
     if not crypto:
         raise RuntimeError("perp_universe() empty after retries — refusing a crypto-less universe")
-    return crypto | builder_universe(builder_dexes)
+    builder = builder_universe(builder_dexes)
+    if builder_dexes and not builder:
+        raise RuntimeError("builder_universe() empty after retries — refusing a builder-less universe "
+                           "(would falsely retire every stock/commodity trader as spot_dominant)")
+    return crypto | builder
 
 
 def book_top(coin: str):
