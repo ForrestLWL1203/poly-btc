@@ -654,7 +654,7 @@ const PARAM_META = {
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
-  ADD_MARGIN_PCT: { name: "每次加仓比例", desc: "跟随加仓每次投入(占可用)", range: "—", up: "加仓更猛", dn: "加仓更轻" },
+  ADD_FRAC: { name: "每次加仓比例", desc: "每次加仓额=首开保证金×此%(50=首开一半;首开3%+3加=满仓7.5%)", range: "30–60", up: "加仓更猛、满仓更重", dn: "加仓更轻" },
   MAX_ADDS: { name: "最多加仓次数", desc: "跟随主力加仓的次数上限", range: "—", up: "跟更多加仓", dn: "更早停跟加仓" },
   COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
   STOP_MARGIN_PCT: { name: "止损=亏损保证金%", desc: "亏掉本仓这么多%保证金就平仓(70=亏到70%保证金,爆仓前兜底);带杠杆自动换算逆向价格:5x→14%、3x→23%、7x→10%", range: "50–90", up: "更宽容、离爆仓更近", dn: "砍更早、单笔亏更少但易误杀恢复单" },

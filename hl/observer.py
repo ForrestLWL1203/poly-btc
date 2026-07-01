@@ -39,7 +39,7 @@ def _log(msg: str):
 
 class Observer:
     def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None,
-                 add_margin_pct: float = None):
+                 add_frac: float = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
@@ -47,7 +47,7 @@ class Observer:
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
         # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap; leverage scales ∝1/σ within the
         # tier (full at σ=stable_sigma_max), capped by the tier. margin = available × <tier>_margin_pct.
-        self.add_margin_pct = config.ADD_MARGIN_PCT if add_margin_pct is None else add_margin_pct
+        self.add_frac = config.ADD_FRAC if add_frac is None else add_frac  # each ADD = first-open margin × this
         self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ≤this → stable tier (also lev-formula σ ref)
         self.high_sigma_min = config.HIGH_SIGMA_MIN       # σ≥this → high-vol tier; between → mid tier
         self.tier_margin = {"stable": config.STABLE_MARGIN_PCT, "mid": config.MID_MARGIN_PCT, "high": config.HIGH_MARGIN_PCT}
@@ -160,7 +160,7 @@ class Observer:
             # evidence floor read by load_targets() via config (module fn, not a method) -> push onto config
             if f.get("FOLLOW_MIN_TRADES") is not None: config.FOLLOW_MIN_TRADES = int(f["FOLLOW_MIN_TRADES"])
             if f.get("FOLLOW_MIN_ACTIVE_DAYS") is not None: config.FOLLOW_MIN_ACTIVE_DAYS = int(f["FOLLOW_MIN_ACTIVE_DAYS"])
-            if f.get("ADD_MARGIN_PCT") is not None: self.add_margin_pct = f["ADD_MARGIN_PCT"]
+            if f.get("ADD_FRAC") is not None: self.add_frac = f["ADD_FRAC"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
@@ -888,8 +888,8 @@ class Observer:
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
             stop_px = self._stop_px_for(px, is_buy, lev)    # 扛单 cut at STOP_MARGIN_PCT of margin (0 = off)
-            ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px,
-                      size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px)
+            ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
+                      size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px)   # first_margin: adds = this × ADD_FRAC
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 "UPDATE copy_position SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,"
                 "liq_px=?,stop_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
@@ -904,7 +904,7 @@ class Observer:
 
     async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, maker, oid):
         """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
-        another ADD_MARGIN_PCT of available at the current price; the avg entry + liq_px recompute.
+        first_margin × ADD_FRAC (half the first-open by default) at the current price; avg entry + liq_px recompute.
         Past the cap we record his add but don't follow (the delta-based exit still mirrors him)."""
         async with ep["lock"]:
             try:
@@ -922,8 +922,8 @@ class Observer:
             stale = (now_ms() - t) > STALE_MS
             px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
             lev = ep["leverage"]
-            async with self.acct_lock:
-                add_margin = max(0.0, self._available() * self.add_margin_pct)
+            async with self.acct_lock:                     # ADD = first-open margin × ADD_FRAC (capped by available)
+                add_margin = max(0.0, min(ep.get("first_margin", ep["margin"]) * self.add_frac, self._available()))
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
@@ -1145,4 +1145,4 @@ def report(db) -> None:
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
     print(f"\n(sizing: σ-tiers margin/lev-cap [stable σ≤{config.STABLE_SIGMA_MAX*100:g}%: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
           f"mid: {config.MID_MARGIN_PCT*100:g}%/{config.MID_LEV_CAP:g}x · high σ≥{config.HIGH_SIGMA_MIN*100:g}%: {config.HIGH_MARGIN_PCT*100:g}%/{config.HIGH_LEV_CAP:g}x], "
-          f"lev=cap×{config.STABLE_SIGMA_MAX*100:g}%/σ, {config.ADD_MARGIN_PCT*100:g}%/add (max {config.MAX_ADDS}), isolated)")
+          f"lev=cap×{config.STABLE_SIGMA_MAX*100:g}%/σ, add={config.ADD_FRAC:g}×first (max {config.MAX_ADDS}), isolated)")

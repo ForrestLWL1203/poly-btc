@@ -50,8 +50,10 @@ LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup onl
 # TARGETING (below) — never a fixed $ amount, always a fraction of available. notional = margin *
 # leverage; isolated liquidation (loss = margin). No stop-loss in v1.
 INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
-ADD_MARGIN_PCT = 0.01       # margin on each follow-on ADD (scale-in) = fraction of available
-MAX_ADDS = 2                # follow the master's scale-ins up to this many adds/position (each ADD_MARGIN_PCT)
+ADD_FRAC = 0.5              # each follow-on ADD commits this fraction of the position's FIRST-OPEN margin
+#                             (NOT the tier margin% again — so BTC 3% first + 3×(3%·0.5) = 7.5% max, not 12%).
+#                             One knob, auto-scales per tier off each position's own first entry.
+MAX_ADDS = 3                # follow the master's scale-ins up to this many adds/position (each = first×ADD_FRAC)
 
 # v8 SIZING (2026-06-30). Three VOLATILITY TIERS (by daily σ = high-low range, see volatility.py); each
 # tier has its own margin% + leverage cap; WITHIN a tier, leverage scales continuously with σ. σ classifies
@@ -73,9 +75,12 @@ STABLE_SIGMA_MAX = 0.05     # σ ≤ this → STABLE tier. 4%→5% (2026-07-01) 
 #                             in STABLE, not MID. STABLE coins now trade at the FULL STABLE_LEV_CAP (not
 #                             σ-throttled) — see _sizing_for. (user: "BTC 作为基准就该 20x")
 HIGH_SIGMA_MIN   = 0.10     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
-STABLE_MARGIN_PCT = 0.10    # per-trade margin = this × available, for STABLE-tier coins
-MID_MARGIN_PCT    = 0.08    # ...for MID-tier coins
-HIGH_MARGIN_PCT   = 0.06    # ...for HIGH-VOL-tier coins (kept meaningful so memes aren't double-crushed)
+STABLE_MARGIN_PCT = 0.03    # FIRST-OPEN margin = this × available, for STABLE-tier coins (BTC). Lowered
+#                             10%→3% (2026-07-01): with ~40 targets, 10% front-loaded the book (first few
+#                             ate the balance, rest were dust). 3% first + 3×1.5% adds = 7.5% max/position,
+#                             fits ~25-30 meaningful concurrent positions. notional stays big via 20x lev.
+MID_MARGIN_PCT    = 0.025   # ...for MID-tier coins (ETH/SOL): 2.5% first + 3×1.25% = 6.25% max
+HIGH_MARGIN_PCT   = 0.02    # ...for HIGH-VOL-tier coins (meme): 2% first + 3×1% = 5% max
 STABLE_LEV_CAP = 20.0       # leverage ceiling for STABLE-tier coins
 MID_LEV_CAP    = 10.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
