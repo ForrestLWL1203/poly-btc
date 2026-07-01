@@ -657,7 +657,7 @@ const PARAM_META = {
   ADD_MARGIN_PCT: { name: "每次加仓比例", desc: "跟随加仓每次投入(占可用)", range: "—", up: "加仓更猛", dn: "加仓更轻" },
   MAX_ADDS: { name: "最多加仓次数", desc: "跟随主力加仓的次数上限", range: "—", up: "跟更多加仓", dn: "更早停跟加仓" },
   COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
-  STOP_SIGMA_MULT: { name: "止损=σ的倍数", desc: "止损距离=此倍数×该币σ;1.0=逆向跑满一个日内振幅(大饼≈4%、ZEC≈15%)", range: "0.8–1.5", up: "更宽容、接近不止损", dn: "砍更早、亏更少但易误杀" },
+  STOP_MARGIN_PCT: { name: "止损=亏损保证金%", desc: "亏掉本仓这么多%保证金就平仓(70=亏到70%保证金,爆仓前兜底);带杠杆自动换算逆向价格:5x→14%、3x→23%、7x→10%", range: "50–90", up: "更宽容、离爆仓更近", dn: "砍更早、单笔亏更少但易误杀恢复单" },
   MAX_ENTRY_CHASE_PCT: { name: "追价保护阈值", desc: "开仓价偏离超此%则放弃(空=关闭)", range: "0.3–1", up: "更宽容追价", dn: "更严防滑点" },
   EXEC_MAKER_MIRROR: { name: "镜像挂单模式", desc: "暂不开放", range: "—" },
   VOL_FAST_DAYS: { name: "波动率快/慢窗口", desc: "σ 计算窗口(只读)", range: "—" },
@@ -834,7 +834,7 @@ function SizingPreview({ vals }) {
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
   const MAXL = n("MAX_LEV", 20), MINL = Math.max(1, n("MIN_LEV", 1));
-  const RB = n("RISK_BUDGET", 60), K = n("STOP_SIGMA_MULT", 1);
+  const RB = n("RISK_BUDGET", 60), SM = n("STOP_MARGIN_PCT", 70);
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;
   const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"], mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
@@ -846,7 +846,7 @@ function SizingPreview({ vals }) {
     const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
     const lev = Math.max(MINL, Math.floor(Math.min(RB / s, cap, MAXL)));
     const margin = bal * mPct;
-    const stopDist = K * s, stopLoss = Math.min(stopDist / 100 * lev, 1);
+    const stopLoss = Math.min(SM / 100, 1), stopDist = stopLoss / lev * 100;  // 硬亏=SM%保证金(固定),逆向价格=SM%÷杠杆
     return { t, margin, lev, notl: margin * lev, stopDist, stopLoss };
   };
   const COINS = [["BTC", 3.9], ["ETH", 5.3], ["ZEC", 14.6]];   /* 每档一个代表:稳定 / 中 / 剧烈 */
@@ -878,7 +878,7 @@ function SizingPreview({ vals }) {
       </div>
       <div className="sz-foot">
         杠杆 = <b>风险预算 {RB}% ÷ σ</b>(按档封顶)· 保证金 = 可用 × 档位%{stopOn
-          ? <React.Fragment> · 止损 = 逆向 <b>{K}×σ</b>(大饼≈{(K * 3.9).toFixed(1)}% / ZEC≈{(K * 14.6).toFixed(1)}%),单次硬亏 ≈ <b>{Math.round(K * RB)}%</b> 保证金</React.Fragment>
+          ? <React.Fragment> · 止损 = 亏到 <b>{Math.round(SM)}%</b> 保证金就平(与币种无关的硬亏),换算逆向价格 = <b>{Math.round(SM)}%÷杠杆</b></React.Fragment>
           : <React.Fragment> · <b>止损已关闭</b>,仅靠强平兜底</React.Fragment>}
       </div>
     </div>

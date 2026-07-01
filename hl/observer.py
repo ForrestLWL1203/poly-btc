@@ -62,11 +62,10 @@ class Observer:
         self.max_adds = config.MAX_ADDS
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
-        # 扛单 copy-side stop: flat adverse-price cut (isolated tail guard). UI-tunable via _reload_params.
+        # 扛单 copy-side stop: MARGIN-based catastrophe cut (v10). UI-tunable via _reload_params.
         self.copy_stop_enable = config.COPY_STOP_ENABLE
-        self.copy_stop_pct = config.COPY_STOP_PCT            # legacy flat-% fallback (σ unavailable)
         self.risk_budget = config.RISK_BUDGET                # v9: lev = RISK_BUDGET/σ (margin loss per 1σ)
-        self.stop_sigma_mult = config.STOP_SIGMA_MULT        # v9: σ-stop cut = this × σ adverse
+        self.stop_margin_pct = config.STOP_MARGIN_PCT        # v10: cut at this fraction of the position's margin
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -178,9 +177,8 @@ class Observer:
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
-            if f.get("COPY_STOP_PCT"): self.copy_stop_pct = f["COPY_STOP_PCT"]
             if f.get("RISK_BUDGET"): self.risk_budget = f["RISK_BUDGET"]
-            if f.get("STOP_SIGMA_MULT") is not None: self.stop_sigma_mult = f["STOP_SIGMA_MULT"]
+            if f.get("STOP_MARGIN_PCT"): self.stop_margin_pct = f["STOP_MARGIN_PCT"]
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
@@ -322,14 +320,15 @@ class Observer:
             lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
         return self.tier_margin[tier], lev
 
-    def _stop_px_for(self, entry_px: float, is_buy: bool, sigma: float = 0.0) -> float:
-        """Stop PRICE from entry: a σ-ADAPTIVE adverse move = STOP_SIGMA_MULT × σ (down for a long, up for
-        a short — same geometry as liq_px). σ = the coin's daily high-low range, so BTC cuts at ~4% and ZEC
-        at ~15% — never noise-stopped, always before liq (lev=RISK_BUDGET/σ ⇒ liq at σ/RISK_BUDGET > σ).
-        Falls back to the legacy flat COPY_STOP_PCT only when σ is unavailable. 0 = disabled."""
-        if not self.copy_stop_enable or not entry_px:
+    def _stop_px_for(self, entry_px: float, is_buy: bool, leverage: float = 0.0) -> float:
+        """Stop PRICE from entry (v10, MARGIN-based): cut when the position's unrealized loss reaches
+        STOP_MARGIN_PCT of its margin. For an isolated position margin-loss% = leverage × adverse-price-%,
+        so the adverse move that costs STOP_MARGIN_PCT of margin is (STOP_MARGIN_PCT ÷ leverage) — down for
+        a long, up for a short (same geometry as liq_px). Leverage-aware and coin-agnostic, and always
+        before liquidation (liq is at 1.0/lev = 100% of margin > STOP_MARGIN_PCT/lev). 0 = disabled."""
+        if not self.copy_stop_enable or not entry_px or not leverage:
             return 0.0
-        d = (self.stop_sigma_mult * sigma) if sigma and sigma > 0 else self.copy_stop_pct
+        d = self.stop_margin_pct / leverage
         if not d:
             return 0.0
         return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
@@ -888,7 +887,7 @@ class Observer:
                 return
             size = notional / px if px else 0.0
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
-            stop_px = self._stop_px_for(px, is_buy, sigma)  # 扛单 cut at STOP_SIGMA_MULT×σ adverse (0 = off)
+            stop_px = self._stop_px_for(px, is_buy, lev)    # 扛单 cut at STOP_MARGIN_PCT of margin (0 = off)
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px,
                       size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px)
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
@@ -934,7 +933,7 @@ class Observer:
             ep["margin"] += add_margin
             ep["notional"] += add_margin * lev
             ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / lev) if is_buy else ep["entry_px"] * (1 + 1.0 / lev)
-            ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, self._sigma(coin))  # re-anchor σ-stop to new avg entry
+            ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, lev)  # re-anchor margin-stop to new avg entry
             ep["add_count"] += 1
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,

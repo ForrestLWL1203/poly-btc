@@ -281,24 +281,20 @@ UNREAL_RISK_W = 0.5
 # perp 'profit' is cancelled by spot, so copying the naked perp leg is a loss for us.
 HEDGE_MAX_FRAC = 0.5
 
-# COPY-SIDE STOP — our isolated-account tail guard: cut a copy when price runs against entry by more than
-# the coin's own daily volatility. v9 (2026-06-30): σ-ADAPTIVE — the cut distance = STOP_SIGMA_MULT × σ
-# (σ = daily high-low range), NOT a flat % anymore. So BTC(σ~4%) cuts at ~4% adverse, ZEC(σ~15%) at ~15%:
-# never noise-stopped (a 1σ adverse move from a mid-range entry is already a tail event), always fires
-# BEFORE liquidation (since lev = RISK_BUDGET/σ ⇒ liq at 1/lev = σ/RISK_BUDGET > σ for RISK_BUDGET<1).
-# By construction a 1×σ stop realizes exactly RISK_BUDGET of the position's margin — uniform across coins.
-# We can't bag-hold like the master ($40k cross + patience) so we cap the tail and free the capital.
-# COPY_STOP_ENABLE = the master toggle (default ON; UI-tunable). COPY_STOP_PCT is the legacy flat-% stop,
-# retained only as a fallback when a coin's σ is unavailable.
+# COPY-SIDE STOP — our isolated-account tail guard: cut a copy when its unrealized loss reaches a fixed
+# fraction of ITS OWN MARGIN. v10 (2026-07-01): MARGIN-BASED — replaces the old σ-multiple stop.
+# WHY the change: a price-distance stop (σ× or flat-%) is leverage-BLIND — the same adverse price % costs 5×
+# more margin at 5x than at 1x — so the σ-stop fired inside normal intraday noise on leveraged positions and
+# cut positions the master rode back to profit (verified 2026-07-01: 6 σ-stops = −$682, 4 of which the master
+# recovered to profit; the tight stop was net-negative even counting the 2 it correctly protected). And
+# drawdown DEPTH doesn't separate "recovers" from "bags" (SILVER bagged at 0.5σ, XLM recovered at 0.77σ) —
+# that is a wallet-SELECTION signal, not a stop signal. So the stop is now a pure catastrophe backstop in
+# MARGIN terms: cut at STOP_MARGIN_PCT of margin. Leverage-aware (adverse price move = STOP_MARGIN_PCT ÷ lev),
+# coin-agnostic, always BEFORE liquidation (liq = 100% of margin). COPY_STOP_ENABLE = master toggle (UI).
 COPY_STOP_ENABLE = True
-STOP_SIGMA_MULT  = 1.0      # cut at this × σ adverse move (1.0 = a full daily high-low range against us).
-#                             Landed at 1.0 (2026-07-01) after 0.8→1.2→1.0: the safe band is M ∈ (0.8, 1.25)
-#                             — must be >0.8 to ride out normal reversion spikes (XLM's 6.87% shakeout that
-#                             the master held to profit) AND <1.25 so BTC's stop (M×4%) fires BEFORE its 20x
-#                             liquidation (5%). 1.0 sits in the middle: BTC stops early at ~4% (<5% liq),
-#                             alts (low lev, far liq) get a full daily-range of room. NOT the leverage anchor
-#                             (that's RISK_BUDGET) — this is purely the stop distance. UI-tunable follow param.
-COPY_STOP_PCT    = 0.18     # LEGACY flat-% fallback (used only if σ unavailable); σ-stop is primary now
+STOP_MARGIN_PCT  = 0.70     # cut when unrealized loss ≥ this fraction of the position's margin (0.70 = bail
+#                             at 70% of the way to liquidation). Leverage-aware adverse price: 5x → ~14%,
+#                             3x → ~23%, 7x → ~10%. UI-tunable follow param. Disable → ride to liquidation.
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
