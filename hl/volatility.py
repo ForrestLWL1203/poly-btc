@@ -30,6 +30,11 @@ def compute(coin: str):
     if not isinstance(cs, list) or len(cs) < config.VOL_MIN_SAMPLES + 1:
         return None
     cs = sorted(cs, key=lambda c: c.get("t", 0))
+    # DROP the last candle — candle_snapshot uses endTime=now, so it's TODAY still forming. Its range grows
+    # through the day and would drift σ intraday (open at 5%, an hour later 8%). Use only CLOSED daily
+    # candles → σ is stable within a day, steps only when a day closes. (min-samples check above guarantees
+    # ≥6 here, so ≥5 remain — enough for _daily_range.)
+    cs = cs[:-1]
     slow = _daily_range(cs)
     if slow is None:
         return None
