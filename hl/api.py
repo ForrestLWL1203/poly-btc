@@ -229,7 +229,7 @@ def _followed_count(db, line):
 def _follow_positions(db):
     """{addr: 1-based position in the copy set} — same filter+order as observer.load_targets. Lets position/
     history badges show the follow-序号 (1..N) instead of the confusing global watchlist rank (#29 > 25)."""
-    line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
+    line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     rows = qall(db, "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
                     "LEFT JOIN profile p ON p.addr=w.addr WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? "
                     "AND COALESCE(w.n_trades,0)>=? AND COALESCE(p.active_days,0)>=? ORDER BY w.rank",
@@ -296,7 +296,7 @@ def ep_overview(db):
     obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     ss = _scanner_status(db)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    _line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # "被跟" = wallets we actually copy
+    _line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE   # "被跟" = wallets we actually copy
     wl = {"c": _followed_count(db, _line)}                        # score≥line AND evidence floor (real set)
 
     def _stale(row):
@@ -484,7 +484,7 @@ def _wallet_trend(db, addr, n=8):
 
 def ep_wallets(db, qs=None):
     qs = qs or {}
-    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9   # native ~0–3 scale
+    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE   # native [0,1] scale
     grid_max = params_mod.get(db, "grid_max_adds", 5) or 5
     page = max(0, int((qs.get("page", ["0"]))[0]))
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
@@ -620,7 +620,7 @@ def ep_discovery(db):
     active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
     # funnel's final stage = wallets ABOVE the follow line (the ones we actually copy), NOT the whole
     # watchlist (which also holds many lower-score actives we only observe).
-    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
+    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     watchlist = _followed_count(db, line_native)   # funnel's final stage = wallets we actually copy
     # reject reasons -> buckets
     reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
@@ -639,7 +639,7 @@ def ep_discovery(db):
     # native [0,1]; display = ×100) so the bins map onto the same 0–100 ruler as the wallet scores.
     scores = [r["score"] for r in qall(db,
               "SELECT score FROM profile WHERE score IS NOT NULL AND score>0")]
-    follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", 0.9) or 0.9
+    follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     nbins = 16
     hi = 1.0
     bins = [0] * nbins
