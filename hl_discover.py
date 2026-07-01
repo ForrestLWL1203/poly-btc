@@ -77,7 +77,10 @@ def _serve_rescan(db):
     two scans at once) -> the observer's HL rate budget is never double-hit. No systemd timeout ->
     a ~2h slow scan can't be killed mid-run. scanner.scan() writes progress/status + absorbs any rescan
     queued during the scan (no redundant back-to-back run)."""
-    config.MIN_POST_INTERVAL = 10.0                  # conservative pace: observer is priority, scan takes the slack
+    config.MIN_POST_INTERVAL = 6.0                   # scan REST pace: ~6s/req uses the budget the observer
+    #                                                  (~25-wallet fill-poll) leaves free, ~1.7× faster than
+    #                                                  10s. If the observer starts logging 429/rate errors,
+    #                                                  bump back up — the observer is still the priority.
     print("scan daemon: on-demand rescans + 24h auto-schedule + observer lifecycle ...", flush=True)
     while True:
         try:
