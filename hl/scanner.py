@@ -17,6 +17,64 @@ from .util import f, now_iso
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 
 
+def _load_cached_fills(db, addr, since):
+    """Cached raw fills for addr in the [since, now] window (ASC). Empty for a never-scanned candidate."""
+    with _db_lock:
+        rows = db.execute("SELECT fill_json FROM candidate_fills WHERE addr=? AND time>=? ORDER BY time",
+                          (addr, since)).fetchall()
+    out = []
+    for r in rows:
+        try:
+            out.append(json.loads(r[0]))
+        except (ValueError, TypeError):
+            pass
+    return out
+
+
+def _store_cached_fills(db, addr, fills, window_start):
+    """Upsert fills (dedup by tid) + prune anything older than the window. CALLER HOLDS _db_lock."""
+    rows = [(addr, x.get("tid"), x["time"], json.dumps(x)) for x in fills if x.get("tid") is not None]
+    if rows:
+        db.executemany("INSERT OR IGNORE INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)", rows)
+    db.execute("DELETE FROM candidate_fills WHERE addr=? AND time<?", (addr, window_start))
+
+
+def _due_for_full_resync(db):
+    """True if no FULL re-sync in the last FULL_RESYNC_DAYS (fresh db / missing col → True). A full re-sync
+    re-fetches everyone's window to heal any incremental gap (append-only fills → gap can only be missing)."""
+    try:
+        r = db.execute("SELECT MAX(finished_at) FROM scan_runs WHERE full=1").fetchone()
+    except Exception:  # noqa: BLE001 — `full` column not yet added (old db)
+        return True
+    if not r or not r[0]:
+        return True
+    try:
+        from datetime import datetime, timezone
+        last = datetime.fromisoformat(str(r[0]).replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - last).total_seconds() / 86400 >= config.FULL_RESYNC_DAYS
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _fetch_profile_fills(db, addr, window_start, p, full):
+    """(raw_full ASC, hit_cap, new_fills_to_persist). Incremental unless `full`: load the cached window,
+    fetch ONLY the delta since our cursor (max cached time − overlap), merge (tid-dedup). A never-cached
+    candidate, or a delta that blows past the page cap (can't be trusted), falls back to a full re-fetch."""
+    if not full:
+        stored = _load_cached_fills(db, addr, window_start)
+        cursor = max((x["time"] for x in stored), default=None)
+        if cursor is not None:
+            delta, hit_cap = rest.fetch_window(addr, max(window_start, cursor - config.POLL_OVERLAP_MS), p.max_pages)
+            if not hit_cap:
+                merged = {x.get("tid"): x for x in stored}
+                merged.update({x.get("tid"): x for x in delta})
+                raw_full = sorted((x for x in merged.values() if x["time"] >= window_start), key=lambda x: x["time"])
+                return raw_full, False, delta
+            # delta hit the cap → too many new fills to trust incrementally → full re-fetch (self-heal)
+    raw_full, hit_cap = rest.fetch_window(addr, window_start, p.max_pages)
+    return raw_full, hit_cap, raw_full
+
+
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
 def _set_scanner_proc(db, state, detail=None):
     try:
@@ -188,7 +246,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # at 2000 AND returned newest-first unsorted, which broke window_days/trades_per_day/last_fill_ms and
     # over-rejected as hit_page_cap). We slice the 14d window for the existing scoring metrics (behaviour
     # unchanged) and use the full fetch for the multi-window / lifetime nets — still ONE fetch per wallet.
-    raw_full, hit_cap = rest.fetch_window(addr, now_ms - config.PROFILE_FETCH_DAYS * 86400_000, p.max_pages)
+    window_start = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
+    full = getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN
+    raw_full, hit_cap, new_fills = _fetch_profile_fills(db, addr, window_start, p, full)
     for x in raw_full:
         x["user"] = addr
     # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,
@@ -271,6 +331,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
                times_seen=(prior or {}).get("times_seen", 0) + 1)
     cols = storage.PROFILE_COLS.split(",")
     with _db_lock:
+        _store_cached_fills(db, addr, new_fills, window_start)   # persist the delta + prune the window
         if ok:
             db.execute("DELETE FROM episode WHERE addr=?", (addr,))
             db.executemany(
@@ -319,12 +380,12 @@ def refresh_watchlist(db, stamp) -> int:
     return len(rows)
 
 
-def _record_run(db, started, t0, candidates, probed, added, retired, kept, rejected, n_active):
+def _record_run(db, started, t0, candidates, probed, added, retired, kept, rejected, n_active, full=0):
     db.execute(
         "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,probed_new,added,"
-        "retired,kept,rejected,n_active) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "retired,kept,rejected,n_active,full) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (started, now_iso(), round(time.time() - t0, 1), candidates, probed, added, retired,
-         kept, rejected, n_active))
+         kept, rejected, n_active, 1 if full else 0))
     db.commit()
 
 
@@ -394,10 +455,11 @@ def scan(db, p) -> None:
     # locks the page ONLY for manual scans; the auto scan runs SILENTLY in the background (it must be slow
     # since the observer owns the rate budget, so locking the UI for its full duration is unacceptable).
     manual = bool(rescan_ids)
-    try:
-        db.execute("ALTER TABLE scan_progress ADD COLUMN manual INTEGER DEFAULT 0"); db.commit()
-    except Exception:  # noqa: BLE001 — column already exists
-        pass
+    for tbl, col in (("scan_progress", "manual"), ("scan_runs", "full")):
+        try:
+            db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT 0"); db.commit()
+        except Exception:  # noqa: BLE001 — column already exists
+            pass
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
                        candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
@@ -423,8 +485,12 @@ def scan(db, p) -> None:
     off_active = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()
                   if r[0] not in seen]                 # actives that fell off the candidate list — recheck too
     workset = (cand + off_active)[:p.limit]
+    # INCREMENTAL by default (delta fills only, merged onto the cached window). Escalate to a FULL re-fetch
+    # when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
+    p.full_scan = getattr(p, "full_scan", False) or (not config.INCREMENTAL_SCAN) or _due_for_full_resync(db)
+    mode = "FULL re-fetch (30d each)" if p.full_scan else "INCREMENTAL (delta fills only)"
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
-    print(f"scan: FULL sweep {len(workset)} wallets ({len(cand)} candidates + {len(off_active)} off-list "
+    print(f"scan: {mode} · {len(workset)} wallets ({len(cand)} candidates + {len(off_active)} off-list "
           f"actives), {p.days}d window, pace {getattr(p, 'scan_interval', 0.8):g}s/req\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
@@ -468,7 +534,13 @@ def scan(db, p) -> None:
     n_active = refresh_watchlist(db, stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
-    _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active)
+    # drop cached fills for wallets no longer in the workset (churned off the leaderboard) — keeps the
+    # candidate_fills cache bounded (they'd otherwise never be pruned again, having stopped being profiled).
+    if workset:
+        qs = ",".join("?" * len(workset))
+        db.execute(f"DELETE FROM candidate_fills WHERE addr NOT IN ({qs})", workset)
+    _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active,
+                full=getattr(p, "full_scan", False))
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
           f"{rejected} rejected. watchlist now: {n_active} active.", flush=True)
     # dashboard: scan finished -> idle + resolve ALL queued rescan(s), INCLUDING any clicked DURING this

@@ -332,6 +332,19 @@ CREATE TABLE IF NOT EXISTS scan_progress (
     updated_at         TEXT
 );
 
+-- Per-candidate raw fills cache (rolling PROFILE_FETCH_DAYS window). Lets the daily re-scan fetch only
+-- the INCREMENTAL fills since our cursor (max stored time) instead of re-pulling the whole 30d each time.
+-- fill_json = the raw HL fill dict (all fields preserved for build_episodes/compute_metrics). Pruned to
+-- the window per addr on each profile; a periodic FULL re-fetch self-heals any gap (fills are append-only).
+CREATE TABLE IF NOT EXISTS candidate_fills (
+    addr      TEXT NOT NULL,
+    tid       INTEGER NOT NULL,   -- HL trade id (unique per fill) — dedup key
+    time      INTEGER NOT NULL,   -- fill time (ms)
+    fill_json TEXT NOT NULL,
+    PRIMARY KEY (addr, tid)
+);
+CREATE INDEX IF NOT EXISTS idx_candidate_fills_addr_time ON candidate_fills(addr, time);
+
 -- UI-tunable strategy parameters. Seeded from code defaults (hl/params.py); the operator edits via
 -- the dashboard; Observer/Scanner read their category at run time (replacing config constants / CLI
 -- args). value is stored as TEXT and parsed by `type`. category: scanner(rescan) | follow(immediate).

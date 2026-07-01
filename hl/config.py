@@ -247,6 +247,17 @@ GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月
 # covers the 14d scoring slice + the 7/14/30d multi-window nets (net_life ≡ net over this 30d window).
 PROFILE_FETCH_DAYS = 30
 
+# INCREMENTAL scan (2026-07-01): the daily re-scan fetches only the fills SINCE our per-candidate cursor
+# (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling
+# the whole 30d for every candidate every day (re-fetching 29 unchanged days = wasted API/time). Fills are
+# cached in candidate_fills. A NEW candidate (no cache) still does one full-window fetch; a delta that hits
+# the page cap falls back to a full fetch (self-heal). A periodic FULL re-sync (every FULL_RESYNC_DAYS)
+# re-fetches everyone's window to heal any gap from a transient error (fills are append-only, so a gap can
+# only be MISSING fills — a full re-fetch re-adds them). The live open-position snapshot is unaffected
+# (still one cheap clearinghouse call per surviving candidate — that's current state, not history).
+INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
+FULL_RESYNC_DAYS = 7        # force a full-window re-fetch for all candidates at least this often (self-heal)
+
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).
 TREND_OPEN_MIN = 0.05

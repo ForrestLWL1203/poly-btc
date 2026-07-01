@@ -24,7 +24,7 @@ def _scan_ns():
     """A scan args-namespace with operational defaults (matches the `scan` subparser); gate/harvest
     params get overlaid from the DB by params.apply_scanner_params. scan_interval 10s = conservative
     pace that leaves HL rate headroom for the always-running observer (the priority)."""
-    return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False,
+    return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False, full_scan=False,
                            workers=4, scan_interval=10.0, max_pages=5, min_crypto=0.3,
                            exclude_hft=True, hft_min_hold_min=3.0,
                            gate_loss_pain_max=config.GATE_LOSS_PAIN_MAX,
@@ -159,6 +159,10 @@ def main() -> int:
                         "rate limit with the always-on observer (8s = ~7.5/min, leaves ~67/min for copy)")
     add_gate_args(s)
     s.add_argument("--no-harvest", action="store_true")
+    s.add_argument("--full", dest="full_scan", action="store_true",
+                   help="force a FULL 30d re-fetch for every candidate (else INCREMENTAL: only delta fills "
+                        "since each candidate's cursor, merged onto the cached window). A full re-sync also "
+                        "runs automatically every FULL_RESYNC_DAYS to self-heal any gap")
 
     w = sub.add_parser("watchlist", help="show our curated tiny leaderboard")
     w.add_argument("--top", type=int, default=40)
