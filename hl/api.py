@@ -29,6 +29,7 @@ from urllib.parse import urlparse, parse_qs
 
 from . import config
 from . import params as params_mod
+from . import procman
 from .util import now_iso
 
 # ─────────────────────────────────────────────────────────────────────────── auth
@@ -161,6 +162,43 @@ def insert_command(db_path, ctype, payload, idem):
         return cur.lastrowid, "pending"
     finally:
         db.close()
+
+
+# Process-lifecycle commands the dashboard EXECUTES DIRECTLY (self-contained control plane — no separate
+# supervisor daemon). observer_start/stop spawn/kill the observer child; rescan spawns a one-shot scan.
+# Everything is still recorded in `commands` so the frontend's poll-by-id contract is unchanged.
+PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan"}
+
+
+def _resolve_command(db_path, cmd_id, status, result):
+    try:
+        db = rw_connect(db_path)
+        db.execute("UPDATE commands SET status=?,done_at=?,result_json=? WHERE id=?",
+                   (status, now_iso(), json.dumps(result or {}), cmd_id))
+        db.commit()
+        db.close()
+    except sqlite3.Error:
+        pass
+
+
+def exec_process_command(db_path, ctype):
+    """Run a process-lifecycle command inline via procman; record it in `commands` for the frontend.
+    observer_start/stop resolve immediately; rescan stays 'pending' (the row IS the manual-scan marker
+    scanner.scan reads) and is driven to 'done' by the scan process it spawns, so the UI tracks the real scan."""
+    cmd_id, _ = insert_command(db_path, ctype, None, None)
+    try:
+        if ctype == "observer_start":
+            res = procman.start_observer(db_path)
+        elif ctype == "observer_stop":
+            res = procman.stop_observer(db_path)
+        else:                                   # rescan: leave the row pending; the spawned scan acks/resolves it
+            procman.start_scan(db_path)
+            return cmd_id, "pending"
+        _resolve_command(db_path, cmd_id, "done", res)
+        return cmd_id, "done"
+    except Exception as e:  # noqa: BLE001
+        _resolve_command(db_path, cmd_id, "error", {"error": str(e)})
+        return cmd_id, "error"
 
 
 def q1(db, sql, args=(), default=None):
@@ -802,8 +840,11 @@ def make_handler(db_path, auth, static_dir=None):
                 if ctype not in ALLOWED_COMMANDS:
                     return self._send(400, {"error": "bad_command_type", "detail": ctype})
                 try:
-                    cmd_id, status = insert_command(db_path, ctype, body.get("payload"),
-                                                    body.get("idempotencyKey"))
+                    if ctype in PROCESS_COMMANDS:            # dashboard executes these directly (procman)
+                        cmd_id, status = exec_process_command(db_path, ctype)
+                    else:                                    # soft commands: queued for the observer to consume
+                        cmd_id, status = insert_command(db_path, ctype, body.get("payload"),
+                                                        body.get("idempotencyKey"))
                     return self._send(202, {"commandId": cmd_id, "status": status})
                 except Exception as e:  # noqa: BLE001
                     return self._send(500, {"error": "server_error", "detail": str(e)})
@@ -945,6 +986,8 @@ def make_handler(db_path, auth, static_dir=None):
 
 def serve(db_path, host="127.0.0.1", port=8787, static_dir=None):
     auth = Auth()
+    procman.reconcile(db_path)                    # drop stale pidfiles; re-attach to a still-live observer
+    procman.start_auto_scan_ticker(db_path)       # 24h auto-scan now lives here (no separate supervisor daemon)
     handler = make_handler(db_path, auth, static_dir)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"dashboard API on http://{host}:{port}  (db={db_path}, static={static_dir or '-'})", flush=True)
