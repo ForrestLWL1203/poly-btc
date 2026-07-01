@@ -71,8 +71,6 @@ PARAM_SPEC = [
         "剧烈档·杠杆上限", "剧烈档杠杆封顶"),
     ("MAX_ADDS",             "follow",  "yellow", "int",     "immediate", config.MAX_ADDS,
         "最多加仓次数", "一笔最多跟几次加仓(防网格拖死)"),
-    ("STOCK_FORCE_HIGH_TIER", "follow", "green",  "bool",    "immediate", config.STOCK_FORCE_HIGH_TIER,
-        "美股按最激烈档", "美股/商品 perp(xyz:*)强制按剧烈档(最低杠杆+最小仓),不被日内σ低估(防跳空)"),
     ("COPY_STOP_ENABLE",     "follow",  "green",  "bool",    "immediate", config.COPY_STOP_ENABLE,
         "启用止损", "逆向超过该币波动率就自动平仓,不陪目标死扛(默认开)"),
     ("STOP_SIGMA_MULT",      "follow",  "yellow", "float",   "immediate", config.STOP_SIGMA_MULT,

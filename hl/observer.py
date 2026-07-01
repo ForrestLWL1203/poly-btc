@@ -65,7 +65,6 @@ class Observer:
         self.copy_stop_pct = config.COPY_STOP_PCT            # legacy flat-% fallback (σ unavailable)
         self.risk_budget = config.RISK_BUDGET                # v9: lev = RISK_BUDGET/σ (margin loss per 1σ)
         self.stop_sigma_mult = config.STOP_SIGMA_MULT        # v9: σ-stop cut = this × σ adverse
-        self.stock_force_high = config.STOCK_FORCE_HIGH_TIER # builder/stock perps → high tier (gap risk)
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -179,7 +178,6 @@ class Observer:
             if f.get("COPY_STOP_PCT"): self.copy_stop_pct = f["COPY_STOP_PCT"]
             if f.get("RISK_BUDGET"): self.risk_budget = f["RISK_BUDGET"]
             if f.get("STOP_SIGMA_MULT") is not None: self.stop_sigma_mult = f["STOP_SIGMA_MULT"]
-            if f.get("STOCK_FORCE_HIGH_TIER") is not None: self.stock_force_high = bool(f["STOCK_FORCE_HIGH_TIER"])
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
@@ -298,11 +296,9 @@ class Observer:
         return self.vol.get(coin) or self.vol_fallback_sigma
 
     def _tier(self, sigma: float, coin: str = None) -> str:
-        """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between). Builder/stock
-        perps (xyz:* — single-name equities/commodities) are FLOORED to 'high' when STOCK_FORCE_HIGH_TIER:
-        their daily-high-low σ under-states gap + market-hours-concentrated risk (see config)."""
-        if coin and ":" in coin and self.stock_force_high:
-            return "high"
+        """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between). Stocks/builder
+        perps (xyz:*) are tiered by their own σ like everything else — their over-leverage risk is handled
+        by the master-leverage cap in the open path, NOT by force-bucketing them (rolled back 2026-07-01)."""
         if sigma <= self.stable_sigma_max:
             return "stable"
         return "high" if sigma >= self.high_sigma_min else "mid"

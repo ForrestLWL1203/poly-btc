@@ -78,14 +78,8 @@ HIGH_MARGIN_PCT   = 0.06    # ...for HIGH-VOL-tier coins (kept meaningful so mem
 STABLE_LEV_CAP = 20.0       # leverage ceiling for STABLE-tier coins
 MID_LEV_CAP    = 10.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
-STOCK_FORCE_HIGH_TIER = True  # builder/stock perps (xyz:* — single-name equities/commodities) are FLOORED to
-#                             the HIGH-vol tier regardless of their measured σ. The σ metric (mean daily
-#                             high-low range) systematically UNDER-states their tradeable risk: their whole
-#                             daily range is packed into ~6.5 market hours (instantaneous vol ~3.7× the 24h
-#                             number) AND they GAP overnight — a discontinuous jump skips the σ-stop. So a
-#                             stock measuring σ≈6% lands in MID and gets 8–12x; flooring to HIGH caps it at
-#                             HIGH_LEV_CAP with HIGH_MARGIN_PCT. (Empirically our biggest losers were SPCX/
-#                             CRCL/SILVER at 7–12x.) UI-tunable; set False to size stocks purely by their σ.
+#                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
+#                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 COIN_MARGIN_CAP_PCT = 0.20  # per-COIN cap: total margin across all our open positions on ONE coin ≤ this
 #                             fraction of the account (stops N wallets piling into the same coin/direction)
