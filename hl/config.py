@@ -203,8 +203,9 @@ SCORE_W_WIN  = 0.35    # 胜率权重
 SCORE_W_ACT  = 0.30    # 活跃度权重(成交数 + 活跃天数,升为核心项) —— W_* 之和自动归一
 SCORE_W_ROI  = 0.35    # ROI 权重(收敛后;ROI 本身就把"小赚大亏"量化为低分)
 SCORE_STRETCH = 1.15   # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。调大→top 更贴近 100
-SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效收益越低
-SCORE_ROI_SCALE   = 0.25  # roiS = 1 − exp(−roi_adj/此):平滑饱和(25%调整收益→0.63,50%→0.86),无悬崖
+ROI_NOTL_FLOOR    = 1000.0 # ROI = net ÷ max(平均名义额, 此):名义额下限防除零/噪音(真实合约仓位远大于此)
+SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效edge越低(回撤也按名义额算)
+SCORE_ROI_SCALE   = 0.35  # roiS = 1 − exp(−roi_adj/此):net/名义额 分布~0.05–1.5,此值让有效区拉得开(0.3→0.58,0.5→0.76)
 SCORE_EV_TRADES = 20      # 活跃度:达此回合数 = 满分
 SCORE_EV_DAYS   = 10      # 活跃度:达此活跃天数 = 满分
 # 反噬/双胞胎守卫 —— 最惨单笔 ÷ 净利润 = |worst_loss_pct|/roi_equity。抓"n笔小赚+1笔大亏吞掉所有收益"的高胜率欺骗手;

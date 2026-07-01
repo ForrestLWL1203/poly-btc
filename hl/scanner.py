@@ -397,20 +397,20 @@ def regate(db, p) -> int:
     stamp = now_iso()
     rows = db.execute(
         "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
-        "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,"
+        "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
         "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,median_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
         "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason "
         "FROM profile").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
-         ad, ar, meps, pdr, conc, skew, uw, mxadds, mdadds, wloss, mhold, wr,
+         ad, ar, meps, avgnotl, pdr, conc, skew, uw, mxadds, mdadds, wloss, mhold, wr,
          roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
              "liq_worst_pct": liqw or 0.0, "active_days": ad or 0, "activity_ratio": ar or 0.0,
-             "median_eps": meps or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
+             "median_eps": meps or 0.0, "avg_notional": avgnotl or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
              "worst_loss_pct": wloss or 0.0,

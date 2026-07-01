@@ -202,9 +202,13 @@ def score(m: dict) -> float:
 
     # ── core positives, each ∈ [0,1] ──
     win = _clip(g("win_rate"), 0.0, 1.0)                                   # 胜率(根本)
-    roi = g("roi_total", g("roi_equity"))                                  # realized + unrealized return
-    dd_eq = g("max_drawdown") / (g("acct_value") + 1.0) + config.UNREAL_RISK_W * g("open_win_frac")
-    roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效收益
+    # ROI = net ÷ 平均持仓名义额 (NOT ÷ 当前权益 — that's contaminated by deposits/withdrawals). This is the
+    # avg % move they capture per position = the DIRECTIONAL edge that TRANSFERS to us (we apply our own
+    # leverage to their direction). Fully withdrawal-immune; drawdown also normalized by notional, not equity.
+    notl = max(g("avg_notional"), config.ROI_NOTL_FLOOR)
+    roi = g("net_pnl") / notl
+    dd_eq = g("max_drawdown") / notl + config.UNREAL_RISK_W * g("open_win_frac")
+    roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效 edge
     roi_s = 1.0 - math.exp(-roi_adj / config.SCORE_ROI_SCALE)             # 平滑饱和 [0,1)
     act = (0.5 * min(1.0, (g("n_trades") + g("bag_count")) / config.SCORE_EV_TRADES)
            + 0.5 * min(1.0, g("active_days") / config.SCORE_EV_DAYS))     # 活跃度(核心项:成交数 + 活跃天数)
