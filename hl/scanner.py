@@ -390,9 +390,17 @@ def scan(db, p) -> None:
     for cid in rescan_ids:
         db.execute("UPDATE commands SET status='acked',acked_at=? WHERE id=?", (now_iso(), cid))
     db.commit()
+    # MANUAL (dashboard button → pending rescan command) vs AUTO (24h schedule, no command). The frontend
+    # locks the page ONLY for manual scans; the auto scan runs SILENTLY in the background (it must be slow
+    # since the observer owns the rate budget, so locking the UI for its full duration is unacceptable).
+    manual = bool(rescan_ids)
+    try:
+        db.execute("ALTER TABLE scan_progress ADD COLUMN manual INTEGER DEFAULT 0"); db.commit()
+    except Exception:  # noqa: BLE001 — column already exists
+        pass
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
-                       candidates_scanned=0, candidates_total=0)
+                       candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
 
     universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)
     if not p.no_harvest:

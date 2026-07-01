@@ -1102,12 +1102,21 @@ function Dashboard({ onLogout }) {
   // mask survives a page refresh/reopen AND catches the 24h auto-scan, so you can't refresh past it and
   // double-click 重采. (Backend is already single-executor + absorbs duplicate rescans; this closes the UX gap.)
   const serverScanning = !!(ov && ov.system && ov.system.scanner === "scanning");
-  useEffect(() => { if (serverScanning) setScanning(true); }, [serverScanning]);
-  // one-shot on mount: if a scan is already in flight, raise the mask IMMEDIATELY (before the first
-  // overview/stream push arrives), so a refresh during a scan never briefly exposes the page.
+  // ONLY a MANUAL (dashboard-triggered) scan locks the page. The 24h AUTO scan runs SILENTLY in the
+  // background — it MUST be slow (the observer owns the rate budget) so it takes a long time, and locking
+  // the dashboard for its whole duration is unacceptable. So when the server reports a scan running, we
+  // check scan-status.manual and only raise the mask for a manual one.
+  useEffect(() => {
+    if (!serverScanning) return;
+    api.get("/api/scan-status").then((s) => {
+      if (s && s.state === "scanning" && s.manual) { setScanning(true); setScanStatus(s); }
+    }).catch(() => {});
+  }, [serverScanning]);
+  // one-shot on mount: if a MANUAL scan is already in flight, raise the mask IMMEDIATELY (survives a
+  // refresh mid-manual-scan). An auto scan in flight is ignored — dashboard stays usable.
   useEffect(() => {
     api.get("/api/scan-status").then((s) => {
-      if (s && s.state === "scanning") { setScanning(true); setScanStatus(s); }
+      if (s && s.state === "scanning" && s.manual) { setScanning(true); setScanStatus(s); }
     }).catch(() => {});
   }, []);
   useEffect(() => {                                  // poll scan progress while the mask is up
@@ -1247,7 +1256,7 @@ function Dashboard({ onLogout }) {
         {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} toast={toast} />}
       </main>
 
-      {(scanning || serverScanning) && <ScanMask status={scanStatus} />}
+      {scanning && <ScanMask status={scanStatus} />}{/* scanning = MANUAL scan only; 24h auto runs silent */}
       {obsPending && <ObsMask label={obsPending.label} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
     </div>

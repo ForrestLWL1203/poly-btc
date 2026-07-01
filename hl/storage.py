@@ -328,6 +328,7 @@ CREATE TABLE IF NOT EXISTS scan_progress (
     candidates_scanned INTEGER DEFAULT 0,
     candidates_total   INTEGER DEFAULT 0,
     eta_sec            INTEGER,
+    manual             INTEGER DEFAULT 0,  -- 1 = dashboard-triggered (lock UI); 0 = 24h auto (silent bg)
     updated_at         TEXT
 );
 

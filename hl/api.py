@@ -676,14 +676,15 @@ def ep_command(db, cmd_id):
 
 
 def ep_scan_status(db):
-    r = q1(db, "SELECT state,started_at,stage,candidates_scanned,candidates_total,eta_sec FROM scan_progress WHERE id=1")
+    r = q1(db, "SELECT * FROM scan_progress WHERE id=1")
     if not r or (r["state"] or "idle") != "scanning":
         return {"state": "idle"}
     started = _iso_epoch(r["started_at"])
     elapsed = int(time.time() - started) if started else 0
     total, scanned, eta = r["candidates_total"] or 0, r["candidates_scanned"] or 0, r["eta_sec"] or 1200
     pct = round(scanned / total * 100) if total else min(99, round(elapsed / eta * 100))
-    return {"state": "scanning", "startedAt": r["started_at"], "elapsedSec": elapsed, "etaSec": eta,
+    manual = bool(r["manual"]) if "manual" in r.keys() else True   # missing col (old db) → treat as manual (safe)
+    return {"state": "scanning", "manual": manual, "startedAt": r["started_at"], "elapsedSec": elapsed, "etaSec": eta,
             "progressPct": pct, "candidatesScanned": scanned, "candidatesTotal": total, "stage": r["stage"]}
 
 
