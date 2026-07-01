@@ -75,12 +75,13 @@ STABLE_SIGMA_MAX = 0.05     # σ ≤ this → STABLE tier. 4%→5% (2026-07-01) 
 #                             in STABLE, not MID. STABLE coins now trade at the FULL STABLE_LEV_CAP (not
 #                             σ-throttled) — see _sizing_for. (user: "BTC 作为基准就该 20x")
 HIGH_SIGMA_MIN   = 0.10     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
-STABLE_MARGIN_PCT = 0.03    # FIRST-OPEN margin = this × available, for STABLE-tier coins (BTC). Lowered
-#                             10%→3% (2026-07-01): with ~40 targets, 10% front-loaded the book (first few
-#                             ate the balance, rest were dust). 3% first + 3×1.5% adds = 7.5% max/position,
-#                             fits ~25-30 meaningful concurrent positions. notional stays big via 20x lev.
-MID_MARGIN_PCT    = 0.025   # ...for MID-tier coins (ETH/SOL): 2.5% first + 3×1.25% = 6.25% max
-HIGH_MARGIN_PCT   = 0.02    # ...for HIGH-VOL-tier coins (meme): 2% first + 3×1% = 5% max
+STABLE_MARGIN_PCT = 0.06    # FIRST-OPEN margin = this × available, for STABLE-tier coins (BTC). Sized for the
+#                             TYPICAL position (first-open ONLY) — adds are the MINORITY case, so do NOT budget
+#                             for the rare full-built (that would leave every non-add position too small to
+#                             matter). 6% × 20x ≈ 120% notional (meaningful standalone); ~12 concurrent via the
+#                             self-throttle; 4.2% max loss/position @70% stop. (v6: line 88 → ~24 targets.)
+MID_MARGIN_PCT    = 0.05    # ...MID (ETH/SOL): 5% × 10x = 50% notional
+HIGH_MARGIN_PCT   = 0.04    # ...HIGH (meme): 4% × 5x = 20% notional
 STABLE_LEV_CAP = 20.0       # leverage ceiling for STABLE-tier coins
 MID_LEV_CAP    = 10.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
