@@ -460,7 +460,7 @@ function Wallets({ confirm, toast }) {
   const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);             // 10/page
-  const [tab, setTab] = useState("followed");        // followed(在跟) | dropped(已掉线)
+  const [tab, setTab] = useState("followed");        // followed(实跟) | observing(样本观察) | dropped(降级)
   const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&page=" + wpage + "&size=10").then(setData).catch(() => {}); }, [wpage, tab]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
   const dropped = tab === "dropped";
@@ -476,10 +476,14 @@ function Wallets({ confirm, toast }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {dropped ? "降级 " + data.total + " 个" : "实跟 " + (data.followed != null ? data.followed : data.total) + " / 达标 " + data.total + " 个"}</span>}</h2>
+        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {
+          tab === "followed" ? "实跟 " + data.total + " 个(与跟单脚本一致)"
+          : tab === "observing" ? "样本观察 " + data.total + " 个(达标但样本不足,暂不跟)"
+          : "降级 " + data.total + " 个"}</span>}</h2>
         <div className="range-tabs">
-          <button className={!dropped ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中</button>
-          <button className={dropped ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
+          <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中{data && data.followed != null ? " " + data.followed : ""}</button>
+          <button className={tab === "observing" ? "on" : ""} onClick={() => { setTab("observing"); setWpage(0); }}>样本观察{data && data.observing != null ? " " + data.observing : ""}</button>
+          <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
         </div>
       </div>
       <div className="tbl-wrap">
@@ -519,7 +523,7 @@ function Wallets({ confirm, toast }) {
               {data && data.wallets.map(w => (
                 <tr key={w.address} className={w.enabled ? "" : "row-off"}
                   style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
-                  <td><span className="rankbadge">{w.rank}</span></td>
+                  <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
                   <td className="num"><b style={{ color: w.evidenceHeld ? "var(--t2)" : (w.score >= data.followLine ? "var(--green-l)" : "var(--t2)") }}>{fNum(w.score, 1)}</b>

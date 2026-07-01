@@ -510,23 +510,27 @@ def ep_wallets(db, qs=None):
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
-    total = len(rows)
-    # evidence floor (mirrors observer.load_targets): score≥line wallets that DON'T clear it are tracked
-    # but NOT copied — flag them so the list is honest (vs silently counting them as followed).
-    held = sum(1 for r in rows if (r["n_trades"] or 0) < config.FOLLOW_MIN_TRADES
-               or (r["active_days"] or 0) < config.FOLLOW_MIN_ACTIVE_DAYS)
+    # Partition by the evidence floor (mirrors observer.load_targets) so the list == what we ACTUALLY copy:
+    #   FOLLOWED (tab 'followed') = score≥line AND clears the floor → the real copy set, numbered 1..N by
+    #                               follow position (NOT global watchlist rank — that confused users).
+    #   OBSERVING (tab 'observing') = score≥line but thin-sample → tracked, not yet copied.
+    def _held(r):
+        return (r["n_trades"] or 0) < config.FOLLOW_MIN_TRADES or (r["active_days"] or 0) < config.FOLLOW_MIN_ACTIVE_DAYS
+    foll = [r for r in rows if not _held(r)]
+    obs = [r for r in rows if _held(r)]
+    tab = (qs.get("tab", ["followed"]))[0]
+    sel = obs if tab == "observing" else foll
     out = []
-    for r in rows[page * size:page * size + size]:
+    for i, r in enumerate(sel[page * size:page * size + size]):
         grid = r["grid"]
         if grid is None:                       # COALESCE: derive from profile until scanner backfills
             grid = min((r["median_adds_per_ep"] or 0) / grid_max, 1.0)
         worst = r["worst_single_loss_pct"]
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
-        evidence_held = ((r["n_trades"] or 0) < config.FOLLOW_MIN_TRADES
-                         or (r["active_days"] or 0) < config.FOLLOW_MIN_ACTIVE_DAYS)
         out.append({
-            "evidenceHeld": evidence_held,   # score-qualified but below the trade/active-day floor → observed, not copied
+            "evidenceHeld": tab == "observing",  # this tab's rows are the held-back set
+            "followPos": (page * size + i + 1) if tab != "observing" else None,   # 1..N position in the copy set
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0), "roiEqPct": (r["roi_equity"] or 0.0) * 100,
             "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
@@ -537,7 +541,8 @@ def ep_wallets(db, qs=None):
             "forwardNetPnl": (r["realized"] or 0) + (r["unreal"] or 0),   # PnL is the real verdict, not win%
             "trend": _wallet_trend(db, r["addr"]),
         })
-    return {"followLine": score100(line_native), "total": total, "followed": total - held,
+    return {"followLine": score100(line_native), "tab": tab, "total": len(sel),
+            "followed": len(foll), "observing": len(obs),
             "page": page, "size": size, "wallets": out}
 
 
