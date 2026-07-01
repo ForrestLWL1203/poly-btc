@@ -261,6 +261,8 @@ def start_scan(db_path, full=False):
     if scan_running(db_path):
         return {"scanning": True, "started": False, "reason": "already_scanning"}
     argv = [PYTHON, os.path.join(REPO, "hl_discover.py"), "--db", db_path, "scan"]
+    if not observer_running(db_path):        # observer off → take the full REST budget, scan FAST (~20-25 min)
+        argv += ["--scan-interval", "1.0", "--workers", "4"]   # else use the CLI default (8s, shares budget)
     if full:
         argv.append("--full")
     pid, started = _spawn(db_path, SCAN, argv)
