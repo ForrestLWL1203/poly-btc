@@ -678,7 +678,8 @@ const PARAM_META = {
   HFT_MIN_HOLD_MIN: { name: "HFT最短中位持仓", desc: "开关开启时,中位持仓低于此分钟数判为HFT剔除", range: "2–5 分钟" },
   SCORE_W_WIN: { name: "评分·胜率权重", desc: "综合评分里胜率的占比(三权重相对生效,无需凑100)", range: "—", up: "更看重持续胜率", dn: "更看重收益/稳定" },
   SCORE_W_ROI: { name: "评分·收益权重", desc: "综合评分里风险调整收益的占比", range: "—", up: "更看重赚得多", dn: "更看重胜率/稳定" },
-  SCORE_W_STAB: { name: "评分·稳定性权重", desc: "综合评分里逐日为正比例(每日都在赚)的占比", range: "—", up: "更看重天天为正", dn: "更看重胜率/收益" },
+  SCORE_W_ACT: { name: "评分·活跃度权重", desc: "综合评分里活跃度(成交数+活跃天数)的占比", range: "—", up: "更看重高频活跃", dn: "更看重胜率/收益" },
+  SCORE_STRETCH: { name: "评分·标度拉伸", desc: "线性拉伸使最强钱包≈100、平滑下滑,便于设跟单线", range: "1.0–1.3", up: "top更贴近100", dn: "整体压低" },
   UW_TOL: { name: "浮亏容忍线 / 危险线", desc: "只读展示", range: "—" },
 };
 const UNIT = { usd: "$", pct: "%", x: "×" };

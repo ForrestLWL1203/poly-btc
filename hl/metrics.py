@@ -193,11 +193,11 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
 
 
 def score(m: dict) -> float:
-    """v5 SMOOTH BLENDED QUALITY ∈ [0,1] (display = ×100). The follow-quality is an ADDITIVE weighted
-    blend of the user's roots — 胜率 / 风险调整ROI / 逐日稳定性 — then a gentle 活跃度(样本) multiplier and
-    two SMOOTH risk guards (反噬/twins, 深度抗单/爆仓). No hard vetoes here (those that remain in gates are
-    pure copyability + net>0); the temp loss_pain/hold_skew/profit_conc gates are folded in as guards.
-    Smooth by construction → no 90→20 cliff; a single flaw discounts, never zeroes."""
+    """v6 QUALITY ∈ [0,1] (display = ×100). ADDITIVE core of the user's THREE roots — 胜率 / 活跃度 / ROI —
+    × only the guards ROI can't see (刷胜率 fake-win + a mild current-deep-bag), × a linear STRETCH so the
+    best real wallet lands near 100 with a smooth decline (easier follow-line setting). NO 反噬/worst-loss
+    guard: 小赚大亏 already surfaces as low/negative ROI (net≤0 → gated; low ROI → low ROI term). We copy
+    ISOLATED with our OWN stop, so a single big loss THEY took doesn't transfer — don't double-punish it."""
     g = lambda k, d=0.0: (m.get(k) if m.get(k) is not None else d)
 
     # ── core positives, each ∈ [0,1] ──
@@ -206,32 +206,21 @@ def score(m: dict) -> float:
     dd_eq = g("max_drawdown") / (g("acct_value") + 1.0) + config.UNREAL_RISK_W * g("open_win_frac")
     roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效收益
     roi_s = 1.0 - math.exp(-roi_adj / config.SCORE_ROI_SCALE)             # 平滑饱和 [0,1)
-    stab = _clip(g("pos_day_ratio"), 0.0, 1.0)                           # 逐日为正比例(稳定性)
-    wsum = config.SCORE_W_WIN + config.SCORE_W_ROI + config.SCORE_W_STAB or 1.0   # relative weights (UI-safe)
-    core = (config.SCORE_W_WIN * win + config.SCORE_W_ROI * roi_s + config.SCORE_W_STAB * stab) / wsum
+    act = (0.5 * min(1.0, (g("n_trades") + g("bag_count")) / config.SCORE_EV_TRADES)
+           + 0.5 * min(1.0, g("active_days") / config.SCORE_EV_DAYS))     # 活跃度(核心项:成交数 + 活跃天数)
+    wsum = config.SCORE_W_WIN + config.SCORE_W_ACT + config.SCORE_W_ROI or 1.0   # relative weights (UI-safe)
+    core = (config.SCORE_W_WIN * win + config.SCORE_W_ACT * act + config.SCORE_W_ROI * roi_s) / wsum
 
-    # ── evidence/活跃度: gentle confidence multiplier (sample size → trust), floored so低频好钱包不被碾压 ──
-    n_eff = g("n_trades") + g("bag_count")
-    samp = 0.6 * min(1.0, n_eff / config.SCORE_EV_TRADES) + 0.4 * min(1.0, g("active_days") / config.SCORE_EV_DAYS)
-    ev = config.SCORE_EV_FLOOR + (1.0 - config.SCORE_EV_FLOOR) * samp
-
-    # ── 反噬/双胞胎守卫: |最惨单笔| ÷ 净利润 (= |worst_loss_pct|/roi_equity). 高胜率也救不了"一笔亏吞掉所有利润". ──
-    roi_eq = g("roi_equity")
-    wl = abs(g("worst_loss_pct"))                                         # worst single round-trip loss / acct (≥0)
-    frag = (wl / roi_eq) if roi_eq > 1e-6 else 0.0                        # net≤0 已被 gates 挡;此处记 0
-    g_frag = _clip(1.0 - max(0.0, frag - config.SCORE_FRAG_FREE) / config.SCORE_FRAG_SPAN,
-                   config.SCORE_GUARD_FLOOR, 1.0)
-
-    # ── 深度抗单/爆仓守卫: 按深度,不按持仓时间. 用 open_underwater(单仓最惨浮亏 = 真实扛单深度),
-    #    不用 open_loss_frac(总浮亏÷账户,会被大账户稀释 → 深扛单单仓看着像没事=“无限保证金熬过来”的假象). ──
-    bag = max(abs(min(0.0, g("open_underwater"))), abs(min(0.0, g("open_loss_frac"))))   # 单仓深度优先, 账户总额兜底
-    deep = max(bag / config.SCORE_BAG_REF, wl / config.SCORE_BLOW_REF)
-    g_deep = _clip(1.0 - max(0.0, deep - 1.0) * config.SCORE_DEEP_SLOPE, config.SCORE_GUARD_FLOOR, 1.0)
-
-    # ── 刷胜率守卫: 高胜率 + 几乎从不兑现亏损 = 靠扛单藏亏刷假胜率(双胞胎本质). 真会止损的高胜率钱包(wl≥LOSS_REF)不罚. ──
+    # ── guards ROI can't capture (NO 反噬/worst-loss dock — ROI handles 小赚大亏) ──
+    wl = abs(g("worst_loss_pct"))     # worst realized single loss / acct — used only by the 刷胜率 guard below
+    # 刷胜率: ≥WIN_FLOOR 胜率 且 几乎从不兑现亏损 = 靠扛浮亏藏亏刷假胜率(ROI 看不出,因为亏损没兑现)。我们的
+    # σ-止损会替他兑现所扛的亏,故其胜率对我们是误导 → 罚。真会止损的高胜率钱包(wl≥LOSS_REF)不受影响。
     manuf = (_clip((win - config.SCORE_MANUF_WIN_FLOOR) / (1.0 - config.SCORE_MANUF_WIN_FLOOR), 0.0, 1.0)
              * _clip(1.0 - wl / config.SCORE_MANUF_LOSS_REF, 0.0, 1.0))
     g_manuf = _clip(1.0 - manuf * config.SCORE_MANUF_PEN, config.SCORE_GUARD_FLOOR, 1.0)
+    # 当前深亏轻推(此刻正在扛的单仓最惨浮亏);地板高——isolated + 我们自有止损让它只是小信号,不是重罚
+    bag = abs(min(0.0, g("open_underwater")))
+    g_deep = _clip(1.0 - max(0.0, bag - config.SCORE_BAG_REF) / config.SCORE_BAG_SPAN, config.SCORE_DEEP_FLOOR, 1.0)
 
-    survival = 0.9 + 0.1 * min(g("times_active", 1), 10) / 10             # cross-scan persistence (tiny)
-    return _clip(core * ev * g_frag * g_deep * g_manuf * survival, 0.0, 1.0)
+    # linear STRETCH → best real wallet ≈ 100, smooth decline (stable/absolute, not max-relative)
+    return _clip(core * g_manuf * g_deep * config.SCORE_STRETCH, 0.0, 1.0)

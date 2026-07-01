@@ -33,13 +33,15 @@ PARAM_SPEC = [
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
         "最长不活跃天数", "超此天数没成交且无持仓 = 失活淘汰"),
-    # 评分权重(v5:综合评分 = 胜率·ROI·稳定性 加权 → 平滑分布;小赚大亏/抗单/一把行情 已折叠为评分内的平滑因子,不再单设门槛)
+    # 评分权重(v6:综合评分 = 胜率·活跃度·ROI 加权 → 平滑分布;小赚大亏由ROI自然体现,不再单设反噬门槛)
     ("SCORE_W_WIN",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_WIN * 100),
         "评分·胜率权重", "综合评分里胜率的占比(三个权重相对生效,无需凑100)"),
+    ("SCORE_W_ACT",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_ACT * 100),
+        "评分·活跃度权重", "综合评分里活跃度(成交数+活跃天数)的占比"),
     ("SCORE_W_ROI",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_ROI * 100),
         "评分·收益权重", "综合评分里风险调整收益的占比"),
-    ("SCORE_W_STAB",         "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_STAB * 100),
-        "评分·稳定性权重", "综合评分里逐日为正比例(稳定性)的占比"),
+    ("SCORE_STRETCH",        "scanner", "yellow", "float",   "rescan", config.SCORE_STRETCH,
+        "评分·标度拉伸", "线性拉伸使最强钱包≈100、平滑下滑(调大→top更贴近100,便于设跟单线)"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
@@ -212,9 +214,9 @@ def apply_scanner_params(db, ns):
     for key, attr in SCANNER_ARG_MAP.items():
         if vals.get(key) is not None:
             setattr(ns, attr, vals[key])
-    for key, cfg in (("SCORE_W_WIN", "SCORE_W_WIN"), ("SCORE_W_ROI", "SCORE_W_ROI"), ("SCORE_W_STAB", "SCORE_W_STAB")):
-        if vals.get(key) is not None:                     # stored as pct → load_category already ÷100
-            setattr(config, cfg, vals[key])
+    for key in ("SCORE_W_WIN", "SCORE_W_ACT", "SCORE_W_ROI", "SCORE_STRETCH"):
+        if vals.get(key) is not None:                     # pct params already ÷100 by load_category; STRETCH is float
+            setattr(config, key, vals[key])
     return ns
 
 

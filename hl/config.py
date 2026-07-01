@@ -195,14 +195,18 @@ SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) —
 #   display = round(score01 × 100).  Native scale is now [0,1] (was [0,3]); score100 = ×100.
 # Smooth because the core is an ADDITIVE weighted blend of [0,1] factors (no capped ratio, no power law),
 # and the guards/evidence are gentle multipliers with floors (a single flaw discounts, never zeroes).
-SCORE_W_WIN  = 0.40    # 胜率权重(用户:胜率是根本)。win = win_rate ∈ [0,1]
-SCORE_W_ROI  = 0.35    # 风险调整收益权重
-SCORE_W_STAB = 0.25    # 逐日为正比例(pos_day_ratio)权重 —— W_* 之和 = 1
+# v6 (2026-07-02): the THREE roots are 胜率 / 活跃度 / ROI (user). 活跃度 promoted from evidence-multiplier
+# to a CORE term; 逐日稳定性 dropped. NO 反噬/worst-loss guard — 小赚大亏 already shows as low/neg ROI
+# (net≤0 gated; low ROI → low ROI term). We copy ISOLATED + our own stop, so their single big loss doesn't
+# transfer. Only guards ROI can't see remain: 刷胜率 (fake win by holding losers) + a mild current-deep-bag.
+SCORE_W_WIN  = 0.35    # 胜率权重
+SCORE_W_ACT  = 0.30    # 活跃度权重(成交数 + 活跃天数,升为核心项) —— W_* 之和自动归一
+SCORE_W_ROI  = 0.35    # ROI 权重(收敛后;ROI 本身就把"小赚大亏"量化为低分)
+SCORE_STRETCH = 1.15   # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。调大→top 更贴近 100
 SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效收益越低
 SCORE_ROI_SCALE   = 0.25  # roiS = 1 − exp(−roi_adj/此):平滑饱和(25%调整收益→0.63,50%→0.86),无悬崖
-SCORE_EV_TRADES = 20      # 达此回合数=证据充分
-SCORE_EV_DAYS   = 10      # 达此活跃天数=证据充分
-SCORE_EV_FLOOR  = 0.6     # 证据乘子下限:样本再少也保留 60% core(不碾压低频好钱包)
+SCORE_EV_TRADES = 20      # 活跃度:达此回合数 = 满分
+SCORE_EV_DAYS   = 10      # 活跃度:达此活跃天数 = 满分
 # 反噬/双胞胎守卫 —— 最惨单笔 ÷ 净利润 = |worst_loss_pct|/roi_equity。抓"n笔小赚+1笔大亏吞掉所有收益"的高胜率欺骗手;
 # 用户的良性例(5赢@5%+1亏@7.5% → 7.5/17.5=0.43)在 FREE 内、不罚。
 SCORE_FRAG_FREE = 0.5     # 最惨单笔 ≤ 净利润此比例 → 不罚
@@ -210,10 +214,10 @@ SCORE_FRAG_SPAN = 1.0     # 超出 FREE 后再涨此幅 → 守卫降到下限(f
 # 深度抗单/爆仓守卫 —— 按【深度】不按持仓时间(用户:小幅逆向抗回盈利很正常、且我们有自己的止损):
 # 深度 = 单仓最惨浮亏 open_underwater(真实扛单深度,不用 open_loss_frac:大账户会把总浮亏稀释成"看着没事",
 # 即"无限保证金熬过来"的假象)。BAG_REF 6%(用户:≤7% 还能接受),所以 −7% 几乎不痛、−9% 中扣、−29% 砍到底。
-SCORE_BAG_REF  = 0.06     # 单仓浮亏达账户此比例 → 深度=1(开始扣)
-SCORE_BLOW_REF = 0.15     # 历史最惨单笔亏达账户此比例 → 深度=1
-SCORE_DEEP_SLOPE = 0.5    # 深度每超出 1,守卫线性下降斜率
-SCORE_GUARD_FLOOR = 0.25  # 守卫乘子下限(最差也保留 25%,靠分数线把它压在线下,而非硬杀)
+SCORE_BAG_REF  = 0.10     # 当前单仓浮亏达账户此比例才开始轻扣(软化:10%起;isolated+自有止损让它只是小信号)
+SCORE_BAG_SPAN = 0.20     # 浮亏超出 BAG_REF 后再涨此幅 → g_deep 降到 DEEP_FLOOR
+SCORE_DEEP_FLOOR = 0.75   # 当前深亏守卫下限(最多扣 25%)
+SCORE_GUARD_FLOOR = 0.25  # 刷胜率守卫下限(最差也保留 25%,靠分数线压在线下,而非硬杀)
 # 刷胜率守卫(双胞胎本质)—— 高胜率 + 几乎从不兑现亏损 = 靠扛单把亏的藏成浮亏、刷出假胜率。
 # 只在【胜率≥WIN_FLOOR 且 最惨实现亏损趋近0】时触发;真会止损(最惨实现亏损≥LOSS_REF)的高胜率钱包不受影响。
 SCORE_MANUF_WIN_FLOOR = 0.95   # 胜率超过此才疑似(95% 以下完全不罚)
