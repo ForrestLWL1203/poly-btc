@@ -271,12 +271,13 @@ HEDGE_MAX_FRAC = 0.5
 # COPY_STOP_ENABLE = the master toggle (default ON; UI-tunable). COPY_STOP_PCT is the legacy flat-% stop,
 # retained only as a fallback when a coin's σ is unavailable.
 COPY_STOP_ENABLE = True
-STOP_SIGMA_MULT  = 1.2      # cut at this × σ adverse move (1.0 = a full daily high-low range). K in the design.
-#                             0.8→1.2 (2026-07-01): 0.8 was cutting us on mean-reversion spikes that the
-#                             masters held through and recovered (e.g. #8's XLM: we stopped −$180, it held to
-#                             +$168). Wider = a true tail guard that doesn't fight the reversion edge; the
-#                             cost is ~50% deeper bleed on the genuine runaways before the cut (isolated
-#                             margin still caps the worst). UI-tunable follow param.
+STOP_SIGMA_MULT  = 1.0      # cut at this × σ adverse move (1.0 = a full daily high-low range against us).
+#                             Landed at 1.0 (2026-07-01) after 0.8→1.2→1.0: the safe band is M ∈ (0.8, 1.25)
+#                             — must be >0.8 to ride out normal reversion spikes (XLM's 6.87% shakeout that
+#                             the master held to profit) AND <1.25 so BTC's stop (M×4%) fires BEFORE its 20x
+#                             liquidation (5%). 1.0 sits in the middle: BTC stops early at ~4% (<5% liq),
+#                             alts (low lev, far liq) get a full daily-range of room. NOT the leverage anchor
+#                             (that's RISK_BUDGET) — this is purely the stop distance. UI-tunable follow param.
 COPY_STOP_PCT    = 0.18     # LEGACY flat-% fallback (used only if σ unavailable); σ-stop is primary now
 
 # paper-copy simulation
