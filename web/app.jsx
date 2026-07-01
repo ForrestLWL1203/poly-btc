@@ -434,7 +434,8 @@ function History() {
                     <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>
                     <td className="num">{fDur(p.durationSec)}</td>
                     <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(p.closedAt)}</td>
-                    <td>{(() => { const t = CLOSE_TYPE[p.closeType] || CLOSE_TYPE.mirror; return <span className={"tint " + t.tint}>{t.label}</span>; })()}</td>
+                    <td>{(() => { const t = CLOSE_TYPE[p.closeType] || CLOSE_TYPE.mirror; return <span className={"tint " + t.tint}>{t.label}</span>; })()}
+                      <div className="muted" style={{ fontSize: 11 }} title="我们实际平仓价(止损=被砍价 / 镜像=跟随目标平仓价)">@ {fPrice(p.closePx)}</div></td>
                     <td><span className={"tint " + (p.result === "win" ? "tint-green" : "tint-red")}>{p.result === "win" ? "赢" : "亏"}</span></td>
                     <td className="addr">{short(p.wallet)} {p.followPos != null
                       ? <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
