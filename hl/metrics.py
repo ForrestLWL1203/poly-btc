@@ -155,8 +155,10 @@ def gates_structural(m: dict, p) -> tuple:
         if getattr(p, "exclude_hft", True) and m.get("median_hold_s") is not None \
                 and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
             return False, "hft_uncopyable"
-        if (m.get("max_adds_per_ep") or 0) > p.grid_max_adds:  # grid/DCA: one round-trip stuffed with
-            return False, "grid_dca"                           # dozens of laddered scale-ins — uncopyable
+        if (m.get("median_adds_per_ep") or 0) > p.grid_max_adds:  # grid/DCA: TYPICALLY laddered scale-ins.
+            return False, "grid_dca"                              # MEDIAN not MAX — one heavy DCA in the window
+        #                                                           ≠ a grid bot (would kill +$65k wallets whose
+        #                                                           median adds is 0). A real grid dominates most eps.
     return True, "ok"
 
 
