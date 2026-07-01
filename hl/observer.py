@@ -845,6 +845,12 @@ class Observer:
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         margin_pct, lev = self._sizing_for(sigma, coin)  # v9: tier margin% + σ-scaled-capped leverage (stocks floored to high tier)
+        # NEVER out-leverage the master: a position at higher leverage than the wallet we copy liquidates on
+        # a SMALLER adverse move than they do (they survive, we blow up). The notional cap below is separate —
+        # our notional can be far under theirs while our LEVERAGE is far over (SILVER: our 20x/$7k vs master
+        # 7x/$2M), so it never caught this. Cap leverage to the master's own (when we have their live lev).
+        if m_lev and m_lev > 0:
+            lev = max(self.min_lev, float(int(min(lev, m_lev))))
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * margin_pct)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
