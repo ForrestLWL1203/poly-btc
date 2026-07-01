@@ -482,16 +482,27 @@ def scan(db, p) -> None:
     cand = [r[0] for r in db.execute(
         f"SELECT addr FROM leaderboard WHERE is_candidate=1 ORDER BY {order} DESC").fetchall()]
     seen = set(cand)
-    off_active = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()
-                  if r[0] not in seen]                 # actives that fell off the candidate list — recheck too
-    workset = (cand + off_active)[:p.limit]
-    # INCREMENTAL by default (delta fills only, merged onto the cached window). Escalate to a FULL re-fetch
-    # when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
+    active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
+    active_set = set(active_addrs)
+    off_active = [a for a in active_addrs if a not in seen]   # actives that fell off the candidate list
+    all_eligible = cand + off_active                          # cache-retention set (prune everything else)
+    # FULL re-fetch when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
     p.full_scan = getattr(p, "full_scan", False) or (not config.INCREMENTAL_SCAN) or _due_for_full_resync(db)
-    mode = "FULL re-fetch (30d each)" if p.full_scan else "INCREMENTAL (delta fills only)"
+    if p.full_scan:
+        workset = all_eligible[:p.limit]                      # weekly/manual: re-profile EVERYONE
+        mode = "FULL (30d re-fetch, all candidates)"
+    else:
+        # DAILY tiered: only ACTIVE wallets + BRAND-NEW (never-profiled) candidates. The already-profiled
+        # rejected long tail (won't flip active in a day) is deferred to the weekly full — cuts the daily
+        # request count ~4× with no follow-set impact (the watchlist is built from actives, all re-profiled).
+        profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
+        daily_cand = [a for a in cand if a in active_set or a not in profiled]
+        workset = (daily_cand + off_active)[:p.limit]
+        mode = (f"INCREMENTAL daily-tier ({len(daily_cand)} active+new of {len(cand)} cand; "
+                f"{len(cand) - len(daily_cand)} rejected-tail → weekly full)")
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
-    print(f"scan: {mode} · {len(workset)} wallets ({len(cand)} candidates + {len(off_active)} off-list "
-          f"actives), {p.days}d window, pace {getattr(p, 'scan_interval', 0.8):g}s/req\n")
+    print(f"scan: {mode} · {len(workset)} wallets + {len(off_active)} off-list actives, "
+          f"{p.days}d window, pace {getattr(p, 'scan_interval', 0.8):g}s/req\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
     cols = storage.PROFILE_COLS.split(",")
@@ -534,11 +545,12 @@ def scan(db, p) -> None:
     n_active = refresh_watchlist(db, stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
-    # drop cached fills for wallets no longer in the workset (churned off the leaderboard) — keeps the
-    # candidate_fills cache bounded (they'd otherwise never be pruned again, having stopped being profiled).
-    if workset:
-        qs = ",".join("?" * len(workset))
-        db.execute(f"DELETE FROM candidate_fills WHERE addr NOT IN ({qs})", workset)
+    # drop cached fills for wallets that left the candidate universe entirely (not a candidate AND not
+    # active) — keeps candidate_fills bounded WITHOUT evicting the deferred long-tail (still candidates,
+    # cache needed for the weekly full). Subquery form avoids a huge NOT IN param list.
+    db.execute("DELETE FROM candidate_fills WHERE addr NOT IN "
+               "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
+               " UNION SELECT addr FROM profile WHERE status='active')")
     _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active,
                 full=getattr(p, "full_scan", False))
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
