@@ -79,6 +79,12 @@ HIGH_MARGIN_PCT   = 0.06    # ...for HIGH-VOL-tier coins (kept meaningful so mem
 STABLE_LEV_CAP = 20.0       # leverage ceiling for STABLE-tier coins
 MID_LEV_CAP    = 10.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
+# PER-TIER minimum order notional: skip a copy whose FINAL notional (after the master-notl cap) is below
+# its tier's floor — a too-small position isn't worth the fee/latency drag (esp. on calm coins where the
+# whole edge is a fraction of a %). Per-tier only — the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
+STABLE_MIN_NOTIONAL = 5000.0   # BTC/majors: below $5k it's not worth opening
+MID_MIN_NOTIONAL    = 3000.0   # mid-vol coins
+HIGH_MIN_NOTIONAL   = 800.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
@@ -89,10 +95,8 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGI
 #                             position, just skip the signal (don't open dust). Existing positions stay
 #                             managed/exited. High-conviction signals (bigger rf) still open later than
 #                             low-conviction ones, which is intended. UI-tunable.
-MIN_COPY_NOTIONAL = 50.0    # skip a copy whose FINAL notional (after the master-notional cap) is below this $.
-#                             MIN_OPEN_MARGIN_PCT is checked on our FORMULA margin BEFORE the master-notl cap,
-#                             so a master with a dust position (e.g. a $4 AVGO probe) slips through — we cap to
-#                             the master's $4 and open a scrap position. This post-cap floor kills that dust.
+# (the flat post-cap dust floor MIN_COPY_NOTIONAL was replaced by the per-tier STABLE/MID/HIGH_MIN_NOTIONAL
+#  above — a $4-probe master position now falls under its tier's min and is skipped.)
 MAX_LEV = 20.0              # hard leverage cap (BTC + anything calmer pin here); also a stale-σ backstop
 
 # Per-coin volatility (regime-aware) for the sizing above. A coin calm-then-erupting must NOT keep its

@@ -644,16 +644,18 @@ const PARAM_META = {
   RISK_BUDGET: { name: "风险预算(1σ亏损)", desc: "核心:逆向1个σ该亏多少保证金;杠杆=此值÷σ,也=单次止损硬亏", range: "50–70%", up: "杠杆更大、止损更肉", dn: "更保守、止损更小" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
+  STABLE_MIN_NOTIONAL: { name: "稳定档·最低名义额", desc: "BTC/大饼单笔名义额低于此(封顶到主力后)就不开,太小没意义", range: "$3k–8k", up: "过滤更多小单", dn: "连很小的也跟" },
   MID_MARGIN_PCT: { name: "中档·保证金", desc: "σ 4–10%(ETH/SOL/HYPE)单笔投入(占可用%)", range: "6–10", up: "每单更重", dn: "每单更轻" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "σ 4–10%的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
+  MID_MIN_NOTIONAL: { name: "中档·最低名义额", desc: "ETH/SOL等单笔名义额低于此就不开", range: "$2k–5k", up: "过滤更多小单", dn: "连很小的也跟" },
   HIGH_MARGIN_PCT: { name: "剧烈档·保证金", desc: "σ≥10%(meme/野币)单笔投入(占可用%)", range: "4–8", up: "每单更重", dn: "每单更轻" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥10%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
+  HIGH_MIN_NOTIONAL: { name: "剧烈档·最低名义额", desc: "meme/野币单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)", range: "$500–1k", up: "过滤更多小单", dn: "连很小的也跟" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
   ADD_MARGIN_PCT: { name: "每次加仓比例", desc: "跟随加仓每次投入(占可用)", range: "—", up: "加仓更猛", dn: "加仓更轻" },
   MAX_ADDS: { name: "最多加仓次数", desc: "跟随主力加仓的次数上限", range: "—", up: "跟更多加仓", dn: "更早停跟加仓" },
-  MIN_COPY_NOTIONAL: { name: "最小跟单名义额", desc: "封顶到主力名义额后若低于此金额=残渣单直接不开(如主力$4的探针仓)", range: "$30–100", up: "过滤更多小单", dn: "连很小的也跟" },
   COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
   STOP_SIGMA_MULT: { name: "止损=σ的倍数", desc: "止损距离=此倍数×该币σ;1.0=逆向跑满一个日内振幅(大饼≈4%、ZEC≈15%)", range: "0.8–1.5", up: "更宽容、接近不止损", dn: "砍更早、亏更少但易误杀" },
   MAX_ENTRY_CHASE_PCT: { name: "追价保护阈值", desc: "开仓价偏离超此%则放弃(空=关闭)", range: "0.3–1", up: "更宽容追价", dn: "更严防滑点" },
@@ -966,9 +968,9 @@ function Settings({ startRescan, confirm, toast }) {
   };
   /* v8 三档保证金/杠杆折叠分组(否则页面太高) */
   const TIER_GROUPS = [
-    { key: "stable", label: "稳定档", sub: "σ ≤ 4% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"] },
-    { key: "mid", label: "中档", sub: "σ 4–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP"] },
-    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] },
+    { key: "stable", label: "稳定档", sub: "σ ≤ 4% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL"] },
+    { key: "mid", label: "中档", sub: "σ 4–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL"] },
+    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL"] },
   ];
   const tierKeys = new Set(TIER_GROUPS.flatMap(g => g.keys));
 
@@ -1031,7 +1033,7 @@ function Settings({ startRescan, confirm, toast }) {
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x</span>}
+                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]}</span>}
               </div>
               {open && rows.map(Prow)}
             </div>

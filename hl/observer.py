@@ -56,7 +56,8 @@ class Observer:
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
-        self.min_copy_notional = config.MIN_COPY_NOTIONAL   # post-cap dust floor (skip scrap positions)
+        self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
+                                  "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.max_adds = config.MAX_ADDS
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
@@ -165,13 +166,13 @@ class Observer:
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
-            for tier, mk, lk in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"),
-                                 ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP"),
-                                 ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP")):
+            for tier, mk, lk, nk in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL"),
+                                     ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL"),
+                                     ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL")):
                 if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
                 if f.get(lk): self.tier_lev_cap[tier] = f[lk]
+                if f.get(nk) is not None: self.tier_min_notional[tier] = f[nk]
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
-            if f.get("MIN_COPY_NOTIONAL") is not None: self.min_copy_notional = f["MIN_COPY_NOTIONAL"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
@@ -877,9 +878,10 @@ class Observer:
             if master_notl > 0 and notional > master_notl:
                 notional = master_notl
                 margin = notional / lev if lev else margin
-            if notional < self.min_copy_notional:     # DUST after the master-notl cap (master had a scrap
-                why = f"dust notl ${notional:,.2f} < ${self.min_copy_notional:g} (master notl ${master_notl:,.0f})"
-                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why}")   # position) → don't open scrap
+            min_notl = self.tier_min_notional.get(self._tier(sigma, coin), 0.0)  # per-tier floor (after master-notl cap)
+            if notional < min_notl:                   # too small for its tier → not worth the fee/latency drag
+                why = f"below {self._tier(sigma, coin)}-tier min notl ${notional:,.0f} < ${min_notl:,.0f} (master notl ${master_notl:,.0f})"
+                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why}")   # → don't open a meaningless small position
                 self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))
                 self.db.commit()
                 self.open_ep.pop((addr, coin), None)
