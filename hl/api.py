@@ -508,7 +508,8 @@ def ep_positions(db, qs):
         out.append({
             "id": f"pos_{r['pos_id']}", "coin": r["coin"], "marketType": r["mtype"] or "crypto",
             "side": r["side"], "entry": entry, "leverage": r["leverage"],
-            "notional": r["notional"] or 0.0, "mark": mark,
+            # scale by remaining/total so a PARTIAL close (rem_size < size) shows the current notional
+            "notional": (r["notional"] or 0.0) * (r["rem_size"] / r["size"] if r["size"] else 1.0), "mark": mark,
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": fpos.get(r["addr"]),

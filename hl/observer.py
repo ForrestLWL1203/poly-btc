@@ -536,7 +536,7 @@ class Observer:
             self._write_proc_status("running")
             return {"paused": False}
         if ctype == "close_position":
-            return await self._cmd_close(int(payload["positionId"]))
+            return await self._cmd_close(int(payload["positionId"]), float(payload.get("fraction", 1.0)))
         if ctype == "close_all":
             return await self._cmd_close_all()
         if ctype == "wallet_toggle":
@@ -553,22 +553,29 @@ class Observer:
                 return addr, coin, ep
         return None
 
-    async def _cmd_close(self, pos_id):
-        """Manual flatten of one live copy at the current book (operator emergency exit). Reuses the
-        normal close path so PnL/account/status finalize identically to a master-driven close."""
+    async def _cmd_close(self, pos_id, frac=1.0):
+        """Manual close of one live copy at the current book (operator exit). `frac` ∈ (0,1] closes that
+        fraction of the remaining size — <100% is a partial reduce (position stays open; freed margin
+        returns to available via rem_size/size). Reuses the normal reduce path so PnL/account/status
+        finalize identically to a master-driven close."""
         found = self._ep_by_pos(pos_id)
         if not found:
             raise ValueError(f"position {pos_id} not open/live")
         addr, coin, ep = found
         if ep.get("entry_px") is None:
             raise ValueError(f"position {pos_id} still opening")
+        frac = max(0.0, min(1.0, frac))
+        if frac <= 0:
+            raise ValueError("fraction must be > 0")
         ba = self.bbo.get(coin)
         mid = ((ba[0] + ba[1]) / 2) if (ba and ba[0] and ba[1]) else ep["entry_px"]
         await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
-                                 closing=True, liq=False, maker=False, forced_px=mid)
-        _log(f"MANUAL-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
-             f"pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
-        return {"positionId": pos_id, "exit": mid, "realizedPnl": round(ep["realized_pnl"], 2)}
+                                 closing=(frac >= 0.999), liq=False, maker=False, forced_px=mid, forced_frac=frac)
+        full = frac >= 0.999
+        _log(f"MANUAL-{'CLOSE' if full else f'REDUCE {int(round(frac*100))}%'} {addr[:10]} {coin} {ep['side']} "
+             f"@ {mid:g}  pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
+        return {"positionId": pos_id, "exit": mid, "fraction": frac, "closed": full,
+                "realizedPnl": round(ep["realized_pnl"], 2), "remSize": round(ep["rem_size"], 8)}
 
     async def _cmd_close_all(self):
         pos_ids = [ep["pos_id"] for ep in self.open_ep.values()]
@@ -960,7 +967,7 @@ class Observer:
             self.db.commit()                                  # the add is in copy_action
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker,
-                            oid=None, gap=False, forced_px=None, stop=False):
+                            oid=None, gap=False, forced_px=None, stop=False, forced_frac=None):
         async with ep["lock"]:
             try:
                 await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
@@ -974,9 +981,13 @@ class Observer:
                        else master_px if stale else self._fill_px(coin, is_buy, maker, master_px))
             # delta-based: close the SAME fraction of our position the master just closed of his —
             # correct for any build-up (adds we followed, adds we skipped past the cap, or none).
-            pos0 = pos1 - signed
-            reduce_frac = (1.0 if closing or abs(pos0) < config.FLAT
-                           else max(0.0, min(1.0, (abs(pos0) - abs(pos1)) / abs(pos0))))
+            if forced_frac is not None:                       # operator manual close: EXACT fraction of rem_size
+                reduce_frac = max(0.0, min(1.0, forced_frac))
+                closing = reduce_frac >= 0.999                # <100% keeps the position OPEN (partial reduce)
+            else:
+                pos0 = pos1 - signed
+                reduce_frac = (1.0 if closing or abs(pos0) < config.FLAT
+                               else max(0.0, min(1.0, (abs(pos0) - abs(pos1)) / abs(pos0))))
             close_size = ep["rem_size"] * reduce_frac
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"]
             ep["rem_size"] -= close_size

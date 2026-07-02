@@ -123,16 +123,28 @@ function EquityChart({ points }) {
 
 /* ----------------------------------------------------------------- modal / confirm */
 function Confirm({ cfg, onClose }) {
+  const [pct, setPct] = useState(100);
+  useEffect(() => { if (cfg && cfg.pctPicker) setPct(100); }, [cfg]);   // reset to default (100%) each open
   if (!cfg) return null;
+  const pick = cfg.pctPicker;
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <h3>{cfg.title}</h3>
         <p>{cfg.body}</p>
+        {pick && <div style={{ margin: "4px 0 2px" }}>
+          <div className="close-pop-row">
+            {[25, 50, 75, 100].map(v => (
+              <button key={v} className={"pct-chip" + (pct === v ? " on" : "")} onClick={() => setPct(v)}>{v}%</button>
+            ))}
+          </div>
+          <p style={{ marginTop: 8 }}>平掉 {pct}% ≈ <b>{fUsd((pick.notional || 0) * pct / 100)}</b> 名义额</p>
+        </div>}
         <div className="modal-row">
           <button className="btn" onClick={onClose}>取消</button>
           <button className={"btn " + (cfg.danger ? "btn-danger" : "btn-accent")}
-            onClick={() => { cfg.onConfirm(); onClose(); }}>{cfg.ok || "确认"}</button>
+            onClick={() => { cfg.onConfirm(pick ? pct / 100 : undefined); onClose(); }}>
+            {pick ? `平仓 ${pct}%` : (cfg.ok || "确认")}</button>
         </div>
       </div>
     </div>
@@ -273,12 +285,13 @@ function Positions({ confirm, toast, streamOpen }) {
   }, [loadOpen, streamOpen]);
 
   const doClose = (p) => confirm({
-    title: "确认平仓", danger: true, ok: "平仓",
-    body: `将手动平掉 ${p.coin} ${p.side === "long" ? "多" : "空"}(名义额 ${fUsd(p.notional)})。此操作高危且不可撤销。`,
-    onConfirm: async () => {                          // button shows inline loading until done — no toast
+    title: "手动平仓", danger: true,
+    body: `平掉 ${p.coin} ${p.side === "long" ? "多" : "空"}(当前名义额 ${fUsd(p.notional)})。选择平仓比例(默认100%),不可撤销。`,
+    pctPicker: { notional: p.notional },
+    onConfirm: async (frac = 1) => {                  // button shows inline loading until done — no toast
       const pid = Number(p.id.replace("pos_", ""));
       setClosing(c => ({ ...c, [pid]: true }));
-      try { await api.cmd("close_position", { positionId: pid }); } catch (_e) {}
+      try { await api.cmd("close_position", { positionId: pid, fraction: frac }); } catch (_e) {}
       await new Promise(r => setTimeout(r, 1800));
       load();
       setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
@@ -341,8 +354,8 @@ function Positions({ confirm, toast, streamOpen }) {
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
                 <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
-                  return <button className="btn btn-danger" disabled={busy} onClick={() => doClose(p)}>
-                    {busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span className="spin" />平仓中</span> : "平仓"}</button>; })()}</td>
+                  return <button className="close-trigger" disabled={busy} onClick={() => doClose(p)}>
+                    {busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span className="spin" />平仓中</span> : "平仓"}</button>; })()}</td>
               </tr>
             ))}
           </tbody>

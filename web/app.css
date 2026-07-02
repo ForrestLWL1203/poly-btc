@@ -128,6 +128,17 @@ body {
 .btn-danger { background: rgba(255, 92, 92, .14); border-color: rgba(255, 92, 92, .3); color: var(--red-l); padding: 6px 12px; font-size: 12px; }
 .btn-danger:hover { background: rgba(255, 92, 92, .22); }
 .btn:disabled { opacity: .55; cursor: default; }
+/* compact partial-close control (small on-brand pill) + the % picker chips in the confirm modal */
+.close-trigger { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 3px 12px;
+  border-radius: 20px; font-size: 11px; font-weight: 600; font-family: var(--mono); cursor: pointer;
+  background: rgba(255, 92, 92, .12); color: var(--red-l); border: 1px solid rgba(255, 92, 92, .28); }
+.close-trigger:hover { background: rgba(255, 92, 92, .22); }
+.close-trigger:disabled { opacity: .6; cursor: default; }
+.close-pop-row { display: flex; gap: 6px; }
+.pct-chip { flex: 1; padding: 6px 0; border-radius: 8px; font-size: 12px; font-family: var(--mono); cursor: pointer;
+  background: rgba(255, 255, 255, .05); border: 1px solid var(--glass-border); color: var(--t2); }
+.pct-chip:hover { background: rgba(255, 255, 255, .1); }
+.pct-chip.on { background: rgba(255, 92, 92, .18); border-color: rgba(255, 92, 92, .5); color: var(--red-l); }
 .spin { width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
