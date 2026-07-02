@@ -1093,16 +1093,15 @@ function Settings({ startRescan, confirm, toast }) {
           const open = openTiers[g.key];
           const rows = g.keys.map(k => list.find(p => p.key === k)).filter(Boolean);
           return (
-            <div key={g.key} style={{ borderTop: "0.5px solid var(--glass-border)" }}>
-              <div onClick={() => setOpenTiers(o => ({ ...o, [g.key]: !o[g.key] }))}
-                style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 4px", cursor: "pointer" }}>
+            <div key={g.key}>
+              <div className={"expand-head" + (open ? " open" : "")} onClick={() => setOpenTiers(o => ({ ...o, [g.key]: !o[g.key] }))}>
                 <span style={{ color: "var(--t3)", width: 12 }}>{open ? "▾" : "▸"}</span>
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
                   保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]} · 加仓 {vals[g.keys[3]]}</span>}
               </div>
-              {open && rows.map(Prow)}
+              {open && <div className="expand-body">{rows.map(Prow)}</div>}
             </div>
           );
         })}

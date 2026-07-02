@@ -145,6 +145,15 @@ tr.detail-row > td { padding: 0 !important; background: rgba(255, 255, 255, .015
 .fills-tbl td { padding: 5px 10px; font-size: 12px; border-top: 1px solid var(--glass-border); }
 .fills-tbl th.num, .fills-tbl td.num { text-align: right; }
 .fill-skipped { background: rgba(255, 92, 92, .06); }
+/* reusable clickable section header for collapsible blocks (tier cards, add-strategy blocks, …) */
+.expand-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px; margin-top: 4px; cursor: pointer;
+  border-radius: 10px; background: rgba(255, 255, 255, .035); border: 1px solid var(--glass-border);
+  transition: background .15s, border-color .15s; }
+.expand-head:hover { background: rgba(255, 255, 255, .07); }
+.expand-head.open { background: rgba(255, 255, 255, .06); border-color: rgba(255, 255, 255, .12);
+  border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom-color: transparent; }
+.expand-body { border: 1px solid rgba(255, 255, 255, .12); border-top: none; border-radius: 0 0 10px 10px;
+  padding: 2px 12px 6px; background: rgba(255, 255, 255, .012); }
 .pct-chip { flex: 1; padding: 6px 0; border-radius: 8px; font-size: 12px; font-family: var(--mono); cursor: pointer;
   background: rgba(255, 255, 255, .05); border: 1px solid var(--glass-border); color: var(--t2); }
 .pct-chip:hover { background: rgba(255, 255, 255, .1); }
