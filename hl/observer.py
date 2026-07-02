@@ -890,21 +890,25 @@ class Observer:
         if m_lev and m_lev > 0:
             lev = max(self.min_lev, float(int(min(lev, m_lev))))
         async with self.acct_lock:                   # serialize margin allocation across opens
-            margin = max(0.0, self._available() * margin_pct)
-            # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
-            # the σ-tier's per-coin cap (STABLE/MID/HIGH_COIN_CAP_PCT). Stops a single move making N wallets pile the SAME way
-            # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
-            # (a wallet flips long while we hold shorts) OFFSETS our exposure, it doesn't stack it, so it
-            # must NOT be blocked. Shrink to the remaining room; skip if that side of the coin is full.
+            # EQUITY-based sizing: a copy's size = its σ-tier margin% of ACCOUNT EQUITY — NOT of the shrinking
+            # dry powder. So the same wallet edge is copied to the same size regardless of how many positions
+            # are already open (faithful replication; the old `available × pct` geometrically shrank late opens).
+            margin = max(0.0, self.balance * margin_pct)
+            # PER-COIN cap (catastrophe backstop, NOT a per-wallet tax): total margin across our open positions
+            # on this coin IN THE SAME DIRECTION ≤ the σ-tier's per-coin cap (STABLE/MID/HIGH_COIN_CAP_PCT).
+            # Bounds how much of the account one coin's single move can destroy when N wallets pile the SAME way
+            # (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal (a wallet flips long
+            # while we hold shorts) OFFSETS our exposure, it doesn't stack it, so it must NOT be blocked.
             existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                 for (a2, c2), e in self.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
             room = max(0.0, self.tier_coin_cap[self._tier(sigma, coin)]
                        * self.balance - existing_coin)   # per-σ-tier per-coin cap (volatile coins get less)
-            capped = min(margin, room)
-            if capped < self.min_open_margin_pct * self.balance:     # free balance too low OR side full
-                why = "coin_full" if room < margin else "margin_too_small"
-                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / want ${margin:,.0f})")
+            avail = self._available()                    # CASH gate: can't deploy more margin than we hold free
+            capped = min(margin, room, avail)            # equity-size, then bound by coin backstop AND free cash
+            if capped < self.min_open_margin_pct * self.balance:     # side full, out of cash, or just too small
+                why = "coin_full" if room < margin else "no_cash" if avail < margin else "margin_too_small"
+                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / cash ${avail:,.0f} / want ${margin:,.0f})")
                 self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # -> skip
                 self.db.commit()
                 self.open_ep.pop((addr, coin), None)

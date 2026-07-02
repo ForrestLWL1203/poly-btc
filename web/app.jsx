@@ -1007,8 +1007,8 @@ function Settings({ startRescan, confirm, toast }) {
 
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
   const ADD_KEYS = new Set(["FOLLOW_POS_ADD", "SMART_ADD", "ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD",
-    "STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT",
     "ADD_FRAC", "STABLE_MAX_ADDS", "MID_MAX_ADDS", "HIGH_MAX_ADDS"]);   // 归入独立「加仓策略」tab
+  //  (单币上限 STABLE/MID/HIGH_COIN_CAP_PCT 已挪回「跟单策略 · σ分档」—— 它是全局灾难闸,管开仓+加仓,不是加仓专属)
   const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const editable = (p) => !(p.type === "display" || p.level === "black");
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
@@ -1045,9 +1045,9 @@ function Settings({ startRescan, confirm, toast }) {
   };
   /* v8 三档保证金/杠杆折叠分组(否则页面太高) */
   const TIER_GROUPS = [
-    { key: "stable", label: "稳定档", sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL"] },
-    { key: "mid", label: "中档", sub: "σ 5–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL"] },
-    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币 / 高波股", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL"] },
+    { key: "stable", label: "稳定档", sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_COIN_CAP_PCT"] },
+    { key: "mid", label: "中档", sub: "σ 5–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_COIN_CAP_PCT"] },
+    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币 / 高波股", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_COIN_CAP_PCT"] },
   ];
   const tierKeys = new Set(TIER_GROUPS.flatMap(g => g.keys));
 
@@ -1112,8 +1112,7 @@ function Settings({ startRescan, confirm, toast }) {
                 {smart ? <React.Fragment>
                   {secLbl("② 智能动态(σ波动闸 + 比例镜像)")}
                   {["ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD"].map(bk).filter(Boolean).map(Prow)}
-                  {secLbl("三档·单币最大占用(加仓总预算)")}
-                  {["STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT"].map(bk).filter(Boolean).map(Prow)}
+                  <div className="muted" style={{ fontSize: 11, padding: "4px 0 6px" }}>加仓额封顶到该币「单币上限」剩余预算 —— 该上限是全局灾难闸,在「跟单策略参数 · 保证金与杠杆 σ分档」里调。</div>
                 </React.Fragment> : <React.Fragment>
                   {secLbl("① 分档硬cap(固定次数 + 固定比例)")}
                   {["ADD_FRAC", "STABLE_MAX_ADDS", "MID_MAX_ADDS", "HIGH_MAX_ADDS"].map(bk).filter(Boolean).map(Prow)}
@@ -1151,7 +1150,7 @@ function Settings({ startRescan, confirm, toast }) {
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]}</span>}
+                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]} · 单币上限 {vals[g.keys[3]]}%</span>}
               </div>
               {open && <div className="expand-body">{rows.map(Prow)}</div>}
             </div>
