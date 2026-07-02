@@ -159,6 +159,12 @@ def gates_structural(m: dict, p) -> tuple:
             return False, "grid_dca"                              # MEDIAN not MAX — one heavy DCA in the window
         #                                                           ≠ a grid bot (would kill +$65k wallets whose
         #                                                           median adds is 0). A real grid dominates most eps.
+        # ALGO-EXECUTION / 拆单: works each round-trip via dozens–hundreds of sliced fills. It's clean at the
+        # EPISODE level (few round-trips, long holds, low median adds → passes every gate above), but each of
+        # its 80+ fills/episode hits our tiny copy as a micro-fill we can't mirror (noise + fees). fills/episode
+        # is the slicing intensity the episode-level gates structurally miss.
+        if (m.get("n_fills") or 0) / m["n_trades"] > getattr(p, "max_fills_per_ep", 30):
+            return False, "hft_uncopyable"
     return True, "ok"
 
 

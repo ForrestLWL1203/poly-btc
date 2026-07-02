@@ -422,7 +422,7 @@ def ep_positions(db, qs):
             if qs.get(key):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
-                        "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,"
+                        "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,cp.master_peak_sz,"
                         "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,w.rank AS wrank FROM copy_position cp "
                         "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
                         " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
@@ -447,7 +447,7 @@ def ep_positions(db, qs):
                         "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,
                         "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
-                        "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0)})
+                        "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0)})
         # all-time stats over the FULL closed set (not just the recent-100 list above), honoring any filter
         sw = "cp.status!='open'" + ("".join(f" AND {c}=?" for c, k in
              (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")) if qs.get(k)))
@@ -487,7 +487,7 @@ def ep_positions(db, qs):
     rows = qall(db,
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
-        "cp.master_open_px,cp.master_leverage,cp.master_margin,"
+        "cp.master_open_px,cp.master_leverage,cp.master_margin,cp.master_peak_sz,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
         "FROM copy_position cp "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
@@ -516,7 +516,7 @@ def ep_positions(db, qs):
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": fpos.get(r["addr"]),
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
-            "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0),
+            "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
             "addCount": r["add_count"] or 0,
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
@@ -667,7 +667,7 @@ def ep_position_detail(db, pos_id):
     price/size, aligned with OUR response — followed (our px×qty) or NOT (a capped add we skipped shows as
     被限制). copy_action records the master's move even when we didn't follow (our_qty_delta=0)."""
     p = q1(db, "SELECT pos_id,addr,coin,side,status,entry_px,leverage,notional,size,rem_size,margin,"
-               "master_open_px,master_leverage,master_margin,realized_pnl,unrealized_pnl,was_liq,was_stopped,"
+               "master_open_px,master_leverage,master_margin,master_peak_sz,realized_pnl,unrealized_pnl,was_liq,was_stopped,"
                "add_count,opened_at,closed_at FROM copy_position WHERE pos_id=?", (pos_id,))
     if not p:
         return {"error": "not_found"}
@@ -724,7 +724,7 @@ def ep_position_detail(db, pos_id):
         "ourEntry": p["entry_px"], "ourLeverage": p["leverage"], "ourNotional": p["notional"],
         "ourSize": p["size"], "ourRemSize": p["rem_size"], "ourMargin": p["margin"],
         "masterEntry": p["master_open_px"], "masterLeverage": p["master_leverage"],
-        "masterNotional": (p["master_margin"] or 0.0) * (p["master_leverage"] or 0.0),
+        "masterNotional": (p["master_peak_sz"] or 0.0) * (p["master_open_px"] or 0.0),   # peak size × avg px = real scale
         "masterFinalPos": (acts[-1]["master_pos_after"] if acts else None),
         "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
         "ourAdds": p["add_count"], "masterAdds": m_adds, "skippedAdds": skipped,   # 我们跟了 (adds-skipped)/adds
