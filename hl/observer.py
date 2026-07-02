@@ -611,21 +611,31 @@ class Observer:
         happen while we're live — never history. Re-reads the watchlist periodically so rolling
         discovery flows in without a restart."""
         last_reload = now_ms()
+        sem = asyncio.Semaphore(config.POLL_CONCURRENCY)
+
+        async def _poll_one(addr):                 # CONCURRENT fetch — the pacer serializes each POST's SPAWN,
+            since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS   # but the network RTTs overlap
+            async with sem:
+                try:
+                    await self._poll_fills(addr, since)
+                except Exception as exc:  # noqa: BLE001 — one wallet's failure must not abort the whole round
+                    _log(f"poll_fills {addr[:10]} error: {exc}")
+
         while not self.stop:
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
                 self._reload_params()              # params FIRST (pick up UI edits) ...
                 self._reload_targets()             # ... then load targets with the fresh follow line
                 last_reload = now_ms()
-            for addr in list(self.addrs):
-                since = self.last_fill_ms.get(addr, now_ms()) - config.POLL_OVERLAP_MS
-                await self._poll_fills(addr, since)
+            await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
             await asyncio.sleep(1)                 # small breath between rounds
 
     # -- REST poll of targets' resting orders (limit ladders + TP/SL) --------
     async def poll_orders(self):
-        """Every ~5s, snapshot each target's open orders via frontendOpenOrders and persist to
-        target_orders — their INTENTIONS (maker entries, take-profit/stop levels) ahead of
-        execution. Diff-based: orders that vanish flip to 'gone'."""
+        """Every ORDER_POLL_S, snapshot each target's open orders via frontendOpenOrders and persist to
+        target_orders — their INTENTIONS (maker entries, take-profit/stop levels) ahead of execution.
+        Diff-based: orders that vanish flip to 'gone'. Display/analysis only (NOT the copy hot path), so
+        it's polled infrequently — it used to run near-continuously and steal ~half the REST budget from
+        the fill signal, roughly doubling copy LAG."""
         while not self.stop:
             for addr in list(self.addrs):
                 oo = await asyncio.to_thread(rest.post_soft, {"type": "frontendOpenOrders", "user": addr})
@@ -653,8 +663,8 @@ class Observer:
                         self.db.execute("UPDATE target_orders SET status='gone', last_seen=? "
                                         "WHERE addr=? AND oid=?", (now_iso(), addr, oid))
                 self.db.commit()
-                await asyncio.sleep(0.3)            # pace REST across wallets
-            await asyncio.sleep(5)
+            await asyncio.sleep(config.ORDER_POLL_S)   # display-only intentions → poll infrequently; the global
+            #                                            pacer already spaces the calls, so no per-wallet sleep needed
 
     # -- PRICING for builder/stock perps (WS bbo can't serve builder dexes) ---
     async def poll_stock_books(self):

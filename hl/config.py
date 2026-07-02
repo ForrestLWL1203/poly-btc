@@ -8,7 +8,7 @@ UA = {"User-Agent": "hl-copytrade/0.3", "Accept": "application/json", "Content-T
 
 # numeric
 FLAT = 1e-6                 # |position| below this (coin units) counts as flat
-MIN_POST_INTERVAL = 1.2     # global REST pace (s/POST). HL /info budget = 1200 WEIGHT/min/IP, and
+MIN_POST_INTERVAL = 1.1     # global REST pace (s/POST). HL /info budget = 1200 WEIGHT/min/IP, and
 #                             our heavy calls (userFillsByTime, frontendOpenOrders) cost weight 20
 #                             each (+1 per 20 results) — so the real ceiling is ~60 weight-20/min,
 #                             NOT a request count. 1.2s = 50/min ≈ 1000 weight/min: safely under
@@ -39,9 +39,16 @@ FOLLOW_MIN_ACTIVE_DAYS = 4  # 30d profile AND ≥ this many active days to be CO
 OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
 AUTO_SCAN_EVERY_H = 24.0   # dashboard auto-scan cadence: spawn a silent full scan this long after the last one
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
-POLL_OVERLAP_MS = 5000     # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
+POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
 #                            it) so a fill landing between poll rounds isn't missed. This is the ONLY
 #                            look-back — the observer is forward-only, it never catches up on history.
+#                            (Widened from 5s so a slower round can't slip a fill past the boundary.)
+POLL_CONCURRENCY = 10      # signal-poll fan-out: fetch this many wallets' fills concurrently. The global
+#                            pacer still spaces the SPAWN of each POST, but the network round-trips overlap
+#                            instead of running serially → a round's wall-time ≈ (N × pace), not (N × (pace+RTT)).
+ORDER_POLL_S = 60          # frontendOpenOrders (target limit-order INTENTIONS — display/analysis, NOT the copy
+#                            hot path) polled at most this often. Was ~continuous (5s) and cost 1 weight-20 call
+#                            PER wallet, stealing ~half the REST budget from the fill signal → doubled copy LAG.
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap
 #                                window; the rest is audit) — keeps the only unbounded table bounded
 
@@ -116,7 +123,10 @@ MAX_LEV = 20.0              # hard leverage cap (BTC + anything calmer pin here)
 VOL_FAST_DAYS = 7           # recent window — catches a fresh volatility regime within ~a day
 VOL_SLOW_DAYS = 30          # long baseline — stable; the floor we hold until calm is sustained
 VOL_MIN_SAMPLES = 5         # need this many daily candles, else fall back
-VOL_REFRESH_S = 3600        # re-fetch each tracked coin's σ at most this often (1h) — vol drifts slowly
+VOL_REFRESH_S = 43200       # re-fetch each tracked coin's σ at most this often (12h). σ is built from CLOSED
+#                             daily candles (today's forming candle is dropped) → it can only STEP when a day
+#                             closes, so refreshing more than a couple times a day is pure wasted REST budget.
+#                             (A newly-seen coin still gets its σ fetched immediately via _ensure_vol.)
 VOL_FALLBACK_SIGMA = 0.10   # σ when candles unavailable (new/illiquid coin) → low lev, small notional
 VOL_PREWARM_TOP = 30        # at startup, warm σ for the top-N by 24h volume in crypto + EACH builder dex
 
