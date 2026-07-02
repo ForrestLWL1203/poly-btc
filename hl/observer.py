@@ -58,7 +58,6 @@ class Observer:
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
                                   "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
-        self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.tier_max_adds = {"stable": config.STABLE_MAX_ADDS, "mid": config.MID_MAX_ADDS,
                               "high": config.HIGH_MAX_ADDS}   # per-σ-tier scale-in cap (hardcap mode)
         # ── 加仓策略引擎 (B 逆向): smart(σ波动闸+比例镜像+三档预算) vs hardcap(次数cap+ADD_FRAC) ──
@@ -182,7 +181,6 @@ class Observer:
                 if f.get(nk) is not None: self.tier_min_notional[tier] = f[nk]
                 if f.get(ak) is not None: self.tier_max_adds[tier] = int(f[ak])
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
-            if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
             if f.get("SMART_ADD") is not None: self.add_strategy = "smart" if f["SMART_ADD"] else "hardcap"
             if f.get("ADD_GAP_K") is not None: self.add_gap_k = f["ADD_GAP_K"]
             if f.get("ADD_GAP_SHRINK_G"): self.add_shrink_g = f["ADD_GAP_SHRINK_G"]
@@ -894,14 +892,14 @@ class Observer:
         async with self.acct_lock:                   # serialize margin allocation across opens
             margin = max(0.0, self._available() * margin_pct)
             # PER-COIN cap: total margin across our open positions on this coin IN THE SAME DIRECTION ≤
-            # COIN_MARGIN_CAP_PCT of the account. Stops a single move making N wallets pile the SAME way
+            # the σ-tier's per-coin cap (STABLE/MID/HIGH_COIN_CAP_PCT). Stops a single move making N wallets pile the SAME way
             # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
             # (a wallet flips long while we hold shorts) OFFSETS our exposure, it doesn't stack it, so it
             # must NOT be blocked. Shrink to the remaining room; skip if that side of the coin is full.
             existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                 for (a2, c2), e in self.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
-            room = max(0.0, self.tier_coin_cap.get(self._tier(sigma, coin), self.coin_margin_cap_pct)
+            room = max(0.0, self.tier_coin_cap[self._tier(sigma, coin)]
                        * self.balance - existing_coin)   # per-σ-tier per-coin cap (volatile coins get less)
             capped = min(margin, room)
             if capped < self.min_open_margin_pct * self.balance:     # free balance too low OR side full
@@ -996,7 +994,7 @@ class Observer:
                 # ③ 比例镜像(目标本次加仓额 ÷ 目标首仓额)× 我们首仓,封顶到该币"三档单币预算"剩余
                 ratio = (abs(signed) * master_px) / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
                 async with self.acct_lock:
-                    coin_cap = self.tier_coin_cap.get(tier, self.coin_margin_cap_pct) * self.balance
+                    coin_cap = self.tier_coin_cap[tier] * self.balance
                     existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                    for (a2, c2), e in self.open_ep.items()
                                    if c2 == coin and e.get("side") == ep["side"])   # incl THIS ep (its current margin)

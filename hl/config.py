@@ -111,8 +111,8 @@ REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge 
 #                             reduce cuts the whole accumulated ratio (self-correcting proportional mirror), and
 #                             a FULL close always executes (exact flat). If he dumps it in 2 big fills, we follow both.
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
-COIN_MARGIN_CAP_PCT = 0.20  # [legacy/stable fallback] per-COIN cap: total margin on ONE coin ≤ this frac
-#                             of the account (stops N wallets piling into the same coin/direction)
+#                           (per-coin cap now lives entirely in the σ-tiered STABLE/MID/HIGH_COIN_CAP_PCT below;
+#                           the old flat COIN_MARGIN_CAP_PCT was removed 2026-07-02 — the tiered caps fully cover it)
 
 # ═══ 加仓策略引擎(独立)═══ B 逆向加仓可选:老"硬cap"(分档次数 + ADD_FRAC) 或 新"智能动态"
 ADD_STRATEGY = "smart"       # "smart" | "hardcap"  —— B 逆向加仓的模式(A 正向加仓固定用 hardcap)

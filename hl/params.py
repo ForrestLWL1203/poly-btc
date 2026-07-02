@@ -107,8 +107,7 @@ PARAM_SPEC = [
         "启用止损", "逆向超过该币波动率就自动平仓,不陪目标死扛(默认开)"),
     ("STOP_MARGIN_PCT",      "follow",  "yellow", "pct",     "immediate", config.STOP_MARGIN_PCT * 100,
         "止损=亏损保证金%", "亏掉本仓这么多%保证金就平仓(70=亏到70%保证金,爆仓前兜底)。带杠杆自动换算逆向价格:5x→14%、3x→23%、7x→10%"),
-    ("COIN_MARGIN_CAP_PCT",  "follow",  "green",  "pct",     "immediate", config.COIN_MARGIN_CAP_PCT * 100,
-        "单币最大占用", "同一币所有仓位保证金合计上限(占账户),防过度集中"),
+    # (COIN_MARGIN_CAP_PCT removed 2026-07-02 — superseded by the σ-tiered 分档单笔上限 in the 加仓策略 tab)
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "稳定档σ上界(档位选择器)", ""),
     ("HIGH_SIGMA_MIN",       "follow",  "hidden", "pct",     "immediate", config.HIGH_SIGMA_MIN * 100, "剧烈档σ下界", ""),
