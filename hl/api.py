@@ -705,13 +705,12 @@ def ep_position_detail(db, pos_id):
             "margin": (sz * px / lev) if (px and lev) else None,   # 本金 committed on this fill
             "pnl": g["pnl"] if not entry else None,
         })
-    held = (p["rem_size"] / p["size"]) if p["size"] else 1.0
     return {
         "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"],
         "closeType": "liq" if p["was_liq"] else ("stop" if p["was_stopped"] else "mirror"),
         "masterAdds": (c["m_adds"] if c else 0) or 0, "ourAdds": (c["our_adds"] if c else 0) or 0,
         "masterEntry": p["master_open_px"], "ourEntry": p["entry_px"], "ourLeverage": lev,
-        "ourMargin": (p["margin"] or 0.0) * held,                  # 我方占用保证金(按剩余仓缩放)
+        "ourMargin": p["margin"] or 0.0,                           # 我方投入保证金(首开+加仓合计)
         "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
         "fills": fills,
     }
