@@ -128,12 +128,10 @@ body {
 .btn-danger { background: rgba(255, 92, 92, .14); border-color: rgba(255, 92, 92, .3); color: var(--red-l); padding: 6px 12px; font-size: 12px; }
 .btn-danger:hover { background: rgba(255, 92, 92, .22); }
 .btn:disabled { opacity: .55; cursor: default; }
-/* compact partial-close control (small on-brand pill) + the % picker chips in the confirm modal */
-.close-trigger { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 3px 12px;
-  border-radius: 20px; font-size: 11px; font-weight: 600; font-family: var(--mono); cursor: pointer;
-  background: rgba(255, 92, 92, .12); color: var(--red-l); border: 1px solid rgba(255, 92, 92, .28); }
-.close-trigger:hover { background: rgba(255, 92, 92, .22); }
-.close-trigger:disabled { opacity: .6; cursor: default; }
+/* compact size modifier for in-table gradient buttons (e.g. 平仓 = .btn .btn-stop .btn-sm) */
+.btn-sm { padding: 5px 12px; font-size: 12px; border-radius: 9px; gap: 5px; box-shadow: 0 3px 10px rgba(226, 82, 74, .28); }
+.btn-sm svg { width: 13px; height: 13px; }
+/* the % picker chips in the confirm modal */
 .close-pop-row { display: flex; gap: 6px; }
 .pct-chip { flex: 1; padding: 6px 0; border-radius: 8px; font-size: 12px; font-family: var(--mono); cursor: pointer;
   background: rgba(255, 255, 255, .05); border: 1px solid var(--glass-border); color: var(--t2); }

@@ -82,6 +82,7 @@ const IC = {
   settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1l-.4-2.6H9.6l-.4 2.6a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L5.1 11a7 7 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 2.6h4.8l.4-2.6a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1z",
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
   bolt: "M13 2 3 14h7l-1 8 10-12h-7z",
+  close: "M18 6 6 18M6 6l12 12",
 };
 
 /* ----------------------------------------------------------------- sparkline */
@@ -354,8 +355,8 @@ function Positions({ confirm, toast, streamOpen }) {
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
                 <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
-                  return <button className="close-trigger" disabled={busy} onClick={() => doClose(p)}>
-                    {busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><span className="spin" />平仓中</span> : "平仓"}</button>; })()}</td>
+                  return <button className="btn btn-stop btn-sm" disabled={busy} onClick={() => doClose(p)}>
+                    {busy ? <><span className="spin" />平仓中</> : <><Ico d={IC.close} />平仓</>}</button>; })()}</td>
               </tr>
             ))}
           </tbody>

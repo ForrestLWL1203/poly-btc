@@ -991,17 +991,30 @@ def make_handler(db_path, auth, static_dir=None):
                 target = base / "index.html"                # SPA fallback
                 if not target.is_file():
                     return self._send(404, {"error": "not_found"})
-            data = target.read_bytes()
+            if target.name == "index.html":
+                # Inject a cache-busting ?v=<asset mtime> onto the app.jsx/app.css refs. babel fetches
+                # app.jsx via a JS-initiated XHR, which a browser hard-refresh does NOT bypass — so a plain
+                # no-store isn't enough to shake a stale copy. A fresh URL per deploy forces the new build.
+                html = target.read_text()
+                try:
+                    ver = int(max((base / f).stat().st_mtime for f in ("app.jsx", "app.css") if (base / f).is_file()))
+                except ValueError:
+                    ver = 0
+                html = html.replace("/app.jsx", f"/app.jsx?v={ver}").replace("/app.css", f"/app.css?v={ver}")
+                data = html.encode()
+            else:
+                data = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
-            # app.jsx/app.css/index.html change on every deploy → never serve a stale copy (this was biting
-            # the operator: edits invisible until a manual hard-refresh). Vendored libs are immutable → cache hard.
-            if "/vendor/" in str(target).replace("\\", "/"):
-                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
-            else:
+            # Only index.html is uncached (it's tiny and carries the ?v=<mtime> version stamp). app.jsx/app.css
+            # are busted by that stamp on deploy, and /vendor/ is immutable → cache them ALL hard, so a normal
+            # refresh re-fetches nothing but index.html (no re-downloading assets every time).
+            if target.name == "index.html":
                 self.send_header("Cache-Control", "no-store, must-revalidate")
                 self.send_header("Pragma", "no-cache")
+            else:
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.end_headers()
             self.wfile.write(data)
 
