@@ -163,7 +163,7 @@ def gates_structural(m: dict, p) -> tuple:
         # EPISODE level (few round-trips, long holds, low median adds → passes every gate above), but each of
         # its 80+ fills/episode hits our tiny copy as a micro-fill we can't mirror (noise + fees). fills/episode
         # is the slicing intensity the episode-level gates structurally miss.
-        if (m.get("n_fills") or 0) / m["n_trades"] > getattr(p, "max_fills_per_ep", 30):
+        if (m.get("n_fills") or 0) / m["n_trades"] > getattr(p, "max_fills_per_ep", 50):
             return False, "hft_uncopyable"
     return True, "ok"
 
