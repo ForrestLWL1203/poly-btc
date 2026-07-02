@@ -87,8 +87,10 @@ PARAM_SPEC = [
     ("ADD_FRAC",             "follow",  "yellow", "pct",     "immediate", config.ADD_FRAC * 100,
         "每次加仓比例", "每次加仓额 = 首开保证金 × 此%(50=首开一半)。BTC首开3%+3次加仓 → 满仓7.5%,不是叠成12%"),
     # ── 加仓策略引擎(B 逆向加仓)—— SMART_ADD 开=智能动态,关=老分档硬cap ──
+    ("FOLLOW_POS_ADD",       "follow",  "green",  "bool",    "immediate", config.FOLLOW_POS_ADD,
+        "A·跟随正向加仓", "目标顺势加仓(拉高成本追盈利)时是否跟。默认关=不追;开=也按比例镜像跟(共用硬顶+预算)"),
     ("SMART_ADD",            "follow",  "green",  "bool",    "immediate", config.ADD_STRATEGY == "smart",
-        "智能动态加仓", "开=σ波动闸+比例镜像+三档预算(推荐);关=老的分档次数硬cap"),
+        "B·智能动态加仓", "开=σ波动闸+比例镜像+三档预算(推荐);关=老的分档次数硬cap"),
     ("ADD_GAP_K",            "follow",  "yellow", "float",   "immediate", config.ADD_GAP_K,
         "波动闸系数k", "只有目标加仓相对我们上次加仓价 逆向移动 ≥ k×该币σ 才跟(数据标定0.15利润最大;调大→更少更精的加仓)"),
     ("ADD_GAP_SHRINK_G",     "follow",  "yellow", "float",   "immediate", config.ADD_GAP_SHRINK_G,

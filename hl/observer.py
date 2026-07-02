@@ -66,6 +66,7 @@ class Observer:
         self.add_gap_k = config.ADD_GAP_K                       # 波动闸 x = k×σ
         self.add_shrink_g = config.ADD_GAP_SHRINK_G             # 每加一次 x×此
         self.add_max_hard = config.ADD_MAX_HARD                 # smart 硬顶
+        self.follow_pos_add = config.FOLLOW_POS_ADD             # A 正向加仓开关(默认关=不追盈利加仓)
         self.tier_coin_cap = {"stable": config.STABLE_COIN_CAP_PCT, "mid": config.MID_COIN_CAP_PCT,
                               "high": config.HIGH_COIN_CAP_PCT}  # 三档单币最大保证金占用%
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
@@ -186,6 +187,7 @@ class Observer:
             if f.get("ADD_GAP_K") is not None: self.add_gap_k = f["ADD_GAP_K"]
             if f.get("ADD_GAP_SHRINK_G"): self.add_shrink_g = f["ADD_GAP_SHRINK_G"]
             if f.get("ADD_MAX_HARD") is not None: self.add_max_hard = int(f["ADD_MAX_HARD"])
+            if f.get("FOLLOW_POS_ADD") is not None: self.follow_pos_add = bool(f["FOLLOW_POS_ADD"])
             for tier, ck in (("stable", "STABLE_COIN_CAP_PCT"), ("mid", "MID_COIN_CAP_PCT"), ("high", "HIGH_COIN_CAP_PCT")):
                 if f.get(ck) is not None: self.tier_coin_cap[tier] = f[ck]
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
@@ -979,11 +981,17 @@ class Observer:
                 self.db.commit()
 
             if self.add_strategy == "smart":
-                # ① 波动闸: 相对我们上次加仓价的逆向移动 ≥ x = k×σ×(g^已加次数)。噪声微加(<x)跳过,越加门槛越高。
+                # 逆向(adv>0=价格朝我们不利方向,摊低)走波动闸;正向(adv<0=顺势加仓)走 A 开关。
                 last = ep.get("last_add_px") or ep["entry_px"]
                 adv = (((last - master_px) if is_buy else (master_px - last)) / last) if last else 0.0
                 x = self.add_gap_k * sigma * (self.add_shrink_g ** ep["add_count"])
-                if adv < x or ep["add_count"] >= self.add_max_hard:      # 波动不够 / 硬顶 → 只观察
+                if adv >= x:                                     # ① B 逆向:摊低幅度够 → 跟
+                    pass
+                elif adv < 0 and self.follow_pos_add:            # A 正向:顺势加仓且开关开 → 跟(共用比例+预算)
+                    pass
+                else:                                            # 逆向但幅度不够 / 正向但A关 → 只观察
+                    return _observe_only()
+                if ep["add_count"] >= self.add_max_hard:         # 硬顶(A/B 共用)
                     return _observe_only()
                 # ③ 比例镜像(目标本次加仓额 ÷ 目标首仓额)× 我们首仓,封顶到该币"三档单币预算"剩余
                 ratio = (abs(signed) * master_px) / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac

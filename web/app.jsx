@@ -999,7 +999,10 @@ function Settings({ startRescan, confirm, toast }) {
   }, []);
 
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
-  const list = params[tab];
+  const ADD_KEYS = new Set(["FOLLOW_POS_ADD", "SMART_ADD", "ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD",
+    "STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT",
+    "ADD_FRAC", "STABLE_MAX_ADDS", "MID_MAX_ADDS", "HIGH_MAX_ADDS"]);   // 归入独立「加仓策略」tab
+  const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const editable = (p) => !(p.type === "display" || p.level === "black");
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
   const tabDirty = list.filter(p => dirty[p.key]);
@@ -1035,9 +1038,9 @@ function Settings({ startRescan, confirm, toast }) {
   };
   /* v8 三档保证金/杠杆折叠分组(否则页面太高) */
   const TIER_GROUPS = [
-    { key: "stable", label: "稳定档", sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"] },
-    { key: "mid", label: "中档", sub: "σ 5–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"] },
-    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币 / 高波股", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS"] },
+    { key: "stable", label: "稳定档", sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL"] },
+    { key: "mid", label: "中档", sub: "σ 5–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL"] },
+    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币 / 高波股", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL"] },
   ];
   const tierKeys = new Set(TIER_GROUPS.flatMap(g => g.keys));
 
@@ -1046,9 +1049,10 @@ function Settings({ startRescan, confirm, toast }) {
     const doIt = async () => {
       setSaving(true);                                  // 短暂全页 loading 代替右上角 tooltip
       const t0 = Date.now();
-      try { await fetch("/api/params/" + tab, { method: "PATCH", headers: { Authorization: "Bearer " + api.token }, body: JSON.stringify(body) }); } catch (_e) {}
+      const cat = tab === "add" ? "follow" : tab;              // 加仓参数在后端属 follow 类
+      try { await fetch("/api/params/" + cat, { method: "PATCH", headers: { Authorization: "Bearer " + api.token }, body: JSON.stringify(body) }); } catch (_e) {}
       setDirty({});
-      if (tab === "follow") { try { await api.cmd("reload_params", {}); } catch (_e) {} }  // 运行中的 observer ~1.5s 内按新参数/新线生效
+      if (tab === "follow" || tab === "add") { try { await api.cmd("reload_params", {}); } catch (_e) {} }  // observer ~1.5s 内生效
       await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));   // 让 loading 可感知
       setSaving(false);
       if (tab === "scanner") startRescan();             // 重采有自己的整页遮罩接管
@@ -1065,12 +1069,53 @@ function Settings({ startRescan, confirm, toast }) {
       <div className="tabs">
         <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
+        <div className={"tab" + (tab === "add" ? " on" : "")} onClick={() => setTab("add")}>加仓策略</div>
       </div>
 
       {tab === "follow" && <SizingPreview vals={vals} />}
 
       <div className="tbl-wrap">
-        {list.filter(p => !(tab === "follow" && tierKeys.has(p.key))).map(p => {
+        {tab === "add" && (() => {
+          const bk = k => list.find(p => p.key === k);
+          const smart = !!vals.SMART_ADD, bOpen = openTiers.B === undefined ? true : openTiers.B;
+          const secLbl = t => <div className="muted" style={{ fontSize: 11, padding: "8px 0 2px", fontWeight: 600, color: "var(--t2)" }}>{t}</div>;
+          return <React.Fragment>
+            <div className="psec-h">加仓策略 · 独立于跟单/采集<span>目标加仓时:我们是否跟、跟多少、跟几次。逆向摊低是重点。</span></div>
+            <div>
+              <div className={"expand-head" + (openTiers.A ? " open" : "")} onClick={() => setOpenTiers(o => ({ ...o, A: !o.A }))}>
+                <span style={{ color: "var(--t3)", width: 12 }}>{openTiers.A ? "▾" : "▸"}</span>
+                <span className="pill tint-green">A · 正向加仓</span>
+                <span className="muted" style={{ fontSize: 12 }}>盈利单顺势加仓、拉高成本追更大利润</span>
+                {!openTiers.A && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>{vals.FOLLOW_POS_ADD ? "跟随" : "不跟(默认)"}</span>}
+              </div>
+              {openTiers.A && <div className="expand-body">
+                {[bk("FOLLOW_POS_ADD")].filter(Boolean).map(Prow)}
+                <div className="muted" style={{ fontSize: 11, padding: "2px 0 6px" }}>正向较简单:开启后按「比例镜像 + 硬顶 + 三档预算」跟,不用波动闸。</div>
+              </div>}
+            </div>
+            <div>
+              <div className={"expand-head" + (bOpen ? " open" : "")} onClick={() => setOpenTiers(o => ({ ...o, B: !(o.B === undefined ? true : o.B) }))}>
+                <span style={{ color: "var(--t3)", width: 12 }}>{bOpen ? "▾" : "▸"}</span>
+                <span className="pill tint-red">B · 逆向加仓(摊低)</span>
+                <span className="muted" style={{ fontSize: 12 }}>目标逆势摊低成本 —— 我们如何跟(二选一)</span>
+                {!bOpen && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>{smart ? "② 智能动态" : "① 分档硬cap"}</span>}
+              </div>
+              {bOpen && <div className="expand-body">
+                {[bk("SMART_ADD")].filter(Boolean).map(Prow)}
+                {smart ? <React.Fragment>
+                  {secLbl("② 智能动态(σ波动闸 + 比例镜像)")}
+                  {["ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD"].map(bk).filter(Boolean).map(Prow)}
+                  {secLbl("三档·单币最大占用(加仓总预算)")}
+                  {["STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT"].map(bk).filter(Boolean).map(Prow)}
+                </React.Fragment> : <React.Fragment>
+                  {secLbl("① 分档硬cap(固定次数 + 固定比例)")}
+                  {["ADD_FRAC", "STABLE_MAX_ADDS", "MID_MAX_ADDS", "HIGH_MAX_ADDS"].map(bk).filter(Boolean).map(Prow)}
+                </React.Fragment>}
+              </div>}
+            </div>
+          </React.Fragment>;
+        })()}
+        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || ADD_KEYS.has(p.key)))).map(p => {
           if (tab === "follow" && p.key === "MIN_FOLLOW_SCORE") {
             const v = Number(vals.MIN_FOLLOW_SCORE);
             const n = scoreDist ? scoreDist.scores.filter(s => s >= v).length : null;
@@ -1099,7 +1144,7 @@ function Settings({ startRescan, confirm, toast }) {
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]} · 加仓 {vals[g.keys[3]]}</span>}
+                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]}</span>}
               </div>
               {open && <div className="expand-body">{rows.map(Prow)}</div>}
             </div>
