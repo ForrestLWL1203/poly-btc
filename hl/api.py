@@ -45,6 +45,16 @@ def score100(raw):
     return round(min(max(raw, 0.0), 1.0) * 100, 1)
 
 
+def recent_roi_pct(week_roi, mon_roi):
+    """Dashboard ROI column = the SAME recent return-on-capital the SCORE's ROI pillar uses: a weighted
+    blend of HL week/month roi (net/本金, deposit-adjusted; all-time excluded — copy only cares about
+    recent form). Shown raw (unclipped) — the score clips each window to +100% only to stop a single
+    window flying away; the display shows the true recent return so the ROI column explains the ranking."""
+    parts = [(config.ROI_W_WEEK, week_roi), (config.ROI_W_MON, mon_roi)]
+    w = sum(wt for wt, v in parts if v is not None)
+    return (sum(wt * v for wt, v in parts if v is not None) / w * 100.0) if w else 0.0
+
+
 def score_from100(disp):
     """Inverse of score100 — UI 0–100 -> native [0,1] before writing MIN_FOLLOW_SCORE."""
     if disp is None:
@@ -531,9 +541,11 @@ def ep_wallets(db, qs=None):
     if (qs.get("tab", ["followed"]))[0] == "dropped":
         rows = qall(db,
             "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,p.score,p.status,p.reason,"
-            "p.market_type,p.win_rate,p.roi_equity,p.net_pnl,p.avg_notional,p.roi_total,p.top_coin,w.rank AS rank "
+            "p.market_type,p.win_rate,p.roi_equity,p.net_pnl,p.avg_notional,p.roi_total,p.top_coin,w.rank AS rank,"
+            "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
+            "LEFT JOIN leaderboard l ON l.addr=fh.addr "
             "WHERE NOT (p.status='active' AND p.score >= ?) ORDER BY fh.last_followed_at DESC", (line_native,))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
@@ -543,7 +555,7 @@ def ep_wallets(db, qs=None):
                 "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
                 "bot_frequency": "高频", "hft_uncopyable": "高频", "spot_dominant": "现货为主"}.get(r["reason"], r["reason"] or "淘汰")),
             "winRatePct": (r["win_rate"] or 0.0) * 100,
-            "roiEqPct": (r["net_pnl"] or 0.0) / max(r["avg_notional"] or 0.0, config.ROI_NOTL_FLOOR) * 100,
+            "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),   # recent HL ROI (matches score)
             "mainCoin": r["top_coin"],
         } for r in rows]
         return {"followLine": score100(line_native), "total": len(out), "tab": "dropped", "wallets": out}
@@ -553,7 +565,7 @@ def ep_wallets(db, qs=None):
     rows = qall(db,
         "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.net_pnl,w.win_rate,w.top_coin,"
         "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,w.n_trades,"
-        "pr.worst_loss_pct,pr.median_adds_per_ep,pr.active_days,pr.avg_notional,"
+        "pr.worst_loss_pct,pr.median_adds_per_ep,pr.active_days,pr.avg_notional,l.week_roi,l.mon_roi,"
         "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr AND e.close_ms >= ?) AS closed_7d,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
         "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
@@ -562,6 +574,7 @@ def ep_wallets(db, qs=None):
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
+        "LEFT JOIN leaderboard l ON l.addr=w.addr "
         "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
     # Partition by the evidence floor (mirrors observer.load_targets) so the list == what we ACTUALLY copy:
     #   FOLLOWED (tab 'followed') = score≥line AND clears the floor → the real copy set, numbered 1..N by
@@ -585,8 +598,8 @@ def ep_wallets(db, qs=None):
             "evidenceHeld": tab == "observing",  # this tab's rows are the held-back set
             "followPos": (page * size + i + 1) if tab != "observing" else None,   # 1..N position in the copy set
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
-            "score": score100(r["score"] or 0.0),   # ROI shown = net ÷ 名义额 (the score's edge metric, withdrawal-immune)
-            "roiEqPct": (r["net_pnl"] or 0.0) / max(r["avg_notional"] or 0.0, config.ROI_NOTL_FLOOR) * 100,
+            "score": score100(r["score"] or 0.0),   # ROI shown = recent HL 收益/本金 (周+月),与评分 ROI 支柱同口径
+            "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
             "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
