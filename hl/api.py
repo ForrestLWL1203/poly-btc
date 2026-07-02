@@ -423,7 +423,7 @@ def ep_positions(db, qs):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                         "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,"
-                        "cp.was_stopped,cp.was_liq,cp.addr,w.rank AS wrank FROM copy_position cp "
+                        "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,w.rank AS wrank FROM copy_position cp "
                         "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
                         " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
         fpos = _follow_positions(db)
@@ -444,7 +444,7 @@ def ep_positions(db, qs):
                         "closeType": "liq" if r["was_liq"] else ("stop" if r["was_stopped"] else "mirror"),
                         "walletRank": r["wrank"],   # wrank None = 已脱榜
                         "followPos": fpos.get(r["addr"]),   # 1..N in the copy set (None = 现在不在跟单集)
-                        "entry": r["entry_px"], "closePx": close_px,
+                        "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,
                         "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
                         "masterNotional": (r["master_margin"] or 0.0) * (r["master_leverage"] or 0.0)})

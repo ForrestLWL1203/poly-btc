@@ -424,7 +424,8 @@ function History() {
                 {rows.length === 0 && <tr><td colSpan="11" className="empty">暂无</td></tr>}
                 {items.map(p => (
                   <tr key={p.id}>
-                    <td><b>{p.coin}</b></td>
+                    <td><b>{p.coin}</b>
+                      {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数">加仓{p.addCount}</span>}</td>
                     <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                     <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
                       <div className="muted" title="源(目标钱包)的开仓价 · 杠杆">源 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
