@@ -274,6 +274,14 @@ function Positions({ confirm, toast, streamOpen }) {
   const [filter, setFilter] = useState("all");
   const [opage, setOpage] = useState(0);             // open positions page (20/page)
   const [pnlSort, setPnlSort] = useState(null);      // null = 默认(新开在前) | "asc" 浮亏在前 | "desc" 浮盈在前
+  const [expandedId, setExpandedId] = useState(null); // pos_id expanded to its detail
+  const [details, setDetails] = useState({});
+  const toggleRow = (rowId) => {
+    const pid = Number(String(rowId).replace("pos_", ""));
+    if (expandedId === pid) { setExpandedId(null); return; }
+    setExpandedId(pid);
+    if (!details[pid]) api.get(`/api/positions/${pid}`).then(d => setDetails(m => ({ ...m, [pid]: d }))).catch(() => {});
+  };
   const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
   // 浮动盈亏 表头点击循环:默认(新开在前) → 浮亏在前 → 浮盈在前 → 默认
   const cyclePnlSort = () => { setPnlSort(d => d === null ? "asc" : d === "asc" ? "desc" : null); setOpage(0); };
@@ -333,9 +341,10 @@ function Positions({ confirm, toast, streamOpen }) {
           <tbody>
             {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
             {open && openRows.length === 0 && <tr><td colSpan="10" className="empty">无持仓</td></tr>}
-            {openItems.map(p => (
-              <tr key={p.id}>
-                <td><span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b>
+            {openItems.map(p => { const pid = Number(String(p.id).replace("pos_", "")); const isOpen = expandedId === pid;
+              return <React.Fragment key={p.id}>
+              <tr onClick={() => toggleRow(p.id)} style={{ cursor: "pointer" }} className={isOpen ? "row-open" : ""}>
+                <td><span className="row-caret" style={{ transform: isOpen ? "rotate(90deg)" : "none" }}>▸</span> <span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b>
                   <a className="ext-link" href={"https://app.hyperliquid.xyz/trade/" + p.coin}
                      target="_blank" rel="noopener noreferrer" title="在 Hyperliquid 看K线" onClick={e => e.stopPropagation()}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -355,10 +364,11 @@ function Positions({ confirm, toast, streamOpen }) {
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
                 <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
-                  return <button className="btn btn-stop btn-sm" disabled={busy} onClick={() => doClose(p)}>
+                  return <button className="btn btn-stop btn-sm" disabled={busy} onClick={e => { e.stopPropagation(); doClose(p); }}>
                     {busy ? <><span className="spin" />平仓中</> : <><Ico d={IC.close} />平仓</>}</button>; })()}</td>
               </tr>
-            ))}
+              {isOpen && <tr className="detail-row"><td colSpan="10"><PositionDetail d={details[pid]} /></td></tr>}
+              </React.Fragment>; })}
           </tbody>
         </table>
       </div>
@@ -377,38 +387,35 @@ function Positions({ confirm, toast, streamOpen }) {
 const CLOSE_TYPE = { mirror: { label: "镜像", tint: "tint-blue" }, stop: { label: "止损", tint: "tint-amber" }, liq: { label: "爆仓", tint: "tint-red" } };
 const ACT_TINT = { 开仓: "tint-green", 加仓: "tint-blue", 减仓: "tint-amber", 平仓: "tint-gray" };
 function PositionDetail({ d }) {
+  if (!d) return <div className="muted" style={{ padding: "14px 16px" }}>加载中…</div>;
   const live = d.status === "open";
   const pnl = live ? d.unrealizedPnl : d.realizedPnl;
   return (
     <div className="pos-detail">
       <div className="pos-detail-sum">
-        <span>我们均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>
-        <span>源均价 <b>{fPrice(d.masterEntry)}</b> · {fNum(d.masterLeverage, 0)}x</span>
-        <span>加仓 我们 <b>{d.ourAdds}</b> / 目标 <b>{d.masterAdds}</b>
-          {d.skippedAdds > 0 && <span className="down"> · 因上限没跟 {d.skippedAdds} 笔 ✗</span>}</span>
+        <span>目标加仓 <b>{d.masterAdds}</b> 次 · 我们跟 <b>{d.ourAdds}</b> 次</span>
+        <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b></span>
+        <span>我方成本均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>
+        <span>我方占用保证金 <b>{fUsd(d.ourMargin)}</b></span>
         <span>{live ? "浮动" : "已实现"}盈亏 <b className={cls(pnl)}>{fSign(pnl, 1)}</b></span>
       </div>
+      <div className="muted" style={{ fontSize: 11, margin: "2px 0 5px" }}>我们的成交记录:</div>
       <table className="fills-tbl">
-        <thead><tr>
-          <th>时间</th><th>动作</th>
-          <th className="num">源 · 价 × 量</th><th className="num">源累计仓</th>
-          <th className="num">我们 · 价 × 量</th><th className="num">该笔盈亏</th><th className="num">滑点</th>
-        </tr></thead>
-        <tbody>{d.fills.map((f, i) => (
-          <tr key={i} className={f.skipped ? "fill-skipped" : ""}>
-            <td className="mono muted">{fTime(f.atSec)}</td>
-            <td><span className={"tint " + (ACT_TINT[f.actionLabel] || "tint-gray")}>{f.actionLabel}</span>
-              {f.fillCount > 1 && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }} title="该订单分多笔成交">×{f.fillCount}笔</span>}
-              {f.maker && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }}>挂单</span>}</td>
-            <td className="num">{fPrice(f.masterPx)} <span className="muted">× {fNum(f.masterSz, 2)}</span></td>
-            <td className="num muted">{fNum(f.masterPosAfter, 1)}</td>
-            <td className="num">{f.followed
-              ? <span>{fPrice(f.ourPx)} <span className="muted">× {fNum(f.ourSz, 2)}</span></span>
-              : <span className="down" title="因加仓上限,我们没有跟这一笔">✗ 被限制</span>}</td>
-            <td className={"num " + (f.pnl != null ? cls(f.pnl) : "")}>{f.pnl != null ? fSign(f.pnl, 1) : "—"}</td>
-            <td className="num muted">{f.followed && f.slippageBps != null ? fNum(f.slippageBps, 0) + "bp" : "—"}</td>
-          </tr>
-        ))}</tbody>
+        <thead><tr><th>时间</th><th>动作</th><th className="num">价格</th><th className="num">本金</th><th className="num">数量</th><th className="num">盈亏</th></tr></thead>
+        <tbody>
+          {d.fills.length === 0 && <tr><td colSpan="6" className="muted" style={{ padding: "6px 8px" }}>暂无成交</td></tr>}
+          {d.fills.map((f, i) => (
+            <tr key={i}>
+              <td className="mono muted">{fTime(f.atSec)}</td>
+              <td><span className={"tint " + (ACT_TINT[f.actionLabel] || "tint-gray")}>{f.actionLabel}</span>
+                {f.fillCount > 1 && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }} title="该订单分多笔成交">×{f.fillCount}</span>}</td>
+              <td className="num">{fPrice(f.px)}</td>
+              <td className="num">{fUsd(f.margin)}</td>
+              <td className="num muted">{fNum(f.qty, 2)}</td>
+              <td className={"num " + (f.pnl != null ? cls(f.pnl) : "")}>{f.pnl != null ? fSign(f.pnl, 1) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
       </table>
     </div>
   );

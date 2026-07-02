@@ -663,72 +663,56 @@ def ep_wallet_detail(db, addr, qs=None):
 
 
 def ep_position_detail(db, pos_id):
-    """Per-position fill-by-fill breakdown: every observed MASTER action (open/add/reduce/close) with its
-    price/size, aligned with OUR response — followed (our px×qty) or NOT (a capped add we skipped shows as
-    被限制). copy_action records the master's move even when we didn't follow (our_qty_delta=0)."""
-    p = q1(db, "SELECT pos_id,addr,coin,side,status,entry_px,leverage,notional,size,rem_size,margin,"
-               "master_open_px,master_leverage,master_margin,master_peak_sz,realized_pnl,unrealized_pnl,was_liq,was_stopped,"
-               "add_count,opened_at,closed_at FROM copy_position WHERE pos_id=?", (pos_id,))
+    """Compact per-position detail: a SUMMARY (target add count, target & our avg entry, our margin, PnL)
+    plus ONLY OUR OWN fills (open/add/reduce/close we actually took). We no longer dump the target's full
+    timeline — some wallets slice into hundreds of fills. Efficient: 2 aggregate queries + fetch only our
+    handful of fills (idx_ca_pos on copy_action(pos_id))."""
+    p = q1(db, "SELECT pos_id,coin,side,status,entry_px,leverage,margin,size,rem_size,master_open_px,"
+               "realized_pnl,unrealized_pnl,was_liq,was_stopped,opened_at,closed_at FROM copy_position WHERE pos_id=?", (pos_id,))
     if not p:
         return {"error": "not_found"}
-    acts = qall(db, "SELECT ts,action,maker,master_px,master_sz_delta,master_pos_after,our_qty_delta,our_px,"
-                    "realized_pnl,slippage_bps,master_oid FROM copy_action WHERE pos_id=? ORDER BY ts,act_id", (pos_id,))
+    lev = p["leverage"] or 1.0
+    # counts only (no row fetch): target's distinct add ORDERS, and how many of them WE followed
+    c = q1(db, "SELECT COUNT(DISTINCT CASE WHEN action='add' THEN master_oid END) m_adds, "
+               "COUNT(DISTINCT CASE WHEN action='add' AND ABS(our_qty_delta)>1e-12 THEN master_oid END) our_adds "
+               "FROM copy_action WHERE pos_id=?", (pos_id,))
+    # OUR fills only (we actually traded) — a handful of rows; group same-order slices into one line
+    acts = qall(db, "SELECT ts,action,our_px,our_qty_delta,realized_pnl,master_oid FROM copy_action "
+                    "WHERE pos_id=? AND ABS(our_qty_delta) > 1e-12 ORDER BY ts,act_id", (pos_id,))
     ACT = {"open": "开仓", "add": "加仓", "reduce": "减仓", "close": "平仓"}
-    # AGGREGATE BY ORDER (master_oid): a single master limit order fills in many slices — HL returns each
-    # slice as its own fill, so raw copy_action can hold dozens of rows for ONE order. Collapse per oid into
-    # one logical row (Σsize, size-weighted avg px, Σpnl, ×N fills). None-oid rows never merge.
     groups = {}
     for a in acts:
-        oid = a["master_oid"]
-        key = oid if oid is not None else f"_n{a['ts']}_{a['act_id'] if 'act_id' in a.keys() else id(a)}"
+        key = a["master_oid"] if a["master_oid"] is not None else f"_n{a['ts']}"
         g = groups.get(key)
         if g is None:
-            g = {"action": a["action"], "maker": bool(a["maker"]), "ts": a["ts"], "mpx_n": 0.0, "m_sz": 0.0,
-                 "opx_n": 0.0, "o_sz": 0.0, "pnl": 0.0, "pos_after": a["master_pos_after"], "n": 0,
-                 "slip_n": 0.0, "slip_w": 0.0}
+            g = {"action": a["action"], "ts": a["ts"], "px_n": 0.0, "sz": 0.0, "pnl": 0.0, "n": 0}
             groups[key] = g
-        m_sz = abs(a["master_sz_delta"] or 0.0)
-        o_sz = abs(a["our_qty_delta"] or 0.0)
-        g["mpx_n"] += (a["master_px"] or 0.0) * m_sz
-        g["m_sz"] += m_sz
-        g["opx_n"] += (a["our_px"] or 0.0) * o_sz
-        g["o_sz"] += o_sz
+        sz = abs(a["our_qty_delta"] or 0.0)
+        g["px_n"] += (a["our_px"] or 0.0) * sz
+        g["sz"] += sz
         g["pnl"] += a["realized_pnl"] or 0.0
-        g["pos_after"] = a["master_pos_after"]            # last slice wins (time-ordered)
-        g["slip_n"] += (a["slippage_bps"] or 0.0) * o_sz
-        g["slip_w"] += o_sz
         g["n"] += 1
-        if a["action"] == "close":                        # a reduce order that flattens shares its oid → label 平仓
+        if a["action"] == "close":
             g["action"] = "close"
-    fills, m_adds, skipped = [], 0, 0
+    fills = []
     for g in groups.values():
-        m_sz, o_sz = g["m_sz"], g["o_sz"]
-        followed = o_sz > 1e-9
-        is_entry = g["action"] in ("open", "add")
-        if g["action"] == "add":
-            m_adds += 1
-            if not followed:
-                skipped += 1
+        sz = g["sz"]
+        px = (g["px_n"] / sz) if sz else None
+        entry = g["action"] in ("open", "add")
         fills.append({
             "atSec": (g["ts"] or 0) / 1000.0, "action": g["action"], "actionLabel": ACT.get(g["action"], g["action"]),
-            "maker": g["maker"], "fillCount": g["n"],
-            "masterPx": (g["mpx_n"] / m_sz) if m_sz else None, "masterSz": m_sz, "masterPosAfter": g["pos_after"],
-            "followed": followed, "ourPx": (g["opx_n"] / o_sz) if followed else None, "ourSz": o_sz if followed else None,
-            "skipped": is_entry and not followed,                 # a master entry/add we did NOT mirror (cap)
-            "pnl": g["pnl"] if g["action"] in ("reduce", "close") else None,
-            "slippageBps": (g["slip_n"] / g["slip_w"]) if g["slip_w"] else None,
+            "fillCount": g["n"], "px": px, "qty": sz,
+            "margin": (sz * px / lev) if (px and lev) else None,   # 本金 committed on this fill
+            "pnl": g["pnl"] if not entry else None,
         })
-    close_type = "liq" if p["was_liq"] else ("stop" if p["was_stopped"] else "mirror")
+    held = (p["rem_size"] / p["size"]) if p["size"] else 1.0
     return {
-        "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"], "closeType": close_type,
-        "ourEntry": p["entry_px"], "ourLeverage": p["leverage"], "ourNotional": p["notional"],
-        "ourSize": p["size"], "ourRemSize": p["rem_size"], "ourMargin": p["margin"],
-        "masterEntry": p["master_open_px"], "masterLeverage": p["master_leverage"],
-        "masterNotional": (p["master_peak_sz"] or 0.0) * (p["master_open_px"] or 0.0),   # peak size × avg px = real scale
-        "masterFinalPos": (acts[-1]["master_pos_after"] if acts else None),
+        "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"],
+        "closeType": "liq" if p["was_liq"] else ("stop" if p["was_stopped"] else "mirror"),
+        "masterAdds": (c["m_adds"] if c else 0) or 0, "ourAdds": (c["our_adds"] if c else 0) or 0,
+        "masterEntry": p["master_open_px"], "ourEntry": p["entry_px"], "ourLeverage": lev,
+        "ourMargin": (p["margin"] or 0.0) * held,                  # 我方占用保证金(按剩余仓缩放)
         "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
-        "ourAdds": p["add_count"], "masterAdds": m_adds, "skippedAdds": skipped,   # 我们跟了 (adds-skipped)/adds
-        "openedAt": _iso_epoch(p["opened_at"]), "closedAt": _iso_epoch(p["closed_at"]),
         "fills": fills,
     }
 

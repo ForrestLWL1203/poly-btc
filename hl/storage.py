@@ -272,6 +272,7 @@ CREATE TABLE IF NOT EXISTS copy_action (
 );
 CREATE INDEX IF NOT EXISTS idx_ca_oid ON copy_action(master_oid);
 CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
+CREATE INDEX IF NOT EXISTS idx_ca_pos_act ON copy_action(pos_id, action, act_id);  -- per-pos action filter + ordered detail
 
 -- Target wallets' RESTING orders (limit ladders + TP/SL triggers), captured by a REST
 -- poller of frontendOpenOrders (zero WS-slot cost). Reveals their intentions BEFORE
