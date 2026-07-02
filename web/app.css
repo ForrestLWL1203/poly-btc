@@ -129,8 +129,8 @@ body {
 .btn-danger:hover { background: rgba(255, 92, 92, .22); }
 .btn:disabled { opacity: .55; cursor: default; }
 /* compact size modifier for in-table gradient buttons (e.g. 平仓 = .btn .btn-stop .btn-sm) */
-.btn-sm { padding: 5px 12px; font-size: 12px; border-radius: 9px; gap: 5px; box-shadow: 0 3px 10px rgba(226, 82, 74, .28); }
-.btn-sm svg { width: 13px; height: 13px; }
+.btn-sm { padding: 2px 8px; font-size: 10.5px; border-radius: 7px; gap: 3px; box-shadow: 0 2px 6px rgba(226, 82, 74, .22); }
+.btn-sm svg { width: 11px; height: 11px; }
 /* the % picker chips in the confirm modal */
 .close-pop-row { display: flex; gap: 6px; }
 .pct-chip { flex: 1; padding: 6px 0; border-radius: 8px; font-size: 12px; font-family: var(--mono); cursor: pointer;
