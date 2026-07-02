@@ -1035,7 +1035,7 @@ function Settings({ startRescan, confirm, toast }) {
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]}</span>}
+                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]} · 加仓 {vals[g.keys[3]]}</span>}
               </div>
               {open && rows.map(Prow)}
             </div>
