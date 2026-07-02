@@ -53,7 +53,11 @@ INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
 ADD_FRAC = 0.5              # each follow-on ADD commits this fraction of the position's FIRST-OPEN margin
 #                             (NOT the tier margin% again — so BTC 3% first + 3×(3%·0.5) = 7.5% max, not 12%).
 #                             One knob, auto-scales per tier off each position's own first entry.
-MAX_ADDS = 3                # follow the master's scale-ins up to this many adds/position (each = first×ADD_FRAC)
+# max follow-on ADDS per position — PER σ-TIER (a volatile coin shouldn't pile into a huge position via
+# repeated averaging). Each add = first-open margin × ADD_FRAC. UI-tunable per tier.
+STABLE_MAX_ADDS = 3         # BTC/majors calm → OK to keep averaging in
+MID_MAX_ADDS    = 2         # ETH/SOL/HYPE
+HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't build size on a wild coin; 0 = never add)
 
 # v8 SIZING (2026-06-30). Three VOLATILITY TIERS (by daily σ = high-low range, see volatility.py); each
 # tier has its own margin% + leverage cap; WITHIN a tier, leverage scales continuously with σ. σ classifies

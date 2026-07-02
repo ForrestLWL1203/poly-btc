@@ -59,7 +59,8 @@ class Observer:
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
                                   "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
-        self.max_adds = config.MAX_ADDS
+        self.tier_max_adds = {"stable": config.STABLE_MAX_ADDS, "mid": config.MID_MAX_ADDS,
+                              "high": config.HIGH_MAX_ADDS}   # per-σ-tier scale-in cap
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
         # 扛单 copy-side stop: MARGIN-based catastrophe cut (v10). UI-tunable via _reload_params.
@@ -165,15 +166,15 @@ class Observer:
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
-            for tier, mk, lk, nk in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL"),
-                                     ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL"),
-                                     ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL")):
+            for tier, mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
+                                         ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"),
+                                         ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS")):
                 if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
                 if f.get(lk): self.tier_lev_cap[tier] = f[lk]
                 if f.get(nk) is not None: self.tier_min_notional[tier] = f[nk]
+                if f.get(ak) is not None: self.tier_max_adds[tier] = int(f[ak])
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
-            if f.get("MAX_ADDS") is not None: self.max_adds = int(f["MAX_ADDS"])
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
@@ -924,7 +925,8 @@ class Observer:
             if m_now > 0 and master_px and ep.get("master_open_px"):
                 m_prev = abs(pos1 - signed)           # 目标加仓前的仓位量
                 ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * master_px) / m_now
-            if ep["add_count"] >= self.max_adds:      # cap reached — observe but don't follow (仍更新源均价)
+            max_adds = self.tier_max_adds.get(self._tier(self._sigma(coin), coin), 0)   # per-σ-tier scale-in cap
+            if ep["add_count"] >= max_adds:           # cap reached — observe but don't follow (仍更新源均价)
                 self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                     0.0, master_px, 0.0, 0.0)
                 self.db.execute("UPDATE copy_position SET master_open_px=? WHERE pos_id=?",
@@ -1162,4 +1164,5 @@ def report(db) -> None:
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
     print(f"\n(sizing: σ-tiers margin/lev-cap [stable σ≤{config.STABLE_SIGMA_MAX*100:g}%: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
           f"mid: {config.MID_MARGIN_PCT*100:g}%/{config.MID_LEV_CAP:g}x · high σ≥{config.HIGH_SIGMA_MIN*100:g}%: {config.HIGH_MARGIN_PCT*100:g}%/{config.HIGH_LEV_CAP:g}x], "
-          f"lev=cap×{config.STABLE_SIGMA_MAX*100:g}%/σ, add={config.ADD_FRAC:g}×first (max {config.MAX_ADDS}), isolated)")
+          f"lev=cap×{config.STABLE_SIGMA_MAX*100:g}%/σ, add={config.ADD_FRAC:g}×first "
+          f"(max {config.STABLE_MAX_ADDS}/{config.MID_MAX_ADDS}/{config.HIGH_MAX_ADDS} by tier), isolated)")
