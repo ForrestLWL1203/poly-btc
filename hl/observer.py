@@ -1054,6 +1054,9 @@ class Observer:
                 reduce_frac = (1.0 if closing or abs(pos0) < config.FLAT
                                else max(0.0, min(1.0, (abs(pos0) - abs(pos1)) / abs(pos0))))
             close_size = ep["rem_size"] * reduce_frac
+            if not closing and close_size * exit_px < config.MIN_REDUCE_NOTIONAL:
+                return   # 尘埃减仓:目标把巨仓拆成上百个小单,映射到我们是 ~$0 微减 → 跳过(不记录/不成交);
+                #         剩余累积到下次有意义的减仓(delta 会按更大比例减)或最终平仓(closing=True 必执行)一起处理
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"]
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl

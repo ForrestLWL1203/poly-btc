@@ -104,6 +104,10 @@ MID_MIN_NOTIONAL    = 3000.0   # mid-vol coins
 HIGH_MIN_NOTIONAL   = 800.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
+MIN_REDUCE_NOTIONAL = 10.0    # DUST-REDUCE skip: an algo master dribbles a huge position out in 100s of tiny
+#                             orders → each maps to a ~$0 micro-reduce for us (noise + fees). Skip mirroring a
+#                             reduce whose notional < this; it accumulates and is caught on the next meaningful
+#                             reduce (delta-based) or the FULL close (always executes → exact flat).
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 COIN_MARGIN_CAP_PCT = 0.20  # [legacy/stable fallback] per-COIN cap: total margin on ONE coin ≤ this frac
 #                             of the account (stops N wallets piling into the same coin/direction)
