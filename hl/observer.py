@@ -1022,6 +1022,7 @@ class Observer:
             ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, lev)  # re-anchor margin-stop to new avg entry
             ep["add_count"] += 1
             ep["last_add_px"] = px                    # advance the smart 波动闸 reference to this fill
+            ep["reduce_anchor"] = None                # master grew → invalidate the reduce-step window
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                 add_size * ep["sign"], px, 0.0, slip)
@@ -1049,14 +1050,24 @@ class Observer:
             if forced_frac is not None:                       # operator manual close: EXACT fraction of rem_size
                 reduce_frac = max(0.0, min(1.0, forced_frac))
                 closing = reduce_frac >= 0.999                # <100% keeps the position OPEN (partial reduce)
+            elif closing or abs(pos1 - signed) < config.FLAT:
+                reduce_frac = 1.0                             # full close always executes → exact flat
             else:
+                # STEP-mirror: an algo master unwinds a big position in 100s of tiny orders. Instead of
+                # mirroring every dust reduce, only act once his cumulative unwind since our last reduce
+                # reaches REDUCE_STEP_FRAC of his position (→ ≤~10 partial reduces). `reduce_anchor` = his
+                # |position| at our last executed reduce (re-anchored to pre-fill size if he grew via an add).
                 pos0 = pos1 - signed
-                reduce_frac = (1.0 if closing or abs(pos0) < config.FLAT
-                               else max(0.0, min(1.0, (abs(pos0) - abs(pos1)) / abs(pos0))))
+                anchor = ep.get("reduce_anchor")
+                if not anchor or anchor <= abs(pos1):         # first reduce, or he added since → re-anchor
+                    anchor = abs(pos0)
+                cum_frac = (anchor - abs(pos1)) / anchor if anchor else 0.0
+                if cum_frac < config.REDUCE_STEP_FRAC:
+                    ep["reduce_anchor"] = anchor              # accumulate; skip this sub-step (no fill/log)
+                    return
+                reduce_frac = min(1.0, cum_frac)              # rem still matches `anchor` → cut the whole ratio
+                ep["reduce_anchor"] = abs(pos1)               # open a fresh 10% window from here
             close_size = ep["rem_size"] * reduce_frac
-            if not closing and close_size * exit_px < config.MIN_REDUCE_NOTIONAL:
-                return   # 尘埃减仓:目标把巨仓拆成上百个小单,映射到我们是 ~$0 微减 → 跳过(不记录/不成交);
-                #         剩余累积到下次有意义的减仓(delta 会按更大比例减)或最终平仓(closing=True 必执行)一起处理
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"]
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl
