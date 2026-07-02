@@ -202,9 +202,9 @@ def score(m: dict) -> float:
 
     # ── core positives, each ∈ [0,1] ──
     win = _clip(g("win_rate"), 0.0, 1.0)                                   # 胜率(根本)
-    # ROI = HL 官方 return-on-capital(净利/本金)综合三窗口(周/月/全部,月度为锚)。HL 已按出入金调整 → 不受
-    # 提币污染;且是资本回报,天然含杠杆效率(net/名义 ≡ 此 ÷ 杠杆,会把杠杆红利除没、埋没大体量BTC波段客)。
-    # 各窗口先 clip 压制新号小本金复利虚高;缺失窗口按可得权重归一。回撤仍按名义额归一(与ROI口径解耦)。
+    # ROI = HL 官方 return-on-capital(净利/本金)。copy 只跟【最近表现】→ 只综合近期两窗口(周+月,月度为锚);
+    # 全期(all_roi)权重=0 不计入。HL 已按出入金调整 → 不受提币污染;且是资本回报,天然含杠杆效率(net/名义 ≡ 此
+    # ÷ 杠杆,会把杠杆红利除没、埋没大体量BTC波段客)。各窗口先 clip 防单窗口带飞;缺失窗口按可得权重归一。
     _rp = [(config.ROI_W_WEEK, m.get("week_roi")), (config.ROI_W_MON, m.get("mon_roi")),
            (config.ROI_W_ALL, m.get("all_roi"))]
     _rw = sum(w for w, v in _rp if v is not None)
