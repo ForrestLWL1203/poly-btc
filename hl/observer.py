@@ -55,6 +55,7 @@ class Observer:
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
+        self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
                                   "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
@@ -171,6 +172,7 @@ class Observer:
             if f.get("ADD_FRAC") is not None: self.add_frac = f["ADD_FRAC"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
+            if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
             for tier, mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
@@ -882,7 +884,12 @@ class Observer:
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
-        margin_pct, lev = self._sizing_for(sigma, coin)  # v9: tier margin% + σ-scaled-capped leverage (stocks floored to high tier)
+        margin_pct, lev = self._sizing_for(sigma, coin)  # v9: tier margin% + σ-scaled-capped leverage
+        # STOCK CAP: stock/builder perps (xyz:*) gap on earnings/news; their calm realized σ badly understates
+        # tail risk (TSLA σ=4% → STABLE tier → 20x → one 10% day wiped our profit). No σ stat catches gaps →
+        # cap leverage by instrument class, hard, regardless of tier/σ/master.
+        if coin.startswith("xyz:"):
+            lev = max(self.min_lev, min(lev, self.stock_max_lev))
         # NEVER out-leverage the master: a position at higher leverage than the wallet we copy liquidates on
         # a SMALLER adverse move than they do (they survive, we blow up). The notional cap below is separate —
         # our notional can be far under theirs while our LEVERAGE is far over (SILVER: our 20x/$7k vs master

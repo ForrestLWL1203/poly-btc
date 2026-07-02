@@ -111,6 +111,11 @@ REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge 
 #                             (10% → at most ~10 partial reduces/position). Smaller unwinds accumulate; the next
 #                             reduce cuts the whole accumulated ratio (self-correcting proportional mirror), and
 #                             a FULL close always executes (exact flat). If he dumps it in 2 big fills, we follow both.
+STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz:*), regardless of σ-tier or
+#                           master lev. Stocks GAP (earnings/news) and their calm realized σ (e.g. TSLA 4%)
+#                           badly understates tail risk — mean-daily-range σ let TSLA into the STABLE tier at
+#                           20x, and one 10% day ate our profit. No σ statistic reliably catches stock gaps →
+#                           cap by instrument class. (2026-07-02, after the TSLA 20x blow-up.)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 #                           (per-coin cap now lives entirely in the σ-tiered STABLE/MID/HIGH_COIN_CAP_PCT below;
 #                           the old flat COIN_MARGIN_CAP_PCT was removed 2026-07-02 — the tiered caps fully cover it)
