@@ -126,6 +126,10 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         # (round-trips/day) can't see this — it all rolls into one episode. max = worst single episode.
         "max_adds_per_ep": max((e.get("n_adds", 0) for e in eps), default=0),
         "median_adds_per_ep": sorted(e.get("n_adds", 0) for e in eps)[len(eps) // 2],
+        # ALGO-SLICER signature: the PEAK fills in any single round-trip. The average (n_fills/n_trades)
+        # hides a slicer whose heavy episodes are diluted by many light ones (e.g. avg 34 but one TSLA
+        # round-trip = 294 fills). MAX is what catches "any one position blew up into hundreds of fills".
+        "max_fills_ep": max((e.get("n_fills", 0) for e in eps), default=0),
         # LOSS DISCIPLINE: the single worst losing round-trip ($, <=0). Caller divides by acct_value
         # -> worst_loss_pct. Small = cuts losses promptly (followable even at 50% win); large = holds
         # one loser to disaster (扛单到爆) — the thing to gate, distinct from cumulative max_drawdown.
@@ -161,9 +165,10 @@ def gates_structural(m: dict, p) -> tuple:
         #                                                           median adds is 0). A real grid dominates most eps.
         # ALGO-EXECUTION / 拆单: works each round-trip via dozens–hundreds of sliced fills. It's clean at the
         # EPISODE level (few round-trips, long holds, low median adds → passes every gate above), but each of
-        # its 80+ fills/episode hits our tiny copy as a micro-fill we can't mirror (noise + fees). fills/episode
-        # is the slicing intensity the episode-level gates structurally miss.
-        if (m.get("n_fills") or 0) / m["n_trades"] > getattr(p, "max_fills_per_ep", 50):
+        # its 100+ fills/episode hits our tiny copy as a micro-fill we can't mirror (noise + fees). Gate on the
+        # PEAK single-episode fill count, NOT the average — the average (n_fills/n_trades) lets a slicer through
+        # when its heavy round-trips are diluted by light ones (it did avg 34 but one round-trip = 294 fills).
+        if (m.get("max_fills_ep") or 0) > getattr(p, "max_fills_per_ep", 100):
             return False, "hft_uncopyable"
     return True, "ok"
 
