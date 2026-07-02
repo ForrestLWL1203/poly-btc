@@ -662,6 +662,51 @@ def ep_wallet_detail(db, addr, qs=None):
     }
 
 
+def ep_position_detail(db, pos_id):
+    """Per-position fill-by-fill breakdown: every observed MASTER action (open/add/reduce/close) with its
+    price/size, aligned with OUR response — followed (our px×qty) or NOT (a capped add we skipped shows as
+    被限制). copy_action records the master's move even when we didn't follow (our_qty_delta=0)."""
+    p = q1(db, "SELECT pos_id,addr,coin,side,status,entry_px,leverage,notional,size,rem_size,margin,"
+               "master_open_px,master_leverage,master_margin,realized_pnl,unrealized_pnl,was_liq,was_stopped,"
+               "add_count,opened_at,closed_at FROM copy_position WHERE pos_id=?", (pos_id,))
+    if not p:
+        return {"error": "not_found"}
+    acts = qall(db, "SELECT ts,action,maker,master_px,master_sz_delta,master_pos_after,our_qty_delta,our_px,"
+                    "realized_pnl,slippage_bps FROM copy_action WHERE pos_id=? ORDER BY ts,act_id", (pos_id,))
+    ACT = {"open": "开仓", "add": "加仓", "reduce": "减仓", "close": "平仓"}
+    fills, m_adds, skipped = [], 0, 0
+    for a in acts:
+        our_qty = abs(a["our_qty_delta"] or 0.0)
+        followed = our_qty > 1e-9
+        is_entry = a["action"] in ("open", "add")
+        if a["action"] == "add":
+            m_adds += 1
+            if not followed:
+                skipped += 1
+        fills.append({
+            "atSec": (a["ts"] or 0) / 1000.0, "action": a["action"], "actionLabel": ACT.get(a["action"], a["action"]),
+            "maker": bool(a["maker"]),
+            "masterPx": a["master_px"], "masterSz": abs(a["master_sz_delta"] or 0.0), "masterPosAfter": a["master_pos_after"],
+            "followed": followed, "ourPx": a["our_px"] if followed else None, "ourSz": our_qty if followed else None,
+            "skipped": is_entry and not followed,                 # a master entry/add we did NOT mirror (cap)
+            "pnl": a["realized_pnl"] if a["action"] in ("reduce", "close") else None,
+            "slippageBps": a["slippage_bps"],
+        })
+    close_type = "liq" if p["was_liq"] else ("stop" if p["was_stopped"] else "mirror")
+    return {
+        "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"], "closeType": close_type,
+        "ourEntry": p["entry_px"], "ourLeverage": p["leverage"], "ourNotional": p["notional"],
+        "ourSize": p["size"], "ourRemSize": p["rem_size"], "ourMargin": p["margin"],
+        "masterEntry": p["master_open_px"], "masterLeverage": p["master_leverage"],
+        "masterNotional": (p["master_margin"] or 0.0) * (p["master_leverage"] or 0.0),
+        "masterFinalPos": (acts[-1]["master_pos_after"] if acts else None),
+        "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
+        "ourAdds": p["add_count"], "masterAdds": m_adds, "skippedAdds": skipped,   # 我们跟了 (adds-skipped)/adds
+        "openedAt": _iso_epoch(p["opened_at"]), "closedAt": _iso_epoch(p["closed_at"]),
+        "fills": fills,
+    }
+
+
 # gate reason -> the 4 UI buckets (kept here so it's tweakable in one place)
 _REJECT_BUCKETS = [
     ("不活跃 / 成交不足", {"inactive", "spot_dominant", "bot_frequency", "irregular"}),
@@ -918,6 +963,10 @@ def make_handler(db_path, auth, static_dir=None):
                     return self._envelope(ep_insights(db))
                 if path == "/api/positions":
                     return self._envelope(ep_positions(db, qs))
+                if path.startswith("/api/positions/"):
+                    pid = path.rsplit("/", 1)[1]
+                    if pid.isdigit():
+                        return self._envelope(ep_position_detail(db, int(pid)))
                 if path == "/api/wallets":
                     return self._envelope(ep_wallets(db, qs))
                 if path.startswith("/api/wallets/"):

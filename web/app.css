@@ -133,6 +133,18 @@ body {
 .btn-sm svg { width: 11px; height: 11px; }
 /* the % picker chips in the confirm modal */
 .close-pop-row { display: flex; gap: 6px; }
+/* history row → expandable fill-by-fill detail (源 vs 我们) */
+.row-caret { display: inline-block; color: var(--t3); font-size: 10px; transition: transform .15s; margin-right: 2px; }
+tr.row-open { background: rgba(255, 255, 255, .03); }
+tr.detail-row > td { padding: 0 !important; background: rgba(255, 255, 255, .015); border-top: none; }
+.pos-detail { padding: 12px 18px 16px; }
+.pos-detail-sum { display: flex; flex-wrap: wrap; gap: 20px; font-size: 12px; color: var(--t2); margin-bottom: 10px; }
+.pos-detail-sum b { color: var(--t1); font-family: var(--mono); font-weight: 600; }
+.fills-tbl { width: 100%; border-collapse: collapse; }
+.fills-tbl th { font-size: 11px; color: var(--t3); text-align: left; padding: 4px 10px; font-weight: 500; }
+.fills-tbl td { padding: 5px 10px; font-size: 12px; border-top: 1px solid var(--glass-border); }
+.fills-tbl th.num, .fills-tbl td.num { text-align: right; }
+.fill-skipped { background: rgba(255, 92, 92, .06); }
 .pct-chip { flex: 1; padding: 6px 0; border-radius: 8px; font-size: 12px; font-family: var(--mono); cursor: pointer;
   background: rgba(255, 255, 255, .05); border: 1px solid var(--glass-border); color: var(--t2); }
 .pct-chip:hover { background: rgba(255, 255, 255, .1); }

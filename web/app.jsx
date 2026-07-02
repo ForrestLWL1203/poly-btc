@@ -375,11 +375,57 @@ function Positions({ confirm, toast, streamOpen }) {
 
 /* ----------------------------------------------------------------- history (closed positions + stats) */
 const CLOSE_TYPE = { mirror: { label: "镜像", tint: "tint-blue" }, stop: { label: "止损", tint: "tint-amber" }, liq: { label: "爆仓", tint: "tint-red" } };
+const ACT_TINT = { 开仓: "tint-green", 加仓: "tint-blue", 减仓: "tint-amber", 平仓: "tint-gray" };
+function PositionDetail({ d }) {
+  const live = d.status === "open";
+  const pnl = live ? d.unrealizedPnl : d.realizedPnl;
+  return (
+    <div className="pos-detail">
+      <div className="pos-detail-sum">
+        <span>我们均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>
+        <span>源均价 <b>{fPrice(d.masterEntry)}</b> · {fNum(d.masterLeverage, 0)}x</span>
+        <span>加仓 我们 <b>{d.ourAdds}</b> / 目标 <b>{d.masterAdds}</b>
+          {d.skippedAdds > 0 && <span className="down"> · 因上限没跟 {d.skippedAdds} 笔 ✗</span>}</span>
+        <span>{live ? "浮动" : "已实现"}盈亏 <b className={cls(pnl)}>{fSign(pnl, 1)}</b></span>
+      </div>
+      <table className="fills-tbl">
+        <thead><tr>
+          <th>时间</th><th>动作</th>
+          <th className="num">源 · 价 × 量</th><th className="num">源累计仓</th>
+          <th className="num">我们 · 价 × 量</th><th className="num">该笔盈亏</th><th className="num">滑点</th>
+        </tr></thead>
+        <tbody>{d.fills.map((f, i) => (
+          <tr key={i} className={f.skipped ? "fill-skipped" : ""}>
+            <td className="mono muted">{fTime(f.atSec)}</td>
+            <td><span className={"tint " + (ACT_TINT[f.actionLabel] || "tint-gray")}>{f.actionLabel}</span>
+              {f.maker && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }}>挂单</span>}</td>
+            <td className="num">{fPrice(f.masterPx)} <span className="muted">× {fNum(f.masterSz, 2)}</span></td>
+            <td className="num muted">{fNum(f.masterPosAfter, 1)}</td>
+            <td className="num">{f.followed
+              ? <span>{fPrice(f.ourPx)} <span className="muted">× {fNum(f.ourSz, 2)}</span></span>
+              : <span className="down" title="因加仓上限,我们没有跟这一笔">✗ 被限制</span>}</td>
+            <td className={"num " + (f.pnl != null ? cls(f.pnl) : "")}>{f.pnl != null ? fSign(f.pnl, 1) : "—"}</td>
+            <td className="num muted">{f.followed && f.slippageBps != null ? fNum(f.slippageBps, 0) + "bp" : "—"}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
 function History() {
   const [data, setData] = useState(null);
   const [filter, setFilter] = useState("all");        // all | win | loss
   const [ctype, setCtype] = useState("all");          // all | mirror | stop | liq
   const [page, setPage] = useState(0);                // 25/page
+  const [expandedId, setExpandedId] = useState(null); // pos_id of the row expanded to fill-by-fill detail
+  const [details, setDetails] = useState({});         // pos_id -> detail payload (lazy-fetched, cached)
+  const toggleRow = (rowId) => {
+    const pid = Number(String(rowId).replace("cls_", ""));
+    if (expandedId === pid) { setExpandedId(null); return; }
+    setExpandedId(pid);
+    if (!details[pid]) api.get(`/api/positions/${pid}`).then(d => setDetails(m => ({ ...m, [pid]: d }))).catch(() => {});
+  };
   useEffect(() => {
     const load = () => api.get("/api/positions?status=closed").then(setData).catch(() => {});
     load(); const t = setInterval(load, 15000); return () => clearInterval(t);
@@ -436,9 +482,10 @@ function History() {
               <thead><tr><th>币种</th><th>方向</th><th className="num">源入场/杠杆</th><th className="num">入场/杠杆</th><th>结算类型</th><th className="num">名义额</th><th className="num">已实现盈亏</th><th className="num">持仓时长</th><th>平仓时间</th><th>钱包</th></tr></thead>
               <tbody>
                 {rows.length === 0 && <tr><td colSpan="10" className="empty">暂无</td></tr>}
-                {items.map(p => (
-                  <tr key={p.id}>
-                    <td><b>{p.coin}</b>
+                {items.map(p => { const pid = Number(String(p.id).replace("cls_", "")); const isOpen = expandedId === pid;
+                  return <React.Fragment key={p.id}>
+                  <tr onClick={() => toggleRow(p.id)} style={{ cursor: "pointer" }} className={isOpen ? "row-open" : ""}>
+                    <td><span className="row-caret" style={{ transform: isOpen ? "rotate(90deg)" : "none" }}>▸</span> <b>{p.coin}</b>
                       {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数">加仓{p.addCount}</span>}</td>
                     <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                     <td className="num muted" title="源(目标钱包)的加权均价(随其加仓更新)· 杠杆">{fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</td>
@@ -454,7 +501,10 @@ function History() {
                       ? <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
                       : <span className="tint tint-gray" title="当时/现在不在跟单集">脱榜</span>}</td>
                   </tr>
-                ))}
+                  {isOpen && <tr className="detail-row"><td colSpan="10">
+                    {details[pid] ? <PositionDetail d={details[pid]} /> : <div className="muted" style={{ padding: "14px 16px" }}>加载中…</div>}
+                  </td></tr>}
+                  </React.Fragment>; })}
               </tbody>
             </table>
           </div>
