@@ -85,16 +85,6 @@ const IC = {
   close: "M18 6 6 18M6 6l12 12",
 };
 
-/* ----------------------------------------------------------------- sparkline */
-function Spark({ data, w = 78, h = 22 }) {
-  if (!data || data.length < 2) return <span className="muted">—</span>;
-  const min = Math.min(...data), max = Math.max(...data), rng = max - min || 1;
-  const pts = data.map((v, i) => [i / (data.length - 1) * w, h - ((v - min) / rng) * (h - 4) - 2]);
-  const up = data[data.length - 1] >= data[0];
-  return <svg className="spark" width={w} height={h}><polyline fill="none" stroke={up ? "var(--green)" : "var(--red)"} strokeWidth="1.6"
-    points={pts.map(p => p.join(",")).join(" ")} /></svg>;
-}
-
 /* ----------------------------------------------------------------- equity chart */
 function EquityChart({ points }) {
   const W = 920, H = 230, PAD = 8;
@@ -590,7 +580,7 @@ function Wallets({ confirm, toast }) {
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th><th className="num">ROI</th><th className="num">胜率</th>
               <th className="num" title="目标钱包自己最近7天平掉的回合数(活跃度)">近7天</th>
-              <th className="num">最大亏损</th><th>主力</th><th className="num">被跟</th><th>趋势</th><th>启用</th>
+              <th className="num">最大亏损</th><th>主力</th><th className="num">被跟</th><th className="num">总体盈亏</th><th>启用</th>
             </tr></thead>
             <tbody>
               {data === null && <tr><td colSpan="12" className="loading">加载中…</td></tr>}
@@ -604,18 +594,15 @@ function Wallets({ confirm, toast }) {
                     {w.evidenceHeld && <div style={{ fontSize: 10, color: "var(--amber-l, #e0a23a)" }} title="评分达标,但成交笔数/活跃天数未到证据门槛,仅观察不跟单">样本观察</div>}
                   </td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
-                  <td className="num">{fNum(w.winRatePct, 0)}%
-                    {(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0) && (() => {
-                      const net = w.forwardNetPnl || 0;
-                      return <div style={{ fontSize: 10, color: net < 0 ? "var(--red-l)" : "var(--green-l)" }}>
-                        实盘 {fSign(net, 0)}{net < -5 ? " ⚠" : ""}</div>;
-                    })()}
-                  </td>
+                  <td className="num">{fNum(w.winRatePct, 0)}%</td>
                   <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
                   <td className="num down">{fNum(w.worstSingleLossPct, 0)}%</td>
                   <td><b>{w.mainCoin}</b></td>
                   <td className="num">{w.followCount}</td>
-                  <td><Spark data={w.trend} /></td>
+                  <td className="num">{(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0)
+                    ? <b style={{ color: (w.forwardNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>
+                        {fSign(w.forwardNetPnl || 0, 0)}{(w.forwardNetPnl || 0) < -5 ? " ⚠" : ""}</b>
+                    : <span className="muted">—</span>}</td>
                   <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
                 </tr>
               ))}

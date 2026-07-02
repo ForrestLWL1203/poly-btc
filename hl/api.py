@@ -522,20 +522,9 @@ def ep_positions(db, qs):
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
 
 
-def _wallet_trend(db, addr, n=8):
-    rows = qall(db, "SELECT realized_pnl FROM copy_position WHERE addr=? AND status!='open' "
-                    "ORDER BY closed_at LIMIT ?", (addr, n))
-    trend, cum = [], 0.0
-    for r in rows:
-        cum += r["realized_pnl"] or 0.0
-        trend.append(round(cum, 2))
-    return trend
-
-
 def ep_wallets(db, qs=None):
     qs = qs or {}
     line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE   # native [0,1] scale
-    grid_max = params_mod.get(db, "grid_max_adds", 5) or 5
     page = max(0, int((qs.get("page", ["0"]))[0]))
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
     # DROPPED tab: wallets that WERE on the follow line (follow_history stamped) but are now below it or
@@ -564,19 +553,22 @@ def ep_wallets(db, qs=None):
     # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
     # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
     cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
+    # ONE grouped scan of episode + copy_position (was 5 correlated subqueries per row + a per-row trend query).
     rows = qall(db,
-        "SELECT w.addr,w.rank,w.market_type,w.score,w.roi_equity,w.net_pnl,w.win_rate,w.top_coin,"
-        "w.worst_single_loss_pct,w.grid,COALESCE(c.enabled,1) AS enabled,w.n_trades,"
-        "pr.worst_loss_pct,pr.median_adds_per_ep,pr.active_days,pr.avg_notional,l.week_roi,l.mon_roi,"
-        "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr AND e.close_ms >= ?) AS closed_7d,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
-        "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS realized,"
-        "(SELECT COALESCE(SUM(unrealized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status='open') AS unreal "
+        "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
+        "COALESCE(c.enabled,1) AS enabled,w.n_trades,pr.worst_loss_pct,pr.active_days,l.week_roi,l.mon_roi,"
+        "COALESCE(e7.c7,0) AS closed_7d,COALESCE(cp.fc,0) AS follow_count,COALESCE(cp.cn,0) AS closed_n,"
+        "COALESCE(cp.rz,0)+COALESCE(cp.ur,0) AS fwd_net "
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
+        "LEFT JOIN (SELECT addr,COUNT(*) c7 FROM episode WHERE close_ms>=? GROUP BY addr) e7 ON e7.addr=w.addr "
+        "LEFT JOIN (SELECT addr,COUNT(*) fc,"
+        "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) cn,"
+        "SUM(CASE WHEN status!='open' THEN realized_pnl ELSE 0 END) rz,"
+        "SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END) ur "
+        "FROM copy_position GROUP BY addr) cp ON cp.addr=w.addr "
         "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
     # Partition by the evidence floor (mirrors observer.load_targets) so the list == what we ACTUALLY copy:
     #   FOLLOWED (tab 'followed') = score≥line AND clears the floor → the real copy set, numbered 1..N by
@@ -590,9 +582,6 @@ def ep_wallets(db, qs=None):
     sel = obs if tab == "observing" else foll
     out = []
     for i, r in enumerate(sel[page * size:page * size + size]):
-        grid = r["grid"]
-        if grid is None:                       # COALESCE: derive from profile until scanner backfills
-            grid = min((r["median_adds_per_ep"] or 0) / grid_max, 1.0)
         worst = r["worst_single_loss_pct"]
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
@@ -602,13 +591,12 @@ def ep_wallets(db, qs=None):
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0),   # ROI shown = recent HL 收益/本金 (周+月),与评分 ROI 支柱同口径
             "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
-            "winRatePct": (r["win_rate"] or 0.0) * 100, "grid": round(grid, 3),
+            "winRatePct": (r["win_rate"] or 0.0) * 100,
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
             "closed7d": r["closed_7d"],                            # target's OWN round-trips closed in 7d (活跃度)
             "closedN": r["closed_n"],                              # our forward (real copy) results
-            "forwardNetPnl": (r["realized"] or 0) + (r["unreal"] or 0),   # PnL is the real verdict, not win%
-            "trend": _wallet_trend(db, r["addr"]),
+            "forwardNetPnl": r["fwd_net"] or 0,                    # 总体盈亏 (real copy verdict) — was under 胜率, now its own col
         })
     return {"followLine": score100(line_native), "tab": tab, "total": len(sel),
             "followed": len(foll), "observing": len(obs),

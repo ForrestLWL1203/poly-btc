@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS episode (
     PRIMARY KEY (addr, coin, open_ms)
 );
 CREATE INDEX IF NOT EXISTS idx_ep_addr ON episode(addr);
+CREATE INDEX IF NOT EXISTS idx_ep_close_addr ON episode(close_ms, addr);  -- wallet-list 近7天 grouped count (filter close_ms, group addr)
 CREATE INDEX IF NOT EXISTS idx_prof_status ON profile(status);
 
 -- OUR curated tiny leaderboard: current active targets, ranked, denormalized for UI.
