@@ -278,6 +278,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
     m["acct_value"] = acct_value
+    # HL 官方 return-on-capital(净利/本金)三窗口 → score() 的 ROI 支柱(取代 net/名义)。None 保留以便加权归一。
+    _lbroi = lambda k: (f(lb[k]) if lb and lb.get(k) is not None else None)
+    m["week_roi"], m["mon_roi"], m["all_roi"] = _lbroi("week_roi"), _lbroi("mon_roi"), _lbroi("all_roi")
     m["roi_equity"] = (m["net_pnl"] / acct_value) if acct_value else 0.0
     m["worst_loss_pct"] = (m["worst_loss"] / acct_value) if acct_value else 0.0  # loss discipline (realized)
     m["times_active"] = (prior or {}).get("times_active", 0)
@@ -396,16 +399,18 @@ def regate(db, p) -> int:
     now = int(time.time() * 1000)
     stamp = now_iso()
     rows = db.execute(
-        "SELECT addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
+        "SELECT p.addr,status,n_trades,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
         "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,median_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
-        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason "
-        "FROM profile").fetchall()
+        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
+        "l.week_roi,l.mon_roi,l.all_roi "                      # HL return-on-capital windows for the ROI pillar
+        "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr").fetchall()
     n_active = 0
     for r in rows:
         (addr, old, n_tr, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
          ad, ar, meps, avgnotl, pdr, conc, skew, uw, mxadds, mdadds, wloss, mhold, wr,
-         roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason) = r
+         roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
+         wkroi, moroi, alroi) = r
         m = {"n_trades": n_tr or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -420,7 +425,9 @@ def regate(db, p) -> int:
              "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0,
              "hedge_ratio": hedge or 0.0,
              # v6 nets: None when scanned before this datum existed → net gates skip (safe pre-rescan)
-             "net_30d": net30, "net_life": netlife}
+             "net_30d": net30, "net_life": netlife,
+             # HL return-on-capital windows (from leaderboard join) → score() ROI pillar. None → weight-renormalized.
+             "week_roi": wkroi, "mon_roi": moroi, "all_roi": alroi}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
         m["loss_pain"] = metrics.loss_pain(
