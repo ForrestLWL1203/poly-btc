@@ -656,9 +656,11 @@ class Observer:
         while not self.stop:
             for coin in list(self.stock_coins):
                 ba = await asyncio.to_thread(rest.book_top, coin)
-                if ba:
-                    self.bbo[coin] = ba
-                    mid = (ba[0] + ba[1]) / 2
+                if ba and ba[0] and ba[1] and ba[0] > 0 and ba[1] > 0:   # need a REAL two-sided book —
+                    self.bbo[coin] = ba                                  # a one-sided/zero book (ask=0 → mid=bid/2)
+                    mid = (ba[0] + ba[1]) / 2                            # would falsely cross liq/stop
+                    if ba[1] < ba[0]:                                    # crossed/garbage book → distrust this tick
+                        continue
                     for (a, c), ep in self.open_ep.items():      # track adverse excursion while open
                         if c == coin and ep["master_open_px"]:
                             adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
@@ -734,6 +736,8 @@ class Observer:
         if not coin or len(ba) < 2 or not ba[0] or not ba[1]:
             return
         bid, ask = f(ba[0].get("px")), f(ba[1].get("px"))
+        if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:   # crossed/zero book → junk tick, ignore
+            return
         self.bbo[coin] = (bid, ask)
         mid = (bid + ask) / 2
         for (a, c), ep in self.open_ep.items():    # track worst adverse excursion while open
@@ -996,6 +1000,8 @@ class Observer:
                                  closing=True, liq=True, maker=False, forced_px=ep["liq_px"])
 
     def _maybe_liquidate(self, coin, mid):
+        if not mid or mid <= 0:          # bad/one-sided book tick → never liquidate on a garbage price
+            return
         for (a, c), ep in list(self.open_ep.items()):
             if c == coin and ep.get("liq_px") and ep["rem_size"] > config.FLAT and not ep.get("liquidating"):
                 hit = mid <= ep["liq_px"] if ep["side"] == "long" else mid >= ep["liq_px"]
@@ -1015,6 +1021,8 @@ class Observer:
 
     def _maybe_stop(self, coin, mid):
         if not self.copy_stop_enable:
+            return
+        if not mid or mid <= 0:          # bad/one-sided book tick → never stop on a garbage price
             return
         for (a, c), ep in list(self.open_ep.items()):
             if (c == coin and ep.get("stop_px") and ep["rem_size"] > config.FLAT
