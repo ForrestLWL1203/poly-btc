@@ -995,6 +995,13 @@ def make_handler(db_path, auth, static_dir=None):
             self.send_response(200)
             self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
+            # app.jsx/app.css/index.html change on every deploy → never serve a stale copy (this was biting
+            # the operator: edits invisible until a manual hard-refresh). Vendored libs are immutable → cache hard.
+            if "/vendor/" in str(target).replace("\\", "/"):
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            else:
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
             self.end_headers()
             self.wfile.write(data)
 
