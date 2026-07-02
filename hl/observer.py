@@ -56,6 +56,7 @@ class Observer:
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
         self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
+        self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
                                   "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
@@ -173,6 +174,7 @@ class Observer:
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
+            if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
             for tier, mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
@@ -912,10 +914,13 @@ class Observer:
             room = max(0.0, self.tier_coin_cap[self._tier(sigma, coin)]
                        * self.balance - existing_coin)   # per-σ-tier per-coin cap (volatile coins get less)
             avail = self._available()                    # CASH gate: can't deploy more margin than we hold free
-            capped = min(margin, room, avail)            # equity-size, then bound by coin backstop AND free cash
-            if capped < self.min_open_margin_pct * self.balance:     # side full, out of cash, or just too small
-                why = "coin_full" if room < margin else "no_cash" if avail < margin else "margin_too_small"
-                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / cash ${avail:,.0f} / want ${margin:,.0f})")
+            reserve = (1.0 - self.max_deploy_pct) * self.balance   # dry-powder kept for adds + new signals + buffer
+            deploy_room = max(0.0, avail - reserve)      # a NEW open may only use cash ABOVE the reserve (adds may dip in)
+            capped = min(margin, room, deploy_room)      # equity-size, bound by coin backstop, deploy cap AND free cash
+            if capped < self.min_open_margin_pct * self.balance:     # side full, deploy cap hit, out of cash, or too small
+                why = ("coin_full" if room < margin else "no_cash" if avail < margin
+                       else "deploy_cap" if deploy_room < margin else "margin_too_small")
+                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / deploy ${deploy_room:,.0f} / cash ${avail:,.0f} / want ${margin:,.0f})")
                 self.db.execute("DELETE FROM copy_position WHERE pos_id=?", (ep["pos_id"],))  # -> skip
                 self.db.commit()
                 self.open_ep.pop((addr, coin), None)

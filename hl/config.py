@@ -136,6 +136,11 @@ FOLLOW_POS_ADD = False     # A 正向加仓:目标"顺势加仓"(价格朝其有
 STABLE_COIN_CAP_PCT = 0.40
 MID_COIN_CAP_PCT    = 0.30
 HIGH_COIN_CAP_PCT   = 0.20
+MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin
+#                           reaches this fraction of equity. Equity-based sizing (每笔=权益×档位%) has no
+#                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
+#                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
+#                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGIN_PCT·scale·available) is below this
 #                             fraction of equity: once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay
