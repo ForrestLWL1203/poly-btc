@@ -49,7 +49,7 @@ PARAM_SPEC = [
     ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
     ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 3, "网格判定:中位加仓上限(超过=习惯性均摊,跟不动)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
-    ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 100, "算法拆单判定:单回合成交笔数峰值上限(任一回合超此=拆单算法/坑货,排除;看峰值不看平均)", ""),
+    ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,

@@ -405,10 +405,13 @@ def regate(db, p) -> int:
         "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
         "l.week_roi,l.mon_roi,l.all_roi "                      # HL return-on-capital windows for the ROI pillar
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr").fetchall()
-    # PEAK single-episode fill count per wallet, from the stored episode table (regate has no fills to rebuild
-    # from) — feeds the algo-slicer gate. A wallet with any 100+-fill round-trip is an un-copyable slicer.
-    maxfe = {a: (mx or 0) for a, mx in db.execute(
-        "SELECT addr, MAX(n_fills) FROM episode GROUP BY addr").fetchall()}
+    # p90 per-episode fill count per wallet, from the stored episode table (regate has no fills to rebuild
+    # from) — feeds the algo-slicer gate. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
+    # isn't killed for a single outlier; only SYSTEMATIC slicing (≥10% heavy round-trips) trips it.
+    _epw = {}
+    for a, nf in db.execute("SELECT addr, n_fills FROM episode WHERE n_fills IS NOT NULL"):
+        _epw.setdefault(a, []).append(nf)
+    p90fe = {a: sorted(xs)[min(len(xs) - 1, int(len(xs) * 0.9))] for a, xs in _epw.items() if xs}
     n_active = 0
     for r in rows:
         (addr, old, n_tr, n_fills, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
@@ -422,7 +425,7 @@ def regate(db, p) -> int:
              "median_eps": meps or 0.0, "avg_notional": avgnotl or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
-             "max_fills_ep": maxfe.get(addr, 0),   # peak single-episode fills → algo-slicer gate (from episode table)
+             "p90_fills_ep": p90fe.get(addr, 0),   # p90 single-episode fills → algo-slicer gate (from episode table)
              "worst_loss_pct": wloss or 0.0,
              # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
