@@ -553,22 +553,21 @@ def ep_wallets(db, qs=None):
     # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
     # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
     cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
-    # ONE grouped scan of episode + copy_position (was 5 correlated subqueries per row + a per-row trend query).
+    # Correlated subqueries (indexed by addr) — O(rows above line, ~dozens), NOT a full grouped scan of the
+    # ever-growing episode/copy_position tables on every refresh. Dropped the per-row _wallet_trend() query and
+    # unused columns (roi_equity/net_pnl/grid/median_adds_per_ep/avg_notional) — those were the real weight.
     rows = qall(db,
         "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
         "COALESCE(c.enabled,1) AS enabled,w.n_trades,pr.worst_loss_pct,pr.active_days,l.week_roi,l.mon_roi,"
-        "COALESCE(e7.c7,0) AS closed_7d,COALESCE(cp.fc,0) AS follow_count,COALESCE(cp.cn,0) AS closed_n,"
-        "COALESCE(cp.rz,0)+COALESCE(cp.ur,0) AS fwd_net "
+        "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr AND e.close_ms>=?) AS closed_7d,"
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
+        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
+        "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open')"
+        "+(SELECT COALESCE(SUM(unrealized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status='open') AS fwd_net "
         "FROM watchlist w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
-        "LEFT JOIN (SELECT addr,COUNT(*) c7 FROM episode WHERE close_ms>=? GROUP BY addr) e7 ON e7.addr=w.addr "
-        "LEFT JOIN (SELECT addr,COUNT(*) fc,"
-        "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) cn,"
-        "SUM(CASE WHEN status!='open' THEN realized_pnl ELSE 0 END) rz,"
-        "SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END) ur "
-        "FROM copy_position GROUP BY addr) cp ON cp.addr=w.addr "
         "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
     # Partition by the evidence floor (mirrors observer.load_targets) so the list == what we ACTUALLY copy:
     #   FOLLOWED (tab 'followed') = score≥line AND clears the floor → the real copy set, numbered 1..N by
