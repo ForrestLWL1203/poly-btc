@@ -498,7 +498,8 @@ def ep_positions(db, qs):
     for r in rows:
         entry = r["entry_px"] or 0.0
         mark = r["mark_px"] if r["mark_px"] else entry           # null until Observer persists (M2)
-        margin = r["margin"] or 0.0
+        held = (r["rem_size"] / r["size"]) if r["size"] else 1.0   # remaining fraction (< 1 after a partial close)
+        margin = (r["margin"] or 0.0) * held                     # EFFECTIVE locked margin on the remaining size
         upnl = r["unrealized_pnl"] if r["unrealized_pnl"] is not None else 0.0
         float_total += upnl
         liq = r["liq_px"]
@@ -509,9 +510,9 @@ def ep_positions(db, qs):
             "id": f"pos_{r['pos_id']}", "coin": r["coin"], "marketType": r["mtype"] or "crypto",
             "side": r["side"], "entry": entry, "leverage": r["leverage"],
             # scale by remaining/total so a PARTIAL close (rem_size < size) shows the current notional
-            "notional": (r["notional"] or 0.0) * (r["rem_size"] / r["size"] if r["size"] else 1.0), "mark": mark,
+            "notional": (r["notional"] or 0.0) * held, "mark": mark,
             "unrealizedPnl": upnl,
-            "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
+            "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,   # vs EFFECTIVE margin (scaled)
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": fpos.get(r["addr"]),
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],

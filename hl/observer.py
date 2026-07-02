@@ -868,7 +868,8 @@ class Observer:
             # into one coin (e.g. all short BTC). Same-direction ONLY on purpose: an opposite-side signal
             # (a wallet flips long while we hold shorts) OFFSETS our exposure, it doesn't stack it, so it
             # must NOT be blocked. Shrink to the remaining room; skip if that side of the coin is full.
-            existing_coin = sum(e.get("margin", 0.0) for (a2, c2), e in self.open_ep.items()
+            existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
+                                for (a2, c2), e in self.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
             room = max(0.0, self.coin_margin_cap_pct * self.balance - existing_coin)
             capped = min(margin, room)
