@@ -60,7 +60,14 @@ class Observer:
                                   "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
         self.coin_margin_cap_pct = config.COIN_MARGIN_CAP_PCT   # per-coin margin ceiling (anti-stacking)
         self.tier_max_adds = {"stable": config.STABLE_MAX_ADDS, "mid": config.MID_MAX_ADDS,
-                              "high": config.HIGH_MAX_ADDS}   # per-σ-tier scale-in cap
+                              "high": config.HIGH_MAX_ADDS}   # per-σ-tier scale-in cap (hardcap mode)
+        # ── 加仓策略引擎 (B 逆向): smart(σ波动闸+比例镜像+三档预算) vs hardcap(次数cap+ADD_FRAC) ──
+        self.add_strategy = config.ADD_STRATEGY
+        self.add_gap_k = config.ADD_GAP_K                       # 波动闸 x = k×σ
+        self.add_shrink_g = config.ADD_GAP_SHRINK_G             # 每加一次 x×此
+        self.add_max_hard = config.ADD_MAX_HARD                 # smart 硬顶
+        self.tier_coin_cap = {"stable": config.STABLE_COIN_CAP_PCT, "mid": config.MID_COIN_CAP_PCT,
+                              "high": config.HIGH_COIN_CAP_PCT}  # 三档单币最大保证金占用%
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
         # 扛单 copy-side stop: MARGIN-based catastrophe cut (v10). UI-tunable via _reload_params.
@@ -175,6 +182,12 @@ class Observer:
                 if f.get(ak) is not None: self.tier_max_adds[tier] = int(f[ak])
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("COIN_MARGIN_CAP_PCT"): self.coin_margin_cap_pct = f["COIN_MARGIN_CAP_PCT"]
+            if f.get("SMART_ADD") is not None: self.add_strategy = "smart" if f["SMART_ADD"] else "hardcap"
+            if f.get("ADD_GAP_K") is not None: self.add_gap_k = f["ADD_GAP_K"]
+            if f.get("ADD_GAP_SHRINK_G"): self.add_shrink_g = f["ADD_GAP_SHRINK_G"]
+            if f.get("ADD_MAX_HARD") is not None: self.add_max_hard = int(f["ADD_MAX_HARD"])
+            for tier, ck in (("stable", "STABLE_COIN_CAP_PCT"), ("mid", "MID_COIN_CAP_PCT"), ("high", "HIGH_COIN_CAP_PCT")):
+                if f.get(ck) is not None: self.tier_coin_cap[tier] = f[ck]
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
@@ -186,10 +199,11 @@ class Observer:
     def _reload_open(self):
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
-            "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px "
-            "FROM copy_position WHERE status='open'").fetchall()
+            "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
+            "master_margin,master_leverage FROM copy_position WHERE status='open'").fetchall()
         for r in rows:
-            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, adds, mae, na, stopx) = r
+            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, adds, mae, na, stopx,
+             m_mgn, m_lev) = r
             ev = asyncio.Event()
             if epx is not None:
                 ev.set()
@@ -200,6 +214,10 @@ class Observer:
                 "notional": notl or 0.0, "entry_px": epx, "size": sz or 0.0, "rem_size": rem or 0.0,
                 "liq_px": liq or 0.0, "stop_px": stopx or 0.0, "realized_pnl": rpnl or 0.0,
                 "add_count": adds or 0, "entries_ready": ev, "lock": asyncio.Lock(),
+                # smart-add restart recovery: first_margin ≈ margin/(1+adds·frac); master首仓额 from open snapshot;
+                # 波动闸 reference resets to current avg (safe — next add just needs a fresh x move from here).
+                "first_margin": (mgn or 0.0) / (1 + (adds or 0) * self.add_frac),
+                "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0), "last_add_px": epx,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False,
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
                     "SELECT DISTINCT master_oid FROM copy_action WHERE pos_id=? AND action IN "
@@ -881,7 +899,8 @@ class Observer:
             existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                 for (a2, c2), e in self.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
-            room = max(0.0, self.coin_margin_cap_pct * self.balance - existing_coin)
+            room = max(0.0, self.tier_coin_cap.get(self._tier(sigma, coin), self.coin_margin_cap_pct)
+                       * self.balance - existing_coin)   # per-σ-tier per-coin cap (volatile coins get less)
             capped = min(margin, room)
             if capped < self.min_open_margin_pct * self.balance:     # free balance too low OR side full
                 why = "coin_full" if room < margin else "margin_too_small"
@@ -912,7 +931,9 @@ class Observer:
             liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
             stop_px = self._stop_px_for(px, is_buy, lev)    # 扛单 cut at STOP_MARGIN_PCT of margin (0 = off)
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
-                      size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px)   # first_margin: adds = this × ADD_FRAC
+                      size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px,
+                      master_first_notl=master_notl,      # 目标首仓名义额 → smart 加仓比例基准
+                      last_add_px=px)                     # 我们上次入场价 → smart 波动闸基准 (adds = first_margin × ...)
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 "UPDATE copy_position SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,"
                 "liq_px=?,stop_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
@@ -943,20 +964,44 @@ class Observer:
             if m_now > 0 and master_px and ep.get("master_open_px"):
                 m_prev = abs(pos1 - signed)           # 目标加仓前的仓位量
                 ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * master_px) / m_now
-            max_adds = self.tier_max_adds.get(self._tier(self._sigma(coin), coin), 0)   # per-σ-tier scale-in cap
-            if ep["add_count"] >= max_adds:           # cap reached — observe but don't follow (仍更新源均价)
+            is_buy = ep["side"] == "long"             # adding to a long => buy more
+            stale = (now_ms() - t) > STALE_MS
+            px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
+            lev = ep["leverage"]
+            sigma = self._sigma(coin); tier = self._tier(sigma, coin)
+            fm = ep.get("first_margin", ep["margin"])
+
+            def _observe_only():                      # record his add, DON'T follow; keep the source avg fresh
                 self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                     0.0, master_px, 0.0, 0.0)
                 self.db.execute("UPDATE copy_position SET master_open_px=? WHERE pos_id=?",
                                 (ep["master_open_px"], ep["pos_id"]))
                 self.db.commit()
-                return
-            is_buy = ep["side"] == "long"             # adding to a long => buy more
-            stale = (now_ms() - t) > STALE_MS
-            px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
-            lev = ep["leverage"]
-            async with self.acct_lock:                     # ADD = first-open margin × ADD_FRAC (capped by available)
-                add_margin = max(0.0, min(ep.get("first_margin", ep["margin"]) * self.add_frac, self._available()))
+
+            if self.add_strategy == "smart":
+                # ① 波动闸: 相对我们上次加仓价的逆向移动 ≥ x = k×σ×(g^已加次数)。噪声微加(<x)跳过,越加门槛越高。
+                last = ep.get("last_add_px") or ep["entry_px"]
+                adv = (((last - master_px) if is_buy else (master_px - last)) / last) if last else 0.0
+                x = self.add_gap_k * sigma * (self.add_shrink_g ** ep["add_count"])
+                if adv < x or ep["add_count"] >= self.add_max_hard:      # 波动不够 / 硬顶 → 只观察
+                    return _observe_only()
+                # ③ 比例镜像(目标本次加仓额 ÷ 目标首仓额)× 我们首仓,封顶到该币"三档单币预算"剩余
+                ratio = (abs(signed) * master_px) / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
+                async with self.acct_lock:
+                    coin_cap = self.tier_coin_cap.get(tier, self.coin_margin_cap_pct) * self.balance
+                    existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
+                                   for (a2, c2), e in self.open_ep.items()
+                                   if c2 == coin and e.get("side") == ep["side"])   # incl THIS ep (its current margin)
+                    add_margin = max(0.0, min(ratio * fm, coin_cap - existing, self._available()))
+                if add_margin < self.min_open_margin_pct * self.balance:  # 预算用尽 / 太小,不值得
+                    return _observe_only()
+            else:                                     # hardcap: 分档次数上限 + 固定 ADD_FRAC(老逻辑)
+                if ep["add_count"] >= self.tier_max_adds.get(tier, 0):
+                    return _observe_only()
+                async with self.acct_lock:
+                    add_margin = max(0.0, min(fm * self.add_frac, self._available()))
+                if add_margin <= 0:
+                    return _observe_only()
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
@@ -968,6 +1013,7 @@ class Observer:
             ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / lev) if is_buy else ep["entry_px"] * (1 + 1.0 / lev)
             ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, lev)  # re-anchor margin-stop to new avg entry
             ep["add_count"] += 1
+            ep["last_add_px"] = px                    # advance the smart 波动闸 reference to this fill
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                 add_size * ep["sign"], px, 0.0, slip)

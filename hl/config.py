@@ -105,8 +105,21 @@ HIGH_MIN_NOTIONAL   = 800.0    # volatile/meme/stock: smaller floor (higher σ, 
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
-COIN_MARGIN_CAP_PCT = 0.20  # per-COIN cap: total margin across all our open positions on ONE coin ≤ this
-#                             fraction of the account (stops N wallets piling into the same coin/direction)
+COIN_MARGIN_CAP_PCT = 0.20  # [legacy/stable fallback] per-COIN cap: total margin on ONE coin ≤ this frac
+#                             of the account (stops N wallets piling into the same coin/direction)
+
+# ═══ 加仓策略引擎(独立)═══ B 逆向加仓可选:老"硬cap"(分档次数 + ADD_FRAC) 或 新"智能动态"
+ADD_STRATEGY = "smart"       # "smart" | "hardcap"  —— B 逆向加仓的模式(A 正向加仓固定用 hardcap)
+# 智能模式三闸:①波动闸 x = ADD_GAP_K×σ(目标加仓相对我们上次加仓价 逆向移动 ≥ x 才跟;数据标定 0.15 利润最大)
+#              ②每跟一次 x ×ADD_GAP_SHRINK_G(逐步收紧,加仓次数自然收口)③单币预算封顶(下面三档)+ 硬顶
+ADD_GAP_K = 0.15            # 波动闸 σ 系数(逐币:x = k×该币σ)
+ADD_GAP_SHRINK_G = 1.5     # 收缩因子(每加一次门槛×此)
+ADD_MAX_HARD = 8           # 智能模式硬顶(兜底;通常单币预算先触顶)
+# 智能模式加仓额 = (目标本次加仓额 ÷ 目标首仓额) × 我们首仓保证金,封顶到该币剩余"单币预算"。
+# 三档单币最大保证金占用(占账户%)—— 剧烈波动币绝不给 20%。首仓 sizing 不变(按典型单定,不因加仓缩小)。
+STABLE_COIN_CAP_PCT = 0.20
+MID_COIN_CAP_PCT    = 0.12
+HIGH_COIN_CAP_PCT   = 0.06
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGIN_PCT·scale·available) is below this
 #                             fraction of equity: once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay
