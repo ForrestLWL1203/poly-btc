@@ -398,6 +398,7 @@ function PositionDetail({ d }) {
           <tr key={i} className={f.skipped ? "fill-skipped" : ""}>
             <td className="mono muted">{fTime(f.atSec)}</td>
             <td><span className={"tint " + (ACT_TINT[f.actionLabel] || "tint-gray")}>{f.actionLabel}</span>
+              {f.fillCount > 1 && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }} title="该订单分多笔成交">×{f.fillCount}笔</span>}
               {f.maker && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }}>挂单</span>}</td>
             <td className="num">{fPrice(f.masterPx)} <span className="muted">× {fNum(f.masterSz, 2)}</span></td>
             <td className="num muted">{fNum(f.masterPosAfter, 1)}</td>

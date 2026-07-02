@@ -672,25 +672,51 @@ def ep_position_detail(db, pos_id):
     if not p:
         return {"error": "not_found"}
     acts = qall(db, "SELECT ts,action,maker,master_px,master_sz_delta,master_pos_after,our_qty_delta,our_px,"
-                    "realized_pnl,slippage_bps FROM copy_action WHERE pos_id=? ORDER BY ts,act_id", (pos_id,))
+                    "realized_pnl,slippage_bps,master_oid FROM copy_action WHERE pos_id=? ORDER BY ts,act_id", (pos_id,))
     ACT = {"open": "开仓", "add": "加仓", "reduce": "减仓", "close": "平仓"}
-    fills, m_adds, skipped = [], 0, 0
+    # AGGREGATE BY ORDER (master_oid): a single master limit order fills in many slices — HL returns each
+    # slice as its own fill, so raw copy_action can hold dozens of rows for ONE order. Collapse per oid into
+    # one logical row (Σsize, size-weighted avg px, Σpnl, ×N fills). None-oid rows never merge.
+    groups = {}
     for a in acts:
-        our_qty = abs(a["our_qty_delta"] or 0.0)
-        followed = our_qty > 1e-9
-        is_entry = a["action"] in ("open", "add")
-        if a["action"] == "add":
+        oid = a["master_oid"]
+        key = oid if oid is not None else f"_n{a['ts']}_{a['act_id'] if 'act_id' in a.keys() else id(a)}"
+        g = groups.get(key)
+        if g is None:
+            g = {"action": a["action"], "maker": bool(a["maker"]), "ts": a["ts"], "mpx_n": 0.0, "m_sz": 0.0,
+                 "opx_n": 0.0, "o_sz": 0.0, "pnl": 0.0, "pos_after": a["master_pos_after"], "n": 0,
+                 "slip_n": 0.0, "slip_w": 0.0}
+            groups[key] = g
+        m_sz = abs(a["master_sz_delta"] or 0.0)
+        o_sz = abs(a["our_qty_delta"] or 0.0)
+        g["mpx_n"] += (a["master_px"] or 0.0) * m_sz
+        g["m_sz"] += m_sz
+        g["opx_n"] += (a["our_px"] or 0.0) * o_sz
+        g["o_sz"] += o_sz
+        g["pnl"] += a["realized_pnl"] or 0.0
+        g["pos_after"] = a["master_pos_after"]            # last slice wins (time-ordered)
+        g["slip_n"] += (a["slippage_bps"] or 0.0) * o_sz
+        g["slip_w"] += o_sz
+        g["n"] += 1
+        if a["action"] == "close":                        # a reduce order that flattens shares its oid → label 平仓
+            g["action"] = "close"
+    fills, m_adds, skipped = [], 0, 0
+    for g in groups.values():
+        m_sz, o_sz = g["m_sz"], g["o_sz"]
+        followed = o_sz > 1e-9
+        is_entry = g["action"] in ("open", "add")
+        if g["action"] == "add":
             m_adds += 1
             if not followed:
                 skipped += 1
         fills.append({
-            "atSec": (a["ts"] or 0) / 1000.0, "action": a["action"], "actionLabel": ACT.get(a["action"], a["action"]),
-            "maker": bool(a["maker"]),
-            "masterPx": a["master_px"], "masterSz": abs(a["master_sz_delta"] or 0.0), "masterPosAfter": a["master_pos_after"],
-            "followed": followed, "ourPx": a["our_px"] if followed else None, "ourSz": our_qty if followed else None,
+            "atSec": (g["ts"] or 0) / 1000.0, "action": g["action"], "actionLabel": ACT.get(g["action"], g["action"]),
+            "maker": g["maker"], "fillCount": g["n"],
+            "masterPx": (g["mpx_n"] / m_sz) if m_sz else None, "masterSz": m_sz, "masterPosAfter": g["pos_after"],
+            "followed": followed, "ourPx": (g["opx_n"] / o_sz) if followed else None, "ourSz": o_sz if followed else None,
             "skipped": is_entry and not followed,                 # a master entry/add we did NOT mirror (cap)
-            "pnl": a["realized_pnl"] if a["action"] in ("reduce", "close") else None,
-            "slippageBps": a["slippage_bps"],
+            "pnl": g["pnl"] if g["action"] in ("reduce", "close") else None,
+            "slippageBps": (g["slip_n"] / g["slip_w"]) if g["slip_w"] else None,
         })
     close_type = "liq" if p["was_liq"] else ("stop" if p["was_stopped"] else "mirror")
     return {
