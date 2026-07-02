@@ -917,9 +917,18 @@ class Observer:
                 pass
             if ep.get("entry_px") is None or (addr, coin) not in self.open_ep:
                 return
-            if ep["add_count"] >= self.max_adds:      # cap reached — observe but don't follow
+            # 源(目标)加权均价:每次目标加仓都把 master_open_px 更新为其 size 加权均价(此前只存首开价 →
+            # 多次加仓的"源"价没更新、和我们的均价没法比)。用目标的真实仓位量(pos1 = 加仓后仓位,signed = 本笔量)。
+            # 即使超过我们的跟随上限(下面 observe-only 分支)也更新 —— 目标仍在摊他的均价。
+            m_now = abs(pos1)
+            if m_now > 0 and master_px and ep.get("master_open_px"):
+                m_prev = abs(pos1 - signed)           # 目标加仓前的仓位量
+                ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * master_px) / m_now
+            if ep["add_count"] >= self.max_adds:      # cap reached — observe but don't follow (仍更新源均价)
                 self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                     0.0, master_px, 0.0, 0.0)
+                self.db.execute("UPDATE copy_position SET master_open_px=? WHERE pos_id=?",
+                                (ep["master_open_px"], ep["pos_id"]))
                 self.db.commit()
                 return
             is_buy = ep["side"] == "long"             # adding to a long => buy more
@@ -944,8 +953,8 @@ class Observer:
                                 add_size * ep["sign"], px, 0.0, slip)
             self.db.execute(
                 "UPDATE copy_position SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,liq_px=?,stop_px=?,"
-                "add_count=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
-                ep["rem_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["pos_id"]))
+                "add_count=?,master_open_px=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
+                ep["rem_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
             self.db.commit()                                  # the add is in copy_action
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker,
