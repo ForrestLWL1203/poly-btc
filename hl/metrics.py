@@ -221,6 +221,20 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
     _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")    # 边际bps = 30d 净利/成交量
     if _mvlm and _mvlm > 0 and (_mpnl / _mvlm * 1e4) < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
         return False, "thin_edge"                              # profit/$ doesn't clear our taker cost with margin
+    # v9 大亏小赚: 平均亏 > 平均赢 (payoff<1). 低胜率真趋势客 payoff 天然 >1 不受影响;抓高胜率倒挂的割肉盘 ——
+    # 我们跟会放大那笔大亏、剪掉小赢。payoff=999(从不兑现亏损)由 score 的刷胜率守卫另管,这里放行。
+    _pay = m.get("payoff_ratio")
+    if _pay is not None and _pay < getattr(p, "min_payoff", config.MIN_PAYOFF):
+        return False, "small_win_big_loss"
+    # v9 单日 windfall: 利润高度集中在一天 且 胜率不高 = 靠一笔偶然大赚撑着(亏损未覆盖,ROI 此刻还正 → 单列)。
+    if (m.get("profit_conc") or 0.0) >= getattr(p, "windfall_conc", config.WINDFALL_CONC) \
+            and (m.get("win_rate") or 0.0) < getattr(p, "windfall_win_max", config.WINDFALL_WIN_MAX):
+        return False, "windfall_dependent"
+    # v9 edge 衰减: 月 edge 达标但近一周 edge 已转负(且这周有真实成交量 = 在活跃地亏,非歇着)。月度光环掩盖近期反转。
+    if config.GATE_REQUIRE_WEEK_EDGE_POS:
+        _wvlm, _wpnl = m.get("pf_week_vlm"), m.get("pf_week_pnl")
+        if _wvlm and _wvlm > 0 and (_wpnl or 0.0) < 0:
+            return False, "edge_decayed"
     return True, "ok"
 
 

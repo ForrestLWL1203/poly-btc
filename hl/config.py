@@ -210,8 +210,10 @@ HARVEST_MIN_ACCT = 10000.0          # real-capital floor (5k→10k; <10k mostly 
 #                                     small-account %-traders sit at ~$11-20k so don't raise further)
 HARVEST_WEEK_VLM_MIN = 500_000.0    # 7d VOLUME floor — genuinely trading this week (strong density is
 #                                     thin below $1M, but $0.5-1M still holds real talent → floor $0.5M)
-HARVEST_WEEK_VLM_MAX = 30_000_000.0 # 7d VOLUME ceiling — above ~$30M = market-maker/HFT-bot (billion-$
-#                                     /wk, razor pnl/vol); 90% of strong wallets sit under $15M
+HARVEST_WEEK_VLM_MAX = 100_000_000.0 # 7d VOLUME ceiling (v9: 30M→100M). Absolute volume is a CRUDE churner cut —
+#                                     the turnover gate (vlm/equity) does it precisely at profile, so a big LEGIT
+#                                     account (deep pockets, low turnover) must not be pre-excluded here. Cheap
+#                                     stage-1 noise-cut only; churner judgment deferred to PORTFOLIO_MAX_TURNOVER.
 HARVEST_PNL_VOL_MIN = 0.001         # 7d pnl/volume FLOOR (0.1%) — below = razor-thin MM, not directional
 HARVEST_PNL_VOL_MAX = 0.08          # 7d pnl/volume CEILING (8%) — above = profit too big for the volume
 #                                     = NOT from trading (deposit/spot/airdrop ghost); real traders 0.2-4%
@@ -322,8 +324,14 @@ GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月
 # v7 PORTFOLIO copyability gates (from HL portfolio: net-of-fees, deposit-adjusted; only when pf data present).
 PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >this = HFT bot (unreplicable at our latency +
 #                                  fee-drag we can't outrun). Full-pop dist: p75=39x (trend), p90=126x (bots).
-PORTFOLIO_MIN_EDGE_BPS = 15.0     # 边际下限 = 30d 净利/成交量 ×1e4. <this ≈ <1.7× our ~9bp round-trip taker cost →
+PORTFOLIO_MIN_EDGE_BPS = 20.0     # 边际下限 = 30d 净利/成交量 ×1e4. <this ≈ <2× our ~9bp round-trip taker cost →
 #                                  no margin left after our slippage/latency. Month window (30d) = less noisy than 7d.
+# --- v9 strict-gate additions: every wallet that survives to the watchlist must be genuinely copyable ---
+MIN_PAYOFF = 1.0        # 盈亏比下限 avg_win/avg_loss. <this = 大亏小赚(平均亏 > 平均赢)—— 我们跟会放大那笔大亏、
+#                        剪掉小赢。低胜率真趋势客 payoff 天然 >1(否则不盈利)故不受影响;抓的是高胜率倒挂盘。
+WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
+WINDFALL_WIN_MAX = 0.60  # (亏损尚未覆盖,ROI 此刻还正)→ reject。真·高胜率的集中不算(它靠稳定胜率不靠一把)。
+GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量)→ reject:月度光环掩盖近期反转,当下在亏。
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
 # target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. 30d exactly

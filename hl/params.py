@@ -54,6 +54,12 @@ PARAM_SPEC = [
         "换手率上限 (x/周)", "周成交量÷账户权益。超过=高频机器人(我们延迟跟不了+手续费拖累)。趋势客一般<40x,机器人>100x"),
     ("PORTFOLIO_MIN_EDGE_BPS","scanner", "yellow", "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
         "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
+    ("MIN_PAYOFF",           "scanner", "yellow", "float",   "rescan", config.MIN_PAYOFF,
+        "盈亏比下限", "平均赢单÷平均亏单。低于此=大亏小赚(一笔亏吃掉多笔赢),跟了会放大大亏剪掉小赢。低胜率真趋势客盈亏比天然>1,不受影响"),
+    ("WINDFALL_CONC",        "scanner", "hidden", "pct",     "rescan", config.WINDFALL_CONC * 100,
+        "单日利润集中度上限", "单日≥此比例毛利且胜率<下条=靠一笔偶然大赚撑着(亏损未覆盖),排除"),
+    ("WINDFALL_WIN_MAX",     "scanner", "hidden", "pct",     "rescan", config.WINDFALL_WIN_MAX * 100,
+        "windfall判定·胜率上限", "配合上条:高集中度+胜率低于此=一波流;真高胜率的集中不算(靠稳定胜率不靠一把)"),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
@@ -235,6 +241,7 @@ SCANNER_ARG_MAP = {
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
     "PORTFOLIO_MAX_TURNOVER": "portfolio_max_turnover", "PORTFOLIO_MIN_EDGE_BPS": "portfolio_min_edge_bps",
+    "MIN_PAYOFF": "min_payoff", "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
 }
 
 
