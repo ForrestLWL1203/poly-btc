@@ -476,11 +476,20 @@ def scan(db, p) -> None:
     start_ms = now_ms - p.days * 86400_000
 
     # dashboard: advertise we're scanning + consume any operator-queued rescan command
-    rescan_ids = [r[0] for r in db.execute(
-        "SELECT id FROM commands WHERE status='pending' AND type='rescan'").fetchall()]
+    rescan_rows = db.execute(
+        "SELECT id, payload_json FROM commands WHERE status='pending' AND type='rescan'").fetchall()
+    rescan_ids = [r[0] for r in rescan_rows]
     for cid in rescan_ids:
         db.execute("UPDATE commands SET status='acked',acked_at=? WHERE id=?", (now_iso(), cid))
     db.commit()
+    # a rescan command may request a FULL sweep (dashboard 全量 checkbox) via its payload → re-profile
+    # EVERYONE (not just the daily active+new tier); picked up by p.full_scan at the workset split below.
+    for _, pj in rescan_rows:
+        try:
+            if pj and json.loads(pj).get("full"):
+                p.full_scan = True
+        except (ValueError, TypeError):
+            pass
     # MANUAL (dashboard button → pending rescan command) vs AUTO (24h schedule, no command). The frontend
     # locks the page ONLY for manual scans; the auto scan runs SILENTLY in the background (it must be slow
     # since the observer owns the rate budget, so locking the UI for its full duration is unacceptable).

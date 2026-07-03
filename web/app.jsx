@@ -756,7 +756,7 @@ function ScanMask({ status }) {
   return (
     <div className="mask">
       <div className="radar" />
-      <h2>全量重采进行中…</h2>
+      <h2>采集进行中…</h2>
       <div className="sub">{mm}:{ss} 已用 · 预计 ~20:00</div>
       <div className="mask-prog"><div className="pf" style={{ width: pct + "%" }} /></div>
       <div className="mask-meta">
@@ -792,6 +792,7 @@ function ObsMask({ label }) {
 function Discovery({ scanning, startRescan, confirm }) {
   const [d, setD] = useState(null);
   const [runs, setRuns] = useState(null);
+  const [fullScan, setFullScan] = useState(false);   // 采集模式:勾选=全量(重采所有候选),默认=增量(仅活跃+新)
   const load = useCallback(() => {
     api.get("/api/discovery").then(setD).catch(() => {});
     api.get("/api/scan-runs?limit=8").then(r => setRuns(r.runs)).catch(() => {});
@@ -800,9 +801,12 @@ function Discovery({ scanning, startRescan, confirm }) {
   useEffect(() => { if (!scanning) load(); }, [scanning, load]);  // refresh after a rescan finishes
 
   const doRescan = () => confirm({
-    title: "触发全量重采", danger: true, ok: "开始重采",
-    body: "将重新拉取排行榜并重建被跟名单(慢速约 2 小时,期间按钮锁定)。全程让跟单优先、不抢其速率。确认执行?",
-    onConfirm: startRescan,
+    title: fullScan ? "触发全量采集" : "触发增量采集",
+    danger: fullScan, ok: fullScan ? "开始全量" : "开始增量",
+    body: fullScan
+      ? "全量:重拉排行榜 + 重采所有候选,让每个 profile 都到最新评分标准(改过评分逻辑后必须跑一次)。无跟单时全速约 30–90 分钟,有跟单则自动慢采让速。期间按钮锁定。确认?"
+      : "增量:只重采活跃+新候选(快,几分钟),旧的 rejected 长尾不动。日常刷新用这个。确认?",
+    onConfirm: () => startRescan(fullScan),
   });
 
   if (!d) return <div className="content"><div className="loading">加载中…</div></div>;
@@ -817,7 +821,14 @@ function Discovery({ scanning, startRescan, confirm }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}><h2>采集进程 · 实时</h2>
-        <button className="btn btn-accent" disabled={busy} onClick={doRescan}><Ico d={IC.discovery} /> {busy ? "采集进行中…" : "触发全量重采"}</button></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <label title="勾选=全量(重拉排行榜+重采所有候选,改过评分后必跑);默认=增量(仅活跃+新,快)"
+            style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: busy ? "default" : "pointer", opacity: busy ? .5 : 1 }}>
+            <input type="checkbox" checked={fullScan} disabled={busy} onChange={e => setFullScan(e.target.checked)} />
+            全量采集
+          </label>
+          <button className="btn btn-accent" disabled={busy} onClick={doRescan}><Ico d={IC.discovery} /> {busy ? "采集进行中…" : (fullScan ? "触发全量采集" : "触发增量采集")}</button>
+        </div></div>
       <div className="card">
         <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
           <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: scColor }}>
@@ -1256,7 +1267,7 @@ function Dashboard({ onLogout }) {
     return () => clearInterval(t);
   }, [loadOv, streamOk]);
 
-  const startRescan = useCallback(async () => { await api.cmd("rescan", {}); setScanning(true); }, []);
+  const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
   // The SERVER is the source of truth for "a full scan is running" (scan_progress / process_status,
   // surfaced as system.scanner). Driving the mask off this — not just a click in this tab — means the
   // mask survives a page refresh/reopen AND catches the 24h auto-scan, so you can't refresh past it and
