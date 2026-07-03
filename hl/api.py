@@ -285,6 +285,30 @@ def _follow_positions(db):
     return {r["addr"]: i + 1 for i, r in enumerate(rows)}
 
 
+def ep_shadow(db):
+    """Taker vs maker-shadow A/B — two isolated paper books, SAME strategy, only execution differs
+    (taker fills on every target fill at the taker fee; maker fills only on the target's maker fills at
+    the maker fee). equity = balance + Σ open unrealized."""
+    def book(acct, pos):
+        br = db.execute(f"SELECT balance FROM {acct} WHERE id=1").fetchone()
+        bal = float(br["balance"]) if br else 0.0
+        o = db.execute(f"SELECT COALESCE(SUM(unrealized_pnl),0) u, COUNT(*) n FROM {pos} WHERE status='open'").fetchone()
+        c = db.execute(f"SELECT COALESCE(SUM(realized_pnl),0) r, COUNT(*) n, "
+                       f"SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) w FROM {pos} WHERE status!='open'").fetchone()
+        upnl = float(o["u"] or 0.0)
+        return {"balance": bal, "unrealized": upnl, "equity": bal + upnl, "realized": float(c["r"] or 0.0),
+                "openN": o["n"], "closedN": c["n"],
+                "winRatePct": ((c["w"] or 0) / c["n"] * 100.0) if c["n"] else 0.0}
+    taker = book("copy_account", "copy_position")
+    maker = book("shadow_account", "shadow_position")
+    mpos = [{"addr": r["addr"], "coin": r["coin"], "side": r["side"], "entry": r["entry_px"],
+             "lev": r["leverage"], "margin": r["margin"], "mark": r["mark_px"],
+             "upnl": r["unrealized_pnl"], "addN": r["add_count"], "openedAt": r["opened_at"]}
+            for r in db.execute("SELECT addr,coin,side,entry_px,leverage,margin,mark_px,unrealized_pnl,"
+                                "add_count,opened_at FROM shadow_position WHERE status='open' ORDER BY opened_at DESC").fetchall()]
+    return {"enabled": bool(config.SHADOW_MAKER_ENABLED), "taker": taker, "maker": maker, "makerPositions": mpos}
+
+
 def ep_overview(db):
     # LIVE-DERIVE from copy_position + copy_account (fresh as of the observer's 25s mark refresh) rather
     # than the 5-min account_stats snapshot row — so the cards aren't up to 5 minutes stale. account_stats
@@ -977,6 +1001,8 @@ def make_handler(db_path, auth, static_dir=None):
                     return self._envelope(ep_scan_status(db))
                 if path == "/api/score-dist":
                     return self._envelope(ep_score_dist(db))
+                if path == "/api/shadow":
+                    return self._envelope(ep_shadow(db))
                 if path.startswith("/api/commands/"):
                     return self._envelope(ep_command(db, int(path.rsplit("/", 1)[1])))
                 return self._send(404, {"error": "not_found"})
