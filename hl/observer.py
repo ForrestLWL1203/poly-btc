@@ -133,27 +133,30 @@ class Observer:
         self._proc_owner = f"observer:{os.getpid()}"
 
     # -- paper account ------------------------------------------------------
-    def _available(self) -> float:
+    def _available(self, book=None) -> float:
         """Balance not currently tied up as isolated margin (margin scales with rem_size/size as a
-        position is partially closed)."""
+        position is partially closed). Per-book; defaults to the taker book."""
+        book = book or self.taker
         locked = self.db.execute(
-            "SELECT COALESCE(SUM(margin * rem_size / size),0) FROM copy_position "
+            f"SELECT COALESCE(SUM(margin * rem_size / size),0) FROM {book.pos_table} "
             "WHERE status='open' AND size>0").fetchone()[0]
-        return self.balance - (locked or 0.0)
+        return book.balance - (locked or 0.0)
 
-    def _load_account(self):
-        row = self.db.execute("SELECT balance FROM copy_account WHERE id=1").fetchone()
+    def _load_account(self, book=None):
+        book = book or self.taker
+        row = self.db.execute(f"SELECT balance FROM {book.acct_table} WHERE id=1").fetchone()
         if row:
-            self.balance = row[0]
+            book.balance = row[0]
         else:
-            self.db.execute("INSERT INTO copy_account (id,initial_balance,balance,updated_at) "
+            self.db.execute(f"INSERT INTO {book.acct_table} (id,initial_balance,balance,updated_at) "
                             "VALUES (1,?,?,?)", (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now_iso()))
             self.db.commit()
-        _log(f"account: balance ${self.balance:,.2f} / available ${self._available():,.2f}")
+        _log(f"account[{book.name}]: balance ${book.balance:,.2f} / available ${self._available(book):,.2f}")
 
-    def _save_account(self):
-        self.db.execute("UPDATE copy_account SET balance=?, updated_at=? WHERE id=1",
-                        (self.balance, now_iso()))
+    def _save_account(self, book=None):
+        book = book or self.taker
+        self.db.execute(f"UPDATE {book.acct_table} SET balance=?, updated_at=? WHERE id=1",
+                        (book.balance, now_iso()))
 
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
@@ -1183,15 +1186,16 @@ class Observer:
                     asyncio.create_task(self._stop_out(a, coin, ep, mid))
 
     def _record_action(self, ep, addr, coin, t, action, maker, oid, master_px, sz_delta, pos_after,
-                       our_qty_delta, our_px, realized, slip):
+                       our_qty_delta, our_px, realized, slip, book=None):
+        book = book or self.taker
         ep["num_actions"] += 1
         self.db.execute(
-            "INSERT INTO copy_action (pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,"
+            f"INSERT INTO {book.act_table} (pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,"
             "master_sz_delta,master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ep["pos_id"], addr, coin, t, now_ms(), action, 1 if maker else 0, oid, master_px, sz_delta,
              pos_after, our_qty_delta, our_px, realized, slip))
-        self.db.execute("UPDATE copy_position SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
+        self.db.execute(f"UPDATE {book.pos_table} SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
 
     async def _poll_fills(self, addr: str, since: int):
