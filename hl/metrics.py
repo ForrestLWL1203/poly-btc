@@ -106,6 +106,13 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
     # commodity). crypto_frac=1 pure crypto, 0 pure stock. Lets the watchlist/UI tag a wallet's battlefield.
     crypto_notl = sum(e["max_notl"] for e in eps if ":" not in e["coin"])
     crypto_frac = (crypto_notl / total_notl) if total_notl else 1.0
+    # 盈亏比 payoff = 平均赢单 / 平均亏单。低胜率但 payoff 高 = 小亏大赢的真趋势客(可跟);高胜率但 payoff<1 =
+    # 大亏小赚假胜率(一笔亏吃掉多笔赢)。从不兑现亏损 → 无亏 → 封顶 999(该情形由 score 的刷胜率守卫另管)。
+    _wins = [e["net_pnl"] for e in eps if e["net_pnl"] > 0]
+    _losses = [-e["net_pnl"] for e in eps if e["net_pnl"] < 0]
+    _avg_win = (sum(_wins) / len(_wins)) if _wins else 0.0
+    _avg_loss = (sum(_losses) / len(_losses)) if _losses else 0.0
+    _payoff = min(999.0, _avg_win / _avg_loss) if _avg_loss > 0 else 999.0
     m = {
         "crypto_frac": crypto_frac,
         "market_type": ("crypto" if crypto_frac >= 0.7 else "stock" if crypto_frac <= 0.3 else "mixed"),
@@ -114,6 +121,7 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         "taker_frac_notl": (taker_notl / tot_notl) if tot_notl else 0.0,
         "median_hold_s": holds[len(holds) // 2],
         "win_rate": sum(1 for e in eps if e["net_pnl"] > 0) / len(eps),
+        "avg_win": _avg_win, "avg_loss": _avg_loss, "payoff_ratio": _payoff,
         "net_pnl": cum, "gross_pnl": sum(e["net_pnl"] + e["fee"] for e in eps),
         "roi_notional": (cum / total_notl) if total_notl else 0.0, "total_notl": total_notl,
         "total_fee": sum(e["fee"] for e in eps), "n_coins": len(coins),
