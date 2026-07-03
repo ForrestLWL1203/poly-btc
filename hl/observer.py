@@ -120,6 +120,8 @@ class Observer:
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.px_ext: dict = {}           # coin -> [lo_bid, hi_ask, reset_ms] rolling ~window extreme, for the
         #                                  maker-shadow 戳破 check: did the price trade THROUGH our resting price?
+        self.hb: dict = {}               # per-heartbeat-interval tally (fills seen / copied / skipped-by-reason);
+        #                                  taker book only (real copy); reset each _announce. Answers "why no trades".
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
@@ -221,6 +223,14 @@ class Observer:
         if not e:
             return True
         return (e[0] < px) if is_buy else (e[1] > px)
+
+    def _tally(self, key, book=None):
+        """Count one heartbeat event for the diagnostic rollup. Only the taker (real copy) book counts;
+        the maker shadow is excluded so the numbers reflect actual copy activity. No per-fill log lines —
+        the 5-min heartbeat prints the aggregate, so 'why no trades' is answerable at zero log growth."""
+        if book is self.maker:
+            return
+        self.hb[key] = self.hb.get(key, 0) + 1
 
     # -- restart recovery: reload open copies from db ------------------------
     def _reload_params(self):
@@ -549,8 +559,14 @@ class Observer:
             await asyncio.sleep(300)
             o = self.db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
             c = self.db.execute("SELECT count(*) FROM copy_position WHERE status!='open'").fetchone()[0]
-            a = self.db.execute("SELECT count(*) FROM copy_action").fetchone()[0]
-            _log(f"heartbeat: {o} open / {c} closed positions, {a} actions recorded")
+            h, self.hb = self.hb, {}           # snapshot + reset this interval's diagnostic tally
+            seen = h.get("seen", 0)
+            acts = {k[4:]: v for k, v in h.items() if k.startswith("act_")}   # open/add/reduce/stop/close
+            skips = {k[5:]: v for k, v in h.items() if k.startswith("skip_")}
+            act_s = ", ".join(f"{k} {v}" for k, v in sorted(acts.items(), key=lambda x: -x[1])) or "-"
+            skip_s = ", ".join(f"{k} {v}" for k, v in sorted(skips.items(), key=lambda x: -x[1])) or "-"
+            _log(f"heartbeat: {o} open / {c} closed | 本轮看到 {seen} → 跟 {sum(acts.values())} ({act_s}), "
+                 f"跳 {sum(skips.values())} ({skip_s})")
             try:
                 self._write_stats()                # append a dashboard snapshot every 5 min
             except Exception as exc:  # noqa: BLE001
@@ -878,6 +894,7 @@ class Observer:
             return
         if not self._record_fill(addr, x):
             return                          # already processed this tid (poll overlap) — idempotent
+        self._tally("seen")                 # a fresh target fill reached us (proves ingestion is alive)
         self.last_fill_ms[addr] = max(self.last_fill_ms.get(addr, 0), x["time"])  # advance cursor
         t = x["time"]
         sz = f(x.get("sz"))
@@ -907,6 +924,12 @@ class Observer:
                     and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                     and not self.paused):               # dashboard pause = no new opens (existing keep to close)
                 self._open_position(addr, coin, t, px, pos1, our_maker, oid, book)
+            elif abs(pos1) < config.FLAT:
+                pass                                    # target closed a position we never held — nothing to copy
+            else:                                       # a fresh open we chose not to take → tally the reason
+                self._tally("skip_paused" if self.paused else
+                            "skip_heldoff" if addr in self.held_off else
+                            "skip_midway", book)         # midway = target already in the position when we saw it
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if liq:
@@ -927,6 +950,7 @@ class Observer:
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None):
         book = book or self.taker
         if not self._copyable(coin):
+            self._tally("skip_opaque", book)
             return              # copy crypto + transparent builder (stocks); skip opaque/unknown
         side = "long" if pos1 > 0 else "short"
         lag_sec = max(0.0, (now_ms() - t) / 1000.0)   # copy latency: master fill -> our detection (dashboard)
@@ -952,6 +976,7 @@ class Observer:
             self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))  # position (also
             self.db.commit()                                                              # avoids /0 below)
             book.open_ep.pop((addr, coin), None)
+            self._tally("skip_unpriceable", book)
             _log(f"skip {coin}: unpriceable (px={px}, master_px={master_px}) — not followed")
             return
         chase = (px - master_px) / master_px * 1e4 * ep["sign"]   # bps worse than master (+ = worse)
@@ -961,7 +986,8 @@ class Observer:
             self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
             self.db.commit()
             book.open_ep.pop((addr, coin), None)
-            return                                            # chase-skip (rare); recorded by absence
+            self._tally("skip_chase", book)
+            return                                            # chase-skip: price ran past master before we detected
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
         # v8 sizing: σ → tier (stable/mid/high) → margin% + lev cap; leverage scales ∝1/σ within the tier
         #  margin = available × <tier>_margin_pct
@@ -1004,6 +1030,7 @@ class Observer:
             if capped < self.min_open_margin_pct * book.balance:     # side full, deploy cap hit, out of cash, or too small
                 why = ("coin_full" if room < margin else "no_cash" if avail < margin
                        else "deploy_cap" if deploy_room < margin else "margin_too_small")
+                self._tally(f"skip_{why}", book)
                 _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / deploy ${deploy_room:,.0f} / cash ${avail:,.0f} / want ${margin:,.0f})")
                 self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))  # -> skip
                 self.db.commit()
@@ -1022,6 +1049,7 @@ class Observer:
             min_notl = self.tier_min_notional.get(self._tier(sigma, coin), 0.0)  # per-tier floor (after master-notl cap)
             if notional < min_notl:                   # too small for its tier → not worth the fee/latency drag
                 why = f"below {self._tier(sigma, coin)}-tier min notl ${notional:,.0f} < ${min_notl:,.0f} (master notl ${master_notl:,.0f})"
+                self._tally("skip_small_notl", book)
                 _log(f"skip {coin} {ep['side']} {addr[:10]}: {why}")   # → don't open a meaningless small position
                 self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
                 self.db.commit()
@@ -1244,6 +1272,7 @@ class Observer:
     def _record_action(self, ep, addr, coin, t, action, maker, oid, master_px, sz_delta, pos_after,
                        our_qty_delta, our_px, realized, slip, book=None):
         book = book or self.taker
+        self._tally(f"act_{action}", book)   # copy activity by kind (open/add/reduce/stop/close) — taker only
         ep["num_actions"] += 1
         self.db.execute(
             f"INSERT INTO {book.act_table} (pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,"
