@@ -283,6 +283,53 @@ CREATE INDEX IF NOT EXISTS idx_ca_oid ON copy_action(master_oid);
 CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
 CREATE INDEX IF NOT EXISTS idx_ca_pos_act ON copy_action(pos_id, action, act_id);  -- per-pos action filter + ordered detail
 
+-- ── MAKER SHADOW (A/B experiment) ─────────────────────────────────────────────
+-- A fully ISOLATED parallel paper account. SAME strategy/sizing/gates/stops as the real taker book, but a
+-- copy is taken ONLY when the target's fill was a resting-limit (maker) fill [+ v2: the book traded THROUGH
+-- our mirrored price], booked at the target's maker price + MAKER fee. Never touches copy_* — it exists purely
+-- to measure "would maker execution have netted more than taker" (lower fee, better entry, but lower fill rate).
+CREATE TABLE IF NOT EXISTS shadow_account (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    initial_balance REAL, balance REAL, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS shadow_position (
+    pos_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    addr TEXT, coin TEXT, side TEXT,
+    status         TEXT,
+    master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
+    master_leverage REAL, master_margin REAL,
+    leverage REAL, margin REAL, notional REAL,
+    entry_px REAL, size REAL, rem_size REAL,
+    liq_px REAL, stop_px REAL,
+    realized_pnl REAL DEFAULT 0, add_count INTEGER DEFAULT 0,
+    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, was_stopped INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
+    mark_px REAL, unrealized_pnl REAL, open_lag_sec REAL,
+    opened_at TEXT, closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sp_status ON shadow_position(status);
+CREATE INDEX IF NOT EXISTS idx_sp_addr ON shadow_position(addr);
+CREATE TABLE IF NOT EXISTS shadow_action (
+    act_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    pos_id INTEGER, addr TEXT, coin TEXT, ts INTEGER, recv_ms INTEGER,
+    action TEXT, maker INTEGER, master_oid INTEGER,
+    master_px REAL, master_sz_delta REAL, master_pos_after REAL,
+    our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL
+);
+CREATE INDEX IF NOT EXISTS idx_sa_pos ON shadow_action(pos_id, action, act_id);
+-- pending mirrored maker orders (the 挂单中 tab): one per target resting order we're shadowing.
+CREATE TABLE IF NOT EXISTS shadow_order (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    addr TEXT, coin TEXT, side TEXT,
+    target_oid INTEGER,               -- the target resting order this mirrors
+    our_px REAL, our_sz REAL,         -- our mirrored maker price + intended size (coin)
+    reduce_only INTEGER DEFAULT 0,    -- 1 = a closing/reducing maker order (mirrors target reduce-only)
+    status TEXT,                      -- pending / filled / target_cancelled / expired
+    pos_id INTEGER,                   -- shadow_position it opened/affected once filled
+    created_at TEXT, updated_at TEXT,
+    UNIQUE(addr, target_oid)
+);
+CREATE INDEX IF NOT EXISTS idx_so_status ON shadow_order(status);
+
 -- Target wallets' RESTING orders (limit ladders + TP/SL triggers), captured by a REST
 -- poller of frontendOpenOrders (zero WS-slot cost). Reveals their intentions BEFORE
 -- execution → maker-copy candidates + their take-profit/stop levels. One row per (addr,
