@@ -317,6 +317,11 @@ GATE_PROFIT_CONC_MAX = 0.8   # reject if one day ≥ this share of gross profit 
 GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
 #                                    net_life field is absent (old profiles) so regate is safe pre-rescan.
 GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月在走下坡). Same absent-skip.
+# v7 PORTFOLIO copyability gates (from HL portfolio: net-of-fees, deposit-adjusted; only when pf data present).
+PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >this = HFT bot (unreplicable at our latency +
+#                                  fee-drag we can't outrun). Full-pop dist: p75=39x (trend), p90=126x (bots).
+PORTFOLIO_MIN_EDGE_BPS = 15.0     # 边际下限 = 30d 净利/成交量 ×1e4. <this ≈ <1.7× our ~9bp round-trip taker cost →
+#                                  no margin left after our slippage/latency. Month window (30d) = less noisy than 7d.
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
 # target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. 30d exactly

@@ -50,6 +50,10 @@ PARAM_SPEC = [
     ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 3, "网格判定:中位加仓上限(超过=习惯性均摊,跟不动)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
     ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
+    ("PORTFOLIO_MAX_TURNOVER","scanner", "yellow", "x",       "rescan", config.PORTFOLIO_MAX_TURNOVER,
+        "换手率上限 (x/周)", "周成交量÷账户权益。超过=高频机器人(我们延迟跟不了+手续费拖累)。趋势客一般<40x,机器人>100x"),
+    ("PORTFOLIO_MIN_EDGE_BPS","scanner", "yellow", "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
+        "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
@@ -230,6 +234,7 @@ SCANNER_ARG_MAP = {
     "min_activity": "min_activity", "grid_max_adds": "grid_max_adds",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
+    "PORTFOLIO_MAX_TURNOVER": "portfolio_max_turnover", "PORTFOLIO_MIN_EDGE_BPS": "portfolio_min_edge_bps",
 }
 
 

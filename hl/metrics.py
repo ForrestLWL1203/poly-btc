@@ -202,6 +202,13 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
     #                                                            directional trade — copying the naked perp
     #                                                            leg loses what their spot leg offsets.
+    # v7 PORTFOLIO copyability (net-of-fees; only when pf data exists → old profiles skip until re-scanned):
+    _turn = m.get("pf_turnover")                               # 换手率 = 周成交量/权益
+    if _turn is not None and _turn > getattr(p, "portfolio_max_turnover", config.PORTFOLIO_MAX_TURNOVER):
+        return False, "hft_turnover"                           # HFT churner — unreplicable + fee-drag
+    _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")    # 边际bps = 30d 净利/成交量
+    if _mvlm and _mvlm > 0 and (_mpnl / _mvlm * 1e4) < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
+        return False, "thin_edge"                              # profit/$ doesn't clear our taker cost with margin
     return True, "ok"
 
 
@@ -218,8 +225,15 @@ def score(m: dict) -> float:
     # ROI = HL 官方 return-on-capital(净利/本金)。copy 只跟【最近表现】→ 只综合近期两窗口(周+月,月度为锚);
     # 全期(all_roi)权重=0 不计入。HL 已按出入金调整 → 不受提币污染;且是资本回报,天然含杠杆效率(net/名义 ≡ 此
     # ÷ 杠杆,会把杠杆红利除没、埋没大体量BTC波段客)。各窗口先 clip 防单窗口带飞;缺失窗口按可得权重归一。
-    _rp = [(config.ROI_W_WEEK, m.get("week_roi")), (config.ROI_W_MON, m.get("mon_roi")),
-           (config.ROI_W_ALL, m.get("all_roi"))]
+    # v7: prefer PORTFOLIO net return-on-capital (fee-inclusive + deposit-adjusted; leaderboard ROI is gross
+    # and lags a day). pf_*_pnl / pf_equity = the real net weekly/monthly return. Fall back to the leaderboard
+    # windows only when pf data is absent (a profile not yet re-scanned) so the switch is safe + rollback-able.
+    _pfeq = g("pf_equity")
+    if _pfeq and _pfeq > 0:
+        _rp = [(config.ROI_W_WEEK, g("pf_week_pnl") / _pfeq), (config.ROI_W_MON, g("pf_mon_pnl") / _pfeq)]
+    else:
+        _rp = [(config.ROI_W_WEEK, m.get("week_roi")), (config.ROI_W_MON, m.get("mon_roi")),
+               (config.ROI_W_ALL, m.get("all_roi"))]
     _rw = sum(w for w, v in _rp if v is not None)
     roi = (sum(w * _clip(v, config.ROI_CLIP_LO, config.ROI_CLIP_HI) for w, v in _rp if v is not None) / _rw
            if _rw else 0.0)
