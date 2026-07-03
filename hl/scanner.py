@@ -531,8 +531,9 @@ def scan(db, p) -> None:
         mode = (f"INCREMENTAL daily-tier ({len(daily_cand)} active+new of {len(cand)} cand; "
                 f"{len(cand) - len(daily_cand)} rejected-tail → weekly full)")
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
+    _pace = config.MIN_POST_INTERVAL   # live adaptive pace (fast when no copy-trading, slow trickle when observer up)
     print(f"scan: {mode} · {len(workset)} wallets + {len(off_active)} off-list actives, "
-          f"{p.days}d window, pace {getattr(p, 'scan_interval', 0.8):g}s/req\n")
+          f"{p.days}d window, pace {_pace:g}s/req ({'FULL-SPEED 无跟单' if _pace <= config.SCAN_IDLE_INTERVAL else '慢采·跟单进行中'})\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
     cols = storage.PROFILE_COLS.split(",")

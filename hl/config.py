@@ -14,6 +14,9 @@ MIN_POST_INTERVAL = 1.1     # global REST pace (s/POST). HL /info budget = 1200 
 #                             NOT a request count. 1.2s = 50/min ≈ 1000 weight/min: safely under
 #                             1200, leaving headroom for the 8s-trickle scanner (~150 weight/min)
 #                             on the same IP. (l2Book/clearinghouseState are only weight 2.)
+SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running — full speed (the observer
+#                             isn't competing for the IP's weight budget). Adaptive: the scan uses the
+#                             slow --scan-interval only while the observer is live; idle → this. ~15min sweep.
 #                             The scanner overrides this to --scan-interval in its own process.
 
 # HL WS hard limits (per IP, official): the binding one is unique users.

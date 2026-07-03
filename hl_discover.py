@@ -13,8 +13,26 @@ import subprocess
 import time
 from types import SimpleNamespace
 
-from hl import config, params, scanner, storage
+import threading
+
+from hl import config, params, procman, scanner, storage
 from hl.util import now_iso
+
+
+def _start_adaptive_pace(db_path, slow_interval):
+    """Scan REST pace adapts to whether copy-trading is live. Observer RUNNING → slow (`slow_interval`,
+    the --scan-interval trickle) so the scan yields the IP's HL weight budget to live fill-polling.
+    Observer STOPPED → full speed (SCAN_IDLE_INTERVAL) — nothing else is competing, so a manual rescan
+    finishes in ~15min instead of ~2h. Re-polls every 20s so it adapts if you start/stop the observer
+    mid-scan (config.MIN_POST_INTERVAL is read live by rest.post)."""
+    def _pace():
+        return slow_interval if procman.observer_running(db_path) else config.SCAN_IDLE_INTERVAL
+    config.MIN_POST_INTERVAL = _pace()                      # set the starting pace before the sweep begins
+    def _tick():
+        while True:
+            time.sleep(20)
+            config.MIN_POST_INTERVAL = _pace()
+    threading.Thread(target=_tick, daemon=True).start()
 
 
 AUTO_SCAN_EVERY_H = 24.0          # self-scheduled cadence (no systemd timer); reference = last scan_runs
@@ -183,9 +201,9 @@ def main() -> int:
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
     params.seed_params(db)                               # ensure UI-tunable params exist (idempotent)
     if args.cmd == "scan":
-        config.MIN_POST_INTERVAL = args.scan_interval   # slow this PROCESS's REST pace (trickle);
+        _start_adaptive_pace(args.db, args.scan_interval)  # observer live → slow trickle; idle → full speed
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
-        scanner.scan(db, args)                          # the observer process keeps its own fast pace
+        scanner.scan(db, args)                          # the observer (when up) keeps its own fast pace
     elif args.cmd == "serve-rescan":
         _serve_rescan(db)
     elif args.cmd == "watchlist":
