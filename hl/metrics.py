@@ -202,7 +202,11 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
     #                                                            directional trade — copying the naked perp
     #                                                            leg loses what their spot leg offsets.
-    # v7 PORTFOLIO copyability (net-of-fees; only when pf data exists → old profiles skip until re-scanned):
+    # v7 PORTFOLIO copyability (net-of-fees). REQUIRE pf data: no portfolio = can't net-score, and the
+    # leaderboard-ROI fallback is RETIRED (its live-vs-frozen mismatch was the old scan/regate scoring
+    # conflict). A pf-less wallet is not active until a scan populates it → scoring only ever walks ONE path.
+    if not m.get("pf_equity"):
+        return False, "no_portfolio"
     _turn = m.get("pf_turnover")                               # 换手率 = 周成交量/权益
     if _turn is not None and _turn > getattr(p, "portfolio_max_turnover", config.PORTFOLIO_MAX_TURNOVER):
         return False, "hft_turnover"                           # HFT churner — unreplicable + fee-drag
@@ -232,8 +236,8 @@ def score(m: dict) -> float:
     if _pfeq and _pfeq > 0:
         _rp = [(config.ROI_W_WEEK, g("pf_week_pnl") / _pfeq), (config.ROI_W_MON, g("pf_mon_pnl") / _pfeq)]
     else:
-        _rp = [(config.ROI_W_WEEK, m.get("week_roi")), (config.ROI_W_MON, m.get("mon_roi")),
-               (config.ROI_W_ALL, m.get("all_roi"))]
+        _rp = []   # no pf → no ROI pillar. Leaderboard fallback RETIRED (gates_state rejects pf-less wallets,
+        #            so an active wallet always has pf; this branch only guards a defensive score() call).
     _rw = sum(w for w, v in _rp if v is not None)
     roi = (sum(w * _clip(v, config.ROI_CLIP_LO, config.ROI_CLIP_HI) for w, v in _rp if v is not None) / _rw
            if _rw else 0.0)
