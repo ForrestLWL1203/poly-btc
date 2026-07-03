@@ -118,6 +118,8 @@ class Observer:
         #                                  EXIT-ONLY: follow their reduce/close, never open a NEW position
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
+        self.px_ext: dict = {}           # coin -> [lo_bid, hi_ask, reset_ms] rolling ~window extreme, for the
+        #                                  maker-shadow 戳破 check: did the price trade THROUGH our resting price?
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
@@ -196,6 +198,29 @@ class Observer:
             return bid if is_buy else ask         # target's resting order (else assuming our rest fills
         #                                           instantly = optimistic; see config.EXEC_MAKER_MIRROR)
         return ask if is_buy else bid             # default: taker catch-up across the spread, CURRENT book
+
+    def _track_px(self, coin, bid, ask):
+        """Roll a coin's recent price extreme (reset every MAKER_THROUGH_WINDOW_MS) so the maker-shadow can
+        ask: did the price trade THROUGH a resting price lately?"""
+        e = self.px_ext.get(coin)
+        now = now_ms()
+        if e is None or now - e[2] > config.MAKER_THROUGH_WINDOW_MS:
+            self.px_ext[coin] = [bid, ask, now]
+        else:
+            if bid < e[0]:
+                e[0] = bid
+            if ask > e[1]:
+                e[1] = ask
+
+    def _maker_filled(self, coin, is_buy, px):
+        """v2 戳破: our resting maker order at `px` fills ONLY if the price traded STRICTLY THROUGH it — we
+        sit BEHIND the target in the queue, so 'price merely touched px' means only the target filled, not us.
+        Buy rests on the bid → filled iff a bid printed below px; sell rests on the ask → iff an ask above px.
+        No recent extreme yet (just-warmed coin) → optimistic True (fall back to v1) so we don't under-count."""
+        e = self.px_ext.get(coin)
+        if not e:
+            return True
+        return (e[0] < px) if is_buy else (e[1] > px)
 
     # -- restart recovery: reload open copies from db ------------------------
     def _reload_params(self):
@@ -744,6 +769,7 @@ class Observer:
                     mid = (ba[0] + ba[1]) / 2                            # would falsely cross liq/stop
                     if ba[1] < ba[0]:                                    # crossed/garbage book → distrust this tick
                         continue
+                    self._track_px(coin, ba[0], ba[1])                   # roll extreme for the maker 戳破 check
                     for book in self.books:                      # both accounts: track MAE + run stops per book
                         for (a, c), ep in book.open_ep.items():  # track adverse excursion while open
                             if c == coin and ep["master_open_px"]:
@@ -824,6 +850,7 @@ class Observer:
         if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:   # crossed/zero book → junk tick, ignore
             return
         self.bbo[coin] = (bid, ask)
+        self._track_px(coin, bid, ask)             # roll the recent extreme for the maker 戳破 check
         mid = (bid + ask) / 2
         for book in self.books:                    # both accounts: track MAE + run stops per book
             for (a, c), ep in book.open_ep.items():    # track worst adverse excursion while open
@@ -872,6 +899,8 @@ class Observer:
         # our_maker = do WE rest a maker order on this fill? taker book always crosses (False); maker book
         # matches the target (their maker fill → we rest; their taker fill → we cross). Drives fill price + fee.
         our_maker = maker if book.match_exec else False
+        if our_maker and not self._maker_filled(coin, signed > 0, px):
+            return   # v2 戳破: price didn't trade THROUGH our resting price → our maker order didn't fill (miss)
         ep = book.open_ep.get(key)
         if ep is None:
             if (abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT
