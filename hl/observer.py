@@ -37,7 +37,42 @@ def _log(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+class Book:
+    """One isolated paper account. The SAME strategy (sizing/adds/stops/caps) is applied to each book — only
+    EXECUTION differs: the taker book fills on every target fill at the taker fee; the maker book fills only on
+    the target's MAKER fills, at the maker fee. Separate tables so the two equity curves compare cleanly."""
+    def __init__(self, name, pos_table, act_table, acct_table, fee, maker_only):
+        self.name = name
+        self.pos_table = pos_table          # copy_position / shadow_position
+        self.act_table = act_table          # copy_action   / shadow_action
+        self.acct_table = acct_table        # copy_account   / shadow_account
+        self.fee = fee                      # taker vs maker rate
+        self.maker_only = maker_only        # maker book acts only on the target's resting-limit (maker) fills
+        self.balance = config.INITIAL_BALANCE
+        self.open_ep: dict = {}             # (addr,coin) -> position state
+        self.acct_lock = asyncio.Lock()     # serialize margin allocation across concurrent opens on THIS book
+
+
 class Observer:
+    # self.balance / self.open_ep / self.acct_lock delegate to the PRIMARY (taker) book so all existing
+    # non-apply code (logs, equity stats, poll/stop loops) keeps working unchanged; the apply/helper methods
+    # take an explicit `book` to operate on either account.
+    @property
+    def balance(self):
+        return self.taker.balance
+
+    @balance.setter
+    def balance(self, v):
+        self.taker.balance = v
+
+    @property
+    def open_ep(self):
+        return self.taker.open_ep
+
+    @property
+    def acct_lock(self):
+        return self.taker.acct_lock
+
     def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None,
                  add_frac: float = None):
         self.db = db
@@ -84,12 +119,13 @@ class Observer:
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.sub_coins: set = set()      # crypto coins we've sent a WS bbo subscription for
         self.stock_coins: set = set()    # builder/stock coins we price via REST l2Book poll
-        self.open_ep: dict = {}          # (addr,coin) -> position state
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
-        self.balance = config.INITIAL_BALANCE   # paper account realized equity (persisted)
-        self.acct_lock = asyncio.Lock()  # serialize margin allocation across concurrent opens
+        # two isolated paper books; self.balance/open_ep/acct_lock delegate to `taker` (see properties above).
+        self.taker = Book("taker", "copy_position", "copy_action", "copy_account", config.TAKER_FEE, False)
+        self.maker = Book("maker", "shadow_position", "shadow_action", "shadow_account", config.MAKER_FEE, True)
+        self.books = [self.taker] + ([self.maker] if config.SHADOW_MAKER_ENABLED else [])
         self.ws = None
         self.stop = False
         self.paused = False              # dashboard pause: stop opening NEW copies; existing keep to close
