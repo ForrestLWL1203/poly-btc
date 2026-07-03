@@ -317,6 +317,16 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
                       "bag_count", "max_bag_days", "max_win_days", "hedge_ratio"):
                 m[k] = snap[k]
             m["roi_total"] = ((m["net_pnl"] + snap["open_unrealized"]) / acct_value) if acct_value else 0.0
+        # v7 PORTFOLIO — authoritative NET-of-fees, deposit-adjusted account perf (one call, all windows).
+        # Fed to the ROI pillar (net, replacing leaderboard gross) + the turnover/edge-bps copyability filters.
+        _pf = rest.portfolio(addr)
+        _pw = rest.parse_portfolio(_pf, "week") or {}
+        _pm = rest.parse_portfolio(_pf, "month") or {}
+        m["pf_week_pnl"], m["pf_week_vlm"] = _pw.get("pnl"), _pw.get("vlm")
+        m["pf_mon_pnl"], m["pf_mon_vlm"] = _pm.get("pnl"), _pm.get("vlm")
+        m["pf_equity"] = _pw.get("equity") or _pm.get("equity")
+        m["pf_max_dd"] = _pm.get("max_drawdown") or _pw.get("max_drawdown")   # 30d curve = fuller DD picture
+        m["pf_turnover"], m["pf_edge_bps"] = _pw.get("turnover"), _pw.get("edge_bps")
         ok, reason = metrics.gates_state(m, now_ms, p)
     m["times_active"] += 1 if ok else 0
 

@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS profile (
     net_30d          REAL,                -- v6: realized net over last 30d (gate: >0 = not cooling off)
     net_life         REAL,                -- v6: realized net over FULL history (gate: >0 = long-term profitable)
     life_trades      INTEGER DEFAULT 0,   -- v6: total closed round-trips in full history (evidence depth)
+    pf_week_pnl      REAL,                -- v7 portfolio (NET of fees, deposit-adjusted): 7d account PnL
+    pf_week_vlm      REAL,                -- v7: 7d traded volume ($)
+    pf_mon_pnl       REAL,                -- v7: 30d account PnL (net)
+    pf_mon_vlm       REAL,                -- v7: 30d traded volume ($)
+    pf_equity        REAL,                -- v7: current account value (portfolio, combined perp+spot+vault)
+    pf_max_dd        REAL,                -- v7: max drawdown from the account-value curve (fraction)
+    pf_turnover      REAL,                -- v7: 7d vlm / equity — frequency proxy (trend traders <~50x, bots >>100x)
+    pf_edge_bps      REAL,                -- v7: 7d net PnL / vlm ×1e4 — profit per $ traded vs our ~9bp taker cost
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -179,8 +187,9 @@ PROFILE_COLS = (
     "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
     "net_7d,net_14d,net_30d,net_life,life_trades,"
+    "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_max_dd,pf_turnover,pf_edge_bps,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 62 columns
+)  # 70 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -401,6 +410,15 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN net_30d REAL",
     "ALTER TABLE profile ADD COLUMN net_life REAL",
     "ALTER TABLE profile ADD COLUMN life_trades INTEGER DEFAULT 0",
+    # v7 portfolio net-of-fees metrics (authoritative account-level perf; leaderboard is gross + lagging).
+    "ALTER TABLE profile ADD COLUMN pf_week_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN pf_week_vlm REAL",
+    "ALTER TABLE profile ADD COLUMN pf_mon_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN pf_mon_vlm REAL",
+    "ALTER TABLE profile ADD COLUMN pf_equity REAL",
+    "ALTER TABLE profile ADD COLUMN pf_max_dd REAL",
+    "ALTER TABLE profile ADD COLUMN pf_turnover REAL",
+    "ALTER TABLE profile ADD COLUMN pf_edge_bps REAL",
 )
 
 
