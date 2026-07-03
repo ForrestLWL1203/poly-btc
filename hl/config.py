@@ -372,7 +372,7 @@ STOP_MARGIN_PCT  = 0.70     # cut when unrealized loss ≥ this fraction of the 
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
 TAKER_FEE = 0.00045          # detection latency, so all three resolve to the same live-book price
 MAKER_FEE = 0.00015          # 1.5bp — maker-shadow account fills passively (resting limit), pays the maker rate
-SHADOW_MAKER_ENABLED = False # gate the parallel maker-shadow book (turn on once the taker refactor is verified)
+SHADOW_MAKER_ENABLED = True  # gate the parallel maker-shadow book (turn on once the taker refactor is verified)
 NOTIONAL = 1000.0            # fixed paper notional per copied trade ($)
 BOOK_HIST_S = max(LATENCIES) + 3  # (legacy) bbo history depth — REST mode prices off current bbo only
 

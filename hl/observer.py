@@ -239,18 +239,19 @@ class Observer:
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
-    def _reload_open(self):
+    def _reload_open(self, book=None):
+        book = book or self.taker
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
             "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
-            "master_margin,master_leverage FROM copy_position WHERE status='open'").fetchall()
+            f"master_margin,master_leverage FROM {book.pos_table} WHERE status='open'").fetchall()
         for r in rows:
             (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, adds, mae, na, stopx,
              m_mgn, m_lev) = r
             ev = asyncio.Event()
             if epx is not None:
                 ev.set()
-            self.open_ep[(addr, coin)] = {
+            book.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
                 "open_maker": False, "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
@@ -263,10 +264,10 @@ class Observer:
                 "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0), "last_add_px": epx,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False,
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
-                    "SELECT DISTINCT master_oid FROM copy_action WHERE pos_id=? AND action IN "
+                    f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "
                     "('open','add')", (pid,)).fetchall() if o is not None}}
         if rows:
-            _log(f"reloaded {len(rows)} open copy positions from db")
+            _log(f"reloaded {len(rows)} open {book.name} copy positions from db")
 
     async def _reconcile_open(self):
         """Startup state-reconcile (replaces the deleted time-based backfill for EXITS). Forward-only
@@ -275,11 +276,11 @@ class Observer:
         positions (clearinghouseState); if the master no longer holds ours (flat on that coin, or
         flipped to the opposite side), close our copy now at the live book. Masters still in the
         position (same side) are left untouched — forward polling follows their next action."""
-        held = sorted({addr for (addr, _) in self.open_ep})
+        held = sorted({addr for book in self.books for (addr, _) in book.open_ep})
         for addr in held:
             # standard perp + each builder dex we hold a position on (stock perps aren't in the
             # standard clearinghouseState — without the dex they'd read as flat and get wrong-closed).
-            dexes = sorted({c.split(":")[0] for (a, c) in self.open_ep if a == addr and ":" in c})
+            dexes = sorted({c.split(":")[0] for book in self.books for (a, c) in book.open_ep if a == addr and ":" in c})
             szi, all_ok = {}, True
             for dex in [None] + dexes:
                 st = await asyncio.to_thread(rest.clearinghouse_state, addr, dex)
@@ -292,19 +293,20 @@ class Observer:
                         szi[p["coin"]] = f(p.get("szi")) or 0.0
             if not all_ok:
                 continue
-            for (a, coin), ep in list(self.open_ep.items()):
-                if a != addr:
-                    continue
-                m = szi.get(coin, 0.0)                # master's signed size on this coin, now
-                still = (m > config.FLAT) if ep["side"] == "long" else (m < -config.FLAT)
-                if still:
-                    continue                          # master still in it (same side) -> keep & follow
-                ba = await asyncio.to_thread(rest.book_top, coin)
-                mid = ((ba[0] + ba[1]) / 2) if ba else ep["entry_px"]
-                await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
-                                         closing=True, liq=False, maker=False, gap=True, forced_px=mid)
-                _log(f"RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
-                     f"pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f} (master no longer holds it)")
+            for book in self.books:
+                for (a, coin), ep in list(book.open_ep.items()):
+                    if a != addr:
+                        continue
+                    m = szi.get(coin, 0.0)                # master's signed size on this coin, now
+                    still = (m > config.FLAT) if ep["side"] == "long" else (m < -config.FLAT)
+                    if still:
+                        continue                          # master still in it (same side) -> keep & follow
+                    ba = await asyncio.to_thread(rest.book_top, coin)
+                    mid = ((ba[0] + ba[1]) / 2) if ba else ep["entry_px"]
+                    await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
+                                             closing=True, liq=False, maker=False, gap=True, forced_px=mid, book=book)
+                    _log(f"[{book.name}] RECONCILE-CLOSE {addr[:10]} {coin} {ep['side']} @ {mid:g} "
+                         f"pnl=${ep['realized_pnl']:+,.1f}  bal=${book.balance:,.0f} (master no longer holds it)")
 
     async def reconcile_loop(self):
         """Periodic safety net for the startup reconcile. Forward polling should catch a master's close
@@ -490,19 +492,19 @@ class Observer:
              open_n, len(closed), win_rate, locked, self.balance - locked, gross, net, fees))
         self.db.commit()
 
-    def _refresh_marks(self):
-        """Mark-to-market open positions into copy_position (mark_px/unrealized_pnl) WITHOUT appending
-        an account_stats row. Lets the read-only dashboard show near-real-time浮盈 (account_stats stays
-        the 5-min equity-curve series). Cheap: one UPDATE per open position off the in-memory book."""
+    def _refresh_marks(self, book=None):
+        """Mark-to-market open positions into the book's position table (mark_px/unrealized_pnl) WITHOUT
+        appending an account_stats row. Lets the read-only dashboard show near-real-time浮盈. Per-book."""
+        book = book or self.taker
         for pos_id, coin, side, rem, size, entry in self.db.execute(
-                "SELECT pos_id,coin,side,rem_size,size,entry_px FROM copy_position "
+                f"SELECT pos_id,coin,side,rem_size,size,entry_px FROM {book.pos_table} "
                 "WHERE status='open' AND size>0").fetchall():
             ba = self.bbo.get(coin)
             if not (ba and ba[0] and ba[1]):
                 continue
             mark = (ba[0] + ba[1]) / 2
             sgn = 1 if side == "long" else -1
-            self.db.execute("UPDATE copy_position SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
+            self.db.execute(f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
                             (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
         self.db.commit()
 
@@ -511,7 +513,8 @@ class Observer:
         while not self.stop:
             await asyncio.sleep(25)
             try:
-                self._refresh_marks()
+                for b in self.books:
+                    self._refresh_marks(b)
             except Exception as exc:  # noqa: BLE001 — never let dashboard freshness kill the engine
                 _log(f"mark refresh failed: {exc}")
 
@@ -740,13 +743,14 @@ class Observer:
                     mid = (ba[0] + ba[1]) / 2                            # would falsely cross liq/stop
                     if ba[1] < ba[0]:                                    # crossed/garbage book → distrust this tick
                         continue
-                    for (a, c), ep in self.open_ep.items():      # track adverse excursion while open
-                        if c == coin and ep["master_open_px"]:
-                            adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
-                                   else (mid - ep["master_open_px"])) / ep["master_open_px"]
-                            ep["mae"] = max(ep.get("mae", 0.0), adv)
-                    self._maybe_liquidate(coin, mid)             # isolated stop-out if liq_px crossed
-                    self._maybe_stop(coin, mid)                  # 扛单 copy-side stop if stop_px crossed
+                    for book in self.books:                      # both accounts: track MAE + run stops per book
+                        for (a, c), ep in book.open_ep.items():  # track adverse excursion while open
+                            if c == coin and ep["master_open_px"]:
+                                adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
+                                       else (mid - ep["master_open_px"])) / ep["master_open_px"]
+                                ep["mae"] = max(ep.get("mae", 0.0), adv)
+                        self._maybe_liquidate(coin, mid, book)   # isolated stop-out if liq_px crossed
+                        self._maybe_stop(coin, mid, book)        # 扛单 copy-side stop if stop_px crossed
             await asyncio.sleep(2 if self.stock_coins else 5)
 
     @staticmethod
@@ -765,9 +769,10 @@ class Observer:
         self.valid_coins = self.crypto_coins | rest.builder_universe()  # + transparent stocks (l2Book)
         _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
-        self._load_account()                       # restore paper account balance (restart-safe)
+        for b in self.books:                       # restore each paper account + its open copies (restart-safe)
+            self._load_account(b)
+            self._reload_open(b)
         self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)
-        self._reload_open()                        # restore open copies (restart-safe)
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
                 self.stock_coins.add(coin)
@@ -819,13 +824,14 @@ class Observer:
             return
         self.bbo[coin] = (bid, ask)
         mid = (bid + ask) / 2
-        for (a, c), ep in self.open_ep.items():    # track worst adverse excursion while open
-            if c == coin and ep["master_open_px"]:
-                adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
-                       else (mid - ep["master_open_px"])) / ep["master_open_px"]
-                ep["mae"] = max(ep.get("mae", 0.0), adv)
-        self._maybe_liquidate(coin, mid)           # isolated stop-out if price crossed liq_px
-        self._maybe_stop(coin, mid)                # 扛单 copy-side stop if price crossed stop_px
+        for book in self.books:                    # both accounts: track MAE + run stops per book
+            for (a, c), ep in book.open_ep.items():    # track worst adverse excursion while open
+                if c == coin and ep["master_open_px"]:
+                    adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
+                           else (mid - ep["master_open_px"])) / ep["master_open_px"]
+                    ep["mae"] = max(ep.get("mae", 0.0), adv)
+            self._maybe_liquidate(coin, mid, book)     # isolated stop-out if price crossed liq_px
+            self._maybe_stop(coin, mid, book)          # 扛单 copy-side stop if price crossed stop_px
 
     def _record_fill(self, addr, x) -> bool:
         """Insert the (aggregated, trade-level) fill; True if NEW, False if this tid was already seen
@@ -858,12 +864,18 @@ class Observer:
         if coin not in self.sub_coins and coin not in self.stock_coins:
             asyncio.create_task(self.ensure_coin(coin))   # route to its pricing source (bbo / l2Book)
 
-        ep = self.open_ep.get(key)
+        for book in self.books:                # taker book always; maker book ONLY on the target's maker fills
+            if book.maker_only and not maker:  # (taker fill = target crossed the spread; no resting order to mirror)
+                continue
+            self._dispatch_fill(book, addr, coin, key, t, signed, pos0, pos1, px, liq, maker, oid)
+
+    def _dispatch_fill(self, book, addr, coin, key, t, signed, pos0, pos1, px, liq, maker, oid):
+        ep = book.open_ep.get(key)
         if ep is None:
             if (abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT
                     and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                     and not self.paused):               # dashboard pause = no new opens (existing keep to close)
-                self._open_position(addr, coin, t, px, pos1, maker, oid)
+                self._open_position(addr, coin, t, px, pos1, maker, oid, book)
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if liq:
@@ -876,10 +888,10 @@ class Observer:
             if oid is not None and oid in ep.get("seen_oids", ()):
                 return
             ep.setdefault("seen_oids", set()).add(oid)
-            asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, maker, oid))
+            asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, maker, oid, book))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
-                                                   closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid))
+                                                   closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid, book=book))
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None):
         book = book or self.taker
