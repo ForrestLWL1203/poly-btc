@@ -185,7 +185,9 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # rest = optimistic paper PnL. Default OFF = honest taker catch-up for ALL fills. Flip ON only once we
 # proactively mirror a target's resting order we saw AHEAD of its fill (target_orders) — then a maker
 # fill is legitimately reproducible. Until that exists, leave OFF so paper PnL doesn't flatter live.
-EXEC_MAKER_MIRROR = False     # True = price master-maker fills at the passive book side (assumes our rest fills)
+EXEC_MAKER_MIRROR = True      # maker book rests at the passive book side on the target's maker fills (saves the
+#                              spread vs crossing) — only fires when our_maker=True, so the taker book (always
+#                              our_maker=False) is unaffected; assumes our rest fills (optimistic; 戳破 = v2).
 
 # Stage-1 leaderboard prefilter (UI-tunable). The leaderboard carries each wallet's 24h/7d/30d/allTime
 # perf in ONE bulk fetch, so we pre-bias on what it CAN reliably say — multi-window profitability +

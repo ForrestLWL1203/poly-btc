@@ -38,16 +38,17 @@ def _log(msg: str):
 
 
 class Book:
-    """One isolated paper account. The SAME strategy (sizing/adds/stops/caps) is applied to each book — only
-    EXECUTION differs: the taker book fills on every target fill at the taker fee; the maker book fills only on
-    the target's MAKER fills, at the maker fee. Separate tables so the two equity curves compare cleanly."""
-    def __init__(self, name, pos_table, act_table, acct_table, fee, maker_only):
+    """One isolated paper account. The SAME strategy (sizing/adds/stops/caps) is applied to each — only
+    EXECUTION differs, and BOTH books copy EVERY target fill. match_exec decides HOW we fill each one:
+      • taker book (match_exec=False): we always CROSS (taker fee), even when the target rested — guaranteed fill.
+      • maker book (match_exec=True): we MATCH the target — maker-rest when they maker (maker fee + their price),
+        cross when they take (taker fee). Fees are charged per fill at the matching rate; separate tables."""
+    def __init__(self, name, pos_table, act_table, acct_table, match_exec):
         self.name = name
         self.pos_table = pos_table          # copy_position / shadow_position
         self.act_table = act_table          # copy_action   / shadow_action
         self.acct_table = acct_table        # copy_account   / shadow_account
-        self.fee = fee                      # taker vs maker rate
-        self.maker_only = maker_only        # maker book acts only on the target's resting-limit (maker) fills
+        self.match_exec = match_exec        # False = always taker; True = match the target's maker/taker per fill
         self.balance = config.INITIAL_BALANCE
         self.open_ep: dict = {}             # (addr,coin) -> position state
         self.acct_lock = asyncio.Lock()     # serialize margin allocation across concurrent opens on THIS book
@@ -123,8 +124,8 @@ class Observer:
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
         # two isolated paper books; self.balance/open_ep/acct_lock delegate to `taker` (see properties above).
-        self.taker = Book("taker", "copy_position", "copy_action", "copy_account", config.TAKER_FEE, False)
-        self.maker = Book("maker", "shadow_position", "shadow_action", "shadow_account", config.MAKER_FEE, True)
+        self.taker = Book("taker", "copy_position", "copy_action", "copy_account", match_exec=False)
+        self.maker = Book("maker", "shadow_position", "shadow_action", "shadow_account", match_exec=True)
         self.books = [self.taker] + ([self.maker] if config.SHADOW_MAKER_ENABLED else [])
         self.ws = None
         self.stop = False
@@ -864,18 +865,19 @@ class Observer:
         if coin not in self.sub_coins and coin not in self.stock_coins:
             asyncio.create_task(self.ensure_coin(coin))   # route to its pricing source (bbo / l2Book)
 
-        for book in self.books:                # taker book always; maker book ONLY on the target's maker fills
-            if book.maker_only and not maker:  # (taker fill = target crossed the spread; no resting order to mirror)
-                continue
+        for book in self.books:                # BOTH books copy every fill; they differ only in HOW we execute it
             self._dispatch_fill(book, addr, coin, key, t, signed, pos0, pos1, px, liq, maker, oid)
 
     def _dispatch_fill(self, book, addr, coin, key, t, signed, pos0, pos1, px, liq, maker, oid):
+        # our_maker = do WE rest a maker order on this fill? taker book always crosses (False); maker book
+        # matches the target (their maker fill → we rest; their taker fill → we cross). Drives fill price + fee.
+        our_maker = maker if book.match_exec else False
         ep = book.open_ep.get(key)
         if ep is None:
             if (abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT
                     and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                     and not self.paused):               # dashboard pause = no new opens (existing keep to close)
-                self._open_position(addr, coin, t, px, pos1, maker, oid, book)
+                self._open_position(addr, coin, t, px, pos1, our_maker, oid, book)
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if liq:
@@ -888,10 +890,10 @@ class Observer:
             if oid is not None and oid in ep.get("seen_oids", ()):
                 return
             ep.setdefault("seen_oids", set()).add(oid)
-            asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, maker, oid, book))
+            asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, our_maker, oid, book))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
-                                                   closing=abs(pos1) < config.FLAT, liq=liq, maker=maker, oid=oid, book=book))
+                                                   closing=abs(pos1) < config.FLAT, liq=liq, maker=our_maker, oid=oid, book=book))
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None):
         book = book or self.taker
@@ -1008,6 +1010,8 @@ class Observer:
                 "liq_px=?,stop_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
                 "WHERE pos_id=?",
                 (lev, margin, notional, px, size, size, liq_px, stop_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
+            book.balance -= abs(size * px) * (config.MAKER_FEE if ep["open_maker"] else config.TAKER_FEE)  # OPEN fee
+            self._save_account(book)
             self.db.commit()
         ep["entries_ready"].set()
         msz = ep["master_peak"] * ep["sign"]
@@ -1094,11 +1098,13 @@ class Observer:
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", maker, oid, master_px, signed, pos1,
                                 add_size * ep["sign"], px, 0.0, slip, book=book)
+            book.balance -= abs(add_size * px) * (config.MAKER_FEE if maker else config.TAKER_FEE)  # ADD fee
+            self._save_account(book)
             self.db.execute(
                 f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,liq_px=?,stop_px=?,"
                 "add_count=?,master_open_px=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
                 ep["rem_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
-            self.db.commit()                                  # the add is in copy_action
+            self.db.commit()                                  # the add is in the action table
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq, maker,
                             oid=None, gap=False, forced_px=None, stop=False, forced_frac=None, book=None):
@@ -1137,10 +1143,11 @@ class Observer:
                 reduce_frac = min(1.0, cum_frac)              # rem still matches `anchor` → cut the whole ratio
                 ep["reduce_anchor"] = abs(pos1)               # open a fresh 10% window from here
             close_size = ep["rem_size"] * reduce_frac
-            pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"]
+            fee = abs(close_size * exit_px) * (config.MAKER_FEE if maker else config.TAKER_FEE)  # exit fee (per our_maker)
+            pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"] - fee    # NET of our exit fee
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl
-            book.balance += pnl                       # realize into the paper account
+            book.balance += pnl                       # realize (net of fee) into the paper account
             slip = (master_px - exit_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             action = "close" if closing else "reduce"
             self._record_action(ep, addr, coin, t, action, maker, oid, master_px, signed, pos1,
