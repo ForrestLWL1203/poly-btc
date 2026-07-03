@@ -203,112 +203,87 @@ def hours_since_last_scan(db_path):
         return 0.0
 
 
-# ── domain API (called by the dashboard) ────────────────────────────────────
+# ── domain API (called by the dashboard) — SYSTEMD is the supervisor ─────────
+# The dashboard buttons drive real systemd units (the dashboard runs as root → can systemctl directly).
+# Restart=always + boot-start (hl-observe) and the daily hl-scan.timer are OS-supervised — no in-process
+# want-marker/ticker to be a single point of failure. The naked-spawn helpers above are legacy/unused.
+OBSERVER_UNIT = "hl-observe.service"
+SCAN_UNIT = "hl-scan.service"
+
+
+def _systemctl(*args, timeout=15):
+    try:
+        return subprocess.run(["systemctl", *args], capture_output=True, text=True, timeout=timeout)
+    except Exception:  # noqa: BLE001 — systemd absent (dev box) → treat as unknown, never raise
+        return None
+
+
+def _unit_state(unit):
+    r = _systemctl("is-active", unit)
+    return (r.stdout.strip() if r else "") or "unknown"
+
+
 def observer_running(db_path):
-    return is_running(db_path, OBSERVER)
-
-
-# ── observer desired-state (want-marker) → auto-resume, replacing systemd Restart=always/boot-start ──
-def _wantfile(db_path):
-    return os.path.join(_run_dir(db_path), f"{OBSERVER}.want")
-
-
-def _set_want(db_path, want):
-    """Persist whether the observer SHOULD be running. reconcile() re-starts it whenever want=1 but the
-    process is dead (crash / dashboard restart / VPS reboot); a deliberate stop clears it so we never
-    resurrect an observer the operator turned off."""
-    if want:
-        try:
-            with open(_wantfile(db_path), "w") as f:
-                f.write("1")
-        except OSError:
-            pass
-    else:
-        try:
-            os.remove(_wantfile(db_path))
-        except OSError:
-            pass
-
-
-def _get_want(db_path):
-    return os.path.exists(_wantfile(db_path))
+    return _unit_state(OBSERVER_UNIT) == "active"
 
 
 def start_observer(db_path):
-    _set_want(db_path, True)         # desired-state = running → reconcile auto-resumes after any death
-    argv = [PYTHON, os.path.join(REPO, "hl_observe.py"), "--db", db_path, "observe"]
-    pid, started = _spawn(db_path, OBSERVER, argv)
-    if started:                     # optimistic 'running' so the UI flips instantly; the observer then
-        _set_proc_status(db_path, "observer", "running", pid)   # keeps its own heartbeat (stale→stopped)
-    return {"running": True, "pid": pid, "started": started}
+    """'启动跟单' → systemd starts the observer service; Restart=always + boot-start then supervise it."""
+    _systemctl("start", "--no-block", OBSERVER_UNIT)
+    running = observer_running(db_path)
+    _set_proc_status(db_path, "observer", "running" if running else "stopped", None)
+    return {"running": running, "pid": None, "started": running}
 
 
 def stop_observer(db_path):
-    _set_want(db_path, False)        # deliberate stop → do NOT auto-resume
-    stopped = _stop(db_path, OBSERVER)
-    _set_proc_status(db_path, "observer", "stopped", None)      # a killed observer can't write its own down-state
-    return {"running": False, "stopped": stopped}
+    """'停止' → systemd stops it. It stays stopped until started again (enabled = boot-start, not auto-resume
+    of a deliberate stop)."""
+    _systemctl("stop", OBSERVER_UNIT)
+    _set_proc_status(db_path, "observer", "stopped", None)   # killed process can't log its own down-state
+    return {"running": False, "stopped": True}
 
 
 def scan_running(db_path):
-    return is_running(db_path, SCAN) or _scan_progress_scanning(db_path)
+    st = _unit_state(SCAN_UNIT)                  # oneshot: 'activating'/'active' while the sweep runs
+    return st in ("active", "activating") or _scan_progress_scanning(db_path)
 
 
 def start_scan(db_path, full=False):
-    """Spawn a one-shot scan process (guarded to a single concurrent scan). MANUAL vs AUTO is decided by
-    scanner.scan itself from whether a pending 'rescan' command exists — the dashboard queues that command
-    for a button press (locks the UI) and does NOT for the 24h auto tick (silent). So this just spawns."""
+    """'重新扫描' → kick the oneshot scan service now (the daily auto-scan is the systemd timer
+    hl-scan.timer). scanner.scan still marks manual=1 from the queued 'rescan' command."""
     if scan_running(db_path):
         return {"scanning": True, "started": False, "reason": "already_scanning"}
-    argv = [PYTHON, os.path.join(REPO, "hl_discover.py"), "--db", db_path, "scan"]
-    if not observer_running(db_path):        # observer off → take the full REST budget, scan FAST (~20-25 min)
-        argv += ["--scan-interval", "1.0", "--workers", "4"]   # else use the CLI default (8s, shares budget)
-    if full:
-        argv.append("--full")
-    pid, started = _spawn(db_path, SCAN, argv)
-    return {"scanning": True, "started": started, "pid": pid}
+    _systemctl("start", "--no-block", SCAN_UNIT)
+    return {"scanning": True, "started": True, "pid": None}
 
 
 def reconcile(db_path):
-    """On dashboard boot: drop stale pidfiles (dead process) so is_running is honest, and if the observer
-    pidfile is dead, make sure process_status reflects stopped. A LIVE observer is left untouched (re-attach)."""
-    for name in (OBSERVER, SCAN):
-        pid = _read_pid(db_path, name)
+    """Sync the observer's process_status marker to systemd's real state + clean any legacy naked pidfile.
+    The live observer writes its own heartbeat; this only corrects the marker after a systemd-side stop/crash
+    the process couldn't log itself. (Supervision + auto-resume are systemd's job now, not ours.)"""
+    if not observer_running(db_path):
+        pid = _read_pid(db_path, OBSERVER)
         if pid:
-            _reap(pid)                       # reap our dead children (no zombies in the long-lived dashboard)
-        if pid and not _alive(pid, _NEEDLE.get(name)):
-            _clear_pid(db_path, name)
-            if name == OBSERVER:
-                _set_proc_status(db_path, "observer", "stopped", None)
-    # AUTO-RESUME (replaces systemd Restart=always + boot-start): if the observer is DESIRED running but
-    # its process is gone (crash / dashboard restart / VPS reboot), bring it back. Called on dashboard boot
-    # AND every ticker cycle (~60s), so a crashed observer self-heals within a cycle. Crash-loop-safe:
-    # at most one (re)start per reconcile.
-    if _get_want(db_path) and not is_running(db_path, OBSERVER):
-        start_observer(db_path)
+            _clear_pid(db_path, OBSERVER)        # one-time cleanup of the pre-systemd naked pidfile
 
 
 def auto_scan_tick(db_path):
-    """Spawn a SILENT auto-scan when AUTO_SCAN_EVERY_H has elapsed since the last completed scan and no
-    scan is currently running. No 'rescan' command is queued → scanner.scan marks it manual=0 (silent)."""
-    if scan_running(db_path):
-        return
-    if hours_since_last_scan(db_path) >= config.AUTO_SCAN_EVERY_H:
-        start_scan(db_path)
+    return   # the daily auto-scan is the systemd timer hl-scan.timer now, not an in-process tick
 
 
 def start_auto_scan_ticker(db_path, interval=60.0):
+    """Kept for API compatibility (dashboard boot calls it). Light status-sync only — real supervision and
+    the daily scan belong to systemd (hl-observe Restart=always, hl-scan.timer)."""
     import threading
 
     def loop():
         while True:
             try:
-                reconcile(db_path)          # reap dead children + clear stale pidfiles + flip observer→stopped
-                auto_scan_tick(db_path)
+                reconcile(db_path)
             except Exception:  # noqa: BLE001 — a ticker error must never kill the thread
                 pass
             time.sleep(interval)
 
-    t = threading.Thread(target=loop, daemon=True, name="auto-scan-ticker")
+    t = threading.Thread(target=loop, daemon=True, name="status-sync")
     t.start()
     return t
