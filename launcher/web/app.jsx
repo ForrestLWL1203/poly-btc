@@ -71,7 +71,9 @@ function Home({ meta, onDeploy, onOps, onReload, say }) {
           <div className="tgt" key={t.id}>
             <div className="ic">{t.mode === "local" ? "🖥" : "☁"}</div>
             <div>
-              <div className="nm">{t.name || t.host || "本地"}</div>
+              <div className="nm">{t.name || t.host || "本地"}
+                {t.keyInstalled && <span className="mono" title="已装 launcher 公钥,运维免密"
+                  style={{ marginLeft: 8, fontSize: 11, color: "var(--green-l)", fontWeight: 500 }}>🔑 免密</span>}</div>
               <div className="meta">{t.mode === "local" ? "本地 · " + (t.app_dir || "") : `${t.user}@${t.host}:${t.ssh_port || 22}`}
                 {t.domain ? " · " + t.domain : ""}</div>
             </div>
@@ -89,7 +91,7 @@ function Home({ meta, onDeploy, onOps, onReload, say }) {
           <span className="muted" style={{ fontSize: 12 }}>{showKey ? "▾" : "▸"}</span>
         </div>
         {showKey && <React.Fragment>
-          <div className="hint" style={{ marginTop: 10 }}>部署时会自动装到 VPS(转免密)。也可手动加到目标机 ~/.ssh/authorized_keys:</div>
+          <div className="hint" style={{ marginTop: 10 }}>部署时自动装到 VPS(转免密),之后运维都用它认证。私钥:<span className="mono" style={{ color: "var(--t2)" }}>{meta.keyPath}</span></div>
           <div className="term" style={{ maxHeight: 80 }}>{meta.pubkey}</div>
         </React.Fragment>}
       </div>
@@ -292,6 +294,7 @@ function Ops({ target, onBack, say }) {
             <h2 style={{ marginBottom: 2 }}>{target.name || target.host} · 运维</h2>
             <div className="meta mono muted" style={{ fontSize: 12 }}>
               {target.mode === "local" ? "本地 " + (target.app_dir || "") : `${target.user}@${target.host}`}
+              {target.keyInstalled && <span style={{ color: "var(--green-l)" }}> · 🔑 免密</span>}
               {st && st.commit ? " · " + st.commit : ""}</div>
           </div>
           <div className="spacer" />

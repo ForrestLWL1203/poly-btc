@@ -45,16 +45,19 @@ def _write(items):
 
 
 _SAVE_FIELDS = ("name", "mode", "host", "user", "ssh_port", "app_dir", "branch",
-                "port", "domain", "dash_user")
+                "port", "domain", "dash_user", "keyInstalled")
 
 
 def save(t):
-    """Upsert a target by id (host+mode for vps, 'local' for local). Strips any secret fields."""
+    """Upsert a target by id (host+mode for vps, 'local' for local), MERGING onto any existing record
+    so a partial update (e.g. just keyInstalled after a deploy) never wipes name/domain/etc. Secrets are
+    dropped (only _SAVE_FIELDS persist)."""
     items = load()
     tid = t.get("id") or (f"vps:{t.get('host')}" if t.get("mode") == "vps" else "local")
-    clean = {"id": tid, "updated": time.strftime("%Y-%m-%d %H:%M")}
+    existing = next((x for x in items if x.get("id") == tid), {})
+    clean = {**existing, "id": tid, "updated": time.strftime("%Y-%m-%d %H:%M")}
     for k in _SAVE_FIELDS:
-        if k in t:
+        if k in t and t[k] not in (None, ""):
             clean[k] = t[k]
     items = [x for x in items if x.get("id") != tid]
     items.append(clean)

@@ -70,9 +70,10 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/targets":
-            _, pub = targets.keypair()
+            kp, pub = targets.keypair()
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            return self._json(200, {"targets": targets.load(), "pubkey": pub, "repoRoot": repo_root})
+            return self._json(200, {"targets": targets.load(), "pubkey": pub,
+                                    "keyPath": kp, "repoRoot": repo_root})
         if path.startswith("/api/deploy/") and path.endswith("/events"):
             return self._stream_deploy(path.split("/")[3])
         return self._serve_static(path)
@@ -126,6 +127,10 @@ class H(BaseHTTPRequestHandler):
             for ev in runner.events():
                 self.wfile.write(f"data: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
                 self.wfile.flush()
+                # On a successful VPS deploy the ssh_key step installed our pubkey → mark the target
+                # passwordless so the UI can show it (and ops authenticate with the key from now on).
+                if ev.get("type") == "end" and ev.get("ok") and runner.cfg.mode == "vps":
+                    targets.save({"id": f"vps:{runner.cfg.host}", "keyInstalled": True})
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
