@@ -327,14 +327,26 @@ GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月
 # v7 PORTFOLIO copyability gates (from HL portfolio: net-of-fees, deposit-adjusted; only when pf data present).
 PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >this = HFT bot (unreplicable at our latency +
 #                                  fee-drag we can't outrun). Full-pop dist: p75=39x (trend), p90=126x (bots).
-PORTFOLIO_MIN_EDGE_BPS = 20.0     # 边际下限 = 30d 净利/成交量 ×1e4. <this ≈ <2× our ~9bp round-trip taker cost →
-#                                  no margin left after our slippage/latency. Month window (30d) = less noisy than 7d.
+PORTFOLIO_MIN_EDGE_BPS = 10.0     # 边际硬底线 = 30d 净利/成交量 ×1e4. v10: 20→10 = 手续费打平点(<此我们结构性净亏 →
+#                                  gate). 10bp 以上的"厚度"不再硬砍,交给 score 的 g_edge 平滑降分(避免误杀好钱包)。
 # --- v9 strict-gate additions: every wallet that survives to the watchlist must be genuinely copyable ---
 MIN_PAYOFF = 1.0        # 盈亏比下限 avg_win/avg_loss. <this = 大亏小赚(平均亏 > 平均赢)—— 我们跟会放大那笔大亏、
 #                        剪掉小赢。低胜率真趋势客 payoff 天然 >1(否则不盈利)故不受影响;抓的是高胜率倒挂盘。
 WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
 WINDFALL_WIN_MAX = 0.60  # (亏损尚未覆盖,ROI 此刻还正)→ reject。真·高胜率的集中不算(它靠稳定胜率不靠一把)。
 GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量)→ reject:月度光环掩盖近期反转,当下在亏。
+# === v10: quality magnitude lives in score() as smooth factors (NOT末尾 hard gates — those fight the composite
+# score + over-cut). gates stay binary (copyability + validity + evidence). A single MIN_ACTIVE_SCORE quality
+# line then makes `active` = the pool of genuinely-good, followable wallets (watchlist); we follow the top-N. ===
+SCORE_THICK_REF   = 1.5   # 赢单每笔名义收益% 达此=满分厚度; 剥蒜(0.5%)→×0.33. 我们的滑点吃薄边际,故厚度直接进分
+SCORE_THICK_FLOOR = 0.3
+SCORE_PAYOFF_REF  = 2.0   # 盈亏比达此=满分; payoff 1(不亏不赚)→×0.5. 替代已删的 small_win_big_loss 硬闸
+SCORE_PAYOFF_FLOOR= 0.4
+SCORE_EDGE_REF    = 60.0  # 月edge(bp)达此=满分厚度; 20bp→×0.33. 手续费硬底线仍是 PORTFOLIO_MIN_EDGE_BPS(闸)
+SCORE_EDGE_FLOOR  = 0.4
+EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 → insufficient_evidence(无战绩无从评判,取消趋势豁免)
+EVIDENCE_MIN_TRADES = 7   #                已平回合 < 此 同理. 5天/7回合≈0.5单/天,砍纯持有+小样本尾巴,不误伤好钱包
+MIN_ACTIVE_SCORE  = 0.50  # 质量线:score < 此 → 不进 active. 让 active = 全是好钱包(watchlist),跟单再从中取前N
 MAX_CONCURRENT_POS = 15  # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。

@@ -128,6 +128,10 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
     _avg_win = (sum(_wins) / len(_wins)) if _wins else 0.0
     _avg_loss = (sum(_losses) / len(_losses)) if _losses else 0.0
     _payoff = min(999.0, _avg_win / _avg_loss) if _avg_loss > 0 else 999.0
+    # 赢单每笔中位名义收益% = 典型赢单吃到几个点的价格波动(杠杆无关、和手续费同口径)。剥蒜(赚一点就跑)的钱包
+    # 这个值很低 → score 的 g_thick 因子据此降分(我们跟单有滑点,薄边际吃不到)。
+    _win_pt_list = sorted(e["net_pnl"] / e["max_notl"] * 100 for e in eps if e["net_pnl"] > 0 and e.get("max_notl"))
+    _win_pt = _win_pt_list[len(_win_pt_list) // 2] if _win_pt_list else 0.0
     _max_concurrent = _peak_concurrent(eps)   # 峰值同时持仓数 → "开仓太多我们装不下" 的可复制性闸
     m = {
         "crypto_frac": crypto_frac,
@@ -138,7 +142,7 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         "median_hold_s": holds[len(holds) // 2],
         "win_rate": sum(1 for e in eps if e["net_pnl"] > 0) / len(eps),
         "avg_win": _avg_win, "avg_loss": _avg_loss, "payoff_ratio": _payoff,
-        "max_concurrent": _max_concurrent,
+        "win_pt": _win_pt, "max_concurrent": _max_concurrent,
         "net_pnl": cum, "gross_pnl": sum(e["net_pnl"] + e["fee"] for e in eps),
         "roi_notional": (cum / total_notl) if total_notl else 0.0, "total_notl": total_notl,
         "total_fee": sum(e["fee"] for e in eps), "n_coins": len(coins),
@@ -179,6 +183,11 @@ def gates_structural(m: dict, p) -> tuple:
     e.g. a pure-hold trend trader) — judged on open positions in gates_state instead."""
     if m["perp_frac"] < p.min_perp:
         return False, "spot_dominant"                          # not copyable enough
+    # v10 有效性硬闸: 14天窗口内战绩太少 → 无从评判其胜率/盈亏比/厚度. 取消旧的"趋势豁免"(纯持有一个浮盈仓就放行)
+    # 漏洞 —— 那类 0 战绩钱包正是尾巴主体. 5天/7回合 ≈ 0.5单/天,砍尾不误伤好钱包(数据校准).
+    if (m.get("active_days") or 0) < getattr(p, "evidence_min_days", config.EVIDENCE_MIN_DAYS) \
+            or (m.get("n_trades") or 0) < getattr(p, "evidence_min_trades", config.EVIDENCE_MIN_TRADES):
+        return False, "insufficient_evidence"
     if (m.get("n_trades") or 0) > 0:                           # structure from closed round-trips
         if m["median_eps"] > p.max_daily_eps:
             return False, "bot_frequency"                      # mid-freq OK; HFT/MM excluded
@@ -242,12 +251,8 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "hft_turnover"                           # HFT churner — unreplicable + fee-drag
     _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")    # 边际bps = 30d 净利/成交量
     if _mvlm and _mvlm > 0 and (_mpnl / _mvlm * 1e4) < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
-        return False, "thin_edge"                              # profit/$ doesn't clear our taker cost with margin
-    # v9 大亏小赚: 平均亏 > 平均赢 (payoff<1). 低胜率真趋势客 payoff 天然 >1 不受影响;抓高胜率倒挂的割肉盘 ——
-    # 我们跟会放大那笔大亏、剪掉小赢。payoff=999(从不兑现亏损)由 score 的刷胜率守卫另管,这里放行。
-    _pay = m.get("payoff_ratio")
-    if _pay is not None and _pay < getattr(p, "min_payoff", config.MIN_PAYOFF):
-        return False, "small_win_big_loss"
+        return False, "thin_edge"                              # 手续费打平硬底线(10bp). 厚度交给 score 的 g_edge.
+    # v10: small_win_big_loss 硬闸移除 → 盈亏比改由 score 的 g_payoff 平滑降分(硬砍会误杀高胜率好钱包).
     # v9 单日 windfall: 利润高度集中在一天 且 胜率不高 = 靠一笔偶然大赚撑着(亏损未覆盖,ROI 此刻还正 → 单列)。
     if (m.get("profit_conc") or 0.0) >= getattr(p, "windfall_conc", config.WINDFALL_CONC) \
             and (m.get("win_rate") or 0.0) < getattr(p, "windfall_win_max", config.WINDFALL_WIN_MAX):
@@ -305,5 +310,14 @@ def score(m: dict) -> float:
     bag = abs(min(0.0, g("open_underwater")))
     g_deep = _clip(1.0 - max(0.0, bag - config.SCORE_BAG_REF) / config.SCORE_BAG_SPAN, config.SCORE_DEEP_FLOOR, 1.0)
 
+    # ── v10 QUALITY-MAGNITUDE factors (folded INTO score, NOT末尾 hard gates — those double-count & over-cut) ──
+    # 每笔厚度: 剥蒜(赢单每笔 <~0.5% 名义)重罚; ≥REF 满分. 我们跟单有滑点,薄边际吃不到 → 直接进分.
+    g_thick = _clip(g("win_pt") / config.SCORE_THICK_REF, config.SCORE_THICK_FLOOR, 1.0)
+    # 盈亏比: 大亏小赚(payoff<1)重罚; ≥REF 满分. 替代已删的 small_win_big_loss 硬闸(不再误杀高胜率盘).
+    g_payoff = _clip(g("payoff_ratio", 1.0) / config.SCORE_PAYOFF_REF, config.SCORE_PAYOFF_FLOOR, 1.0)
+    # 边际厚度: 月edge 越厚越好(手续费底线已在闸门管). 20bp→×0.33, ≥REF(60bp) 满分.
+    _edge = (g("pf_mon_pnl") / g("pf_mon_vlm") * 1e4) if g("pf_mon_vlm") else 0.0
+    g_edge = _clip(_edge / config.SCORE_EDGE_REF, config.SCORE_EDGE_FLOOR, 1.0)
+
     # linear STRETCH → best real wallet ≈ 100, smooth decline (stable/absolute, not max-relative)
-    return _clip(core * g_manuf * g_deep * config.SCORE_STRETCH, 0.0, 1.0)
+    return _clip(core * g_manuf * g_deep * g_thick * g_payoff * g_edge * config.SCORE_STRETCH, 0.0, 1.0)

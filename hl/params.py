@@ -58,6 +58,12 @@ PARAM_SPEC = [
         "盈亏比下限", "平均赢单÷平均亏单。低于此=大亏小赚(一笔亏吃掉多笔赢),跟了会放大大亏剪掉小赢。低胜率真趋势客盈亏比天然>1,不受影响"),
     ("MAX_CONCURRENT_POS",   "scanner", "yellow", "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
+    ("MIN_ACTIVE_SCORE",     "scanner", "yellow", "float",   "rescan", config.MIN_ACTIVE_SCORE,
+        "入选质量线", "综合评分 < 此 → 不进 active。让 active(watchlist)=全是够优质的好钱包,跟单再从中按资金取前N。低质量尾巴在这一刀切掉"),
+    ("EVIDENCE_MIN_DAYS",    "scanner", "yellow", "int",     "rescan", config.EVIDENCE_MIN_DAYS,
+        "证据·最低活跃天数", "14天窗口内活跃天数 < 此 = 战绩太少无从评判 → 排除(取消旧的纯持有豁免)"),
+    ("EVIDENCE_MIN_TRADES",  "scanner", "yellow", "int",     "rescan", config.EVIDENCE_MIN_TRADES,
+        "证据·最低回合数", "14天窗口内已平回合 < 此 = 样本太小 → 排除。配合活跃天数=证据硬闸"),
     ("WINDFALL_CONC",        "scanner", "hidden", "pct",     "rescan", config.WINDFALL_CONC * 100,
         "单日利润集中度上限", "单日≥此比例毛利且胜率<下条=靠一笔偶然大赚撑着(亏损未覆盖),排除"),
     ("WINDFALL_WIN_MAX",     "scanner", "hidden", "pct",     "rescan", config.WINDFALL_WIN_MAX * 100,
@@ -244,7 +250,8 @@ SCANNER_ARG_MAP = {
     "max_fills_per_ep": "max_fills_per_ep",
     "PORTFOLIO_MAX_TURNOVER": "portfolio_max_turnover", "PORTFOLIO_MIN_EDGE_BPS": "portfolio_min_edge_bps",
     "MIN_PAYOFF": "min_payoff", "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
-    "MAX_CONCURRENT_POS": "max_concurrent_pos",
+    "MAX_CONCURRENT_POS": "max_concurrent_pos", "MIN_ACTIVE_SCORE": "min_active_score",
+    "EVIDENCE_MIN_DAYS": "evidence_min_days", "EVIDENCE_MIN_TRADES": "evidence_min_trades",
 }
 
 

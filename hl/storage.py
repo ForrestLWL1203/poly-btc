@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS profile (
     avg_win          REAL DEFAULT 0,      -- 平均赢单 ($)
     avg_loss         REAL DEFAULT 0,      -- 平均亏单 ($, 正值)
     payoff_ratio     REAL DEFAULT 0,      -- 盈亏比 avg_win/avg_loss (<1 = 大亏小赚; 无亏封顶 999)
+    win_pt           REAL DEFAULT 0,      -- 赢单每笔中位名义收益% → score g_thick 因子 (剥蒜降分)
     max_concurrent   INTEGER DEFAULT 0,   -- 峰值同时持仓数 (>阈值 = 组合客,我们装不下 → too_many_concurrent)
     net_pnl          REAL,
     roi_equity       REAL,
@@ -184,7 +185,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 
 PROFILE_COLS = (
     "addr,status,reason,score,n_fills,n_trades,window_days,trades_per_day,taker_frac_notl,"
-    "median_hold_s,win_rate,avg_win,avg_loss,payoff_ratio,max_concurrent,net_pnl,roi_equity,roi_notional,total_notl,acct_value,perp_frac,"
+    "median_hold_s,win_rate,avg_win,avg_loss,payoff_ratio,win_pt,max_concurrent,net_pnl,roi_equity,roi_notional,total_notl,acct_value,perp_frac,"
     "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
@@ -193,7 +194,7 @@ PROFILE_COLS = (
     "net_7d,net_14d,net_30d,net_life,life_trades,"
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_max_dd,pf_turnover,pf_edge_bps,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 74 columns
+)  # 75 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -475,6 +476,7 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN avg_loss REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN payoff_ratio REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
+    "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% → score g_thick 因子
 )
 
 

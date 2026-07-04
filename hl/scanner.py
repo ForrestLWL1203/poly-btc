@@ -336,8 +336,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     m["age_days"] = (prior or {}).get("age_days")
 
     prev_status = (prior or {}).get("status")
-    status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
     m["score"] = metrics.score(m) if ok else 0.0
+    if ok and m["score"] < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
+        ok, reason, m["score"] = False, "low_quality", 0.0     # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
+    status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
     row = dict(m)                                    # keys match column names -> robust positional build
     row.update(addr=addr, status=status, reason=reason, last_refreshed=stamp,
                first_added=(prior or {}).get("first_added") or (stamp if ok else None),
@@ -436,6 +438,11 @@ def regate(db, p) -> int:
             cur += d; pk = max(pk, cur)
         return pk
     concw = {a: _peakc(v) for a, v in _iv.items()}
+    # win_pt (median winning per-trade % on notional) from the episode table → score's g_thick factor (same as scan)
+    _wpt = {}
+    for a, npnl, mnotl in db.execute("SELECT addr, net_pnl, max_notl FROM episode WHERE net_pnl>0 AND max_notl>0"):
+        _wpt.setdefault(a, []).append(npnl / mnotl * 100)
+    winptw = {a: sorted(v)[len(v) // 2] for a, v in _wpt.items() if v}
     n_active = 0
     for r in rows:
         (addr, old, n_tr, n_fills, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
@@ -451,6 +458,7 @@ def regate(db, p) -> int:
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
              "p90_fills_ep": p90fe.get(addr, 0),   # p90 single-episode fills → algo-slicer gate (from episode table)
              "max_concurrent": concw.get(addr, 0), # peak simultaneous positions → too_many_concurrent gate
+             "win_pt": winptw.get(addr, 0.0),       # median winning per-trade % → score g_thick factor
              "worst_loss_pct": wloss or 0.0,
              # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
@@ -474,8 +482,10 @@ def regate(db, p) -> int:
         ok, reason = metrics.gates_structural(m, p)
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
-        status = "active" if ok else ("retired" if old == "active" else "rejected")
         score = metrics.score(m) if ok else 0.0
+        if ok and score < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
+            ok, reason, score = False, "low_quality", 0.0      # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
+        status = "active" if ok else ("retired" if old == "active" else "rejected")
         db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=? WHERE addr=?",
                    (status, reason, score, m["loss_pain"], concw.get(addr, 0), addr))
         n_active += 1 if ok else 0
