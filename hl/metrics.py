@@ -26,6 +26,21 @@ def _clip(x, lo, hi):
     return max(lo, min(hi, x))
 
 
+def _peak_concurrent(eps: list) -> int:
+    """Peak number of SIMULTANEOUSLY-open positions (sweep line over each episode's [open, close]).
+    A wallet that habitually holds 15-20 positions at once can't be copied on our equity-based sizing +
+    deploy cap (we fit ~5-8) — we'd take a random subset, missing the balanced book that nets it positive.
+    At-instant ties: process closes (-1) before opens (+1) so a same-ms close→reopen isn't double-counted."""
+    evts = sorted([(e["open_ms"], 1) for e in eps if e.get("open_ms") and e.get("close_ms")]
+                  + [(e["close_ms"], -1) for e in eps if e.get("open_ms") and e.get("close_ms")],
+                  key=lambda x: (x[0], x[1]))
+    cur = peak = 0
+    for _, d in evts:
+        cur += d
+        peak = max(peak, cur)
+    return peak
+
+
 def _daily(eps: list, lookback_days: float) -> dict:
     """Bucket episodes by calendar day → daily pnl/count series + derived consistency metrics."""
     by_day: dict = {}
@@ -113,6 +128,7 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
     _avg_win = (sum(_wins) / len(_wins)) if _wins else 0.0
     _avg_loss = (sum(_losses) / len(_losses)) if _losses else 0.0
     _payoff = min(999.0, _avg_win / _avg_loss) if _avg_loss > 0 else 999.0
+    _max_concurrent = _peak_concurrent(eps)   # 峰值同时持仓数 → "开仓太多我们装不下" 的可复制性闸
     m = {
         "crypto_frac": crypto_frac,
         "market_type": ("crypto" if crypto_frac >= 0.7 else "stock" if crypto_frac <= 0.3 else "mixed"),
@@ -122,6 +138,7 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         "median_hold_s": holds[len(holds) // 2],
         "win_rate": sum(1 for e in eps if e["net_pnl"] > 0) / len(eps),
         "avg_win": _avg_win, "avg_loss": _avg_loss, "payoff_ratio": _payoff,
+        "max_concurrent": _max_concurrent,
         "net_pnl": cum, "gross_pnl": sum(e["net_pnl"] + e["fee"] for e in eps),
         "roi_notional": (cum / total_notl) if total_notl else 0.0, "total_notl": total_notl,
         "total_fee": sum(e["fee"] for e in eps), "n_coins": len(coins),
@@ -180,6 +197,11 @@ def gates_structural(m: dict, p) -> tuple:
         # is a false positive, empirically confirmed). p90 > threshold ⇒ ≥10% of round-trips are fill-heavy = algo.
         if (m.get("p90_fills_ep") or 0) > getattr(p, "max_fills_per_ep", 50):
             return False, "hft_uncopyable"
+        # v9 装不下: 峰值同时持仓 > cap. Our equity-均额 sizing + deploy cap fits ~5-8 concurrent; a wallet that
+        # habitually holds 15-20 at once (portfolio/basket trader) can only be copied as a RANDOM subset — we
+        # miss the cross-position hedging that nets it positive, so our slice bleeds (empirically: 0xc9c781).
+        if (m.get("max_concurrent") or 0) > getattr(p, "max_concurrent_pos", config.MAX_CONCURRENT_POS):
+            return False, "too_many_concurrent"
     return True, "ok"
 
 

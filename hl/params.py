@@ -56,6 +56,8 @@ PARAM_SPEC = [
         "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
     ("MIN_PAYOFF",           "scanner", "yellow", "float",   "rescan", config.MIN_PAYOFF,
         "盈亏比下限", "平均赢单÷平均亏单。低于此=大亏小赚(一笔亏吃掉多笔赢),跟了会放大大亏剪掉小赢。低胜率真趋势客盈亏比天然>1,不受影响"),
+    ("MAX_CONCURRENT_POS",   "scanner", "yellow", "int",     "rescan", config.MAX_CONCURRENT_POS,
+        "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
     ("WINDFALL_CONC",        "scanner", "hidden", "pct",     "rescan", config.WINDFALL_CONC * 100,
         "单日利润集中度上限", "单日≥此比例毛利且胜率<下条=靠一笔偶然大赚撑着(亏损未覆盖),排除"),
     ("WINDFALL_WIN_MAX",     "scanner", "hidden", "pct",     "rescan", config.WINDFALL_WIN_MAX * 100,
@@ -242,6 +244,7 @@ SCANNER_ARG_MAP = {
     "max_fills_per_ep": "max_fills_per_ep",
     "PORTFOLIO_MAX_TURNOVER": "portfolio_max_turnover", "PORTFOLIO_MIN_EDGE_BPS": "portfolio_min_edge_bps",
     "MIN_PAYOFF": "min_payoff", "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
+    "MAX_CONCURRENT_POS": "max_concurrent_pos",
 }
 
 

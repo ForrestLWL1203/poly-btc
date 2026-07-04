@@ -424,6 +424,18 @@ def regate(db, p) -> int:
     for a, nf in db.execute("SELECT addr, n_fills FROM episode WHERE n_fills IS NOT NULL"):
         _epw.setdefault(a, []).append(nf)
     p90fe = {a: sorted(xs)[min(len(xs) - 1, int(len(xs) * 0.9))] for a, xs in _epw.items() if xs}
+    # peak concurrent positions per wallet (sweep line over each episode's [open,close]) — the too_many_concurrent
+    # gate. Computed HERE from the episode table (not a stored col) so regate applies the SAME gate as a scan.
+    _iv = {}
+    for a, om, cm in db.execute("SELECT addr, open_ms, close_ms FROM episode WHERE open_ms IS NOT NULL AND close_ms IS NOT NULL"):
+        _iv.setdefault(a, []).append((om, cm))
+    def _peakc(ivs):
+        evts = sorted([(o, 1) for o, _c in ivs] + [(_c, -1) for _o, _c in ivs], key=lambda x: (x[0], x[1]))
+        cur = pk = 0
+        for _, d in evts:
+            cur += d; pk = max(pk, cur)
+        return pk
+    concw = {a: _peakc(v) for a, v in _iv.items()}
     n_active = 0
     for r in rows:
         (addr, old, n_tr, n_fills, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
@@ -438,6 +450,7 @@ def regate(db, p) -> int:
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
              "p90_fills_ep": p90fe.get(addr, 0),   # p90 single-episode fills → algo-slicer gate (from episode table)
+             "max_concurrent": concw.get(addr, 0), # peak simultaneous positions → too_many_concurrent gate
              "worst_loss_pct": wloss or 0.0,
              # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
