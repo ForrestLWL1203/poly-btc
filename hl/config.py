@@ -146,7 +146,9 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGI
 #                             low-conviction ones, which is intended. UI-tunable.
 # (the flat post-cap dust floor MIN_COPY_NOTIONAL was replaced by the per-tier STABLE/MID/HIGH_MIN_NOTIONAL
 #  above — a $4-probe master position now falls under its tier's min and is skipped.)
-MAX_LEV = 20.0              # hard leverage cap (BTC + anything calmer pin here); also a stale-σ backstop
+MAX_LEV = 50.0             # v10: raised 20→50 — leverage is now the VISIBLE σ-tier cap; MAX_LEV is only a
+#                            far backstop + the ceiling on the master's read leverage (so "never exceed master"
+#                            uses the master's REAL lev, not a 20-clipped one that wrongly under-levered us).
 
 # Per-coin volatility (regime-aware) for the sizing above. A coin calm-then-erupting must NOT keep its
 # old low σ and get over-levered into a blow-up — so we use TWO horizons and take the MAX (de-risk fast

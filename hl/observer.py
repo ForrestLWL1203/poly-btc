@@ -409,7 +409,7 @@ class Observer:
         redundant with tier cap + master-lev cap + margin/coin/deploy limits + σ-stop. INTEGER leverage."""
         tier = self._tier(sigma, coin)
         cap = self.tier_lev_cap[tier]
-        lev = max(self.min_lev, float(int(min(cap, self.max_lev))))
+        lev = max(self.min_lev, float(int(cap)))   # v10: 档位上限即天花板(全局 MAX_LEV 去掉,别偷偷覆盖可见档位设置)
         return self.tier_margin[tier], lev
 
     def _stop_px_for(self, entry_px: float, is_buy: bool, leverage: float = 0.0) -> float:

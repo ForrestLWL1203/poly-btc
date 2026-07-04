@@ -904,7 +904,7 @@ function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
-  const MAXL = n("MAX_LEV", 20), MINL = Math.max(1, n("MIN_LEV", 1));
+  const MINL = Math.max(1, n("MIN_LEV", 1));
   const SM = n("STOP_MARGIN_PCT", 70);
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;
   const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
@@ -915,7 +915,7 @@ function SizingPreview({ vals }) {
   const calc = s0 => {
     const s = Math.max(0.1, s0), t = tier(s);
     const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
-    const lev = Math.max(MINL, Math.floor(Math.min(cap, MAXL)));   // v10: 杠杆 = 档位上限(再被目标杠杆+股票上限封顶)
+    const lev = Math.max(MINL, Math.floor(cap));   // v10: 杠杆 = 档位上限(再被目标杠杆+股票上限封顶)
     const margin = bal * mPct;
     const stopLoss = Math.min(SM / 100, 1), stopDist = stopLoss / lev * 100;  // 硬亏=SM%保证金(固定),逆向价格=SM%÷杠杆
     return { t, margin, lev, notl: margin * lev, stopDist, stopLoss };
