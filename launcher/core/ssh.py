@@ -36,6 +36,39 @@ def _q(s):
     return "'" + str(s).replace("'", "'\\''") + "'"
 
 
+def ensure_paramiko(emit=None):
+    """Make paramiko importable, AUTO-INSTALLING it on first VPS use so a non-technical operator never
+    has to. Returns True if available. Local deploys never call this (no SSH dep). Tries a normal then a
+    --user pip install into the launcher's own interpreter; guides a manual install if both fail."""
+    import importlib
+    try:
+        importlib.import_module("paramiko")
+        return True
+    except ImportError:
+        pass
+    import subprocess
+    import sys
+    if emit:
+        emit("首次远程部署:自动安装 SSH 依赖 paramiko(约十几秒,只此一次)…")
+    for extra in ([], ["--user"]):
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "paramiko", *extra],
+                           check=True, timeout=240)
+        except Exception:  # noqa: BLE001
+            continue
+        importlib.invalidate_caches()
+        try:
+            importlib.import_module("paramiko")
+            if emit:
+                emit("✓ paramiko 安装完成")
+            return True
+        except ImportError:
+            continue
+    if emit:
+        emit("✗ paramiko 自动安装失败 — 请在终端运行:pip3 install paramiko,再重试")
+    return False
+
+
 # ───────────────────────────────────────────────────────────── remote (paramiko)
 class SSHExecutor(Executor):
     def __init__(self, host, user="root", password=None, key_filename=None, port=22, timeout=25):

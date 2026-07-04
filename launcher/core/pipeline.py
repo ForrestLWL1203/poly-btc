@@ -7,7 +7,7 @@ deploy, key thereafter) and reused for every step, then closed.
 import queue
 import threading
 
-from .ssh import SSHExecutor, LocalExecutor
+from .ssh import SSHExecutor, LocalExecutor, ensure_paramiko
 from .steps import Ctx, StepError, steps_for
 
 
@@ -35,8 +35,18 @@ class DeployRunner:
 
     def _run(self):
         steps = steps_for(self.cfg.mode)
-        self._put({"type": "begin", "mode": self.cfg.mode,
-                   "steps": [{"id": s[0], "title": s[1]} for s in steps]})
+        # VPS mode shows a leading "准备依赖" step that auto-installs paramiko (runs locally, before we
+        # can construct the SSH executor) so the operator never pre-installs anything.
+        display = ([{"id": "deps", "title": "准备依赖"}] if self.cfg.mode == "vps" else []) \
+            + [{"id": s[0], "title": s[1]} for s in steps]
+        self._put({"type": "begin", "mode": self.cfg.mode, "steps": display})
+        if self.cfg.mode == "vps":
+            self._put({"type": "step", "id": "deps", "status": "running"})
+            if not ensure_paramiko(lambda l: self._put({"type": "log", "step": "deps", "line": l})):
+                self._put({"type": "step", "id": "deps", "status": "error", "error": "paramiko 安装失败"})
+                self._put({"type": "end", "ok": False, "failed": "deps"})
+                return
+            self._put({"type": "step", "id": "deps", "status": "done"})
         try:
             ex = connect(self.cfg)
         except Exception as e:  # noqa: BLE001
