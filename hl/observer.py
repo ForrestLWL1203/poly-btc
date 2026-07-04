@@ -110,7 +110,7 @@ class Observer:
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
         # 扛单 copy-side stop: MARGIN-based catastrophe cut (v10). UI-tunable via _reload_params.
         self.copy_stop_enable = config.COPY_STOP_ENABLE
-        self.risk_budget = config.RISK_BUDGET                # v9: lev = RISK_BUDGET/σ (margin loss per 1σ)
+        # (v10: RISK_BUDGET / σ-scaled leverage removed — leverage is now the σ-tier's cap, see _sizing_for)
         self.stop_margin_pct = config.STOP_MARGIN_PCT        # v10: cut at this fraction of the position's margin
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
@@ -268,7 +268,7 @@ class Observer:
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
-            if f.get("RISK_BUDGET"): self.risk_budget = f["RISK_BUDGET"]
+            # (v10: RISK_BUDGET removed — leverage = σ-tier cap)
             if f.get("STOP_MARGIN_PCT"): self.stop_margin_pct = f["STOP_MARGIN_PCT"]
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
@@ -403,19 +403,13 @@ class Observer:
         return "high" if sigma >= self.high_sigma_min else "mid"
 
     def _sizing_for(self, sigma: float, coin: str = None):
-        """v9 (margin_pct, leverage) for a coin's σ. margin% by tier; leverage = floor(clip(RISK_BUDGET/σ,
-        MIN_LEV, tier cap)). RISK_BUDGET = the margin loss a 1σ move should cost (so lev·σ ≈ RISK_BUDGET);
-        ties directly to the σ-stop. INTEGER leverage (floor). NOT mirrored from the master."""
+        """v10 (margin_pct, leverage) for a coin's σ. σ → tier (stable/mid/high) → margin% + leverage = the
+        tier's LEV CAP (clipped by MIN/MAX_LEV; the caller further caps to the master's own leverage + the
+        stock cap). The old σ-scaled RISK_BUDGET/σ was dropped — it mostly hit the tier cap anyway and was
+        redundant with tier cap + master-lev cap + margin/coin/deploy limits + σ-stop. INTEGER leverage."""
         tier = self._tier(sigma, coin)
         cap = self.tier_lev_cap[tier]
-        if tier == "stable":
-            # benchmark/calm tier (BTC etc.) trades at the FULL cap — NOT σ-throttled (user: BTC 就该 20x).
-            # Trade-off: at 20x a BTC 1σ move (~4.2%) costs ~84% of margin vs the 60% risk-budget, and the
-            # σ-stop (4.2%) sits just under liq (5%) — accepted for our most-liquid benchmark asset.
-            lev = max(self.min_lev, float(int(min(cap, self.max_lev))))
-        else:
-            lev_raw = (self.risk_budget / sigma) if sigma > 0 else cap
-            lev = max(self.min_lev, float(int(min(lev_raw, cap, self.max_lev))))
+        lev = max(self.min_lev, float(int(min(cap, self.max_lev))))
         return self.tier_margin[tier], lev
 
     def _stop_px_for(self, entry_px: float, is_buy: bool, leverage: float = 0.0) -> float:
@@ -987,9 +981,9 @@ class Observer:
             self._tally("skip_chase", book)
             return                                            # chase-skip: price ran past master before we detected
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
-        # v8 sizing: σ → tier (stable/mid/high) → margin% + lev cap; leverage scales ∝1/σ within the tier
-        #  margin = available × <tier>_margin_pct
-        #  lev    = floor(clip( RISK_BUDGET/σ , MIN_LEV , <tier>_lev_cap ))   (v9: RISK_BUDGET = margin/1σ)
+        # v10 sizing: σ → tier (stable/mid/high) → margin% + leverage = the tier's LEV CAP
+        #  margin = equity × <tier>_margin_pct
+        #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ master lev + stock cap)
         #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)

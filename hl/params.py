@@ -75,8 +75,8 @@ PARAM_SPEC = [
         "跟单评分线", "评分 ≥ 此线的钱包才实际跟单(见下方实时达标数)"),
     # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — redundant with the scanner EVIDENCE gate,
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
-    ("RISK_BUDGET",          "follow",  "green",  "pct",     "immediate", config.RISK_BUDGET * 100,
-        "风险预算(1σ亏损)", "核心:逆向 1 个 σ 该亏多少保证金。杠杆 = 此值 ÷ σ,也定单次止损硬亏"),
+    # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
+    #  tier cap + master-lev cap + margin/coin/deploy limits + σ-stop)
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,
         "稳定档·保证金", "稳定档(σ≤4%,如 BTC/GOLD)每单保证金,占可用%"),
     ("STABLE_LEV_CAP",       "follow",  "yellow", "x",       "immediate", config.STABLE_LEV_CAP,

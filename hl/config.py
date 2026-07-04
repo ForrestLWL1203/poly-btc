@@ -77,15 +77,10 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #   high    σ ≥ HIGH_SIGMA_MIN          (ZEC/memes/wild) → small
 #   margin   = EQUITY × <tier>_MARGIN_PCT   (v10 2026-07-02: equity, NOT shrinking available — so a wallet's
 #              copy is the same size regardless of open order; free cash only gates it as a hard backstop)
-#   leverage = floor(clip( RISK_BUDGET / σ , MIN_LEV , <tier>_LEV_CAP ))   ← v9 (2026-06-30)
-#              RISK_BUDGET = the margin loss a 1σ adverse move should cost (so lev·σ ≈ RISK_BUDGET). This
-#              REPLACES the old hardcoded `STABLE_LEV_CAP×STABLE_SIGMA_MAX` (= 20×4% = 80%) anchor — same
-#              shape, but the knob now MEANS something and ties directly to the σ-stop: a 1×σ stop costs
-#              exactly RISK_BUDGET of margin (constant across coins). Absolute-vol targeting (σ rises →
-#              lev drops), NOT relative-to-BTC. Tier cap is the hard ceiling (binds only for very-low-σ
-#              coins). So RISK_BUDGET=60%: BTC(σ3.9%)→15x, ETH→10x(cap), HYPE→6x, ZEC→4x.
+#   leverage = the σ-tier's LEV CAP (v10: σ-scaled RISK_BUDGET/σ dropped as redundant with tier cap +
+#              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV; the caller
+#              further caps to the master's own leverage and the stock cap. σ still selects the tier.
 #   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
-RISK_BUDGET = 0.60          # v9: margin loss target on a 1σ move; lev = RISK_BUDGET/σ. = single σ-stop loss.
 STABLE_SIGMA_MAX = 0.05     # σ ≤ this → STABLE tier. 4%→5% (2026-07-01) so BTC (σ≈4.2%, our benchmark) lands
 #                             in STABLE, not MID. STABLE coins now trade at the FULL STABLE_LEV_CAP (not
 #                             σ-throttled) — see _sizing_for. (user: "BTC 作为基准就该 20x")
