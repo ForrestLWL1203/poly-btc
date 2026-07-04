@@ -262,15 +262,12 @@ def _scanner_status(db):
 
 
 def _followed_count(db, line):
-    """Count of wallets we ACTUALLY copy — mirrors observer.load_targets: score ≥ line AND the evidence
-    floor (n_trades ≥ FOLLOW_MIN_TRADES, active_days ≥ FOLLOW_MIN_ACTIVE_DAYS), enabled. (NOT just
-    score ≥ line — that overstates by the thin-sample wallets the floor holds back.)"""
+    """Count of wallets we ACTUALLY copy — mirrors observer.load_targets: score ≥ line, enabled. Evidence
+    is now enforced at profile time (scanner EVIDENCE gate), so active wallets already have a track record —
+    no separate follow-time floor (v10)."""
     r = q1(db, "SELECT COUNT(*) cnt FROM watchlist w "
                "LEFT JOIN target_controls tc ON tc.addr=w.addr "
-               "LEFT JOIN profile p ON p.addr=w.addr "
-               "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? "
-               "AND COALESCE(w.n_trades,0)>=? AND COALESCE(p.active_days,0)>=?",
-               (line, config.FOLLOW_MIN_TRADES, config.FOLLOW_MIN_ACTIVE_DAYS))
+               "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=?", (line,))
     return (r["cnt"] if r else 0)
 
 
@@ -279,9 +276,7 @@ def _follow_positions(db):
     history badges show the follow-序号 (1..N) instead of the confusing global watchlist rank (#29 > 25)."""
     line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     rows = qall(db, "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-                    "LEFT JOIN profile p ON p.addr=w.addr WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? "
-                    "AND COALESCE(w.n_trades,0)>=? AND COALESCE(p.active_days,0)>=? ORDER BY w.rank",
-                    (line, config.FOLLOW_MIN_TRADES, config.FOLLOW_MIN_ACTIVE_DAYS))
+                    "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? ORDER BY w.rank", (line,))
     return {r["addr"]: i + 1 for i, r in enumerate(rows)}
 
 
@@ -593,12 +588,11 @@ def ep_wallets(db, qs=None):
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
         "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
-    # Partition by the evidence floor (mirrors observer.load_targets) so the list == what we ACTUALLY copy:
-    #   FOLLOWED (tab 'followed') = score≥line AND clears the floor → the real copy set, numbered 1..N by
-    #                               follow position (NOT global watchlist rank — that confused users).
-    #   OBSERVING (tab 'observing') = score≥line but thin-sample → tracked, not yet copied.
+    # v10: evidence is enforced at profile time (scanner EVIDENCE gate), so every wallet above the follow
+    # line IS copied — no thin-sample holdback. FOLLOWED = score≥line (the real copy set); OBSERVING is now
+    # empty (kept for the frontend's tab contract).
     def _held(r):
-        return (r["n_trades"] or 0) < config.FOLLOW_MIN_TRADES or (r["active_days"] or 0) < config.FOLLOW_MIN_ACTIVE_DAYS
+        return False
     foll = [r for r in rows if not _held(r)]
     obs = [r for r in rows if _held(r)]
     tab = (qs.get("tab", ["followed"]))[0]

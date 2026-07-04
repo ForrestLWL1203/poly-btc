@@ -34,8 +34,8 @@ MIN_FOLLOW_SCORE = 0.88     # follow watchlist wallets with score >= this. v5 (2
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
-FOLLOW_MIN_TRADES = 8       # follow-set evidence floor: a wallet must have ≥ this many closed trades in the
-FOLLOW_MIN_ACTIVE_DAYS = 4  # 30d profile AND ≥ this many active days to be COPIED — independent of score.
+# (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — evidence is enforced once at profile time by the
+#  scanner EVIDENCE gate (EVIDENCE_MIN_DAYS / EVIDENCE_MIN_TRADES); no separate follow-time re-check needed)
 #                             A 100%-win-on-3-trades wallet scores low (evidence multiplier) but still clears
 #                             the line; this floor keeps it OUT of the follow set until it has real history.
 #                             It stays on the watchlist (observed) — promoted automatically once it qualifies.
