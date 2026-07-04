@@ -97,6 +97,13 @@ def caddy_step(ctx):
     c = ctx.cfg
     if not c.domain:
         ctx.emit("未配置域名,跳过 HTTPS(用 IP:端口 或 SSH 隧道访问)"); return
+    # ACME (Let's Encrypt) validates by connecting to THIS host on 80/443 from outside. If ufw is active
+    # but only permits 22 (common VPS default), the challenge times out and NO cert is issued (dashboard
+    # then only answers on 127.0.0.1). Open 80/443 first — keep 22 so we never lock ourselves out.
+    ctx.sh("if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then "
+           "ufw allow 22/tcp >/dev/null 2>&1; ufw allow 80/tcp >/dev/null 2>&1; "
+           "ufw allow 443/tcp >/dev/null 2>&1; echo '✓ ufw 放行 22/80/443(ACME 签证书需要)'; "
+           "else echo 'ufw 未启用,无需放行'; fi", check=False)
     from . import templates
     ctx.ex.put_text("/etc/caddy/Caddyfile", templates.caddyfile(c.domain, c.port))
     ctx.emit(f"写入 Caddyfile({c.domain} → 127.0.0.1:{c.port})")
