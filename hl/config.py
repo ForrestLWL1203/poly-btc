@@ -330,8 +330,7 @@ PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >thi
 PORTFOLIO_MIN_EDGE_BPS = 10.0     # 边际硬底线 = 30d 净利/成交量 ×1e4. v10: 20→10 = 手续费打平点(<此我们结构性净亏 →
 #                                  gate). 10bp 以上的"厚度"不再硬砍,交给 score 的 g_edge 平滑降分(避免误杀好钱包)。
 # --- v9 strict-gate additions: every wallet that survives to the watchlist must be genuinely copyable ---
-MIN_PAYOFF = 1.0        # 盈亏比下限 avg_win/avg_loss. <this = 大亏小赚(平均亏 > 平均赢)—— 我们跟会放大那笔大亏、
-#                        剪掉小赢。低胜率真趋势客 payoff 天然 >1(否则不盈利)故不受影响;抓的是高胜率倒挂盘。
+# (MIN_PAYOFF removed v10 — small_win_big_loss hard gate gone; 盈亏比 is now the g_payoff factor in score, ref = SCORE_PAYOFF_REF)
 WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
 WINDFALL_WIN_MAX = 0.60  # (亏损尚未覆盖,ROI 此刻还正)→ reject。真·高胜率的集中不算(它靠稳定胜率不靠一把)。
 GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量)→ reject:月度光环掩盖近期反转,当下在亏。

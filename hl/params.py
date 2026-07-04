@@ -27,8 +27,8 @@ PARAM_SPEC = [
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
     ("HARVEST_WEEK_VLM_MAX", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MAX,
         "周成交量上限", "近7天成交额 ≤ 此(超过=做市/高频机器人,跟不上)"),
-    ("HARVEST_PNL_VOL_MAX",  "scanner", "yellow", "pct",     "rescan", config.HARVEST_PNL_VOL_MAX * 100,
-        "盈利/成交量上限", "周盈利 ÷ 周成交量 ≤ 此(过高=非交易所得的幽灵号)"),
+    ("HARVEST_PNL_VOL_MAX",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MAX * 100,
+        "盈利/成交量上限(防幽灵号)", ""),   # v10: 藏 —— 冷门幽灵号预筛,和已 hidden 的下限对齐
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
@@ -40,8 +40,8 @@ PARAM_SPEC = [
         "评分·活跃度权重", "综合评分里活跃度(成交数+活跃天数)的占比"),
     ("SCORE_W_ROI",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_ROI * 100),
         "评分·收益权重", "综合评分里风险调整收益的占比"),
-    ("SCORE_STRETCH",        "scanner", "yellow", "float",   "rescan", config.SCORE_STRETCH,
-        "评分·标度拉伸", "线性拉伸使最强钱包≈100、平滑下滑(调大→top更贴近100,便于设跟单线)"),
+    ("SCORE_STRETCH",        "scanner", "hidden", "float",   "rescan", config.SCORE_STRETCH,
+        "评分·标度拉伸", ""),   # v10: 藏 —— 内部标定(改评分公式后由开发重标使顶分≈100),非操作员策略
     ("SCORE_THICK_REF",      "scanner", "yellow", "float",   "rescan", config.SCORE_THICK_REF,
         "评分·厚度满分线(赢单每笔%)", "赢单每笔名义收益% ≥ 此 = 厚度满分;越低于此越降分(剥蒜)。调高=对厚度更苛刻,更多薄单被压"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
@@ -56,8 +56,7 @@ PARAM_SPEC = [
         "换手率上限 (x/周)", "周成交量÷账户权益。超过=高频机器人(我们延迟跟不了+手续费拖累)。趋势客一般<40x,机器人>100x"),
     ("PORTFOLIO_MIN_EDGE_BPS","scanner", "yellow", "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
         "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
-    ("MIN_PAYOFF",           "scanner", "yellow", "float",   "rescan", config.MIN_PAYOFF,
-        "盈亏比下限", "平均赢单÷平均亏单。低于此=大亏小赚(一笔亏吃掉多笔赢),跟了会放大大亏剪掉小赢。低胜率真趋势客盈亏比天然>1,不受影响"),
+    # (MIN_PAYOFF removed v10 — the small_win_big_loss hard gate is gone; 盈亏比 now a smooth g_payoff factor in score)
     ("MAX_CONCURRENT_POS",   "scanner", "yellow", "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
     ("MIN_ACTIVE_SCORE",     "scanner", "yellow", "float",   "rescan", config.MIN_ACTIVE_SCORE,
@@ -98,12 +97,10 @@ PARAM_SPEC = [
         "剧烈档·杠杆上限", "剧烈档杠杆封顶"),
     ("HIGH_MIN_NOTIONAL",    "follow",  "yellow", "usd",     "immediate", config.HIGH_MIN_NOTIONAL,
         "剧烈档·最低名义额", "剧烈档(meme/野币)单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)"),
-    ("STABLE_MAX_ADDS",      "follow",  "yellow", "int",     "immediate", config.STABLE_MAX_ADDS,
-        "稳定档·最多加仓", "稳定档(BTC/大饼)一笔最多跟几次加仓;波动小,可多摊"),
-    ("MID_MAX_ADDS",         "follow",  "yellow", "int",     "immediate", config.MID_MAX_ADDS,
-        "中档·最多加仓", "中档(ETH/SOL/HYPE)一笔最多跟几次加仓"),
-    ("HIGH_MAX_ADDS",        "follow",  "yellow", "int",     "immediate", config.HIGH_MAX_ADDS,
-        "剧烈档·最多加仓", "剧烈档(meme/野币/高波股)一笔最多跟几次加仓;波动大,少加甚至设0"),
+    # 分档最多加仓 —— 仅老模式(SMART_ADD 关)生效; 智能加仓走 σ波动闸+ADD_MAX_HARD. v10: 藏,避免占版面
+    ("STABLE_MAX_ADDS",      "follow",  "hidden", "int",     "immediate", config.STABLE_MAX_ADDS, "稳定档·最多加仓(legacy)", ""),
+    ("MID_MAX_ADDS",         "follow",  "hidden", "int",     "immediate", config.MID_MAX_ADDS, "中档·最多加仓(legacy)", ""),
+    ("HIGH_MAX_ADDS",        "follow",  "hidden", "int",     "immediate", config.HIGH_MAX_ADDS, "剧烈档·最多加仓(legacy)", ""),
     ("ADD_FRAC",             "follow",  "yellow", "pct",     "immediate", config.ADD_FRAC * 100,
         "每次加仓比例", "每次加仓额 = 首开保证金 × 此%(50=首开一半)。BTC首开3%+3次加仓 → 满仓7.5%,不是叠成12%"),
     # ── 加仓策略引擎(B 逆向加仓)—— SMART_ADD 开=智能动态,关=老分档硬cap ──
@@ -251,7 +248,7 @@ SCANNER_ARG_MAP = {
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
     "PORTFOLIO_MAX_TURNOVER": "portfolio_max_turnover", "PORTFOLIO_MIN_EDGE_BPS": "portfolio_min_edge_bps",
-    "MIN_PAYOFF": "min_payoff", "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
+    "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
     "MAX_CONCURRENT_POS": "max_concurrent_pos", "MIN_ACTIVE_SCORE": "min_active_score",
     "EVIDENCE_MIN_DAYS": "evidence_min_days", "EVIDENCE_MIN_TRADES": "evidence_min_trades",
 }
