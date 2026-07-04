@@ -476,8 +476,8 @@ def regate(db, p) -> int:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
         status = "active" if ok else ("retired" if old == "active" else "rejected")
         score = metrics.score(m) if ok else 0.0
-        db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=? WHERE addr=?",
-                   (status, reason, score, m["loss_pain"], addr))
+        db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=? WHERE addr=?",
+                   (status, reason, score, m["loss_pain"], concw.get(addr, 0), addr))
         n_active += 1 if ok else 0
     db.commit()
     n = refresh_watchlist(db, stamp)
