@@ -699,7 +699,6 @@ const PARAM_META = {
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "watchlist 里评分≥此线的钱包才实际跟单(0–100 标准化分,见下方实时达标数)", range: "—", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
   FOLLOW_MIN_TRADES: { name: "跟单·最低成交笔数", desc: "证据门槛:近30天平掉回合数<此=样本太薄,留在名单观察但不跟单", range: "5–10", up: "只跟履历厚的、更稳", dn: "放进薄样本、信号更多" },
   FOLLOW_MIN_ACTIVE_DAYS: { name: "跟单·最低活跃天数", desc: "证据门槛:活跃天数<此=履历太短,留在名单观察但不跟单", range: "3–5", up: "只跟交易天数多的", dn: "放进新钱包" },
-  RISK_BUDGET: { name: "风险预算(1σ亏损)", desc: "核心:逆向1个σ该亏多少保证金;杠杆=此值÷σ,也=单次止损硬亏", range: "50–70%", up: "杠杆更大、止损更肉", dn: "更保守、止损更小" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
   STABLE_MIN_NOTIONAL: { name: "稳定档·最低名义额", desc: "BTC/大饼单笔名义额低于此(封顶到主力后)就不开,太小没意义", range: "$3k–8k", up: "过滤更多小单", dn: "连很小的也跟" },
@@ -899,14 +898,14 @@ function Discovery({ scanning, startRescan, confirm }) {
 }
 
 /* ----------------------------------------------------------------- settings */
-/* 下单沙盘 — 用真实 v9 公式实时换算:杠杆 = floor(clip(RISK_BUDGET/σ, 档帽));止损 = K×σ 逆向。
+/* 下单沙盘 — 用真实 v10 公式实时换算:杠杆 = 档位上限(floor,clip MIN/MAX_LEV);止损 = 亏SM%保证金 逆向。
    只读展示(无可调目标杠杆),紧凑液态玻璃风。σ 为实采日内最高-最低振幅均值。读自正在编辑的 vals。 */
 function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
   const MAXL = n("MAX_LEV", 20), MINL = Math.max(1, n("MIN_LEV", 1));
-  const RB = n("RISK_BUDGET", 60), SM = n("STOP_MARGIN_PCT", 70);
+  const SM = n("STOP_MARGIN_PCT", 70);
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;
   const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"], mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
@@ -916,7 +915,7 @@ function SizingPreview({ vals }) {
   const calc = s0 => {
     const s = Math.max(0.1, s0), t = tier(s);
     const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
-    const lev = Math.max(MINL, Math.floor(Math.min(RB / s, cap, MAXL)));
+    const lev = Math.max(MINL, Math.floor(Math.min(cap, MAXL)));   // v10: 杠杆 = 档位上限(再被目标杠杆+股票上限封顶)
     const margin = bal * mPct;
     const stopLoss = Math.min(SM / 100, 1), stopDist = stopLoss / lev * 100;  // 硬亏=SM%保证金(固定),逆向价格=SM%÷杠杆
     return { t, margin, lev, notl: margin * lev, stopDist, stopLoss };
@@ -949,7 +948,7 @@ function SizingPreview({ vals }) {
         })}
       </div>
       <div className="sz-foot">
-        杠杆 = <b>风险预算 {RB}% ÷ σ</b>(按档封顶)· 保证金 = 可用 × 档位%{stopOn
+        杠杆 = <b>σ 档位上限</b>(σ 定档,再被目标杠杆+股票上限封顶)· 保证金 = 可用 × 档位%{stopOn
           ? <React.Fragment> · 止损 = 亏到 <b>{Math.round(SM)}%</b> 保证金就平(与币种无关的硬亏),换算逆向价格 = <b>{Math.round(SM)}%÷杠杆</b></React.Fragment>
           : <React.Fragment> · <b>止损已关闭</b>,仅靠强平兜底</React.Fragment>}
       </div>
@@ -1137,7 +1136,7 @@ function Settings({ startRescan, confirm, toast }) {
           return Prow(p);
         })}
         {tab === "follow" && <div className="psec-h">保证金与杠杆 · 按波动率 σ 分档
-          <span>杠杆由「风险预算 ÷ σ」自动算,这里设各档的单笔保证金% 与杠杆上限(封顶)</span></div>}
+          <span>杠杆 = σ 所在档位的上限(σ 定档),这里设各档的单笔保证金% 与杠杆上限</span></div>}
         {tab === "follow" && TIER_GROUPS.map(g => {
           const open = openTiers[g.key];
           const rows = g.keys.map(k => list.find(p => p.key === k)).filter(Boolean);
