@@ -182,6 +182,27 @@ def seed_params(db):
     db.commit()
 
 
+def reset_defaults(db, category=None):
+    """恢复默认配置: FORCE-overwrite params back to PARAM_SPEC (= config.py) defaults.
+
+    Unlike seed_params (INSERT OR IGNORE, which protects operator edits), this OVERWRITES the live
+    value with the current code default — the dashboard/launcher "恢复默认" op. category None = all;
+    "follow"/"scanner" = just that tab. Also refreshes default_value so the column tracks config.
+    Returns the number of params reset. Only touches rows that already exist (seed first on a fresh DB).
+    """
+    stamp = now_iso()
+    n = 0
+    for key, cat, level, ptype, effect, default, name, desc in PARAM_SPEC:
+        if category and cat != category:
+            continue
+        dv = _to_text(default)
+        cur = db.execute("UPDATE params SET value=?,default_value=?,updated_at=? WHERE key=?",
+                         (dv, dv, stamp, key))
+        n += cur.rowcount
+    db.commit()
+    return n
+
+
 def get_all(db):
     """Return {scanner:[...], follow:[...]} with parsed values + metadata, in PARAM_SPEC order."""
     rows = {r["key"]: r for r in db.execute(

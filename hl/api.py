@@ -855,6 +855,18 @@ def patch_params(db_path, category, updates):
         db.close()
 
 
+def reset_params(db_path, category):
+    """恢复默认配置: force-overwrite params back to config defaults. category 'all' = both tabs.
+    Same single-writer contract as patch_params (writes only the params table)."""
+    db = rw_connect(db_path)
+    try:
+        cat = None if category == "all" else category
+        n = params_mod.reset_defaults(db, cat)
+        return n
+    finally:
+        db.close()
+
+
 def ep_params(db):
     data = params_mod.get_all(db)
     # MIN_FOLLOW_SCORE is on the score ruler -> present it on the same 0–100 scale as wallet scores
@@ -922,6 +934,20 @@ def make_handler(db_path, auth, static_dir=None):
                         cmd_id, status = insert_command(db_path, ctype, body.get("payload"),
                                                         body.get("idempotencyKey"))
                     return self._send(202, {"commandId": cmd_id, "status": status})
+                except Exception as e:  # noqa: BLE001
+                    return self._send(500, {"error": "server_error", "detail": str(e)})
+            if path.startswith("/api/params/") and path.endswith("/reset"):
+                if not self._authed():
+                    return self._send(401, {"error": "unauthorized"})
+                cat = path.split("/")[3]                      # /api/params/{cat}/reset
+                if cat not in ("follow", "scanner", "all"):
+                    return self._send(400, {"error": "bad_category"})
+                try:
+                    n = reset_params(db_path, cat)
+                    resp = {"reset": n}
+                    if cat in ("scanner", "all"):
+                        resp["pendingRescan"] = True           # scanner defaults need a rescan to bite
+                    return self._send(200, resp)
                 except Exception as e:  # noqa: BLE001
                     return self._send(500, {"error": "server_error", "detail": str(e)})
             return self._send(404, {"error": "not_found"})

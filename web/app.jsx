@@ -1071,6 +1071,31 @@ function Settings({ startRescan, confirm, toast }) {
     else doIt();
   };
 
+  // 恢复默认配置:把当前页所属类别(scanner / follow — add 属 follow)全部参数强制写回代码默认值,覆盖操作员修改。
+  const resetDefaults = () => {
+    const cat = tab === "add" ? "follow" : tab;
+    const label = cat === "scanner" ? "钱包采集" : "跟单策略(含加仓)";
+    confirm({
+      title: "恢复默认配置", danger: true, ok: "恢复默认",
+      body: `将把「${label}」全部参数强制恢复为代码默认值,覆盖你在此页的所有修改。不可撤销。`,
+      onConfirm: async () => {
+        setSaving(true);
+        const t0 = Date.now();
+        try { await fetch("/api/params/" + cat + "/reset", { method: "POST", headers: { Authorization: "Bearer " + api.token } }); } catch (_e) {}
+        try {                                                     // 重取,把重置后的值刷回界面
+          const p = await api.get("/api/params");
+          setParams(p);
+          const v = {}; [...p.scanner, ...p.follow].forEach(x => { v[x.key] = x.value; });
+          setVals(v); setDirty({});
+        } catch (_e) {}
+        if (cat === "follow") { try { await api.cmd("reload_params", {}); } catch (_e) {} }   // observer ~1.5s 内生效
+        await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
+        setSaving(false);
+        if (cat === "scanner") startRescan();                     // 采集默认值需重采才生效(重采有自己的整页遮罩)
+      },
+    });
+  };
+
   return (
     <div className="content">
       {saving && <div className="mask"><span className="spin" style={{ width: 34, height: 34, borderWidth: 3 }} /><h2 style={{ marginTop: 22 }}>保存中…</h2></div>}
@@ -1078,6 +1103,8 @@ function Settings({ startRescan, confirm, toast }) {
         <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
         <div className={"tab" + (tab === "add" ? " on" : "")} onClick={() => setTab("add")}>加仓策略</div>
+        <button className="btn" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}
+          style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12, padding: "4px 12px" }}>↺ 恢复默认</button>
       </div>
 
       {tab === "follow" && <SizingPreview vals={vals} />}

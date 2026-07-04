@@ -203,10 +203,12 @@ def hours_since_last_scan(db_path):
         return 0.0
 
 
-# ── domain API (called by the dashboard) — SYSTEMD is the supervisor ─────────
-# The dashboard buttons drive real systemd units (the dashboard runs as root → can systemctl directly).
-# Restart=always + boot-start (hl-observe) and the daily hl-scan.timer are OS-supervised — no in-process
-# want-marker/ticker to be a single point of failure. The naked-spawn helpers above are legacy/unused.
+# ── domain API (called by the dashboard) — SYSTEMD on the VPS, DETACHED-SPAWN locally ────────
+# On the production VPS the dashboard runs as root and drives real systemd units (hl-observe
+# Restart=always + boot-start, hl-scan.timer daily) — OS-supervised, no in-process SPOF. On a box
+# with NO systemd (macOS dev, a local launcher deploy) the SAME buttons fall back to the detached-
+# spawn helpers above (pidfile-tracked under data/run/, session-leader so a dashboard restart never
+# double-spawns or orphan-kills). _use_systemd() picks the backend once; everything else is transparent.
 OBSERVER_UNIT = "hl-observe.service"
 SCAN_UNIT = "hl-scan.service"
 
@@ -218,43 +220,78 @@ def _systemctl(*args, timeout=15):
         return None
 
 
+_SYSTEMD = None
+def _use_systemd():
+    """True iff this host is systemd-managed (cached). Gates the supervisor backend for observer/scan."""
+    global _SYSTEMD
+    if _SYSTEMD is None:
+        r = _systemctl("is-system-running", timeout=5)     # any answer (even 'degraded') ⇒ systemd present
+        _SYSTEMD = r is not None and bool((r.stdout or "").strip())
+    return _SYSTEMD
+
+
+def _observe_argv(db_path):
+    return [PYTHON, os.path.join(REPO, "hl_observe.py"), "--db", db_path, "observe"]
+
+
+def _scan_argv(db_path):
+    return [PYTHON, os.path.join(REPO, "hl_discover.py"), "--db", db_path, "scan", "--days", "14"]
+
+
 def _unit_state(unit):
     r = _systemctl("is-active", unit)
     return (r.stdout.strip() if r else "") or "unknown"
 
 
 def observer_running(db_path):
-    return _unit_state(OBSERVER_UNIT) == "active"
+    if _use_systemd():
+        return _unit_state(OBSERVER_UNIT) == "active"
+    return is_running(db_path, OBSERVER)
 
 
 def start_observer(db_path):
-    """'启动跟单' → systemd starts the observer service; Restart=always + boot-start then supervise it."""
-    _systemctl("start", "--no-block", OBSERVER_UNIT)
+    """'启动跟单' → systemd (VPS) or a detached child (local). Idempotent; supervised by OS / pidfile."""
+    if _use_systemd():
+        _systemctl("start", "--no-block", OBSERVER_UNIT)
+    else:
+        _spawn(db_path, OBSERVER, _observe_argv(db_path))
     running = observer_running(db_path)
-    _set_proc_status(db_path, "observer", "running" if running else "stopped", None)
-    return {"running": running, "pid": None, "started": running}
+    pid = None if _use_systemd() else _read_pid(db_path, OBSERVER)
+    _set_proc_status(db_path, "observer", "running" if running else "stopped", pid)
+    return {"running": running, "pid": pid, "started": running}
 
 
 def stop_observer(db_path):
-    """'停止' → systemd stops it. It stays stopped until started again (enabled = boot-start, not auto-resume
-    of a deliberate stop)."""
-    _systemctl("stop", OBSERVER_UNIT)
+    """'停止' → systemd stops it / SIGTERM the local child's group. Stays stopped until started again."""
+    if _use_systemd():
+        _systemctl("stop", OBSERVER_UNIT)
+    else:
+        _stop(db_path, OBSERVER)
     _set_proc_status(db_path, "observer", "stopped", None)   # killed process can't log its own down-state
     return {"running": False, "stopped": True}
 
 
 def scan_running(db_path):
-    st = _unit_state(SCAN_UNIT)                  # oneshot: 'activating'/'active' while the sweep runs
-    return st in ("active", "activating") or _scan_progress_scanning(db_path)
+    if _use_systemd():
+        st = _unit_state(SCAN_UNIT)              # oneshot: 'activating'/'active' while the sweep runs
+        if st in ("active", "activating"):
+            return True
+    elif is_running(db_path, SCAN):
+        return True
+    return _scan_progress_scanning(db_path)
 
 
 def start_scan(db_path, full=False):
-    """'重新扫描' → kick the oneshot scan service now (the daily auto-scan is the systemd timer
-    hl-scan.timer). scanner.scan still marks manual=1 from the queued 'rescan' command."""
+    """'重新扫描' → kick a scan now (systemd oneshot on the VPS, detached child locally). scanner.scan
+    reads the 'full' flag from the queued rescan command + marks manual=1 itself."""
     if scan_running(db_path):
         return {"scanning": True, "started": False, "reason": "already_scanning"}
-    _systemctl("start", "--no-block", SCAN_UNIT)
-    return {"scanning": True, "started": True, "pid": None}
+    if _use_systemd():
+        _systemctl("start", "--no-block", SCAN_UNIT)
+        pid = None
+    else:
+        pid, _ = _spawn(db_path, SCAN, _scan_argv(db_path))
+    return {"scanning": True, "started": True, "pid": pid}
 
 
 def reconcile(db_path):

@@ -26,7 +26,9 @@ MAX_WS_USERS = 10           # max unique users across user-specific subscription
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MIN_FOLLOW_SCORE = 0.88     # follow watchlist wallets with score >= this. v5 (2026-06-30): score is now
+MIN_FOLLOW_SCORE = 0.70     # follow watchlist wallets with score >= this. v10 (2026-07-03): baked in from the
+#                             operator-tuned DB value (~22 followed on the current distribution). UI-tunable.
+#                             v5 (2026-06-30): score is now
 #                             native [0,1] (display ×100); 0.55 = display 55 → ~36 followable on the current
 #                             smooth distribution (top≈77), comfortably above the 20+ floor. The smooth blend
 #                             makes this a real quality cut (not a cliff). UI-tunable (0–100 ruler).
@@ -92,9 +94,9 @@ STABLE_MARGIN_PCT = 0.06    # FIRST-OPEN margin = this × EQUITY, for STABLE-tie
 #                             cash gate taps in; 4.2% max loss/position @70% stop. (v6: line 88 → ~24 targets.)
 MID_MARGIN_PCT    = 0.05    # ...MID (ETH/SOL): 5% × 10x = 50% notional
 HIGH_MARGIN_PCT   = 0.04    # ...HIGH (meme): 4% × 5x = 20% notional
-STABLE_LEV_CAP = 20.0       # leverage ceiling for STABLE-tier coins
-MID_LEV_CAP    = 10.0       # ...for MID-tier coins
-HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
+STABLE_LEV_CAP = 30.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 30x)
+MID_LEV_CAP    = 15.0       # ...for MID-tier coins
+HIGH_LEV_CAP   = 7.0        # ...for HIGH-VOL-tier coins
 # PER-TIER minimum order notional: skip a copy whose FINAL notional (after the master-notl cap) is below
 # its tier's floor — a too-small position isn't worth the fee/latency drag (esp. on calm coins where the
 # whole edge is a fraction of a %). Per-tier only — the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
@@ -255,7 +257,7 @@ SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) —
 SCORE_W_WIN  = 0.35    # 胜率权重
 SCORE_W_ACT  = 0.30    # 活跃度权重(成交数 + 活跃天数,升为核心项) —— W_* 之和自动归一
 SCORE_W_ROI  = 0.35    # ROI 权重(收敛后;ROI 本身就把"小赚大亏"量化为低分)
-SCORE_STRETCH = 1.15   # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。调大→top 更贴近 100
+SCORE_STRETCH = 1.227  # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。调大→top 更贴近 100(operator-tuned)
 ROI_NOTL_FLOOR    = 1000.0 # 名义额下限(仅用于把 max_drawdown 归一成 dd_eq;防除零/噪音)
 SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效edge越低(回撤按名义额归一)
 SCORE_ROI_SCALE   = 0.35  # roiS = 1 − exp(−roi_adj/此):综合ROI 分布~0.05–1.5,此值让有效区拉得开(0.3→0.58,0.5→0.76,1.0→0.94)
@@ -340,7 +342,8 @@ SCORE_PAYOFF_REF  = 1.0   # 盈亏比≥此(1.0)=满分,只罚真·大亏小赚(
 SCORE_PAYOFF_FLOOR= 0.6    # → 轻推,不双重惩罚高胜率盘(0x770493 payoff1.0/胜78% 不再被压)
 EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 → insufficient_evidence(无战绩无从评判,取消趋势豁免)
 EVIDENCE_MIN_TRADES = 7   #                已平回合 < 此 同理. 5天/7回合≈0.5单/天,砍纯持有+小样本尾巴,不误伤好钱包
-MIN_ACTIVE_SCORE  = 0.50  # 质量线:score < 此 → 不进 active. 让 active = 全是好钱包(watchlist),跟单再从中取前N
+MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active = 全是好钱包(watchlist),跟单再从中取前N
+#                          (operator-tuned 0.60: 质量线切掉 ~72 个尾巴,active 只留够优质的)
 MAX_CONCURRENT_POS = 15  # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。
