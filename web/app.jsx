@@ -525,9 +525,13 @@ function Wallets({ confirm, toast }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);             // 10/page
   const [tab, setTab] = useState("followed");        // followed(实跟) | observing(样本观察) | dropped(降级)
-  const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&page=" + wpage + "&size=10").then(setData).catch(() => {}); }, [wpage, tab]);
+  // 一次全取回(列表就 ~几十个),浏览器本地翻页 → 翻页零网络往返(VPS 在欧洲,跨洋 RTT 高,别每页都请求)
+  const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&size=500").then(setData).catch(() => {}); }, [tab]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
   const dropped = tab === "dropped";
+  const allRows = (data && data.wallets) || [];
+  const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
+  const pageRows = allRows.slice(pg * PER, pg * PER + PER);
 
   const toggle = (w) => {
     const next = !w.enabled;
@@ -560,7 +564,7 @@ function Wallets({ confirm, toast }) {
             <tbody>
               {data === null && <tr><td colSpan="9" className="loading">加载中…</td></tr>}
               {data && data.wallets.length === 0 && <tr><td colSpan="9" className="empty">暂无降级钱包 —— 都在跟单中 👍</td></tr>}
-              {data && data.wallets.map(w => (
+              {data && pageRows.map(w => (
                 <tr key={w.address} style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
@@ -584,7 +588,7 @@ function Wallets({ confirm, toast }) {
             </tr></thead>
             <tbody>
               {data === null && <tr><td colSpan="12" className="loading">加载中…</td></tr>}
-              {data && data.wallets.map(w => (
+              {data && pageRows.map(w => (
                 <tr key={w.address} className={w.enabled ? "" : "row-off"}
                   style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
@@ -610,11 +614,11 @@ function Wallets({ confirm, toast }) {
           </table>
         )}
       </div>
-      {data && data.total > data.size && (
+      {allRows.length > PER && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
-          <button className="btn" disabled={wpage <= 0} onClick={() => setWpage(wpage - 1)}>上一页</button>
-          <span className="muted mono">第 {data.page + 1} / {Math.ceil(data.total / data.size)} 页</span>
-          <button className="btn" disabled={(wpage + 1) * data.size >= data.total} onClick={() => setWpage(wpage + 1)}>下一页</button>
+          <button className="btn" disabled={pg <= 0} onClick={() => setWpage(pg - 1)}>上一页</button>
+          <span className="muted mono">第 {pg + 1} / {pages} 页 · 共 {allRows.length}</span>
+          <button className="btn" disabled={pg >= pages - 1} onClick={() => setWpage(pg + 1)}>下一页</button>
         </div>
       )}
       {drawer && <WalletDrawer address={drawer} onClose={() => setDrawer(null)} />}
