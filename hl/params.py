@@ -42,6 +42,8 @@ PARAM_SPEC = [
         "评分·收益权重", "综合评分里风险调整收益的占比"),
     ("SCORE_STRETCH",        "scanner", "yellow", "float",   "rescan", config.SCORE_STRETCH,
         "评分·标度拉伸", "线性拉伸使最强钱包≈100、平滑下滑(调大→top更贴近100,便于设跟单线)"),
+    ("SCORE_THICK_REF",      "scanner", "yellow", "float",   "rescan", config.SCORE_THICK_REF,
+        "评分·厚度满分线(赢单每笔%)", "赢单每笔名义收益% ≥ 此 = 厚度满分;越低于此越降分(剥蒜)。调高=对厚度更苛刻,更多薄单被压"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
@@ -262,7 +264,7 @@ def apply_scanner_params(db, ns):
     for key, attr in SCANNER_ARG_MAP.items():
         if vals.get(key) is not None:
             setattr(ns, attr, vals[key])
-    for key in ("SCORE_W_WIN", "SCORE_W_ACT", "SCORE_W_ROI", "SCORE_STRETCH"):
+    for key in ("SCORE_W_WIN", "SCORE_W_ACT", "SCORE_W_ROI", "SCORE_STRETCH", "SCORE_THICK_REF"):
         if vals.get(key) is not None:                     # pct params already ÷100 by load_category; STRETCH is float
             setattr(config, key, vals[key])
     return ns
