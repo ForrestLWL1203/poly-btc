@@ -340,10 +340,8 @@ GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量
 # line then makes `active` = the pool of genuinely-good, followable wallets (watchlist); we follow the top-N. ===
 SCORE_THICK_REF   = 1.5   # 赢单每笔名义收益% 达此=满分厚度; 剥蒜(0.5%)→×0.33. 我们的滑点吃薄边际,故厚度直接进分
 SCORE_THICK_FLOOR = 0.3
-SCORE_PAYOFF_REF  = 2.0   # 盈亏比达此=满分; payoff 1(不亏不赚)→×0.5. 替代已删的 small_win_big_loss 硬闸
-SCORE_PAYOFF_FLOOR= 0.4
-SCORE_EDGE_REF    = 60.0  # 月edge(bp)达此=满分厚度; 20bp→×0.33. 手续费硬底线仍是 PORTFOLIO_MIN_EDGE_BPS(闸)
-SCORE_EDGE_FLOOR  = 0.4
+SCORE_PAYOFF_REF  = 1.0   # 盈亏比≥此(1.0)=满分,只罚真·大亏小赚(payoff<1); payoff 和胜率联动,高胜率天生不需高盈亏比
+SCORE_PAYOFF_FLOOR= 0.6    # → 轻推,不双重惩罚高胜率盘(0x770493 payoff1.0/胜78% 不再被压)
 EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 → insufficient_evidence(无战绩无从评判,取消趋势豁免)
 EVIDENCE_MIN_TRADES = 7   #                已平回合 < 此 同理. 5天/7回合≈0.5单/天,砍纯持有+小样本尾巴,不误伤好钱包
 MIN_ACTIVE_SCORE  = 0.50  # 质量线:score < 此 → 不进 active. 让 active = 全是好钱包(watchlist),跟单再从中取前N

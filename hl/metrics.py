@@ -311,13 +311,11 @@ def score(m: dict) -> float:
     g_deep = _clip(1.0 - max(0.0, bag - config.SCORE_BAG_REF) / config.SCORE_BAG_SPAN, config.SCORE_DEEP_FLOOR, 1.0)
 
     # ── v10 QUALITY-MAGNITUDE factors (folded INTO score, NOT末尾 hard gates — those double-count & over-cut) ──
-    # 每笔厚度: 剥蒜(赢单每笔 <~0.5% 名义)重罚; ≥REF 满分. 我们跟单有滑点,薄边际吃不到 → 直接进分.
+    # 每笔厚度(核心,用户点5): 剥蒜(赢单每笔 <~0.5% 名义)重罚→×0.33; ≥REF(1.5%) 满分. 我们跟单有滑点,薄边际吃不到.
     g_thick = _clip(g("win_pt") / config.SCORE_THICK_REF, config.SCORE_THICK_FLOOR, 1.0)
-    # 盈亏比: 大亏小赚(payoff<1)重罚; ≥REF 满分. 替代已删的 small_win_big_loss 硬闸(不再误杀高胜率盘).
+    # 盈亏比: 只罚真·大亏小赚(payoff<1); payoff≥REF(1.0) 满分 → 不误伤 payoff 1.0 的高胜率盘. 高地板(0.6)=轻推.
+    #   edge 厚度不单列因子(和 ROI 支柱重复); 手续费硬底线在闸门(10bp),ROI 支柱已奖励回报.
     g_payoff = _clip(g("payoff_ratio", 1.0) / config.SCORE_PAYOFF_REF, config.SCORE_PAYOFF_FLOOR, 1.0)
-    # 边际厚度: 月edge 越厚越好(手续费底线已在闸门管). 20bp→×0.33, ≥REF(60bp) 满分.
-    _edge = (g("pf_mon_pnl") / g("pf_mon_vlm") * 1e4) if g("pf_mon_vlm") else 0.0
-    g_edge = _clip(_edge / config.SCORE_EDGE_REF, config.SCORE_EDGE_FLOOR, 1.0)
 
     # linear STRETCH → best real wallet ≈ 100, smooth decline (stable/absolute, not max-relative)
-    return _clip(core * g_manuf * g_deep * g_thick * g_payoff * g_edge * config.SCORE_STRETCH, 0.0, 1.0)
+    return _clip(core * g_manuf * g_deep * g_thick * g_payoff * config.SCORE_STRETCH, 0.0, 1.0)
