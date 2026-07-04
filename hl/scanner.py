@@ -603,8 +603,10 @@ def scan(db, p) -> None:
                 retired += 1
             else:
                 rejected += 1
+            # progress on EVERY completion (single cheap 1-row UPDATE) so the mask's xxx/yyy moves
+            # smoothly (~1 wallet/sec) instead of jumping every 10 (~14s frozen gaps → looked stuck).
+            _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
             if done % 10 == 0:
-                _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
                 _set_scanner_proc(db, "scanning", {"stage": "score_filter",   # refresh heartbeat so the
                                   "scanned": done, "total": len(workset)})    # dashboard isn't "心跳超时"
 

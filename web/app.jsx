@@ -756,11 +756,15 @@ function ScanMask({ status }) {
   const pct = (status && status.progressPct) || 0;
   const el = (status && status.elapsedSec) || 0;
   const mm = String(Math.floor(el / 60)).padStart(2, "0"), ss = String(el % 60).padStart(2, "0");
+  const remain = pct > 3 ? Math.round(el * (100 - pct) / pct) : null;   // live ETA = 已用 × 剩余%/已完成%
+  const eta = remain != null
+    ? `预计还需 ~${String(Math.floor(remain / 60)).padStart(2, "0")}:${String(remain % 60).padStart(2, "0")}`
+    : "预计剩余计算中…";
   return (
     <div className="mask">
       <div className="radar" />
       <h2>采集进行中…</h2>
-      <div className="sub">{mm}:{ss} 已用 · 预计 ~20:00</div>
+      <div className="sub">{mm}:{ss} 已用 · {eta}</div>
       <div className="mask-prog"><div className="pf" style={{ width: pct + "%" }} /></div>
       <div className="mask-meta">
         <span>{pct}%</span>
