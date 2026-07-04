@@ -486,8 +486,8 @@ def regate(db, p) -> int:
         if ok and score < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
             ok, reason, score = False, "low_quality", 0.0      # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
         status = "active" if ok else ("retired" if old == "active" else "rejected")
-        db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=? WHERE addr=?",
-                   (status, reason, score, m["loss_pain"], concw.get(addr, 0), addr))
+        db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=?,win_pt=? WHERE addr=?",
+                   (status, reason, score, m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0), addr))
         n_active += 1 if ok else 0
     db.commit()
     n = refresh_watchlist(db, stamp)
