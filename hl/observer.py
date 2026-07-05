@@ -101,9 +101,10 @@ class Observer:
         # ── 加仓策略引擎 (B 逆向): smart(σ波动闸+比例镜像+三档预算) vs hardcap(次数cap+ADD_FRAC) ──
         self.add_strategy = config.ADD_STRATEGY
         self.add_gap_k = config.ADD_GAP_K                       # 波动闸 x = k×σ
+        self.pos_add_gap_k = config.POS_ADD_GAP_K               # 顺势加仓也要过价差闸,避免小碎单全跟
         self.add_shrink_g = config.ADD_GAP_SHRINK_G             # 每加一次 x×此
         self.add_max_hard = config.ADD_MAX_HARD                 # smart 硬顶
-        self.follow_pos_add = config.FOLLOW_POS_ADD             # A 正向加仓开关(默认关=不追盈利加仓)
+        self.follow_pos_add = config.FOLLOW_POS_ADD             # A 正向加仓开关(开=过 POS_ADD_GAP_K 才跟)
         self.tier_coin_cap = {"stable": config.STABLE_COIN_CAP_PCT, "mid": config.MID_COIN_CAP_PCT,
                               "high": config.HIGH_COIN_CAP_PCT}  # 三档单币最大保证金占用%
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
@@ -260,6 +261,7 @@ class Observer:
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("SMART_ADD") is not None: self.add_strategy = "smart" if f["SMART_ADD"] else "hardcap"
             if f.get("ADD_GAP_K") is not None: self.add_gap_k = f["ADD_GAP_K"]
+            if f.get("POS_ADD_GAP_K") is not None: self.pos_add_gap_k = f["POS_ADD_GAP_K"]
             if f.get("ADD_GAP_SHRINK_G"): self.add_shrink_g = f["ADD_GAP_SHRINK_G"]
             if f.get("ADD_MAX_HARD") is not None: self.add_max_hard = int(f["ADD_MAX_HARD"])
             if f.get("FOLLOW_POS_ADD") is not None: self.follow_pos_add = bool(f["FOLLOW_POS_ADD"])
@@ -1102,13 +1104,16 @@ class Observer:
                 self.db.commit()
 
             if self.add_strategy == "smart":
-                # 逆向(adv>0=价格朝我们不利方向,摊低)走波动闸;正向(adv<0=顺势加仓)走 A 开关。
+                # 逆向(adv>0=价格朝我们不利方向,摊低)走 ADD_GAP_K;
+                # 正向(adv<0=顺势加仓)也要过 POS_ADD_GAP_K,避免 1.01/1.02/1.03 这类小碎追单全跟。
                 last = ep.get("last_add_px") or ep["entry_px"]
                 adv = (((last - master_px) if is_buy else (master_px - last)) / last) if last else 0.0
-                x = self.add_gap_k * sigma * (self.add_shrink_g ** ep["add_count"])
+                gap_mult = self.add_shrink_g ** ep["add_count"]
+                x = self.add_gap_k * sigma * gap_mult
+                pos_x = self.pos_add_gap_k * sigma * gap_mult
                 if adv >= x:                                     # ① B 逆向:摊低幅度够 → 跟
                     pass
-                elif adv < 0 and self.follow_pos_add:            # A 正向:顺势加仓且开关开 → 跟(共用比例+预算)
+                elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_x:
                     pass
                 else:                                            # 逆向但幅度不够 / 正向但A关 → 只观察
                     return _observe_only()

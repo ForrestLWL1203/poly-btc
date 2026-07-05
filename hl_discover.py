@@ -45,6 +45,7 @@ def _scan_ns():
     return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False, full_scan=False,
                            workers=4, scan_interval=10.0, max_pages=5, min_crypto=0.3,
                            exclude_hft=True, hft_min_hold_min=3.0,
+                           max_single_adds=config.MAX_SINGLE_ADDS_PER_EP,
                            gate_loss_pain_max=config.GATE_LOSS_PAIN_MAX,
                            gate_hold_skew_max=config.GATE_HOLD_SKEW_MAX,
                            gate_profit_conc_max=config.GATE_PROFIT_CONC_MAX)
@@ -138,6 +139,9 @@ def main() -> int:
                         help="reject grid/DCA: MEDIAN scale-ins per round-trip above this = habitual "
                              "averaging-down. Our model = open + MAX_ADDS adds, so a wallet that TYPICALLY "
                              "ladders 4+ times we only get the worst pre-average entries on → uncopyable")
+        pr.add_argument("--max-single-adds", type=float, default=config.MAX_SINGLE_ADDS_PER_EP,
+                        help="reject heavy DCA: any single round-trip with more scale-ins than this is "
+                             "uncopyable even when the median is low")
         pr.add_argument("--max-single-loss", type=float, default=0.10,
                         help="reject 扛单到爆: worst single round-trip loss as fraction of account "
                              "(cuts-losses-small wallets pass even at 50%% win; one disaster loss = out)")

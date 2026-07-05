@@ -196,9 +196,11 @@ def gates_structural(m: dict, p) -> tuple:
                 and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
             return False, "hft_uncopyable"
         if (m.get("median_adds_per_ep") or 0) > p.grid_max_adds:  # grid/DCA: TYPICALLY laddered scale-ins.
-            return False, "grid_dca"                              # MEDIAN not MAX — one heavy DCA in the window
-        #                                                           ≠ a grid bot (would kill +$65k wallets whose
-        #                                                           median adds is 0). A real grid dominates most eps.
+            return False, "grid_dca"
+        # Heavy one-off DCA is also uncopyable: median catches habitual grid bots, but a single 20-100+
+        # scale-in winner can be exactly where the target's edge lives and where our copy path diverges.
+        if (m.get("max_adds_per_ep") or 0) > getattr(p, "max_single_adds", config.MAX_SINGLE_ADDS_PER_EP):
+            return False, "heavy_dca"
         # ALGO-EXECUTION / 拆单: works each round-trip via dozens–hundreds of sliced fills we can't mirror
         # (noise + fees). Gate on the p90 per-episode fill count — SYSTEMATIC slicing. NOT the average (a slicer
         # hides when its heavy round-trips are diluted by light ones: avg 34 but one round-trip = 294 fills), and

@@ -55,6 +55,24 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["followed_adds"], 1)
         self.assertGreater(result["copy_net_pnl"], 0)
 
+    def test_positive_add_waits_for_gap_when_enabled(self):
+        fills = [
+            fill(1, "ZEC", "B", 10, 0, 100.0, 30),
+            fill(2, "ZEC", "B", 10, 10, 100.5, 31),
+            fill(3, "ZEC", "B", 10, 20, 101.2, 32),
+            fill(4, "ZEC", "A", 30, 30, 102.0, 33),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ZEC": 0.10}, overrides={
+            "FOLLOW_POS_ADD": True,
+            "POS_ADD_GAP_K": 0.10,
+            "ADD_GAP_SHRINK_G": 1.0,
+        })
+
+        self.assertEqual(result["closed_n"], 1)
+        self.assertEqual(result["missed_adds"], 1)
+        self.assertEqual(result["followed_adds"], 1)
+
     def test_portfolio_replay_keeps_same_coin_wallet_positions_separate(self):
         fills = [
             user_fill("0xa", 1, "BTC", "B", 100, 0, 100.0, 1),

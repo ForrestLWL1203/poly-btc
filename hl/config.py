@@ -122,13 +122,14 @@ MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (
 
 # ═══ 加仓策略引擎(独立)═══ B 逆向加仓可选:老"硬cap"(分档次数 + ADD_FRAC) 或 新"智能动态"
 ADD_STRATEGY = "smart"       # "smart" | "hardcap"  —— B 逆向加仓的模式(A 正向加仓固定用 hardcap)
-# 智能模式三闸:①波动闸 x = ADD_GAP_K×σ(目标加仓相对我们上次加仓价 逆向移动 ≥ x 才跟;数据标定 0.15 利润最大)
+# 智能模式三闸:①波动闸 x = k×σ(目标加仓相对我们上次加仓价 移动≥x 才跟;逆向/顺势各自有 k)
 #              ②每跟一次 x ×ADD_GAP_SHRINK_G(逐步收紧,加仓次数自然收口)③单币预算封顶(下面三档)+ 硬顶
-ADD_GAP_K = 0.15            # 波动闸 σ 系数(逐币:x = k×该币σ)
-ADD_GAP_SHRINK_G = 1.5     # 收缩因子(每加一次门槛×此)
+ADD_GAP_K = 0.12            # 逆向摊价波动闸 σ 系数(逐币:x = k×该币σ)
+POS_ADD_GAP_K = 0.08        # 顺势加仓波动闸 σ 系数; FOLLOW_POS_ADD 开时也要过此闸,避免小碎单全跟
+ADD_GAP_SHRINK_G = 1.2      # 收缩因子(每加一次门槛×此)
 ADD_MAX_HARD = 8           # 智能模式硬顶(兜底;通常单币预算先触顶)
-FOLLOW_POS_ADD = False     # A 正向加仓:目标"顺势加仓"(价格朝其有利方向、拉高成本)时是否跟。默认关=不追盈利加仓;
-#                            开=也按比例镜像跟(共用硬顶+三档预算)。B 逆向(摊低)始终按上面的波动闸走。
+FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有利方向、拉高成本)时是否跟。开=过 POS_ADD_GAP_K 才跟;
+#                            关=完全不追盈利加仓。B 逆向(摊低)始终按 ADD_GAP_K 波动闸走。
 # 智能模式加仓额 = (目标本次加仓额 ÷ 目标首仓额) × 我们首仓保证金,封顶到该币剩余"单币预算"。
 # 三档单币"灾难闸":同一币+同向所有仓位保证金合计 ≤ 占账户%。不是"单笔税"(单笔大小由 EQUITY×MARGIN_PCT 定),
 # 而是封住"N 个钱包碰巧全压同一币同向 → 一次波动最多吃掉账户的百分之几"。实测极少堆币(最集中仅~9%),故设宽
@@ -347,6 +348,8 @@ MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active 
 MAX_CONCURRENT_POS = 15  # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。
+MAX_SINGLE_ADDS_PER_EP = 20  # 单个 round-trip 最多允许的 scale-in 次数. median_adds 抓"典型网格",
+#                              max_adds 抓"偶发但关键的重DCA":20+ 到 100+ 次这类我们结构上跟不了,提前拒绝。
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
 # target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. 30d exactly

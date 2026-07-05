@@ -64,6 +64,7 @@ class Backtest:
         self.gross_pnl = 0.0
         self.add_strategy = overrides.get("ADD_STRATEGY", config.ADD_STRATEGY)
         self.add_gap_k = overrides.get("ADD_GAP_K", config.ADD_GAP_K)
+        self.pos_add_gap_k = overrides.get("POS_ADD_GAP_K", config.POS_ADD_GAP_K)
         self.add_shrink_g = overrides.get("ADD_GAP_SHRINK_G", config.ADD_GAP_SHRINK_G)
         self.add_max_hard = int(overrides.get("ADD_MAX_HARD", config.ADD_MAX_HARD))
         self.follow_pos_add = bool(overrides.get("FOLLOW_POS_ADD", config.FOLLOW_POS_ADD))
@@ -236,10 +237,12 @@ class Backtest:
         if self.add_strategy == "smart":
             last = ep.get("last_add_px") or ep["entry_px"]
             adv = (((last - px) if is_buy else (px - last)) / last) if last else 0.0
-            threshold = self.add_gap_k * sigma * (self.add_shrink_g ** ep["add_count"])
+            gap_mult = self.add_shrink_g ** ep["add_count"]
+            threshold = self.add_gap_k * sigma * gap_mult
+            pos_threshold = self.pos_add_gap_k * sigma * gap_mult
             if adv >= threshold:
                 pass
-            elif adv < 0 and self.follow_pos_add:
+            elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_threshold:
                 pass
             else:
                 return self._observe_add(ep)
