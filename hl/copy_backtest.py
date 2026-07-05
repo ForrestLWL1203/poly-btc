@@ -100,6 +100,7 @@ class Backtest:
         return self.result()
 
     def process_fill(self, x):
+        addr = (x.get("user") or self.addr or "").lower()
         coin = x.get("coin")
         if not coin:
             return
@@ -113,22 +114,22 @@ class Backtest:
         signed = sz if x.get("side") == "B" else -sz
         pos0 = f(x.get("startPosition"))
         pos1 = pos0 + signed
-        key = (self.addr, coin)
+        key = (addr, coin)
         oid = x.get("oid")
 
         was_flat = abs(pos0) < config.FLAT
         if was_flat and abs(pos1) >= config.FLAT:
             self.target_open_events += 1
         if abs(pos1) < config.FLAT:
-            self.target_pos.pop(coin, None)
+            self.target_pos.pop(key, None)
         else:
-            self.target_pos[coin] = pos1
+            self.target_pos[key] = pos1
         self.target_peak_concurrent = max(self.target_peak_concurrent, len(self.target_pos))
 
         ep = self.open.get(key)
         if ep is None:
             if was_flat and abs(pos1) >= config.FLAT:
-                self._open_position(coin, x.get("time"), px, pos1, oid)
+                self._open_position(addr, coin, x.get("time"), px, pos1, oid)
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
@@ -139,11 +140,11 @@ class Backtest:
             if oid is not None and oid in ep["seen_oids"]:
                 return
             ep["seen_oids"].add(oid)
-            self._apply_add(coin, px, signed, pos1, oid)
+            self._apply_add(addr, coin, px, signed, pos1, oid)
         else:
-            self._apply_reduce(coin, px, signed, pos1, closing=abs(pos1) < config.FLAT)
+            self._apply_reduce(addr, coin, px, signed, pos1, closing=abs(pos1) < config.FLAT)
 
-    def _open_position(self, coin, t, px, pos1, oid):
+    def _open_position(self, addr, coin, t, px, pos1, oid):
         sigma = self.sigma(coin)
         tier = _tier(sigma)
         margin_pct, lev = _sizing_for(sigma)
@@ -179,7 +180,8 @@ class Backtest:
         self.balance -= fee
         self.fee_drag += fee
         is_buy = side == "long"
-        self.open[(self.addr, coin)] = {
+        self.open[(addr, coin)] = {
+            "addr": addr,
             "coin": coin,
             "side": side,
             "sign": sign,
@@ -217,8 +219,8 @@ class Backtest:
         ep["missed_adds"] += 1
         self.missed_adds += 1
 
-    def _apply_add(self, coin, px, signed, pos1, oid):
-        ep = self.open[(self.addr, coin)]
+    def _apply_add(self, addr, coin, px, signed, pos1, oid):
+        ep = self.open[(addr, coin)]
         m_now = abs(pos1)
         if m_now > 0 and ep["master_open_px"]:
             m_prev = abs(pos1 - signed)
@@ -282,8 +284,8 @@ class Backtest:
         self.fee_drag += fee
         self.followed_adds += 1
 
-    def _apply_reduce(self, coin, px, signed, pos1, closing=False, status="closed"):
-        key = (self.addr, coin)
+    def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed"):
+        key = (addr, coin)
         ep = self.open.get(key)
         if not ep:
             return
@@ -325,9 +327,9 @@ class Backtest:
             liq_hit = px <= ep["liq_px"] if ep["side"] == "long" else px >= ep["liq_px"]
             stop_hit = self.copy_stop_enable and ep["stop_px"] and (px <= ep["stop_px"] if ep["side"] == "long" else px >= ep["stop_px"])
             if liq_hit:
-                self._apply_reduce(coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated")
+                self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated")
             elif stop_hit:
-                self._apply_reduce(coin, px, 0.0, 0.0, closing=True, status="stopped")
+                self._apply_reduce(addr, coin, px, 0.0, 0.0, closing=True, status="stopped")
 
     def result(self):
         unreal = 0.0
@@ -371,6 +373,7 @@ class Backtest:
 
 def summarize_position(p):
     return {
+        "addr": p.get("addr"),
         "coin": p["coin"],
         "side": p["side"],
         "status": p.get("status", "open"),

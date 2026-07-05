@@ -17,6 +17,12 @@ def fill(t, coin, side, sz, start, px, oid, crossed=True):
     }
 
 
+def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
+    x = fill(t, coin, side, sz, start, px, oid, crossed)
+    x["user"] = user
+    return x
+
+
 class CopyBacktestTests(unittest.TestCase):
     def test_smart_add_skips_small_adverse_add_and_reports_dependency(self):
         fills = [
@@ -48,6 +54,21 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["missed_adds"], 0)
         self.assertEqual(result["followed_adds"], 1)
         self.assertGreater(result["copy_net_pnl"], 0)
+
+    def test_portfolio_replay_keeps_same_coin_wallet_positions_separate(self):
+        fills = [
+            user_fill("0xa", 1, "BTC", "B", 100, 0, 100.0, 1),
+            user_fill("0xb", 2, "BTC", "B", 100, 0, 100.0, 2),
+            user_fill("0xa", 3, "BTC", "A", 100, 100, 101.0, 3),
+            user_fill("0xb", 4, "BTC", "A", 100, 100, 102.0, 4),
+        ]
+
+        result = run_backtest("portfolio", fills, sigmas={"BTC": 0.04})
+
+        self.assertEqual(result["closed_n"], 2)
+        self.assertEqual(result["target_open_events"], 2)
+        self.assertEqual(result["copy_peak_concurrent"], 2)
+        self.assertEqual({p["addr"] for p in result["positions"]}, {"0xa", "0xb"})
 
 
 if __name__ == "__main__":
