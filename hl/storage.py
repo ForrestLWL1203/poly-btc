@@ -106,10 +106,10 @@ CREATE TABLE IF NOT EXISTS profile (
     times_active     INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS episode (
-    addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, close_ms INTEGER,
+    addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, seq INTEGER DEFAULT 0, close_ms INTEGER,
     hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER,
     open_px REAL, close_px REAL,
-    PRIMARY KEY (addr, coin, open_ms)
+    PRIMARY KEY (addr, coin, open_ms, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_ep_addr ON episode(addr);
 CREATE INDEX IF NOT EXISTS idx_prof_status ON profile(status);
@@ -492,5 +492,38 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
             db.execute(stmt)
         except sqlite3.OperationalError:
             pass                          # column already exists (fresh DB or prior run) — fine
+    _migrate_episode_seq(db)
     db.commit()
     return db
+
+
+def _migrate_episode_seq(db: sqlite3.Connection) -> None:
+    cols = db.execute("PRAGMA table_info(episode)").fetchall()
+    if not cols:
+        return
+    pk_cols = [r[1] for r in sorted((r for r in cols if r[5]), key=lambda r: r[5])]
+    if pk_cols == ["addr", "coin", "open_ms", "seq"]:
+        return
+
+    names = {r[1] for r in cols}
+    db.execute("DROP TABLE IF EXISTS episode_migrate_old")
+    db.execute("ALTER TABLE episode RENAME TO episode_migrate_old")
+    db.executescript(
+        """
+        CREATE TABLE episode (
+            addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, seq INTEGER DEFAULT 0, close_ms INTEGER,
+            hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER,
+            open_px REAL, close_px REAL,
+            PRIMARY KEY (addr, coin, open_ms, seq)
+        );
+        """
+    )
+    seq_expr = "COALESCE(seq, 0)" if "seq" in names else "0"
+    db.execute(
+        "INSERT OR IGNORE INTO episode "
+        "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px) "
+        f"SELECT addr,coin,side,open_ms,{seq_expr},close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px "
+        "FROM episode_migrate_old"
+    )
+    db.execute("DROP TABLE episode_migrate_old")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ep_addr ON episode(addr)")

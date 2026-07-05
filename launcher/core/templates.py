@@ -56,7 +56,7 @@ Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory={app_dir}
 ExecStart={py} {app_dir}/hl_discover.py --db {db} scan --days {days} --scan-interval {scan_interval}
-TimeoutStartSec=3600
+TimeoutStartSec=14h
 """
 
 

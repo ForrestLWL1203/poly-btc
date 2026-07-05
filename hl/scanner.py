@@ -17,6 +17,19 @@ from .util import f, now_iso
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 
 
+def _episode_rows(addr: str, eps: list) -> list:
+    """Rows for episode storage; seq preserves same-ms flip/reopen episodes instead of replacing them."""
+    seen = {}
+    rows = []
+    for e in eps:
+        key = (e["coin"], e["open_ms"])
+        seq = seen.get(key, 0)
+        seen[key] = seq + 1
+        rows.append((addr, e["coin"], e["side"], e["open_ms"], seq, e["close_ms"], e["hold_s"],
+                     e["net_pnl"], e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]))
+    return rows
+
+
 def _load_cached_fills(db, addr, since):
     """Cached raw fills for addr in the [since, now] window (ASC). Empty for a never-scanned candidate."""
     with _db_lock:
@@ -348,12 +361,16 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     with _db_lock:
         _store_cached_fills(db, addr, new_fills, window_start)   # persist the delta + prune the window
         if ok:
+            erows = _episode_rows(addr, eps)
             db.execute("DELETE FROM episode WHERE addr=?", (addr,))
             db.executemany(
-                "INSERT OR REPLACE INTO episode (addr,coin,side,open_ms,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                [(addr, e["coin"], e["side"], e["open_ms"], e["close_ms"], e["hold_s"], e["net_pnl"],
-                  e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]) for e in eps])
+                "INSERT OR REPLACE INTO episode "
+                "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                erows)
+            stored = db.execute("SELECT COUNT(*) FROM episode WHERE addr=?", (addr,)).fetchone()[0]
+            if stored != len(eps):
+                raise RuntimeError(f"episode consistency failed for {addr}: stored {stored}, built {len(eps)}")
         db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
                    f"VALUES ({','.join('?' * len(cols))})", [row.get(c) for c in cols])
         db.commit()
