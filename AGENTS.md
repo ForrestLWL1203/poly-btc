@@ -1,0 +1,169 @@
+# AGENTS.md
+
+## Current Project
+
+This repo is now a Hyperliquid copy-trade product. Ignore old non-Hyperliquid research tooling unless
+the user explicitly asks for it.
+
+Archived legacy files:
+
+- `collect.py`
+- `discover.py`
+- `watch.py`
+- `profile.py`
+- `schema.sql`
+- `lib/`
+
+Active Hyperliquid product:
+
+- Scanner/discovery: `hl_discover.py`, `hl/scanner.py`, `hl/metrics.py`, `hl/fills.py`
+- Observer/paper copy engine: `hl_observe.py`, `hl/observer.py`
+- Dashboard API: `hl_dashboard.py`, `hl/api.py`
+- Dashboard frontend: `web/app.jsx`, compiled to `web/app.js`
+- Launcher/ops tool: `launcher/launcher.py`, `launcher/server.py`, `launcher/core/*`, `launcher/web/*`
+
+Read `CLAUDE.md` first for private current-memory notes, then verify against code.
+
+## Live VPS Access
+
+Live VPS host/user/key details are private and belong in local `CLAUDE.md`, not in committed docs.
+Use the launcher-managed SSH key referenced there, and do not rely on the default SSH identity.
+Do not print key contents.
+
+## Secrets And Data
+
+Never print, summarize, commit, or copy secret values.
+
+Sensitive paths:
+
+- `secret/`
+- `launcher/data/keys/`
+- `launcher/data/targets.json`
+- `data/`
+
+Filenames and schemas are okay to inspect when needed. Secret values are not.
+
+## Runtime Architecture
+
+All active state is in one SQLite DB, normally `data/hl.db`, using WAL.
+
+The control-plane invariant:
+
+- Dashboard may read business tables.
+- Dashboard writes only `commands` and `params`.
+- Observer/Scanner write trading/discovery state.
+- `process_status` and `scan_progress` drive UI liveness/progress.
+
+Scanner:
+
+- Maintains `leaderboard -> profile -> watchlist`.
+- `harvest()` uses Hyperliquid leaderboard data for candidates.
+- `_profile_one()` pulls fills, rebuilds episodes, reads portfolio/open state, and computes metrics.
+- `metrics.gates_structural()` and `metrics.gates_state()` are binary copyability gates.
+- `metrics.score()` returns native `[0, 1]`; API displays `0-100`.
+- Applies DB scanner params through `params.apply_scanner_params()`.
+
+Observer:
+
+- Forward-only: starts cursors at current time and does not copy historical fills.
+- Signal is REST `userFillsByTime`.
+- Pricing is WS BBO for standard perps and REST `l2Book` for builder/stock perps.
+- Persists copy state in `copy_position`/`copy_action`.
+- Runs taker and maker-shadow paper books when configured.
+- Consumes pause/resume/close/wallet_toggle/reload_params commands.
+- Reloads follow/sizing params through `Observer._reload_params()`.
+
+## Commands
+
+Dashboard:
+
+```bash
+python3 hl_dashboard.py --db data/hl.db --static web --host 127.0.0.1 --port 8810
+```
+
+Scanner:
+
+```bash
+python3 hl_discover.py --db data/hl.db scan --days 14 --scan-interval 8
+python3 hl_discover.py --db data/hl.db regate
+python3 hl_discover.py --db data/hl.db watchlist --top 40
+```
+
+Observer:
+
+```bash
+python3 hl_observe.py --db data/hl.db observe
+python3 hl_observe.py --db data/hl.db report
+```
+
+Launcher:
+
+```bash
+python3 launcher/launcher.py --port 8799 --no-browser
+```
+
+Mock dashboard preview:
+
+```bash
+python3 web/dev/seed_mock.py data/hl_mock.db
+python3 web/dev/mock_consumer.py data/hl_mock.db
+DASH_PASSWORD=mock123 python3 hl_dashboard.py --db data/hl_mock.db --static web --host 127.0.0.1 --port 8810
+```
+
+## Frontend Build
+
+Both frontends are precompiled React without bundling React itself. Edit JSX, then compile JS.
+
+Dashboard:
+
+```bash
+web/build.sh
+```
+
+Launcher:
+
+```bash
+launcher/web/build.sh
+```
+
+Do not hand-edit minified `web/app.js` or `launcher/web/app.js`.
+
+## Deployment And Ops
+
+VPS mode:
+
+- Clones/resets code from GitHub with `git reset --hard origin/<branch>`.
+- Installs `hl-dashboard.service`, `hl-observe.service`, `hl-scan.service`, `hl-scan.timer`.
+- Enables dashboard and scan timer.
+- Enables observer but does not start it automatically; dashboard controls it.
+- Optional Caddy reverse proxy handles HTTPS when a domain is configured.
+
+Local mode:
+
+- Launcher starts only the dashboard directly.
+- Dashboard `procman` starts/stops observer and one-shot scans through detached child processes.
+
+Before changing deployment logic, read:
+
+- `hl/procman.py`
+- `launcher/core/services.py`
+- `launcher/core/templates.py`
+- `launcher/core/ops.py`
+
+## Known Caveats
+
+- Some docs/comments still mention old score scales or browser-Babel preview mode. Current score is native
+  `[0, 1]`, displayed as `0-100`; frontend JS is precompiled.
+- `hl/api.py` and legacy supervisor code can resolve process command failures with status `"error"`,
+  while the normal command contract uses `"failed"`.
+- Keep public docs free of private hosts, credentials, keys, and operational secrets.
+
+## Verification
+
+For Python-only changes:
+
+```bash
+python3 -m py_compile hl/*.py hl_*.py launcher/*.py launcher/core/*.py
+```
+
+For dashboard/launcher UI changes, run the relevant build script and then smoke the local server or mock preview.
