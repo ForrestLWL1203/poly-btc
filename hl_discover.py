@@ -117,6 +117,12 @@ def _serve_rescan(db):
                 scanner.scan(db, ns)                 # consumes pending rescan(s) + writes progress/status
         except Exception as exc:  # noqa: BLE001
             print(f"scan daemon error: {exc}", flush=True)
+            try:
+                n = scanner.ensure_watchlist_current(db)
+                scanner._set_scan_progress(db, state="idle", stage="error")
+                scanner._set_scanner_proc(db, "idle", {"last_error": str(exc)[:300], "active": n})
+            except Exception:
+                pass
         time.sleep(3)
 
 
@@ -199,6 +205,7 @@ def main() -> int:
     g = sub.add_parser("regate", help="re-apply gate thresholds on STORED profiles (no re-fetch) + rebuild watchlist")
     add_gate_args(g)
 
+    sub.add_parser("repair-watchlist", help="rebuild watchlist if it drifted from active profiles")
     sub.add_parser("serve-rescan", help="daemon: run a full scan on demand when a dashboard rescan command is queued")
 
     args = ap.parse_args()
@@ -207,7 +214,13 @@ def main() -> int:
     if args.cmd == "scan":
         _start_adaptive_pace(args.db, args.scan_interval)  # observer live → slow trickle; idle → full speed
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
-        scanner.scan(db, args)                          # the observer (when up) keeps its own fast pace
+        try:
+            scanner.scan(db, args)                      # the observer (when up) keeps its own fast pace
+        except Exception as exc:  # noqa: BLE001
+            n = scanner.ensure_watchlist_current(db)
+            scanner._set_scan_progress(db, state="idle", stage="error")
+            scanner._set_scanner_proc(db, "idle", {"last_error": str(exc)[:300], "active": n})
+            raise
     elif args.cmd == "serve-rescan":
         _serve_rescan(db)
     elif args.cmd == "watchlist":
@@ -217,6 +230,8 @@ def main() -> int:
     elif args.cmd == "regate":
         params.apply_scanner_params(db, args)            # honor UI-tuned gates (incl HFT switch) on regate
         scanner.regate(db, args)
+    elif args.cmd == "repair-watchlist":
+        print(f"watchlist {scanner.ensure_watchlist_current(db)} active")
     db.close()
     return 0
 

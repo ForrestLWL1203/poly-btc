@@ -57,6 +57,7 @@ Environment=PYTHONUNBUFFERED=1
 WorkingDirectory={app_dir}
 ExecStart={py} {app_dir}/hl_discover.py --db {db} scan --days {days} --scan-interval {scan_interval}
 TimeoutStartSec=14h
+ExecStopPost={py} {app_dir}/hl_discover.py --db {db} repair-watchlist
 """
 
 

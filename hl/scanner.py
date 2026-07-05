@@ -389,7 +389,7 @@ def refresh_watchlist(db, stamp) -> int:
         "p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
         "p.times_active, p.first_added, p.last_fill_ms "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
-        "WHERE p.status='active' ORDER BY p.score DESC").fetchall()
+        "WHERE p.status='active' ORDER BY p.score DESC, p.addr").fetchall()
     for rank, r in enumerate(rows, 1):
         db.execute(
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
@@ -410,6 +410,24 @@ def refresh_watchlist(db, stamp) -> int:
          db.execute("SELECT addr, score FROM watchlist WHERE score >= ?", (line,)).fetchall()])
     db.commit()
     return len(rows)
+
+
+def _active_profile_addrs(db):
+    return [r[0] for r in db.execute(
+        "SELECT addr FROM profile WHERE status='active' ORDER BY score DESC, addr").fetchall()]
+
+
+def _watchlist_addrs(db):
+    return [r[0] for r in db.execute("SELECT addr FROM watchlist ORDER BY rank").fetchall()]
+
+
+def ensure_watchlist_current(db, stamp=None) -> int:
+    """Repair the derived watchlist if a previous scan died after profile updates but before rebuild."""
+    active = _active_profile_addrs(db)
+    current = _watchlist_addrs(db)
+    if current == active:
+        return len(current)
+    return refresh_watchlist(db, stamp or now_iso())
 
 
 def _record_run(db, started, t0, candidates, probed, added, retired, kept, rejected, n_active, full=0):
@@ -518,6 +536,7 @@ def scan(db, p) -> None:
     started, t0 = now_iso(), time.time()
     stamp = now_iso()
     start_ms = now_ms - p.days * 86400_000
+    ensure_watchlist_current(db, stamp)
 
     # dashboard: advertise we're scanning + consume any operator-queued rescan command
     rescan_rows = db.execute(
