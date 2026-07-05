@@ -231,7 +231,11 @@ def main() -> int:
         params.apply_scanner_params(db, args)            # honor UI-tuned gates (incl HFT switch) on regate
         scanner.regate(db, args)
     elif args.cmd == "repair-watchlist":
-        print(f"watchlist {scanner.ensure_watchlist_current(db)} active")
+        n = scanner.ensure_watchlist_current(db)
+        scanner._set_scan_progress(db, state="idle", stage="repair_watchlist",
+                                   candidates_scanned=0, candidates_total=0)
+        scanner._set_scanner_proc(db, "idle", {"last_repair_at": now_iso(), "active": n})
+        print(f"watchlist {n} active")
     db.close()
     return 0
 

@@ -256,8 +256,9 @@ def _scanner_status(db):
     except (ValueError, TypeError):
         detail = {}
     hb = _iso_epoch(r["heartbeat_at"])
+    stale = bool((r["state"] or "unknown") != "idle" and hb and (time.time() - hb) > PROC_STALE_SEC)
     return {"mode": r["state"] or "unknown",
-            "stale": bool(hb and (time.time() - hb) > PROC_STALE_SEC),
+            "stale": stale,
             "heartbeatAt": r["heartbeat_at"], "detail": detail}
 
 
