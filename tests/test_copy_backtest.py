@@ -88,6 +88,47 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["copy_peak_concurrent"], 2)
         self.assertEqual({p["addr"] for p in result["positions"]}, {"0xa", "0xb"})
 
+    def test_price_path_can_liquidate_between_target_fills(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 40),
+            fill(3_000, "BTC", "A", 100, 100, 101.0, 41),
+        ]
+
+        fills_only = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={"COPY_STOP_ENABLE": False})
+        with_path = run_backtest(
+            "0xabc",
+            fills,
+            sigmas={"BTC": 0.04},
+            overrides={"COPY_STOP_ENABLE": False},
+            price_path={"BTC": [{"time": 2_000, "low": 95.0, "high": 100.0}]},
+        )
+
+        self.assertEqual(fills_only["positions"][0]["status"], "closed")
+        self.assertEqual(fills_only["positions"][0]["opened_at"], 1_000)
+        self.assertEqual(fills_only["positions"][0]["closed_at"], 3_000)
+        self.assertGreater(fills_only["copy_net_pnl"], 0)
+        self.assertEqual(with_path["positions"][0]["status"], "liquidated")
+        self.assertEqual(with_path["liquidations"], 1)
+        self.assertLess(with_path["copy_net_pnl"], 0)
+
+    def test_price_path_can_stop_between_target_fills_before_liquidation(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 50),
+            fill(3_000, "BTC", "A", 100, 100, 101.0, 51),
+        ]
+
+        result = run_backtest(
+            "0xabc",
+            fills,
+            sigmas={"BTC": 0.04},
+            overrides={"COPY_STOP_ENABLE": True, "STOP_MARGIN_PCT": 0.70},
+            price_path={"BTC": [{"time": 2_000, "low": 97.0, "high": 100.0}]},
+        )
+
+        self.assertEqual(result["positions"][0]["status"], "stopped")
+        self.assertEqual(result["stops"], 1)
+        self.assertEqual(result["liquidations"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

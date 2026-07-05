@@ -41,6 +41,61 @@ def _stop_px(entry_px: float, is_buy: bool, lev: float, copy_stop_enable: bool, 
     return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
 
 
+def _row_time(row: dict) -> int:
+    for key in ("time", "T", "t"):
+        val = row.get(key)
+        if val is not None:
+            return int(f(val))
+    return 0
+
+
+def _row_price(row: dict, *keys: str) -> float:
+    for key in keys:
+        val = row.get(key)
+        if val is not None:
+            out = f(val)
+            if out > 0:
+                return out
+    return 0.0
+
+
+def _price_events(price_path) -> list[dict]:
+    """Normalize optional tick/candle path data into per-coin high/low events."""
+    if not price_path:
+        return []
+    rows = []
+    if isinstance(price_path, dict):
+        for coin, coin_rows in price_path.items():
+            for row in coin_rows or []:
+                if isinstance(row, dict):
+                    item = dict(row)
+                    item.setdefault("coin", coin)
+                    rows.append(item)
+    else:
+        rows = [row for row in price_path if isinstance(row, dict)]
+
+    out = []
+    for row in rows:
+        coin = row.get("coin")
+        if not coin:
+            continue
+        lo = _row_price(row, "low", "l", "px", "price", "close", "c")
+        hi = _row_price(row, "high", "h", "px", "price", "close", "c")
+        if lo <= 0 or hi <= 0:
+            continue
+        if hi < lo:
+            lo, hi = hi, lo
+        out.append({
+            "time": _row_time(row),
+            "coin": coin,
+            "low": lo,
+            "high": hi,
+            "close": _row_price(row, "close", "c", "px", "price") or (lo + hi) / 2,
+        })
+    out.sort(key=lambda x: x["time"])
+    return out
+
+
 class Backtest:
     def __init__(self, addr, sigmas=None, initial_balance=None, overrides=None):
         overrides = overrides or {}
@@ -73,6 +128,7 @@ class Backtest:
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
+        self.price_path_points = 0
 
     def sigma(self, coin):
         return self.sigmas.get(coin) or config.VOL_FALLBACK_SIGMA
@@ -95,9 +151,24 @@ class Backtest:
             "high": config.HIGH_MIN_NOTIONAL,
         }[tier]
 
-    def run(self, fills):
-        for x in sorted((fills or []), key=lambda r: r.get("time", 0)):
-            self.process_fill(x)
+    def run(self, fills, price_path=None):
+        path_events = _price_events(price_path)
+        self.price_path_points = len(path_events)
+        if not path_events:
+            for x in sorted((fills or []), key=lambda r: r.get("time", 0)):
+                self.process_fill(x)
+            return self.result()
+
+        events = []
+        for row in path_events:
+            events.append((row["time"], 0, row))
+        for row in fills or []:
+            events.append((int(row.get("time", 0) or 0), 1, row))
+        for _, kind, row in sorted(events, key=lambda x: (x[0], x[1])):
+            if kind == 0:
+                self.process_price(row)
+            else:
+                self.process_fill(row)
         return self.result()
 
     def process_fill(self, x):
@@ -143,7 +214,21 @@ class Backtest:
             ep["seen_oids"].add(oid)
             self._apply_add(addr, coin, px, signed, pos1, oid)
         else:
-            self._apply_reduce(addr, coin, px, signed, pos1, closing=abs(pos1) < config.FLAT)
+            self._apply_reduce(addr, coin, px, signed, pos1, closing=abs(pos1) < config.FLAT, t=x.get("time"))
+
+    def process_price(self, x):
+        coin = x.get("coin")
+        if not coin:
+            return
+        lo = f(x.get("low"))
+        hi = f(x.get("high"))
+        if lo <= 0 or hi <= 0:
+            return
+        if hi < lo:
+            lo, hi = hi, lo
+        close = f(x.get("close")) or (lo + hi) / 2
+        self.last_px[coin] = close
+        self._mark_stops_range(coin, lo, hi, x.get("time"))
 
     def _open_position(self, addr, coin, t, px, pos1, oid):
         sigma = self.sigma(coin)
@@ -287,7 +372,7 @@ class Backtest:
         self.fee_drag += fee
         self.followed_adds += 1
 
-    def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed"):
+    def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed", t=None):
         key = (addr, coin)
         ep = self.open.get(key)
         if not ep:
@@ -318,7 +403,7 @@ class Backtest:
         self.fee_drag += fee
         self.balance += pnl
         if closing:
-            ep["closed_at"] = None
+            ep["closed_at"] = t
             ep["status"] = status
             self.closed.append(ep)
             self.open.pop(key, None)
@@ -330,9 +415,24 @@ class Backtest:
             liq_hit = px <= ep["liq_px"] if ep["side"] == "long" else px >= ep["liq_px"]
             stop_hit = self.copy_stop_enable and ep["stop_px"] and (px <= ep["stop_px"] if ep["side"] == "long" else px >= ep["stop_px"])
             if liq_hit:
-                self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated")
+                self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated", t=t)
             elif stop_hit:
-                self._apply_reduce(addr, coin, px, 0.0, 0.0, closing=True, status="stopped")
+                self._apply_reduce(addr, coin, px, 0.0, 0.0, closing=True, status="stopped", t=t)
+
+    def _mark_stops_range(self, coin, low, high, t):
+        for (addr, c), ep in list(self.open.items()):
+            if c != coin:
+                continue
+            if ep["side"] == "long":
+                liq_hit = low <= ep["liq_px"]
+                stop_hit = self.copy_stop_enable and ep["stop_px"] and low <= ep["stop_px"]
+            else:
+                liq_hit = high >= ep["liq_px"]
+                stop_hit = self.copy_stop_enable and ep["stop_px"] and high >= ep["stop_px"]
+            if liq_hit:
+                self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated", t=t)
+            elif stop_hit:
+                self._apply_reduce(addr, coin, ep["stop_px"], 0.0, 0.0, closing=True, status="stopped", t=t)
 
     def result(self):
         unreal = 0.0
@@ -341,6 +441,8 @@ class Backtest:
             unreal += ep["rem_size"] * (px - ep["entry_px"]) * ep["sign"]
         closed_net = sum(p["realized_net"] for p in self.closed)
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
+        stops = sum(1 for p in self.closed if p.get("status") == "stopped")
+        liquidations = sum(1 for p in self.closed if p.get("status") == "liquidated")
         initial_notl = sum(p["target_initial_notl"] for p in self.closed) + sum(p["target_initial_notl"] for p in self.open.values())
         add_notl = sum(p["target_add_notl"] for p in self.closed) + sum(p["target_add_notl"] for p in self.open.values())
         capacity_skips = sum(self.skip_reasons[k] for k in ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small"))
@@ -350,6 +452,8 @@ class Backtest:
             "closed_n": len(self.closed),
             "open_n": len(self.open),
             "wins": wins,
+            "stops": stops,
+            "liquidations": liquidations,
             "copy_win_rate": wins / len(self.closed) if self.closed else 0.0,
             "copy_net_pnl": equity_pnl,
             "closed_net_pnl": closed_net,
@@ -368,6 +472,7 @@ class Backtest:
             "copy_peak_concurrent": self.copy_peak_concurrent,
             "max_concurrent_fit": self.copy_peak_concurrent / self.target_peak_concurrent if self.target_peak_concurrent else 1.0,
             "capacity_open_fit": self.opened_n / (self.opened_n + capacity_skips) if (self.opened_n + capacity_skips) else 1.0,
+            "price_path_points": self.price_path_points,
             "skip_reasons": dict(self.skip_reasons),
             "positions": [summarize_position(p) for p in self.closed],
             "open_positions": [summarize_position(p) for p in self.open.values()],
@@ -380,6 +485,8 @@ def summarize_position(p):
         "coin": p["coin"],
         "side": p["side"],
         "status": p.get("status", "open"),
+        "opened_at": p.get("opened_at"),
+        "closed_at": p.get("closed_at"),
         "net_pnl": p["realized_net"],
         "gross_pnl": p["gross_pnl"],
         "entry_fees": p["entry_fees"],
@@ -398,5 +505,5 @@ def summarize_position(p):
     }
 
 
-def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None):
-    return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance, overrides=overrides).run(fills)
+def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None):
+    return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance, overrides=overrides).run(fills, price_path=price_path)
