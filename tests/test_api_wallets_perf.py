@@ -84,6 +84,8 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["closedN"], 1)
         self.assertEqual(wallet["closed7d"], 1)
         self.assertEqual(wallet["forwardNetPnl"], 12)
+        self.assertEqual(wallet["rawScore"], 90.0)
+        self.assertIn("scoreBreakdown", wallet)
         self.assertNotIn("evidenceHeld", wallet)
 
     def test_dropped_wallets_omit_unused_profile_columns(self):
@@ -105,6 +107,34 @@ class ApiWalletsPerfTests(unittest.TestCase):
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
 
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
+        self.assertIn("scoreBreakdown", res["wallets"][0])
+
+    def test_dropped_wallet_uses_follow_score_not_raw_profile_score(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute("UPDATE params SET value='0.7' WHERE key='MIN_FOLLOW_SCORE'")
+            db.execute(
+                "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) "
+                "VALUES ('0xaaa','2026-01-01T00:00:00Z',0.8)"
+            )
+            db.execute(
+                "INSERT INTO profile (addr,status,reason,score,market_type,win_rate,top_coin) "
+                "VALUES ('0xaaa','active','ok',0.9,'crypto',0.5,'BTC')"
+            )
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
+                "VALUES (1,'0xaaa',0.6,'crypto',0.5,'BTC','now')"
+            )
+            db.commit()
+
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
+
+        self.assertEqual(res["total"], 1)
+        self.assertEqual(res["wallets"][0]["dropReason"], "掉出评分线")
+        self.assertEqual(res["wallets"][0]["score"], 60.0)
+        self.assertEqual(res["wallets"][0]["rawScore"], 90.0)
 
     def test_dropped_wallets_are_paginated_in_sql(self):
         with tempfile.TemporaryDirectory() as td:

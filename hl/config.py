@@ -36,6 +36,15 @@ MIN_FOLLOW_SCORE = 0.70     # follow watchlist wallets with score >= this. v10 (
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
+# Post-scan follow-line adaptation. The watchlist is ranked by copy-follow score (raw profile score blended
+# with copy-backtest evidence); after each scan/regate we move MIN_FOLLOW_SCORE to the Nth copyable wallet,
+# with a floor so weak active tails do not get followed just because the pool is small.
+AUTO_FOLLOW_LINE_ENABLE = True
+AUTO_FOLLOW_MIN_N = 7          # below this, prefer enough flow unless quality is below the hard score floor
+AUTO_FOLLOW_TARGET_N = 16      # capacity cap when quality is flat (funding/API/attention budget)
+AUTO_FOLLOW_MAX_N = 20         # absolute auto-line cap; MAX_TARGETS remains the hard observer cap
+AUTO_FOLLOW_MIN_SCORE = 0.60   # never follow below this copy-follow quality floor
+AUTO_FOLLOW_CLIFF_GAP = 0.045  # clear score drop between adjacent ranks = quality cliff; cut before it
 # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — evidence is enforced once at profile time by the
 #  scanner EVIDENCE gate (EVIDENCE_MIN_DAYS / EVIDENCE_MIN_TRADES); no separate follow-time re-check needed)
 #                             A 100%-win-on-3-trades wallet scores low (evidence multiplier) but still clears

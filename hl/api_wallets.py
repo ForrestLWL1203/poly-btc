@@ -3,8 +3,40 @@
 import time
 
 from . import config
+from . import follow_score
 from . import params as params_mod
 from .api_common import iso_epoch, q1, qall, recent_roi_pct, score100
+
+
+def _col(row, key, default=None):
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _score_breakdown(row):
+    _score, detail = follow_score.compute_follow_score({
+        "score": _col(row, "raw_score", _col(row, "profile_score")),
+        "copy_bt_net_pnl": _col(row, "copy_bt_net_pnl"),
+        "copy_bt_win_rate": _col(row, "copy_bt_win_rate"),
+        "copy_bt_closed_n": _col(row, "copy_bt_closed_n"),
+        "copy_bt_open_fill_rate": _col(row, "copy_bt_open_fill_rate"),
+        "copy_bt_liquidations": _col(row, "copy_bt_liquidations"),
+        "copy_bt_fee_drag": _col(row, "copy_bt_fee_drag"),
+        "copy_bt_14d_net_pnl": _col(row, "copy_bt_14d_net_pnl"),
+        "copy_bt_14d_closed_n": _col(row, "copy_bt_14d_closed_n"),
+        "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
+        "copy_bt_7d_closed_n": _col(row, "copy_bt_7d_closed_n"),
+    })
+    return {
+        "rawScore": score100(detail.get("rawScore")),
+        "copyScore": score100(detail.get("copyScore")) if detail.get("copyScore") is not None else None,
+        "confidencePct": round((detail.get("confidence") or 0.0) * 100, 0),
+        "copyPnl": detail.get("copyPnl"),
+        "closedN": detail.get("closedN"),
+        "reasons": detail.get("reasons") or [],
+    }
 
 
 def ep_wallets(db, qs=None):
@@ -17,20 +49,27 @@ def ep_wallets(db, qs=None):
         total_row = q1(db,
             "SELECT COUNT(*) c "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
-            "WHERE NOT (p.status='active' AND p.score >= ?)", (line_native,))
+            "LEFT JOIN watchlist w ON w.addr=fh.addr "
+            "WHERE NOT (w.addr IS NOT NULL AND w.score >= ?)", (line_native,))
         total = (total_row["c"] if total_row else 0) or 0
         rows = qall(db,
-            "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,p.score,p.status,p.reason,"
+            "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,"
+            "COALESCE(w.score,p.score) AS follow_score,p.score AS raw_score,p.status,p.reason,"
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
+            "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
+            "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
+            "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,"
             "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
             "LEFT JOIN leaderboard l ON l.addr=fh.addr "
-            "WHERE NOT (p.status='active' AND p.score >= ?) "
+            "WHERE NOT (w.addr IS NOT NULL AND w.score >= ?) "
             "ORDER BY fh.last_followed_at DESC LIMIT ? OFFSET ?", (line_native, size, page * size))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
-            "score": score100(r["score"] or 0.0), "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
+            "score": score100(r["follow_score"] or 0.0), "rawScore": score100(r["raw_score"] or 0.0),
+            "scoreBreakdown": _score_breakdown(r),
+            "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
             "lastFollowedAt": iso_epoch(r["last_followed_at"]),
             "dropReason": ("掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
                 "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
@@ -59,7 +98,11 @@ def ep_wallets(db, qs=None):
         "  FROM page_followed f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
         ") "
         "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
-        "COALESCE(c.enabled,1) AS enabled,pr.worst_loss_pct,l.week_roi,l.mon_roi,"
+        "COALESCE(c.enabled,1) AS enabled,pr.score AS raw_score,pr.worst_loss_pct,"
+        "pr.copy_bt_net_pnl,pr.copy_bt_win_rate,pr.copy_bt_closed_n,pr.copy_bt_open_fill_rate,"
+        "pr.copy_bt_liquidations,pr.copy_bt_fee_drag,pr.copy_bt_14d_net_pnl,pr.copy_bt_14d_closed_n,"
+        "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,"
+        "l.week_roi,l.mon_roi,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,"
         "COALESCE(cs.follow_count,0) AS follow_count,"
         "COALESCE(cs.closed_n,0) AS closed_n,"
@@ -81,6 +124,8 @@ def ep_wallets(db, qs=None):
             "followPos": page * size + i + 1,
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0),
+            "rawScore": score100(r["raw_score"] or 0.0),
+            "scoreBreakdown": _score_breakdown(r),
             "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
             "winRatePct": (r["win_rate"] or 0.0) * 100,
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],

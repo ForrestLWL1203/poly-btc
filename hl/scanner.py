@@ -10,7 +10,7 @@ import os
 import threading
 import time
 
-from . import auto_tune, config, metrics, params, rest, storage
+from . import auto_tune, config, follow_score, metrics, params, rest, storage
 from .fills import build_episodes, is_spot
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
@@ -409,24 +409,60 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
 def refresh_watchlist(db, stamp) -> int:
     """Rebuild OUR tiny leaderboard (watchlist) from active profiles. Derived view —
     profile stays the source of truth; operator settings in target_controls survive."""
+    params.seed_params(db)
     db.execute("DELETE FROM watchlist")
-    rows = db.execute(
+    cur = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
         "p.n_trades, p.trades_per_day, p.taker_frac_notl, p.median_hold_s, p.win_rate, p.max_drawdown, "
         "p.age_days, p.top_coin, p.market_type, p.tp_move_pct, p.roi_total, p.open_loss_frac, p.open_win_frac, "
         "p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
-        "p.times_active, p.first_added, p.last_fill_ms "
+        "p.times_active, p.first_added, p.last_fill_ms, "
+        "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
+        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
-        "WHERE p.status='active' ORDER BY p.score DESC, p.addr").fetchall()
-    for rank, r in enumerate(rows, 1):
+        "WHERE p.status='active' ORDER BY p.score DESC, p.addr")
+    row_cols = [d[0] for d in cur.description]
+    rows = [dict(zip(row_cols, r)) for r in cur.fetchall()]
+    ranked = []
+    for r in rows:
+        score, _detail = follow_score.compute_follow_score(r)
+        r["follow_score"] = score
+        ranked.append(r)
+    ranked.sort(key=lambda r: (-(r["follow_score"] or 0.0), r["addr"]))
+    for rank, r in enumerate(ranked, 1):
         db.execute(
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
             "market_type,tp_move_pct,roi_total,open_loss_frac,open_win_frac,"
             "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (rank,) + r + (stamp,))
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                rank, r["addr"], r["display_name"], r["follow_score"], r["roi_equity"], r["mon_roi"],
+                r["net_pnl"], r["acct_value"], r["n_trades"], r["trades_per_day"], r["taker_frac_notl"],
+                r["median_hold_s"], r["win_rate"], r["max_drawdown"], r["age_days"], r["top_coin"],
+                r["market_type"], r["tp_move_pct"], r["roi_total"], r["open_loss_frac"], r["open_win_frac"],
+                r["perp_frac"], r["lev_proxy"], r["margin_type"], r["cur_leverage"], r["liq_worst_pct"],
+                r["times_active"], r["first_added"], r["last_fill_ms"], stamp,
+            ))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
-                   (r[0], stamp))
+                   (r["addr"], stamp))
+    if getattr(config, "AUTO_FOLLOW_LINE_ENABLE", True) and ranked:
+        choice = follow_score.choose_follow_line(
+            ranked,
+            min_score=float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60)),
+            min_n=int(getattr(config, "AUTO_FOLLOW_MIN_N", 7)),
+            target_n=min(int(getattr(config, "AUTO_FOLLOW_TARGET_N", 16)), int(config.MAX_TARGETS)),
+            max_n=min(int(getattr(config, "AUTO_FOLLOW_MAX_N", 20)), int(config.MAX_TARGETS)),
+            cliff_gap=float(getattr(config, "AUTO_FOLLOW_CLIFF_GAP", 0.045)),
+        )
+        desired = choice["line"]
+        prev = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+        if abs(float(prev) - desired) > 0.0005:
+            db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.6f}", stamp))
+            db.execute(
+                "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
+                ("reload_params", '{"by":"auto_follow_line"}', "scanner", stamp))
     # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
     # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
     line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE

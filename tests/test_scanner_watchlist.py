@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hl import scanner, scanner_copy_bt, scanner_lifecycle, storage
+from hl import params, scanner, scanner_copy_bt, scanner_lifecycle, storage
 
 
 def _profile_row(addr, status, score, **overrides):
@@ -423,6 +423,74 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual([(r[0], r[1], r[2], r[3]) for r in rows],
                              [(1, "0xaaa", 0.91, "2026-07-06T00:00:00Z"),
                               (2, "0xbbb", 0.82, "2026-07-06T00:00:00Z")])
+
+    def test_refresh_watchlist_ranks_by_copy_follow_score_not_raw_score(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row(
+                        "0xweak",
+                        "active",
+                        0.674,
+                        copy_bt_net_pnl=1300.3,
+                        copy_bt_14d_net_pnl=28.3,
+                        copy_bt_7d_net_pnl=889.6,
+                        copy_bt_closed_n=46,
+                        copy_bt_14d_closed_n=30,
+                        copy_bt_7d_closed_n=8,
+                        copy_bt_open_fill_rate=1.0,
+                    ),
+                    _profile_row(
+                        "0xstrong",
+                        "active",
+                        0.667,
+                        copy_bt_net_pnl=2270.8,
+                        copy_bt_14d_net_pnl=1395.1,
+                        copy_bt_7d_net_pnl=1446.3,
+                        copy_bt_closed_n=41,
+                        copy_bt_14d_closed_n=22,
+                        copy_bt_7d_closed_n=17,
+                        copy_bt_open_fill_rate=1.0,
+                    ),
+                ],
+            )
+            db.commit()
+
+            scanner.refresh_watchlist(db, "2026-07-06T00:00:00Z")
+
+            rows = db.execute("SELECT rank,addr,score FROM watchlist ORDER BY rank").fetchall()
+            self.assertEqual([r[1] for r in rows], ["0xstrong", "0xweak"])
+            self.assertGreater(rows[0][2], rows[1][2])
+
+    def test_refresh_watchlist_auto_moves_follow_line_to_target_rank(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.90),
+                    _profile_row("0xbbb", "active", 0.80),
+                    _profile_row("0xccc", "active", 0.70),
+                ],
+            )
+            db.commit()
+
+            with patch.object(scanner.config, "AUTO_FOLLOW_MIN_N", 1), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_TARGET_N", 2), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_MAX_N", 3), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_MIN_SCORE", 0.60), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_CLIFF_GAP", 1.0):
+                scanner.refresh_watchlist(db, "2026-07-06T00:00:00Z")
+
+            line = db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0]
+            cmd = db.execute("SELECT type,payload_json FROM commands ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual(float(line), 0.8)
+            self.assertEqual(tuple(cmd), ("reload_params", '{"by":"auto_follow_line"}'))
 
 
 if __name__ == "__main__":

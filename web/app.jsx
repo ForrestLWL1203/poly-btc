@@ -548,6 +548,23 @@ function Wallets({ confirm, toast }) {
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
+  const scoreTitle = (w) => {
+    const b = w.scoreBreakdown || {};
+    const pnl = b.copyPnl || {};
+    const n = b.closedN || {};
+    const lines = [
+      `最终跟单分 ${fNum(w.score, 1)}`,
+      `原始评分 ${fNum(w.rawScore, 1)}`,
+    ];
+    if (pnl["30d"] != null || pnl["14d"] != null || pnl["7d"] != null) {
+      lines.push(`copy回测 30天 ${fSign(pnl["30d"] || 0, 0)} / ${n["30d"] || 0}笔`);
+      lines.push(`copy回测 14天 ${fSign(pnl["14d"] || 0, 0)} / ${n["14d"] || 0}笔`);
+      lines.push(`copy回测 7天 ${fSign(pnl["7d"] || 0, 0)} / ${n["7d"] || 0}笔`);
+    }
+    if (b.copyScore != null) lines.push(`copy分 ${fNum(b.copyScore, 1)} · 置信 ${fNum(b.confidencePct, 0)}%`);
+    (b.reasons || []).slice(0, 4).forEach(r => lines.push("· " + r));
+    return lines.join("\n");
+  };
 
   const toggle = (w) => {
     const next = !w.enabled;
@@ -582,7 +599,7 @@ function Wallets({ confirm, toast }) {
                 <tr key={w.address} style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num"><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                  <td className="num" title={scoreTitle(w)}><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                   <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
                   <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
                   <td className="num">{fNum(w.winRatePct, 0)}%</td>
@@ -608,7 +625,7 @@ function Wallets({ confirm, toast }) {
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                  <td className="num" title={scoreTitle(w)}><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
                   <td className="num">{fNum(w.winRatePct, 0)}%</td>
                   <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
