@@ -60,8 +60,27 @@ Scanner:
 - `harvest()` uses Hyperliquid leaderboard data for candidates.
 - `_profile_one()` pulls fills, rebuilds episodes, reads portfolio/open state, and computes metrics.
 - `metrics.gates_structural()` and `metrics.gates_state()` are binary copyability gates.
-- `metrics.score()` returns native `[0, 1]`; API displays `0-100`.
+- `metrics.score()` returns the raw profile score in native `[0, 1]`; API displays `0-100`.
 - Applies DB scanner params through `params.apply_scanner_params()`.
+- `hl/follow_score.py` computes the final copy-follow score from raw profile score plus copy backtest
+  evidence (`copy_bt_*` 30d/14d/7d, sample confidence, fill rate, liquidations, fee drag).
+- `watchlist.score` is the final copy-follow score. `profile.score` remains the raw profile score.
+- `scanner.refresh_watchlist()` ranks active wallets by copy-follow score, then auto-updates
+  `MIN_FOLLOW_SCORE`: quality cliff first, otherwise capacity target; below the minimum score floor is never followed.
+- Updating the follow line inserts a `reload_params` command so the observer refreshes the target set.
+
+Post-scan auto tuning:
+
+- `hl/auto_tune.py` uses the current followed wallet set (`watchlist.score >= MIN_FOLLOW_SCORE` and enabled controls).
+- Tuning is portfolio-level, not per-wallet: it merges all selected wallets' `candidate_fills` by time and calls
+  `run_backtest("portfolio", fills, ...)` with one shared simulated account.
+- The portfolio replay sees funding contention: shared balance/available, open positions, deploy cap, per-coin cap,
+  no-cash skips, deploy-cap skips, coin-full skips, add budget pressure, and peak concurrency.
+- The sizing grid tunes margin upper bounds, leverage caps, and the full-power deployment line.
+- The add grid tunes smart-add core params (`ADD_GAP_K`, `ADD_GAP_SHRINK_G`, `ADD_MAX_HARD`) after the sizing candidate.
+- Important current limitation: automatic wallet-count selection is still heuristic (`choose_follow_line`: score cliff
+  or capacity target). It does **not yet** run a top-N portfolio grid for N=7..20 to choose the best wallet count.
+  If asked to improve this, implement N-prefix portfolio replay before final tuning.
 
 Observer:
 
