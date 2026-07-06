@@ -104,6 +104,24 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(result["positions"][0]["margin"], 150.0)
         self.assertEqual(result["positions"][0]["leverage"], 25.0)
 
+    def test_master_leverage_on_fill_caps_backtest_leverage_like_live_observer(self):
+        fills = [
+            fill(1, "BTC", "B", 10_000, 0, 100.0, 62),
+            fill(2, "BTC", "A", 10_000, 10_000, 101.0, 63),
+        ]
+        fills[0]["masterLeverage"] = 5
+
+        result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
+            "STABLE_MARGIN_PCT": 0.015,
+            "STABLE_LEV_CAP": 25.0,
+            "STABLE_MIN_NOTIONAL": 0.0,
+        })
+
+        self.assertEqual(result["closed_n"], 1)
+        self.assertEqual(result["positions"][0]["leverage"], 5.0)
+        self.assertEqual(result["master_leverage_known"], 1)
+        self.assertEqual(result["master_leverage_missing"], 0)
+
     def test_dynamic_margin_range_shrinks_only_as_deploy_fills(self):
         fills = []
         for i in range(8):

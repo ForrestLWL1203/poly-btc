@@ -495,7 +495,8 @@ def _compact_backtest(result: dict) -> dict:
         "target_open_events", "opened_n", "open_fill_rate", "target_adds",
         "followed_adds", "missed_adds", "missed_add_rate", "add_dependency",
         "target_peak_concurrent", "copy_peak_concurrent", "max_concurrent_fit",
-        "capacity_open_fit", "fills",
+        "capacity_open_fit", "master_leverage_coverage", "master_leverage_known",
+        "master_leverage_missing", "fills",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}

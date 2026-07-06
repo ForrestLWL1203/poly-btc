@@ -10,16 +10,13 @@ from __future__ import annotations
 from collections import Counter
 
 from . import config
+from .copy_engine import OpenSizingParams, extract_master_leverage, plan_open_sizing, stop_px
 from .fill_transition import classify_fill_transition
-from .sizing import margin_pct_for_deploy
 from .util import f
 
 
 def _stop_px(entry_px: float, is_buy: bool, lev: float, copy_stop_enable: bool, stop_margin_pct: float) -> float:
-    if not copy_stop_enable or not entry_px or not lev or not stop_margin_pct:
-        return 0.0
-    d = stop_margin_pct / lev
-    return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
+    return stop_px(entry_px, is_buy, lev, copy_stop_enable, stop_margin_pct)
 
 
 def _row_time(row: dict) -> int:
@@ -145,6 +142,26 @@ class Backtest:
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
         self.price_path_points = 0
+        self.master_leverage_known = 0
+        self.master_leverage_missing = 0
+
+    def open_sizing_params(self):
+        return OpenSizingParams(
+            stable_sigma_max=self.stable_sigma_max,
+            high_sigma_min=self.high_sigma_min,
+            tier_margin=self.tier_margin,
+            tier_margin_min=self.tier_margin_min,
+            tier_lev_cap=self.tier_lev_cap,
+            tier_min_notional=self.tier_min_notional,
+            tier_coin_cap=self.tier_coin_cap,
+            min_lev=self.min_lev,
+            stock_max_lev=self.stock_max_lev,
+            deploy_full_pct=self.deploy_full_pct,
+            max_deploy_pct=self.max_deploy_pct,
+            min_open_margin_pct=self.min_open_margin_pct,
+            copy_stop_enable=self.copy_stop_enable,
+            stop_margin_pct=self.stop_margin_pct,
+        )
 
     def sigma(self, coin):
         return self.sigmas.get(coin) or config.VOL_FALLBACK_SIGMA
@@ -154,20 +171,12 @@ class Backtest:
             return "stable"
         return "high" if sigma >= self.high_sigma_min else "mid"
 
-    def sizing_for(self, sigma: float, coin: str | None = None) -> tuple[float, float]:
-        tier = self.tier(sigma, coin)
-        lev = max(self.min_lev, float(int(self.tier_lev_cap[tier])))
-        return self.tier_margin[tier], lev
-
     def available(self):
         locked = sum(p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0) for p in self.open.values())
         return self.balance - locked
 
     def coin_cap_pct(self, tier):
         return self.tier_coin_cap[tier]
-
-    def min_notional(self, tier):
-        return self.tier_min_notional[tier]
 
     def run(self, fills, price_path=None):
         path_events = _price_events(price_path)
@@ -220,7 +229,7 @@ class Backtest:
         ep = self.open.get(key)
         if ep is None:
             if transition in ("open", "flip") and abs(pos1) >= config.FLAT:
-                self._open_position(addr, coin, x.get("time"), px, pos1, oid)
+                self._open_position(addr, coin, x.get("time"), px, pos1, oid, x)
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
@@ -228,7 +237,7 @@ class Backtest:
         if transition == "flip":
             ep["master_peak"] = max(ep["master_peak"], abs(pos0))
             self._apply_reduce(addr, coin, px, -pos0, 0.0, closing=True, t=x.get("time"))
-            self._open_position(addr, coin, x.get("time"), px, pos1, oid)
+            self._open_position(addr, coin, x.get("time"), px, pos1, oid, x)
             return
 
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
@@ -254,47 +263,43 @@ class Backtest:
         self.last_px[coin] = close
         self._mark_stops_range(coin, lo, hi, x.get("time"))
 
-    def _open_position(self, addr, coin, t, px, pos1, oid):
+    def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
         sigma = self.sigma(coin)
-        tier = self.tier(sigma, coin)
-        margin_pct, lev = self.sizing_for(sigma, coin)
-        if coin.startswith("xyz:"):
-            lev = max(self.min_lev, min(lev, self.stock_max_lev))
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
         target_notl = abs(pos1) * px
         avail = self.available()
-        locked = max(0.0, self.balance - avail)
-        margin_pct = margin_pct_for_deploy(
-            self.tier_margin[tier],
-            self.tier_margin_min[tier],
-            self.deploy_full_pct,
-            self.max_deploy_pct,
-            locked,
-            self.balance,
-        )
-        margin = max(0.0, self.balance * margin_pct)
         existing_coin = sum(
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
             for (addr, c), p in self.open.items()
             if c == coin and p["side"] == side
         )
-        room = max(0.0, self.coin_cap_pct(tier) * self.balance - existing_coin)
-        deploy_room = max(0.0, avail - (1.0 - self.max_deploy_pct) * self.balance)
-        capped = min(margin, room, deploy_room)
-        if capped < self.min_open_margin_pct * self.balance:
-            why = "coin_full" if room < margin else "no_cash" if avail < margin else "deploy_cap" if deploy_room < margin else "margin_too_small"
+        master_lev = extract_master_leverage(fill)
+        if master_lev:
+            self.master_leverage_known += 1
+        else:
+            self.master_leverage_missing += 1
+        plan = plan_open_sizing(
+            coin=coin,
+            side=side,
+            entry_px=px,
+            sigma=sigma,
+            balance=self.balance,
+            available=avail,
+            existing_coin_margin=existing_coin,
+            master_notional=target_notl,
+            master_leverage=master_lev,
+            params=self.open_sizing_params(),
+        )
+        tier = plan.tier
+        if not plan.ok:
+            why = plan.reason
             self.skip_reasons[f"skip_{why}"] += 1
             return
-        margin = capped
-        notional = margin * lev
-        if target_notl > 0 and notional > target_notl:
-            notional = target_notl
-            margin = notional / lev if lev else margin
-        if notional < self.min_notional(tier):
-            self.skip_reasons["skip_small_notl"] += 1
-            return
-        size = notional / px
+        margin = plan.margin
+        notional = plan.notional
+        lev = plan.leverage
+        size = plan.size
         fee = abs(size * px) * config.TAKER_FEE
         self.balance -= fee
         self.fee_drag += fee
@@ -318,8 +323,9 @@ class Backtest:
             "first_margin": margin,
             "notional": notional,
             "leverage": lev,
-            "liq_px": px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev),
-            "stop_px": _stop_px(px, is_buy, lev, self.copy_stop_enable, self.stop_margin_pct),
+            "master_leverage": master_lev,
+            "liq_px": plan.liq_px,
+            "stop_px": plan.stop_px,
             "last_add_px": px,
             "add_count": 0,
             "followed_adds": 0,
@@ -506,6 +512,12 @@ class Backtest:
             "max_concurrent_fit": self.copy_peak_concurrent / self.target_peak_concurrent if self.target_peak_concurrent else 1.0,
             "capacity_open_fit": self.opened_n / (self.opened_n + capacity_skips) if (self.opened_n + capacity_skips) else 1.0,
             "price_path_points": self.price_path_points,
+            "master_leverage_known": self.master_leverage_known,
+            "master_leverage_missing": self.master_leverage_missing,
+            "master_leverage_coverage": (
+                self.master_leverage_known / (self.master_leverage_known + self.master_leverage_missing)
+                if (self.master_leverage_known + self.master_leverage_missing) else 1.0
+            ),
             "skip_reasons": dict(self.skip_reasons),
             "positions": [summarize_position(p) for p in self.closed],
             "open_positions": [summarize_position(p) for p in self.open.values()],
@@ -533,6 +545,7 @@ def summarize_position(p):
         "missed_adds": p["missed_adds"],
         "entry_px": p["entry_px"],
         "master_avg_px": p["master_open_px"],
+        "master_leverage": p.get("master_leverage"),
         "leverage": p["leverage"],
         "margin": p["margin"],
     }

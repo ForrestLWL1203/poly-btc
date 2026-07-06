@@ -27,8 +27,8 @@ import time
 import websockets
 
 from . import config, rest, volatility, ws
+from .copy_engine import OpenSizingParams, plan_open_sizing, stop_px as engine_stop_px, tier_for_sigma
 from .fill_transition import classify_fill_transition
-from .sizing import margin_pct_for_deploy
 from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
@@ -407,19 +407,7 @@ class Observer:
         """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between). Stocks/builder
         perps (xyz:*) are tiered by their own σ like everything else — their over-leverage risk is handled
         by the master-leverage cap in the open path, NOT by force-bucketing them (rolled back 2026-07-01)."""
-        if sigma <= self.stable_sigma_max:
-            return "stable"
-        return "high" if sigma >= self.high_sigma_min else "mid"
-
-    def _sizing_for(self, sigma: float, coin: str = None):
-        """v10 (margin_pct, leverage) for a coin's σ. σ → tier (stable/mid/high) → margin% + leverage = the
-        tier's LEV CAP (clipped by MIN/MAX_LEV; the caller further caps to the master's own leverage + the
-        stock cap). The old σ-scaled RISK_BUDGET/σ was dropped — it mostly hit the tier cap anyway and was
-        redundant with tier cap + master-lev cap + margin/coin/deploy limits + σ-stop. INTEGER leverage."""
-        tier = self._tier(sigma, coin)
-        cap = self.tier_lev_cap[tier]
-        lev = max(self.min_lev, float(int(cap)))   # v10: 档位上限即天花板(全局 MAX_LEV 去掉,别偷偷覆盖可见档位设置)
-        return self.tier_margin[tier], lev
+        return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min)
 
     def _stop_px_for(self, entry_px: float, is_buy: bool, leverage: float = 0.0) -> float:
         """Stop PRICE from entry (v10, MARGIN-based): cut when the position's unrealized loss reaches
@@ -429,10 +417,25 @@ class Observer:
         before liquidation (liq is at 1.0/lev = 100% of margin > STOP_MARGIN_PCT/lev). 0 = disabled."""
         if not self.copy_stop_enable or not entry_px or not leverage:
             return 0.0
-        d = self.stop_margin_pct / leverage
-        if not d:
-            return 0.0
-        return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
+        return engine_stop_px(entry_px, is_buy, leverage, self.copy_stop_enable, self.stop_margin_pct)
+
+    def _open_sizing_params(self):
+        return OpenSizingParams(
+            stable_sigma_max=self.stable_sigma_max,
+            high_sigma_min=self.high_sigma_min,
+            tier_margin=self.tier_margin,
+            tier_margin_min=self.tier_margin_min,
+            tier_lev_cap=self.tier_lev_cap,
+            tier_min_notional=self.tier_min_notional,
+            tier_coin_cap=self.tier_coin_cap,
+            min_lev=self.min_lev,
+            stock_max_lev=self.stock_max_lev,
+            deploy_full_pct=self.deploy_full_pct,
+            max_deploy_pct=self.max_deploy_pct,
+            min_open_margin_pct=self.min_open_margin_pct,
+            copy_stop_enable=self.copy_stop_enable,
+            stop_margin_pct=self.stop_margin_pct,
+        )
 
     async def _ensure_vol(self, coin: str):
         """Track coin for the periodic σ refresh, and fetch it NOW if we have no fresh value (so a
@@ -1014,34 +1017,11 @@ class Observer:
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
-        margin_pct, lev = self._sizing_for(sigma, coin)  # v9: tier margin% + σ-scaled-capped leverage
-        # STOCK CAP: stock/builder perps (xyz:*) gap on earnings/news; their calm realized σ badly understates
-        # tail risk (TSLA σ=4% → STABLE tier → 20x → one 10% day wiped our profit). No σ stat catches gaps →
-        # cap leverage by instrument class, hard, regardless of tier/σ/master.
-        if coin.startswith("xyz:"):
-            lev = max(self.min_lev, min(lev, self.stock_max_lev))
-        # NEVER out-leverage the master: a position at higher leverage than the wallet we copy liquidates on
-        # a SMALLER adverse move than they do (they survive, we blow up). The notional cap below is separate —
-        # our notional can be far under theirs while our LEVERAGE is far over (SILVER: our 20x/$7k vs master
-        # 7x/$2M), so it never caught this. Cap leverage to the master's own (when we have their live lev).
-        if m_lev and m_lev > 0:
-            lev = max(self.min_lev, float(int(min(lev, m_lev))))
         async with book.acct_lock:                   # serialize margin allocation across opens
             # Dynamic equity-based sizing: below DEPLOY_FULL_PCT, use the tier's upper-bound margin; between
             # DEPLOY_FULL_PCT and MAX_DEPLOY_PCT, linearly shrink new opens toward the lower bound. Adds still
             # may dip into the reserve because they usually matter more to copy fidelity than fresh opens.
             avail = self._available(book)                # CASH gate: can't deploy more margin than we hold free
-            locked = max(0.0, book.balance - avail)
-            tier = self._tier(sigma, coin)
-            margin_pct = margin_pct_for_deploy(
-                self.tier_margin[tier],
-                self.tier_margin_min[tier],
-                self.deploy_full_pct,
-                self.max_deploy_pct,
-                locked,
-                book.balance,
-            )
-            margin = max(0.0, book.balance * margin_pct)
             # PER-COIN cap (catastrophe backstop, NOT a per-wallet tax): total margin across our open positions
             # on this coin IN THE SAME DIRECTION ≤ the σ-tier's per-coin cap (STABLE/MID/HIGH_COIN_CAP_PCT).
             # Bounds how much of the account one coin's single move can destroy when N wallets pile the SAME way
@@ -1050,41 +1030,37 @@ class Observer:
             existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                 for (a2, c2), e in book.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
-            room = max(0.0, self.tier_coin_cap[tier] * book.balance - existing_coin)
-            reserve = (1.0 - self.max_deploy_pct) * book.balance   # dry-powder kept for adds + new signals + buffer
-            deploy_room = max(0.0, avail - reserve)      # a NEW open may only use cash ABOVE the reserve (adds may dip in)
-            capped = min(margin, room, deploy_room)      # equity-size, bound by coin backstop, deploy cap AND free cash
-            if capped < self.min_open_margin_pct * book.balance:     # side full, deploy cap hit, out of cash, or too small
-                why = ("coin_full" if room < margin else "no_cash" if avail < margin
-                       else "deploy_cap" if deploy_room < margin else "margin_too_small")
-                self._tally(f"skip_{why}", book)
-                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${room:,.0f} / deploy ${deploy_room:,.0f} / cash ${avail:,.0f} / want ${margin:,.0f})")
+            target_notl = abs(ep["master_peak"]) * master_px if master_px else 0.0
+            master_notl = (m_mgn or 0.0) * (m_lev or 0.0) or target_notl
+            plan = plan_open_sizing(
+                coin=coin,
+                side=ep["side"],
+                entry_px=px,
+                sigma=sigma,
+                balance=book.balance,
+                available=avail,
+                existing_coin_margin=existing_coin,
+                master_notional=master_notl,
+                master_leverage=m_lev,
+                params=self._open_sizing_params(),
+            )
+            if not plan.ok:
+                self._tally(f"skip_{plan.reason}", book)
+                if plan.reason == "small_notl":
+                    why = f"below {plan.tier}-tier min notl ${plan.notional:,.0f} < ${self.tier_min_notional.get(plan.tier, 0.0):,.0f} (master notl ${plan.master_notional:,.0f})"
+                else:
+                    why = plan.reason
+                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${plan.room:,.0f} / deploy ${plan.deploy_room:,.0f} / cash ${plan.available:,.0f} / want ${plan.wanted_margin:,.0f})")
                 self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))  # -> skip
                 self.db.commit()
                 book.open_ep.pop((addr, coin), None)
                 return
-            margin = capped
-            notional = margin * lev
-            # NEVER exceed the MASTER's own notional on this coin — we're a small isolated account
-            # copying them; a position bigger than the source's is more exposed than the thing we're
-            # copying (the twins-style small-notional scalpers especially). Cap notional, shrink margin
-            # to match (margin stays = notional/lev so the isolated loss bound tracks the real size).
-            master_notl = (m_mgn or 0.0) * (m_lev or 0.0)        # master_margin × master_leverage = their notional
-            if master_notl > 0 and notional > master_notl:
-                notional = master_notl
-                margin = notional / lev if lev else margin
-            min_notl = self.tier_min_notional.get(self._tier(sigma, coin), 0.0)  # per-tier floor (after master-notl cap)
-            if notional < min_notl:                   # too small for its tier → not worth the fee/latency drag
-                why = f"below {self._tier(sigma, coin)}-tier min notl ${notional:,.0f} < ${min_notl:,.0f} (master notl ${master_notl:,.0f})"
-                self._tally("skip_small_notl", book)
-                _log(f"skip {coin} {ep['side']} {addr[:10]}: {why}")   # → don't open a meaningless small position
-                self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
-                self.db.commit()
-                book.open_ep.pop((addr, coin), None)
-                return
-            size = notional / px if px else 0.0
-            liq_px = px * (1 - 1.0 / lev) if is_buy else px * (1 + 1.0 / lev)  # isolated: loss = margin
-            stop_px = self._stop_px_for(px, is_buy, lev)    # 扛单 cut at STOP_MARGIN_PCT of margin (0 = off)
+            lev = plan.leverage
+            margin = plan.margin
+            notional = plan.notional
+            size = plan.size
+            liq_px = plan.liq_px
+            stop_px = plan.stop_px
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
                       size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px,
                       master_first_notl=master_notl,      # 目标首仓名义额 → smart 加仓比例基准
