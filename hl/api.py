@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from . import procman
-from .api_common import q1
+from .api_commands import ALLOWED_COMMANDS, PROCESS_COMMANDS, ep_command, exec_process_command, insert_command
 from .api_discovery import ep_discovery, ep_scan_runs, ep_scan_status, ep_score_dist
 from .api_discovery import scanner_status as _scanner_status
 from .api_overview import ep_equity, ep_insights, ep_overview, ep_shadow
@@ -115,90 +115,8 @@ def ro_connect(path):
     return db
 
 
-def rw_connect(path):
-    """Read-WRITE connection — used ONLY to write the command channel / params (never business tables).
-    The DB is already WAL (storage.connect); busy_timeout lets a brief insert wait out the engine's commit."""
-    db = sqlite3.connect(path, timeout=10)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA busy_timeout=10000")
-    return db
-
-
-# commands the dashboard may enqueue. observer owns the first five; scanner owns rescan; patch_params
-# is reserved (M4 uses PATCH /api/params directly, but the type is accepted for completeness).
-# observer owns pause/resume/close/toggle (soft, in-process); the scan-trigger SUPERVISOR owns
-# observer_start/observer_stop (process lifecycle via systemctl — the observer can't start itself);
-# scanner owns rescan; patch_params is reserved (M4 uses PATCH /api/params directly).
-ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
-                    "observer_start", "observer_stop", "rescan", "patch_params", "reload_params"}
-def insert_command(db_path, ctype, payload, idem):
-    db = rw_connect(db_path)
-    try:
-        if idem:
-            row = db.execute("SELECT id,status FROM commands WHERE idempotency_key=?", (idem,)).fetchone()
-            if row:
-                return row["id"], row["status"]            # idempotent replay -> same command
-        cur = db.execute(
-            "INSERT INTO commands (type,payload_json,idempotency_key,owner,status,created_at) "
-            "VALUES (?,?,?,?,'pending',?)",
-            (ctype, json.dumps(payload or {}), idem, "dashboard", now_iso()))
-        db.commit()
-        return cur.lastrowid, "pending"
-    finally:
-        db.close()
-
-
-# Process-lifecycle commands the dashboard EXECUTES DIRECTLY (self-contained control plane — no separate
-# supervisor daemon). observer_start/stop spawn/kill the observer child; rescan spawns a one-shot scan.
-# Everything is still recorded in `commands` so the frontend's poll-by-id contract is unchanged.
-PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan"}
-
-
-def _resolve_command(db_path, cmd_id, status, result):
-    try:
-        db = rw_connect(db_path)
-        db.execute("UPDATE commands SET status=?,done_at=?,result_json=? WHERE id=?",
-                   (status, now_iso(), json.dumps(result or {}), cmd_id))
-        db.commit()
-        db.close()
-    except sqlite3.Error:
-        pass
-
-
-def exec_process_command(db_path, ctype):
-    """Run a process-lifecycle command inline via procman; record it in `commands` for the frontend.
-    observer_start/stop resolve immediately; rescan stays 'pending' (the row IS the manual-scan marker
-    scanner.scan reads) and is driven to 'done' by the scan process it spawns, so the UI tracks the real scan."""
-    cmd_id, _ = insert_command(db_path, ctype, None, None)
-    try:
-        if ctype == "observer_start":
-            res = procman.start_observer(db_path)
-        elif ctype == "observer_stop":
-            res = procman.stop_observer(db_path)
-        else:                                   # rescan: leave the row pending; the spawned scan acks/resolves it
-            procman.start_scan(db_path)
-            return cmd_id, "pending"
-        _resolve_command(db_path, cmd_id, "done", res)
-        return cmd_id, "done"
-    except Exception as e:  # noqa: BLE001
-        _resolve_command(db_path, cmd_id, "error", {"error": str(e)})
-        return cmd_id, "error"
-
-
 def _iso_ago(seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
-
-
-# ─────────────────────────────────────────────────────────────────────── endpoints
-def ep_command(db, cmd_id):
-    r = q1(db, "SELECT id,type,status,result_json,error,created_at,acked_at,done_at "
-               "FROM commands WHERE id=?", (cmd_id,))
-    if not r:
-        return {"commandId": cmd_id, "status": "not_found"}
-    return {"commandId": r["id"], "type": r["type"], "status": r["status"],
-            "result": json.loads(r["result_json"]) if r["result_json"] else None,
-            "error": r["error"], "createdAt": r["created_at"],
-            "ackedAt": r["acked_at"], "doneAt": r["done_at"]}
 
 
 # ── SSE live stream (replaces polling for the fast-changing bundle) ──
