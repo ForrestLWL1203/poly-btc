@@ -58,7 +58,7 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 class ScannerWatchlistTests(unittest.TestCase):
     def test_harvest_clears_stale_candidate_flags_before_current_leaderboard(self):
         with tempfile.TemporaryDirectory() as td:
-            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA)
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.execute(
                 "INSERT INTO leaderboard (addr,is_candidate,fetched_at,mon_roi,week_roi) VALUES "
                 "('0xstale',1,'old',0.9,0.8)"
@@ -81,6 +81,55 @@ class ScannerWatchlistTests(unittest.TestCase):
             rows = dict(db.execute("SELECT addr,is_candidate FROM leaderboard").fetchall())
             self.assertEqual(rows["0xstale"], 0)
             self.assertEqual(rows["0xfresh"], 1)
+
+    def test_prune_discovery_cache_removes_disappeared_non_active_profiles(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xgone", "rejected", 0.0),
+                    _profile_row("0xcand", "rejected", 0.0),
+                    _profile_row("0xactive", "active", 0.9),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO leaderboard (addr,is_candidate,fetched_at,mon_roi,week_roi) VALUES (?,?,?,?,?)",
+                [
+                    ("0xgone", 0, "2026-07-01T00:00:00Z", 0.1, 0.1),
+                    ("0xcand", 1, "2026-07-02T00:00:00Z", 0.2, 0.2),
+                    ("0xactive", 0, "2026-07-01T00:00:00Z", 0.3, 0.3),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                [
+                    ("0xgone", 1, 1, "{}"),
+                    ("0xcand", 2, 1, "{}"),
+                    ("0xactive", 3, 1, "{}"),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO episode (addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    ("0xgone", "BTC", "long", 1, 0, 2, 1, 1, 0, 100, 2, 100, 101),
+                    ("0xactive", "BTC", "long", 1, 0, 2, 1, 1, 0, 100, 2, 100, 101),
+                ],
+            )
+            db.commit()
+
+            counts = scanner._prune_discovery_cache(db)
+
+            self.assertEqual(counts["profiles"], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xgone'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM episode WHERE addr='0xgone'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills WHERE addr='0xgone'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xcand'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xactive'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM leaderboard WHERE addr='0xgone'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM leaderboard WHERE addr='0xactive'").fetchone()[0], 1)
 
     def test_incremental_scan_workset_rechecks_current_top_ranked_rejected_tail(self):
         cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]

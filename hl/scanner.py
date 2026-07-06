@@ -54,6 +54,54 @@ def _store_cached_fills(db, addr, fills, window_start):
     db.execute("DELETE FROM candidate_fills WHERE addr=? AND time<?", (addr, window_start))
 
 
+def _prune_discovery_cache(db):
+    """Bound discovery state after a scan.
+
+    Keep current candidates for incremental rechecks, and keep active profiles even if they fell off the
+    leaderboard candidate set. Drop disappeared non-active profiles and their derived/cache rows.
+    """
+    db.execute("CREATE TEMP TABLE IF NOT EXISTS prune_discovery_addrs (addr TEXT PRIMARY KEY)")
+    db.execute("DELETE FROM prune_discovery_addrs")
+    db.execute(
+        "INSERT OR IGNORE INTO prune_discovery_addrs(addr) "
+        "SELECT p.addr FROM profile p "
+        "WHERE COALESCE(p.status,'')!='active' "
+        "AND NOT EXISTS (SELECT 1 FROM leaderboard l WHERE l.addr=p.addr AND l.is_candidate=1)"
+    )
+    n_stale = db.execute("SELECT COUNT(*) FROM prune_discovery_addrs").fetchone()[0]
+    before_episode = db.total_changes
+    db.execute("DELETE FROM episode WHERE addr IN (SELECT addr FROM prune_discovery_addrs)")
+    n_episode = db.total_changes - before_episode
+    before_fills = db.total_changes
+    db.execute(
+        "DELETE FROM candidate_fills WHERE addr NOT IN "
+        "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
+        " UNION SELECT addr FROM profile WHERE status='active')"
+    )
+    n_fills = db.total_changes - before_fills
+    before_profiles = db.total_changes
+    db.execute("DELETE FROM profile WHERE addr IN (SELECT addr FROM prune_discovery_addrs)")
+    n_profiles = db.total_changes - before_profiles
+    current_fetch = db.execute("SELECT MAX(fetched_at) FROM leaderboard").fetchone()[0]
+    before_leaderboard = db.total_changes
+    if current_fetch:
+        db.execute(
+            "DELETE FROM leaderboard WHERE COALESCE(fetched_at,'')<>? "
+            "AND NOT EXISTS (SELECT 1 FROM profile p WHERE p.addr=leaderboard.addr AND p.status='active')",
+            (current_fetch,),
+        )
+    n_leaderboard = db.total_changes - before_leaderboard
+    db.execute("DELETE FROM prune_discovery_addrs")
+    db.commit()
+    return {
+        "stale_profiles": int(n_stale or 0),
+        "episodes": int(n_episode or 0),
+        "fills": int(n_fills or 0),
+        "profiles": int(n_profiles or 0),
+        "leaderboard": int(n_leaderboard or 0),
+    }
+
+
 def _due_for_full_resync(db):
     """True if no FULL re-sync in the last FULL_RESYNC_DAYS (fresh db / missing col → True). A full re-sync
     re-fetches everyone's window to heal any incremental gap (append-only fills → gap can only be missing)."""
@@ -952,12 +1000,9 @@ def scan(db, p) -> None:
     _maybe_auto_tune_margins(db, "scan", stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
-    # drop cached fills for wallets that left the candidate universe entirely (not a candidate AND not
-    # active) — keeps candidate_fills bounded WITHOUT evicting the deferred long-tail (still candidates,
-    # cache needed for the weekly full). Subquery form avoids a huge NOT IN param list.
-    db.execute("DELETE FROM candidate_fills WHERE addr NOT IN "
-               "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
-               " UNION SELECT addr FROM profile WHERE status='active')")
+    pruned = _prune_discovery_cache(db)
+    if any(pruned.values()):
+        print(f"pruned discovery cache: {pruned}", flush=True)
     _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active,
                 full=getattr(p, "full_scan", False))
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
