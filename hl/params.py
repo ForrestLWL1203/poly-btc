@@ -88,7 +88,7 @@ PARAM_SPEC = [
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
     #  tier cap + master-lev cap + margin/coin/deploy limits + σ-stop)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
-        "自动调保证金", "每日采集/重筛后按当前跟单钱包组合回测,只微调三档保证金上限;下限/杠杆/上限线由人工控制"),
+        "自动调保证金", "每日采集/重筛后按当前跟单钱包组合回测,小网格微调仓位上限/杠杆/满火力线与智能加仓k/g/硬顶;下限/单币上限/总上限/止损由人工控制"),
     ("DEPLOY_FULL_PCT",      "follow",  "yellow", "pct",     "immediate", config.DEPLOY_FULL_PCT * 100,
         "满火力占用线", "总保证金占用≤此比例时按保证金上限开新仓;超过后线性缩到下限"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,

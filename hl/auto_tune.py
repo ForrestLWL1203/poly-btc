@@ -1,9 +1,9 @@
 """Post-scan portfolio auto-tuning for copy-trading sizing.
 
 The tuner adjusts the operator-approved sizing surface: first-open margin upper
-bounds, tier leverage caps, and the deployment level where new opens begin to
-shrink. Lower margin bounds, per-coin caps, max deployment cap, stop rules, and
-add rules remain operator-owned risk limits.
+bounds, tier leverage caps, the deployment level where new opens begin to
+shrink, and the smart-add core knobs. Lower margin bounds, per-coin caps, max
+deployment cap, and stop rules remain operator-owned risk limits.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
 DEPLOY_KEYS = ("DEPLOY_FULL_PCT",)
 TUNE_KEYS = MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS
+ADD_TUNE_KEYS = ("ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD")
 CAPACITY_SKIP_KEYS = ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small")
 
 
@@ -66,6 +67,10 @@ def _same_tune_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
     return _same_values(a, b, TUNE_KEYS, eps)
 
 
+def _same_add_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
+    return _same_values(a, b, ADD_TUNE_KEYS, eps)
+
+
 def store_margin_state(db, base: dict, last_auto: dict) -> None:
     """Persist manual baseline and last auto-applied margins in engine units."""
     _state_set(db, "margin_base", {k: float(base[k]) for k in MARGIN_KEYS})
@@ -102,6 +107,21 @@ def resolve_tune_baseline(db, current: dict) -> tuple[dict, bool]:
     if not base or not last or not _same_tune_values(current, last):
         return current, True
     return {k: float(base[k]) for k in TUNE_KEYS}, False
+
+
+def store_add_state(db, base: dict, last_auto: dict) -> None:
+    _state_set(db, "add_base", {k: float(base[k]) for k in ADD_TUNE_KEYS})
+    _state_set(db, "add_last_auto", {k: float(last_auto[k]) for k in ADD_TUNE_KEYS})
+    db.commit()
+
+
+def resolve_add_baseline(db, current: dict) -> tuple[dict, bool]:
+    current = {k: float(current[k]) for k in ADD_TUNE_KEYS}
+    base = _json_load(_state_get(db, "add_base"), None)
+    last = _json_load(_state_get(db, "add_last_auto"), None)
+    if not base or not last or not _same_add_values(current, last):
+        return current, True
+    return {k: float(base[k]) for k in ADD_TUNE_KEYS}, False
 
 
 def _capacity_skips(result: dict) -> int:
@@ -175,7 +195,8 @@ def _candidate_distance(candidate: dict, baseline: dict) -> float:
     base_params = baseline.get("params") or {}
     if not params_ or not base_params:
         return abs(float(candidate.get("mult") or 1.0) - float(baseline.get("mult") or 1.0))
-    return sum(abs(float(params_.get(k, 0.0)) - float(base_params.get(k, 0.0))) for k in TUNE_KEYS)
+    keys = tuple(candidate.get("distance_keys") or baseline.get("distance_keys") or TUNE_KEYS)
+    return sum(abs(float(params_.get(k, 0.0)) - float(base_params.get(k, 0.0))) for k in keys)
 
 
 def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
@@ -260,6 +281,24 @@ def build_tune_candidate(base: dict, margin_mult: float, lev_caps: tuple[float, 
     }
 
 
+def build_add_candidate(base: dict, gap_k: float, shrink_g: float, max_hard: int) -> dict:
+    params_ = {
+        "ADD_GAP_K": float(gap_k),
+        "ADD_GAP_SHRINK_G": float(shrink_g),
+        "ADD_MAX_HARD": int(max_hard),
+    }
+    return {
+        "gap_k": params_["ADD_GAP_K"],
+        "shrink_g": params_["ADD_GAP_SHRINK_G"],
+        "max_hard": params_["ADD_MAX_HARD"],
+        "add_params": params_,
+        "params": params_,
+        "distance_keys": ADD_TUNE_KEYS,
+        "windows": {},
+        "score": None,
+    }
+
+
 def _unique_values(values, current=None):
     out = []
     for val in list(values or []) + ([] if current is None else [current]):
@@ -305,6 +344,19 @@ def tune_candidates_from_axes(base: dict) -> list[dict]:
     ]
 
 
+def add_candidates_from_axes(base: dict) -> list[dict]:
+    gap_ks = _unique_values(getattr(config, "AUTO_TUNE_ADD_GAP_KS", (0.04, 0.06, 0.08, 0.10, 0.12)),
+                            float(base["ADD_GAP_K"]))
+    shrink_gs = _unique_values(getattr(config, "AUTO_TUNE_ADD_SHRINK_GS", (1.1, 1.2, 1.3, 1.5)),
+                               float(base["ADD_GAP_SHRINK_G"]))
+    max_hards = _unique_values(getattr(config, "AUTO_TUNE_ADD_MAX_HARDS", (4, 6, 8, 10)),
+                               float(base["ADD_MAX_HARD"]))
+    return [
+        build_add_candidate(base, gap_k, shrink_g, int(max_hard))
+        for gap_k, shrink_g, max_hard in itertools.product(gap_ks, shrink_gs, max_hards)
+    ]
+
+
 def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
     out = dict(follow)
     params_ = candidate.get("params") or {}
@@ -317,6 +369,17 @@ def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
     out["DEPLOY_FULL_PCT"] = float(params_["DEPLOY_FULL_PCT"])
     if "SMART_ADD" in out:
         out["ADD_STRATEGY"] = "smart" if out["SMART_ADD"] else "hardcap"
+    return out
+
+
+def follow_overrides_for_add_candidate(follow: dict, candidate: dict) -> dict:
+    out = dict(follow)
+    params_ = candidate.get("params") or {}
+    out["ADD_STRATEGY"] = "smart"
+    out["SMART_ADD"] = True
+    out["ADD_GAP_K"] = float(params_["ADD_GAP_K"])
+    out["ADD_GAP_SHRINK_G"] = float(params_["ADD_GAP_SHRINK_G"])
+    out["ADD_MAX_HARD"] = int(params_["ADD_MAX_HARD"])
     return out
 
 
@@ -349,6 +412,26 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     return out
 
 
+def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
+                           sigmas: dict | None = None, now_ms: int | None = None) -> dict:
+    now_ms = now_ms or int(time.time() * 1000)
+    overrides = follow_overrides_for_add_candidate(follow, candidate)
+    params_ = {k: overrides[k] for k in ADD_TUNE_KEYS}
+    sigmas = sigmas if sigmas is not None else _load_sigmas(db)
+    windows = {}
+    for days in getattr(config, "AUTO_TUNE_MARGIN_DAYS", (30, 14, 7)):
+        start_ms = now_ms - int(days) * 86400_000
+        fills = _load_portfolio_fills(db, addrs, start_ms)
+        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides)
+        result["fills"] = len(fills)
+        windows[int(days)] = result
+    out = dict(candidate)
+    out["params"] = params_
+    out["add_params"] = params_
+    out["windows"] = windows
+    return out
+
+
 def evaluate_margin_candidate(db, addrs: list[str], follow: dict, base: dict, mult: float,
                               sigmas: dict | None = None, now_ms: int | None = None) -> dict:
     tune_base = {**{k: float(base[k]) for k in MARGIN_KEYS},
@@ -371,6 +454,13 @@ def _write_tune_params(db, vals: dict) -> None:
         val = float(vals[key])
         stored = val * 100.0 if key in MARGIN_KEYS or key in DEPLOY_KEYS else val
         db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (str(stored), stamp, key))
+
+
+def _write_add_params(db, vals: dict) -> None:
+    stamp = now_iso()
+    for key in ADD_TUNE_KEYS:
+        val = int(vals[key]) if key == "ADD_MAX_HARD" else float(vals[key])
+        db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (str(val), stamp, key))
 
 
 def _record_run(db, source: str, stamp: str, selected: dict | None, applied: bool, followed_n: int,
@@ -415,9 +505,13 @@ def _compact_backtest(result: dict) -> dict:
 def _compact_candidate(candidate: dict) -> dict:
     return {
         "mult": candidate.get("mult"),
+        "gap_k": candidate.get("gap_k"),
+        "shrink_g": candidate.get("shrink_g"),
+        "max_hard": candidate.get("max_hard"),
         "margins": candidate.get("margins"),
         "lev_caps": candidate.get("lev_caps"),
         "deploy_full_pct": candidate.get("deploy_full_pct"),
+        "add_params": candidate.get("add_params"),
         "params": candidate.get("params"),
         "score": _candidate_score(candidate),
         "windows": {str(days): _compact_backtest(result) for days, result in (candidate.get("windows") or {}).items()},
@@ -454,25 +548,57 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected = choose_margin_candidate(candidates, baseline)
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
-    applied = False
+
+    follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
+    current_add = {k: float(follow[k]) for k in ADD_TUNE_KEYS}
+    add_base, add_baseline_reset = resolve_add_baseline(db, current_add)
+    add_candidates = []
+    add_baseline = None
+    selected_add = None
+    selected_add_params = add_base
+    if follow_for_add.get("SMART_ADD", True):
+        add_candidates = [
+            evaluate_add_candidate(db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms)
+            for candidate in add_candidates_from_axes(add_base)
+        ]
+        add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
+                            add_candidates[0] if add_candidates else None)
+        selected_add = choose_margin_candidate(add_candidates, add_baseline) if add_baseline else None
+        if selected_add:
+            selected_add_params = selected_add.get("params") or add_base
+
+    applied_sizing = False
+    applied_add = False
     if not dry_run and not _same_tune_values(current, selected_params):
         _write_tune_params(db, selected_params)
+        applied_sizing = True
+    if not dry_run and follow_for_add.get("SMART_ADD", True) and not _same_add_values(current_add, selected_add_params):
+        _write_add_params(db, selected_add_params)
+        applied_add = True
+    applied = applied_sizing or applied_add
+    if not dry_run and applied:
         _enqueue_reload(db, source)
-        applied = True
     if not dry_run:
         store_tune_state(db, base, selected_params)
+        if follow_for_add.get("SMART_ADD", True):
+            store_add_state(db, add_base, selected_add_params)
 
     result = {
         "status": "ok",
         "applied": applied,
+        "applied_sizing": applied_sizing,
+        "applied_add": applied_add,
         "baseline_reset": baseline_reset,
+        "add_baseline_reset": add_baseline_reset,
         "followed_n": len(addrs),
         "selected_mult": selected.get("mult"),
         "margins": selected_margins,
         "lev_caps": selected.get("lev_caps"),
         "deploy_full_pct": selected.get("deploy_full_pct"),
         "params": selected_params,
+        "add_params": selected_add_params,
         "candidates": [_compact_candidate(c) for c in candidates],
+        "add_candidates": [_compact_candidate(c) for c in add_candidates],
     }
     _record_run(db, source, stamp, selected, applied, len(addrs), base, result)
     db.commit()

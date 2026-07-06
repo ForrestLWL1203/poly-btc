@@ -621,6 +621,7 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
         return
     margins = res.get("margins") or {}
     lev_caps = res.get("lev_caps") or {}
+    add_params = res.get("add_params") or {}
     print(
         "auto-tune margin: "
         f"mult={res.get('selected_mult')} applied={bool(res.get('applied'))} "
@@ -629,7 +630,9 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
         f"mid={margins.get('MID_MARGIN_PCT', 0) * 100:.2f}% "
         f"high={margins.get('HIGH_MARGIN_PCT', 0) * 100:.2f}% "
         f"lev={tuple(lev_caps.get(k) for k in ('STABLE_LEV_CAP', 'MID_LEV_CAP', 'HIGH_LEV_CAP'))} "
-        f"full={(res.get('deploy_full_pct') or 0) * 100:.0f}%",
+        f"full={(res.get('deploy_full_pct') or 0) * 100:.0f}% "
+        f"add=k{add_params.get('ADD_GAP_K')} g{add_params.get('ADD_GAP_SHRINK_G')} "
+        f"hard{add_params.get('ADD_MAX_HARD')}",
         flush=True,
     )
 

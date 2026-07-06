@@ -34,10 +34,20 @@ const fSign = (v, d = 0) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v)
 const fTime = (ep) => (ep == null ? "—" : new Date(ep * 1000).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }));  // epoch(UTC) -> UTC+8
 const fPct = (v, d = 1) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(d) + "%");
 const fNum = (v, d = 1) => (v == null ? "—" : Number(v).toFixed(d));
-const fParam = (v, d = 1) => {
+const paramDigits = (v, ptype) => {
+  if (ptype === "int") return 0;
+  if (ptype === "pct") return 1;
+  if (ptype === "float") {
+    const n = Math.abs(Number(v));
+    return n > 0 && n < 1 ? 3 : 2;
+  }
+  return 1;
+};
+const fParam = (v, ptypeOrDigits = null) => {
   if (v == null || v === "") return "—";
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
+  const d = typeof ptypeOrDigits === "number" ? ptypeOrDigits : paramDigits(v, ptypeOrDigits);
   return String(Number(n.toFixed(d)));
 };
 // price formatter with magnitude-adaptive decimals (BTC 60528 vs S 0.02221 vs FARTCOIN 0.1317)
@@ -1003,7 +1013,7 @@ function EditableValue({ value, unit, ptype, disabled, onCommit }) {
     const v = draft === "" || draft == null ? null : Number(draft);
     if (v !== value && !(v == null && value == null)) onCommit(v);
   };
-  if (disabled) return <span className="ev ev-ro">{value == null ? "—" : fParam(value)}{unit && <i className="ev-u">{unit}</i>}</span>;
+  if (disabled) return <span className="ev ev-ro">{value == null ? "—" : fParam(value, ptype)}{unit && <i className="ev-u">{unit}</i>}</span>;
   if (editing) return (
     <input ref={ref} className="ev-input" type={ptype === "nullable" ? "text" : "number"} value={draft == null ? "" : draft}
       placeholder={ptype === "nullable" ? "关闭" : ""}
@@ -1012,7 +1022,7 @@ function EditableValue({ value, unit, ptype, disabled, onCommit }) {
   );
   return (
     <span className="ev" title="点击编辑" onClick={() => { setDraft(value); setEditing(true); }}>
-      {value == null ? <span className="ev-empty">关闭</span> : fParam(value)}{value != null && unit && <i className="ev-u">{unit}</i>}
+      {value == null ? <span className="ev-empty">关闭</span> : fParam(value, ptype)}{value != null && unit && <i className="ev-u">{unit}</i>}
     </span>
   );
 }
@@ -1291,7 +1301,7 @@ function Settings({ startRescan, confirm, toast }) {
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                  保证金 {fParam(vals[g.min])}–{fParam(vals[g.max])}% · 杠杆 ≤{fParam(vals[g.lev])}x · 最低 ${fParam(vals[g.notl])} · 单币上限 {fParam(vals[g.cap])}%</span>}
+                  保证金 {fParam(vals[g.min], "pct")}–{fParam(vals[g.max], "pct")}% · 杠杆 ≤{fParam(vals[g.lev], "x")}x · 最低 ${fParam(vals[g.notl], "usd")} · 单币上限 {fParam(vals[g.cap], "pct")}%</span>}
               </div>
               {open && <div className="expand-body">
                 {RangeRow(g)}

@@ -352,13 +352,16 @@ COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到按比例缩放的样
 COPY_BT_MIN_CLOSED = 7      # copy 回测至少有这么多已平仓才作为硬闸,样本太少先只记录不否决
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 
-# Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator: first-open
-# margin upper bounds, tier leverage caps and the "full firepower" deployment line. Lower bounds,
-# per-coin caps, max deploy cap, stop settings and add rules remain operator-controlled risk boundaries.
+# Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
+# core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled
+# risk boundaries.
 AUTO_TUNE_MARGIN_ENABLE = True
 AUTO_TUNE_MARGIN_MULTS = (0.8, 1.0, 1.2, 1.4, 1.6)
 AUTO_TUNE_LEV_CAP_SETS = ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50)
+AUTO_TUNE_ADD_GAP_KS = (0.04, 0.06, 0.08, 0.10, 0.12)
+AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3, 1.5)
+AUTO_TUNE_ADD_MAX_HARDS = (4, 6, 8, 10)
 AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
 AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08

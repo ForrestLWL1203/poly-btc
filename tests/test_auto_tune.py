@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from hl import auto_tune, storage
+from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
@@ -162,6 +163,86 @@ class AutoTuneTests(unittest.TestCase):
         selected = auto_tune.choose_margin_candidate([baseline, recent_winner_with_older_liqs], baseline)
 
         self.assertEqual(selected["mult"], 1.4)
+
+    def test_build_add_candidate_changes_smart_add_core_params(self):
+        follow = {
+            "ADD_GAP_K": 0.12,
+            "ADD_GAP_SHRINK_G": 1.2,
+            "ADD_MAX_HARD": 8,
+            "SMART_ADD": True,
+        }
+        base = {k: follow[k] for k in auto_tune.ADD_TUNE_KEYS}
+        candidate = auto_tune.build_add_candidate(base, 0.06, 1.3, 6)
+
+        overrides = auto_tune.follow_overrides_for_add_candidate(follow, candidate)
+
+        self.assertEqual(overrides["ADD_STRATEGY"], "smart")
+        self.assertAlmostEqual(overrides["ADD_GAP_K"], 0.06)
+        self.assertAlmostEqual(overrides["ADD_GAP_SHRINK_G"], 1.3)
+        self.assertEqual(overrides["ADD_MAX_HARD"], 6)
+
+    def test_maybe_tune_margins_writes_add_params_after_sizing_grid(self):
+        db = self._db()
+        params.seed_params(db)
+        base_windows = {
+            30: {"copy_net_pnl": 1000, "closed_n": 10, "capacity_open_fit": 0.9,
+                 "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
+            14: {"copy_net_pnl": 300, "closed_n": 5, "capacity_open_fit": 0.9,
+                 "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+            7: {"copy_net_pnl": 100, "closed_n": 3, "capacity_open_fit": 1.0,
+                "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+        }
+        better_windows = {
+            30: {"copy_net_pnl": 1100, "closed_n": 10, "capacity_open_fit": 0.9,
+                 "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
+            14: {"copy_net_pnl": 500, "closed_n": 5, "capacity_open_fit": 0.9,
+                 "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+            7: {"copy_net_pnl": 150, "closed_n": 3, "capacity_open_fit": 1.0,
+                "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+        }
+
+        def tune_axes(base):
+            return [auto_tune.build_tune_candidate(
+                base, 1.0, tuple(base[k] for k in auto_tune.LEV_KEYS), base["DEPLOY_FULL_PCT"]
+            )]
+
+        def eval_tune(_db, _addrs, follow, candidate, sigmas=None, now_ms=None):
+            out = dict(candidate)
+            out["params"] = {k: follow[k] for k in auto_tune.TUNE_KEYS}
+            out["margins"] = {k: follow[k] for k in auto_tune.MARGIN_KEYS}
+            out["lev_caps"] = {k: follow[k] for k in auto_tune.LEV_KEYS}
+            out["deploy_full_pct"] = follow["DEPLOY_FULL_PCT"]
+            out["windows"] = dict(base_windows)
+            return out
+
+        def add_axes(base):
+            return [
+                auto_tune.build_add_candidate(base, 0.12, 1.2, 8),
+                auto_tune.build_add_candidate(base, 0.06, 1.3, 6),
+            ]
+
+        def eval_add(_db, _addrs, _follow, candidate, sigmas=None, now_ms=None):
+            out = dict(candidate)
+            out["params"] = dict(candidate["params"])
+            out["windows"] = better_windows if candidate["params"]["ADD_GAP_K"] == 0.06 else base_windows
+            return out
+
+        with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
+                patch.object(auto_tune, "_load_sigmas", return_value={}), \
+                patch.object(auto_tune, "tune_candidates_from_axes", side_effect=tune_axes), \
+                patch.object(auto_tune, "evaluate_tune_candidate", side_effect=eval_tune), \
+                patch.object(auto_tune, "add_candidates_from_axes", side_effect=add_axes), \
+                patch.object(auto_tune, "evaluate_add_candidate", side_effect=eval_add):
+            res = auto_tune.maybe_tune_margins(db, source="test")
+
+        self.assertTrue(res["applied"])
+        self.assertAlmostEqual(res["add_params"]["ADD_GAP_K"], 0.06)
+        rows = dict(db.execute(
+            "SELECT key,value FROM params WHERE key IN ('ADD_GAP_K','ADD_GAP_SHRINK_G','ADD_MAX_HARD')"
+        ).fetchall())
+        self.assertEqual(rows["ADD_GAP_K"], "0.06")
+        self.assertEqual(rows["ADD_GAP_SHRINK_G"], "1.3")
+        self.assertEqual(rows["ADD_MAX_HARD"], "6")
 
 
 if __name__ == "__main__":
