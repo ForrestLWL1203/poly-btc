@@ -332,9 +332,10 @@ def ep_overview(db):
             gross += cur_notl
             net += cur_notl * sgn
         open_n = (q1(db, "SELECT COUNT(*) c FROM copy_position WHERE status='open'") or {"c": 0})["c"]
-        closed = [row["realized_pnl"] for row in qall(db,
-                  "SELECT realized_pnl FROM copy_position WHERE status!='open'")]
-        win_rate = (sum(1 for r in closed if (r or 0) > 0) / len(closed)) if closed else 0.0
+        closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
+                        "FROM copy_position WHERE status!='open'") or {"n": 0, "wins": 0}
+        closed_n = closed["n"] or 0
+        win_rate = ((closed["wins"] or 0) / closed_n) if closed_n else 0.0
         gross_traded = (q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action")
                         or {"g": 0})["g"] or 0.0
         equity = balance + upnl

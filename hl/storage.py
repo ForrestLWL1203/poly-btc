@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS episode (
     PRIMARY KEY (addr, coin, open_ms, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_ep_addr ON episode(addr);
+CREATE INDEX IF NOT EXISTS idx_ep_addr_close ON episode(addr, close_ms);
 CREATE INDEX IF NOT EXISTS idx_prof_status ON profile(status);
 
 -- OUR curated tiny leaderboard: current active targets, ranked, denormalized for UI.
@@ -158,6 +159,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     last_fill_ms   INTEGER,
     updated_at     TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_watchlist_score_rank ON watchlist(score, rank);
+CREATE INDEX IF NOT EXISTS idx_watchlist_rank ON watchlist(rank);
 
 -- Follow-status history: last time each wallet was AT/ABOVE the follow line. Updated each scan/regate
 -- for the currently-followed set; a wallet that drops below the line keeps its old timestamp, so the UI
@@ -284,6 +287,11 @@ CREATE TABLE IF NOT EXISTS copy_position (
 );
 CREATE INDEX IF NOT EXISTS idx_cp_status ON copy_position(status);
 CREATE INDEX IF NOT EXISTS idx_cp_addr ON copy_position(addr);
+CREATE INDEX IF NOT EXISTS idx_cp_status_opened ON copy_position(status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cp_closed_closed_at ON copy_position(closed_at DESC) WHERE status!='open';
+CREATE INDEX IF NOT EXISTS idx_cp_addr_status_opened ON copy_position(addr, status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cp_coin_status_opened ON copy_position(coin, status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_cp_side_status_opened ON copy_position(side, status, opened_at DESC);
 
 -- One row per master action on a tracked position (open / add / reduce / close), with
 -- full detail + OUR mirrored fill at the primary 2s latency. UI "timeline / drill-down".
@@ -299,6 +307,7 @@ CREATE TABLE IF NOT EXISTS copy_action (
 CREATE INDEX IF NOT EXISTS idx_ca_oid ON copy_action(master_oid);
 CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
 CREATE INDEX IF NOT EXISTS idx_ca_pos_act ON copy_action(pos_id, action, act_id);  -- per-pos action filter + ordered detail
+CREATE INDEX IF NOT EXISTS idx_ca_pos_action_ts ON copy_action(pos_id, action, ts, act_id);
 
 -- ── MAKER SHADOW (A/B experiment) ─────────────────────────────────────────────
 -- A fully ISOLATED parallel paper account. SAME strategy/sizing/gates/stops as the real taker book, but a
