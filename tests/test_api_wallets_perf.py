@@ -24,6 +24,8 @@ class GuardedDb:
             "p.roi_total",
             "FROM episode e JOIN followed f",
             "FROM copy_position cp JOIN followed f",
+            "FROM episode e JOIN page_followed f",
+            "FROM copy_position cp JOIN page_followed f",
         )
         if any(fragment in normalized for fragment in forbidden):
             raise AssertionError("wallets endpoint should aggregate per-wallet stats before joining watchlist")
