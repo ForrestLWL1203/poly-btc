@@ -1285,6 +1285,7 @@ function Dashboard({ onLogout }) {
   const [scanStatus, setScanStatus] = useState(null);
   const [obsPending, setObsPending] = useState(null);   // observer 控制过渡 {label, target} → 显示遮罩
   const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
+  const mobileNavRef = useRef(null);
   const toast = () => {};   // 右上角 tooltip 已废弃 — 各动作改用整页/按钮内联 loading 反馈
 
   const ov = (streamOk && live && live.overview) || polledOv;    // prefer live stream; fall back to polled
@@ -1395,6 +1396,19 @@ function Dashboard({ onLogout }) {
     }
   };
   useEffect(() => { if (obs !== "running") setStopChecked(false); }, [obs]);  // reset escalation off-running
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.matchMedia && !window.matchMedia("(max-width: 860px)").matches) return;
+    const raf = requestAnimationFrame(() => {
+      const nav = mobileNavRef.current;
+      const active = nav && nav.querySelector(".mobile-nav-item.active");
+      if (!nav || !active) return;
+      const left = active.offsetLeft - (nav.clientWidth - active.offsetWidth) / 2;
+      nav.scrollLeft = Math.max(0, left);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [page]);
+
+  const mobileNavItems = NAV.flatMap(([, items]) => items);
 
   return (
     <div className="shell">
@@ -1472,6 +1486,25 @@ function Dashboard({ onLogout }) {
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} toast={toast} />}
       </main>
+
+      <nav className="mobile-nav" aria-label="移动端导航" ref={mobileNavRef}>
+        {mobileNavItems.map(([k, label, d]) => {
+          const cnt = (ov && ov.system)
+            ? (k === "positions" ? ov.openCount : k === "wallets" ? ov.system.watchlistCount : null)
+            : null;
+          return (
+            <button key={k} className={"mobile-nav-item" + (page === k ? " active" : "")} onClick={() => setPage(k)} type="button">
+              <Ico d={d} />
+              <span>{label}</span>
+              {cnt != null && <b>{cnt}</b>}
+            </button>
+          );
+        })}
+        <button className="mobile-nav-item mobile-logout" onClick={onLogout} type="button">
+          <Ico d={IC.logout} />
+          <span>退出</span>
+        </button>
+      </nav>
 
       {scanning && <ScanMask status={scanStatus} />}{/* scanning = MANUAL scan only; 24h auto runs silent */}
       {obsPending && <ObsMask label={obsPending.label} />}
