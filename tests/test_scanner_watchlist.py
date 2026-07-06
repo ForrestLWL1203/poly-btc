@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hl import scanner, scanner_lifecycle, storage
+from hl import scanner, scanner_copy_bt, scanner_lifecycle, storage
 
 
 def _profile_row(addr, status, score, **overrides):
@@ -183,7 +183,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
     def test_copy_backtest_gate_rejects_copy_loss_with_enough_sample(self):
         m = {}
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
             {"copy_net_pnl": -1.0, "copy_win_rate": 0.4, "closed_n": 8,
              "opened_n": 10, "target_open_events": 12, "liquidations": 1, "fee_drag": 3.5},
@@ -198,7 +198,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
     def test_copy_backtest_gate_records_but_allows_thin_sample_loss(self):
         m = {}
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
             {"copy_net_pnl": -10.0, "copy_win_rate": 0.0, "closed_n": 3,
              "opened_n": 3, "target_open_events": 3, "liquidations": 0, "fee_drag": 1.0},
@@ -211,7 +211,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_closed_n"], 3)
 
     def test_copy_backtest_gate_allows_positive_copy_result(self):
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             {},
             {"copy_net_pnl": 12.0, "copy_win_rate": 0.6, "closed_n": 7,
              "opened_n": 8, "target_open_events": 8, "liquidations": 0, "fee_drag": 2.0},
@@ -223,7 +223,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
     def test_copy_backtest_gate_rejects_recent_window_loss_with_enough_sample(self):
         m = {}
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
             {
                 30: {"copy_net_pnl": 100.0, "copy_win_rate": 0.6, "closed_n": 8,
@@ -246,7 +246,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
     def test_copy_backtest_gate_allows_primary_loss_when_recent_windows_recover(self):
         m = {"net_pnl": 50.0, "roi_total": 0.05, "net_30d": 200.0, "net_life": 500.0}
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
             {
                 30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
@@ -267,7 +267,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_7d_net_pnl"], 8.0)
 
     def test_copy_backtest_gate_keeps_primary_loss_when_target_perp_is_not_profitable(self):
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             {"net_pnl": -1.0, "roi_total": -0.01, "net_30d": 200.0, "net_life": 500.0},
             {
                 30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
@@ -285,7 +285,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(reason, "copy_backtest_loss")
 
     def test_copy_backtest_gate_keeps_primary_loss_when_recent_recovery_is_thin(self):
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             {"net_pnl": 50.0, "roi_total": 0.05, "net_30d": 200.0, "net_life": 500.0},
             {
                 30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
@@ -304,7 +304,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
     def test_copy_backtest_gate_records_but_allows_thin_recent_window_loss(self):
         m = {}
-        ok, reason = scanner._apply_copy_bt_gate(
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
             {
                 30: {"copy_net_pnl": 100.0, "copy_win_rate": 0.6, "closed_n": 8,
@@ -380,7 +380,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 copy_bt_min_net_pnl=0.0,
             )
 
-            with patch.object(scanner, "_copy_bt_result", return_value={
+            with patch.object(scanner, "_copy_bt_results", return_value={
                 "copy_net_pnl": -25.0,
                 "copy_win_rate": 0.3,
                 "closed_n": 9,

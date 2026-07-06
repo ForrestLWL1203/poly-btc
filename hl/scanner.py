@@ -6,14 +6,18 @@ Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
 import json
-import math
 import os
 import threading
 import time
 
 from . import auto_tune, config, metrics, params, rest, storage
-from .copy_backtest import run_backtest
 from .fills import build_episodes, is_spot
+from .scanner_copy_bt import (
+    apply_copy_bt_gate as _apply_copy_bt_gate,
+    copy_bt_overrides as _copy_bt_overrides,
+    copy_bt_results as _copy_bt_results,
+    copy_bt_sigmas as _copy_bt_sigmas,
+)
 from .scanner_lifecycle import (
     profile_workset as _profile_workset,
     prune_discovery_cache as _prune_discovery_cache,
@@ -73,185 +77,6 @@ def _due_for_full_resync(db):
         return (datetime.now(timezone.utc) - last).total_seconds() / 86400 >= config.FULL_RESYNC_DAYS
     except Exception:  # noqa: BLE001
         return True
-
-
-def _copy_bt_sigmas(db):
-    try:
-        return {coin: sigma for coin, sigma in db.execute("SELECT coin,sigma FROM coin_vol WHERE sigma IS NOT NULL")}
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _copy_bt_overrides(db):
-    try:
-        vals = params.load_follow(db)
-    except Exception:  # noqa: BLE001
-        return {}
-    out = dict(vals)
-    if "SMART_ADD" in vals:
-        out["ADD_STRATEGY"] = "smart" if vals["SMART_ADD"] else "hardcap"
-    return out
-
-
-def _copy_bt_window_days(p):
-    base = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
-    days = [base] + list(getattr(config, "COPY_BT_RECENT_DAYS", (14, 7)))
-    out = []
-    for d in days:
-        try:
-            v = int(d)
-        except (TypeError, ValueError):
-            continue
-        if v > 0 and v not in out and v <= base:
-            out.append(v)
-    return out or [base]
-
-
-def _copy_bt_min_closed_for_days(p, days):
-    base_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
-    base_min = int(getattr(p, "copy_bt_min_closed", config.COPY_BT_MIN_CLOSED) or 0)
-    if base_days <= 0 or days >= base_days:
-        return base_min
-    return max(1, int(math.ceil(base_min * days / base_days)))
-
-
-def _copy_bt_result(addr, fills, now_ms, p, days=None):
-    days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
-    start_ms = now_ms - days * 86400_000
-    replay_fills = [x for x in fills if x.get("time", 0) >= start_ms]
-    if not replay_fills:
-        return {}
-    try:
-        return run_backtest(
-            addr,
-            replay_fills,
-            sigmas=getattr(p, "copy_bt_sigmas", None) or {},
-            overrides=getattr(p, "copy_bt_overrides", None) or {},
-        )
-    except Exception:  # noqa: BLE001 — backtest is a quality aid; never kill discovery on a replay bug
-        return {}
-
-
-def _copy_bt_results(addr, fills, now_ms, p):
-    return {days: _copy_bt_result(addr, fills, now_ms, p, days=days) for days in _copy_bt_window_days(p)}
-
-
-def _record_primary_copy_bt(m, result):
-    if not result:
-        return
-    opened = int(result.get("opened_n") or 0)
-    target_open = int(result.get("target_open_events") or 0)
-    m.update(
-        copy_bt_net_pnl=result.get("copy_net_pnl"),
-        copy_bt_win_rate=result.get("copy_win_rate"),
-        copy_bt_closed_n=int(result.get("closed_n") or 0),
-        copy_bt_open_fill_rate=(opened / target_open) if target_open else None,
-        copy_bt_liquidations=int(result.get("liquidations") or 0),
-        copy_bt_fee_drag=result.get("fee_drag"),
-    )
-
-
-def _record_recent_copy_bt(m, days, result):
-    if not result:
-        return
-    if days == 14:
-        m["copy_bt_14d_net_pnl"] = result.get("copy_net_pnl")
-        m["copy_bt_14d_closed_n"] = int(result.get("closed_n") or 0)
-    elif days == 7:
-        m["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
-        m["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
-
-
-def _copy_bt_target_perp_positive(m):
-    """Target wallet itself must still be profitable on copyable perp metrics before old copy loss is waived."""
-    if (m.get("net_pnl") or 0.0) <= 0:
-        return False
-    roi_total = m.get("roi_total")
-    if roi_total is None:
-        roi_total = m.get("roi_equity")
-    if roi_total is not None and roi_total <= 0:
-        return False
-    for key in ("net_30d", "net_life"):
-        val = m.get(key)
-        if val is not None and val <= 0:
-            return False
-    return True
-
-
-def _copy_bt_recent_recovery_ok(m, by_days, primary_days, p, min_net):
-    """Allow an old primary-window loss only after every configured recent window has recovered."""
-    if not _copy_bt_target_perp_positive(m):
-        return False
-    recent_days = []
-    for days in getattr(config, "COPY_BT_RECENT_DAYS", (14, 7)):
-        try:
-            d = int(days)
-        except (TypeError, ValueError):
-            continue
-        if 0 < d < primary_days and d not in recent_days:
-            recent_days.append(d)
-    if not recent_days:
-        return False
-    for days in recent_days:
-        res = by_days.get(days)
-        if not res:
-            return False
-        if int(res.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
-            return False
-        net = res.get("copy_net_pnl")
-        if net is None or net <= min_net:
-            return False
-    return True
-
-
-def _apply_copy_bt_gate(m, result, p):
-    if not result:
-        return True, "ok"
-
-    if "copy_net_pnl" in result:
-        days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
-        _record_primary_copy_bt(m, result)
-        if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
-            return True, "ok"
-        if int(result.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
-            return True, "ok"
-        net = result.get("copy_net_pnl")
-        min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
-        if net is not None and net <= min_net:
-            return False, "copy_backtest_loss"
-        return True, "ok"
-
-    by_days = {}
-    for days, res in result.items():
-        try:
-            d = int(days)
-        except (TypeError, ValueError):
-            continue
-        if res:
-            by_days[d] = res
-    if not by_days:
-        return True, "ok"
-
-    primary_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
-    primary = by_days.get(primary_days) or by_days.get(max(by_days))
-    _record_primary_copy_bt(m, primary)
-    for days, res in by_days.items():
-        _record_recent_copy_bt(m, days, res)
-
-    if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
-        return True, "ok"
-    min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
-    recent_recovery_ok = _copy_bt_recent_recovery_ok(m, by_days, primary_days, p, min_net)
-    for days in sorted(by_days, reverse=True):
-        res = by_days[days]
-        if int(res.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
-            continue
-        net = res.get("copy_net_pnl")
-        if net is not None and net <= min_net:
-            if days == primary_days and recent_recovery_ok:
-                continue
-            return False, "copy_backtest_loss" if days == primary_days else f"copy_backtest_loss_{days}d"
-    return True, "ok"
 
 
 def _copy_bt_cached_fills(db, addr, now_ms, p):
