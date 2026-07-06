@@ -57,6 +57,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         )
 
         self.assertEqual(workset, ["0xactive", "0xnew", "0xold_good"])
+        self.assertIn("1 active + 1 new + 1 top-recheck", mode)
         self.assertIn("top-recheck", mode)
 
     def test_incremental_scan_workset_keeps_off_list_actives_and_dedupes_recheck(self):

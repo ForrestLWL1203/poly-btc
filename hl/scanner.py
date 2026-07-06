@@ -101,7 +101,9 @@ def _profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily
     if full_scan:
         return all_eligible[:limit], "FULL (30d re-fetch, all candidates)"
 
-    active_new = [a for a in candidates if a in active_set or a not in profiled_set]
+    active_candidates = [a for a in candidates if a in active_set]
+    new_candidates = [a for a in candidates if a not in profiled_set]
+    active_new = _dedupe_preserve(active_candidates + new_candidates)
     daily_recheck_top = (
         config.DAILY_RECHECK_TOP_N if daily_recheck_top is None else int(daily_recheck_top or 0)
     )
@@ -117,7 +119,8 @@ def _profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily
     covered = len(set(active_new) | set(top_recheck))
     deferred = max(0, len(candidates) - covered)
     mode = (
-        f"INCREMENTAL daily-tier ({len(active_new)} active+new + {len(top_recheck)} top-recheck "
+        f"INCREMENTAL daily-tier ({len(active_candidates)} active + {len(new_candidates)} new "
+        f"+ {len(top_recheck)} top-recheck "
         f"of {len(candidates)} cand; {deferred} deferred-tail -> weekly full)"
     )
     return workset, mode
@@ -900,7 +903,7 @@ def scan(db, p) -> None:
     off_active_n = len([a for a in active_addrs if a not in cand_set])
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
     _pace = config.MIN_POST_INTERVAL   # live adaptive pace (fast when no copy-trading, slow trickle when observer up)
-    print(f"scan: {mode} · {len(workset)} wallets + {off_active_n} off-list actives, "
+    print(f"scan: {mode} · {len(workset)} wallets (incl {off_active_n} off-list actives), "
           f"{p.days}d window, pace {_pace:g}s/req ({'FULL-SPEED 无跟单' if _pace <= config.SCAN_IDLE_INTERVAL else '慢采·跟单进行中'})\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
