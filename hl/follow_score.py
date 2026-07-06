@@ -162,6 +162,10 @@ def choose_follow_line(
     if not rows:
         return {"line": float(min_score), "count": 0, "reason": "no_wallet_above_floor"}
 
+    def inclusive_line(score: float) -> float:
+        score = _num(score)
+        return max(float(min_score), score - 1e-9 if score > min_score else score)
+
     available = len(rows)
     min_n = max(1, min(int(min_n), available))
     max_n = max(min_n, min(int(max_n), available))
@@ -172,7 +176,7 @@ def choose_follow_line(
         next_score = _num(rows[n].get("follow_score", rows[n].get("score")))
         if prev_score - next_score >= cliff_gap:
             return {
-                "line": max(float(min_score), prev_score),
+                "line": inclusive_line(prev_score),
                 "count": n,
                 "reason": "quality_cliff",
                 "gap": prev_score - next_score,
@@ -180,7 +184,7 @@ def choose_follow_line(
 
     chosen_score = _num(rows[target_n - 1].get("follow_score", rows[target_n - 1].get("score")))
     return {
-        "line": max(float(min_score), chosen_score),
+        "line": inclusive_line(chosen_score),
         "count": target_n,
         "reason": "capacity_cap",
         "gap": 0.0,

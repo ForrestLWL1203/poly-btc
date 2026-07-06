@@ -459,7 +459,7 @@ def refresh_watchlist(db, stamp) -> int:
         desired = choice["line"]
         prev = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
         if abs(float(prev) - desired) > 0.0005:
-            db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.6f}", stamp))
+            db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.9f}", stamp))
             db.execute(
                 "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
                 ("reload_params", '{"by":"auto_follow_line"}', "scanner", stamp))
