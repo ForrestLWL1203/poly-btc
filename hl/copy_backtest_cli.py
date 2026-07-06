@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 
-from . import config
+from . import config, params as params_mod
 from .copy_backtest import run_backtest
 
 
@@ -29,6 +29,22 @@ def load_cached_fills(db, addr: str, start_ms: int = 0) -> list:
         except (TypeError, ValueError):
             continue
     return fills
+
+
+def load_follow_overrides(db) -> dict:
+    """Current dashboard follow params in engine units.
+
+    Older test/dev DBs may not have the params table; in that case the backtest
+    intentionally falls back to code defaults.
+    """
+    try:
+        vals = params_mod.load_follow(db)
+    except sqlite3.Error:
+        return {}
+    out = dict(vals)
+    if "SMART_ADD" in vals:
+        out["ADD_STRATEGY"] = "smart" if vals["SMART_ADD"] else "hardcap"
+    return out
 
 
 def wallet_context(db, addr: str) -> dict:
@@ -60,7 +76,7 @@ def run_wallet(db, addr: str, days: int = 30, start_ms: int | None = None) -> di
         start_ms = int(time.time() * 1000) - int(days * 86400_000)
     sigmas = load_sigmas(db)
     fills = load_cached_fills(db, addr, start_ms)
-    result = run_backtest(addr, fills, sigmas=sigmas)
+    result = run_backtest(addr, fills, sigmas=sigmas, overrides=load_follow_overrides(db))
     used = {p["coin"] for p in result.get("positions", [])} | {p["coin"] for p in result.get("open_positions", [])}
     result.update(wallet_context(db, addr))
     result["fills"] = len(fills)

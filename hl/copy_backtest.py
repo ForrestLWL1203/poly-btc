@@ -13,27 +13,6 @@ from . import config
 from .util import f
 
 
-def _tier(sigma: float) -> str:
-    if sigma <= config.STABLE_SIGMA_MAX:
-        return "stable"
-    return "high" if sigma >= config.HIGH_SIGMA_MIN else "mid"
-
-
-def _sizing_for(sigma: float) -> tuple[float, float]:
-    tier = _tier(sigma)
-    margin = {
-        "stable": config.STABLE_MARGIN_PCT,
-        "mid": config.MID_MARGIN_PCT,
-        "high": config.HIGH_MARGIN_PCT,
-    }[tier]
-    lev = {
-        "stable": config.STABLE_LEV_CAP,
-        "mid": config.MID_LEV_CAP,
-        "high": config.HIGH_LEV_CAP,
-    }[tier]
-    return margin, max(config.MIN_LEV, float(int(lev)))
-
-
 def _stop_px(entry_px: float, is_buy: bool, lev: float, copy_stop_enable: bool, stop_margin_pct: float) -> float:
     if not copy_stop_enable or not entry_px or not lev or not stop_margin_pct:
         return 0.0
@@ -117,6 +96,35 @@ class Backtest:
         self.target_adds = 0
         self.fee_drag = 0.0
         self.gross_pnl = 0.0
+        self.stable_sigma_max = overrides.get("STABLE_SIGMA_MAX", config.STABLE_SIGMA_MAX)
+        self.high_sigma_min = overrides.get("HIGH_SIGMA_MIN", config.HIGH_SIGMA_MIN)
+        self.tier_margin = {
+            "stable": overrides.get("STABLE_MARGIN_PCT", config.STABLE_MARGIN_PCT),
+            "mid": overrides.get("MID_MARGIN_PCT", config.MID_MARGIN_PCT),
+            "high": overrides.get("HIGH_MARGIN_PCT", config.HIGH_MARGIN_PCT),
+        }
+        self.tier_lev_cap = {
+            "stable": overrides.get("STABLE_LEV_CAP", config.STABLE_LEV_CAP),
+            "mid": overrides.get("MID_LEV_CAP", config.MID_LEV_CAP),
+            "high": overrides.get("HIGH_LEV_CAP", config.HIGH_LEV_CAP),
+        }
+        self.tier_min_notional = {
+            "stable": overrides.get("STABLE_MIN_NOTIONAL", config.STABLE_MIN_NOTIONAL),
+            "mid": overrides.get("MID_MIN_NOTIONAL", config.MID_MIN_NOTIONAL),
+            "high": overrides.get("HIGH_MIN_NOTIONAL", config.HIGH_MIN_NOTIONAL),
+        }
+        self.tier_coin_cap = {
+            "stable": overrides.get("STABLE_COIN_CAP_PCT", config.STABLE_COIN_CAP_PCT),
+            "mid": overrides.get("MID_COIN_CAP_PCT", config.MID_COIN_CAP_PCT),
+            "high": overrides.get("HIGH_COIN_CAP_PCT", config.HIGH_COIN_CAP_PCT),
+        }
+        self.tier_max_adds = {
+            "stable": int(overrides.get("STABLE_MAX_ADDS", config.STABLE_MAX_ADDS)),
+            "mid": int(overrides.get("MID_MAX_ADDS", config.MID_MAX_ADDS)),
+            "high": int(overrides.get("HIGH_MAX_ADDS", config.HIGH_MAX_ADDS)),
+        }
+        self.min_lev = overrides.get("MIN_LEV", config.MIN_LEV)
+        self.stock_max_lev = overrides.get("STOCK_MAX_LEV", config.STOCK_MAX_LEV)
         self.add_strategy = overrides.get("ADD_STRATEGY", config.ADD_STRATEGY)
         self.add_gap_k = overrides.get("ADD_GAP_K", config.ADD_GAP_K)
         self.pos_add_gap_k = overrides.get("POS_ADD_GAP_K", config.POS_ADD_GAP_K)
@@ -133,23 +141,25 @@ class Backtest:
     def sigma(self, coin):
         return self.sigmas.get(coin) or config.VOL_FALLBACK_SIGMA
 
+    def tier(self, sigma: float, coin: str | None = None) -> str:
+        if sigma <= self.stable_sigma_max:
+            return "stable"
+        return "high" if sigma >= self.high_sigma_min else "mid"
+
+    def sizing_for(self, sigma: float, coin: str | None = None) -> tuple[float, float]:
+        tier = self.tier(sigma, coin)
+        lev = max(self.min_lev, float(int(self.tier_lev_cap[tier])))
+        return self.tier_margin[tier], lev
+
     def available(self):
         locked = sum(p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0) for p in self.open.values())
         return self.balance - locked
 
     def coin_cap_pct(self, tier):
-        return {
-            "stable": config.STABLE_COIN_CAP_PCT,
-            "mid": config.MID_COIN_CAP_PCT,
-            "high": config.HIGH_COIN_CAP_PCT,
-        }[tier]
+        return self.tier_coin_cap[tier]
 
     def min_notional(self, tier):
-        return {
-            "stable": config.STABLE_MIN_NOTIONAL,
-            "mid": config.MID_MIN_NOTIONAL,
-            "high": config.HIGH_MIN_NOTIONAL,
-        }[tier]
+        return self.tier_min_notional[tier]
 
     def run(self, fills, price_path=None):
         path_events = _price_events(price_path)
@@ -232,10 +242,10 @@ class Backtest:
 
     def _open_position(self, addr, coin, t, px, pos1, oid):
         sigma = self.sigma(coin)
-        tier = _tier(sigma)
-        margin_pct, lev = _sizing_for(sigma)
+        tier = self.tier(sigma, coin)
+        margin_pct, lev = self.sizing_for(sigma, coin)
         if coin.startswith("xyz:"):
-            lev = max(config.MIN_LEV, min(lev, config.STOCK_MAX_LEV))
+            lev = max(self.min_lev, min(lev, self.stock_max_lev))
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
         target_notl = abs(pos1) * px
@@ -317,7 +327,7 @@ class Backtest:
         self.target_adds += 1
 
         sigma = self.sigma(coin)
-        tier = _tier(sigma)
+        tier = self.tier(sigma, coin)
         is_buy = ep["side"] == "long"
         if self.add_strategy == "smart":
             last = ep.get("last_add_px") or ep["entry_px"]
@@ -345,7 +355,7 @@ class Backtest:
             if add_margin < self.min_open_margin_pct * self.balance:
                 return self._observe_add(ep)
         else:
-            max_adds = {"stable": config.STABLE_MAX_ADDS, "mid": config.MID_MAX_ADDS, "high": config.HIGH_MAX_ADDS}[tier]
+            max_adds = self.tier_max_adds[tier]
             if ep["add_count"] >= max_adds:
                 return self._observe_add(ep)
             add_margin = max(0.0, min(ep["first_margin"] * self.add_frac, self.available()))

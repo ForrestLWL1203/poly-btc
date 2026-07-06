@@ -88,6 +88,22 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["copy_peak_concurrent"], 2)
         self.assertEqual({p["addr"] for p in result["positions"]}, {"0xa", "0xb"})
 
+    def test_tier_sizing_overrides_match_live_follow_params(self):
+        fills = [
+            fill(1, "BTC", "B", 10_000, 0, 100.0, 60),
+            fill(2, "BTC", "A", 10_000, 10_000, 101.0, 61),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
+            "STABLE_MARGIN_PCT": 0.015,
+            "STABLE_LEV_CAP": 25.0,
+            "STABLE_MIN_NOTIONAL": 2500.0,
+        })
+
+        self.assertEqual(result["closed_n"], 1)
+        self.assertAlmostEqual(result["positions"][0]["margin"], 150.0)
+        self.assertEqual(result["positions"][0]["leverage"], 25.0)
+
     def test_price_path_can_liquidate_between_target_fills(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 40),
