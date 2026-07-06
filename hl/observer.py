@@ -27,6 +27,7 @@ import time
 import websockets
 
 from . import config, rest, volatility, ws
+from .sizing import margin_pct_for_deploy
 from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
@@ -87,11 +88,14 @@ class Observer:
         self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ≤this → stable tier (also lev-formula σ ref)
         self.high_sigma_min = config.HIGH_SIGMA_MIN       # σ≥this → high-vol tier; between → mid tier
         self.tier_margin = {"stable": config.STABLE_MARGIN_PCT, "mid": config.MID_MARGIN_PCT, "high": config.HIGH_MARGIN_PCT}
+        self.tier_margin_min = {"stable": config.STABLE_MARGIN_MIN_PCT, "mid": config.MID_MARGIN_MIN_PCT,
+                                "high": config.HIGH_MARGIN_MIN_PCT}
         self.tier_lev_cap = {"stable": config.STABLE_LEV_CAP, "mid": config.MID_LEV_CAP, "high": config.HIGH_LEV_CAP}
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
         self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
+        self.deploy_full_pct = config.DEPLOY_FULL_PCT        # <= this deployed margin: use tier margin upper bound
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
@@ -248,13 +252,15 @@ class Observer:
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
+            if f.get("DEPLOY_FULL_PCT") is not None: self.deploy_full_pct = f["DEPLOY_FULL_PCT"]
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
-            for tier, mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
-                                         ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"),
-                                         ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS")):
+            for tier, mk, min_mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_MARGIN_MIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
+                                                 ("mid", "MID_MARGIN_PCT", "MID_MARGIN_MIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"),
+                                                 ("high", "HIGH_MARGIN_PCT", "HIGH_MARGIN_MIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS")):
                 if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
+                if f.get(min_mk) is not None: self.tier_margin_min[tier] = f[min_mk]
                 if f.get(lk): self.tier_lev_cap[tier] = f[lk]
                 if f.get(nk) is not None: self.tier_min_notional[tier] = f[nk]
                 if f.get(ak) is not None: self.tier_max_adds[tier] = int(f[ak])
@@ -1003,9 +1009,20 @@ class Observer:
         if m_lev and m_lev > 0:
             lev = max(self.min_lev, float(int(min(lev, m_lev))))
         async with book.acct_lock:                   # serialize margin allocation across opens
-            # EQUITY-based sizing: a copy's size = its σ-tier margin% of ACCOUNT EQUITY — NOT of the shrinking
-            # dry powder. So the same wallet edge is copied to the same size regardless of how many positions
-            # are already open (faithful replication; the old `available × pct` geometrically shrank late opens).
+            # Dynamic equity-based sizing: below DEPLOY_FULL_PCT, use the tier's upper-bound margin; between
+            # DEPLOY_FULL_PCT and MAX_DEPLOY_PCT, linearly shrink new opens toward the lower bound. Adds still
+            # may dip into the reserve because they usually matter more to copy fidelity than fresh opens.
+            avail = self._available(book)                # CASH gate: can't deploy more margin than we hold free
+            locked = max(0.0, book.balance - avail)
+            tier = self._tier(sigma, coin)
+            margin_pct = margin_pct_for_deploy(
+                self.tier_margin[tier],
+                self.tier_margin_min[tier],
+                self.deploy_full_pct,
+                self.max_deploy_pct,
+                locked,
+                book.balance,
+            )
             margin = max(0.0, book.balance * margin_pct)
             # PER-COIN cap (catastrophe backstop, NOT a per-wallet tax): total margin across our open positions
             # on this coin IN THE SAME DIRECTION ≤ the σ-tier's per-coin cap (STABLE/MID/HIGH_COIN_CAP_PCT).
@@ -1015,9 +1032,7 @@ class Observer:
             existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                 for (a2, c2), e in book.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
-            room = max(0.0, self.tier_coin_cap[self._tier(sigma, coin)]
-                       * book.balance - existing_coin)   # per-σ-tier per-coin cap (volatile coins get less)
-            avail = self._available(book)                # CASH gate: can't deploy more margin than we hold free
+            room = max(0.0, self.tier_coin_cap[tier] * book.balance - existing_coin)
             reserve = (1.0 - self.max_deploy_pct) * book.balance   # dry-powder kept for adds + new signals + buffer
             deploy_room = max(0.0, avail - reserve)      # a NEW open may only use cash ABOVE the reserve (adds may dip in)
             capped = min(margin, room, deploy_room)      # equity-size, bound by coin backstop, deploy cap AND free cash

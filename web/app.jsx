@@ -703,15 +703,20 @@ const PARAM_META = {
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "watchlist 里评分≥此线的钱包才实际跟单(0–100 标准化分,见下方实时达标数)", range: "—", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
   FOLLOW_MIN_TRADES: { name: "跟单·最低成交笔数", desc: "证据门槛:近30天平掉回合数<此=样本太薄,留在名单观察但不跟单", range: "5–10", up: "只跟履历厚的、更稳", dn: "放进薄样本、信号更多" },
   FOLLOW_MIN_ACTIVE_DAYS: { name: "跟单·最低活跃天数", desc: "证据门槛:活跃天数<此=履历太短,留在名单观察但不跟单", range: "3–5", up: "只跟交易天数多的", dn: "放进新钱包" },
-  STABLE_MARGIN_PCT: { name: "稳定档·保证金", desc: "σ≤4%(BTC等)单笔投入(占可用%)", range: "8–12", up: "每单更重", dn: "每单更轻" },
+  STABLE_MARGIN_MIN_PCT: { name: "稳定档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
+  STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "2–5", up: "低频期每单更重", dn: "低频期每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
   STABLE_MIN_NOTIONAL: { name: "稳定档·最低名义额", desc: "BTC/大饼单笔名义额低于此(封顶到主力后)就不开,太小没意义", range: "$3k–8k", up: "过滤更多小单", dn: "连很小的也跟" },
-  MID_MARGIN_PCT: { name: "中档·保证金", desc: "σ 4–10%(ETH/SOL/HYPE)单笔投入(占可用%)", range: "6–10", up: "每单更重", dn: "每单更轻" },
+  MID_MARGIN_MIN_PCT: { name: "中档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
+  MID_MARGIN_PCT: { name: "中档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "2–5", up: "低频期每单更重", dn: "低频期每单更轻" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "σ 4–10%的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MIN_NOTIONAL: { name: "中档·最低名义额", desc: "ETH/SOL等单笔名义额低于此就不开", range: "$2k–5k", up: "过滤更多小单", dn: "连很小的也跟" },
-  HIGH_MARGIN_PCT: { name: "剧烈档·保证金", desc: "σ≥10%(meme/野币)单笔投入(占可用%)", range: "4–8", up: "每单更重", dn: "每单更轻" },
+  HIGH_MARGIN_MIN_PCT: { name: "剧烈档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "0.5–2", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
+  HIGH_MARGIN_PCT: { name: "剧烈档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "1–4", up: "低频期每单更重", dn: "低频期每单更轻" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥10%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
   HIGH_MIN_NOTIONAL: { name: "剧烈档·最低名义额", desc: "meme/野币单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)", range: "$500–1k", up: "过滤更多小单", dn: "连很小的也跟" },
+  DEPLOY_FULL_PCT: { name: "满火力占用线", desc: "组合保证金占用不超过此值时按各档保证金上限开新仓", range: "30–50", up: "更久保持大单", dn: "更早开始缩仓" },
+  MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–85", up: "允许更多新仓", dn: "更早锁住新仓" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
@@ -911,19 +916,31 @@ function Discovery({ scanning, startRescan, confirm }) {
    只读展示(无可调目标杠杆),紧凑液态玻璃风。σ 为实采日内最高-最低振幅均值。读自正在编辑的 vals。 */
 function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
+  const [deploy, setDeploy] = React.useState(20);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
   const MINL = Math.max(1, n("MIN_LEV", 1));
   const SM = n("STOP_MARGIN_PCT", 70);
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;
   const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
-  const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"], mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
+  const TM = { stable: ["STABLE_MARGIN_MIN_PCT", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"],
+    mid: ["MID_MARGIN_MIN_PCT", "MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_MIN_PCT", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
   const DOT = { stable: "var(--green)", mid: "var(--amber)", high: "var(--red)" };
-  const dft = { STABLE_MARGIN_PCT: 10, STABLE_LEV_CAP: 20, MID_MARGIN_PCT: 8, MID_LEV_CAP: 10, HIGH_MARGIN_PCT: 6, HIGH_LEV_CAP: 5 };
+  const dft = { STABLE_MARGIN_MIN_PCT: 2, STABLE_MARGIN_PCT: 3.5, STABLE_LEV_CAP: 25,
+    MID_MARGIN_MIN_PCT: 2, MID_MARGIN_PCT: 3, MID_LEV_CAP: 10, HIGH_MARGIN_MIN_PCT: 1.2, HIGH_MARGIN_PCT: 2, HIGH_LEV_CAP: 4 };
   const usd = x => x >= 1000 ? "$" + (x / 1000).toFixed(x >= 10000 ? 0 : 1) + "k" : "$" + Math.round(x);
+  const marginPct = t => {
+    const lo = Math.min(n(TM[t][0], dft[TM[t][0]]), n(TM[t][1], dft[TM[t][1]])) / 100;
+    const hi = Math.max(n(TM[t][0], dft[TM[t][0]]), n(TM[t][1], dft[TM[t][1]])) / 100;
+    const full = n("DEPLOY_FULL_PCT", 40) / 100, lock = n("MAX_DEPLOY_PCT", 80) / 100;
+    const d = Math.max(0, deploy / 100);
+    if (d <= full) return hi;
+    if (d >= lock || lock <= full) return lo;
+    return lo + (hi - lo) * (lock - d) / (lock - full);
+  };
   const calc = s0 => {
     const s = Math.max(0.1, s0), t = tier(s);
-    const mPct = n(TM[t][0], dft[TM[t][0]]) / 100, cap = n(TM[t][1], dft[TM[t][1]]);
+    const mPct = marginPct(t), cap = n(TM[t][2], dft[TM[t][2]]);
     const lev = Math.max(MINL, Math.floor(cap));   // v10: 杠杆 = 档位上限(再被目标杠杆+股票上限封顶)
     const margin = bal * mPct;
     const stopLoss = Math.min(SM / 100, 1), stopDist = stopLoss / lev * 100;  // 硬亏=SM%保证金(固定),逆向价格=SM%÷杠杆
@@ -934,8 +951,10 @@ function SizingPreview({ vals }) {
     <div className="sz">
       <div className="sz-hd">
         <div className="sz-ttl">下单沙盘<span>· 按当前参数实时换算</span></div>
-        <div className="sz-bal"><label>可用余额</label>
+        <div className="sz-bal"><label>账户权益</label>
           <input type="number" value={bal} onChange={e => setBal(Number(e.target.value) || 0)} /></div>
+        <div className="sz-bal"><label>已占用%</label>
+          <input type="number" value={deploy} onChange={e => setDeploy(Number(e.target.value) || 0)} /></div>
       </div>
       <div className="sz-grid">
         <div className="sz-hdr">币种</div><div className="sz-hdr sz-num">σ</div>
@@ -957,7 +976,7 @@ function SizingPreview({ vals }) {
         })}
       </div>
       <div className="sz-foot">
-        杠杆 = <b>σ 档位上限</b>(σ 定档,再被目标杠杆+股票上限封顶)· 保证金 = 可用 × 档位%{stopOn
+        杠杆 = <b>σ 档位上限</b>(σ 定档,再被目标杠杆+股票上限封顶)· 保证金 = 权益 × 动态区间%{stopOn
           ? <React.Fragment> · 止损 = 亏到 <b>{Math.round(SM)}%</b> 保证金就平(与币种无关的硬亏),换算逆向价格 = <b>{Math.round(SM)}%÷杠杆</b></React.Fragment>
           : <React.Fragment> · <b>止损已关闭</b>,仅靠强平兜底</React.Fragment>}
       </div>
@@ -1021,6 +1040,7 @@ function Settings({ startRescan, confirm, toast }) {
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
   const tabDirty = list.filter(p => dirty[p.key]);
   const autoTuneParam = tab === "follow" ? list.find(p => p.key === AUTO_TUNE_KEY) : null;
+  const byKey = k => list.find(p => p.key === k);
 
   const Prow = (p) => {
     const m = PARAM_META[p.key] || {}; const ed = editable(p); const lvl = p.level;
@@ -1053,13 +1073,79 @@ function Settings({ startRescan, confirm, toast }) {
   };
   /* v8 三档保证金/杠杆折叠分组(否则页面太高) */
   const TIER_GROUPS = [
-    { key: "stable", label: "稳定档", sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green", keys: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_COIN_CAP_PCT"] },
-    { key: "mid", label: "中档", sub: "σ 5–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber", keys: ["MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_COIN_CAP_PCT"] },
-    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币 / 高波股", tint: "tint-red", keys: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_COIN_CAP_PCT"] },
+    { key: "stable", label: "稳定档", sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)", tint: "tint-green",
+      min: "STABLE_MARGIN_MIN_PCT", max: "STABLE_MARGIN_PCT", lev: "STABLE_LEV_CAP", notl: "STABLE_MIN_NOTIONAL", cap: "STABLE_COIN_CAP_PCT" },
+    { key: "mid", label: "中档", sub: "σ 5–10% · ETH / SOL / HYPE 等主流", tint: "tint-amber",
+      min: "MID_MARGIN_MIN_PCT", max: "MID_MARGIN_PCT", lev: "MID_LEV_CAP", notl: "MID_MIN_NOTIONAL", cap: "MID_COIN_CAP_PCT" },
+    { key: "high", label: "剧烈档", sub: "σ ≥ 10% · ZEC / meme / 野币 / 高波股", tint: "tint-red",
+      min: "HIGH_MARGIN_MIN_PCT", max: "HIGH_MARGIN_PCT", lev: "HIGH_LEV_CAP", notl: "HIGH_MIN_NOTIONAL", cap: "HIGH_COIN_CAP_PCT" },
   ];
-  const tierKeys = new Set(TIER_GROUPS.flatMap(g => g.keys));
+  const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.min, g.max, g.lev, g.notl, g.cap]));
+  const deployKeys = new Set(["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
+  const validationBadKeys = new Set();
+  const validationErrors = [];
+  const numVal = k => Number(vals[k]);
+  const markErr = (msg, keys) => {
+    validationErrors.push(msg);
+    (keys || []).forEach(k => validationBadKeys.add(k));
+  };
+  const validatePct = (label, key) => {
+    const v = numVal(key);
+    if (!Number.isFinite(v)) { markErr(`${label} 必须是数字`, [key]); return false; }
+    if (v < 0 || v > 100) { markErr(`${label} 必须在 0–100% 之间`, [key]); return false; }
+    return true;
+  };
+  if (tab === "follow") {
+    TIER_GROUPS.forEach(g => {
+      const okMin = validatePct(`${g.label}保证金下限`, g.min);
+      const okMax = validatePct(`${g.label}保证金上限`, g.max);
+      if (okMin && okMax && numVal(g.min) > numVal(g.max)) {
+        markErr(`${g.label}保证金下限不能高于上限`, [g.min, g.max]);
+      }
+    });
+    const okFull = validatePct("满火力占用线", "DEPLOY_FULL_PCT");
+    const okLock = validatePct("组合部署上限", "MAX_DEPLOY_PCT");
+    if (okFull && okLock && numVal("DEPLOY_FULL_PCT") >= numVal("MAX_DEPLOY_PCT")) {
+      markErr("满火力占用线必须低于组合部署上限", ["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
+    }
+  }
+
+  const RangeRow = (g) => {
+    const pMin = byKey(g.min), pMax = byKey(g.max);
+    if (!pMin || !pMax) return null;
+    return (
+      <div className={"prow range-row" + (dirty[g.min] || dirty[g.max] ? " dirty" : "") + (validationBadKeys.has(g.min) || validationBadKeys.has(g.max) ? " invalid" : "")}>
+        <span className="lvl-dot lvl-green" />
+        <div className="pn"><b>{g.label}·保证金区间</b></div>
+        <div className="pd">低占用用上限,拥挤时线性缩到下限。自动调参只改上限</div>
+        <div className="range-ctl">
+          <EditableValue value={vals[g.min]} unit="%" ptype="pct" disabled={!editable(pMin)} onCommit={v => set(g.min, v)} />
+          <span>至</span>
+          <EditableValue value={vals[g.max]} unit="%" ptype="pct" disabled={!editable(pMax)} onCommit={v => set(g.max, v)} />
+        </div>
+      </div>
+    );
+  };
+
+  const DeployRangeRow = () => {
+    const pFull = byKey("DEPLOY_FULL_PCT"), pLock = byKey("MAX_DEPLOY_PCT");
+    if (!pFull || !pLock) return null;
+    return (
+      <div className={"prow range-row deploy-row" + (dirty.DEPLOY_FULL_PCT || dirty.MAX_DEPLOY_PCT ? " dirty" : "") + (validationBadKeys.has("DEPLOY_FULL_PCT") || validationBadKeys.has("MAX_DEPLOY_PCT") ? " invalid" : "")}>
+        <span className="lvl-dot lvl-green" />
+        <div className="pn"><b>组合火力区间</b></div>
+        <div className="pd">占用≤左值满火力;左值到右值线性缩仓;≥右值停开新仓,保留资金给加仓/平仓管理</div>
+        <div className="range-ctl">
+          <EditableValue value={vals.DEPLOY_FULL_PCT} unit="%" ptype="pct" disabled={!editable(pFull)} onCommit={v => set("DEPLOY_FULL_PCT", v)} />
+          <span>至</span>
+          <EditableValue value={vals.MAX_DEPLOY_PCT} unit="%" ptype="pct" disabled={!editable(pLock)} onCommit={v => set("MAX_DEPLOY_PCT", v)} />
+        </div>
+      </div>
+    );
+  };
 
   const apply = async () => {
+    if (validationErrors.length) return;
     const body = {}; tabDirty.forEach(p => { body[p.key] = vals[p.key]; });
     const doIt = async () => {
       setSaving(true);                                  // 短暂全页 loading 代替右上角 tooltip
@@ -1156,7 +1242,7 @@ function Settings({ startRescan, confirm, toast }) {
             </div>
           </React.Fragment>;
         })()}
-        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY))).map(p => {
+        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY))).map(p => {
           if (tab === "follow" && p.key === "MIN_FOLLOW_SCORE") {
             const v = Number(vals.MIN_FOLLOW_SCORE);
             const n = scoreDist ? scoreDist.scores.filter(s => s >= v).length : null;
@@ -1183,9 +1269,15 @@ function Settings({ startRescan, confirm, toast }) {
               style={{ opacity: editable(autoTuneParam) ? 1 : .5 }}><div className="knob" /></div>
           </div>}
         </div>}
+        {tab === "follow" && DeployRangeRow()}
+        {tab === "follow" && validationErrors.length > 0 && (
+          <div className="param-errors">
+            {validationErrors.map((e, i) => <div key={i}>{e}</div>)}
+          </div>
+        )}
         {tab === "follow" && TIER_GROUPS.map(g => {
           const open = openTiers[g.key];
-          const rows = g.keys.map(k => list.find(p => p.key === k)).filter(Boolean);
+          const rows = [g.lev, g.notl, g.cap].map(byKey).filter(Boolean);
           return (
             <div key={g.key}>
               <div className={"expand-head" + (open ? " open" : "")} onClick={() => setOpenTiers(o => ({ ...o, [g.key]: !o[g.key] }))}>
@@ -1193,9 +1285,12 @@ function Settings({ startRescan, confirm, toast }) {
                 <span className={"pill " + g.tint}>{g.label}</span>
                 <span className="muted" style={{ fontSize: 12 }}>{g.sub}</span>
                 {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                  保证金 {vals[g.keys[0]]}% · 杠杆 ≤{vals[g.keys[1]]}x · 最低 ${vals[g.keys[2]]} · 单币上限 {vals[g.keys[3]]}%</span>}
+                  保证金 {vals[g.min]}–{vals[g.max]}% · 杠杆 ≤{vals[g.lev]}x · 最低 ${vals[g.notl]} · 单币上限 {vals[g.cap]}%</span>}
               </div>
-              {open && <div className="expand-body">{rows.map(Prow)}</div>}
+              {open && <div className="expand-body">
+                {RangeRow(g)}
+                {rows.map(Prow)}
+              </div>}
             </div>
           );
         })}
@@ -1206,7 +1301,7 @@ function Settings({ startRescan, confirm, toast }) {
           <div className="ab-l">{tabDirty.length} 项未应用改动{tab === "scanner" ? "(需重采生效)" : "(即时生效)"}</div>
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn" onClick={() => { setVals(v => { const nv = { ...v }; const o = {}; [...params.scanner, ...params.follow].forEach(x => o[x.key] = x.value); tabDirty.forEach(p => nv[p.key] = o[p.key]); return nv; }); setDirty({}); }}>放弃</button>
-            <button className="btn btn-accent" onClick={apply}>{tab === "scanner" ? "应用并重采" : "保存(即时生效)"}</button>
+            <button className="btn btn-accent" disabled={validationErrors.length > 0} onClick={apply}>{tab === "scanner" ? "应用并重采" : "保存(即时生效)"}</button>
           </div>
         </div>
       )}

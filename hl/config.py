@@ -87,22 +87,21 @@ STABLE_SIGMA_MAX = 0.05     # σ ≤ this → STABLE tier. 4%→5% (2026-07-01) 
 #                             in STABLE, not MID. STABLE coins now trade at the FULL STABLE_LEV_CAP (not
 #                             σ-throttled) — see _sizing_for. (user: "BTC 作为基准就该 20x")
 HIGH_SIGMA_MIN   = 0.10     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
-STABLE_MARGIN_PCT = 0.06    # FIRST-OPEN margin = this × EQUITY, for STABLE-tier coins (BTC). Sized for the
-#                             TYPICAL position (first-open ONLY) — adds are the MINORITY case, so do NOT budget
-#                             for the rare full-built (that would leave every non-add position too small to
-#                             matter). 6% × 20x ≈ 120% notional (meaningful standalone); ~16 concurrent before the
-#                             cash gate taps in; 4.2% max loss/position @70% stop. (v6: line 88 → ~24 targets.)
-MID_MARGIN_PCT    = 0.05    # ...MID (ETH/SOL): 5% × 10x = 50% notional
-HIGH_MARGIN_PCT   = 0.04    # ...HIGH (meme): 4% × 5x = 20% notional
-STABLE_LEV_CAP = 30.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 30x)
-MID_LEV_CAP    = 15.0       # ...for MID-tier coins
-HIGH_LEV_CAP   = 7.0        # ...for HIGH-VOL-tier coins
+STABLE_MARGIN_MIN_PCT = 0.020  # first-open margin lower bound once portfolio deployment gets crowded
+MID_MARGIN_MIN_PCT    = 0.020
+HIGH_MARGIN_MIN_PCT   = 0.012
+STABLE_MARGIN_PCT = 0.035      # first-open margin upper bound when deployment is light (<= DEPLOY_FULL_PCT)
+MID_MARGIN_PCT    = 0.030
+HIGH_MARGIN_PCT   = 0.020
+STABLE_LEV_CAP = 25.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 25x)
+MID_LEV_CAP    = 10.0       # ...for MID-tier coins
+HIGH_LEV_CAP   = 4.0        # ...for HIGH-VOL-tier coins
 # PER-TIER minimum order notional: skip a copy whose FINAL notional (after the master-notl cap) is below
 # its tier's floor — a too-small position isn't worth the fee/latency drag (esp. on calm coins where the
 # whole edge is a fraction of a %). Per-tier only — the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
-STABLE_MIN_NOTIONAL = 5000.0   # BTC/majors: below $5k it's not worth opening
-MID_MIN_NOTIONAL    = 3000.0   # mid-vol coins
-HIGH_MIN_NOTIONAL   = 800.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
+STABLE_MIN_NOTIONAL = 2500.0   # BTC/majors: below this it's not worth opening
+MID_MIN_NOTIONAL    = 1000.0   # mid-vol coins
+HIGH_MIN_NOTIONAL   = 250.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
 REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge position out in 100s of tiny
@@ -134,9 +133,11 @@ FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有
 # 三档单币"灾难闸":同一币+同向所有仓位保证金合计 ≤ 占账户%。不是"单笔税"(单笔大小由 EQUITY×MARGIN_PCT 定),
 # 而是封住"N 个钱包碰巧全压同一币同向 → 一次波动最多吃掉账户的百分之几"。实测极少堆币(最集中仅~9%),故设宽
 # (2026-07-02: 20/12/6 → 40/30/20),日常不触发,只拦真·极端堆仓;高波动币仍比 BTC 更严。
-STABLE_COIN_CAP_PCT = 0.40
-MID_COIN_CAP_PCT    = 0.30
-HIGH_COIN_CAP_PCT   = 0.20
+STABLE_COIN_CAP_PCT = 0.30
+MID_COIN_CAP_PCT    = 0.22
+HIGH_COIN_CAP_PCT   = 0.15
+DEPLOY_FULL_PCT = 0.40      # <= this deployed margin: use each tier's upper-bound margin. Between this and
+#                           MAX_DEPLOY_PCT, new-open margin linearly shrinks to the tier lower bound.
 MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin
 #                           reaches this fraction of equity. Equity-based sizing (每笔=权益×档位%) has no
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps

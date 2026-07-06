@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 
 from . import config
+from .sizing import margin_pct_for_deploy
 from .util import f
 
 
@@ -103,6 +104,11 @@ class Backtest:
             "mid": overrides.get("MID_MARGIN_PCT", config.MID_MARGIN_PCT),
             "high": overrides.get("HIGH_MARGIN_PCT", config.HIGH_MARGIN_PCT),
         }
+        self.tier_margin_min = {
+            "stable": overrides.get("STABLE_MARGIN_MIN_PCT", config.STABLE_MARGIN_MIN_PCT),
+            "mid": overrides.get("MID_MARGIN_MIN_PCT", config.MID_MARGIN_MIN_PCT),
+            "high": overrides.get("HIGH_MARGIN_MIN_PCT", config.HIGH_MARGIN_MIN_PCT),
+        }
         self.tier_lev_cap = {
             "stable": overrides.get("STABLE_LEV_CAP", config.STABLE_LEV_CAP),
             "mid": overrides.get("MID_LEV_CAP", config.MID_LEV_CAP),
@@ -132,6 +138,7 @@ class Backtest:
         self.add_max_hard = int(overrides.get("ADD_MAX_HARD", config.ADD_MAX_HARD))
         self.follow_pos_add = bool(overrides.get("FOLLOW_POS_ADD", config.FOLLOW_POS_ADD))
         self.add_frac = overrides.get("ADD_FRAC", config.ADD_FRAC)
+        self.deploy_full_pct = overrides.get("DEPLOY_FULL_PCT", config.DEPLOY_FULL_PCT)
         self.max_deploy_pct = overrides.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
@@ -249,6 +256,16 @@ class Backtest:
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
         target_notl = abs(pos1) * px
+        avail = self.available()
+        locked = max(0.0, self.balance - avail)
+        margin_pct = margin_pct_for_deploy(
+            self.tier_margin[tier],
+            self.tier_margin_min[tier],
+            self.deploy_full_pct,
+            self.max_deploy_pct,
+            locked,
+            self.balance,
+        )
         margin = max(0.0, self.balance * margin_pct)
         existing_coin = sum(
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
@@ -256,7 +273,6 @@ class Backtest:
             if c == coin and p["side"] == side
         )
         room = max(0.0, self.coin_cap_pct(tier) * self.balance - existing_coin)
-        avail = self.available()
         deploy_room = max(0.0, avail - (1.0 - self.max_deploy_pct) * self.balance)
         capped = min(margin, room, deploy_room)
         if capped < self.min_open_margin_pct * self.balance:

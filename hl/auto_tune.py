@@ -185,9 +185,12 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
     return out
 
 
-def _follow_overrides(follow: dict, margins: dict) -> dict:
+def follow_overrides_for_margin_candidate(follow: dict, margins: dict) -> dict:
     out = dict(follow)
-    out.update({k: float(margins[k]) for k in MARGIN_KEYS})
+    for key in MARGIN_KEYS:
+        min_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+        floor = float(follow.get(min_key) or 0.0)
+        out[key] = max(floor, float(margins[key]))
     if "SMART_ADD" in out:
         out["ADD_STRATEGY"] = "smart" if out["SMART_ADD"] else "hardcap"
     return out
@@ -197,7 +200,8 @@ def evaluate_margin_candidate(db, addrs: list[str], follow: dict, base: dict, mu
                               sigmas: dict | None = None, now_ms: int | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     margins = {k: float(base[k]) * float(mult) for k in MARGIN_KEYS}
-    overrides = _follow_overrides(follow, margins)
+    overrides = follow_overrides_for_margin_candidate(follow, margins)
+    margins = {k: overrides[k] for k in MARGIN_KEYS}
     sigmas = sigmas if sigmas is not None else _load_sigmas(db)
     windows = {}
     for days in getattr(config, "AUTO_TUNE_MARGIN_DAYS", (30, 14, 7)):

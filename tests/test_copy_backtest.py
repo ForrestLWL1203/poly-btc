@@ -104,6 +104,34 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(result["positions"][0]["margin"], 150.0)
         self.assertEqual(result["positions"][0]["leverage"], 25.0)
 
+    def test_dynamic_margin_range_shrinks_only_as_deploy_fills(self):
+        fills = []
+        for i in range(8):
+            coin = f"C{i}"
+            fills.append(fill(i + 1, coin, "B", 10_000, 0, 100.0, 100 + i))
+        sigmas = {f"C{i}": 0.04 for i in range(8)}
+
+        result = run_backtest("0xabc", fills, sigmas=sigmas, overrides={
+            "STABLE_MARGIN_MIN_PCT": 0.02,
+            "STABLE_MARGIN_PCT": 0.04,
+            "STABLE_LEV_CAP": 10.0,
+            "STABLE_MIN_NOTIONAL": 0.0,
+            "STABLE_COIN_CAP_PCT": 1.0,
+            "DEPLOY_FULL_PCT": 0.08,
+            "MAX_DEPLOY_PCT": 0.50,
+            "COPY_STOP_ENABLE": False,
+        })
+
+        margins = [p["margin"] for p in sorted(result["open_positions"], key=lambda p: p["opened_at"])]
+
+        self.assertGreaterEqual(len(margins), 6)
+        self.assertGreater(margins[0], 390)
+        self.assertGreater(margins[1], 390)
+        self.assertLess(margins[3], 390)
+        self.assertGreater(margins[3], 300)
+        self.assertGreater(margins[-1], 190)
+        self.assertLess(margins[-1], margins[3])
+
     def test_price_path_can_liquidate_between_target_fills(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 40),

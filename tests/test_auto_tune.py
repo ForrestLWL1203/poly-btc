@@ -80,6 +80,32 @@ class AutoTuneTests(unittest.TestCase):
         self.assertTrue(reset)
         self.assertEqual(resolved, manual)
 
+    def test_candidate_margin_tune_changes_max_bounds_only(self):
+        follow = {
+            "STABLE_MARGIN_MIN_PCT": 0.020,
+            "MID_MARGIN_MIN_PCT": 0.020,
+            "HIGH_MARGIN_MIN_PCT": 0.012,
+            "STABLE_MARGIN_PCT": 0.030,
+            "MID_MARGIN_PCT": 0.030,
+            "HIGH_MARGIN_PCT": 0.020,
+            "SMART_ADD": True,
+        }
+        margins = {
+            "STABLE_MARGIN_PCT": 0.036,
+            "MID_MARGIN_PCT": 0.036,
+            "HIGH_MARGIN_PCT": 0.024,
+        }
+
+        overrides = auto_tune.follow_overrides_for_margin_candidate(follow, margins)
+
+        self.assertEqual(overrides["STABLE_MARGIN_MIN_PCT"], 0.020)
+        self.assertEqual(overrides["MID_MARGIN_MIN_PCT"], 0.020)
+        self.assertEqual(overrides["HIGH_MARGIN_MIN_PCT"], 0.012)
+        self.assertEqual(overrides["STABLE_MARGIN_PCT"], 0.036)
+        self.assertEqual(overrides["MID_MARGIN_PCT"], 0.036)
+        self.assertEqual(overrides["HIGH_MARGIN_PCT"], 0.024)
+        self.assertEqual(overrides["ADD_STRATEGY"], "smart")
+
 
 if __name__ == "__main__":
     unittest.main()
