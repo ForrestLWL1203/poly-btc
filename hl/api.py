@@ -30,10 +30,11 @@ from . import config
 from . import params as params_mod
 from . import procman
 from .api_common import iso_epoch as _iso_epoch
-from .api_common import q1, qall, score100, score_from100
+from .api_common import q1, qall
 from .api_discovery import ep_discovery, ep_scan_runs, ep_scan_status, ep_score_dist
 from .api_discovery import followed_count as _followed_count
 from .api_discovery import scanner_status as _scanner_status
+from .api_params import ep_params, patch_params, reset_params
 from .api_positions import ep_position_detail, ep_positions
 from .api_wallets import ep_wallet_detail, ep_wallets
 from .util import now_iso
@@ -360,8 +361,6 @@ def ep_command(db, cmd_id):
             "ackedAt": r["acked_at"], "doneAt": r["done_at"]}
 
 
-WRITABLE_LEVELS = {"green", "yellow", "blue"}     # black / display are read-only
-
 # ── SSE live stream (replaces polling for the fast-changing bundle) ──
 STREAM_MAX = 8                # cap concurrent stream connections (single-user; guards a reconnect storm)
 STREAM_TICK = 1.0            # server-side read cadence; we push only on CHANGE (+ heartbeat)
@@ -375,57 +374,6 @@ def _fast_bundle(db):
     Slow data (wallets/discovery/params/scan-runs) stays on-demand GET."""
     return {"overview": ep_overview(db), "positions": ep_positions(db, {"status": ["open"]}),
             "serverTime": now_iso()}
-
-
-def patch_params(db_path, category, updates):
-    """Write UI param edits to the params table (the only place the dashboard writes besides commands).
-    Rejects read-only levels. MIN_FOLLOW_SCORE arrives on the 0–100 ruler -> inverted to native."""
-    db = rw_connect(db_path)
-    try:
-        out = {}
-        for key, val in (updates or {}).items():
-            row = db.execute("SELECT category,level,type FROM params WHERE key=?", (key,)).fetchone()
-            if not row:
-                continue
-            if row["category"] != category:
-                continue
-            if row["level"] not in WRITABLE_LEVELS or row["type"] == "display":
-                raise ValueError(f"{key} is read-only")
-            stored = val
-            if key == "MIN_FOLLOW_SCORE" and val is not None:
-                stored = score_from100(val)                       # UI 0–100 -> native ~0–3
-            sval = (None if stored is None else "true" if stored is True
-                    else "false" if stored is False else str(stored))
-            db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (sval, now_iso(), key))
-            out[key] = val
-        db.commit()
-        return out
-    finally:
-        db.close()
-
-
-def reset_params(db_path, category):
-    """恢复默认配置: force-overwrite params back to config defaults. category 'all' = both tabs.
-    Same single-writer contract as patch_params (writes only the params table)."""
-    db = rw_connect(db_path)
-    try:
-        cat = None if category == "all" else category
-        n = params_mod.reset_defaults(db, cat)
-        return n
-    finally:
-        db.close()
-
-
-def ep_params(db):
-    data = params_mod.get_all(db)
-    # MIN_FOLLOW_SCORE is on the score ruler -> present it on the same 0–100 scale as wallet scores
-    # (engine stores native ~0–3). The M4 PATCH must invert with score_from100() before writing.
-    for pr in data.get("follow", []):
-        if pr["key"] == "MIN_FOLLOW_SCORE":
-            pr["value"] = score100(pr["value"])
-            pr["default"] = score100(pr["default"])
-            pr["scaled"] = True            # hint to the frontend: 0–100 display ruler
-    return data
 
 
 # ─────────────────────────────────────────────────────────────────────── http handler
