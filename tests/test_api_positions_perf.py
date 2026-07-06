@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from importlib import import_module, util
 from pathlib import Path
 
 from hl import api, params, storage
@@ -56,6 +57,13 @@ class ApiPositionsPerfTests(unittest.TestCase):
         res = api.ep_positions(GuardedDb(self._db()), {"status": ["closed"]})
 
         self.assertEqual(res["positions"][0]["followPos"], 1)
+
+    def test_positions_endpoints_are_split_from_api_module(self):
+        self.assertIsNotNone(util.find_spec("hl.api_positions"))
+        api_positions = import_module("hl.api_positions")
+
+        self.assertIs(api.ep_positions, api_positions.ep_positions)
+        self.assertIs(api.ep_position_detail, api_positions.ep_position_detail)
 
 
 if __name__ == "__main__":
