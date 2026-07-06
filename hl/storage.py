@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS follow_history (
     last_followed_at    TEXT,
     last_followed_score REAL
 );
+CREATE INDEX IF NOT EXISTS idx_follow_history_last_followed ON follow_history(last_followed_at DESC, addr);
 
 -- Operator controls, set via UI; persist across scans (NOT wiped on watchlist rebuild).
 CREATE TABLE IF NOT EXISTS target_controls (

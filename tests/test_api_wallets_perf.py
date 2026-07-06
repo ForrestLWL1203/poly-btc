@@ -22,6 +22,8 @@ class GuardedDb:
             "p.net_pnl",
             "p.avg_notional",
             "p.roi_total",
+            "FROM episode e JOIN followed f",
+            "FROM copy_position cp JOIN followed f",
         )
         if any(fragment in normalized for fragment in forbidden):
             raise AssertionError("wallets endpoint should aggregate per-wallet stats before joining watchlist")
@@ -101,6 +103,30 @@ class ApiWalletsPerfTests(unittest.TestCase):
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
 
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
+
+    def test_dropped_wallets_are_paginated_in_sql(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            for i, addr in enumerate(("0xaaa", "0xbbb", "0xccc")):
+                db.execute(
+                    "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) VALUES (?,?,0.8)",
+                    (addr, f"2026-01-0{i + 1}T00:00:00Z"),
+                )
+                db.execute(
+                    "INSERT INTO profile (addr,status,reason,score,market_type,win_rate,top_coin) "
+                    "VALUES (?,'rejected','not_profitable',0.4,'crypto',0.5,'BTC')",
+                    (addr,),
+                )
+            db.commit()
+
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"], "page": ["1"], "size": ["2"]})
+
+        self.assertEqual(res["total"], 3)
+        self.assertEqual(res["page"], 1)
+        self.assertEqual(res["size"], 2)
+        self.assertEqual([w["address"] for w in res["wallets"]], ["0xaaa"])
 
     def test_wallets_observing_tab_falls_back_to_followed_without_legacy_bucket(self):
         with tempfile.TemporaryDirectory() as td:

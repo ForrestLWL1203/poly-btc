@@ -14,6 +14,11 @@ def ep_wallets(db, qs=None):
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
 
     if (qs.get("tab", ["followed"]))[0] == "dropped":
+        total_row = q1(db,
+            "SELECT COUNT(*) c "
+            "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
+            "WHERE NOT (p.status='active' AND p.score >= ?)", (line_native,))
+        total = (total_row["c"] if total_row else 0) or 0
         rows = qall(db,
             "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,p.score,p.status,p.reason,"
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
@@ -21,7 +26,8 @@ def ep_wallets(db, qs=None):
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
             "LEFT JOIN leaderboard l ON l.addr=fh.addr "
-            "WHERE NOT (p.status='active' AND p.score >= ?) ORDER BY fh.last_followed_at DESC", (line_native,))
+            "WHERE NOT (p.status='active' AND p.score >= ?) "
+            "ORDER BY fh.last_followed_at DESC LIMIT ? OFFSET ?", (line_native, size, page * size))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0), "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
@@ -33,21 +39,24 @@ def ep_wallets(db, qs=None):
             "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
             "mainCoin": r["top_coin"],
         } for r in rows]
-        return {"followLine": score100(line_native), "total": len(out), "tab": "dropped", "wallets": out}
+        return {"followLine": score100(line_native), "total": total, "tab": "dropped",
+                "page": page, "size": size, "wallets": out}
 
     cutoff7d = int((time.time() - 7 * 86400) * 1000)
+    total_row = q1(db, "SELECT COUNT(*) c FROM watchlist WHERE score>=?", (line_native,))
+    total = (total_row["c"] if total_row else 0) or 0
     rows = qall(db,
-        "WITH followed AS ("
+        "WITH page_followed AS ("
         "  SELECT addr,rank,market_type,score,win_rate,top_coin,worst_single_loss_pct "
-        "  FROM watchlist WHERE score>=?"
+        "  FROM watchlist WHERE score>=? ORDER BY rank LIMIT ? OFFSET ?"
         "), ep7 AS ("
         "  SELECT e.addr, COUNT(*) AS closed_7d "
-        "  FROM episode e JOIN followed f ON f.addr=e.addr WHERE e.close_ms>=? GROUP BY e.addr"
+        "  FROM episode e JOIN page_followed f ON f.addr=e.addr WHERE e.close_ms>=? GROUP BY e.addr"
         "), copy_stats AS ("
         "  SELECT cp.addr, COUNT(*) AS follow_count,"
         "         SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) AS closed_n,"
         "         COALESCE(SUM(CASE WHEN status!='open' THEN realized_pnl ELSE unrealized_pnl END),0) AS fwd_net "
-        "  FROM copy_position cp JOIN followed f ON f.addr=cp.addr GROUP BY cp.addr"
+        "  FROM copy_position cp JOIN page_followed f ON f.addr=cp.addr GROUP BY cp.addr"
         ") "
         "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
         "COALESCE(c.enabled,1) AS enabled,pr.worst_loss_pct,l.week_roi,l.mon_roi,"
@@ -55,16 +64,16 @@ def ep_wallets(db, qs=None):
         "COALESCE(cs.follow_count,0) AS follow_count,"
         "COALESCE(cs.closed_n,0) AS closed_n,"
         "COALESCE(cs.fwd_net,0) AS fwd_net "
-        "FROM followed w "
+        "FROM page_followed w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
         "LEFT JOIN ep7 ON ep7.addr=w.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=w.addr "
-        "ORDER BY w.rank", (line_native, cutoff7d))
+        "ORDER BY w.rank", (line_native, size, page * size, cutoff7d))
 
     out = []
-    for i, r in enumerate(rows[page * size:page * size + size]):
+    for i, r in enumerate(rows):
         worst = r["worst_single_loss_pct"]
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
@@ -80,8 +89,8 @@ def ep_wallets(db, qs=None):
             "closedN": r["closed_n"],
             "forwardNetPnl": r["fwd_net"] or 0,
         })
-    return {"followLine": score100(line_native), "tab": "followed", "total": len(rows),
-            "followed": len(rows), "page": page, "size": size, "wallets": out}
+    return {"followLine": score100(line_native), "tab": "followed", "total": total,
+            "followed": total, "page": page, "size": size, "wallets": out}
 
 
 def ep_wallet_detail(db, addr, qs=None):

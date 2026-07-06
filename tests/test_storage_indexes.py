@@ -22,6 +22,7 @@ class StorageIndexTests(unittest.TestCase):
             "idx_prof_status_reason",
             "idx_watchlist_score_rank",
             "idx_watchlist_rank",
+            "idx_follow_history_last_followed",
             "idx_ep_addr_close",
             "idx_scan_runs_finished",
             "idx_cp_status_opened",
