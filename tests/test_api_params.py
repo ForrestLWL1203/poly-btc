@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from importlib import import_module, util
 
-from hl import api
+from hl import api_params
 
 
 class ApiParamsTests(unittest.TestCase):
@@ -12,9 +12,9 @@ class ApiParamsTests(unittest.TestCase):
         self.assertIsNotNone(util.find_spec("hl.api_params"))
         api_params = import_module("hl.api_params")
 
-        self.assertIs(api.ep_params, api_params.ep_params)
-        self.assertIs(api.patch_params, api_params.patch_params)
-        self.assertIs(api.reset_params, api_params.reset_params)
+        self.assertTrue(callable(api_params.ep_params))
+        self.assertTrue(callable(api_params.patch_params))
+        self.assertTrue(callable(api_params.reset_params))
 
     def test_patch_min_follow_score_stores_native_score(self):
         fd, path = tempfile.mkstemp(suffix=".db")
@@ -33,7 +33,7 @@ class ApiParamsTests(unittest.TestCase):
             db.commit()
             db.close()
 
-            updated = api.patch_params(path, "follow", {"MIN_FOLLOW_SCORE": 77})
+            updated = api_params.patch_params(path, "follow", {"MIN_FOLLOW_SCORE": 77})
 
             self.assertEqual(updated, {"MIN_FOLLOW_SCORE": 77})
             db = sqlite3.connect(path)

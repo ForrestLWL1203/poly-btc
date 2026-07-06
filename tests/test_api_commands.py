@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from importlib import import_module, util
 
-from hl import api
+from hl import api_commands
 
 
 class ApiCommandTests(unittest.TestCase):
@@ -25,16 +25,16 @@ class ApiCommandTests(unittest.TestCase):
         self.assertIsNotNone(util.find_spec("hl.api_commands"))
         api_commands = import_module("hl.api_commands")
 
-        self.assertIs(api.insert_command, api_commands.insert_command)
-        self.assertIs(api.exec_process_command, api_commands.exec_process_command)
-        self.assertIs(api.ep_command, api_commands.ep_command)
-        self.assertIs(api.ALLOWED_COMMANDS, api_commands.ALLOWED_COMMANDS)
+        self.assertTrue(callable(api_commands.insert_command))
+        self.assertTrue(callable(api_commands.exec_process_command))
+        self.assertTrue(callable(api_commands.ep_command))
+        self.assertIn("pause", api_commands.ALLOWED_COMMANDS)
 
     def test_insert_command_reuses_idempotency_key(self):
         path = self._commands_db()
         try:
-            cmd_id, status = api.insert_command(path, "pause", {"a": 1}, "same-key")
-            replay_id, replay_status = api.insert_command(path, "pause", {"a": 2}, "same-key")
+            cmd_id, status = api_commands.insert_command(path, "pause", {"a": 1}, "same-key")
+            replay_id, replay_status = api_commands.insert_command(path, "pause", {"a": 2}, "same-key")
 
             self.assertEqual(status, "pending")
             self.assertEqual(replay_status, "pending")

@@ -4,7 +4,7 @@ import unittest
 from importlib import import_module, util
 from pathlib import Path
 
-from hl import api, storage
+from hl import api_overview, storage
 
 
 class GuardedDb:
@@ -23,10 +23,10 @@ class ApiOverviewPerfTests(unittest.TestCase):
         self.assertIsNotNone(util.find_spec("hl.api_overview"))
         api_overview = import_module("hl.api_overview")
 
-        self.assertIs(api.ep_shadow, api_overview.ep_shadow)
-        self.assertIs(api.ep_overview, api_overview.ep_overview)
-        self.assertIs(api.ep_equity, api_overview.ep_equity)
-        self.assertIs(api.ep_insights, api_overview.ep_insights)
+        self.assertTrue(callable(api_overview.ep_shadow))
+        self.assertTrue(callable(api_overview.ep_overview))
+        self.assertTrue(callable(api_overview.ep_equity))
+        self.assertTrue(callable(api_overview.ep_insights))
 
     def test_overview_aggregates_closed_win_rate_in_sql(self):
         with tempfile.TemporaryDirectory() as td:
@@ -45,7 +45,7 @@ class ApiOverviewPerfTests(unittest.TestCase):
             )
             db.commit()
 
-            overview = api.ep_overview(GuardedDb(db))
+            overview = api_overview.ep_overview(GuardedDb(db))
 
         self.assertEqual(overview["winRatePct"], 50.0)
 

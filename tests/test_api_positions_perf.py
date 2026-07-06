@@ -4,7 +4,7 @@ import unittest
 from importlib import import_module, util
 from pathlib import Path
 
-from hl import api, params, storage
+from hl import api_positions, params, storage
 
 
 class GuardedDb:
@@ -49,12 +49,12 @@ class ApiPositionsPerfTests(unittest.TestCase):
         return db
 
     def test_open_positions_embed_follow_positions_without_extra_query(self):
-        res = api.ep_positions(GuardedDb(self._db()), {"status": ["open"]})
+        res = api_positions.ep_positions(GuardedDb(self._db()), {"status": ["open"]})
 
         self.assertEqual(res["positions"][0]["followPos"], 1)
 
     def test_closed_positions_embed_follow_positions_without_extra_query(self):
-        res = api.ep_positions(GuardedDb(self._db()), {"status": ["closed"]})
+        res = api_positions.ep_positions(GuardedDb(self._db()), {"status": ["closed"]})
 
         self.assertEqual(res["positions"][0]["followPos"], 1)
 
@@ -62,8 +62,8 @@ class ApiPositionsPerfTests(unittest.TestCase):
         self.assertIsNotNone(util.find_spec("hl.api_positions"))
         api_positions = import_module("hl.api_positions")
 
-        self.assertIs(api.ep_positions, api_positions.ep_positions)
-        self.assertIs(api.ep_position_detail, api_positions.ep_position_detail)
+        self.assertTrue(callable(api_positions.ep_positions))
+        self.assertTrue(callable(api_positions.ep_position_detail))
 
 
 if __name__ == "__main__":

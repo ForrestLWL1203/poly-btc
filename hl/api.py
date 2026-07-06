@@ -27,13 +27,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from . import procman
-from .api_commands import ALLOWED_COMMANDS, PROCESS_COMMANDS, ep_command, exec_process_command, insert_command
-from .api_discovery import ep_discovery, ep_scan_runs, ep_scan_status, ep_score_dist
-from .api_discovery import scanner_status as _scanner_status
-from .api_overview import ep_equity, ep_insights, ep_overview, ep_shadow
-from .api_params import ep_params, patch_params, reset_params
-from .api_positions import ep_position_detail, ep_positions
-from .api_wallets import ep_wallet_detail, ep_wallets
+from .api_overview import ep_overview
+from .api_positions import ep_positions
+from .api_routes import dispatch_get as _dispatch_get
+from .api_routes import dispatch_patch as _dispatch_patch
+from .api_routes import dispatch_post as _dispatch_post
 from .util import now_iso
 
 # ─────────────────────────────────────────────────────────────────────────── auth
@@ -115,10 +113,6 @@ def ro_connect(path):
     return db
 
 
-def _iso_ago(seconds):
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
-
-
 # ── SSE live stream (replaces polling for the fast-changing bundle) ──
 STREAM_MAX = 8                # cap concurrent stream connections (single-user; guards a reconnect storm)
 STREAM_TICK = 1.0            # server-side read cadence; we push only on CHANGE (+ heartbeat)
@@ -167,64 +161,18 @@ def make_handler(db_path, auth, static_dir=None):
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path == "/api/auth/login":
-                body = self._read_json() or {}
-                token, err = auth.login(body.get("username"), body.get("password"))
-                if err:
-                    code = 429 if err == "rate_limited" else 401
-                    return self._send(code, {"error": err})
-                return self._send(200, {"token": token,
-                                        "expiresAt": _iso_ago(-TOKEN_TTL_S)})
-            if path == "/api/commands":
-                if not self._authed():
-                    return self._send(401, {"error": "unauthorized"})
-                body = self._read_json() or {}
-                ctype = body.get("type")
-                if ctype not in ALLOWED_COMMANDS:
-                    return self._send(400, {"error": "bad_command_type", "detail": ctype})
-                try:
-                    if ctype in PROCESS_COMMANDS:            # dashboard executes these directly (procman)
-                        cmd_id, status = exec_process_command(db_path, ctype)
-                    else:                                    # soft commands: queued for the observer to consume
-                        cmd_id, status = insert_command(db_path, ctype, body.get("payload"),
-                                                        body.get("idempotencyKey"))
-                    return self._send(202, {"commandId": cmd_id, "status": status})
-                except Exception as e:  # noqa: BLE001
-                    return self._send(500, {"error": "server_error", "detail": str(e)})
-            if path.startswith("/api/params/") and path.endswith("/reset"):
-                if not self._authed():
-                    return self._send(401, {"error": "unauthorized"})
-                cat = path.split("/")[3]                      # /api/params/{cat}/reset
-                if cat not in ("follow", "scanner", "all"):
-                    return self._send(400, {"error": "bad_category"})
-                try:
-                    n = reset_params(db_path, cat)
-                    resp = {"reset": n}
-                    if cat in ("scanner", "all"):
-                        resp["pendingRescan"] = True           # scanner defaults need a rescan to bite
-                    return self._send(200, resp)
-                except Exception as e:  # noqa: BLE001
-                    return self._send(500, {"error": "server_error", "detail": str(e)})
+            handled, code, payload = _dispatch_post(db_path, auth, path, self._read_json() or {}, self._authed())
+            if handled:
+                return self._send(code, payload)
             return self._send(404, {"error": "not_found"})
 
         def do_PATCH(self):
             path = urlparse(self.path).path
             if not self._authed():
                 return self._send(401, {"error": "unauthorized"})
-            if path.startswith("/api/params/"):
-                cat = path.rsplit("/", 1)[1]
-                if cat not in ("follow", "scanner"):
-                    return self._send(400, {"error": "bad_category"})
-                try:
-                    updated = patch_params(db_path, cat, self._read_json() or {})
-                    resp = {"updated": updated}
-                    if cat == "scanner":
-                        resp["pendingRescan"] = True            # changes need a rescan to take effect
-                    return self._send(200, resp)
-                except ValueError as e:
-                    return self._send(422, {"error": str(e)})
-                except Exception as e:  # noqa: BLE001
-                    return self._send(500, {"error": "server_error", "detail": str(e)})
+            handled, code, payload = _dispatch_patch(db_path, path, self._read_json() or {})
+            if handled:
+                return self._send(code, payload)
             return self._send(404, {"error": "not_found"})
 
         def _read_json(self):
@@ -250,36 +198,9 @@ def make_handler(db_path, auth, static_dir=None):
                 return self._send(401, {"error": "unauthorized"})
             db = ro_connect(db_path)
             try:
-                if path == "/api/overview":
-                    return self._envelope(ep_overview(db))
-                if path == "/api/equity":
-                    return self._envelope(ep_equity(db, qs.get("range", ["all"])[0]))
-                if path == "/api/insights":
-                    return self._envelope(ep_insights(db))
-                if path == "/api/positions":
-                    return self._envelope(ep_positions(db, qs))
-                if path.startswith("/api/positions/"):
-                    pid = path.rsplit("/", 1)[1]
-                    if pid.isdigit():
-                        return self._envelope(ep_position_detail(db, int(pid)))
-                if path == "/api/wallets":
-                    return self._envelope(ep_wallets(db, qs))
-                if path.startswith("/api/wallets/"):
-                    return self._envelope(ep_wallet_detail(db, path.rsplit("/", 1)[1], qs))
-                if path == "/api/discovery":
-                    return self._envelope(ep_discovery(db))
-                if path == "/api/scan-runs":
-                    return self._envelope(ep_scan_runs(db, int(qs.get("limit", [20])[0])))
-                if path == "/api/params":
-                    return self._envelope(ep_params(db))
-                if path == "/api/scan-status":
-                    return self._envelope(ep_scan_status(db))
-                if path == "/api/score-dist":
-                    return self._envelope(ep_score_dist(db))
-                if path == "/api/shadow":
-                    return self._envelope(ep_shadow(db))
-                if path.startswith("/api/commands/"):
-                    return self._envelope(ep_command(db, int(path.rsplit("/", 1)[1])))
+                handled, data = _dispatch_get(db, path, qs)
+                if handled:
+                    return self._envelope(data)
                 return self._send(404, {"error": "not_found"})
             except Exception as e:                          # noqa: BLE001 — never 500 the dashboard
                 return self._send(500, {"error": "server_error", "detail": str(e)})

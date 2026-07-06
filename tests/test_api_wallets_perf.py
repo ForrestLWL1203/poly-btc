@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hl import api, params, storage
+from hl import api_wallets, params, storage
 
 
 class GuardedDb:
@@ -73,7 +73,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
             )
             db.commit()
 
-            res = api.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
 
         wallet = res["wallets"][0]
         self.assertEqual(wallet["followCount"], 1)
@@ -98,7 +98,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
             db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
             db.commit()
 
-            res = api.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
 
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
 
@@ -113,7 +113,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
             )
             db.commit()
 
-            res = api.ep_wallets(GuardedDb(db), {"tab": ["observing"]})
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["observing"]})
 
         self.assertEqual(res["tab"], "followed")
         self.assertEqual(res["followed"], 1)
@@ -138,7 +138,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
             )
             db.commit()
 
-            res = api.ep_wallet_detail(WalletDetailGuardedDb(db), "0xaaa")
+            res = api_wallets.ep_wallet_detail(WalletDetailGuardedDb(db), "0xaaa")
 
         self.assertEqual(res["closedN"], 1)
         record = res["records"][0]

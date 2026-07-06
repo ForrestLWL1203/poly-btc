@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 from importlib import import_module, util
 
-from hl import api
+from hl import api_discovery
 
 
 class ApiScannerStatusTests(unittest.TestCase):
@@ -19,12 +19,12 @@ class ApiScannerStatusTests(unittest.TestCase):
         return db
 
     def test_idle_batch_scanner_is_not_stale_between_timer_runs(self):
-        st = api._scanner_status(self._db_with_status("idle"))
+        st = api_discovery.scanner_status(self._db_with_status("idle"))
 
         self.assertFalse(st["stale"])
 
     def test_scanning_scanner_is_stale_when_heartbeat_is_old(self):
-        st = api._scanner_status(self._db_with_status("scanning"))
+        st = api_discovery.scanner_status(self._db_with_status("scanning"))
 
         self.assertTrue(st["stale"])
 
@@ -32,11 +32,11 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertIsNotNone(util.find_spec("hl.api_discovery"))
         api_discovery = import_module("hl.api_discovery")
 
-        self.assertIs(api._scanner_status, api_discovery.scanner_status)
-        self.assertIs(api.ep_discovery, api_discovery.ep_discovery)
-        self.assertIs(api.ep_scan_runs, api_discovery.ep_scan_runs)
-        self.assertIs(api.ep_scan_status, api_discovery.ep_scan_status)
-        self.assertIs(api.ep_score_dist, api_discovery.ep_score_dist)
+        self.assertTrue(callable(api_discovery.scanner_status))
+        self.assertTrue(callable(api_discovery.ep_discovery))
+        self.assertTrue(callable(api_discovery.ep_scan_runs))
+        self.assertTrue(callable(api_discovery.ep_scan_status))
+        self.assertTrue(callable(api_discovery.ep_score_dist))
 
 
 if __name__ == "__main__":
