@@ -20,6 +20,17 @@ class GuardedDb:
         return self.db.execute(sql, args)
 
 
+class DetailGuardedDb:
+    def __init__(self, db):
+        self.db = db
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        if normalized.startswith("SELECT ts,action,our_px,our_qty_delta,realized_pnl,master_oid FROM copy_action"):
+            raise AssertionError("position detail should aggregate action fills in SQL, not fetch every slice")
+        return self.db.execute(sql, args)
+
+
 class ApiPositionsPerfTests(unittest.TestCase):
     def _db(self):
         td = tempfile.TemporaryDirectory()
@@ -64,6 +75,45 @@ class ApiPositionsPerfTests(unittest.TestCase):
 
         self.assertTrue(callable(api_positions.ep_positions))
         self.assertTrue(callable(api_positions.ep_position_detail))
+
+    def test_position_detail_aggregates_action_fills_in_sql(self):
+        db = self._db()
+        pos_id = db.execute(
+            "INSERT INTO copy_position "
+            "(addr,coin,side,status,entry_px,leverage,margin,size,rem_size,master_open_px,opened_at) "
+            "VALUES ('0xaaa','BTC','long','open',100,5,100,5,5,99,'2026-01-01T00:00:00Z')"
+        ).lastrowid
+        rows = [
+            (pos_id, "0xaaa", "BTC", 1000, "add", 7, 100, 1, 0),
+            (pos_id, "0xaaa", "BTC", 1001, "add", 7, 110, 3, 0),
+            (pos_id, "0xaaa", "BTC", 2000, "reduce", 8, 120, -1, 5),
+            (pos_id, "0xaaa", "BTC", 2001, "close", 8, 130, -2, 15),
+        ]
+        db.executemany(
+            "INSERT INTO copy_action "
+            "(pos_id,addr,coin,ts,action,master_oid,our_px,our_qty_delta,realized_pnl) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        db.commit()
+
+        detail = api_positions.ep_position_detail(DetailGuardedDb(db), pos_id)
+
+        self.assertEqual(detail["masterAdds"], 1)
+        self.assertEqual(detail["ourAdds"], 1)
+        self.assertEqual(len(detail["fills"]), 2)
+        add_fill, close_fill = detail["fills"]
+        self.assertEqual(add_fill["action"], "add")
+        self.assertEqual(add_fill["fillCount"], 2)
+        self.assertEqual(add_fill["qty"], 4)
+        self.assertEqual(add_fill["px"], 107.5)
+        self.assertEqual(add_fill["margin"], 86.0)
+        self.assertIsNone(add_fill["pnl"])
+        self.assertEqual(close_fill["action"], "close")
+        self.assertEqual(close_fill["fillCount"], 2)
+        self.assertEqual(close_fill["qty"], 3)
+        self.assertAlmostEqual(close_fill["px"], 126.6666666667)
+        self.assertEqual(close_fill["pnl"], 20)
 
 
 if __name__ == "__main__":

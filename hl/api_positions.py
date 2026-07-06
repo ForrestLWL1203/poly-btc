@@ -131,25 +131,27 @@ def ep_position_detail(db, pos_id):
     c = q1(db, "SELECT COUNT(DISTINCT CASE WHEN action='add' THEN master_oid END) m_adds, "
                "COUNT(DISTINCT CASE WHEN action='add' AND ABS(our_qty_delta)>1e-12 THEN master_oid END) our_adds "
                "FROM copy_action WHERE pos_id=?", (pos_id,))
-    acts = qall(db, "SELECT ts,action,our_px,our_qty_delta,realized_pnl,master_oid FROM copy_action "
-                    "WHERE pos_id=? AND ABS(our_qty_delta) > 1e-12 ORDER BY ts,act_id", (pos_id,))
+    acts = qall(db,
+        "WITH base AS ("
+        "  SELECT act_id,ts,action,our_px,our_qty_delta,realized_pnl,"
+        "         CASE WHEN master_oid IS NOT NULL THEN 'm:'||master_oid ELSE 'n:'||ts END AS gkey "
+        "  FROM copy_action WHERE pos_id=? AND ABS(our_qty_delta) > 1e-12"
+        "), grouped AS ("
+        "  SELECT gkey,MIN(ts) AS ts,MIN(act_id) AS first_act_id,"
+        "         SUM(ABS(our_qty_delta)) AS sz,"
+        "         SUM(COALESCE(our_px,0)*ABS(our_qty_delta)) AS px_n,"
+        "         SUM(COALESCE(realized_pnl,0)) AS pnl,"
+        "         COUNT(*) AS n,"
+        "         MAX(CASE WHEN action='close' THEN 1 ELSE 0 END) AS has_close "
+        "  FROM base GROUP BY gkey"
+        ") "
+        "SELECT g.ts,CASE WHEN g.has_close THEN 'close' ELSE b.action END AS action,"
+        "       g.px_n,g.sz,g.pnl,g.n "
+        "FROM grouped g JOIN base b ON b.act_id=g.first_act_id "
+        "ORDER BY g.ts,g.first_act_id", (pos_id,))
     act_labels = {"open": "开仓", "add": "加仓", "reduce": "减仓", "close": "平仓"}
-    groups = {}
-    for a in acts:
-        key = a["master_oid"] if a["master_oid"] is not None else f"_n{a['ts']}"
-        g = groups.get(key)
-        if g is None:
-            g = {"action": a["action"], "ts": a["ts"], "px_n": 0.0, "sz": 0.0, "pnl": 0.0, "n": 0}
-            groups[key] = g
-        sz = abs(a["our_qty_delta"] or 0.0)
-        g["px_n"] += (a["our_px"] or 0.0) * sz
-        g["sz"] += sz
-        g["pnl"] += a["realized_pnl"] or 0.0
-        g["n"] += 1
-        if a["action"] == "close":
-            g["action"] = "close"
     fills = []
-    for g in groups.values():
+    for g in acts:
         sz = g["sz"]
         px = (g["px_n"] / sz) if sz else None
         entry = g["action"] in ("open", "add")
