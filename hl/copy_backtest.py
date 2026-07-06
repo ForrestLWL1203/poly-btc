@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 
 from . import config
+from .fill_transition import classify_fill_transition
 from .sizing import margin_pct_for_deploy
 from .util import f
 
@@ -205,9 +206,10 @@ class Backtest:
         pos1 = pos0 + signed
         key = (addr, coin)
         oid = x.get("oid")
+        transition = classify_fill_transition(pos0, pos1)
 
         was_flat = abs(pos0) < config.FLAT
-        if was_flat and abs(pos1) >= config.FLAT:
+        if transition in ("open", "flip") and abs(pos1) >= config.FLAT:
             self.target_open_events += 1
         if abs(pos1) < config.FLAT:
             self.target_pos.pop(key, None)
@@ -217,15 +219,20 @@ class Backtest:
 
         ep = self.open.get(key)
         if ep is None:
-            if was_flat and abs(pos1) >= config.FLAT:
+            if transition in ("open", "flip") and abs(pos1) >= config.FLAT:
                 self._open_position(addr, coin, x.get("time"), px, pos1, oid)
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
 
+        if transition == "flip":
+            ep["master_peak"] = max(ep["master_peak"], abs(pos0))
+            self._apply_reduce(addr, coin, px, -pos0, 0.0, closing=True, t=x.get("time"))
+            self._open_position(addr, coin, x.get("time"), px, pos1, oid)
+            return
+
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
-        growing = abs(pos1) >= abs(pos0) - config.FLAT and abs(pos1) >= config.FLAT
-        if growing:
+        if transition == "add":
             if oid is not None and oid in ep["seen_oids"]:
                 return
             ep["seen_oids"].add(oid)

@@ -173,6 +173,42 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["stops"], 1)
         self.assertEqual(result["liquidations"], 0)
 
+    def test_long_to_short_flip_closes_old_position_and_opens_new_one(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 70),
+            fill(2_000, "BTC", "A", 200, 100, 99.0, 71),
+            fill(3_000, "BTC", "B", 100, -100, 98.0, 72),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
+            "COPY_STOP_ENABLE": False,
+            "STABLE_MIN_NOTIONAL": 0.0,
+        })
+
+        self.assertEqual(result["closed_n"], 2)
+        self.assertEqual(result["target_open_events"], 2)
+        self.assertEqual(len(result["open_positions"]), 0)
+        self.assertEqual([p["side"] for p in result["positions"]], ["long", "short"])
+        self.assertEqual([p["closed_at"] for p in result["positions"]], [2_000, 3_000])
+
+    def test_short_to_long_flip_closes_old_position_and_opens_new_one(self):
+        fills = [
+            fill(1_000, "ETH", "A", 100, 0, 100.0, 80),
+            fill(2_000, "ETH", "B", 200, -100, 101.0, 81),
+            fill(3_000, "ETH", "A", 100, 100, 102.0, 82),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ETH": 0.08}, overrides={
+            "COPY_STOP_ENABLE": False,
+            "MID_MIN_NOTIONAL": 0.0,
+        })
+
+        self.assertEqual(result["closed_n"], 2)
+        self.assertEqual(result["target_open_events"], 2)
+        self.assertEqual(len(result["open_positions"]), 0)
+        self.assertEqual([p["side"] for p in result["positions"]], ["short", "long"])
+        self.assertEqual([p["closed_at"] for p in result["positions"]], [2_000, 3_000])
+
 
 if __name__ == "__main__":
     unittest.main()

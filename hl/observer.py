@@ -27,6 +27,7 @@ import time
 import websockets
 
 from . import config, rest, volatility, ws
+from .fill_transition import classify_fill_transition
 from .sizing import margin_pct_for_deploy
 from .util import f, now_iso, now_ms
 
@@ -918,9 +919,10 @@ class Observer:
         our_maker = maker if book.match_exec else False
         if our_maker and not self._maker_filled(coin, signed > 0, px):
             return   # v2 戳破: price didn't trade THROUGH our resting price → our maker order didn't fill (miss)
+        transition = classify_fill_transition(pos0, pos1)
         ep = book.open_ep.get(key)
         if ep is None:
-            if (abs(pos0) < config.FLAT and abs(pos1) >= config.FLAT
+            if (transition in ("open", "flip") and abs(pos1) >= config.FLAT
                     and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                     and not self.paused):               # dashboard pause = no new opens (existing keep to close)
                 self._open_position(addr, coin, t, px, pos1, our_maker, oid, book)
@@ -931,10 +933,16 @@ class Observer:
                             "skip_heldoff" if addr in self.held_off else
                             "skip_midway", book)         # midway = target already in the position when we saw it
             return
+        if transition == "flip":
+            ep["master_peak"] = max(ep["master_peak"], abs(pos0))
+            if liq:
+                ep["was_liq"] = 1
+            asyncio.create_task(self._apply_flip(addr, coin, ep, t, px, pos0, pos1, liq, our_maker, oid, book))
+            return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if liq:
             ep["was_liq"] = 1
-        if abs(pos1) >= abs(pos0) - config.FLAT and not abs(pos1) < config.FLAT:
+        if transition == "add":
             # A scale-in is a NEW ORDER (new oid) growing the position. Same-oid continued fills are
             # one resting order filling over time (slices) — aggregateByTime only merges same-INSTANT
             # fills, so a limit order filling over several seconds reappears as same-oid fills; counting
@@ -946,6 +954,16 @@ class Observer:
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
                                                    closing=abs(pos1) < config.FLAT, liq=liq, maker=our_maker, oid=oid, book=book))
+
+    async def _apply_flip(self, addr, coin, ep, t, master_px, pos0, pos1, liq, maker, oid, book=None):
+        book = book or self.taker
+        await self._apply_reduce(addr, coin, ep, t, master_px, -pos0, 0.0,
+                                 closing=True, liq=liq, maker=maker, oid=oid, book=book)
+        if (addr, coin) in book.open_ep:
+            return
+        if addr in self.held_off or self.paused:
+            return
+        self._open_position(addr, coin, t, master_px, pos1, maker, oid, book)
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None):
         book = book or self.taker
