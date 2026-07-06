@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS leaderboard (
     is_candidate  INTEGER DEFAULT 0,
     fetched_at    TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_leaderboard_candidate_mon_roi ON leaderboard(is_candidate, mon_roi DESC, addr);
+CREATE INDEX IF NOT EXISTS idx_leaderboard_candidate_week_roi ON leaderboard(is_candidate, week_roi DESC, addr);
+CREATE INDEX IF NOT EXISTS idx_leaderboard_candidate_mon_pnl ON leaderboard(is_candidate, mon_pnl DESC, addr);
 CREATE TABLE IF NOT EXISTS profile (
     addr             TEXT PRIMARY KEY,
     status           TEXT,
@@ -124,6 +127,8 @@ CREATE TABLE IF NOT EXISTS episode (
 CREATE INDEX IF NOT EXISTS idx_ep_addr ON episode(addr);
 CREATE INDEX IF NOT EXISTS idx_ep_addr_close ON episode(addr, close_ms);
 CREATE INDEX IF NOT EXISTS idx_prof_status ON profile(status);
+CREATE INDEX IF NOT EXISTS idx_prof_status_score_addr ON profile(status, score DESC, addr);
+CREATE INDEX IF NOT EXISTS idx_prof_status_reason ON profile(status, reason);
 
 -- OUR curated tiny leaderboard: current active targets, ranked, denormalized for UI.
 -- Derived (rebuilt each scan) from profile+leaderboard; single source of truth = profile.
@@ -194,6 +199,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     rejected    INTEGER,
     n_active    INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
 """
 
 PROFILE_COLS = (
@@ -390,6 +396,7 @@ CREATE TABLE IF NOT EXISTS commands (
     created_at      TEXT, acked_at TEXT, done_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cmd_status ON commands(status);
+CREATE INDEX IF NOT EXISTS idx_cmd_status_type_id ON commands(status, type, id);
 
 -- Liveness + state machine for the two background processes. Each upserts its own row per heartbeat;
 -- a stale heartbeat_at (vs now) signals a dead process for self-heal / UI "stale" badge.

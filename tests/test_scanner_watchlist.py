@@ -42,6 +42,55 @@ def _profile_row(addr, status, score, **overrides):
 
 
 class ScannerWatchlistTests(unittest.TestCase):
+    def test_incremental_scan_workset_rechecks_current_top_ranked_rejected_tail(self):
+        cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]
+        active = ["0xactive"]
+        profiled = {"0xactive", "0xold_good", "0xold_tail"}
+
+        workset, mode = scanner._profile_workset(
+            cand,
+            active,
+            profiled,
+            full_scan=False,
+            limit=100,
+            daily_recheck_top=2,
+        )
+
+        self.assertEqual(workset, ["0xactive", "0xnew", "0xold_good"])
+        self.assertIn("top-recheck", mode)
+
+    def test_incremental_scan_workset_keeps_off_list_actives_and_dedupes_recheck(self):
+        cand = ["0xactive", "0xold_good", "0xnew"]
+        active = ["0xactive", "0xoff"]
+        profiled = {"0xactive", "0xold_good", "0xoff"}
+
+        workset, _mode = scanner._profile_workset(
+            cand,
+            active,
+            profiled,
+            full_scan=False,
+            limit=100,
+            daily_recheck_top=3,
+        )
+
+        self.assertEqual(workset, ["0xactive", "0xnew", "0xold_good", "0xoff"])
+
+    def test_full_scan_workset_uses_all_candidates_plus_off_list_actives(self):
+        cand = ["0xa", "0xb"]
+        active = ["0xb", "0xoff"]
+
+        workset, mode = scanner._profile_workset(
+            cand,
+            active,
+            profiled={"0xa", "0xb", "0xoff"},
+            full_scan=True,
+            limit=100,
+            daily_recheck_top=0,
+        )
+
+        self.assertEqual(workset, ["0xa", "0xb", "0xoff"])
+        self.assertIn("FULL", mode)
+
     def test_copy_backtest_gate_rejects_copy_loss_with_enough_sample(self):
         m = {}
         ok, reason = scanner._apply_copy_bt_gate(

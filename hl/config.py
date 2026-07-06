@@ -389,6 +389,7 @@ PROFILE_FETCH_DAYS = 30
 # (still one cheap clearinghouse call per surviving candidate — that's current state, not history).
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
 FULL_RESYNC_DAYS = 7        # force a full-window re-fetch for all candidates at least this often (self-heal)
+DAILY_RECHECK_TOP_N = 80    # daily incremental scans also re-profile this many current top-ranked old candidates
 
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).

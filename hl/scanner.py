@@ -1,6 +1,6 @@
 """Discovery domain: the rolling scanner that maintains the live watchlist.
 
-harvest leaderboard -> coarse candidates -> profile work-set (actives + top-N new)
+harvest leaderboard -> coarse candidates -> profile work-set (actives + new + top rechecks)
 over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
@@ -69,6 +69,58 @@ def _due_for_full_resync(db):
         return (datetime.now(timezone.utc) - last).total_seconds() / 86400 >= config.FULL_RESYNC_DAYS
     except Exception:  # noqa: BLE001
         return True
+
+
+def _dedupe_preserve(items):
+    out = []
+    seen = set()
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily_recheck_top=None):
+    """Choose wallets to profile this scan.
+
+    Full scans sweep every current candidate plus off-list actives. Daily incremental scans still keep the
+    cheap active/new path, but also re-check the current leaderboard's top old candidates so recovered wallets
+    can replenish the watchlist before the weekly full resync.
+    """
+    candidates = list(candidates or [])
+    active_addrs = list(active_addrs or [])
+    limit = int(limit or 0)
+    limit = limit if limit > 0 else len(candidates) + len(active_addrs)
+    active_set = set(active_addrs)
+    profiled_set = set(profiled or [])
+    candidate_set = set(candidates)
+    off_active = [a for a in active_addrs if a not in candidate_set]
+    all_eligible = _dedupe_preserve(candidates + off_active)
+    if full_scan:
+        return all_eligible[:limit], "FULL (30d re-fetch, all candidates)"
+
+    active_new = [a for a in candidates if a in active_set or a not in profiled_set]
+    daily_recheck_top = (
+        config.DAILY_RECHECK_TOP_N if daily_recheck_top is None else int(daily_recheck_top or 0)
+    )
+    already = set(active_new)
+    top_recheck = []
+    if daily_recheck_top > 0:
+        for addr in candidates[:daily_recheck_top]:
+            if addr in already:
+                continue
+            top_recheck.append(addr)
+            already.add(addr)
+    workset = _dedupe_preserve(active_new + top_recheck + off_active)[:limit]
+    covered = len(set(active_new) | set(top_recheck))
+    deferred = max(0, len(candidates) - covered)
+    mode = (
+        f"INCREMENTAL daily-tier ({len(active_new)} active+new + {len(top_recheck)} top-recheck "
+        f"of {len(candidates)} cand; {deferred} deferred-tail -> weekly full)"
+    )
+    return workset, mode
 
 
 def _copy_bt_sigmas(db):
@@ -839,28 +891,16 @@ def scan(db, p) -> None:
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(p.order, "mon_roi")
     cand = [r[0] for r in db.execute(
         f"SELECT addr FROM leaderboard WHERE is_candidate=1 ORDER BY {order} DESC").fetchall()]
-    seen = set(cand)
     active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
-    active_set = set(active_addrs)
-    off_active = [a for a in active_addrs if a not in seen]   # actives that fell off the candidate list
-    all_eligible = cand + off_active                          # cache-retention set (prune everything else)
     # FULL re-fetch when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
     p.full_scan = getattr(p, "full_scan", False) or (not config.INCREMENTAL_SCAN) or _due_for_full_resync(db)
-    if p.full_scan:
-        workset = all_eligible[:p.limit]                      # weekly/manual: re-profile EVERYONE
-        mode = "FULL (30d re-fetch, all candidates)"
-    else:
-        # DAILY tiered: only ACTIVE wallets + BRAND-NEW (never-profiled) candidates. The already-profiled
-        # rejected long tail (won't flip active in a day) is deferred to the weekly full — cuts the daily
-        # request count ~4× with no follow-set impact (the watchlist is built from actives, all re-profiled).
-        profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
-        daily_cand = [a for a in cand if a in active_set or a not in profiled]
-        workset = (daily_cand + off_active)[:p.limit]
-        mode = (f"INCREMENTAL daily-tier ({len(daily_cand)} active+new of {len(cand)} cand; "
-                f"{len(cand) - len(daily_cand)} rejected-tail → weekly full)")
+    profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
+    workset, mode = _profile_workset(cand, active_addrs, profiled, p.full_scan, p.limit)
+    cand_set = set(cand)
+    off_active_n = len([a for a in active_addrs if a not in cand_set])
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
     _pace = config.MIN_POST_INTERVAL   # live adaptive pace (fast when no copy-trading, slow trickle when observer up)
-    print(f"scan: {mode} · {len(workset)} wallets + {len(off_active)} off-list actives, "
+    print(f"scan: {mode} · {len(workset)} wallets + {off_active_n} off-list actives, "
           f"{p.days}d window, pace {_pace:g}s/req ({'FULL-SPEED 无跟单' if _pace <= config.SCAN_IDLE_INTERVAL else '慢采·跟单进行中'})\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
