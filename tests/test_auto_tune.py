@@ -135,6 +135,34 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(overrides["DEPLOY_FULL_PCT"], 0.50)
         self.assertEqual(overrides["ADD_STRATEGY"], "smart")
 
+    def test_choose_candidate_uses_recent_window_for_capacity_and_liquidation_guard(self):
+        baseline = {
+            "mult": 1.0,
+            "windows": {
+                30: {"copy_net_pnl": 1000, "closed_n": 10, "capacity_open_fit": 0.90,
+                     "liquidations": 1, "target_open_events": 10, "skip_reasons": {}},
+                14: {"copy_net_pnl": 300, "closed_n": 5, "capacity_open_fit": 0.82,
+                     "liquidations": 1, "target_open_events": 5, "skip_reasons": {}},
+                7: {"copy_net_pnl": 80, "closed_n": 3, "capacity_open_fit": 0.90,
+                    "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+            },
+        }
+        recent_winner_with_older_liqs = {
+            "mult": 1.4,
+            "windows": {
+                30: {"copy_net_pnl": 1500, "closed_n": 10, "capacity_open_fit": 0.75,
+                     "liquidations": 5, "target_open_events": 10, "skip_reasons": {"skip_deploy_cap": 3}},
+                14: {"copy_net_pnl": 700, "closed_n": 5, "capacity_open_fit": 0.75,
+                     "liquidations": 1, "target_open_events": 5, "skip_reasons": {"skip_deploy_cap": 1}},
+                7: {"copy_net_pnl": 120, "closed_n": 3, "capacity_open_fit": 0.80,
+                    "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+            },
+        }
+
+        selected = auto_tune.choose_margin_candidate([baseline, recent_winner_with_older_liqs], baseline)
+
+        self.assertEqual(selected["mult"], 1.4)
+
 
 if __name__ == "__main__":
     unittest.main()

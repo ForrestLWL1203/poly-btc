@@ -144,23 +144,24 @@ def _capacity_fit(result: dict) -> float:
 def _candidate_valid(candidate: dict, baseline: dict) -> bool:
     windows = candidate.get("windows") or {}
     base_windows = baseline.get("windows") or {}
-    base30 = base_windows.get(30, {})
-    result30 = windows.get(30, {})
-    if not result30:
+    primary_days = 14 if 14 in windows and 14 in base_windows else max(windows) if windows else 0
+    base_primary = base_windows.get(primary_days, {})
+    result_primary = windows.get(primary_days, {})
+    if not result_primary:
         return False
 
     min_open_fit = max(
         float(getattr(config, "AUTO_TUNE_MARGIN_MIN_OPEN_FIT", 0.75)),
-        _capacity_fit(base30) - float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03)),
+        _capacity_fit(base_primary) - float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03)),
     )
-    if _capacity_fit(result30) < min_open_fit:
+    if _capacity_fit(result_primary) < min_open_fit:
         return False
-    if int(result30.get("liquidations") or 0) > int(base30.get("liquidations") or 0):
+    if int(result_primary.get("liquidations") or 0) > int(base_primary.get("liquidations") or 0):
         return False
 
-    base_skips = _capacity_skips(base30)
-    skip_allow = max(2, int((base30.get("target_open_events") or 0) * float(getattr(config, "AUTO_TUNE_MARGIN_CAP_SKIP_FRAC", 0.05))))
-    if _capacity_skips(result30) > base_skips + skip_allow:
+    base_skips = _capacity_skips(base_primary)
+    skip_allow = max(2, int((base_primary.get("target_open_events") or 0) * float(getattr(config, "AUTO_TUNE_MARGIN_CAP_SKIP_FRAC", 0.05))))
+    if _capacity_skips(result_primary) > base_skips + skip_allow:
         return False
 
     for days, result in windows.items():
