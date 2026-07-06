@@ -87,6 +87,8 @@ PARAM_SPEC = [
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
     #  tier cap + master-lev cap + margin/coin/deploy limits + σ-stop)
+    ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
+        "自动调保证金", "每日采集/重筛后按当前跟单钱包组合回测,自动微调三档单笔保证金;不动杠杆和上限"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,
         "稳定档·保证金", "稳定档(σ≤4%,如 BTC/GOLD)每单保证金,占可用%"),
     ("STABLE_LEV_CAP",       "follow",  "yellow", "x",       "immediate", config.STABLE_LEV_CAP,

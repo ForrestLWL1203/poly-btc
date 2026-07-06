@@ -11,7 +11,7 @@ import os
 import threading
 import time
 
-from . import config, metrics, params, rest, storage
+from . import auto_tune, config, metrics, params, rest, storage
 from .copy_backtest import run_backtest
 from .fills import build_episodes, is_spot
 from .util import f, now_iso
@@ -565,6 +565,27 @@ def refresh_watchlist(db, stamp) -> int:
     return len(rows)
 
 
+def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
+    try:
+        res = auto_tune.maybe_tune_margins(db, source=source, stamp=stamp)
+    except Exception as exc:  # noqa: BLE001 — auto tuning must never abort discovery
+        print(f"auto-tune margin: skipped after {source}: {exc}", flush=True)
+        return
+    if res.get("status") != "ok":
+        print(f"auto-tune margin: {res.get('status')}", flush=True)
+        return
+    margins = res.get("margins") or {}
+    print(
+        "auto-tune margin: "
+        f"mult={res.get('selected_mult')} applied={bool(res.get('applied'))} "
+        f"followed={res.get('followed_n')} "
+        f"stable={margins.get('STABLE_MARGIN_PCT', 0) * 100:.2f}% "
+        f"mid={margins.get('MID_MARGIN_PCT', 0) * 100:.2f}% "
+        f"high={margins.get('HIGH_MARGIN_PCT', 0) * 100:.2f}%",
+        flush=True,
+    )
+
+
 def _active_profile_addrs(db):
     return [r[0] for r in db.execute(
         "SELECT addr FROM profile WHERE status='active' ORDER BY score DESC, addr").fetchall()]
@@ -707,6 +728,7 @@ def regate(db, p) -> int:
         n_active += 1 if ok else 0
     db.commit()
     n = refresh_watchlist(db, stamp)
+    _maybe_auto_tune_margins(db, "regate", stamp)
     print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
     return n
 
@@ -831,6 +853,8 @@ def scan(db, p) -> None:
 
     _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
     n_active = refresh_watchlist(db, stamp)
+    _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
+    _maybe_auto_tune_margins(db, "scan", stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
     # drop cached fills for wallets that left the candidate universe entirely (not a candidate AND not

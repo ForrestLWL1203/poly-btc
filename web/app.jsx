@@ -747,7 +747,8 @@ const PARAM_META = {
 };
 const UNIT = { usd: "$", pct: "%", x: "×" };
 const STAGES_FE = [["scan_leaderboard", "扫描排行榜"], ["fetch_history", "拉取历史 & 算指标"],
-  ["score_filter", "评分 · 网格/扛单过滤"], ["rebuild_watchlist", "重建被跟名单"], ["persist", "写库 & 校验"]];
+  ["score_filter", "评分 · 网格/扛单过滤"], ["rebuild_watchlist", "重建被跟名单"],
+  ["auto_tune", "组合回测调参"], ["persist", "写库 & 校验"]];
 
 /* ----------------------------------------------------------------- scan mask */
 function ScanMask({ status }) {
@@ -1013,11 +1014,13 @@ function Settings({ startRescan, confirm, toast }) {
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
   const ADD_KEYS = new Set(["FOLLOW_POS_ADD", "SMART_ADD", "ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD",
     "ADD_FRAC", "STABLE_MAX_ADDS", "MID_MAX_ADDS", "HIGH_MAX_ADDS"]);   // 归入独立「加仓策略」tab
+  const AUTO_TUNE_KEY = "AUTO_TUNE_MARGIN_ENABLE";
   //  (单币上限 STABLE/MID/HIGH_COIN_CAP_PCT 已挪回「跟单策略 · σ分档」—— 它是全局灾难闸,管开仓+加仓,不是加仓专属)
   const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const editable = (p) => !(p.type === "display" || p.level === "black");
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
   const tabDirty = list.filter(p => dirty[p.key]);
+  const autoTuneParam = tab === "follow" ? list.find(p => p.key === AUTO_TUNE_KEY) : null;
 
   const Prow = (p) => {
     const m = PARAM_META[p.key] || {}; const ed = editable(p); const lvl = p.level;
@@ -1153,7 +1156,7 @@ function Settings({ startRescan, confirm, toast }) {
             </div>
           </React.Fragment>;
         })()}
-        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || ADD_KEYS.has(p.key)))).map(p => {
+        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY))).map(p => {
           if (tab === "follow" && p.key === "MIN_FOLLOW_SCORE") {
             const v = Number(vals.MIN_FOLLOW_SCORE);
             const n = scoreDist ? scoreDist.scores.filter(s => s >= v).length : null;
@@ -1170,8 +1173,16 @@ function Settings({ startRescan, confirm, toast }) {
           }
           return Prow(p);
         })}
-        {tab === "follow" && <div className="psec-h">保证金与杠杆 · 按波动率 σ 分档
-          <span>杠杆 = σ 所在档位的上限(σ 定档),这里设各档的单笔保证金% 与杠杆上限</span></div>}
+        {tab === "follow" && <div className="psec-h psec-h-row">
+          <div className="psec-title-block">保证金与杠杆 · 按波动率 σ 分档
+            <span>杠杆 = σ 所在档位的上限(σ 定档),这里设各档的单笔保证金% 与杠杆上限</span></div>
+          {autoTuneParam && <div className={"psec-switch" + (dirty[AUTO_TUNE_KEY] ? " dirty" : "")} title={autoTuneParam.desc}>
+            <span>自动调保证金</span>
+            <div className={"toggle " + (vals[AUTO_TUNE_KEY] ? "on" : "")}
+              onClick={() => editable(autoTuneParam) && set(AUTO_TUNE_KEY, !vals[AUTO_TUNE_KEY])}
+              style={{ opacity: editable(autoTuneParam) ? 1 : .5 }}><div className="knob" /></div>
+          </div>}
+        </div>}
         {tab === "follow" && TIER_GROUPS.map(g => {
           const open = openTiers[g.key];
           const rows = g.keys.map(k => list.find(p => p.key === k)).filter(Boolean);

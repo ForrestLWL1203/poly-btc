@@ -398,7 +398,7 @@ CREATE TABLE IF NOT EXISTS scan_progress (
     id                 INTEGER PRIMARY KEY CHECK (id = 1),
     state              TEXT,              -- idle|scanning
     started_at         TEXT,
-    stage              TEXT,              -- scan_leaderboard|fetch_history|score_filter|rebuild_watchlist|persist
+    stage              TEXT,              -- scan_leaderboard|fetch_history|score_filter|rebuild_watchlist|auto_tune|persist
     candidates_scanned INTEGER DEFAULT 0,
     candidates_total   INTEGER DEFAULT 0,
     eta_sec            INTEGER,
@@ -431,6 +431,25 @@ CREATE TABLE IF NOT EXISTS params (
     effect        TEXT,                   -- rescan | immediate
     default_value TEXT,
     updated_at    TEXT
+);
+
+-- Auto-tuner audit/state. State stores the operator's manual baseline separately from the
+-- last auto-applied value, so daily tuning never compounds on yesterday's tuned result.
+CREATE TABLE IF NOT EXISTS auto_tune_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS auto_tune_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    source        TEXT,
+    stamp         TEXT,
+    selected_mult REAL,
+    applied       INTEGER DEFAULT 0,
+    followed_n    INTEGER DEFAULT 0,
+    baseline_json TEXT,
+    result_json   TEXT,
+    created_at    TEXT
 );
 """
 
