@@ -100,6 +100,16 @@ CREATE TABLE IF NOT EXISTS profile (
     pf_max_dd        REAL,                -- v7: max drawdown from the account-value curve (fraction)
     pf_turnover      REAL,                -- v7: 7d vlm / equity — frequency proxy (trend traders <~50x, bots >>100x)
     pf_edge_bps      REAL,                -- v7: 7d net PnL / vlm ×1e4 — profit per $ traded vs our ~9bp taker cost
+    copy_bt_net_pnl  REAL,                -- copy replay net PnL under current observer rules (fees included)
+    copy_bt_win_rate REAL,                -- copy replay closed-position win rate
+    copy_bt_closed_n INTEGER DEFAULT 0,   -- copy replay closed positions
+    copy_bt_open_fill_rate REAL,          -- copied opens / target open events
+    copy_bt_liquidations INTEGER DEFAULT 0,
+    copy_bt_fee_drag REAL DEFAULT 0,
+    copy_bt_14d_net_pnl REAL,             -- recent copy replay net PnL (14d confirmation)
+    copy_bt_14d_closed_n INTEGER DEFAULT 0,
+    copy_bt_7d_net_pnl REAL,              -- short-term copy replay net PnL (7d confirmation)
+    copy_bt_7d_closed_n INTEGER DEFAULT 0,
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -193,8 +203,10 @@ PROFILE_COLS = (
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
     "net_7d,net_14d,net_30d,net_life,life_trades,"
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_max_dd,pf_turnover,pf_edge_bps,"
+    "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,copy_bt_liquidations,copy_bt_fee_drag,"
+    "copy_bt_14d_net_pnl,copy_bt_14d_closed_n,copy_bt_7d_net_pnl,copy_bt_7d_closed_n,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 75 columns
+)  # 85 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -471,6 +483,16 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN pf_max_dd REAL",
     "ALTER TABLE profile ADD COLUMN pf_turnover REAL",
     "ALTER TABLE profile ADD COLUMN pf_edge_bps REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_win_rate REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_closed_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_open_fill_rate REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_liquidations INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_fee_drag REAL DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_14d_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_14d_closed_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_7d_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_7d_closed_n INTEGER DEFAULT 0",
     # 盈亏比 (avg_win/avg_loss) + 平均赢/亏 — 大亏小赚 & 低胜率真趋势客的判据
     "ALTER TABLE profile ADD COLUMN avg_win REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN avg_loss REAL DEFAULT 0",

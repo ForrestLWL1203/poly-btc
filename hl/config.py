@@ -312,15 +312,12 @@ PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet ov
 HOLD_SKEW_FREE = 3.0   # skew up to 3× is tolerated (holding small losers a bit longer ≠ blow-up risk)
 HOLD_SKEW_W    = 0.5   # weight of the (hold_skew - FREE) term inside disc
 
-# ── DISCIPLINE GATES (2026-06-30) — promote the SOFT score sub-terms above to HARD watchlist-entry
-# gates, so a 赌徒 never enters the watchlist at all (not merely ranked low). These use metrics ALREADY
-# stored on the profile (loss_pain / hold_skew / profit_conc) → `regate` applies them instantly with no
-# re-fetch. Plus a LIFETIME-net check (the one new datum, from the full-history fetch) that catches a
-# wallet whose blow-up is OLDER than the 14d scoring window (e.g. #47: clean 14d, but -123k over 287d).
-# All UI-tunable (params.py → apply_scanner_params overlays onto the scan/regate namespace).
-GATE_LOSS_PAIN_MAX   = 1.0   # reject if |worst realized loss| / median win ≥ this (要求小亏大赚:worst<median win). 0 = off.
-GATE_HOLD_SKEW_MAX   = 1.5   # reject if median losing-hold / winning-hold ≥ this (抗单). 0 = off.
-GATE_PROFIT_CONC_MAX = 0.8   # reject if one day ≥ this share of gross profit (一把行情/未经验证). 0 = off.
+# Retired discipline hard-gates. Kept only so old scan namespaces / stale DB refs don't break.
+# Do NOT use these as active vetoes: loss_pain / hold_skew can be high on wallets that are still
+# profitable under our actual copy rules. Copyability is now judged by COPY_BT_* replay below.
+GATE_LOSS_PAIN_MAX   = 1.0
+GATE_HOLD_SKEW_MAX   = 1.5
+GATE_PROFIT_CONC_MAX = 0.8
 GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
 #                                    net_life field is absent (old profiles) so regate is safe pre-rescan.
 GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月在走下坡). Same absent-skip.
@@ -348,6 +345,11 @@ EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 →
 EVIDENCE_MIN_TRADES = 7   #                已平回合 < 此 同理. 5天/7回合≈0.5单/天,砍纯持有+小样本尾巴,不误伤好钱包
 MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active = 全是好钱包(watchlist),跟单再从中取前N
 #                          (operator-tuned 0.60: 质量线切掉 ~72 个尾巴,active 只留够优质的)
+COPY_BT_GATE_ENABLE = True  # active 准入二次校验: 用历史 fills 按当前 observer 规则回放,目标赚但我们亏 → 不跟
+COPY_BT_DAYS = 30           # copy 回测窗口。用 30d 覆盖 14d 评分外的复制不稳定性,但仍是近期窗口
+COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到按比例缩放的样本数后,近期 copy 亏损也不进 active
+COPY_BT_MIN_CLOSED = 7      # copy 回测至少有这么多已平仓才作为硬闸,样本太少先只记录不否决
+COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 MAX_CONCURRENT_POS = 15  # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。

@@ -45,10 +45,7 @@ def _scan_ns():
     return SimpleNamespace(days=14, limit=100000, order="mon_roi", no_harvest=False, full_scan=False,
                            workers=4, scan_interval=10.0, max_pages=5, min_crypto=0.3,
                            exclude_hft=True, hft_min_hold_min=3.0,
-                           max_single_adds=config.MAX_SINGLE_ADDS_PER_EP,
-                           gate_loss_pain_max=config.GATE_LOSS_PAIN_MAX,
-                           gate_hold_skew_max=config.GATE_HOLD_SKEW_MAX,
-                           gate_profit_conc_max=config.GATE_PROFIT_CONC_MAX)
+                           max_single_adds=config.MAX_SINGLE_ADDS_PER_EP)
 
 
 def _hours_since_last_scan(db):

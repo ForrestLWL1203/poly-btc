@@ -6,11 +6,13 @@ Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
 import json
+import math
 import os
 import threading
 import time
 
 from . import config, metrics, params, rest, storage
+from .copy_backtest import run_backtest
 from .fills import build_episodes, is_spot
 from .util import f, now_iso
 
@@ -67,6 +69,155 @@ def _due_for_full_resync(db):
         return (datetime.now(timezone.utc) - last).total_seconds() / 86400 >= config.FULL_RESYNC_DAYS
     except Exception:  # noqa: BLE001
         return True
+
+
+def _copy_bt_sigmas(db):
+    try:
+        return {coin: sigma for coin, sigma in db.execute("SELECT coin,sigma FROM coin_vol WHERE sigma IS NOT NULL")}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _copy_bt_overrides(db):
+    try:
+        vals = params.load_follow(db)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = dict(vals)
+    if "SMART_ADD" in vals:
+        out["ADD_STRATEGY"] = "smart" if vals["SMART_ADD"] else "hardcap"
+    return out
+
+
+def _copy_bt_window_days(p):
+    base = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    days = [base] + list(getattr(config, "COPY_BT_RECENT_DAYS", (14, 7)))
+    out = []
+    for d in days:
+        try:
+            v = int(d)
+        except (TypeError, ValueError):
+            continue
+        if v > 0 and v not in out and v <= base:
+            out.append(v)
+    return out or [base]
+
+
+def _copy_bt_min_closed_for_days(p, days):
+    base_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    base_min = int(getattr(p, "copy_bt_min_closed", config.COPY_BT_MIN_CLOSED) or 0)
+    if base_days <= 0 or days >= base_days:
+        return base_min
+    return max(1, int(math.ceil(base_min * days / base_days)))
+
+
+def _copy_bt_result(addr, fills, now_ms, p, days=None):
+    days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
+    start_ms = now_ms - days * 86400_000
+    replay_fills = [x for x in fills if x.get("time", 0) >= start_ms]
+    if not replay_fills:
+        return {}
+    try:
+        return run_backtest(
+            addr,
+            replay_fills,
+            sigmas=getattr(p, "copy_bt_sigmas", None) or {},
+            overrides=getattr(p, "copy_bt_overrides", None) or {},
+        )
+    except Exception:  # noqa: BLE001 — backtest is a quality aid; never kill discovery on a replay bug
+        return {}
+
+
+def _copy_bt_results(addr, fills, now_ms, p):
+    return {days: _copy_bt_result(addr, fills, now_ms, p, days=days) for days in _copy_bt_window_days(p)}
+
+
+def _record_primary_copy_bt(m, result):
+    if not result:
+        return
+    opened = int(result.get("opened_n") or 0)
+    target_open = int(result.get("target_open_events") or 0)
+    m.update(
+        copy_bt_net_pnl=result.get("copy_net_pnl"),
+        copy_bt_win_rate=result.get("copy_win_rate"),
+        copy_bt_closed_n=int(result.get("closed_n") or 0),
+        copy_bt_open_fill_rate=(opened / target_open) if target_open else None,
+        copy_bt_liquidations=int(result.get("liquidations") or 0),
+        copy_bt_fee_drag=result.get("fee_drag"),
+    )
+
+
+def _record_recent_copy_bt(m, days, result):
+    if not result:
+        return
+    if days == 14:
+        m["copy_bt_14d_net_pnl"] = result.get("copy_net_pnl")
+        m["copy_bt_14d_closed_n"] = int(result.get("closed_n") or 0)
+    elif days == 7:
+        m["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
+        m["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
+
+
+def _apply_copy_bt_gate(m, result, p):
+    if not result:
+        return True, "ok"
+
+    if "copy_net_pnl" in result:
+        days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+        _record_primary_copy_bt(m, result)
+        if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
+            return True, "ok"
+        if int(result.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
+            return True, "ok"
+        net = result.get("copy_net_pnl")
+        min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
+        if net is not None and net <= min_net:
+            return False, "copy_backtest_loss"
+        return True, "ok"
+
+    by_days = {}
+    for days, res in result.items():
+        try:
+            d = int(days)
+        except (TypeError, ValueError):
+            continue
+        if res:
+            by_days[d] = res
+    if not by_days:
+        return True, "ok"
+
+    primary_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    primary = by_days.get(primary_days) or by_days.get(max(by_days))
+    _record_primary_copy_bt(m, primary)
+    for days, res in by_days.items():
+        _record_recent_copy_bt(m, days, res)
+
+    if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
+        return True, "ok"
+    min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
+    for days in sorted(by_days, reverse=True):
+        res = by_days[days]
+        if int(res.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
+            continue
+        net = res.get("copy_net_pnl")
+        if net is not None and net <= min_net:
+            return False, "copy_backtest_loss" if days == primary_days else f"copy_backtest_loss_{days}d"
+    return True, "ok"
+
+
+def _copy_bt_cached_fills(db, addr, now_ms, p):
+    """Cached copyable fills for regate's no-network copy replay."""
+    days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    start_ms = now_ms - days * 86400_000
+    out = []
+    for x in _load_cached_fills(db, addr, start_ms):
+        coin = x.get("coin")
+        if not coin or is_spot(coin):
+            continue
+        row = dict(x)
+        row["user"] = addr
+        out.append(row)
+    return out
 
 
 def _fetch_profile_fills(db, addr, window_start, p, full):
@@ -341,6 +492,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
         m["pf_max_dd"] = _pm.get("max_drawdown") or _pw.get("max_drawdown")   # 30d curve = fuller DD picture
         m["pf_turnover"], m["pf_edge_bps"] = _pw.get("turnover"), _pw.get("edge_bps")
         ok, reason = metrics.gates_state(m, now_ms, p)
+    if ok:
+        ok, reason = _apply_copy_bt_gate(m, _copy_bt_results(addr, perp_full, now_ms, p), p)
     m["times_active"] += 1 if ok else 0
 
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
@@ -445,6 +598,8 @@ def regate(db, p) -> int:
     full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
     now = int(time.time() * 1000)
     stamp = now_iso()
+    p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
+    p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
     rows = db.execute(
         "SELECT p.addr,status,n_trades,n_fills,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
@@ -452,7 +607,10 @@ def regate(db, p) -> int:
         "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
         "l.week_roi,l.mon_roi,l.all_roi,"                      # HL return-on-capital windows for the ROI pillar
         "p.pf_turnover,p.pf_mon_pnl,p.pf_mon_vlm,p.pf_week_pnl,p.pf_equity,"   # v7 portfolio net metrics (gates + ROI)
-        "p.payoff_ratio,p.pf_week_vlm "   # v9: needed so regate applies the SAME payoff + edge-decay gates as a scan
+        "p.payoff_ratio,p.pf_week_vlm,"   # v9: needed so regate applies the SAME payoff + edge-decay gates as a scan
+        "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
+        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n "
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr").fetchall()
     # p90 per-episode fill count per wallet, from the stored episode table (regate has no fills to rebuild
     # from) — feeds the algo-slicer gate. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
@@ -483,7 +641,9 @@ def regate(db, p) -> int:
         (addr, old, n_tr, n_fills, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
          ad, ar, meps, avgnotl, pdr, conc, skew, uw, mxadds, mdadds, wloss, mhold, wr,
          roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
-         wkroi, moroi, alroi, pf_turn, pf_mpnl, pf_mvlm, pf_wpnl, pf_eq, pay, pf_wvlm) = r
+         wkroi, moroi, alroi, pf_turn, pf_mpnl, pf_mvlm, pf_wpnl, pf_eq, pay, pf_wvlm,
+         copy_net, copy_wr, copy_closed, copy_open_fill_rate, copy_liqs, copy_fee,
+         copy14_net, copy14_closed, copy7_net, copy7_closed) = r
         m = {"n_trades": n_tr or 0, "n_fills": n_fills or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -509,7 +669,12 @@ def regate(db, p) -> int:
              "pf_week_pnl": pf_wpnl, "pf_equity": pf_eq,
              # v9: payoff (大亏小赚 gate) + week vlm (edge-decay gate) — MUST be here or regate skips both
              # gates the scan applies, silently re-activating wallets the scan rejected (the 128 vs 165 bug).
-             "payoff_ratio": pay, "pf_week_vlm": pf_wvlm}
+             "payoff_ratio": pay, "pf_week_vlm": pf_wvlm,
+             "copy_bt_net_pnl": copy_net, "copy_bt_win_rate": copy_wr,
+             "copy_bt_closed_n": copy_closed, "copy_bt_open_fill_rate": copy_open_fill_rate,
+             "copy_bt_liquidations": copy_liqs, "copy_bt_fee_drag": copy_fee,
+             "copy_bt_14d_net_pnl": copy14_net, "copy_bt_14d_closed_n": copy14_closed,
+             "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_closed_n": copy7_closed}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
         m["loss_pain"] = metrics.loss_pain(
@@ -517,12 +682,28 @@ def regate(db, p) -> int:
         ok, reason = metrics.gates_structural(m, p)
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
+        if ok:
+            ok, reason = _apply_copy_bt_gate(
+                m,
+                _copy_bt_results(addr, _copy_bt_cached_fills(db, addr, now, p), now, p),
+                p,
+            )
         score = metrics.score(m) if ok else 0.0
         if ok and score < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
             ok, reason, score = False, "low_quality", 0.0      # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
         status = "active" if ok else ("retired" if old == "active" else "rejected")
-        db.execute("UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=?,win_pt=? WHERE addr=?",
-                   (status, reason, score, m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0), addr))
+        db.execute(
+            "UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
+            "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
+            "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_14d_net_pnl=?,copy_bt_14d_closed_n=?,"
+            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=? WHERE addr=?",
+            (status, reason, score, m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
+             m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
+             m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
+             m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_closed_n"),
+             m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_closed_n"),
+             addr),
+        )
         n_active += 1 if ok else 0
     db.commit()
     n = refresh_watchlist(db, stamp)
@@ -565,6 +746,8 @@ def scan(db, p) -> None:
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
                        candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
+    p.copy_bt_sigmas = _copy_bt_sigmas(db)
+    p.copy_bt_overrides = _copy_bt_overrides(db)
 
     universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)
     if not p.no_harvest:
