@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hl import scanner, storage
+from hl import scanner, scanner_lifecycle, storage
 
 
 def _profile_row(addr, status, score, **overrides):
@@ -120,7 +120,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             )
             db.commit()
 
-            counts = scanner._prune_discovery_cache(db)
+            counts = scanner_lifecycle.prune_discovery_cache(db)
 
             self.assertEqual(counts["profiles"], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xgone'").fetchone()[0], 0)
@@ -136,7 +136,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         active = ["0xactive"]
         profiled = {"0xactive", "0xold_good", "0xold_tail"}
 
-        workset, mode = scanner._profile_workset(
+        workset, mode = scanner_lifecycle.profile_workset(
             cand,
             active,
             profiled,
@@ -154,7 +154,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         active = ["0xactive", "0xoff"]
         profiled = {"0xactive", "0xold_good", "0xoff"}
 
-        workset, _mode = scanner._profile_workset(
+        workset, _mode = scanner_lifecycle.profile_workset(
             cand,
             active,
             profiled,
@@ -169,7 +169,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         cand = ["0xa", "0xb"]
         active = ["0xb", "0xoff"]
 
-        workset, mode = scanner._profile_workset(
+        workset, mode = scanner_lifecycle.profile_workset(
             cand,
             active,
             profiled={"0xa", "0xb", "0xoff"},
