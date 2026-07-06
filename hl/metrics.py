@@ -227,6 +227,8 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "inactive"                               # no recent fills AND no live position
     if (m.get("roi_total") if m.get("roi_total") is not None else m.get("net_pnl", 0)) <= 0:
         return False, "not_profitable"                         # realized + UNREALIZED net loss (catches 扛单)
+    if config.GATE_REQUIRE_WINDOW_NET and m.get("net_pnl") is not None and m["net_pnl"] <= 0:
+        return False, "recent_window_loss"                      # recent copyable contract leg is losing
     if m["activity_ratio"] < p.min_activity and not trend:     # low-freq noise — but a genuine trend
         return False, "irregular"                              # holder (winning open) is exempt
     # NOTE (v5 2026-06-30): the loss_pain/hold_skew/profit_conc/blow-up HARD gates were REMOVED — they

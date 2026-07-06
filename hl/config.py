@@ -324,6 +324,9 @@ GATE_PROFIT_CONC_MAX = 0.8   # reject if one day ≥ this share of gross profit 
 GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
 #                                    net_life field is absent (old profiles) so regate is safe pre-rescan.
 GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月在走下坡). Same absent-skip.
+GATE_REQUIRE_WINDOW_NET   = True   # reject if the current scoring window's copyable-perp realized net ≤ 0.
+#                                    Portfolio/leaderboard pnl can include account effects we do not copy;
+#                                    the profile window is the actual recent contract leg we can observe.
 # v7 PORTFOLIO copyability gates (from HL portfolio: net-of-fees, deposit-adjusted; only when pf data present).
 PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >this = HFT bot (unreplicable at our latency +
 #                                  fee-drag we can't outrun). Full-pop dist: p75=39x (trend), p90=126x (bots).
