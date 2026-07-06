@@ -102,6 +102,24 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
 
+    def test_wallets_observing_tab_falls_back_to_followed_without_legacy_bucket(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
+                "VALUES (1,'0xaaa',0.9,'crypto',0.75,'BTC','now')"
+            )
+            db.commit()
+
+            res = api.ep_wallets(GuardedDb(db), {"tab": ["observing"]})
+
+        self.assertEqual(res["tab"], "followed")
+        self.assertEqual(res["followed"], 1)
+        self.assertNotIn("observing", res)
+        self.assertEqual(res["wallets"][0]["followPos"], 1)
+
     def test_wallet_detail_records_are_lean_and_lazy_load_position_detail(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

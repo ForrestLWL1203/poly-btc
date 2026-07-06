@@ -540,7 +540,7 @@ function Wallets({ confirm, toast }) {
   const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);             // 10/page
-  const [tab, setTab] = useState("followed");        // followed(实跟) | observing(样本观察) | dropped(降级)
+  const [tab, setTab] = useState("followed");        // followed(实跟) | dropped(降级)
   // 一次全取回(列表就 ~几十个),浏览器本地翻页 → 翻页零网络往返(VPS 在欧洲,跨洋 RTT 高,别每页都请求)
   const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&size=500").then(setData).catch(() => {}); }, [tab]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
@@ -562,11 +562,9 @@ function Wallets({ confirm, toast }) {
       <div className="section-h" style={{ marginTop: 6 }}>
         <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {
           tab === "followed" ? "实跟 " + data.total + " 个(与跟单脚本一致)"
-          : tab === "observing" ? "样本观察 " + data.total + " 个(达标但样本不足,暂不跟)"
           : "降级 " + data.total + " 个"}</span>}</h2>
         <div className="range-tabs">
           <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中{data && data.followed != null ? " " + data.followed : ""}</button>
-          <button className={tab === "observing" ? "on" : ""} onClick={() => { setTab("observing"); setWpage(0); }}>样本观察{data && data.observing != null ? " " + data.observing : ""}</button>
           <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
         </div>
       </div>
@@ -610,9 +608,7 @@ function Wallets({ confirm, toast }) {
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num"><b style={{ color: w.evidenceHeld ? "var(--t2)" : (w.score >= data.followLine ? "var(--green-l)" : "var(--t2)") }}>{fNum(w.score, 1)}</b>
-                    {w.evidenceHeld && <div style={{ fontSize: 10, color: "var(--amber-l, #e0a23a)" }} title="评分达标,但成交笔数/活跃天数未到证据门槛,仅观察不跟单">样本观察</div>}
-                  </td>
+                  <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
                   <td className="num">{fNum(w.winRatePct, 0)}%</td>
                   <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
@@ -722,8 +718,6 @@ function WalletDrawer({ address, onClose }) {
 const PARAM_META = {
   // follow
   MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "watchlist 里评分≥此线的钱包才实际跟单(0–100 标准化分,见下方实时达标数)", range: "—", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
-  FOLLOW_MIN_TRADES: { name: "跟单·最低成交笔数", desc: "证据门槛:近30天平掉回合数<此=样本太薄,留在名单观察但不跟单", range: "5–10", up: "只跟履历厚的、更稳", dn: "放进薄样本、信号更多" },
-  FOLLOW_MIN_ACTIVE_DAYS: { name: "跟单·最低活跃天数", desc: "证据门槛:活跃天数<此=履历太短,留在名单观察但不跟单", range: "3–5", up: "只跟交易天数多的", dn: "放进新钱包" },
   STABLE_MARGIN_MIN_PCT: { name: "稳定档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "2–5", up: "低频期每单更重", dn: "低频期每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },

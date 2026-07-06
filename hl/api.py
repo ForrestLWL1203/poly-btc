@@ -577,8 +577,9 @@ def ep_wallets(db, qs=None):
             "mainCoin": r["top_coin"],
         } for r in rows]
         return {"followLine": score100(line_native), "total": len(out), "tab": "dropped", "wallets": out}
-    # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
-    # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
+    # Only the wallets we ACTUALLY follow: score above the follow line. enabled+disabled both shown so the
+    # toggle works. Evidence is enforced at profile time by scanner gates, so there is no thin-sample holdback
+    # bucket here.
     cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
     # Pre-aggregate forward stats once, then join them to the followed watchlist rows. This avoids repeated
     # per-wallet probes of episode/copy_position as the forward history grows.
@@ -608,22 +609,16 @@ def ep_wallets(db, qs=None):
         "LEFT JOIN ep7 ON ep7.addr=w.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=w.addr "
         "ORDER BY w.rank", (line_native, cutoff7d))
-    # v10: evidence is enforced at profile time (scanner EVIDENCE gate), so every wallet above the follow
-    # line IS copied — no thin-sample holdback. FOLLOWED = score≥line (the real copy set); OBSERVING is now
-    # empty (kept for the frontend's tab contract).
-    def _held(r):
-        return False
-    foll = [r for r in rows if not _held(r)]
-    obs = [r for r in rows if _held(r)]
     tab = (qs.get("tab", ["followed"]))[0]
-    sel = obs if tab == "observing" else foll
+    if tab != "followed":
+        tab = "followed"
     out = []
-    for i, r in enumerate(sel[page * size:page * size + size]):
+    for i, r in enumerate(rows[page * size:page * size + size]):
         worst = r["worst_single_loss_pct"]
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
         out.append({
-            "followPos": (page * size + i + 1) if tab != "observing" else None,   # 1..N position in the copy set
+            "followPos": page * size + i + 1,   # 1..N position in the copy set
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0),   # ROI shown = recent HL 收益/本金 (周+月),与评分 ROI 支柱同口径
             "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
@@ -634,8 +629,8 @@ def ep_wallets(db, qs=None):
             "closedN": r["closed_n"],                              # our forward (real copy) results
             "forwardNetPnl": r["fwd_net"] or 0,                    # 总体盈亏 (real copy verdict) — was under 胜率, now its own col
         })
-    return {"followLine": score100(line_native), "tab": tab, "total": len(sel),
-            "followed": len(foll), "observing": len(obs),
+    return {"followLine": score100(line_native), "tab": tab, "total": len(rows),
+            "followed": len(rows),
             "page": page, "size": size, "wallets": out}
 
 
