@@ -64,15 +64,17 @@ def ep_discovery(db):
     reject_reasons = [{"label": lbl, "pct": round(n / total_rej * 100) if total_rej else 0}
                       for lbl, n in buckets]
 
-    scores = [r["score"] for r in qall(db, "SELECT score FROM profile WHERE score IS NOT NULL AND score>0")]
     follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     nbins = 16
-    hi = 1.0
     bins = [0] * nbins
-    for sc in scores:
-        idx = min(int(max(sc, 0.0) / hi * nbins), nbins - 1)
-        bins[idx] += 1
-    follow_idx = min(int(follow_line / hi * nbins), nbins - 1)
+    for row in qall(db,
+        "SELECT CASE WHEN score*?>=? THEN ? ELSE CAST(score*? AS INTEGER) END idx,COUNT(*) n "
+        "FROM profile WHERE score IS NOT NULL AND score>0 GROUP BY idx",
+        (nbins, nbins - 1, nbins - 1, nbins)):
+        idx = int(row["idx"])
+        if 0 <= idx < nbins:
+            bins[idx] = row["n"]
+    follow_idx = min(int(follow_line * nbins), nbins - 1)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     return {"funnel": {"candidates": candidates, "active": active, "watchlist": watchlist},
             "rejectReasons": reject_reasons,
