@@ -14,6 +14,8 @@ class GuardedDb:
         normalized = " ".join(sql.split())
         if normalized.startswith("SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr"):
             raise AssertionError("positions endpoint should not run a separate follow-position query")
+        if "cp.master_margin" in normalized:
+            raise AssertionError("positions endpoint should not select unused master_margin")
         return self.db.execute(sql, args)
 
 

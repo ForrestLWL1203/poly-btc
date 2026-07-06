@@ -446,7 +446,7 @@ def ep_positions(db, qs):
                 where.append(f"{col}=?"); args.append(qs[key][0])
         rows = qall(db, _follow_set_cte() +
                         "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
-                        "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,cp.master_peak_sz,"
+                        "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
                         "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,w.rank AS wrank,fs.follow_pos "
                         "FROM copy_position cp "
                         "LEFT JOIN watchlist w ON w.addr=cp.addr "
@@ -514,7 +514,7 @@ def ep_positions(db, qs):
         _follow_set_cte() +
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
-        "cp.master_open_px,cp.master_leverage,cp.master_margin,cp.master_peak_sz,"
+        "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos "
         "FROM copy_position cp "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
@@ -559,7 +559,7 @@ def ep_wallets(db, qs=None):
     if (qs.get("tab", ["followed"]))[0] == "dropped":
         rows = qall(db,
             "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,p.score,p.status,p.reason,"
-            "p.market_type,p.win_rate,p.roi_equity,p.net_pnl,p.avg_notional,p.roi_total,p.top_coin,w.rank AS rank,"
+            "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
             "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
@@ -584,7 +584,7 @@ def ep_wallets(db, qs=None):
     # per-wallet probes of episode/copy_position as the forward history grows.
     rows = qall(db,
         "WITH followed AS ("
-        "  SELECT addr,rank,market_type,score,win_rate,top_coin,worst_single_loss_pct,n_trades "
+        "  SELECT addr,rank,market_type,score,win_rate,top_coin,worst_single_loss_pct "
         "  FROM watchlist WHERE score>=?"
         "), ep7 AS ("
         "  SELECT e.addr, COUNT(*) AS closed_7d "
@@ -596,7 +596,7 @@ def ep_wallets(db, qs=None):
         "  FROM copy_position cp JOIN followed f ON f.addr=cp.addr GROUP BY cp.addr"
         ") "
         "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
-        "COALESCE(c.enabled,1) AS enabled,w.n_trades,pr.worst_loss_pct,pr.active_days,l.week_roi,l.mon_roi,"
+        "COALESCE(c.enabled,1) AS enabled,pr.worst_loss_pct,l.week_roi,l.mon_roi,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,"
         "COALESCE(cs.follow_count,0) AS follow_count,"
         "COALESCE(cs.closed_n,0) AS closed_n,"
@@ -623,7 +623,6 @@ def ep_wallets(db, qs=None):
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
         out.append({
-            "evidenceHeld": tab == "observing",  # this tab's rows are the held-back set
             "followPos": (page * size + i + 1) if tab != "observing" else None,   # 1..N position in the copy set
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["score"] or 0.0),   # ROI shown = recent HL 收益/本金 (周+月),与评分 ROI 支柱同口径

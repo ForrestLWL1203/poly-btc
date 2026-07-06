@@ -16,6 +16,12 @@ class GuardedDb:
             "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr",
             "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr",
             "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr",
+            "w.n_trades",
+            "pr.active_days",
+            "p.roi_equity",
+            "p.net_pnl",
+            "p.avg_notional",
+            "p.roi_total",
         )
         if any(fragment in normalized for fragment in forbidden):
             raise AssertionError("wallets endpoint should aggregate per-wallet stats before joining watchlist")
@@ -51,6 +57,27 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["closedN"], 1)
         self.assertEqual(wallet["closed7d"], 1)
         self.assertEqual(wallet["forwardNetPnl"], 12)
+        self.assertNotIn("evidenceHeld", wallet)
+
+    def test_dropped_wallets_omit_unused_profile_columns(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) "
+                "VALUES ('0xaaa','2026-01-01T00:00:00Z',0.8)"
+            )
+            db.execute(
+                "INSERT INTO profile (addr,status,reason,score,market_type,win_rate,top_coin) "
+                "VALUES ('0xaaa','rejected','not_profitable',0.4,'crypto',0.5,'BTC')"
+            )
+            db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            db.commit()
+
+            res = api.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
+
+        self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
 
 
 if __name__ == "__main__":
