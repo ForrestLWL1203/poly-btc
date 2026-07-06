@@ -1,0 +1,57 @@
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+from hl import api, params, storage
+
+
+class GuardedDb:
+    def __init__(self, db):
+        self.db = db
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        forbidden = (
+            "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr",
+            "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr",
+            "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr",
+        )
+        if any(fragment in normalized for fragment in forbidden):
+            raise AssertionError("wallets endpoint should aggregate per-wallet stats before joining watchlist")
+        return self.db.execute(sql, args)
+
+
+class ApiWalletsPerfTests(unittest.TestCase):
+    def test_wallets_uses_joined_aggregates_for_forward_stats(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,n_trades,updated_at) "
+                "VALUES (1,'0xaaa',0.9,'crypto',0.75,'BTC',10,'now')"
+            )
+            db.execute("INSERT INTO profile (addr,status,score,active_days) VALUES ('0xaaa','active',0.9,5)")
+            db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            db.execute(
+                "INSERT INTO episode (addr,coin,side,open_ms,seq,close_ms) "
+                "VALUES ('0xaaa','BTC','long',1,0,9999999999999)"
+            )
+            db.execute(
+                "INSERT INTO copy_position (addr,coin,side,status,realized_pnl,opened_at,closed_at) "
+                "VALUES ('0xaaa','BTC','long','closed',12,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+            )
+            db.commit()
+
+            res = api.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
+
+        wallet = res["wallets"][0]
+        self.assertEqual(wallet["followCount"], 1)
+        self.assertEqual(wallet["closedN"], 1)
+        self.assertEqual(wallet["closed7d"], 1)
+        self.assertEqual(wallet["forwardNetPnl"], 12)
+
+
+if __name__ == "__main__":
+    unittest.main()

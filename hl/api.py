@@ -272,13 +272,14 @@ def _followed_count(db, line):
     return (r["cnt"] if r else 0)
 
 
-def _follow_positions(db):
-    """{addr: 1-based position in the copy set} — same filter+order as observer.load_targets. Lets position/
-    history badges show the follow-序号 (1..N) instead of the confusing global watchlist rank (#29 > 25)."""
-    line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    rows = qall(db, "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-                    "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=? ORDER BY w.rank", (line,))
-    return {r["addr"]: i + 1 for i, r in enumerate(rows)}
+def _follow_set_cte() -> str:
+    return (
+        "WITH follow_set AS ("
+        "SELECT w.addr, ROW_NUMBER() OVER (ORDER BY w.rank) AS follow_pos "
+        "FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+        "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=?"
+        ") "
+    )
 
 
 def ep_shadow(db):
@@ -437,17 +438,21 @@ def ep_insights(db):
 
 def ep_positions(db, qs):
     status = (qs.get("status", ["open"])[0])
+    line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     if status == "closed":
         where, args = ["cp.status!='open'"], []
         for col, key in (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")):
             if qs.get(key):
                 where.append(f"{col}=?"); args.append(qs[key][0])
-        rows = qall(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
+        rows = qall(db, _follow_set_cte() +
+                        "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                         "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_margin,cp.master_peak_sz,"
-                        "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,w.rank AS wrank FROM copy_position cp "
-                        "LEFT JOIN watchlist w ON w.addr=cp.addr WHERE " + " AND ".join(where) +
-                        " ORDER BY cp.closed_at DESC LIMIT 100", tuple(args))   # most recent 100 (UI paginates 25/page)
-        fpos = _follow_positions(db)
+                        "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,w.rank AS wrank,fs.follow_pos "
+                        "FROM copy_position cp "
+                        "LEFT JOIN watchlist w ON w.addr=cp.addr "
+                        "LEFT JOIN follow_set fs ON fs.addr=cp.addr "
+                        "WHERE " + " AND ".join(where) +
+                        " ORDER BY cp.closed_at DESC LIMIT 100", tuple([line] + args))   # most recent 100 (UI paginates 25/page)
         out = []
         for r in rows:
             o, c = _iso_epoch(r["opened_at"]), _iso_epoch(r["closed_at"])
@@ -464,7 +469,7 @@ def ep_positions(db, qs):
                         # 结算类型: liq=爆仓 / stop=我们主动σ止损 / mirror=镜像跟随目标平仓
                         "closeType": "liq" if r["was_liq"] else ("stop" if r["was_stopped"] else "mirror"),
                         "walletRank": r["wrank"],   # wrank None = 已脱榜
-                        "followPos": fpos.get(r["addr"]),   # 1..N in the copy set (None = 现在不在跟单集)
+                        "followPos": r["follow_pos"],   # 1..N in the copy set (None = 现在不在跟单集)
                         "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,
                         "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
@@ -506,15 +511,16 @@ def ep_positions(db, qs):
         if qs.get(key):
             where.append(f"{col}=?"); args.append(qs[key][0])
     rows = qall(db,
+        _follow_set_cte() +
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
         "cp.master_open_px,cp.master_leverage,cp.master_margin,cp.master_peak_sz,"
-        "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype "
+        "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos "
         "FROM copy_position cp "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
         "LEFT JOIN profile pr ON pr.addr=cp.addr "
-        "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple(args))
-    fpos = _follow_positions(db)
+        "LEFT JOIN follow_set fs ON fs.addr=cp.addr "
+        "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple([line] + args))
     out, float_total = [], 0.0
     for r in rows:
         entry = r["entry_px"] or 0.0
@@ -534,7 +540,7 @@ def ep_positions(db, qs):
             "notional": (r["notional"] or 0.0) * held, "mark": mark,
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,   # vs EFFECTIVE margin (scaled)
-            "wallet": r["addr"], "walletRank": r["wrank"], "followPos": fpos.get(r["addr"]),
+            "wallet": r["addr"], "walletRank": r["wrank"], "followPos": r["follow_pos"],
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
             "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
@@ -574,22 +580,34 @@ def ep_wallets(db, qs=None):
     # Only the wallets we ACTUALLY follow: score above the follow line (the watchlist also holds many
     # lower-score actives we observe but don't copy). enabled+disabled both shown so the toggle works.
     cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
-    # Correlated subqueries (indexed by addr) — O(rows above line, ~dozens), NOT a full grouped scan of the
-    # ever-growing episode/copy_position tables on every refresh. Dropped the per-row _wallet_trend() query and
-    # unused columns (roi_equity/net_pnl/grid/median_adds_per_ep/avg_notional) — those were the real weight.
+    # Pre-aggregate forward stats once, then join them to the followed watchlist rows. This avoids repeated
+    # per-wallet probes of episode/copy_position as the forward history grows.
     rows = qall(db,
+        "WITH followed AS ("
+        "  SELECT addr,rank,market_type,score,win_rate,top_coin,worst_single_loss_pct,n_trades "
+        "  FROM watchlist WHERE score>=?"
+        "), ep7 AS ("
+        "  SELECT e.addr, COUNT(*) AS closed_7d "
+        "  FROM episode e JOIN followed f ON f.addr=e.addr WHERE e.close_ms>=? GROUP BY e.addr"
+        "), copy_stats AS ("
+        "  SELECT cp.addr, COUNT(*) AS follow_count,"
+        "         SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) AS closed_n,"
+        "         COALESCE(SUM(CASE WHEN status!='open' THEN realized_pnl ELSE unrealized_pnl END),0) AS fwd_net "
+        "  FROM copy_position cp JOIN followed f ON f.addr=cp.addr GROUP BY cp.addr"
+        ") "
         "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
         "COALESCE(c.enabled,1) AS enabled,w.n_trades,pr.worst_loss_pct,pr.active_days,l.week_roi,l.mon_roi,"
-        "(SELECT COUNT(*) FROM episode e WHERE e.addr=w.addr AND e.close_ms>=?) AS closed_7d,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr) AS follow_count,"
-        "(SELECT COUNT(*) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open') AS closed_n,"
-        "(SELECT COALESCE(SUM(realized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status!='open')"
-        "+(SELECT COALESCE(SUM(unrealized_pnl),0) FROM copy_position cp WHERE cp.addr=w.addr AND cp.status='open') AS fwd_net "
-        "FROM watchlist w "
+        "COALESCE(ep7.closed_7d,0) AS closed_7d,"
+        "COALESCE(cs.follow_count,0) AS follow_count,"
+        "COALESCE(cs.closed_n,0) AS closed_n,"
+        "COALESCE(cs.fwd_net,0) AS fwd_net "
+        "FROM followed w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
-        "WHERE w.score >= ? ORDER BY w.rank", (cutoff7d, line_native))
+        "LEFT JOIN ep7 ON ep7.addr=w.addr "
+        "LEFT JOIN copy_stats cs ON cs.addr=w.addr "
+        "ORDER BY w.rank", (line_native, cutoff7d))
     # v10: evidence is enforced at profile time (scanner EVIDENCE gate), so every wallet above the follow
     # line IS copied — no thin-sample holdback. FOLLOWED = score≥line (the real copy set); OBSERVING is now
     # empty (kept for the frontend's tab contract).
