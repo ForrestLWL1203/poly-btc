@@ -644,22 +644,24 @@ def ep_wallet_detail(db, addr, qs=None):
     # SCORED (historical 14d, the basis of the score) — from profile
     pr = q1(db, "SELECT score,win_rate,n_trades,market_type FROM profile WHERE addr=?", (addr,))
     # FORWARD (our real copy results)
-    agg = q1(db, "SELECT COALESCE(SUM(realized_pnl),0) pnl, COUNT(*) n, "
-                 "SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
-                 "FROM copy_position WHERE addr=? AND status!='open'", (addr,))
-    op = q1(db, "SELECT COUNT(*) n, COALESCE(SUM(unrealized_pnl),0) u "
-                "FROM copy_position WHERE addr=? AND status='open'", (addr,))
-    n = (agg["n"] if agg else 0) or 0
+    agg = q1(db,
+             "SELECT COUNT(*) total_n,"
+             "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) closed_n,"
+             "SUM(CASE WHEN status!='open' AND realized_pnl>0 THEN 1 ELSE 0 END) wins,"
+             "COALESCE(SUM(CASE WHEN status!='open' THEN realized_pnl ELSE 0 END),0) realized,"
+             "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_n,"
+             "COALESCE(SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END),0) open_u "
+             "FROM copy_position WHERE addr=?", (addr,))
+    n = (agg["closed_n"] if agg else 0) or 0
     win_n = (agg["wins"] if agg else 0) or 0
-    realized = (agg["pnl"] if agg else 0.0) or 0.0
-    open_u = (op["u"] if op else 0.0) or 0.0
-    total_recs = (q1(db, "SELECT COUNT(*) c FROM copy_position WHERE addr=?", (addr,)) or {"c": 0})["c"]
+    realized = (agg["realized"] if agg else 0.0) or 0.0
+    open_n = (agg["open_n"] if agg else 0) or 0
+    open_u = (agg["open_u"] if agg else 0.0) or 0.0
+    total_recs = (agg["total_n"] if agg else 0) or 0
     rp = max(0, int((qs.get("recPage", ["0"]))[0])) if qs else 0
     rs = min(50, max(1, int((qs.get("recSize", ["20"]))[0]))) if qs else 20
     recs = qall(db,
-        "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at,cp.closed_at,"
-        "cp.entry_px,cp.mark_px,cp.leverage,cp.margin,cp.notional,cp.master_open_px,cp.add_count,"
-        "(SELECT our_px FROM copy_action ca WHERE ca.pos_id=cp.pos_id AND ca.action='close' ORDER BY ca.act_id DESC LIMIT 1) AS exit_px "
+        "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at "
         "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
         (addr, rs, rp * rs))
     return {
@@ -672,16 +674,13 @@ def ep_wallet_detail(db, addr, qs=None):
         # 实盘(我们跟出来)
         "forwardWinRatePct": (win_n / n * 100) if n else None,
         "closedN": n, "winN": win_n, "lossN": n - win_n,
-        "realizedPnl": realized, "openN": (op["n"] if op else 0), "openUnrealized": open_u,
+        "realizedPnl": realized, "openN": open_n, "openUnrealized": open_u,
         "netPnl": realized + open_u,
         "recordsTotal": total_recs, "recPage": rp, "recSize": rs,
         "records": [{
             "id": r["pos_id"], "coin": r["coin"], "side": r["side"], "status": r["status"],
             "pnl": (r["realized_pnl"] or 0.0) if r["status"] != "open" else (r["unrealized_pnl"] or 0.0),
-            "openedAt": r["opened_at"], "closedAt": r["closed_at"],
-            "entry": r["entry_px"], "exit": (r["exit_px"] if r["status"] != "open" else r["mark_px"]),
-            "masterEntry": r["master_open_px"], "leverage": r["leverage"], "margin": r["margin"],
-            "notional": r["notional"], "addCount": r["add_count"],
+            "openedAt": r["opened_at"],
         } for r in recs],
     }
 

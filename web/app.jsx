@@ -648,8 +648,16 @@ function WalletDrawer({ address, onClose }) {
   const [d, setD] = useState(null);
   const [recPage, setRecPage] = useState(0);
   const [exp, setExp] = useState({});
-  useEffect(() => { setRecPage(0); setExp({}); }, [address]);
+  const [details, setDetails] = useState({});
+  useEffect(() => { setRecPage(0); setExp({}); setDetails({}); }, [address]);
   useEffect(() => { api.get(`/api/wallets/${address}?recPage=${recPage}&recSize=20`).then(setD).catch(() => {}); }, [address, recPage]);
+  const toggleRecord = (id) => {
+    const next = !exp[id];
+    setExp(e => ({ ...e, [id]: next }));
+    if (next && !details[id]) {
+      api.get(`/api/positions/${id}`).then(payload => setDetails(m => ({ ...m, [id]: payload }))).catch(() => {});
+    }
+  };
   const net = d && (d.netPnl || 0);
   const losing = d && net < -5;          // ⚠ only when we're actually losing money on it (not low win%)
   const recPages = d ? Math.max(1, Math.ceil(d.recordsTotal / d.recSize)) : 1;
@@ -681,7 +689,7 @@ function WalletDrawer({ address, onClose }) {
               <table><thead><tr><th>币种</th><th>方向</th><th className="num">盈亏</th><th className="num">时间</th><th>状态</th></tr></thead>
                 <tbody>{d.records.map(r => (
                   <React.Fragment key={r.id}>
-                    <tr style={{ cursor: "pointer" }} onClick={() => setExp(e => ({ ...e, [r.id]: !e[r.id] }))}>
+                    <tr style={{ cursor: "pointer" }} onClick={() => toggleRecord(r.id)}>
                       <td><b>{r.coin}</b> <span className="muted" style={{ fontSize: 10 }}>{exp[r.id] ? "▴" : "▾"}</span></td>
                       <td><span className={"tint " + (r.side === "long" ? "tint-green" : "tint-red")}>{r.side === "long" ? "多" : "空"}</span></td>
                       <td className={"num " + cls(r.pnl)}>{fSign(r.pnl, 1)}{r.status === "open" ? <span className="muted" style={{ fontSize: 10 }}> 浮</span> : ""}</td>
@@ -689,11 +697,8 @@ function WalletDrawer({ address, onClose }) {
                       <td className="muted">{STATUS_LABEL[r.status] || r.status}</td>
                     </tr>
                     {exp[r.id] && (
-                      <tr><td colSpan="5" style={{ background: "rgba(255,255,255,.02)", fontFamily: "var(--mono)", fontSize: 11.5, lineHeight: 1.9, color: "var(--t2)" }}>
-                        开仓价 <b>{fPrice(r.entry)}</b> → {r.status === "open" ? "现价" : "平仓价"} <b>{fPrice(r.exit)}</b>
-                        　杠杆 {fNum(r.leverage, 0)}x　保证金 {fUsd(r.margin)}　名义额 {fUsd(r.notional)}<br />
-                        主力开仓价 {fPrice(r.masterEntry)}{r.addCount ? `　加仓 ${r.addCount} 次` : ""}
-                        {r.closedAt ? `　平于 ${agoText(r.closedAt)}` : ""}
+                      <tr className="detail-row"><td colSpan="5">
+                        <PositionDetail d={details[r.id]} />
                       </td></tr>
                     )}
                   </React.Fragment>
