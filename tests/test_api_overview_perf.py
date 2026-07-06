@@ -15,6 +15,20 @@ class GuardedDb:
         normalized = " ".join(sql.split())
         if normalized == "SELECT realized_pnl FROM copy_position WHERE status!='open'":
             raise AssertionError("overview must aggregate closed PnL in SQL, not fetch every row")
+        if normalized.startswith("SELECT side,rem_size,size,entry_px,mark_px,unrealized_pnl,margin,notional FROM copy_position"):
+            raise AssertionError("overview must aggregate open risk in SQL, not fetch every row")
+        return self.db.execute(sql, args)
+
+
+class CountingDb:
+    def __init__(self, db):
+        self.db = db
+        self.gross_sum_queries = 0
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        if normalized == "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action":
+            self.gross_sum_queries += 1
         return self.db.execute(sql, args)
 
 
@@ -48,6 +62,60 @@ class ApiOverviewPerfTests(unittest.TestCase):
             overview = api_overview.ep_overview(GuardedDb(db))
 
         self.assertEqual(overview["winRatePct"], 50.0)
+
+    def test_overview_aggregates_open_risk_in_sql(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO copy_account (id,initial_balance,balance,updated_at) VALUES (1,10000,10000,'now')"
+            )
+            db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,mark_px,margin,notional,size,rem_size,unrealized_pnl,opened_at) "
+                "VALUES ('0x1','BTC','long','open',100,110,100,1000,10,5,NULL,'2026-01-01T00:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,mark_px,margin,notional,size,rem_size,unrealized_pnl,opened_at) "
+                "VALUES ('0x2','ETH','short','open',200,190,80,800,4,4,44,'2026-01-01T00:00:00Z')"
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(GuardedDb(db))
+
+        self.assertEqual(overview["openCount"], 2)
+        self.assertEqual(overview["unrealizedPnl"], 94.0)
+        self.assertEqual(overview["availableBalance"], 9870.0)
+        self.assertEqual(overview["risk"]["gross"], 1300.0)
+        self.assertEqual(overview["risk"]["net"], -300.0)
+
+    def test_overview_reuses_gross_traded_until_copy_actions_change(self):
+        if hasattr(api_overview, "_GROSS_TRADED_CACHE"):
+            api_overview._GROSS_TRADED_CACHE.clear()
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO copy_account (id,initial_balance,balance,updated_at) VALUES (1,10000,10000,'now')"
+            )
+            db.execute(
+                "INSERT INTO copy_action (pos_id,addr,coin,ts,action,our_qty_delta,our_px) "
+                "VALUES (1,'0x1','BTC',1,'open',2,100)"
+            )
+            db.commit()
+            counting = CountingDb(db)
+
+            api_overview.ep_overview(counting)
+            api_overview.ep_overview(counting)
+            db.execute(
+                "INSERT INTO copy_action (pos_id,addr,coin,ts,action,our_qty_delta,our_px) "
+                "VALUES (1,'0x1','BTC',2,'close',-2,110)"
+            )
+            db.commit()
+            api_overview.ep_overview(counting)
+
+        self.assertEqual(counting.gross_sum_queries, 2)
 
 
 if __name__ == "__main__":

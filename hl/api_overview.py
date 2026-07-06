@@ -9,10 +9,37 @@ from .api_discovery import followed_count, scanner_status
 
 
 PROC_STALE_SEC = 90
+_GROSS_TRADED_CACHE = {}
 
 
 def _iso_ago(seconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+
+
+def _db_cache_key(db):
+    try:
+        row = db.execute("PRAGMA database_list").fetchone()
+        path = row["file"] if hasattr(row, "keys") else row[2]
+        if path:
+            return path
+    except Exception:  # noqa: BLE001 - cache key fallback only
+        pass
+    return id(db)
+
+
+def _gross_traded(db):
+    key = _db_cache_key(db)
+    head = q1(db, "SELECT MAX(act_id) max_id FROM copy_action") or {"max_id": None}
+    max_id = head["max_id"]
+    cached = _GROSS_TRADED_CACHE.get(key)
+    if cached and cached[0] == max_id:
+        return cached[1]
+    row = q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action") or {"g": 0.0}
+    gross = row["g"] or 0.0
+    if len(_GROSS_TRADED_CACHE) > 32:
+        _GROSS_TRADED_CACHE.clear()
+    _GROSS_TRADED_CACHE[key] = (max_id, gross)
+    return gross
 
 
 def ep_shadow(db):
@@ -55,26 +82,30 @@ def ep_overview(db):
     else:
         init = acct["initial_balance"] or 1.0
         balance = acct["balance"] or 0.0
-        upnl = locked = gross = net = 0.0
-        for r in qall(db, "SELECT side,rem_size,size,entry_px,mark_px,unrealized_pnl,margin,notional "
-                          "FROM copy_position WHERE status='open' AND size>0"):
-            sgn = 1 if r["side"] == "long" else -1
-            mark = r["mark_px"] if r["mark_px"] else (r["entry_px"] or 0)
-            u = r["unrealized_pnl"] if r["unrealized_pnl"] is not None else \
-                (r["rem_size"] or 0) * (mark - (r["entry_px"] or 0)) * sgn
-            upnl += u
-            frac = (r["rem_size"] / r["size"]) if r["size"] else 0
-            locked += (r["margin"] or 0) * frac
-            cur_notl = (r["notional"] or 0) * frac
-            gross += cur_notl
-            net += cur_notl * sgn
-        open_n = (q1(db, "SELECT COUNT(*) c FROM copy_position WHERE status='open'") or {"c": 0})["c"]
+        open_risk = q1(db,
+            "SELECT COUNT(*) open_n, "
+            "COALESCE(SUM(CASE WHEN size>0 THEN "
+            "  CASE WHEN unrealized_pnl IS NOT NULL THEN unrealized_pnl ELSE "
+            "    COALESCE(rem_size,0) * "
+            "    ((CASE WHEN mark_px IS NOT NULL AND mark_px!=0 THEN mark_px ELSE COALESCE(entry_px,0) END) "
+            "     - COALESCE(entry_px,0)) * "
+            "    (CASE WHEN side='long' THEN 1 ELSE -1 END) "
+            "  END ELSE 0 END),0) upnl, "
+            "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(margin,0)*COALESCE(rem_size,0)/size ELSE 0 END),0) locked, "
+            "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(notional,0)*COALESCE(rem_size,0)/size ELSE 0 END),0) gross, "
+            "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(notional,0)*COALESCE(rem_size,0)/size*"
+            "  (CASE WHEN side='long' THEN 1 ELSE -1 END) ELSE 0 END),0) net "
+            "FROM copy_position WHERE status='open'")
+        open_n = (open_risk["open_n"] if open_risk else 0) or 0
+        upnl = (open_risk["upnl"] if open_risk else 0.0) or 0.0
+        locked = (open_risk["locked"] if open_risk else 0.0) or 0.0
+        gross = (open_risk["gross"] if open_risk else 0.0) or 0.0
+        net = (open_risk["net"] if open_risk else 0.0) or 0.0
         closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
                         "FROM copy_position WHERE status!='open'") or {"n": 0, "wins": 0}
         closed_n = closed["n"] or 0
         win_rate = ((closed["wins"] or 0) / closed_n) if closed_n else 0.0
-        gross_traded = (q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action")
-                        or {"g": 0})["g"] or 0.0
+        gross_traded = _gross_traded(db)
         equity = balance + upnl
         realized = balance - init
         available = balance - locked
