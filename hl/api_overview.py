@@ -173,23 +173,35 @@ def ep_equity(db, rng):
     return {"range": rng, "points": pts}
 
 
-def _top_bottom(rows, key, top=5, bottom=3):
-    s = sorted(rows, key=lambda r: r[key], reverse=True)
-    if len(s) <= top + bottom:
-        return s
-    return s[:top] + s[-bottom:]
+def _top_bottom_group_rows(db, stats_sql, top=5, bottom=3):
+    return qall(db,
+        "WITH stats AS ("
+        + stats_sql +
+        "), ranked AS ("
+        "  SELECT stats.*,COUNT(*) OVER() total,"
+        "         ROW_NUMBER() OVER (ORDER BY net DESC) desc_rn,"
+        "         ROW_NUMBER() OVER (ORDER BY net ASC) asc_rn "
+        "  FROM stats"
+        ") "
+        "SELECT * FROM ranked "
+        "WHERE total<=? OR desc_rn<=? OR asc_rn<=? "
+        "ORDER BY CASE WHEN total<=? OR desc_rn<=? THEN 0 ELSE 1 END, net DESC",
+        (top + bottom, top, bottom, top + bottom, top))
 
 
 def ep_insights(db):
     NET = "COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0)"
-    wallets = [{
-        "address": r["addr"], "rank": r["rank"], "netPnl": r["net"] or 0.0, "closedN": r["cn"] or 0,
-        "winRatePct": (r["wn"] / r["cn"] * 100) if r["cn"] else None,
-    } for r in qall(db,
+    wallet_sql = (
         f"SELECT cp.addr, {NET} net, w.rank, "
         "SUM(CASE WHEN cp.status!='open' THEN 1 ELSE 0 END) cn, "
         "SUM(CASE WHEN cp.status!='open' AND cp.realized_pnl>0 THEN 1 ELSE 0 END) wn "
-        "FROM copy_position cp LEFT JOIN watchlist w ON w.addr=cp.addr GROUP BY cp.addr")]
-    coins = [{"coin": r["coin"], "netPnl": r["net"] or 0.0, "n": r["n"]} for r in qall(db,
-        f"SELECT cp.coin, {NET} net, COUNT(*) n FROM copy_position cp GROUP BY cp.coin")]
-    return {"walletContrib": _top_bottom(wallets, "netPnl"), "coinPnl": _top_bottom(coins, "netPnl")}
+        "FROM copy_position cp LEFT JOIN watchlist w ON w.addr=cp.addr GROUP BY cp.addr"
+    )
+    wallets = [{
+        "address": r["addr"], "rank": r["rank"], "netPnl": r["net"] or 0.0, "closedN": r["cn"] or 0,
+        "winRatePct": (r["wn"] / r["cn"] * 100) if r["cn"] else None,
+    } for r in _top_bottom_group_rows(db, wallet_sql)]
+    coin_sql = f"SELECT cp.coin, {NET} net, COUNT(*) n FROM copy_position cp GROUP BY cp.coin"
+    coins = [{"coin": r["coin"], "netPnl": r["net"] or 0.0, "n": r["n"]} for r in
+             _top_bottom_group_rows(db, coin_sql)]
+    return {"walletContrib": wallets, "coinPnl": coins}
