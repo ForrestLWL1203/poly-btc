@@ -17,7 +17,6 @@ Run via hl_dashboard.py. Endpoints:
   GET  /api/scan-runs?limit=20
   GET  /api/params
 """
-import calendar
 import json
 import os
 import secrets
@@ -30,37 +29,13 @@ from urllib.parse import urlparse, parse_qs
 from . import config
 from . import params as params_mod
 from . import procman
+from .api_common import iso_epoch as _iso_epoch
+from .api_common import q1, qall, score100, score_from100
+from .api_wallets import ep_wallet_detail, ep_wallets
 from .util import now_iso
 
 # ─────────────────────────────────────────────────────────────────────────── auth
 TOKEN_TTL_S = 24 * 3600
-
-# Score display scale. v5 native score is already [0,1], so display is a plain ×100 (engine/DB stay
-# native). MIN_FOLLOW_SCORE=0.50 -> 50. Applied to wallet scores, the follow line, AND the
-# MIN_FOLLOW_SCORE setting so the operator reads ONE 0–100 ruler everywhere.
-def score100(raw):
-    """Native v5 score [0,1] -> 0–100 display."""
-    if raw is None:
-        return None
-    return round(min(max(raw, 0.0), 1.0) * 100, 1)
-
-
-def recent_roi_pct(week_roi, mon_roi):
-    """Dashboard ROI column = the SAME recent return-on-capital the SCORE's ROI pillar uses: a weighted
-    blend of HL week/month roi (net/本金, deposit-adjusted; all-time excluded — copy only cares about
-    recent form). Shown raw (unclipped) — the score clips each window to +100% only to stop a single
-    window flying away; the display shows the true recent return so the ROI column explains the ranking."""
-    parts = [(config.ROI_W_WEEK, week_roi), (config.ROI_W_MON, mon_roi)]
-    w = sum(wt for wt, v in parts if v is not None)
-    return (sum(wt * v for wt, v in parts if v is not None) / w * 100.0) if w else 0.0
-
-
-def score_from100(disp):
-    """Inverse of score100 — UI 0–100 -> native [0,1] before writing MIN_FOLLOW_SCORE."""
-    if disp is None:
-        return None
-    return disp / 100.0
-
 
 class Auth:
     """Single-user opaque-token auth. Username from $DASH_USER / secret/dash_user (default 'admin');
@@ -209,30 +184,6 @@ def exec_process_command(db_path, ctype):
     except Exception as e:  # noqa: BLE001
         _resolve_command(db_path, cmd_id, "error", {"error": str(e)})
         return cmd_id, "error"
-
-
-def q1(db, sql, args=(), default=None):
-    """First row (or default). Tolerates a missing table (un-migrated db) -> default."""
-    try:
-        return db.execute(sql, args).fetchone()
-    except sqlite3.OperationalError:
-        return default
-
-
-def qall(db, sql, args=()):
-    try:
-        return db.execute(sql, args).fetchall()
-    except sqlite3.OperationalError:
-        return []
-
-
-def _iso_epoch(s):
-    if not s:
-        return None
-    try:
-        return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))   # ISO is UTC -> timegm (not mktime/local)
-    except (ValueError, TypeError):
-        return None
 
 
 def _iso_ago(seconds):
@@ -547,137 +498,6 @@ def ep_positions(db, qs):
             "addCount": r["add_count"] or 0,
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
-
-
-def ep_wallets(db, qs=None):
-    qs = qs or {}
-    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE   # native [0,1] scale
-    page = max(0, int((qs.get("page", ["0"]))[0]))
-    size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
-    # DROPPED tab: wallets that WERE on the follow line (follow_history stamped) but are now below it or
-    # no longer active — "recently demoted for poor performance". Recovers automatically if it climbs back.
-    if (qs.get("tab", ["followed"]))[0] == "dropped":
-        rows = qall(db,
-            "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,p.score,p.status,p.reason,"
-            "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
-            "l.week_roi,l.mon_roi "
-            "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
-            "LEFT JOIN watchlist w ON w.addr=fh.addr "
-            "LEFT JOIN leaderboard l ON l.addr=fh.addr "
-            "WHERE NOT (p.status='active' AND p.score >= ?) ORDER BY fh.last_followed_at DESC", (line_native,))
-        out = [{
-            "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
-            "score": score100(r["score"] or 0.0), "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
-            "lastFollowedAt": _iso_epoch(r["last_followed_at"]),
-            "dropReason": ("掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
-                "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
-                "bot_frequency": "高频", "hft_uncopyable": "高频", "spot_dominant": "现货为主"}.get(r["reason"], r["reason"] or "淘汰")),
-            "winRatePct": (r["win_rate"] or 0.0) * 100,
-            "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),   # recent HL ROI (matches score)
-            "mainCoin": r["top_coin"],
-        } for r in rows]
-        return {"followLine": score100(line_native), "total": len(out), "tab": "dropped", "wallets": out}
-    # Only the wallets we ACTUALLY follow: score above the follow line. enabled+disabled both shown so the
-    # toggle works. Evidence is enforced at profile time by scanner gates, so there is no thin-sample holdback
-    # bucket here.
-    cutoff7d = int((time.time() - 7 * 86400) * 1000)   # target's own round-trips closed in the last 7d
-    # Pre-aggregate forward stats once, then join them to the followed watchlist rows. This avoids repeated
-    # per-wallet probes of episode/copy_position as the forward history grows.
-    rows = qall(db,
-        "WITH followed AS ("
-        "  SELECT addr,rank,market_type,score,win_rate,top_coin,worst_single_loss_pct "
-        "  FROM watchlist WHERE score>=?"
-        "), ep7 AS ("
-        "  SELECT e.addr, COUNT(*) AS closed_7d "
-        "  FROM episode e JOIN followed f ON f.addr=e.addr WHERE e.close_ms>=? GROUP BY e.addr"
-        "), copy_stats AS ("
-        "  SELECT cp.addr, COUNT(*) AS follow_count,"
-        "         SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) AS closed_n,"
-        "         COALESCE(SUM(CASE WHEN status!='open' THEN realized_pnl ELSE unrealized_pnl END),0) AS fwd_net "
-        "  FROM copy_position cp JOIN followed f ON f.addr=cp.addr GROUP BY cp.addr"
-        ") "
-        "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
-        "COALESCE(c.enabled,1) AS enabled,pr.worst_loss_pct,l.week_roi,l.mon_roi,"
-        "COALESCE(ep7.closed_7d,0) AS closed_7d,"
-        "COALESCE(cs.follow_count,0) AS follow_count,"
-        "COALESCE(cs.closed_n,0) AS closed_n,"
-        "COALESCE(cs.fwd_net,0) AS fwd_net "
-        "FROM followed w "
-        "LEFT JOIN target_controls c ON c.addr=w.addr "
-        "LEFT JOIN profile pr ON pr.addr=w.addr "
-        "LEFT JOIN leaderboard l ON l.addr=w.addr "
-        "LEFT JOIN ep7 ON ep7.addr=w.addr "
-        "LEFT JOIN copy_stats cs ON cs.addr=w.addr "
-        "ORDER BY w.rank", (line_native, cutoff7d))
-    tab = (qs.get("tab", ["followed"]))[0]
-    if tab != "followed":
-        tab = "followed"
-    out = []
-    for i, r in enumerate(rows[page * size:page * size + size]):
-        worst = r["worst_single_loss_pct"]
-        if worst is None:
-            worst = (r["worst_loss_pct"] or 0.0) * 100
-        out.append({
-            "followPos": page * size + i + 1,   # 1..N position in the copy set
-            "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
-            "score": score100(r["score"] or 0.0),   # ROI shown = recent HL 收益/本金 (周+月),与评分 ROI 支柱同口径
-            "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
-            "winRatePct": (r["win_rate"] or 0.0) * 100,
-            "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
-            "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
-            "closed7d": r["closed_7d"],                            # target's OWN round-trips closed in 7d (活跃度)
-            "closedN": r["closed_n"],                              # our forward (real copy) results
-            "forwardNetPnl": r["fwd_net"] or 0,                    # 总体盈亏 (real copy verdict) — was under 胜率, now its own col
-        })
-    return {"followLine": score100(line_native), "tab": tab, "total": len(rows),
-            "followed": len(rows),
-            "page": page, "size": size, "wallets": out}
-
-
-def ep_wallet_detail(db, addr, qs=None):
-    w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
-    # SCORED (historical 14d, the basis of the score) — from profile
-    pr = q1(db, "SELECT score,win_rate,n_trades,market_type FROM profile WHERE addr=?", (addr,))
-    # FORWARD (our real copy results)
-    agg = q1(db,
-             "SELECT COUNT(*) total_n,"
-             "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) closed_n,"
-             "SUM(CASE WHEN status!='open' AND realized_pnl>0 THEN 1 ELSE 0 END) wins,"
-             "COALESCE(SUM(CASE WHEN status!='open' THEN realized_pnl ELSE 0 END),0) realized,"
-             "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_n,"
-             "COALESCE(SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END),0) open_u "
-             "FROM copy_position WHERE addr=?", (addr,))
-    n = (agg["closed_n"] if agg else 0) or 0
-    win_n = (agg["wins"] if agg else 0) or 0
-    realized = (agg["realized"] if agg else 0.0) or 0.0
-    open_n = (agg["open_n"] if agg else 0) or 0
-    open_u = (agg["open_u"] if agg else 0.0) or 0.0
-    total_recs = (agg["total_n"] if agg else 0) or 0
-    rp = max(0, int((qs.get("recPage", ["0"]))[0])) if qs else 0
-    rs = min(50, max(1, int((qs.get("recSize", ["20"]))[0]))) if qs else 20
-    recs = qall(db,
-        "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at "
-        "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
-        (addr, rs, rp * rs))
-    return {
-        "address": addr, "rank": (w["rank"] if w else None),
-        "marketType": (pr["market_type"] if pr else None),
-        "score": score100(pr["score"]) if pr else None,
-        # 历史(评分依据)
-        "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
-        "scoredTrades": (pr["n_trades"] if pr else None),
-        # 实盘(我们跟出来)
-        "forwardWinRatePct": (win_n / n * 100) if n else None,
-        "closedN": n, "winN": win_n, "lossN": n - win_n,
-        "realizedPnl": realized, "openN": open_n, "openUnrealized": open_u,
-        "netPnl": realized + open_u,
-        "recordsTotal": total_recs, "recPage": rp, "recSize": rs,
-        "records": [{
-            "id": r["pos_id"], "coin": r["coin"], "side": r["side"], "status": r["status"],
-            "pnl": (r["realized_pnl"] or 0.0) if r["status"] != "open" else (r["unrealized_pnl"] or 0.0),
-            "openedAt": r["opened_at"],
-        } for r in recs],
-    }
 
 
 def ep_position_detail(db, pos_id):
