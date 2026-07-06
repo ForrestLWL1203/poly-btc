@@ -261,6 +261,48 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
     return out
 
 
+def _portfolio_fill_json_bytes(db, addrs: Iterable[str], start_ms: int) -> int:
+    addrs = [(a or "").lower() for a in addrs if a]
+    if not addrs:
+        return 0
+    qs = ",".join("?" for _ in addrs)
+    try:
+        row = db.execute(
+            f"SELECT COALESCE(SUM(LENGTH(fill_json)),0) FROM candidate_fills WHERE addr IN ({qs}) AND time>=?",
+            (*addrs, int(start_ms or 0)),
+        ).fetchone()
+        return int((row[0] if row else 0) or 0)
+    except sqlite3.Error:
+        return 0
+
+
+def _tune_days() -> list[int]:
+    out = []
+    for days in getattr(config, "AUTO_TUNE_MARGIN_DAYS", (30, 14, 7)):
+        try:
+            val = int(days)
+        except (TypeError, ValueError):
+            continue
+        if val > 0 and val not in out:
+            out.append(val)
+    return out or [30]
+
+
+def _portfolio_window_fills(db, addrs: list[str], now_ms: int) -> dict[int, list[dict]] | None:
+    days = _tune_days()
+    max_days = max(days)
+    start_ms = now_ms - max_days * 86400_000
+    max_bytes = int(getattr(config, "AUTO_TUNE_FILL_CACHE_MAX_BYTES", 64 * 1024 * 1024) or 0)
+    if max_bytes > 0 and _portfolio_fill_json_bytes(db, addrs, start_ms) > max_bytes:
+        return None
+    fills = _load_portfolio_fills(db, addrs, start_ms)
+    windows = {}
+    for day in days:
+        start_ms = now_ms - day * 86400_000
+        windows[day] = [x for x in fills if int(x.get("time") or 0) >= start_ms]
+    return windows
+
+
 def build_tune_candidate(base: dict, margin_mult: float, lev_caps: tuple[float, float, float],
                          deploy_full_pct: float) -> dict:
     margins = {k: float(base[k]) * float(margin_mult) for k in MARGIN_KEYS}
@@ -390,56 +432,60 @@ def follow_overrides_for_margin_candidate(follow: dict, margins: dict) -> dict:
     return follow_overrides_for_tune_candidate(follow, candidate)
 
 
+def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
+                       window_fills: dict[int, list[dict]] | None = None) -> dict:
+    windows = {}
+    for days in _tune_days():
+        fills = list((window_fills or {}).get(days) or [])
+        if window_fills is None:
+            start_ms = now_ms - int(days) * 86400_000
+            fills = _load_portfolio_fills(db, addrs, start_ms)
+        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides)
+        result["fills"] = len(fills)
+        windows[int(days)] = result
+    return windows
+
+
 def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
-                            sigmas: dict | None = None, now_ms: int | None = None) -> dict:
+                            sigmas: dict | None = None, now_ms: int | None = None,
+                            window_fills: dict[int, list[dict]] | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     overrides = follow_overrides_for_tune_candidate(follow, candidate)
     params_ = {k: overrides[k] for k in TUNE_KEYS}
     sigmas = sigmas if sigmas is not None else _load_sigmas(db)
-    windows = {}
-    for days in getattr(config, "AUTO_TUNE_MARGIN_DAYS", (30, 14, 7)):
-        start_ms = now_ms - int(days) * 86400_000
-        fills = _load_portfolio_fills(db, addrs, start_ms)
-        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides)
-        result["fills"] = len(fills)
-        windows[int(days)] = result
     out = dict(candidate)
     out["params"] = params_
     out["margins"] = {k: params_[k] for k in MARGIN_KEYS}
     out["lev_caps"] = {k: params_[k] for k in LEV_KEYS}
     out["deploy_full_pct"] = params_["DEPLOY_FULL_PCT"]
-    out["windows"] = windows
+    out["windows"] = _candidate_windows(db, addrs, sigmas, overrides, now_ms, window_fills=window_fills)
     return out
 
 
 def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
-                           sigmas: dict | None = None, now_ms: int | None = None) -> dict:
+                           sigmas: dict | None = None, now_ms: int | None = None,
+                           window_fills: dict[int, list[dict]] | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     overrides = follow_overrides_for_add_candidate(follow, candidate)
     params_ = {k: overrides[k] for k in ADD_TUNE_KEYS}
     sigmas = sigmas if sigmas is not None else _load_sigmas(db)
-    windows = {}
-    for days in getattr(config, "AUTO_TUNE_MARGIN_DAYS", (30, 14, 7)):
-        start_ms = now_ms - int(days) * 86400_000
-        fills = _load_portfolio_fills(db, addrs, start_ms)
-        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides)
-        result["fills"] = len(fills)
-        windows[int(days)] = result
     out = dict(candidate)
     out["params"] = params_
     out["add_params"] = params_
-    out["windows"] = windows
+    out["windows"] = _candidate_windows(db, addrs, sigmas, overrides, now_ms, window_fills=window_fills)
     return out
 
 
 def evaluate_margin_candidate(db, addrs: list[str], follow: dict, base: dict, mult: float,
-                              sigmas: dict | None = None, now_ms: int | None = None) -> dict:
+                              sigmas: dict | None = None, now_ms: int | None = None,
+                              window_fills: dict[int, list[dict]] | None = None) -> dict:
     tune_base = {**{k: float(base[k]) for k in MARGIN_KEYS},
                  **{k: float(follow[k]) for k in LEV_KEYS},
                  "DEPLOY_FULL_PCT": float(follow["DEPLOY_FULL_PCT"])}
     candidate = build_tune_candidate(tune_base, mult, tuple(tune_base[k] for k in LEV_KEYS),
                                      tune_base["DEPLOY_FULL_PCT"])
-    return evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms)
+    return evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                                   window_fills=window_fills)
 
 
 def _write_margin_params(db, margins: dict) -> None:
@@ -541,8 +587,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     base, baseline_reset = resolve_tune_baseline(db, current)
     sigmas = _load_sigmas(db)
     now_ms = int(time.time() * 1000)
+    window_fills = _portfolio_window_fills(db, addrs, now_ms)
     candidates = [
-        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms)
+        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                                window_fills=window_fills)
         for candidate in tune_candidates_from_axes(base)
     ]
     baseline = next((c for c in candidates if _same_tune_values(c.get("params") or {}, base)), candidates[0])
@@ -559,7 +607,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected_add_params = add_base
     if follow_for_add.get("SMART_ADD", True):
         add_candidates = [
-            evaluate_add_candidate(db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms)
+            evaluate_add_candidate(db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms,
+                                   window_fills=window_fills)
             for candidate in add_candidates_from_axes(add_base)
         ]
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),

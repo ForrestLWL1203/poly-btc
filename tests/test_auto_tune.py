@@ -206,7 +206,7 @@ class AutoTuneTests(unittest.TestCase):
                 base, 1.0, tuple(base[k] for k in auto_tune.LEV_KEYS), base["DEPLOY_FULL_PCT"]
             )]
 
-        def eval_tune(_db, _addrs, follow, candidate, sigmas=None, now_ms=None):
+        def eval_tune(_db, _addrs, follow, candidate, sigmas=None, now_ms=None, **_kwargs):
             out = dict(candidate)
             out["params"] = {k: follow[k] for k in auto_tune.TUNE_KEYS}
             out["margins"] = {k: follow[k] for k in auto_tune.MARGIN_KEYS}
@@ -221,7 +221,7 @@ class AutoTuneTests(unittest.TestCase):
                 auto_tune.build_add_candidate(base, 0.06, 1.3, 6),
             ]
 
-        def eval_add(_db, _addrs, _follow, candidate, sigmas=None, now_ms=None):
+        def eval_add(_db, _addrs, _follow, candidate, sigmas=None, now_ms=None, **_kwargs):
             out = dict(candidate)
             out["params"] = dict(candidate["params"])
             out["windows"] = better_windows if candidate["params"]["ADD_GAP_K"] == 0.06 else base_windows
@@ -243,6 +243,80 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(rows["ADD_GAP_K"], "0.06")
         self.assertEqual(rows["ADD_GAP_SHRINK_G"], "1.3")
         self.assertEqual(rows["ADD_MAX_HARD"], "6")
+
+    def test_maybe_tune_margins_loads_portfolio_fills_once_for_both_grids(self):
+        db = self._db()
+        params.seed_params(db)
+        load_calls = []
+        fake_fills = [
+            {"user": "0xaaa", "time": 1, "tid": 1, "coin": "BTC", "side": "B",
+             "sz": "1", "startPosition": "0", "px": "100", "oid": 1, "crossed": True},
+            {"user": "0xaaa", "time": 2, "tid": 2, "coin": "BTC", "side": "A",
+             "sz": "1", "startPosition": "1", "px": "101", "oid": 2, "crossed": True},
+        ]
+
+        def one_tune_candidate(base):
+            return [auto_tune.build_tune_candidate(
+                base, 1.0, tuple(base[k] for k in auto_tune.LEV_KEYS), base["DEPLOY_FULL_PCT"]
+            )]
+
+        def one_add_candidate(base):
+            return [auto_tune.build_add_candidate(
+                base, float(base["ADD_GAP_K"]), float(base["ADD_GAP_SHRINK_G"]), int(base["ADD_MAX_HARD"])
+            )]
+
+        def load_once(_db, addrs, start_ms):
+            load_calls.append((tuple(addrs), start_ms))
+            return list(fake_fills)
+
+        with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
+                patch.object(auto_tune, "_load_sigmas", return_value={"BTC": 0.04}), \
+                patch.object(auto_tune, "tune_candidates_from_axes", side_effect=one_tune_candidate), \
+                patch.object(auto_tune, "add_candidates_from_axes", side_effect=one_add_candidate), \
+                patch.object(auto_tune, "_load_portfolio_fills", side_effect=load_once), \
+                patch.object(auto_tune.time, "time", return_value=10.0):
+            res = auto_tune.maybe_tune_margins(db, source="test")
+
+        self.assertIn(res["status"], ("applied", "unchanged", "ok"))
+        self.assertEqual(len(load_calls), 1)
+
+    def test_maybe_tune_margins_falls_back_when_fill_cache_guard_exceeded(self):
+        db = self._db()
+        params.seed_params(db)
+        load_calls = []
+        fake_fills = [
+            {"user": "0xaaa", "time": 1, "tid": 1, "coin": "BTC", "side": "B",
+             "sz": "1", "startPosition": "0", "px": "100", "oid": 1, "crossed": True},
+            {"user": "0xaaa", "time": 2, "tid": 2, "coin": "BTC", "side": "A",
+             "sz": "1", "startPosition": "1", "px": "101", "oid": 2, "crossed": True},
+        ]
+
+        def one_tune_candidate(base):
+            return [auto_tune.build_tune_candidate(
+                base, 1.0, tuple(base[k] for k in auto_tune.LEV_KEYS), base["DEPLOY_FULL_PCT"]
+            )]
+
+        def one_add_candidate(base):
+            return [auto_tune.build_add_candidate(
+                base, float(base["ADD_GAP_K"]), float(base["ADD_GAP_SHRINK_G"]), int(base["ADD_MAX_HARD"])
+            )]
+
+        def load_window(_db, addrs, start_ms):
+            load_calls.append((tuple(addrs), start_ms))
+            return list(fake_fills)
+
+        with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
+                patch.object(auto_tune, "_load_sigmas", return_value={"BTC": 0.04}), \
+                patch.object(auto_tune, "tune_candidates_from_axes", side_effect=one_tune_candidate), \
+                patch.object(auto_tune, "add_candidates_from_axes", side_effect=one_add_candidate), \
+                patch.object(auto_tune, "_portfolio_fill_json_bytes",
+                             return_value=auto_tune.config.AUTO_TUNE_FILL_CACHE_MAX_BYTES + 1), \
+                patch.object(auto_tune, "_load_portfolio_fills", side_effect=load_window), \
+                patch.object(auto_tune.time, "time", return_value=10.0):
+            res = auto_tune.maybe_tune_margins(db, source="test")
+
+        self.assertIn(res["status"], ("applied", "unchanged", "ok"))
+        self.assertEqual(len(load_calls), len(auto_tune._tune_days()) * 2)
 
 
 if __name__ == "__main__":
