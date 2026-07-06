@@ -41,7 +41,47 @@ def _profile_row(addr, status, score, **overrides):
     return [row.get(c) for c in cols]
 
 
+def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, mon_pnl=4_000, all_pnl=10_000):
+    return {
+        "ethAddress": addr,
+        "displayName": None,
+        "accountValue": account,
+        "windowPerformances": [
+            ("day", {"pnl": 100, "roi": 0.01, "vlm": 100_000}),
+            ("week", {"pnl": week_pnl, "roi": week_pnl / account, "vlm": week_vlm}),
+            ("month", {"pnl": mon_pnl, "roi": mon_pnl / account, "vlm": week_vlm * 2}),
+            ("allTime", {"pnl": all_pnl, "roi": all_pnl / account, "vlm": week_vlm * 4}),
+        ],
+    }
+
+
 class ScannerWatchlistTests(unittest.TestCase):
+    def test_harvest_clears_stale_candidate_flags_before_current_leaderboard(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA)
+            db.execute(
+                "INSERT INTO leaderboard (addr,is_candidate,fetched_at,mon_roi,week_roi) VALUES "
+                "('0xstale',1,'old',0.9,0.8)"
+            )
+            db.commit()
+            p = SimpleNamespace(
+                min_acct=10_000,
+                week_vlm_min=500_000,
+                week_vlm_max=100_000_000,
+                pnl_vol_min=0.001,
+                pnl_vol_max=0.08,
+            )
+
+            with patch.object(scanner.rest, "get_leaderboard", return_value=[
+                _leaderboard_row("0xfresh"),
+            ]):
+                n = scanner.harvest(db, p)
+
+            self.assertEqual(n, 1)
+            rows = dict(db.execute("SELECT addr,is_candidate FROM leaderboard").fetchall())
+            self.assertEqual(rows["0xstale"], 0)
+            self.assertEqual(rows["0xfresh"], 1)
+
     def test_incremental_scan_workset_rechecks_current_top_ranked_rejected_tail(self):
         cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]
         active = ["0xactive"]

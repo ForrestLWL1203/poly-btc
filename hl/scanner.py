@@ -386,6 +386,7 @@ def harvest(db, p) -> int:
     rows = rest.get_leaderboard()
     now = now_iso()
     n_cand = 0
+    db.execute("UPDATE leaderboard SET is_candidate=0")
     for r in rows:
         w = {name: perf for name, perf in r.get("windowPerformances", [])}
         d, wk, mo, al = w.get("day", {}), w.get("week", {}), w.get("month", {}), w.get("allTime", {})
