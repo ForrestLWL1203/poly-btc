@@ -160,16 +160,25 @@ def ep_overview(db):
 
 def ep_equity(db, rng):
     cutoff = {"1d": _iso_ago(86400), "7d": _iso_ago(7 * 86400)}.get(rng)
+    max_pts = 300
     if cutoff:
-        rows = qall(db, "SELECT ts,equity FROM account_stats WHERE ts>=? ORDER BY ts", (cutoff,))
+        where_sql, args = "WHERE ts>=?", (cutoff,)
     else:
         rng = "all"
-        rows = qall(db, "SELECT ts,equity FROM account_stats ORDER BY ts")
+        where_sql, args = "", ()
+    rows = qall(db,
+        "WITH ordered AS ("
+        "  SELECT ts,equity,ROW_NUMBER() OVER (ORDER BY ts)-1 rn,COUNT(*) OVER () total "
+        "  FROM account_stats " + where_sql +
+        "), sampled AS ("
+        "  SELECT ts,equity,rn,total,"
+        "         CASE WHEN total>? THEN CAST(total/? AS INTEGER)+1 ELSE 1 END stride "
+        "  FROM ordered"
+        ") "
+        "SELECT ts,equity FROM sampled "
+        "WHERE rn%stride=0 OR rn=total-1 ORDER BY ts",
+        tuple(args) + (max_pts, max_pts))
     pts = [{"t": r["ts"], "equity": r["equity"]} for r in rows]
-    max_pts = 300
-    if len(pts) > max_pts:
-        stride = len(pts) // max_pts + 1
-        pts = pts[::stride] + ([pts[-1]] if (len(pts) - 1) % stride else [])
     return {"range": rng, "points": pts}
 
 

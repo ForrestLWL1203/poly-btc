@@ -45,6 +45,19 @@ class InsightsGuardedDb:
         return self.db.execute(sql, args)
 
 
+class EquityGuardedDb:
+    def __init__(self, db):
+        self.db = db
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        if normalized == "SELECT ts,equity FROM account_stats ORDER BY ts":
+            raise AssertionError("equity endpoint should sample in SQL, not fetch the whole series")
+        if normalized == "SELECT ts,equity FROM account_stats WHERE ts>=? ORDER BY ts":
+            raise AssertionError("equity endpoint should sample ranged series in SQL, not fetch every point")
+        return self.db.execute(sql, args)
+
+
 class ApiOverviewPerfTests(unittest.TestCase):
     def test_overview_endpoints_are_split_from_api_module(self):
         self.assertIsNotNone(util.find_spec("hl.api_overview"))
@@ -153,6 +166,25 @@ class ApiOverviewPerfTests(unittest.TestCase):
 
         self.assertEqual([x["netPnl"] for x in insights["walletContrib"]], [40, 30, 20, 10, 0, -30, -40, -50])
         self.assertEqual([x["netPnl"] for x in insights["coinPnl"]], [40, 30, 20, 10, 0, -30, -40, -50])
+
+    def test_equity_curve_samples_large_series_in_sql(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.executemany(
+                "INSERT INTO account_stats (ts,balance,unrealized_pnl,equity) VALUES (?,?,0,?)",
+                [(f"2026-01-01T00:{i:04d}:00Z", 10000 + i, 10000 + i) for i in range(1000)],
+            )
+            db.commit()
+
+            res = api_overview.ep_equity(EquityGuardedDb(db), "all")
+
+        points = res["points"]
+        self.assertEqual(res["range"], "all")
+        self.assertEqual(len(points), 251)
+        self.assertEqual(points[0]["equity"], 10000)
+        self.assertEqual(points[1]["equity"], 10004)
+        self.assertEqual(points[-1]["equity"], 10999)
 
 
 if __name__ == "__main__":
