@@ -1,7 +1,13 @@
 import re
 import subprocess
+import tempfile
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import urlopen
+
+from hl import api
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +38,31 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertEqual([], missing, f"missing static script assets: {missing}")
         self.assertEqual([], untracked, f"static script assets must be tracked for VPS deploy: {untracked}")
+
+    def test_index_response_cache_busts_compiled_assets(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "index.html").write_text(
+                '<link rel="stylesheet" href="/app.css" />'
+                '<script src="/app.js"></script>',
+                encoding="utf-8",
+            )
+            (root / "app.css").write_text("body{}", encoding="utf-8")
+            (root / "app.js").write_text("window.__ok=1", encoding="utf-8")
+
+            handler = api.make_handler(":memory:", auth="test", static_dir=str(root))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                body = urlopen(f"http://127.0.0.1:{server.server_port}/", timeout=2).read().decode()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+        self.assertRegex(body, r'/app\.js\?v=\d+')
+        self.assertRegex(body, r'/app\.css\?v=\d+')
 
 
 if __name__ == "__main__":

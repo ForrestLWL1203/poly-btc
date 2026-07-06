@@ -1084,22 +1084,24 @@ def make_handler(db_path, auth, static_dir=None):
                 if not target.is_file():
                     return self._send(404, {"error": "not_found"})
             if target.name == "index.html":
-                # Inject a cache-busting ?v=<asset mtime> onto the app.jsx/app.css refs. babel fetches
-                # app.jsx via a JS-initiated XHR, which a browser hard-refresh does NOT bypass — so a plain
-                # no-store isn't enough to shake a stale copy. A fresh URL per deploy forces the new build.
+                # Inject a cache-busting ?v=<asset mtime> onto compiled assets. They are served immutable, so
+                # a fresh URL per deploy is what forces phones and desktop browsers to load the new UI.
+                import re
                 html = target.read_text()
+                assets = ("app.js", "app.css", "app.jsx")
                 try:
-                    ver = int(max((base / f).stat().st_mtime for f in ("app.jsx", "app.css") if (base / f).is_file()))
+                    ver = int(max((base / f).stat().st_mtime for f in assets if (base / f).is_file()))
                 except ValueError:
                     ver = 0
-                html = html.replace("/app.jsx", f"/app.jsx?v={ver}").replace("/app.css", f"/app.css?v={ver}")
+                for asset in assets:
+                    html = re.sub(rf"/{re.escape(asset)}(?:\?v=[^\"']*)?", f"/{asset}?v={ver}", html)
                 data = html.encode()
             else:
                 data = target.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", mimetypes.guess_type(str(target))[0] or "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
-            # Only index.html is uncached (it's tiny and carries the ?v=<mtime> version stamp). app.jsx/app.css
+            # Only index.html is uncached (it's tiny and carries the ?v=<mtime> version stamp). app.js/app.css
             # are busted by that stamp on deploy, and /vendor/ is immutable → cache them ALL hard, so a normal
             # refresh re-fetches nothing but index.html (no re-downloading assets every time).
             if target.name == "index.html":
