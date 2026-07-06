@@ -31,6 +31,9 @@ from . import params as params_mod
 from . import procman
 from .api_common import iso_epoch as _iso_epoch
 from .api_common import q1, qall, score100, score_from100
+from .api_discovery import ep_discovery, ep_scan_runs, ep_scan_status, ep_score_dist
+from .api_discovery import followed_count as _followed_count
+from .api_discovery import scanner_status as _scanner_status
 from .api_positions import ep_position_detail, ep_positions
 from .api_wallets import ep_wallet_detail, ep_wallets
 from .util import now_iso
@@ -192,38 +195,6 @@ def _iso_ago(seconds):
 
 
 # ─────────────────────────────────────────────────────────────────────── endpoints
-def _scanner_status(db):
-    """Live status of the CONTINUOUS rolling scanner (distinct from a stop-the-world full rescan).
-    mode: rolling (always-on trickle) | scanning (full rescan) | stopped | unknown. detail carries the
-    rolling sweep position / pace / last-touched wallet so the UI can show it's actively working."""
-    r = q1(db, "SELECT state,heartbeat_at,detail_json FROM process_status WHERE name='scanner'")
-    if not r:
-        # no status row yet (scanner runs as a 6h batch — hasn't written one this code-version). If scans
-        # have ever run, treat as idle-between-cycles (healthy), not a scary 'unknown'.
-        ran = q1(db, "SELECT COUNT(*) c FROM scan_runs")
-        return {"mode": "idle" if (ran and ran["c"]) else "unknown", "stale": False,
-                "heartbeatAt": None, "detail": {}}
-    try:
-        detail = json.loads(r["detail_json"]) if r["detail_json"] else {}
-    except (ValueError, TypeError):
-        detail = {}
-    hb = _iso_epoch(r["heartbeat_at"])
-    stale = bool((r["state"] or "unknown") != "idle" and hb and (time.time() - hb) > PROC_STALE_SEC)
-    return {"mode": r["state"] or "unknown",
-            "stale": stale,
-            "heartbeatAt": r["heartbeat_at"], "detail": detail}
-
-
-def _followed_count(db, line):
-    """Count of wallets we ACTUALLY copy — mirrors observer.load_targets: score ≥ line, enabled. Evidence
-    is now enforced at profile time (scanner EVIDENCE gate), so active wallets already have a track record —
-    no separate follow-time floor (v10)."""
-    r = q1(db, "SELECT COUNT(*) cnt FROM watchlist w "
-               "LEFT JOIN target_controls tc ON tc.addr=w.addr "
-               "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=?", (line,))
-    return (r["cnt"] if r else 0)
-
-
 def ep_shadow(db):
     """Taker vs maker-shadow A/B — two isolated paper books, SAME strategy, only execution differs
     (taker fills on every target fill at the taker fee; maker fills only on the target's maker fills at
@@ -378,63 +349,6 @@ def ep_insights(db):
     return {"walletContrib": _top_bottom(wallets, "netPnl"), "coinPnl": _top_bottom(coins, "netPnl")}
 
 
-# gate reason -> the 4 UI buckets (kept here so it's tweakable in one place)
-_REJECT_BUCKETS = [
-    ("不活跃 / 成交不足", {"inactive", "spot_dominant", "bot_frequency", "irregular"}),
-    ("网格度过高", {"grid_dca"}),
-    ("扛单 / 单笔大亏", {"blowup_loss", "not_profitable"}),
-]
-
-
-def ep_discovery(db):
-    candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
-    active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
-    # funnel's final stage = wallets ABOVE the follow line (the ones we actually copy), NOT the whole
-    # watchlist (which also holds many lower-score actives we only observe).
-    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    watchlist = _followed_count(db, line_native)   # funnel's final stage = wallets we actually copy
-    # reject reasons -> buckets
-    reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
-    counts = {row["reason"]: row["n"] for row in reason_rows}
-    total_rej = sum(counts.values()) or 0
-    buckets, used = [], set()
-    for label, keys in _REJECT_BUCKETS:
-        n = sum(counts.get(k, 0) for k in keys)
-        used |= keys
-        buckets.append([label, n])
-    other = sum(v for k, v in counts.items() if k not in used)
-    buckets.append(["其他", other])
-    reject_reasons = [{"label": lbl, "pct": round(n / total_rej * 100) if total_rej else 0}
-                      for lbl, n in buckets]
-    # score histogram over scored profiles. X-axis anchored to the native score ceiling (v5 score is
-    # native [0,1]; display = ×100) so the bins map onto the same 0–100 ruler as the wallet scores.
-    scores = [r["score"] for r in qall(db,
-              "SELECT score FROM profile WHERE score IS NOT NULL AND score>0")]
-    follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    nbins = 16
-    hi = 1.0
-    bins = [0] * nbins
-    for sc in scores:
-        idx = min(int(max(sc, 0.0) / hi * nbins), nbins - 1)
-        bins[idx] += 1
-    follow_idx = min(int(follow_line / hi * nbins), nbins - 1)
-    last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    return {"funnel": {"candidates": candidates, "active": active, "watchlist": watchlist},
-            "rejectReasons": reject_reasons,
-            "scoreHistogram": {"bins": bins, "followLineBinIndex": follow_idx},
-            "scanner": _scanner_status(db),               # live rolling-scanner status for the page card
-            "lastScanAt": (last_scan["m"] if last_scan else None)}
-
-
-def ep_scan_runs(db, limit):
-    rows = qall(db, "SELECT started_at,finished_at,candidates,added,retired,kept,rejected,n_active "
-                    "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
-    return {"runs": [{"at": r["started_at"], "finishedAt": r["finished_at"],
-                      "candidates": r["candidates"], "added": r["added"], "retired": r["retired"],
-                      "kept": r["kept"], "rejected": r["rejected"], "active": r["n_active"]}
-                     for r in rows]}
-
-
 def ep_command(db, cmd_id):
     r = q1(db, "SELECT id,type,status,result_json,error,created_at,acked_at,done_at "
                "FROM commands WHERE id=?", (cmd_id,))
@@ -444,28 +358,6 @@ def ep_command(db, cmd_id):
             "result": json.loads(r["result_json"]) if r["result_json"] else None,
             "error": r["error"], "createdAt": r["created_at"],
             "ackedAt": r["acked_at"], "doneAt": r["done_at"]}
-
-
-def ep_scan_status(db):
-    r = q1(db, "SELECT * FROM scan_progress WHERE id=1")
-    if not r or (r["state"] or "idle") != "scanning":
-        return {"state": "idle"}
-    started = _iso_epoch(r["started_at"])
-    elapsed = int(time.time() - started) if started else 0
-    total, scanned, eta = r["candidates_total"] or 0, r["candidates_scanned"] or 0, r["eta_sec"] or 1200
-    pct = round(scanned / total * 100) if total else min(99, round(elapsed / eta * 100))
-    manual = bool(r["manual"]) if "manual" in r.keys() else True   # missing col (old db) → treat as manual (safe)
-    return {"state": "scanning", "manual": manual, "startedAt": r["started_at"], "elapsedSec": elapsed, "etaSec": eta,
-            "progressPct": pct, "candidatesScanned": scanned, "candidatesTotal": total, "stage": r["stage"]}
-
-
-def ep_score_dist(db):
-    """All watchlist (active) wallets' DISPLAY scores (0–100), sorted desc — lets the Settings UI show,
-    live, how many wallets a given MIN_FOLLOW_SCORE would actually follow (the number is the real guide,
-    not an abstract range). Tiny payload (~dozens of floats)."""
-    scores = [round(score100(r["score"] or 0.0), 1)
-              for r in qall(db, "SELECT score FROM watchlist ORDER BY score DESC")]
-    return {"scores": scores, "total": len(scores)}
 
 
 WRITABLE_LEVELS = {"green", "yellow", "blue"}     # black / display are read-only

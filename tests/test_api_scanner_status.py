@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from importlib import import_module, util
 
 from hl import api
 
@@ -26,6 +27,16 @@ class ApiScannerStatusTests(unittest.TestCase):
         st = api._scanner_status(self._db_with_status("scanning"))
 
         self.assertTrue(st["stale"])
+
+    def test_discovery_endpoints_are_split_from_api_module(self):
+        self.assertIsNotNone(util.find_spec("hl.api_discovery"))
+        api_discovery = import_module("hl.api_discovery")
+
+        self.assertIs(api._scanner_status, api_discovery.scanner_status)
+        self.assertIs(api.ep_discovery, api_discovery.ep_discovery)
+        self.assertIs(api.ep_scan_runs, api_discovery.ep_scan_runs)
+        self.assertIs(api.ep_scan_status, api_discovery.ep_scan_status)
+        self.assertIs(api.ep_score_dist, api_discovery.ep_score_dist)
 
 
 if __name__ == "__main__":
