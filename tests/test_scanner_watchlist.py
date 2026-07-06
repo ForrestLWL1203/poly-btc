@@ -105,6 +105,46 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_14d_net_pnl"], -12.0)
         self.assertEqual(m["copy_bt_14d_closed_n"], 4)
 
+    def test_copy_backtest_gate_allows_primary_loss_when_recent_windows_recover(self):
+        m = {}
+        ok, reason = scanner._apply_copy_bt_gate(
+            m,
+            {
+                30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
+                     "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 6.0},
+                14: {"copy_net_pnl": 35.0, "copy_win_rate": 0.6, "closed_n": 4,
+                     "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
+                7: {"copy_net_pnl": 8.0, "copy_win_rate": 0.5, "closed_n": 2,
+                    "opened_n": 2, "target_open_events": 2, "liquidations": 0, "fee_drag": 1.0},
+            },
+            SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
+                            copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(m["copy_bt_net_pnl"], -80.0)
+        self.assertEqual(m["copy_bt_14d_net_pnl"], 35.0)
+        self.assertEqual(m["copy_bt_7d_net_pnl"], 8.0)
+
+    def test_copy_backtest_gate_keeps_primary_loss_when_recent_recovery_is_thin(self):
+        ok, reason = scanner._apply_copy_bt_gate(
+            {},
+            {
+                30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
+                     "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 6.0},
+                14: {"copy_net_pnl": 35.0, "copy_win_rate": 0.6, "closed_n": 4,
+                     "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
+                7: {"copy_net_pnl": 8.0, "copy_win_rate": 0.5, "closed_n": 1,
+                    "opened_n": 1, "target_open_events": 1, "liquidations": 0, "fee_drag": 1.0},
+            },
+            SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
+                            copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "copy_backtest_loss")
+
     def test_copy_backtest_gate_records_but_allows_thin_recent_window_loss(self):
         m = {}
         ok, reason = scanner._apply_copy_bt_gate(

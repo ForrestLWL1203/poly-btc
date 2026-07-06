@@ -158,6 +158,30 @@ def _record_recent_copy_bt(m, days, result):
         m["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
 
 
+def _copy_bt_recent_recovery_ok(by_days, primary_days, p, min_net):
+    """Allow an old primary-window loss only after every configured recent window has recovered."""
+    recent_days = []
+    for days in getattr(config, "COPY_BT_RECENT_DAYS", (14, 7)):
+        try:
+            d = int(days)
+        except (TypeError, ValueError):
+            continue
+        if 0 < d < primary_days and d not in recent_days:
+            recent_days.append(d)
+    if not recent_days:
+        return False
+    for days in recent_days:
+        res = by_days.get(days)
+        if not res:
+            return False
+        if int(res.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
+            return False
+        net = res.get("copy_net_pnl")
+        if net is None or net <= min_net:
+            return False
+    return True
+
+
 def _apply_copy_bt_gate(m, result, p):
     if not result:
         return True, "ok"
@@ -195,12 +219,15 @@ def _apply_copy_bt_gate(m, result, p):
     if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
         return True, "ok"
     min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
+    recent_recovery_ok = _copy_bt_recent_recovery_ok(by_days, primary_days, p, min_net)
     for days in sorted(by_days, reverse=True):
         res = by_days[days]
         if int(res.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):
             continue
         net = res.get("copy_net_pnl")
         if net is not None and net <= min_net:
+            if days == primary_days and recent_recovery_ok:
+                continue
             return False, "copy_backtest_loss" if days == primary_days else f"copy_backtest_loss_{days}d"
     return True, "ok"
 
