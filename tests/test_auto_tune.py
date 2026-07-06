@@ -12,49 +12,50 @@ class AutoTuneTests(unittest.TestCase):
         self.addCleanup(td.cleanup)
         return db
 
-    def test_choose_candidate_requires_recent_profit_and_preserved_fit(self):
+    def test_choose_candidate_requires_recent_profit_and_preserved_capacity_fit(self):
         baseline = {
             "mult": 1.0,
             "windows": {
                 30: {"copy_net_pnl": 1000, "closed_n": 10, "open_fill_rate": 0.90,
-                     "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
+                     "capacity_open_fit": 0.90, "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
                 14: {"copy_net_pnl": 250, "closed_n": 5, "open_fill_rate": 0.90,
-                     "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+                     "capacity_open_fit": 0.90, "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
                 7: {"copy_net_pnl": 80, "closed_n": 3, "open_fill_rate": 1.0,
-                    "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+                    "capacity_open_fit": 1.0, "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
             },
         }
         bad_fit = {
             "mult": 1.5,
             "windows": {
                 30: {"copy_net_pnl": 4000, "closed_n": 10, "open_fill_rate": 0.55,
-                     "liquidations": 0, "target_open_events": 10, "skip_reasons": {"skip_deploy_cap": 4}},
+                     "capacity_open_fit": 0.55, "liquidations": 0, "target_open_events": 10,
+                     "skip_reasons": {"skip_deploy_cap": 4}},
                 14: {"copy_net_pnl": 500, "closed_n": 5, "open_fill_rate": 0.60,
-                     "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+                     "capacity_open_fit": 0.60, "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
                 7: {"copy_net_pnl": 100, "closed_n": 3, "open_fill_rate": 1.0,
-                    "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+                    "capacity_open_fit": 1.0, "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
             },
         }
         bad_recent = {
             "mult": 1.25,
             "windows": {
                 30: {"copy_net_pnl": 2000, "closed_n": 10, "open_fill_rate": 0.90,
-                     "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
+                     "capacity_open_fit": 0.90, "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
                 14: {"copy_net_pnl": -1, "closed_n": 5, "open_fill_rate": 0.90,
-                     "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+                     "capacity_open_fit": 0.90, "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
                 7: {"copy_net_pnl": 100, "closed_n": 3, "open_fill_rate": 1.0,
-                    "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+                    "capacity_open_fit": 1.0, "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
             },
         }
         good = {
             "mult": 1.25,
             "windows": {
-                30: {"copy_net_pnl": 1800, "closed_n": 10, "open_fill_rate": 0.88,
-                     "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
-                14: {"copy_net_pnl": 350, "closed_n": 5, "open_fill_rate": 0.88,
-                     "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+                30: {"copy_net_pnl": 1800, "closed_n": 10, "open_fill_rate": 0.65,
+                     "capacity_open_fit": 0.88, "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
+                14: {"copy_net_pnl": 350, "closed_n": 5, "open_fill_rate": 0.65,
+                     "capacity_open_fit": 0.88, "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
                 7: {"copy_net_pnl": 90, "closed_n": 3, "open_fill_rate": 1.0,
-                    "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
+                    "capacity_open_fit": 1.0, "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
             },
         }
 
@@ -104,6 +105,34 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(overrides["STABLE_MARGIN_PCT"], 0.036)
         self.assertEqual(overrides["MID_MARGIN_PCT"], 0.036)
         self.assertEqual(overrides["HIGH_MARGIN_PCT"], 0.024)
+        self.assertEqual(overrides["ADD_STRATEGY"], "smart")
+
+    def test_build_tune_candidate_changes_margin_lev_and_deploy_full(self):
+        follow = {
+            "STABLE_MARGIN_MIN_PCT": 0.020,
+            "MID_MARGIN_MIN_PCT": 0.020,
+            "HIGH_MARGIN_MIN_PCT": 0.020,
+            "STABLE_MARGIN_PCT": 0.040,
+            "MID_MARGIN_PCT": 0.030,
+            "HIGH_MARGIN_PCT": 0.030,
+            "STABLE_LEV_CAP": 25.0,
+            "MID_LEV_CAP": 10.0,
+            "HIGH_LEV_CAP": 4.0,
+            "DEPLOY_FULL_PCT": 0.40,
+            "SMART_ADD": True,
+        }
+        base = {k: follow[k] for k in auto_tune.TUNE_KEYS}
+        candidate = auto_tune.build_tune_candidate(base, 1.4, (35, 12, 5), 0.50)
+
+        overrides = auto_tune.follow_overrides_for_tune_candidate(follow, candidate)
+
+        self.assertAlmostEqual(overrides["STABLE_MARGIN_PCT"], 0.056)
+        self.assertAlmostEqual(overrides["MID_MARGIN_PCT"], 0.042)
+        self.assertAlmostEqual(overrides["HIGH_MARGIN_PCT"], 0.042)
+        self.assertEqual(overrides["STABLE_LEV_CAP"], 35)
+        self.assertEqual(overrides["MID_LEV_CAP"], 12)
+        self.assertEqual(overrides["HIGH_LEV_CAP"], 5)
+        self.assertEqual(overrides["DEPLOY_FULL_PCT"], 0.50)
         self.assertEqual(overrides["ADD_STRATEGY"], "smart")
 
 
