@@ -158,8 +158,26 @@ def _record_recent_copy_bt(m, days, result):
         m["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
 
 
-def _copy_bt_recent_recovery_ok(by_days, primary_days, p, min_net):
+def _copy_bt_target_perp_positive(m):
+    """Target wallet itself must still be profitable on copyable perp metrics before old copy loss is waived."""
+    if (m.get("net_pnl") or 0.0) <= 0:
+        return False
+    roi_total = m.get("roi_total")
+    if roi_total is None:
+        roi_total = m.get("roi_equity")
+    if roi_total is not None and roi_total <= 0:
+        return False
+    for key in ("net_30d", "net_life"):
+        val = m.get(key)
+        if val is not None and val <= 0:
+            return False
+    return True
+
+
+def _copy_bt_recent_recovery_ok(m, by_days, primary_days, p, min_net):
     """Allow an old primary-window loss only after every configured recent window has recovered."""
+    if not _copy_bt_target_perp_positive(m):
+        return False
     recent_days = []
     for days in getattr(config, "COPY_BT_RECENT_DAYS", (14, 7)):
         try:
@@ -219,7 +237,7 @@ def _apply_copy_bt_gate(m, result, p):
     if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
         return True, "ok"
     min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
-    recent_recovery_ok = _copy_bt_recent_recovery_ok(by_days, primary_days, p, min_net)
+    recent_recovery_ok = _copy_bt_recent_recovery_ok(m, by_days, primary_days, p, min_net)
     for days in sorted(by_days, reverse=True):
         res = by_days[days]
         if int(res.get("closed_n") or 0) < _copy_bt_min_closed_for_days(p, days):

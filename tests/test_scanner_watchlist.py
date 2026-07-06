@@ -106,7 +106,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_14d_closed_n"], 4)
 
     def test_copy_backtest_gate_allows_primary_loss_when_recent_windows_recover(self):
-        m = {}
+        m = {"net_pnl": 50.0, "roi_total": 0.05, "net_30d": 200.0, "net_life": 500.0}
         ok, reason = scanner._apply_copy_bt_gate(
             m,
             {
@@ -127,9 +127,27 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_14d_net_pnl"], 35.0)
         self.assertEqual(m["copy_bt_7d_net_pnl"], 8.0)
 
+    def test_copy_backtest_gate_keeps_primary_loss_when_target_perp_is_not_profitable(self):
+        ok, reason = scanner._apply_copy_bt_gate(
+            {"net_pnl": -1.0, "roi_total": -0.01, "net_30d": 200.0, "net_life": 500.0},
+            {
+                30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
+                     "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 6.0},
+                14: {"copy_net_pnl": 35.0, "copy_win_rate": 0.6, "closed_n": 4,
+                     "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
+                7: {"copy_net_pnl": 8.0, "copy_win_rate": 0.5, "closed_n": 2,
+                    "opened_n": 2, "target_open_events": 2, "liquidations": 0, "fee_drag": 1.0},
+            },
+            SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
+                            copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "copy_backtest_loss")
+
     def test_copy_backtest_gate_keeps_primary_loss_when_recent_recovery_is_thin(self):
         ok, reason = scanner._apply_copy_bt_gate(
-            {},
+            {"net_pnl": 50.0, "roi_total": 0.05, "net_30d": 200.0, "net_life": 500.0},
             {
                 30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
                      "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 6.0},
