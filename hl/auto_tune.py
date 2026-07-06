@@ -71,7 +71,6 @@ def resolve_margin_baseline(db, current: dict) -> tuple[dict, bool]:
     base = _json_load(_state_get(db, "margin_base"), None)
     last = _json_load(_state_get(db, "margin_last_auto"), None)
     if not base or not last or not _same_margins(current, last):
-        store_margin_state(db, current, current)
         return current, True
     return {k: float(base[k]) for k in MARGIN_KEYS}, False
 
