@@ -147,6 +147,46 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(event["status"], "active")
         self.assertEqual(event["payload"]["copyBt"]["14dNetPnl"], 500)
 
+    def test_pipeline_summary_endpoint_compacts_latest_scan_decisions(self):
+        db = self._db()
+        self._insert_profiles(db)
+        pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa", "0xbbb"])
+        pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
+            "status": "ok",
+            "reason": "portfolio_topn",
+            "line": 0.735,
+            "count": 2,
+            "target_n": 16,
+        })
+        pipeline_audit.record_auto_tune_result(db, "2026-07-07T00:00:00Z", "scan", {
+            "status": "ok",
+            "applied": True,
+            "applied_sizing": True,
+            "applied_add": False,
+            "followed_n": 2,
+            "selected_mult": 1.2,
+            "params": {"MID_MARGIN_PCT": 0.04},
+            "add_params": {"ADD_GAP_K": 0.08},
+            "candidates": [{"score": 1}],
+            "add_candidates": [],
+        })
+        db.commit()
+
+        res = api_discovery.ep_pipeline_summary(db, {})
+
+        self.assertEqual(res["stamp"], "2026-07-07T00:00:00Z")
+        self.assertEqual(res["source"], "scan")
+        self.assertEqual(res["profile"]["total"], 2)
+        self.assertEqual(res["profile"]["active"], 1)
+        self.assertEqual(res["profile"]["rejected"], 1)
+        self.assertEqual(res["profile"]["reasonCounts"][0]["reason"], "copy_bt_loss")
+        self.assertEqual(res["followLine"]["reason"], "portfolio_topn")
+        self.assertEqual(res["followLine"]["score"], 73.5)
+        self.assertEqual(res["followLine"]["count"], 2)
+        self.assertTrue(res["autoTune"]["applied"])
+        self.assertTrue(res["autoTune"]["appliedSizing"])
+        self.assertFalse(res["autoTune"]["appliedAdd"])
+
 
 if __name__ == "__main__":
     unittest.main()

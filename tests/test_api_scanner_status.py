@@ -50,6 +50,7 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertTrue(callable(api_discovery.ep_scan_runs))
         self.assertTrue(callable(api_discovery.ep_scan_status))
         self.assertTrue(callable(api_discovery.ep_score_dist))
+        self.assertTrue(callable(api_discovery.ep_pipeline_summary))
 
     def test_discovery_score_histogram_aggregates_bins_in_sql(self):
         with tempfile.TemporaryDirectory() as td:

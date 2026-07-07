@@ -294,6 +294,23 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .histo .hb.below { background: rgba(255,255,255,.1); }
 .histo-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--green); }
 .histo-line .lbl { position: absolute; top: -2px; left: 6px; font-size: 10px; color: var(--green-l); white-space: nowrap; }
+.pipeline-card { margin-top: 14px; }
+.pipeline-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pipeline-stamp { margin-top: 4px; font-family: var(--mono); font-size: 12px; color: var(--t2); }
+.pipeline-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.pipe-metric { min-width: 0; padding: 11px 12px; border-radius: 12px; background: rgba(255,255,255,.035);
+  border: 1px solid rgba(255,255,255,.07); }
+.pipe-metric span { display: block; color: var(--t3); font-size: 11px; margin-bottom: 5px; }
+.pipe-metric b { display: block; font-family: var(--mono); color: var(--t1); font-size: 18px; line-height: 1.15; }
+.pipe-metric b em { font-style: normal; font-size: 11px; color: var(--t3); font-weight: 500; }
+.pipe-metric small { display: block; margin-top: 4px; color: var(--t3); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipeline-detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 14px; margin-top: 12px;
+  padding-top: 12px; border-top: 1px solid rgba(255,255,255,.06); }
+.pipeline-line { margin-top: 5px; font-family: var(--mono); font-size: 12px; color: var(--t2); }
+.pipe-reasons { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-top: 5px; }
+.pipe-reason { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 999px;
+  background: rgba(255,92,92,.09); color: var(--red-l); font-size: 11px; }
+.pipe-reason b { font-family: var(--mono); color: var(--t1); }
 
 /* ---------- scan mask ---------- */
 .mask { position: fixed; inset: 0; z-index: 60; background: rgba(8,8,10,.86); backdrop-filter: blur(8px);
@@ -494,6 +511,9 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .card { border-radius: 14px; padding: 14px; }
   .kpi { font-size: 23px; }
   .kpi-sub { flex-wrap: wrap; }
+  .pipeline-grid,
+  .pipeline-detail { grid-template-columns: minmax(0, 1fr); }
+  .pipe-metric small { white-space: normal; }
   .section-h { align-items: flex-start; gap: 10px; flex-direction: column; margin: 16px 0 10px; }
   .section-h h2 { line-height: 1.35; }
   .range-tabs,

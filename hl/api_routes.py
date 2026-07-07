@@ -3,7 +3,14 @@
 import time
 
 from .api_commands import ALLOWED_COMMANDS, PROCESS_COMMANDS, ep_command, exec_process_command, insert_command
-from .api_discovery import ep_discovery, ep_pipeline_audit, ep_scan_runs, ep_scan_status, ep_score_dist
+from .api_discovery import (
+    ep_discovery,
+    ep_pipeline_audit,
+    ep_pipeline_summary,
+    ep_scan_runs,
+    ep_scan_status,
+    ep_score_dist,
+)
 from .api_overview import ep_equity, ep_insights, ep_overview, ep_shadow
 from .api_params import ep_params, patch_params, reset_params
 from .api_positions import ep_position_detail, ep_positions
@@ -45,6 +52,7 @@ GET_ROUTES = {
     "/api/scan-status": lambda db, qs: ep_scan_status(db),
     "/api/score-dist": lambda db, qs: ep_score_dist(db),
     "/api/pipeline-audit": lambda db, qs: ep_pipeline_audit(db, qs),
+    "/api/pipeline-summary": lambda db, qs: ep_pipeline_summary(db, qs),
     "/api/shadow": lambda db, qs: ep_shadow(db),
 }
 
