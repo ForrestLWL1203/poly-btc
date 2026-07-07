@@ -819,12 +819,12 @@ class Observer:
             #                                            pacer already spaces the calls, so no per-wallet sleep needed
 
     # -- PRICING for builder/stock perps (WS bbo can't serve builder dexes) ---
-    async def poll_stock_books(self):
-        """Keep self.bbo fresh for builder/stock coins we're tracking via REST l2Book (best bid/ask).
-        Only polls coins we've actually seen a fill on (added to stock_coins on first sight), so the
-        cost is a handful of calls — and zero when no stock positions are in play."""
+    async def poll_stock_mids(self):
+        """Keep builder/stock dashboard marks fresh from allMids.
+
+        This is separate from l2Book warming so live marks are never blocked behind the slower global
+        REST pacer used by fill polling and book-top requests."""
         last_log = 0
-        book_i = 0
         while not self.stop:
             coins = sorted(self.stock_coins)
             try:
@@ -847,6 +847,13 @@ class Observer:
                     last_log = time.time()
             except Exception as exc:  # noqa: BLE001
                 _log(f"stock mids refresh failed: {exc}")
+            await asyncio.sleep(2 if self.stock_coins else 5)
+
+    async def poll_stock_books(self):
+        """Keep best bid/ask warm for stock execution pricing. Round-robin: marks come from allMids."""
+        book_i = 0
+        while not self.stop:
+            coins = sorted(self.stock_coins)
 
             if coins:
                 coin = coins[book_i % len(coins)]
@@ -902,7 +909,8 @@ class Observer:
         asyncio.create_task(self.reconcile_loop())    # periodic orphan-check: close copies whose master exited
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.poll_orders())    # resting-order intentions (REST)
-        asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book)
+        asyncio.create_task(self.poll_stock_mids())   # stock/commodity marks (REST allMids, fast)
+        asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book, slower)
         asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)
         while not self.stop:                        # WS: PRICING only (per-coin bbo, no user subs)
             try:
