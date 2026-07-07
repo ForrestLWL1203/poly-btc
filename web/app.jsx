@@ -47,6 +47,114 @@ function usePolling(load, intervalMs, enabled = true) {
   }, [load, intervalMs, enabled]);
 }
 
+function useDashboardStream(token) {
+  const [live, setLive] = useState(null);            // SSE fast bundle {overview, positions, serverTime}
+  const [streamOk, setStreamOk] = useState(false);
+
+  // SSE live stream replaces polling when connected. EventSource auto-reconnects; on error we flip
+  // streamOk off so the polling fallback resumes until the stream recovers.
+  useEffect(() => {
+    if (!token || typeof EventSource === "undefined") return;
+    let es;
+    try {
+      es = new EventSource("/api/stream?token=" + encodeURIComponent(token));
+      es.onmessage = (e) => { try { setLive(JSON.parse(e.data)); setStreamOk(true); } catch (_e) {} };
+      es.onerror = () => setStreamOk(false);
+    } catch (_e) { setStreamOk(false); }
+    return () => { if (es) es.close(); };
+  }, [token]);
+
+  return { live, streamOk };
+}
+
+function useOverviewRefresh(live, streamOk) {
+  const [polledOverview, setPolledOverview] = useState(null);
+  const loadOverview = useCallback(() => { api.get("/api/overview").then(setPolledOverview).catch(() => {}); }, []);
+
+  // Fallback polling does one immediate load on mount/reconnect gaps, so the page paints before
+  // the stream's first push and recovers cleanly when SSE drops.
+  usePolling(loadOverview, 7000, !streamOk);
+
+  return {
+    overview: (streamOk && live && live.overview) || polledOverview,
+    setPolledOverview,
+  };
+}
+
+function useManualScanProgress(serverScanning) {
+  const [scanning, setScanning] = useState(false);
+  const [scanStatus, setScanStatus] = useState(null);
+
+  const checkManualScan = useCallback(() => {
+    api.get("/api/scan-status").then((s) => {
+      if (s && s.state === "scanning" && s.manual) { setScanning(true); setScanStatus(s); }
+    }).catch(() => {});
+  }, []);
+
+  // Server state is the source of truth. Manual scans lock the page; 24h auto scans stay silent.
+  useEffect(() => { if (serverScanning) checkManualScan(); }, [serverScanning, checkManualScan]);
+  useEffect(() => { checkManualScan(); }, [checkManualScan]);
+
+  useEffect(() => {
+    if (!scanning) return;
+    let alive = true, started = Date.now(), seen = false;
+    const tick = async () => {
+      try {
+        const s = await api.get("/api/scan-status");
+        if (!alive) return;
+        if (s.state === "scanning") { seen = true; setScanStatus(s); }
+        // Clear only when both progress and overview agree the scan is done. The 8s grace covers
+        // click -> daemon pickup timing, where progress may briefly still look idle.
+        else if ((seen || Date.now() - started > 8000) && !serverScanning) {
+          setScanning(false); setScanStatus(null);
+        }
+      } catch (_e) {}
+    };
+    tick(); const t = setInterval(tick, 1200);
+    return () => { alive = false; clearInterval(t); };
+  }, [scanning, serverScanning]);
+
+  return { scanning, setScanning, scanStatus };
+}
+
+function useObserverTransition(setOverview) {
+  const [obsPending, setObsPending] = useState(null);   // {label, target} while observer reaches target state
+
+  useEffect(() => {
+    if (!obsPending) return;
+    let alive = true, started = Date.now();
+    const tick = async () => {
+      try {
+        const o = await api.get("/api/overview");
+        if (!alive) return;
+        setOverview(o);
+        const st = o && o.system ? o.system.observer : null;
+        if (st === obsPending.target || Date.now() - started > 30000) setObsPending(null);
+      } catch (_e) {}
+    };
+    tick(); const t = setInterval(tick, 1500);
+    return () => { alive = false; clearInterval(t); };
+  }, [obsPending, setOverview]);
+
+  return { obsPending, setObsPending };
+}
+
+function useDashboardRefresh() {
+  const { live, streamOk } = useDashboardStream(api.token);
+  const { overview, setPolledOverview } = useOverviewRefresh(live, streamOk);
+  const serverScanning = !!(overview && overview.system && overview.system.scanner === "scanning");
+  const scan = useManualScanProgress(serverScanning);
+  const observer = useObserverTransition(setPolledOverview);
+
+  return {
+    ov: overview,
+    livePositions: streamOk ? (live && live.positions) : null,
+    streamOk,
+    ...scan,
+    ...observer,
+  };
+}
+
 /* ----------------------------------------------------------------- format */
 const fUsd = (v, d = 0) => (v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 const fSign = (v, d = 0) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
@@ -1567,101 +1675,17 @@ const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", 
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
-  const [polledOv, setPolledOv] = useState(null);
-  const [live, setLive] = useState(null);            // SSE fast bundle {overview, positions, serverTime}
-  const [streamOk, setStreamOk] = useState(false);
+  const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh();
   const [confirmCfg, setConfirmCfg] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [scanning, setScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState(null);
-  const [obsPending, setObsPending] = useState(null);   // observer 控制过渡 {label, target} → 显示遮罩
   const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
   const mobileNavRef = useRef(null);
   const toast = () => {};   // 右上角 tooltip 已废弃 — 各动作改用整页/按钮内联 loading 反馈
 
-  const ov = (streamOk && live && live.overview) || polledOv;    // prefer live stream; fall back to polled
-
-  // SSE live stream (replaces polling when connected). EventSource auto-reconnects; on error we flip
-  // streamOk off so the polling fallback below resumes until the stream recovers.
-  useEffect(() => {
-    if (!api.token || typeof EventSource === "undefined") return;
-    let es;
-    try {
-      es = new EventSource("/api/stream?token=" + encodeURIComponent(api.token));
-      es.onmessage = (e) => { try { setLive(JSON.parse(e.data)); setStreamOk(true); } catch (_e) {} };
-      es.onerror = () => setStreamOk(false);
-    } catch (_e) { setStreamOk(false); }
-    return () => { if (es) es.close(); };
-  }, []);
-
-  // Polling fallback for overview: only while the stream is NOT delivering. usePolling does one immediate load
-  // on mount/reconnect gap, so the page paints before the stream's first push.
-  const loadOv = useCallback(() => { api.get("/api/overview").then(setPolledOv).catch(() => {}); }, []);
-  usePolling(loadOv, 7000, !streamOk);
-
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
-  // The SERVER is the source of truth for "a full scan is running" (scan_progress / process_status,
-  // surfaced as system.scanner). Driving the mask off this — not just a click in this tab — means the
-  // mask survives a page refresh/reopen AND catches the 24h auto-scan, so you can't refresh past it and
-  // double-click 重采. (Backend is already single-executor + absorbs duplicate rescans; this closes the UX gap.)
-  const serverScanning = !!(ov && ov.system && ov.system.scanner === "scanning");
-  // ONLY a MANUAL (dashboard-triggered) scan locks the page. The 24h AUTO scan runs SILENTLY in the
-  // background — it MUST be slow (the observer owns the rate budget) so it takes a long time, and locking
-  // the dashboard for its whole duration is unacceptable. So when the server reports a scan running, we
-  // check scan-status.manual and only raise the mask for a manual one.
-  useEffect(() => {
-    if (!serverScanning) return;
-    api.get("/api/scan-status").then((s) => {
-      if (s && s.state === "scanning" && s.manual) { setScanning(true); setScanStatus(s); }
-    }).catch(() => {});
-  }, [serverScanning]);
-  // one-shot on mount: if a MANUAL scan is already in flight, raise the mask IMMEDIATELY (survives a
-  // refresh mid-manual-scan). An auto scan in flight is ignored — dashboard stays usable.
-  useEffect(() => {
-    api.get("/api/scan-status").then((s) => {
-      if (s && s.state === "scanning" && s.manual) { setScanning(true); setScanStatus(s); }
-    }).catch(() => {});
-  }, []);
-  useEffect(() => {                                  // poll scan progress while the mask is up
-    if (!scanning) return;
-    let alive = true, started = Date.now(), seen = false;
-    const tick = async () => {
-      try {
-        const s = await api.get("/api/scan-status");
-        if (!alive) return;
-        if (s.state === "scanning") { seen = true; setScanStatus(s); }
-        // clear ONLY when BOTH the progress poll AND the overview agree the scan is done (avoids a
-        // premature un-mask from API timing skew); 8s grace covers the click→daemon-pickup window.
-        else if ((seen || Date.now() - started > 8000) && !serverScanning) {
-          setScanning(false); setScanStatus(null);
-        }
-      } catch (_e) {}
-    };
-    tick(); const t = setInterval(tick, 1200);
-    return () => { alive = false; clearInterval(t); };
-  }, [scanning, serverScanning]);
-
-  // observer-control transition: poll overview while the mask is up, clear it when the engine reaches the
-  // target state (running/stopped/paused) — start/stop take ~5-10s (supervisor+systemctl+boot). 30s safety.
-  useEffect(() => {
-    if (!obsPending) return;
-    let alive = true, started = Date.now();
-    const tick = async () => {
-      try {
-        const o = await api.get("/api/overview");
-        if (!alive) return;
-        setPolledOv(o);
-        const st = o && o.system ? o.system.observer : null;
-        if (st === obsPending.target || Date.now() - started > 30000) setObsPending(null);
-      } catch (_e) {}
-    };
-    tick(); const t = setInterval(tick, 1500);
-    return () => { alive = false; clearInterval(t); };
-  }, [obsPending]);
 
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const obsUp = obs === "running" || obs === "paused";            // process is alive (vs not started)
-  const pausing = busy || !!obsPending;
+  const pausing = !!obsPending;
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
   const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
@@ -1765,7 +1789,7 @@ function Dashboard({ onLogout }) {
         )}
 
         {page === "overview" && <Overview ov={ov} />}
-        {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} streamOpen={streamOk ? (live && live.positions) : null} />}
+        {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} streamOpen={livePositions} />}
         {page === "history" && <History />}
         {page === "shadow" && <ShadowCompare />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} toast={toast} />}
