@@ -539,11 +539,14 @@ function History() {
 function Wallets({ confirm, toast }) {
   const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
+  const [auditOpen, setAuditOpen] = useState({});
+  const [audits, setAudits] = useState({});
   const [wpage, setWpage] = useState(0);             // 10/page
   const [tab, setTab] = useState("followed");        // followed(实跟) | dropped(降级)
   // 一次全取回(列表就 ~几十个),浏览器本地翻页 → 翻页零网络往返(VPS 在欧洲,跨洋 RTT 高,别每页都请求)
   const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&size=500").then(setData).catch(() => {}); }, [tab]);
   useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { setAuditOpen({}); setAudits({}); }, [tab]);
   const dropped = tab === "dropped";
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
@@ -564,6 +567,53 @@ function Wallets({ confirm, toast }) {
     if (b.copyScore != null) lines.push(`copy分 ${fNum(b.copyScore, 1)} · 置信 ${fNum(b.confidencePct, 0)}%`);
     (b.reasons || []).slice(0, 4).forEach(r => lines.push("· " + r));
     return lines.join("\n");
+  };
+
+  const auditStage = (s) => ({ profile: "画像", watchlist: "名单", follow_line: "跟单线", auto_tune: "调参" }[s] || s || "—");
+  const auditCopyText = (payload) => {
+    const c = payload && payload.copyBt;
+    if (!c) return null;
+    const v30 = c["30dNetPnl"], v14 = c["14dNetPnl"], v7 = c["7dNetPnl"];
+    if (v30 == null && v14 == null && v7 == null) return null;
+    return `copy 30d ${fSign(v30 || 0, 0)} / 14d ${fSign(v14 || 0, 0)} / 7d ${fSign(v7 || 0, 0)}`;
+  };
+  const loadAudit = (addr) => {
+    const key = (addr || "").toLowerCase();
+    setAuditOpen(s => ({ ...s, [key]: !s[key] }));
+    if (!audits[key]) {
+      setAudits(s => ({ ...s, [key]: { loading: true, events: [] } }));
+      api.get("/api/pipeline-audit?addr=" + encodeURIComponent(key) + "&limit=8")
+        .then(res => setAudits(s => ({ ...s, [key]: { loading: false, events: res.events || [] } })))
+        .catch(() => setAudits(s => ({ ...s, [key]: { loading: false, error: true, events: [] } })));
+    }
+  };
+  const auditBox = (addr) => {
+    const key = (addr || "").toLowerCase();
+    const a = audits[key] || { loading: true, events: [] };
+    if (a.loading) return <div className="audit-box muted">加载审计记录…</div>;
+    if (a.error) return <div className="audit-box down">审计记录读取失败</div>;
+    if (!a.events.length) return <div className="audit-box muted">暂无该钱包的审计记录</div>;
+    return (
+      <div className="audit-box">
+        {a.events.map(e => {
+          const copy = auditCopyText(e.payload);
+          return (
+            <div className="audit-event" key={e.id}>
+              <div>
+                <span className={"tint " + (e.status === "active" || e.status === "followed" ? "tint-green" : e.status === "below_line" ? "tint-amber" : "tint-red")}>{auditStage(e.stage)}</span>
+                <span className="muted" style={{ marginLeft: 8 }}>{e.status || "—"} · {e.reason || "—"}</span>
+              </div>
+              <div className="audit-meta">
+                <span>{e.stamp ? e.stamp.slice(5, 16).replace("T", " ") : "—"}</span>
+                {e.rawScore != null && <span>raw {fNum(e.rawScore, 1)}</span>}
+                {e.followScore != null && <span>follow {fNum(e.followScore, 1)}</span>}
+                {copy && <span>{copy}</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
   };
 
   const toggle = (w) => {
@@ -595,19 +645,26 @@ function Wallets({ confirm, toast }) {
             <tbody>
               {data === null && <tr><td colSpan="9" className="loading">加载中…</td></tr>}
               {data && data.wallets.length === 0 && <tr><td colSpan="9" className="empty">暂无降级钱包 —— 都在跟单中 👍</td></tr>}
-              {data && pageRows.map(w => (
-                <tr key={w.address} style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
-                  <td className="addr">{short(w.address)}</td>
-                  <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num" title={scoreTitle(w)}><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
-                  <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
-                  <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
-                  <td className="num">{fNum(w.winRatePct, 0)}%</td>
-                  <td><b>{w.mainCoin}</b></td>
-                  <td><span className="tint tint-red">{w.dropReason}</span></td>
-                  <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.lastFollowedAt)}</td>
-                </tr>
-              ))}
+              {data && pageRows.map(w => {
+                const key = (w.address || "").toLowerCase();
+                const open = !!auditOpen[key];
+                return (
+                  <React.Fragment key={w.address}>
+                    <tr className={open ? "row-open" : ""} style={{ cursor: "pointer" }} onClick={() => loadAudit(w.address)}>
+                      <td className="addr"><span className="row-caret">{open ? "▴" : "▾"}</span>{short(w.address)}</td>
+                      <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
+                      <td className="num" title={scoreTitle(w)}><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                      <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
+                      <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
+                      <td className="num">{fNum(w.winRatePct, 0)}%</td>
+                      <td><b>{w.mainCoin}</b></td>
+                      <td><span className="tint tint-red">{w.dropReason}</span></td>
+                      <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.lastFollowedAt)}</td>
+                    </tr>
+                    {open && <tr className="detail-row"><td colSpan="9">{auditBox(w.address)}</td></tr>}
+                  </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         ) : (

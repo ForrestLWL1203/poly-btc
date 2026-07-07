@@ -425,6 +425,33 @@ class ScannerWatchlistTests(unittest.TestCase):
                              [(1, "0xaaa", 0.91, "2026-07-06T00:00:00Z"),
                               (2, "0xbbb", 0.82, "2026-07-06T00:00:00Z")])
 
+    def test_ensure_watchlist_current_ignores_rank_order_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.91),
+                    _profile_row("0xbbb", "active", 0.82),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (?,?,?,?)",
+                [
+                    (1, "0xbbb", 0.95, "old"),
+                    (2, "0xaaa", 0.70, "old"),
+                ],
+            )
+            db.commit()
+
+            n = scanner.ensure_watchlist_current(db, "2026-07-06T00:00:00Z")
+
+            self.assertEqual(n, 2)
+            rows = db.execute("SELECT rank,addr,score,updated_at FROM watchlist ORDER BY rank").fetchall()
+            self.assertEqual([(r[0], r[1], r[2], r[3]) for r in rows],
+                             [(1, "0xbbb", 0.95, "old"), (2, "0xaaa", 0.70, "old")])
+
     def test_refresh_watchlist_ranks_by_copy_follow_score_not_raw_score(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

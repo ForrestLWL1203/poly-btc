@@ -534,7 +534,7 @@ def ensure_watchlist_current(db, stamp=None) -> int:
     """Repair the derived watchlist if a previous scan died after profile updates but before rebuild."""
     active = _active_profile_addrs(db)
     current = _watchlist_addrs(db)
-    if current == active:
+    if set(current) == set(active):
         return len(current)
     return refresh_watchlist(db, stamp or now_iso(), source="repair")
 
