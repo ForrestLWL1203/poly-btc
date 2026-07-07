@@ -78,9 +78,11 @@ Post-scan auto tuning:
   no-cash skips, deploy-cap skips, coin-full skips, add budget pressure, and peak concurrency.
 - The sizing grid tunes margin upper bounds, leverage caps, and the full-power deployment line.
 - The add grid tunes smart-add core params (`ADD_GAP_K`, `ADD_GAP_SHRINK_G`, `ADD_MAX_HARD`) after the sizing candidate.
-- Important current limitation: automatic wallet-count selection is still heuristic (`choose_follow_line`: score cliff
-  or capacity target). It does **not yet** run a top-N portfolio grid for N=7..20 to choose the best wallet count.
-  If asked to improve this, implement N-prefix portfolio replay before final tuning.
+- Automatic wallet-count selection first tries an N-prefix portfolio replay: candidate top-N sets are replayed
+  through one shared simulated account with current follow params, and the line moves to the best
+  profitable/capacity-safe prefix only when it materially beats the capacity target. If cached fills are
+  insufficient/too large, it falls back to `choose_follow_line` (score cliff or capacity target). This selector
+  uses current params only; after it sets `MIN_FOLLOW_SCORE`, sizing/add grids run on the selected final set.
 
 Observer:
 

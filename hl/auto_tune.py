@@ -209,6 +209,33 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     )
 
 
+def _portfolio_line_score(candidate: dict) -> float:
+    windows = candidate.get("windows") or {}
+    return (
+        _result_pnl(windows.get(14, {}))
+        + 0.50 * _result_pnl(windows.get(7, {}))
+        + 0.25 * _result_pnl(windows.get(30, {}))
+    )
+
+
+def _inclusive_follow_line(score: float, min_score: float) -> float:
+    score = float(score or 0.0)
+    return max(float(min_score), score - 1e-9 if score > min_score else score)
+
+
+def _compact_follow_line_candidate(candidate: dict) -> dict:
+    return {
+        "n": candidate.get("n"),
+        "line": candidate.get("line"),
+        "score_floor": candidate.get("score_floor"),
+        "score": _portfolio_line_score(candidate),
+        "windows": {
+            str(days): _compact_backtest(result)
+            for days, result in (candidate.get("windows") or {}).items()
+        },
+    }
+
+
 def choose_margin_candidate(candidates: list[dict], baseline: dict) -> dict:
     """Pick the best 14d-led PnL candidate that preserves copyability."""
     valid = [c for c in candidates if _candidate_valid(c, baseline)]
@@ -301,6 +328,131 @@ def _portfolio_window_fills(db, addrs: list[str], now_ms: int) -> dict[int, list
         start_ms = now_ms - day * 86400_000
         windows[day] = [x for x in fills if int(x.get("time") or 0) >= start_ms]
     return windows
+
+
+def _filter_window_fills_by_addr(window_fills: dict[int, list[dict]], addrs: Iterable[str]) -> dict[int, list[dict]]:
+    allowed = {(a or "").lower() for a in addrs if a}
+    return {
+        int(days): [x for x in fills if (x.get("user") or "").lower() in allowed]
+        for days, fills in (window_fills or {}).items()
+    }
+
+
+def _follow_line_candidate_valid(candidate: dict) -> bool:
+    windows = candidate.get("windows") or {}
+    primary = windows.get(14) or (windows.get(max(windows)) if windows else None)
+    if not primary:
+        return False
+    min_open_fit = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MIN_OPEN_FIT", 0.70))
+    if _capacity_fit(primary) < min_open_fit:
+        return False
+    for days, result in windows.items():
+        if _enough_sample(result, int(days)) and _result_pnl(result) <= 0:
+            return False
+    return True
+
+
+def _follow_line_candidate_key(candidate: dict, target_n: int) -> tuple:
+    windows = candidate.get("windows") or {}
+    primary = windows.get(14) or {}
+    return (
+        _portfolio_line_score(candidate),
+        _result_pnl(windows.get(14, {})),
+        _result_pnl(windows.get(7, {})),
+        _result_pnl(windows.get(30, {})),
+        -int(primary.get("liquidations") or 0),
+        _capacity_fit(primary),
+        -abs(int(candidate.get("n") or 0) - int(target_n)),
+    )
+
+
+def _meaningfully_better(candidate: dict, reference: dict) -> bool:
+    gain = _portfolio_line_score(candidate) - _portfolio_line_score(reference)
+    min_abs = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN", 250.0))
+    min_rel = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN", 0.08))
+    hurdle = max(min_abs, abs(_portfolio_line_score(reference)) * min_rel)
+    return gain >= hurdle
+
+
+def choose_follow_line_by_portfolio(db, ranked: list[dict], follow: dict | None = None,
+                                    stamp: str | None = None) -> dict:
+    """Choose MIN_FOLLOW_SCORE by replaying ranked top-N prefixes as one shared copy account.
+
+    This is intentionally a narrow selector: it tunes only the wallet-count boundary using
+    current follow params. Sizing/add grids still run afterwards on the selected final set.
+    If cached fills are too large/missing, or no prefix has enough positive evidence, caller
+    should fall back to the score-cliff/capacity heuristic.
+    """
+    if not getattr(config, "AUTO_FOLLOW_PORTFOLIO_ENABLE", True):
+        return {"status": "disabled", "reason": "portfolio_selector_disabled"}
+
+    min_score = float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60))
+    rows = [r for r in ranked if float(r.get("follow_score", r.get("score")) or 0.0) >= min_score]
+    if not rows:
+        return {"status": "fallback", "reason": "no_wallet_above_floor"}
+
+    available = len(rows)
+    min_n = max(1, min(int(getattr(config, "AUTO_FOLLOW_MIN_N", 7)), available))
+    max_n = max(min_n, min(int(getattr(config, "AUTO_FOLLOW_MAX_N", 20)), int(config.MAX_TARGETS), available))
+    target_n = max(min_n, min(int(getattr(config, "AUTO_FOLLOW_TARGET_N", 16)), max_n))
+    max_addrs = [(r.get("addr") or "").lower() for r in rows[:max_n] if r.get("addr")]
+    if not max_addrs:
+        return {"status": "fallback", "reason": "no_candidate_addrs"}
+
+    now_ms = int(time.time() * 1000)
+    window_fills = _portfolio_window_fills(db, max_addrs, now_ms)
+    if window_fills is None:
+        return {"status": "fallback", "reason": "fill_cache_guard"}
+    if not any(window_fills.values()):
+        return {"status": "fallback", "reason": "no_cached_fills"}
+
+    follow = dict(follow or params.load_follow(db))
+    if "SMART_ADD" in follow:
+        follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+    sigmas = _load_sigmas(db)
+    candidates = []
+    for n in range(min_n, max_n + 1):
+        addrs = max_addrs[:n]
+        fills_by_window = _filter_window_fills_by_addr(window_fills, addrs)
+        windows = _candidate_windows(db, addrs, sigmas, follow, now_ms, window_fills=fills_by_window)
+        candidates.append({
+            "n": n,
+            "line": _inclusive_follow_line(rows[n - 1].get("follow_score", rows[n - 1].get("score")), min_score),
+            "addrs": addrs,
+            "score_floor": float(rows[n - 1].get("follow_score", rows[n - 1].get("score")) or min_score),
+            "windows": windows,
+        })
+
+    valid = [c for c in candidates if _follow_line_candidate_valid(c)]
+    if not valid:
+        return {
+            "status": "fallback",
+            "reason": "no_valid_portfolio_prefix",
+            "candidates": [_compact_follow_line_candidate(c) for c in candidates],
+        }
+
+    reference = next((c for c in valid if int(c["n"]) == target_n), None)
+    if reference is None:
+        reference = min(valid, key=lambda c: abs(int(c["n"]) - target_n))
+    best = max(valid, key=lambda c: _follow_line_candidate_key(c, target_n))
+    use_best = best is not reference and _meaningfully_better(best, reference)
+    selected = best if use_best else reference
+    reason = "portfolio_topn" if use_best else "portfolio_flat_capacity"
+    result = {
+        "status": "ok",
+        "reason": reason,
+        "line": float(selected["line"]),
+        "count": int(selected["n"]),
+        "target_n": int(target_n),
+        "min_n": int(min_n),
+        "max_n": int(max_n),
+        "selected": _compact_follow_line_candidate(selected),
+        "reference": _compact_follow_line_candidate(reference),
+        "best": _compact_follow_line_candidate(best),
+        "candidates": [_compact_follow_line_candidate(c) for c in candidates],
+    }
+    _state_set(db, "follow_line_last_choice", {**result, "stamp": stamp or now_iso()})
+    return result
 
 
 def build_tune_candidate(base: dict, margin_mult: float, lev_caps: tuple[float, float, float],

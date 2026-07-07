@@ -45,6 +45,10 @@ AUTO_FOLLOW_TARGET_N = 16      # capacity cap when quality is flat (funding/API/
 AUTO_FOLLOW_MAX_N = 20         # absolute auto-line cap; MAX_TARGETS remains the hard observer cap
 AUTO_FOLLOW_MIN_SCORE = 0.60   # never follow below this copy-follow quality floor
 AUTO_FOLLOW_CLIFF_GAP = 0.045  # clear score drop between adjacent ranks = quality cliff; cut before it
+AUTO_FOLLOW_PORTFOLIO_ENABLE = True   # before final line, replay top-N prefixes as one shared copy account
+AUTO_FOLLOW_PORTFOLIO_MIN_OPEN_FIT = 0.70
+AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN = 250.0
+AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN = 0.08
 # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — evidence is enforced once at profile time by the
 #  scanner EVIDENCE gate (EVIDENCE_MIN_DAYS / EVIDENCE_MIN_TRADES); no separate follow-time re-check needed)
 #                             A 100%-win-on-3-trades wallet scores low (evidence multiplier) but still clears

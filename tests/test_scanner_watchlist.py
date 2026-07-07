@@ -1,4 +1,5 @@
 import tempfile
+import json
 import time
 import unittest
 from pathlib import Path
@@ -490,7 +491,12 @@ class ScannerWatchlistTests(unittest.TestCase):
             line = db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0]
             cmd = db.execute("SELECT type,payload_json FROM commands ORDER BY id DESC LIMIT 1").fetchone()
             self.assertAlmostEqual(float(line), 0.8, places=6)
-            self.assertEqual(tuple(cmd), ("reload_params", '{"by":"auto_follow_line"}'))
+            self.assertEqual(cmd[0], "reload_params")
+            payload = json.loads(cmd[1])
+            self.assertEqual(payload["by"], "auto_follow_line")
+            self.assertEqual(payload["reason"], "capacity_cap")
+            self.assertEqual(payload["status"], "heuristic")
+            self.assertEqual(payload["count"], 2)
 
     def test_auto_follow_line_keeps_fractional_boundary_wallet_included(self):
         with tempfile.TemporaryDirectory() as td:
@@ -519,6 +525,35 @@ class ScannerWatchlistTests(unittest.TestCase):
             followed = db.execute("SELECT COUNT(*) FROM watchlist WHERE score>=?", (line,)).fetchone()[0]
             self.assertLessEqual(line, boundary)
             self.assertEqual(followed, 2)
+
+    def test_refresh_watchlist_uses_portfolio_follow_line_choice(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.90),
+                    _profile_row("0xbbb", "active", 0.80),
+                    _profile_row("0xccc", "active", 0.70),
+                ],
+            )
+            db.commit()
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok",
+                "reason": "portfolio_topn",
+                "line": 0.799999999,
+                "count": 2,
+            }):
+                scanner.refresh_watchlist(db, "2026-07-06T00:00:00Z")
+
+            line = db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0]
+            cmd = db.execute("SELECT payload_json FROM commands ORDER BY id DESC LIMIT 1").fetchone()[0]
+            self.assertAlmostEqual(float(line), 0.799999999)
+            self.assertIn("portfolio_topn", cmd)
+            self.assertIn('"count": 2', cmd)
 
 
 if __name__ == "__main__":

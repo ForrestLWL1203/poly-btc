@@ -318,6 +318,96 @@ class AutoTuneTests(unittest.TestCase):
         self.assertIn(res["status"], ("applied", "unchanged", "ok"))
         self.assertEqual(len(load_calls), len(auto_tune._tune_days()) * 2)
 
+    def test_choose_follow_line_by_portfolio_prefers_profitable_prefix(self):
+        db = self._db()
+        params.seed_params(db)
+        ranked = [
+            {"addr": "0xaaa", "follow_score": 0.90},
+            {"addr": "0xbbb", "follow_score": 0.84},
+            {"addr": "0xccc", "follow_score": 0.78},
+            {"addr": "0xddd", "follow_score": 0.72},
+        ]
+        windows_by_n = {
+            2: {30: 2200, 14: 1800, 7: 600},
+            3: {30: 1600, 14: 900, 7: 300},
+            4: {30: 1500, 14: 850, 7: 250},
+        }
+
+        def fake_windows(_db, addrs, _sigmas, _overrides, _now_ms, window_fills=None):
+            vals = windows_by_n[len(addrs)]
+            return {
+                day: {
+                    "copy_net_pnl": pnl,
+                    "closed_n": 10,
+                    "capacity_open_fit": 0.95,
+                    "open_fill_rate": 0.95,
+                    "liquidations": 0,
+                    "target_open_events": 10,
+                    "skip_reasons": {},
+                }
+                for day, pnl in vals.items()
+            }
+
+        with patch.object(auto_tune.config, "AUTO_FOLLOW_MIN_N", 2), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_TARGET_N", 3), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_MAX_N", 4), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_MIN_SCORE", 0.60), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN", 250.0), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN", 0.08), \
+                patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                patch.object(auto_tune, "_load_sigmas", return_value={}), \
+                patch.object(auto_tune, "_candidate_windows", side_effect=fake_windows):
+            choice = auto_tune.choose_follow_line_by_portfolio(db, ranked, stamp="2026-07-07T00:00:00Z")
+
+        self.assertEqual(choice["status"], "ok")
+        self.assertEqual(choice["reason"], "portfolio_topn")
+        self.assertEqual(choice["count"], 2)
+        self.assertLessEqual(choice["line"], 0.84)
+        self.assertGreater(choice["line"], 0.83)
+
+    def test_choose_follow_line_by_portfolio_keeps_capacity_when_edge_is_small(self):
+        db = self._db()
+        params.seed_params(db)
+        ranked = [
+            {"addr": "0xaaa", "follow_score": 0.90},
+            {"addr": "0xbbb", "follow_score": 0.84},
+            {"addr": "0xccc", "follow_score": 0.78},
+        ]
+        windows_by_n = {
+            2: {30: 1200, 14: 1050, 7: 500},
+            3: {30: 1180, 14: 1000, 7: 480},
+        }
+
+        def fake_windows(_db, addrs, _sigmas, _overrides, _now_ms, window_fills=None):
+            vals = windows_by_n[len(addrs)]
+            return {
+                day: {
+                    "copy_net_pnl": pnl,
+                    "closed_n": 10,
+                    "capacity_open_fit": 0.95,
+                    "open_fill_rate": 0.95,
+                    "liquidations": 0,
+                    "target_open_events": 10,
+                    "skip_reasons": {},
+                }
+                for day, pnl in vals.items()
+            }
+
+        with patch.object(auto_tune.config, "AUTO_FOLLOW_MIN_N", 2), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_TARGET_N", 3), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_MAX_N", 3), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_MIN_SCORE", 0.60), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN", 250.0), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN", 0.08), \
+                patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                patch.object(auto_tune, "_load_sigmas", return_value={}), \
+                patch.object(auto_tune, "_candidate_windows", side_effect=fake_windows):
+            choice = auto_tune.choose_follow_line_by_portfolio(db, ranked, stamp="2026-07-07T00:00:00Z")
+
+        self.assertEqual(choice["status"], "ok")
+        self.assertEqual(choice["reason"], "portfolio_flat_capacity")
+        self.assertEqual(choice["count"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

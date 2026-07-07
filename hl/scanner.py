@@ -448,21 +448,33 @@ def refresh_watchlist(db, stamp) -> int:
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r["addr"], stamp))
     if getattr(config, "AUTO_FOLLOW_LINE_ENABLE", True) and ranked:
-        choice = follow_score.choose_follow_line(
-            ranked,
-            min_score=float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60)),
-            min_n=int(getattr(config, "AUTO_FOLLOW_MIN_N", 7)),
-            target_n=min(int(getattr(config, "AUTO_FOLLOW_TARGET_N", 16)), int(config.MAX_TARGETS)),
-            max_n=min(int(getattr(config, "AUTO_FOLLOW_MAX_N", 20)), int(config.MAX_TARGETS)),
-            cliff_gap=float(getattr(config, "AUTO_FOLLOW_CLIFF_GAP", 0.045)),
-        )
+        try:
+            choice = auto_tune.choose_follow_line_by_portfolio(db, ranked, stamp=stamp)
+        except Exception as exc:  # noqa: BLE001 — wallet-count tuning must never abort discovery
+            print(f"auto-follow portfolio line: fallback after error: {exc}", flush=True)
+            choice = {"status": "fallback", "reason": "portfolio_error"}
+        if choice.get("status") != "ok":
+            choice = follow_score.choose_follow_line(
+                ranked,
+                min_score=float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60)),
+                min_n=int(getattr(config, "AUTO_FOLLOW_MIN_N", 7)),
+                target_n=min(int(getattr(config, "AUTO_FOLLOW_TARGET_N", 16)), int(config.MAX_TARGETS)),
+                max_n=min(int(getattr(config, "AUTO_FOLLOW_MAX_N", 20)), int(config.MAX_TARGETS)),
+                cliff_gap=float(getattr(config, "AUTO_FOLLOW_CLIFF_GAP", 0.045)),
+            )
+            choice["status"] = "heuristic"
         desired = choice["line"]
         prev = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
         if abs(float(prev) - desired) > 0.0005:
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.9f}", stamp))
             db.execute(
                 "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
-                ("reload_params", '{"by":"auto_follow_line"}', "scanner", stamp))
+                ("reload_params", json.dumps({
+                    "by": "auto_follow_line",
+                    "reason": choice.get("reason"),
+                    "status": choice.get("status"),
+                    "count": choice.get("count"),
+                }), "scanner", stamp))
     # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
     # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
     line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
