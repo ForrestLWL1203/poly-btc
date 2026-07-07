@@ -10,7 +10,7 @@ import os
 import threading
 import time
 
-from . import auto_tune, config, follow_score, metrics, params, rest, storage
+from . import auto_tune, config, follow_score, metrics, params, pipeline_audit, rest, storage
 from .fills import build_episodes, is_spot
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
@@ -406,7 +406,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
 
 
 # ------------------------------------------------------------------ curated outputs
-def refresh_watchlist(db, stamp) -> int:
+def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     """Rebuild OUR tiny leaderboard (watchlist) from active profiles. Derived view —
     profile stays the source of truth; operator settings in target_controls survive."""
     params.seed_params(db)
@@ -464,6 +464,7 @@ def refresh_watchlist(db, stamp) -> int:
             )
             choice["status"] = "heuristic"
         desired = choice["line"]
+        pipeline_audit.record_follow_line_choice(db, stamp, source, choice)
         prev = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
         if abs(float(prev) - desired) > 0.0005:
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.9f}", stamp))
@@ -478,6 +479,7 @@ def refresh_watchlist(db, stamp) -> int:
     # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
     # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
     line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+    pipeline_audit.record_watchlist_snapshot(db, stamp, source, line)
     db.executemany(
         "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) VALUES (?,?,?) "
         "ON CONFLICT(addr) DO UPDATE SET last_followed_at=excluded.last_followed_at, "
@@ -495,8 +497,12 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
         print(f"auto-tune margin: skipped after {source}: {exc}", flush=True)
         return
     if res.get("status") != "ok":
+        pipeline_audit.record_auto_tune_result(db, stamp, source, res)
+        db.commit()
         print(f"auto-tune margin: {res.get('status')}", flush=True)
         return
+    pipeline_audit.record_auto_tune_result(db, stamp, source, res)
+    db.commit()
     margins = res.get("margins") or {}
     lev_caps = res.get("lev_caps") or {}
     add_params = res.get("add_params") or {}
@@ -530,7 +536,7 @@ def ensure_watchlist_current(db, stamp=None) -> int:
     current = _watchlist_addrs(db)
     if current == active:
         return len(current)
-    return refresh_watchlist(db, stamp or now_iso())
+    return refresh_watchlist(db, stamp or now_iso(), source="repair")
 
 
 def _record_run(db, started, t0, candidates, probed, added, retired, kept, rejected, n_active, full=0):
@@ -656,7 +662,9 @@ def regate(db, p) -> int:
         )
         n_active += 1 if ok else 0
     db.commit()
-    n = refresh_watchlist(db, stamp)
+    n = refresh_watchlist(db, stamp, source="regate")
+    pipeline_audit.record_profile_snapshot(db, stamp, "regate")
+    db.commit()
     _maybe_auto_tune_margins(db, "regate", stamp)
     print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
     return n
@@ -769,7 +777,9 @@ def scan(db, p) -> None:
                                   "scanned": done, "total": len(workset)})    # dashboard isn't "心跳超时"
 
     _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
-    n_active = refresh_watchlist(db, stamp)
+    n_active = refresh_watchlist(db, stamp, source="scan")
+    pipeline_audit.record_profile_snapshot(db, stamp, "scan", workset)
+    db.commit()
     _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
     _maybe_auto_tune_margins(db, "scan", stamp)
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]

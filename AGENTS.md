@@ -68,6 +68,9 @@ Scanner:
 - `scanner.refresh_watchlist()` ranks active wallets by copy-follow score, then auto-updates
   `MIN_FOLLOW_SCORE`: quality cliff first, otherwise capacity target; below the minimum score floor is never followed.
 - Updating the follow line inserts a `reload_params` command so the observer refreshes the target set.
+- Scanner/regate/watchlist/auto-tune decisions are snapshotted to `pipeline_audit`.
+  Use `/api/pipeline-audit?limit=100&stamp=&stage=&addr=` or SQL against `pipeline_audit` to answer
+  why a wallet was active/rejected/followed/below-line and what copy-backtest/auto-tune evidence was used.
 
 Post-scan auto tuning:
 

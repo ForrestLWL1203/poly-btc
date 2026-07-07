@@ -201,6 +201,29 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     n_active    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
+
+-- Decision audit for the discovery -> profile -> watchlist -> follow-line pipeline.
+-- One scan/regate stamp can produce:
+--   profile     rows per profiled wallet (status/reason/raw score/copy-BT summary)
+--   watchlist   rows per ranked active wallet (followed/below-line/disabled)
+--   follow_line one row with the automatic line choice summary
+--   auto_tune   one row with the post-scan sizing/add tuning summary
+CREATE TABLE IF NOT EXISTS pipeline_audit (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    stamp         TEXT,
+    source        TEXT,
+    stage         TEXT,
+    addr          TEXT,
+    rank          INTEGER,
+    status        TEXT,
+    reason        TEXT,
+    raw_score     REAL,
+    follow_score  REAL,
+    payload_json  TEXT,
+    created_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stamp_stage ON pipeline_audit(stamp DESC, stage, rank);
+CREATE INDEX IF NOT EXISTS idx_pipeline_audit_addr ON pipeline_audit(addr, stamp DESC);
 """
 
 PROFILE_COLS = (

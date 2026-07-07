@@ -111,3 +111,57 @@ def ep_score_dist(db):
     scores = [round(score100(r["score"] or 0.0), 1)
               for r in qall(db, "SELECT score FROM watchlist ORDER BY score DESC")]
     return {"scores": scores, "total": len(scores)}
+
+
+def _dict_rows(cur):
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _limit(qs, default=100, max_limit=500):
+    try:
+        val = int(qs.get("limit", [default])[0])
+    except (TypeError, ValueError):
+        val = default
+    return max(1, min(max_limit, val))
+
+
+def ep_pipeline_audit(db, qs):
+    """Recent scanner/follow pipeline decisions for ops debugging."""
+    where, args = [], []
+    for key in ("stamp", "source", "stage", "addr"):
+        val = (qs.get(key, [None]) or [None])[0]
+        if not val:
+            continue
+        col = "addr" if key == "addr" else key
+        where.append(f"{col}=?")
+        args.append(val.lower() if key == "addr" else val)
+    sql = (
+        "SELECT id,stamp,source,stage,addr,rank,status,reason,raw_score,follow_score,payload_json,created_at "
+        "FROM pipeline_audit"
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    rows = _dict_rows(db.execute(sql, (*args, _limit(qs))))
+    events = []
+    for r in rows:
+        try:
+            payload = json.loads(r.pop("payload_json") or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        events.append({
+            "id": r["id"],
+            "stamp": r["stamp"],
+            "source": r["source"],
+            "stage": r["stage"],
+            "addr": r["addr"],
+            "rank": r["rank"],
+            "status": r["status"],
+            "reason": r["reason"],
+            "rawScore": score100(r["raw_score"]) if r["raw_score"] is not None else None,
+            "followScore": score100(r["follow_score"]) if r["follow_score"] is not None else None,
+            "payload": payload,
+            "createdAt": r["created_at"],
+        })
+    return {"events": events, "total": len(events)}

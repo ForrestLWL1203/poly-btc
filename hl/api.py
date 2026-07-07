@@ -15,6 +15,7 @@ Run via hl_dashboard.py. Endpoints:
   GET  /api/wallets/{address}
   GET  /api/discovery
   GET  /api/scan-runs?limit=20
+  GET  /api/pipeline-audit?limit=100&stamp=&stage=&addr=
   GET  /api/params
 """
 import json
