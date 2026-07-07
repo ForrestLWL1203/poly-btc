@@ -35,6 +35,18 @@ const api = {
   },
 };
 
+/* ----------------------------------------------------------------- refresh hooks */
+function usePolling(load, intervalMs, enabled = true) {
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const tick = () => { if (!cancelled) load(); };
+    tick();
+    const t = setInterval(tick, intervalMs);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [load, intervalMs, enabled]);
+}
+
 /* ----------------------------------------------------------------- format */
 const fUsd = (v, d = 0) => (v == null ? "—" : "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
 const fSign = (v, d = 0) => (v == null ? "—" : (v >= 0 ? "+" : "") + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
@@ -184,7 +196,8 @@ function Overview({ ov }) {
   const [eq, setEq] = useState(null);
   const [ins, setIns] = useState(null);
   useEffect(() => { api.get("/api/equity?range=" + range).then(setEq).catch(() => {}); }, [range]);
-  useEffect(() => { const f = () => api.get("/api/insights").then(setIns).catch(() => {}); f(); const t = setInterval(f, 15000); return () => clearInterval(t); }, []);
+  const loadInsights = useCallback(() => { api.get("/api/insights").then(setIns).catch(() => {}); }, []);
+  usePolling(loadInsights, 15000);
   if (!ov) return <div className="loading">加载中…</div>;
   const r = ov.risk, f = ov.fees;
   return (
@@ -322,10 +335,7 @@ function Positions({ confirm, toast, streamOpen }) {
     }).catch(() => {});
   }, []);
   // open positions come from the SSE stream; fallback-poll only when the stream isn't delivering.
-  useEffect(() => {
-    if (!streamOpen) { loadOpen(); var to = setInterval(loadOpen, 6000); }
-    return () => { if (to) clearInterval(to); };
-  }, [loadOpen, streamOpen]);
+  usePolling(loadOpen, 6000, !streamOpen);
   useEffect(() => { loadBlacklist(); }, [loadBlacklist]);
 
   const doClose = (p) => confirm({
@@ -499,10 +509,8 @@ function History() {
     setExpandedId(pid);
     if (!details[pid]) api.get(`/api/positions/${pid}`).then(d => setDetails(m => ({ ...m, [pid]: d }))).catch(() => {});
   };
-  useEffect(() => {
-    const load = () => api.get("/api/positions?status=closed").then(setData).catch(() => {});
-    load(); const t = setInterval(load, 15000); return () => clearInterval(t);
-  }, []);
+  const loadClosed = useCallback(() => { api.get("/api/positions?status=closed").then(setData).catch(() => {}); }, []);
+  usePolling(loadClosed, 15000);
   const PER = 25;
   const st = data && data.stats;
   const all = (data && data.positions) || [];
@@ -604,7 +612,7 @@ function Wallets({ confirm, toast }) {
   const [tab, setTab] = useState("followed");        // followed(实跟) | dropped(降级)
   // 一次全取回(列表就 ~几十个),浏览器本地翻页 → 翻页零网络往返(VPS 在欧洲,跨洋 RTT 高,别每页都请求)
   const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&size=500").then(setData).catch(() => {}); }, [tab]);
-  useEffect(() => { load(); const t = setInterval(load, 12000); return () => clearInterval(t); }, [load]);
+  usePolling(load, 12000);
   useEffect(() => { setAuditOpen({}); setAudits({}); }, [tab]);
   const dropped = tab === "dropped";
   const allRows = (data && data.wallets) || [];
@@ -958,7 +966,7 @@ function Discovery({ scanning, startRescan, confirm }) {
     api.get("/api/discovery").then(setD).catch(() => {});
     api.get("/api/scan-runs?limit=8").then(r => setRuns(r.runs)).catch(() => {});
   }, []);
-  useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, [load]);  // live
+  usePolling(load, 4000);  // live
   useEffect(() => { if (!scanning) load(); }, [scanning, load]);  // refresh after a rescan finishes
 
   const doRescan = () => confirm({
@@ -1502,10 +1510,8 @@ function Settings({ startRescan, confirm, toast }) {
 /* ----------------------------------------------------------------- shell */
 function ShadowCompare() {
   const [d, setD] = useState(null);
-  useEffect(() => {
-    const f = () => api.get("/api/shadow").then(setD).catch(() => {});
-    f(); const t = setInterval(f, 10000); return () => clearInterval(t);
-  }, []);
+  const loadShadow = useCallback(() => { api.get("/api/shadow").then(setD).catch(() => {}); }, []);
+  usePolling(loadShadow, 10000);
   if (!d) return <div className="content"><div className="loading">加载中…</div></div>;
   const roi = b => (b.equity / 10000 - 1) * 100;
   const Acct = ({ b, name, tint }) => (
@@ -1588,15 +1594,10 @@ function Dashboard({ onLogout }) {
     return () => { if (es) es.close(); };
   }, []);
 
-  // Polling fallback for overview: only while the stream is NOT delivering. One immediate load on mount
-  // paints before the stream's first push.
+  // Polling fallback for overview: only while the stream is NOT delivering. usePolling does one immediate load
+  // on mount/reconnect gap, so the page paints before the stream's first push.
   const loadOv = useCallback(() => { api.get("/api/overview").then(setPolledOv).catch(() => {}); }, []);
-  useEffect(() => {
-    loadOv();
-    if (streamOk) return;
-    const t = setInterval(loadOv, 7000);
-    return () => clearInterval(t);
-  }, [loadOv, streamOk]);
+  usePolling(loadOv, 7000, !streamOk);
 
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
   // The SERVER is the source of truth for "a full scan is running" (scan_progress / process_status,

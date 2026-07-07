@@ -64,6 +64,13 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertRegex(body, r'/app\.js\?v=\d+')
         self.assertRegex(body, r'/app\.css\?v=\d+')
 
+    def test_dashboard_repeating_refreshes_use_shared_polling_hook(self):
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("function usePolling(", jsx)
+        self.assertIn("clearInterval", jsx)
+        self.assertGreaterEqual(jsx.count("usePolling("), 6)
+
 
 if __name__ == "__main__":
     unittest.main()
