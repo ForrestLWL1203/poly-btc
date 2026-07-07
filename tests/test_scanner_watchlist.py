@@ -640,6 +640,102 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertIn("watchlist", stages)
             self.assertIn("auto_tune", stages)
 
+    def test_post_scan_pipeline_replays_topn_prefix_before_auto_tune(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.95, copy_bt_net_pnl=1200, copy_bt_14d_net_pnl=800, copy_bt_7d_net_pnl=300),
+                    _profile_row("0xbbb", "active", 0.90, copy_bt_net_pnl=1000, copy_bt_14d_net_pnl=700, copy_bt_7d_net_pnl=250),
+                    _profile_row("0xccc", "active", 0.85, copy_bt_net_pnl=900, copy_bt_14d_net_pnl=650, copy_bt_7d_net_pnl=200),
+                    _profile_row("0xddd", "active", 0.80, copy_bt_net_pnl=800, copy_bt_14d_net_pnl=600, copy_bt_7d_net_pnl=150),
+                ],
+            )
+            db.commit()
+            pnl_by_n = {
+                2: {30: 3000, 14: 2400, 7: 900},
+                3: {30: 1800, 14: 1200, 7: 300},
+                4: {30: 1700, 14: 1100, 7: 280},
+            }
+            seen = {}
+
+            def fake_candidate_windows(_db, addrs, _sigmas, _follow, _now_ms, window_fills=None):
+                addrs = [(a or "").lower() for a in addrs]
+                for fills in (window_fills or {}).values():
+                    self.assertTrue(all((f.get("user") or "").lower() in addrs for f in fills))
+                return {
+                    days: {
+                        "copy_net_pnl": pnl,
+                        "closed_n": 10,
+                        "capacity_open_fit": 0.98,
+                        "open_fill_rate": 0.98,
+                        "liquidations": 0,
+                        "target_open_events": 10,
+                        "skip_reasons": {},
+                    }
+                    for days, pnl in pnl_by_n[len(addrs)].items()
+                }
+
+            def fake_tune(db_arg, source, stamp):
+                follow = params.load_follow(db_arg)
+                seen["source"] = source
+                seen["stamp"] = stamp
+                seen["line"] = follow["MIN_FOLLOW_SCORE"]
+                seen["addrs"] = scanner.auto_tune._load_followed_wallets(db_arg, follow)
+                return {
+                    "status": "ok",
+                    "applied": False,
+                    "applied_sizing": False,
+                    "applied_add": False,
+                    "followed_n": len(seen["addrs"]),
+                    "selected_mult": 1.0,
+                    "margins": {},
+                    "lev_caps": {},
+                    "deploy_full_pct": 0.40,
+                    "params": {},
+                    "add_params": {},
+                    "candidates": [],
+                    "add_candidates": [],
+                }
+
+            fake_fills = {
+                30: [{"user": a} for a in ("0xaaa", "0xbbb", "0xccc", "0xddd")],
+                14: [{"user": a} for a in ("0xaaa", "0xbbb", "0xccc", "0xddd")],
+                7: [{"user": a} for a in ("0xaaa", "0xbbb", "0xccc", "0xddd")],
+            }
+            with patch.object(scanner.config, "AUTO_FOLLOW_MIN_N", 2), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_TARGET_N", 4), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_MAX_N", 4), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_MIN_SCORE", 0.50), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN", 250.0), \
+                    patch.object(scanner.config, "AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN", 0.05), \
+                    patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value=fake_fills), \
+                    patch.object(scanner.auto_tune, "_load_sigmas", return_value={}), \
+                    patch.object(scanner.auto_tune, "_candidate_windows", side_effect=fake_candidate_windows), \
+                    patch.object(scanner.auto_tune, "maybe_tune_margins", side_effect=fake_tune):
+                n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
+
+            self.assertEqual(n, 4)
+            self.assertEqual(seen["addrs"], ["0xaaa", "0xbbb"])
+            self.assertEqual(seen["source"], "scan")
+            follow = db.execute(
+                "SELECT reason,payload_json FROM pipeline_audit WHERE stamp=? AND stage='follow_line'",
+                ("2026-07-06T00:00:00Z",),
+            ).fetchone()
+            payload = json.loads(follow[1])
+            self.assertEqual(follow[0], "portfolio_topn")
+            self.assertEqual(payload["selected"]["n"], 2)
+            self.assertEqual(payload["reference"]["n"], 4)
+            self.assertEqual(payload["count"], 2)
+            followed = db.execute(
+                "SELECT addr FROM watchlist WHERE score>=? ORDER BY rank",
+                (seen["line"],),
+            ).fetchall()
+            self.assertEqual([r[0] for r in followed], ["0xaaa", "0xbbb"])
+
 
 if __name__ == "__main__":
     unittest.main()
