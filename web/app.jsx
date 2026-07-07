@@ -1,3 +1,4 @@
+import { api } from "./lib/api.js";
 import {
   SCANNER_LABEL,
   agoText,
@@ -23,36 +24,6 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const DASH_USER = "admin";                       // preview auto-login (matches launch.json env)
 const DASH_PW = "mock123";
-const TOK_KEY = "hl_dash_token";
-
-/* ----------------------------------------------------------------- api */
-const api = {
-  token: localStorage.getItem(TOK_KEY) || null,
-  async login(username, pw) {
-    const r = await fetch("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password: pw }) });
-    if (!r.ok) throw new Error("login_failed");
-    const d = await r.json();
-    api.token = d.token; localStorage.setItem(TOK_KEY, d.token); return d;
-  },
-  async get(path) {
-    const r = await fetch(path, { headers: { Authorization: "Bearer " + api.token } });
-    if (r.status === 401) { api.token = null; localStorage.removeItem(TOK_KEY); throw new Error("unauth"); }
-    return (await r.json()).data;
-  },
-  async cmd(type, payload) {
-    const r = await fetch("/api/commands", {
-      method: "POST", headers: { Authorization: "Bearer " + api.token },
-      body: JSON.stringify({ type, payload }) });
-    return r.json();
-  },
-  async patchParams(category, body) {
-    const r = await fetch("/api/params/" + category, {
-      method: "PATCH", headers: { Authorization: "Bearer " + api.token },
-      body: JSON.stringify(body) });
-    if (!r.ok) throw new Error("param_patch_failed");
-    return (await r.json()).data;
-  },
-};
 
 /* ----------------------------------------------------------------- icons */
 const Ico = ({ d }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
@@ -1679,7 +1650,7 @@ function App() {
     try { await api.login(user, pw); setAuthed(true); setErr(null); }
     catch (_e) { setErr("账号或密码错误"); }
   };
-  const logout = () => { api.token = null; localStorage.removeItem(TOK_KEY); setAuthed(false); };
+  const logout = () => { api.logout(); setAuthed(false); };
 
   if (authed) return <Dashboard onLogout={logout} />;
   return (

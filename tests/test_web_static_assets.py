@@ -90,6 +90,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         build = (ROOT / "web" / "build.sh").read_text(encoding="utf-8")
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
 
+        self.assertIn('from "./lib/api.js"', jsx)
         self.assertIn('from "./lib/format.js"', jsx)
         self.assertIn('from "./lib/refresh.js"', jsx)
         self.assertIn("--bundle", build)
