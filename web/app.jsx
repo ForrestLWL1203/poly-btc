@@ -102,6 +102,12 @@ const scannerColor = (mode, stale) => {
 
 /* ----------------------------------------------------------------- icons */
 const Ico = ({ d }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
+const BanIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M6 6l12 12" />
+  </svg>
+);
 const IC = {
   overview: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z",
   positions: "M3 3v18h18M7 16l4-4 3 3 5-6",
@@ -113,7 +119,6 @@ const IC = {
   bolt: "M13 2 3 14h7l-1 8 10-12h-7z",
   close: "M18 6 6 18M6 6l12 12",
   plus: "M12 5v14M5 12h14",
-  block: "M18.4 5.6A9 9 0 1 0 5.6 18.4M5.6 5.6l12.8 12.8",
 };
 
 /* ----------------------------------------------------------------- equity chart */
@@ -402,10 +407,12 @@ function Positions({ confirm, toast, streamOpen }) {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg></a>
                   {(() => { const c = normalizeCoin(p.coin), banned = blacklist.includes(c), busy = blacklisting[c];
-                    return <button className={"coin-ban-btn" + (banned ? " on" : "")} disabled={busy || banned}
-                      title={banned ? "已在币种黑名单" : "加入币种黑名单:后续所有钱包的新开仓都会忽略"}
-                      onClick={e => { e.stopPropagation(); addBlacklist(p.coin); }}>
-                      {busy ? <span className="spin" /> : <Ico d={IC.block} />}</button>;
+                    return <button className={"coin-ban-btn" + (banned ? " on" : "")} disabled={busy}
+                      aria-label={banned ? "已在币种黑名单" : "加入币种黑名单"}
+                      onClick={e => { e.stopPropagation(); if (!banned) addBlacklist(p.coin); }}>
+                      {busy ? <span className="spin" /> : <BanIcon />}
+                      <span className="coin-ban-tip">{banned ? "已在币种黑名单" : "加入币种黑名单"}</span>
+                    </button>;
                   })()}
                   {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
