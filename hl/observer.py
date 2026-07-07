@@ -34,6 +34,7 @@ from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
 STALE_MS = 30_000          # a detected fill older than this priced at master px (book unreliable)
+MARK_WRITE_MIN_MS = 1_000  # dashboard mark freshness: persist at most once/sec/coin from live book ticks
 
 
 def _log(msg: str):
@@ -126,6 +127,7 @@ class Observer:
         #                                  EXIT-ONLY: follow their reduce/close, never open a NEW position
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
+        self.mark_write_ms: dict = {}    # coin -> last DB mark write ms (throttle BBO-triggered writes)
         self.px_ext: dict = {}           # coin -> [lo_bid, hi_ask, reset_ms] rolling ~window extreme, for the
         #                                  maker-shadow 戳破 check: did the price trade THROUGH our resting price?
         self.hb: dict = {}               # per-heartbeat-interval tally (fills seen / copied / skipped-by-reason);
@@ -551,6 +553,36 @@ class Observer:
                             (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
         self.db.commit()
 
+    def _refresh_coin_marks(self, coin: str, book=None) -> int:
+        """Persist live mark/unrealized PnL for one coin only. Used by BBO/l2Book ticks so the dashboard
+        does not wait for the slower full mark_refresh_loop."""
+        book = book or self.taker
+        ba = self.bbo.get(coin)
+        if not (coin and ba and ba[0] and ba[1]):
+            return 0
+        mark = (ba[0] + ba[1]) / 2
+        n = 0
+        for pos_id, side, rem, entry in self.db.execute(
+                f"SELECT pos_id,side,rem_size,entry_px FROM {book.pos_table} "
+                "WHERE status='open' AND coin=? AND size>0", (coin,)).fetchall():
+            sgn = 1 if side == "long" else -1
+            self.db.execute(f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
+                            (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
+            n += 1
+        if n:
+            self.db.commit()
+        return n
+
+    def _refresh_coin_marks_throttled(self, coin: str):
+        now = now_ms()
+        if now - self.mark_write_ms.get(coin, 0) < MARK_WRITE_MIN_MS:
+            return
+        wrote = 0
+        for b in self.books:
+            wrote += self._refresh_coin_marks(coin, b)
+        if wrote:
+            self.mark_write_ms[coin] = now
+
     async def mark_refresh_loop(self):
         """Frequent mark refresh for dashboard freshness (between the 5-min account_stats snapshots)."""
         while not self.stop:
@@ -792,6 +824,7 @@ class Observer:
                     mid = (ba[0] + ba[1]) / 2                            # would falsely cross liq/stop
                     if ba[1] < ba[0]:                                    # crossed/garbage book → distrust this tick
                         continue
+                    self._refresh_coin_marks_throttled(coin)
                     self._track_px(coin, ba[0], ba[1])                   # roll extreme for the maker 戳破 check
                     for book in self.books:                      # both accounts: track MAE + run stops per book
                         for (a, c), ep in book.open_ep.items():  # track adverse excursion while open
@@ -873,6 +906,7 @@ class Observer:
         if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:   # crossed/zero book → junk tick, ignore
             return
         self.bbo[coin] = (bid, ask)
+        self._refresh_coin_marks_throttled(coin)
         self._track_px(coin, bid, ask)             # roll the recent extreme for the maker 戳破 check
         mid = (bid + ask) / 2
         for book in self.books:                    # both accounts: track MAE + run stops per book
