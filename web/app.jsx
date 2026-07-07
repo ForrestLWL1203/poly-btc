@@ -16,6 +16,7 @@ import {
   scannerColor,
   short,
 } from "./lib/format.js";
+import { useDashboardRefresh, usePolling } from "./lib/refresh.js";
 
 /* 跟单监控台 — precompiled React dashboard. Talks to the live dashboard API. */
 const { useState, useEffect, useRef, useCallback } = React;
@@ -52,126 +53,6 @@ const api = {
     return (await r.json()).data;
   },
 };
-
-/* ----------------------------------------------------------------- refresh hooks */
-function usePolling(load, intervalMs, enabled = true) {
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    const tick = () => { if (!cancelled) load(); };
-    tick();
-    const t = setInterval(tick, intervalMs);
-    return () => { cancelled = true; clearInterval(t); };
-  }, [load, intervalMs, enabled]);
-}
-
-function useDashboardStream(token) {
-  const [live, setLive] = useState(null);            // SSE fast bundle {overview, positions, serverTime}
-  const [streamOk, setStreamOk] = useState(false);
-
-  // SSE live stream replaces polling when connected. EventSource auto-reconnects; on error we flip
-  // streamOk off so the polling fallback resumes until the stream recovers.
-  useEffect(() => {
-    if (!token || typeof EventSource === "undefined") return;
-    let es;
-    try {
-      es = new EventSource("/api/stream?token=" + encodeURIComponent(token));
-      es.onmessage = (e) => { try { setLive(JSON.parse(e.data)); setStreamOk(true); } catch (_e) {} };
-      es.onerror = () => setStreamOk(false);
-    } catch (_e) { setStreamOk(false); }
-    return () => { if (es) es.close(); };
-  }, [token]);
-
-  return { live, streamOk };
-}
-
-function useOverviewRefresh(live, streamOk) {
-  const [polledOverview, setPolledOverview] = useState(null);
-  const loadOverview = useCallback(() => { api.get("/api/overview").then(setPolledOverview).catch(() => {}); }, []);
-
-  // Fallback polling does one immediate load on mount/reconnect gaps, so the page paints before
-  // the stream's first push and recovers cleanly when SSE drops.
-  usePolling(loadOverview, 7000, !streamOk);
-
-  return {
-    overview: (streamOk && live && live.overview) || polledOverview,
-    setPolledOverview,
-  };
-}
-
-function useManualScanProgress(serverScanning) {
-  const [scanning, setScanning] = useState(false);
-  const [scanStatus, setScanStatus] = useState(null);
-
-  const checkManualScan = useCallback(() => {
-    api.get("/api/scan-status").then((s) => {
-      if (s && s.state === "scanning" && s.manual) { setScanning(true); setScanStatus(s); }
-    }).catch(() => {});
-  }, []);
-
-  // Server state is the source of truth. Manual scans lock the page; 24h auto scans stay silent.
-  useEffect(() => { if (serverScanning) checkManualScan(); }, [serverScanning, checkManualScan]);
-  useEffect(() => { checkManualScan(); }, [checkManualScan]);
-
-  useEffect(() => {
-    if (!scanning) return;
-    let alive = true, started = Date.now(), seen = false;
-    const tick = async () => {
-      try {
-        const s = await api.get("/api/scan-status");
-        if (!alive) return;
-        if (s.state === "scanning") { seen = true; setScanStatus(s); }
-        // Clear only when both progress and overview agree the scan is done. The 8s grace covers
-        // click -> daemon pickup timing, where progress may briefly still look idle.
-        else if ((seen || Date.now() - started > 8000) && !serverScanning) {
-          setScanning(false); setScanStatus(null);
-        }
-      } catch (_e) {}
-    };
-    tick(); const t = setInterval(tick, 1200);
-    return () => { alive = false; clearInterval(t); };
-  }, [scanning, serverScanning]);
-
-  return { scanning, setScanning, scanStatus };
-}
-
-function useObserverTransition(setOverview) {
-  const [obsPending, setObsPending] = useState(null);   // {label, target} while observer reaches target state
-
-  useEffect(() => {
-    if (!obsPending) return;
-    let alive = true, started = Date.now();
-    const tick = async () => {
-      try {
-        const o = await api.get("/api/overview");
-        if (!alive) return;
-        setOverview(o);
-        const st = o && o.system ? o.system.observer : null;
-        if (st === obsPending.target || Date.now() - started > 30000) setObsPending(null);
-      } catch (_e) {}
-    };
-    tick(); const t = setInterval(tick, 1500);
-    return () => { alive = false; clearInterval(t); };
-  }, [obsPending, setOverview]);
-
-  return { obsPending, setObsPending };
-}
-
-function useDashboardRefresh() {
-  const { live, streamOk } = useDashboardStream(api.token);
-  const { overview, setPolledOverview } = useOverviewRefresh(live, streamOk);
-  const serverScanning = !!(overview && overview.system && overview.system.scanner === "scanning");
-  const scan = useManualScanProgress(serverScanning);
-  const observer = useObserverTransition(setPolledOverview);
-
-  return {
-    ov: overview,
-    livePositions: streamOk ? (live && live.positions) : null,
-    streamOk,
-    ...scan,
-    ...observer,
-  };
-}
 
 /* ----------------------------------------------------------------- icons */
 const Ico = ({ d }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
@@ -1628,7 +1509,7 @@ const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", 
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
-  const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh();
+  const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
   const [confirmCfg, setConfirmCfg] = useState(null);
   const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
   const mobileNavRef = useRef(null);

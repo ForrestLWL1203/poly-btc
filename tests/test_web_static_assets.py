@@ -66,20 +66,22 @@ class WebStaticAssetsTests(unittest.TestCase):
 
     def test_dashboard_repeating_refreshes_use_shared_polling_hook(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        refresh = (ROOT / "web" / "lib" / "refresh.js").read_text(encoding="utf-8")
 
-        self.assertIn("function usePolling(", jsx)
-        self.assertIn("clearInterval", jsx)
-        self.assertGreaterEqual(jsx.count("usePolling("), 6)
+        self.assertIn("function usePolling(", refresh)
+        self.assertIn("clearInterval", refresh)
+        self.assertGreaterEqual((jsx + refresh).count("usePolling("), 6)
 
     def test_dashboard_refresh_layer_owns_stream_and_transition_polling(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        refresh = (ROOT / "web" / "lib" / "refresh.js").read_text(encoding="utf-8")
         dashboard = jsx.split("function Dashboard(", 1)[1].split("/* ----------------------------------------------------------------- root */", 1)[0]
 
-        self.assertIn("function useDashboardRefresh(", jsx)
-        self.assertIn("function useDashboardStream(", jsx)
-        self.assertIn("function useManualScanProgress(", jsx)
-        self.assertIn("function useObserverTransition(", jsx)
-        self.assertIn("useDashboardRefresh()", dashboard)
+        self.assertIn("function useDashboardRefresh(", refresh)
+        self.assertIn("function useDashboardStream(", refresh)
+        self.assertIn("function useManualScanProgress(", refresh)
+        self.assertIn("function useObserverTransition(", refresh)
+        self.assertIn("useDashboardRefresh(api)", dashboard)
         self.assertNotIn("new EventSource", dashboard)
         self.assertNotIn("setInterval", dashboard)
         self.assertNotIn("/api/scan-status", dashboard)
@@ -89,6 +91,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
 
         self.assertIn('from "./lib/format.js"', jsx)
+        self.assertIn('from "./lib/refresh.js"', jsx)
         self.assertIn("--bundle", build)
         self.assertIn("--format=iife", build)
 
