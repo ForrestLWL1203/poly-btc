@@ -24,6 +24,22 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_coin_blacklist_skips_new_open(self):
+        fills = [
+            fill(1_000, "xyz:SHKX", "B", 100, 0, 100.0, 1),
+            fill(2_000, "xyz:SHKX", "A", 100, 100, 101.0, 2),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"xyz:SHKX": 0.12}, overrides={
+            "COIN_BLACKLIST": "XYZ:SHKX",
+        })
+
+        self.assertEqual(result["target_open_events"], 1)
+        self.assertEqual(result["opened_n"], 0)
+        self.assertEqual(result["closed_n"], 0)
+        self.assertEqual(len(result["open_positions"]), 0)
+        self.assertEqual(result["skip_reasons"].get("skip_coin_blacklist"), 1)
+
     def test_smart_add_skips_small_adverse_add_and_reports_dependency(self):
         fills = [
             fill(1, "ZEC", "A", 100, 0, 100.0, 10),

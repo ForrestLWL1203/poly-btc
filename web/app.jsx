@@ -26,6 +26,13 @@ const api = {
       body: JSON.stringify({ type, payload }) });
     return r.json();
   },
+  async patchParams(category, body) {
+    const r = await fetch("/api/params/" + category, {
+      method: "PATCH", headers: { Authorization: "Bearer " + api.token },
+      body: JSON.stringify(body) });
+    if (!r.ok) throw new Error("param_patch_failed");
+    return (await r.json()).data;
+  },
 };
 
 /* ----------------------------------------------------------------- format */
@@ -71,6 +78,12 @@ const fDur = (s) => {
 };
 const short = (a) => (a ? a.slice(0, 6) + "…" + a.slice(-4) : "—");
 const cls = (v) => (v == null ? "" : v >= 0 ? "up" : "down");
+const normalizeCoin = (c) => String(c || "").trim().toUpperCase();
+const parseCoinList = (v) => {
+  const src = Array.isArray(v) ? v.join(",") : String(v || "");
+  return Array.from(new Set(src.split(/[\s,;，、]+/).map(normalizeCoin).filter(Boolean))).sort();
+};
+const formatCoinList = (coins) => parseCoinList(coins).join(", ");
 const agoText = (iso) => {
   if (!iso) return "—";
   const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -99,6 +112,8 @@ const IC = {
   logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
   bolt: "M13 2 3 14h7l-1 8 10-12h-7z",
   close: "M18 6 6 18M6 6l12 12",
+  plus: "M12 5v14M5 12h14",
+  block: "M18.4 5.6A9 9 0 1 0 5.6 18.4M5.6 5.6l12.8 12.8",
 };
 
 /* ----------------------------------------------------------------- equity chart */
@@ -277,6 +292,8 @@ function Overview({ ov }) {
 function Positions({ confirm, toast, streamOpen }) {
   const [polledOpen, setPolledOpen] = useState(null);
   const [closing, setClosing] = useState({});        // positionId -> true while its 平仓 command is in flight
+  const [blacklist, setBlacklist] = useState([]);
+  const [blacklisting, setBlacklisting] = useState({});
   const [filter, setFilter] = useState("all");
   const [opage, setOpage] = useState(0);             // open positions page (20/page)
   const [pnlSort, setPnlSort] = useState(null);      // null = 默认(新开在前) | "asc" 浮亏在前 | "desc" 浮盈在前
@@ -293,11 +310,18 @@ function Positions({ confirm, toast, streamOpen }) {
   const cyclePnlSort = () => { setPnlSort(d => d === null ? "asc" : d === "asc" ? "desc" : null); setOpage(0); };
   const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
   const load = loadOpen;                              // doClose refreshes the open list after a manual close
+  const loadBlacklist = useCallback(() => {
+    api.get("/api/params").then(p => {
+      const row = (p.follow || []).find(x => x.key === "COIN_BLACKLIST");
+      setBlacklist(parseCoinList(row ? row.value : ""));
+    }).catch(() => {});
+  }, []);
   // open positions come from the SSE stream; fallback-poll only when the stream isn't delivering.
   useEffect(() => {
     if (!streamOpen) { loadOpen(); var to = setInterval(loadOpen, 6000); }
     return () => { if (to) clearInterval(to); };
   }, [loadOpen, streamOpen]);
+  useEffect(() => { loadBlacklist(); }, [loadBlacklist]);
 
   const doClose = (p) => confirm({
     title: "手动平仓", danger: true,
@@ -312,6 +336,28 @@ function Positions({ confirm, toast, streamOpen }) {
       setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
     },
   });
+  const addBlacklist = async (coin) => {
+    const normalized = normalizeCoin(coin);
+    if (!normalized) return;
+    setBlacklisting(m => ({ ...m, [normalized]: true }));
+    try {
+      const p = await api.get("/api/params");
+      const row = (p.follow || []).find(x => x.key === "COIN_BLACKLIST");
+      const current = parseCoinList(row ? row.value : "");
+      if (!current.includes(normalized)) {
+        const next = formatCoinList([...current, normalized]);
+        await api.patchParams("follow", { COIN_BLACKLIST: next });
+        await api.cmd("reload_params", {});
+        setBlacklist(parseCoinList(next));
+      } else {
+        setBlacklist(current);
+      }
+    } catch (_e) {
+      loadBlacklist();
+    } finally {
+      setBlacklisting(m => { const n = { ...m }; delete n[normalized]; return n; });
+    }
+  };
 
   const filt = (rows) => !rows ? [] : rows.filter(p =>
     filter === "all" ? true : filter === "crypto" ? p.marketType === "crypto" :
@@ -355,6 +401,12 @@ function Positions({ confirm, toast, streamOpen }) {
                      target="_blank" rel="noopener noreferrer" title="在 Hyperliquid 看K线" onClick={e => e.stopPropagation()}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg></a>
+                  {(() => { const c = normalizeCoin(p.coin), banned = blacklist.includes(c), busy = blacklisting[c];
+                    return <button className={"coin-ban-btn" + (banned ? " on" : "")} disabled={busy || banned}
+                      title={banned ? "已在币种黑名单" : "加入币种黑名单:后续所有钱包的新开仓都会忽略"}
+                      onClick={e => { e.stopPropagation(); addBlacklist(p.coin); }}>
+                      {busy ? <span className="spin" /> : <Ico d={IC.block} />}</button>;
+                  })()}
                   {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                 <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
@@ -1100,6 +1152,43 @@ function EditableValue({ value, unit, ptype, disabled, onCommit }) {
   );
 }
 
+function CoinBlacklistEditor({ param, value, dirty, disabled, onCommit }) {
+  const [draft, setDraft] = useState("");
+  const coins = parseCoinList(value);
+  const commitCoins = (next) => onCommit(formatCoinList(next));
+  const add = () => {
+    const c = normalizeCoin(draft);
+    if (!c || coins.includes(c)) { setDraft(""); return; }
+    commitCoins([...coins, c]);
+    setDraft("");
+  };
+  return (
+    <div className={"prow coin-blacklist-row" + (dirty ? " dirty" : "")}>
+      <span className="lvl-dot lvl-green" />
+      <div className="pn"><b>{param.name}</b></div>
+      <div className="pd">{param.desc}</div>
+      <div className="pctl coin-blacklist-ctl">
+        <div className="coin-tags">
+          {coins.length === 0 && <span className="coin-empty">暂无黑名单</span>}
+          {coins.map(c => (
+            <button key={c} className="coin-tag" disabled={disabled} title="从黑名单删除"
+              onClick={() => commitCoins(coins.filter(x => x !== c))}>
+              <span>{c}</span><b>×</b>
+            </button>
+          ))}
+        </div>
+        <div className="coin-add">
+          <input value={draft} disabled={disabled} placeholder="XYZ:SHKX"
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") add(); else if (e.key === "Escape") setDraft(""); }} />
+          <button className="btn btn-sm" disabled={disabled || !normalizeCoin(draft)}
+            title="添加币种" onClick={add}><Ico d={IC.plus} /></button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Settings({ startRescan, confirm, toast }) {
   const [params, setParams] = useState(null);
   const [tab, setTab] = useState("scanner");
@@ -1123,12 +1212,14 @@ function Settings({ startRescan, confirm, toast }) {
   const ADD_KEYS = new Set(["FOLLOW_POS_ADD", "SMART_ADD", "ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD",
     "ADD_FRAC", "STABLE_MAX_ADDS", "MID_MAX_ADDS", "HIGH_MAX_ADDS"]);   // 归入独立「加仓策略」tab
   const AUTO_TUNE_KEY = "AUTO_TUNE_MARGIN_ENABLE";
+  const BLACKLIST_KEY = "COIN_BLACKLIST";
   //  (单币上限 STABLE/MID/HIGH_COIN_CAP_PCT 已挪回「跟单策略 · σ分档」—— 它是全局灾难闸,管开仓+加仓,不是加仓专属)
   const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const editable = (p) => !(p.type === "display" || p.level === "black");
   const set = (key, val) => { setVals(v => ({ ...v, [key]: val })); setDirty(dd => ({ ...dd, [key]: true })); };
   const tabDirty = list.filter(p => dirty[p.key]);
   const autoTuneParam = tab === "follow" ? list.find(p => p.key === AUTO_TUNE_KEY) : null;
+  const blacklistParam = tab === "follow" ? list.find(p => p.key === BLACKLIST_KEY) : null;
   const byKey = k => list.find(p => p.key === k);
 
   const Prow = (p) => {
@@ -1240,7 +1331,7 @@ function Settings({ startRescan, confirm, toast }) {
       setSaving(true);                                  // 短暂全页 loading 代替右上角 tooltip
       const t0 = Date.now();
       const cat = tab === "add" ? "follow" : tab;              // 加仓参数在后端属 follow 类
-      try { await fetch("/api/params/" + cat, { method: "PATCH", headers: { Authorization: "Bearer " + api.token }, body: JSON.stringify(body) }); } catch (_e) {}
+      try { await api.patchParams(cat, body); } catch (_e) {}
       setDirty({});
       if (tab === "follow" || tab === "add") { try { await api.cmd("reload_params", {}); } catch (_e) {} }  // observer ~1.5s 内生效
       await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));   // 让 loading 可感知
@@ -1331,7 +1422,7 @@ function Settings({ startRescan, confirm, toast }) {
             </div>
           </React.Fragment>;
         })()}
-        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY))).map(p => {
+        {tab !== "add" && list.filter(p => !(tab === "follow" && (tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY))).map(p => {
           if (tab === "follow" && p.key === "MIN_FOLLOW_SCORE") {
             const v = Number(vals.MIN_FOLLOW_SCORE);
             const n = scoreDist ? scoreDist.scores.filter(s => s >= v).length : null;
@@ -1343,6 +1434,9 @@ function Settings({ startRescan, confirm, toast }) {
                     评分 ≥ <b>{isFinite(v) ? v : "—"}</b> 时,当前 watchlist 有 <b style={{ color: "var(--accent)" }}>{n}</b> 个钱包达标会被跟单
                     <span className="muted"> / 共 {scoreDist.total} 个候选</span></React.Fragment>}
                 </div>
+                {blacklistParam && <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
+                  value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editable(blacklistParam)}
+                  onCommit={v => set(BLACKLIST_KEY, v)} />}
               </React.Fragment>
             );
           }

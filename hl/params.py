@@ -10,7 +10,7 @@ reading from this table (M2/M4) they convert `pct` values /100. Defaults below m
 code (hl/config.py + hl_discover.py argparse) so seeding never changes live behaviour.
 
 level drives UI affordance: green=edit freely, yellow=edit w/ confirm, blue=dev-mode only,
-black=read-only. type: usd|pct|x|int|float|nullable|bool|display.
+black=read-only. type: usd|pct|x|int|float|nullable|bool|text|display.
 """
 from . import config
 from .util import now_iso
@@ -83,6 +83,8 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "immediate", config.MIN_FOLLOW_SCORE,
         "跟单评分线", "评分 ≥ 此线的钱包才实际跟单(见下方实时达标数)"),
+    ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
+        "币种黑名单", "命中的币种不再新开仓;已有仓位仍继续跟随减仓/平仓。建议从持仓行一键加入,避免符号别名写错"),
     # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — redundant with the scanner EVIDENCE gate,
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
@@ -179,6 +181,8 @@ def parse(value, ptype):
     """Parse the stored TEXT value back to a Python value per `type`. NULL/'' -> None for nullable."""
     if ptype == "display":
         return value
+    if ptype == "text":
+        return "" if value is None else str(value)
     if value is None or value == "":
         return None
     if ptype == "bool":

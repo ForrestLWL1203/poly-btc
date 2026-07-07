@@ -46,6 +46,36 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_patch_coin_blacklist_normalizes_list(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            db.execute(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES ('COIN_BLACKLIST','','follow','green','text','immediate','',NULL)"
+            )
+            db.commit()
+            db.close()
+
+            updated = api_params.patch_params(path, "follow", {"COIN_BLACKLIST": " xyz:shkx, btc\nETH "})
+
+            self.assertEqual(updated, {"COIN_BLACKLIST": " xyz:shkx, btc\nETH "})
+            db = sqlite3.connect(path)
+            stored = db.execute("SELECT value FROM params WHERE key='COIN_BLACKLIST'").fetchone()[0]
+            db.close()
+            self.assertEqual(stored, "BTC, ETH, XYZ:SHKX")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
 
 if __name__ == "__main__":
     unittest.main()

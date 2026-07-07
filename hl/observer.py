@@ -27,6 +27,7 @@ import time
 import websockets
 
 from . import config, rest, volatility, ws
+from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
 from .copy_engine import OpenSizingParams, plan_open_sizing, stop_px as engine_stop_px, tier_for_sigma
 from .fill_transition import classify_fill_transition
 from .util import f, now_iso, now_ms
@@ -96,6 +97,7 @@ class Observer:
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
         self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
+        self.coin_blacklist = parse_coin_blacklist(config.COIN_BLACKLIST)
         self.deploy_full_pct = config.DEPLOY_FULL_PCT        # <= this deployed margin: use tier margin upper bound
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
@@ -247,6 +249,7 @@ class Observer:
             from . import params as P
             f = P.load_follow(self.db)
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
+            if f.get("COIN_BLACKLIST") is not None: self.coin_blacklist = parse_coin_blacklist(f["COIN_BLACKLIST"])
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
             # (v10: FOLLOW_MIN_TRADES/FOLLOW_MIN_ACTIVE_DAYS dropped — evidence enforced once at profile time)
             if f.get("ADD_FRAC") is not None: self.add_frac = f["ADD_FRAC"]
@@ -970,6 +973,9 @@ class Observer:
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None):
         book = book or self.taker
+        if coin_is_blacklisted(coin, self.coin_blacklist):
+            self._tally("skip_coin_blacklist", book)
+            return
         if not self._copyable(coin):
             self._tally("skip_opaque", book)
             return              # copy crypto + transparent builder (stocks); skip opaque/unknown

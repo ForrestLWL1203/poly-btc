@@ -4,6 +4,7 @@ import sqlite3
 
 from . import params as params_mod
 from .api_common import score100, score_from100
+from .coin_filter import format_coin_blacklist
 from .util import now_iso
 
 
@@ -30,7 +31,12 @@ def patch_params(db_path, category, updates):
                 continue
             if row["level"] not in WRITABLE_LEVELS or row["type"] == "display":
                 raise ValueError(f"{key} is read-only")
-            stored = score_from100(val) if key == "MIN_FOLLOW_SCORE" and val is not None else val
+            if key == "MIN_FOLLOW_SCORE" and val is not None:
+                stored = score_from100(val)
+            elif key == "COIN_BLACKLIST":
+                stored = format_coin_blacklist(val)
+            else:
+                stored = val
             sval = (None if stored is None else "true" if stored is True
                     else "false" if stored is False else str(stored))
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (sval, now_iso(), key))

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 
 from . import config
+from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
 from .copy_engine import OpenSizingParams, extract_master_leverage, plan_open_sizing, stop_px
 from .fill_transition import classify_fill_transition
 from .util import f
@@ -141,6 +142,7 @@ class Backtest:
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
+        self.coin_blacklist = parse_coin_blacklist(overrides.get("COIN_BLACKLIST", config.COIN_BLACKLIST))
         self.price_path_points = 0
         self.master_leverage_known = 0
         self.master_leverage_missing = 0
@@ -264,6 +266,9 @@ class Backtest:
         self._mark_stops_range(coin, lo, hi, x.get("time"))
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
+        if coin_is_blacklisted(coin, self.coin_blacklist):
+            self.skip_reasons["skip_coin_blacklist"] += 1
+            return
         sigma = self.sigma(coin)
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
