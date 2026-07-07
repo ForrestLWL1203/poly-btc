@@ -39,6 +39,24 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertIsNone(eth["mark_px"])
         self.assertIsNone(eth["unrealized_pnl"])
 
+    def test_builder_all_mids_mark_overrides_book_mid_for_dashboard_marks(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO copy_position "
+            "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
+            "VALUES ('0xccc','xyz:MU','long','open',900,5,50,900,1,1,'2026-01-01T00:00:00Z')"
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+        obs.bbo["xyz:MU"] = (941, 943)
+        obs.mark_mid["xyz:MU"] = 937
+
+        obs._refresh_coin_marks("xyz:MU")
+
+        mu = db.execute("SELECT mark_px,unrealized_pnl FROM copy_position WHERE coin='xyz:MU'").fetchone()
+        self.assertEqual(mu["mark_px"], 937)
+        self.assertEqual(mu["unrealized_pnl"], 37)
+
 
 if __name__ == "__main__":
     unittest.main()

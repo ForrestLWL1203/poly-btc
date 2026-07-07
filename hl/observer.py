@@ -127,6 +127,7 @@ class Observer:
         #                                  EXIT-ONLY: follow their reduce/close, never open a NEW position
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
+        self.mark_mid: dict = {}         # coin -> authoritative display/risk mark (builder allMids, etc.)
         self.mark_write_ms: dict = {}    # coin -> last DB mark write ms (throttle BBO-triggered writes)
         self.px_ext: dict = {}           # coin -> [lo_bid, hi_ask, reset_ms] rolling ~window extreme, for the
         #                                  maker-shadow 戳破 check: did the price trade THROUGH our resting price?
@@ -210,6 +211,15 @@ class Observer:
             return bid if is_buy else ask         # target's resting order (else assuming our rest fills
         #                                           instantly = optimistic; see config.EXEC_MAKER_MIRROR)
         return ask if is_buy else bid             # default: taker catch-up across the spread, CURRENT book
+
+    def _mark_px(self, coin: str, fallback=None):
+        mid = self.mark_mid.get(coin)
+        if mid and mid > 0:
+            return mid
+        ba = self.bbo.get(coin)
+        if ba and ba[0] and ba[1]:
+            return (ba[0] + ba[1]) / 2
+        return fallback
 
     def _track_px(self, coin, bid, ask):
         """Roll a coin's recent price extreme (reset every MAKER_THROUGH_WINDOW_MS) so the maker-shadow can
@@ -510,8 +520,7 @@ class Observer:
         for pos_id, coin, side, rem, size, entry, margin, notional in self.db.execute(
                 "SELECT pos_id,coin,side,rem_size,size,entry_px,margin,notional FROM copy_position "
                 "WHERE status='open' AND size>0").fetchall():
-            ba = self.bbo.get(coin)
-            mark = ((ba[0] + ba[1]) / 2) if (ba and ba[0] and ba[1]) else (entry or 0)
+            mark = self._mark_px(coin, entry or 0)
             sgn = 1 if side == "long" else -1
             pos_upnl = rem * (mark - (entry or 0)) * sgn
             upnl += pos_upnl
@@ -544,10 +553,9 @@ class Observer:
         for pos_id, coin, side, rem, size, entry in self.db.execute(
                 f"SELECT pos_id,coin,side,rem_size,size,entry_px FROM {book.pos_table} "
                 "WHERE status='open' AND size>0").fetchall():
-            ba = self.bbo.get(coin)
-            if not (ba and ba[0] and ba[1]):
+            mark = self._mark_px(coin)
+            if not mark:
                 continue
-            mark = (ba[0] + ba[1]) / 2
             sgn = 1 if side == "long" else -1
             self.db.execute(f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
                             (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
@@ -557,10 +565,9 @@ class Observer:
         """Persist live mark/unrealized PnL for one coin only. Used by BBO/l2Book ticks so the dashboard
         does not wait for the slower full mark_refresh_loop."""
         book = book or self.taker
-        ba = self.bbo.get(coin)
-        if not (coin and ba and ba[0] and ba[1]):
+        mark = self._mark_px(coin)
+        if not (coin and mark):
             return 0
-        mark = (ba[0] + ba[1]) / 2
         n = 0
         for pos_id, side, rem, entry in self.db.execute(
                 f"SELECT pos_id,side,rem_size,entry_px FROM {book.pos_table} "
@@ -816,24 +823,45 @@ class Observer:
         """Keep self.bbo fresh for builder/stock coins we're tracking via REST l2Book (best bid/ask).
         Only polls coins we've actually seen a fill on (added to stock_coins on first sight), so the
         cost is a handful of calls — and zero when no stock positions are in play."""
+        last_log = 0
+        book_i = 0
         while not self.stop:
-            for coin in list(self.stock_coins):
-                ba = await asyncio.to_thread(rest.book_top, coin)
+            coins = sorted(self.stock_coins)
+            try:
+                mids = await asyncio.to_thread(rest.all_mids, "xyz", True)
+                for coin in coins:
+                    mid = f(mids.get(coin)) if isinstance(mids, dict) else 0.0
+                    if mid > 0:
+                        self.mark_mid[coin] = mid
+                        self._refresh_coin_marks_throttled(coin)
+                        for book in self.books:
+                            for (a, c), ep in book.open_ep.items():
+                                if c == coin and ep["master_open_px"]:
+                                    adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
+                                           else (mid - ep["master_open_px"])) / ep["master_open_px"]
+                                    ep["mae"] = max(ep.get("mae", 0.0), adv)
+                            self._maybe_liquidate(coin, mid, book)
+                            self._maybe_stop(coin, mid, book)
+                if coins and time.time() - last_log > 300:
+                    _log(f"stock mids refreshed: {len(coins)} coins")
+                    last_log = time.time()
+            except Exception as exc:  # noqa: BLE001
+                _log(f"stock mids refresh failed: {exc}")
+
+            if coins:
+                coin = coins[book_i % len(coins)]
+                book_i += 1
+                try:
+                    ba = await asyncio.to_thread(rest.book_top, coin)
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"stock book {coin} failed: {exc}")
+                    ba = None
                 if ba and ba[0] and ba[1] and ba[0] > 0 and ba[1] > 0:   # need a REAL two-sided book —
-                    self.bbo[coin] = ba                                  # a one-sided/zero book (ask=0 → mid=bid/2)
-                    mid = (ba[0] + ba[1]) / 2                            # would falsely cross liq/stop
                     if ba[1] < ba[0]:                                    # crossed/garbage book → distrust this tick
-                        continue
-                    self._refresh_coin_marks_throttled(coin)
-                    self._track_px(coin, ba[0], ba[1])                   # roll extreme for the maker 戳破 check
-                    for book in self.books:                      # both accounts: track MAE + run stops per book
-                        for (a, c), ep in book.open_ep.items():  # track adverse excursion while open
-                            if c == coin and ep["master_open_px"]:
-                                adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
-                                       else (mid - ep["master_open_px"])) / ep["master_open_px"]
-                                ep["mae"] = max(ep.get("mae", 0.0), adv)
-                        self._maybe_liquidate(coin, mid, book)   # isolated stop-out if liq_px crossed
-                        self._maybe_stop(coin, mid, book)        # 扛单 copy-side stop if stop_px crossed
+                        ba = None
+                    if ba:
+                        self.bbo[coin] = ba                              # used for execution bid/ask
+                        self._track_px(coin, ba[0], ba[1])               # roll extreme for the maker 戳破 check
             await asyncio.sleep(2 if self.stock_coins else 5)
 
     @staticmethod

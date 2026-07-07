@@ -58,6 +58,20 @@ def post_soft(body: dict):
         return None
 
 
+def realtime_post_soft(body: dict, timeout: float = 5.0):
+    """Low-latency market-data POST for dashboard/risk marks.
+
+    This deliberately does not use the global historical/fill pacer: one allMids call every few seconds is
+    cheap, and sharing the fill-signal queue can leave stock marks stale behind dozens of userFills calls."""
+    try:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # -- higher-level reads -------------------------------------------------------
 def get_leaderboard() -> list:
     data = _get(config.LEADERBOARD_URL)
@@ -255,3 +269,12 @@ def book_top(coin: str):
         from .util import f as _f
         return _f(lv[0][0]["px"]), _f(lv[1][0]["px"])
     return None
+
+
+def all_mids(dex: str = None, realtime: bool = False) -> dict:
+    """Current mid prices. With dex='xyz', keys are fully-qualified builder coins like 'xyz:MU'."""
+    body = {"type": "allMids"}
+    if dex:
+        body["dex"] = dex
+    m = realtime_post_soft(body) if realtime else post_soft(body)
+    return m if isinstance(m, dict) else {}
