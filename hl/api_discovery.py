@@ -173,9 +173,23 @@ def _latest_pipeline_key(db, qs):
     if stamp:
         if source:
             return stamp, source
-        row = q1(db, "SELECT source FROM pipeline_audit WHERE stamp=? ORDER BY id DESC LIMIT 1", (stamp,))
+        row = q1(db, """
+            SELECT source FROM (
+                SELECT source,MAX(id) max_id,
+                       MAX(CASE WHEN stage IN ('follow_line','auto_tune') THEN id END) decision_id
+                FROM pipeline_audit WHERE stamp=? GROUP BY source
+            )
+            ORDER BY (decision_id IS NOT NULL) DESC,COALESCE(decision_id,max_id) DESC LIMIT 1
+        """, (stamp,))
         return (stamp, _col(row, "source", 0)) if row else (stamp, None)
-    row = q1(db, "SELECT stamp,source FROM pipeline_audit ORDER BY id DESC LIMIT 1")
+    row = q1(db, """
+        SELECT stamp,source FROM (
+            SELECT stamp,source,MAX(id) max_id,
+                   MAX(CASE WHEN stage IN ('follow_line','auto_tune') THEN id END) decision_id
+            FROM pipeline_audit GROUP BY stamp,source
+        )
+        ORDER BY (decision_id IS NOT NULL) DESC,COALESCE(decision_id,max_id) DESC LIMIT 1
+    """)
     return (_col(row, "stamp", 0), _col(row, "source", 1)) if row else (None, None)
 
 

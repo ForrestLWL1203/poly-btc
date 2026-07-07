@@ -187,6 +187,24 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertTrue(res["autoTune"]["appliedSizing"])
         self.assertFalse(res["autoTune"]["appliedAdd"])
 
+    def test_pipeline_summary_prefers_latest_complete_decision_over_profile_only_backfill(self):
+        db = self._db()
+        self._insert_profiles(db)
+        pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa"])
+        pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
+            "status": "ok",
+            "reason": "portfolio_topn",
+            "line": 0.735,
+        })
+        pipeline_audit.record_profile_snapshot(db, "2026-07-08T00:00:00Z", "manual_backfill", ["0xbbb"])
+        db.commit()
+
+        res = api_discovery.ep_pipeline_summary(db, {})
+
+        self.assertEqual(res["stamp"], "2026-07-07T00:00:00Z")
+        self.assertEqual(res["source"], "scan")
+        self.assertEqual(res["followLine"]["reason"], "portfolio_topn")
+
 
 if __name__ == "__main__":
     unittest.main()
