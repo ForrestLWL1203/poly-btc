@@ -1,4 +1,5 @@
 import { api } from "./lib/api.js";
+import { Positions, PositionDetail } from "./components/Positions.jsx";
 import {
   SCANNER_LABEL,
   agoText,
@@ -17,6 +18,7 @@ import {
   scannerColor,
   short,
 } from "./lib/format.js";
+import { IC, Ico } from "./lib/icons.jsx";
 import { useDashboardRefresh, usePolling } from "./lib/refresh.js";
 
 /* 跟单监控台 — precompiled React dashboard. Talks to the live dashboard API. */
@@ -24,27 +26,6 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 const DASH_USER = "admin";                       // preview auto-login (matches launch.json env)
 const DASH_PW = "mock123";
-
-/* ----------------------------------------------------------------- icons */
-const Ico = ({ d }) => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>;
-const BanIcon = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <circle cx="12" cy="12" r="8.5" />
-    <path d="M6 6l12 12" />
-  </svg>
-);
-const IC = {
-  overview: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z",
-  positions: "M3 3v18h18M7 16l4-4 3 3 5-6",
-  history: "M3 3v5h5M3.05 13A9 9 0 1 0 6 5.3L3 8M12 7v5l4 2",
-  wallets: "M3 7h18v12H3zM3 7l2-3h14l2 3M16 13h2",
-  discovery: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zm10 2-4.3-4.3",
-  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1l-.4-2.6H9.6l-.4 2.6a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L5.1 11a7 7 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 2.6h4.8l.4-2.6a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1z",
-  logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
-  bolt: "M13 2 3 14h7l-1 8 10-12h-7z",
-  close: "M18 6 6 18M6 6l12 12",
-  plus: "M12 5v14M5 12h14",
-};
 
 /* ----------------------------------------------------------------- equity chart */
 function EquityChart({ points }) {
@@ -219,195 +200,8 @@ function Overview({ ov }) {
   );
 }
 
-/* ----------------------------------------------------------------- positions */
-function Positions({ confirm, toast, streamOpen }) {
-  const [polledOpen, setPolledOpen] = useState(null);
-  const [closing, setClosing] = useState({});        // positionId -> true while its 平仓 command is in flight
-  const [blacklist, setBlacklist] = useState([]);
-  const [blacklisting, setBlacklisting] = useState({});
-  const [filter, setFilter] = useState("all");
-  const [opage, setOpage] = useState(0);             // open positions page (20/page)
-  const [pnlSort, setPnlSort] = useState(null);      // null = 默认(新开在前) | "asc" 浮亏在前 | "desc" 浮盈在前
-  const [expandedId, setExpandedId] = useState(null); // pos_id expanded to its detail
-  const [details, setDetails] = useState({});
-  const toggleRow = (rowId) => {
-    const pid = Number(String(rowId).replace("pos_", ""));
-    if (expandedId === pid) { setExpandedId(null); return; }
-    setExpandedId(pid);
-    if (!details[pid]) api.get(`/api/positions/${pid}`).then(d => setDetails(m => ({ ...m, [pid]: d }))).catch(() => {});
-  };
-  const open = streamOpen || polledOpen;             // prefer the SSE stream for open positions
-  // 浮动盈亏 表头点击循环:默认(新开在前) → 浮亏在前 → 浮盈在前 → 默认
-  const cyclePnlSort = () => { setPnlSort(d => d === null ? "asc" : d === "asc" ? "desc" : null); setOpage(0); };
-  const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
-  const load = loadOpen;                              // doClose refreshes the open list after a manual close
-  const loadBlacklist = useCallback(() => {
-    api.get("/api/params").then(p => {
-      const row = (p.follow || []).find(x => x.key === "COIN_BLACKLIST");
-      setBlacklist(parseCoinList(row ? row.value : ""));
-    }).catch(() => {});
-  }, []);
-  // open positions come from the SSE stream; fallback-poll only when the stream isn't delivering.
-  usePolling(loadOpen, 6000, !streamOpen);
-  useEffect(() => { loadBlacklist(); }, [loadBlacklist]);
-
-  const doClose = (p) => confirm({
-    title: "手动平仓", danger: true,
-    body: `平掉 ${p.coin} ${p.side === "long" ? "多" : "空"}(当前名义额 ${fUsd(p.notional)})。选择平仓比例(默认100%),不可撤销。`,
-    pctPicker: { notional: p.notional },
-    onConfirm: async (frac = 1) => {                  // button shows inline loading until done — no toast
-      const pid = Number(p.id.replace("pos_", ""));
-      setClosing(c => ({ ...c, [pid]: true }));
-      try { await api.cmd("close_position", { positionId: pid, fraction: frac }); } catch (_e) {}
-      await new Promise(r => setTimeout(r, 1800));
-      load();
-      setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
-    },
-  });
-  const addBlacklist = async (coin) => {
-    const normalized = normalizeCoin(coin);
-    if (!normalized) return;
-    setBlacklisting(m => ({ ...m, [normalized]: true }));
-    try {
-      const p = await api.get("/api/params");
-      const row = (p.follow || []).find(x => x.key === "COIN_BLACKLIST");
-      const current = parseCoinList(row ? row.value : "");
-      if (!current.includes(normalized)) {
-        const next = formatCoinList([...current, normalized]);
-        await api.patchParams("follow", { COIN_BLACKLIST: next });
-        await api.cmd("reload_params", {});
-        setBlacklist(parseCoinList(next));
-      } else {
-        setBlacklist(current);
-      }
-    } catch (_e) {
-      loadBlacklist();
-    } finally {
-      setBlacklisting(m => { const n = { ...m }; delete n[normalized]; return n; });
-    }
-  };
-
-  const filt = (rows) => !rows ? [] : rows.filter(p =>
-    filter === "all" ? true : filter === "crypto" ? p.marketType === "crypto" :
-    filter === "stock" ? p.marketType === "stock" : filter === "long" ? p.side === "long" : p.side === "short");
-
-  const OPER = 20;
-  let openRows = open ? filt(open.positions) : [];   // API delivers newest-first; that's the default order
-  if (pnlSort) openRows = [...openRows].sort((a, b) =>
-    pnlSort === "asc" ? (a.unrealizedPnl - b.unrealizedPnl) : (b.unrealizedPnl - a.unrealizedPnl));
-  const opages = Math.max(1, Math.ceil(openRows.length / OPER));
-  const opg = Math.min(opage, opages - 1);
-  const openItems = openRows.slice(opg * OPER, opg * OPER + OPER);
-
-  return (
-    <div className="content">
-      <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>当前持仓 {open && <span className="muted">· 浮动 <span className={cls(open.summary.floatingPnl)}>{fSign(open.summary.floatingPnl, 1)}</span> · {open.summary.openCount} 笔</span>}</h2>
-        <div className="range-tabs">
-          {[["all", "全部"], ["crypto", "Crypto"], ["stock", "股票"], ["long", "多"], ["short", "空"]].map(([k, l]) =>
-            <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}
-        </div>
-      </div>
-      <div className="tbl-wrap">
-        <table>
-          <thead><tr>
-            <th>币种</th><th>方向</th><th className="num">入场/杠杆</th><th className="num">名义额</th>
-            <th className="num">现价</th>
-            <th className="num sortable" onClick={cyclePnlSort} title="点击按浮动盈亏排序(浮亏在前 / 浮盈在前 / 默认新开在前)">
-              浮动盈亏 <span className={"sort-ind" + (pnlSort ? " active" : "")}>{pnlSort === "asc" ? "▲" : pnlSort === "desc" ? "▼" : "⇅"}</span>
-            </th>
-            <th>钱包</th><th className="num">lag</th><th className="num">爆仓价</th><th></th>
-          </tr></thead>
-          <tbody>
-            {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
-            {open && openRows.length === 0 && <tr><td colSpan="10" className="empty">无持仓</td></tr>}
-            {openItems.map(p => { const pid = Number(String(p.id).replace("pos_", "")); const isOpen = expandedId === pid;
-              return <React.Fragment key={p.id}>
-              <tr onClick={() => toggleRow(p.id)} style={{ cursor: "pointer" }} className={isOpen ? "row-open" : ""}>
-                <td><span className="row-caret" style={{ transform: isOpen ? "rotate(90deg)" : "none" }}>▸</span> <span className="tint tint-gray">{p.marketType === "stock" ? "股" : "币"}</span> <b>{p.coin}</b>
-                  <a className="ext-link" href={"https://app.hyperliquid.xyz/trade/" + p.coin}
-                     target="_blank" rel="noopener noreferrer" title="在 Hyperliquid 看K线" onClick={e => e.stopPropagation()}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg></a>
-                  {(() => { const c = normalizeCoin(p.coin), banned = blacklist.includes(c), busy = blacklisting[c];
-                    return <button className={"coin-ban-btn" + (banned ? " on" : "")} disabled={busy}
-                      aria-label={banned ? "已在币种黑名单" : "加入币种黑名单"}
-                      onClick={e => { e.stopPropagation(); if (!banned) addBlacklist(p.coin); }}>
-                      {busy ? <span className="spin" /> : <BanIcon />}
-                      <span className="coin-ban-tip">{banned ? "已在币种黑名单" : "加入币种黑名单"}</span>
-                    </button>;
-                  })()}
-                  {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数(上限2)">加仓{p.addCount}</span>}</td>
-                <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
-                <td className="num">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x
-                  <div className="muted" title="源(目标钱包)的加权均价(随其加仓更新)· 杠杆">源 {fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</div></td>
-                <td className="num">{fUsd(p.notional)}
-                  <div className="muted" title="源(目标钱包)这一单的名义额(我们 ≤ 它)">源 {fUsd(p.masterNotional)}</div></td>
-                <td className="num">{fPrice(p.mark)}</td>
-                <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
-                <td className="addr">{short(p.wallet)} {p.followPos != null
-                  ? <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
-                  : <span className="tint tint-gray" title="当前不在跟单集(仅平仓)">脱榜</span>}</td>
-                <td className="num" title="跟单延迟:目标开仓 → 我们检测并跟开的秒数(旧仓未记录显示 —)">{p.lagSec != null ? fNum(p.lagSec, 1) + "s" : "—"}</td>
-                <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
-                  {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
-                <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
-                  return <button className="btn btn-stop btn-sm" disabled={busy} onClick={e => { e.stopPropagation(); doClose(p); }}>
-                    {busy ? <><span className="spin" />平仓中</> : <><Ico d={IC.close} />平仓</>}</button>; })()}</td>
-              </tr>
-              {isOpen && <tr className="detail-row"><td colSpan="10"><PositionDetail d={details[pid]} /></td></tr>}
-              </React.Fragment>; })}
-          </tbody>
-        </table>
-      </div>
-      {openRows.length > OPER && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
-          <button className="btn" disabled={opg <= 0} onClick={() => setOpage(opg - 1)}>上一页</button>
-          <span className="muted mono">第 {opg + 1} / {opages} 页 · 共 {openRows.length} 笔</span>
-          <button className="btn" disabled={opg >= opages - 1} onClick={() => setOpage(opg + 1)}>下一页</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* ----------------------------------------------------------------- history (closed positions + stats) */
 const CLOSE_TYPE = { mirror: { label: "镜像", tint: "tint-blue" }, stop: { label: "止损", tint: "tint-amber" }, liq: { label: "爆仓", tint: "tint-red" } };
-const ACT_TINT = { 开仓: "tint-green", 加仓: "tint-blue", 减仓: "tint-amber", 平仓: "tint-gray" };
-function PositionDetail({ d }) {
-  if (!d) return <div className="muted" style={{ padding: "14px 16px" }}>加载中…</div>;
-  const live = d.status === "open";
-  const pnl = live ? d.unrealizedPnl : d.realizedPnl;
-  return (
-    <div className="pos-detail">
-      <div className="pos-detail-sum">
-        <span>目标加仓 <b>{d.masterAdds}</b> 次 · 我们跟 <b>{d.ourAdds}</b> 次</span>
-        <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b></span>
-        <span>我方成本均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>
-        <span>我方投入保证金 <b>{fUsd(d.ourMargin)}</b></span>
-        <span>{live ? "浮动" : "已实现"}盈亏 <b className={cls(pnl)}>{fSign(pnl, 1)}</b></span>
-      </div>
-      <div className="muted" style={{ fontSize: 11, margin: "2px 0 5px" }}>我们的成交记录:</div>
-      <table className="fills-tbl">
-        <thead><tr><th>时间</th><th>动作</th><th className="num">价格</th><th className="num">本金</th><th className="num">数量</th><th className="num">盈亏</th></tr></thead>
-        <tbody>
-          {d.fills.length === 0 && <tr><td colSpan="6" className="muted" style={{ padding: "6px 8px" }}>暂无成交</td></tr>}
-          {d.fills.map((f, i) => (
-            <tr key={i}>
-              <td className="mono muted">{fTime(f.atSec)}</td>
-              <td><span className={"tint " + (ACT_TINT[f.actionLabel] || "tint-gray")}>{f.actionLabel}</span>
-                {f.fillCount > 1 && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }} title="该订单分多笔成交">×{f.fillCount}</span>}</td>
-              <td className="num">{fPrice(f.px)}</td>
-              <td className="num">{fUsd(f.margin)}</td>
-              <td className="num muted">{fNum(f.qty, 2)}</td>
-              <td className={"num " + (f.pnl != null ? cls(f.pnl) : "")}>{f.pnl != null ? fSign(f.pnl, 1) : "—"}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
 
 function History() {
   const [data, setData] = useState(null);

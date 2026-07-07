@@ -96,6 +96,17 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("--bundle", build)
         self.assertIn("--format=iife", build)
 
+    def test_positions_page_is_split_from_dashboard_shell(self):
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        positions = ROOT / "web" / "components" / "Positions.jsx"
+
+        self.assertTrue(positions.exists(), "Positions page should live in web/components/Positions.jsx")
+        body = positions.read_text(encoding="utf-8") if positions.exists() else ""
+        self.assertIn('from "../lib/api.js"', body)
+        self.assertIn("export function Positions(", body)
+        self.assertNotIn("function Positions(", jsx)
+        self.assertIn('from "./components/Positions.jsx"', jsx)
+
 
 if __name__ == "__main__":
     unittest.main()
