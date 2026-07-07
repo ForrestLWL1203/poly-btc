@@ -582,6 +582,64 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertIn("portfolio_topn", cmd)
             self.assertIn('"count": 2', cmd)
 
+    def test_post_scan_pipeline_sets_follow_line_before_auto_tune(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.90),
+                    _profile_row("0xbbb", "active", 0.80),
+                    _profile_row("0xccc", "active", 0.70),
+                ],
+            )
+            db.commit()
+            seen = {}
+
+            def fake_tune(db_arg, source, stamp):
+                follow = params.load_follow(db_arg)
+                seen["source"] = source
+                seen["stamp"] = stamp
+                seen["line"] = follow["MIN_FOLLOW_SCORE"]
+                seen["addrs"] = scanner.auto_tune._load_followed_wallets(db_arg, follow)
+                return {
+                    "status": "ok",
+                    "applied": True,
+                    "applied_sizing": True,
+                    "applied_add": True,
+                    "followed_n": len(seen["addrs"]),
+                    "selected_mult": 1.0,
+                    "margins": {"STABLE_MARGIN_PCT": 0.04, "MID_MARGIN_PCT": 0.03, "HIGH_MARGIN_PCT": 0.03},
+                    "lev_caps": {"STABLE_LEV_CAP": 25, "MID_LEV_CAP": 10, "HIGH_LEV_CAP": 4},
+                    "deploy_full_pct": 0.40,
+                    "params": {},
+                    "add_params": {"ADD_GAP_K": 0.06, "ADD_GAP_SHRINK_G": 1.1, "ADD_MAX_HARD": 6},
+                    "candidates": [{"mult": 1.0}],
+                    "add_candidates": [{"gap_k": 0.06}],
+                }
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok",
+                "reason": "portfolio_topn",
+                "line": 0.799999999,
+                "count": 2,
+            }), patch.object(scanner.auto_tune, "maybe_tune_margins", side_effect=fake_tune):
+                n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
+
+            self.assertEqual(n, 3)
+            self.assertAlmostEqual(seen["line"], 0.799999999)
+            self.assertEqual(seen["addrs"], ["0xaaa", "0xbbb"])
+            self.assertEqual(seen["source"], "scan")
+            stages = [r[0] for r in db.execute(
+                "SELECT stage FROM pipeline_audit WHERE stamp=? ORDER BY id",
+                ("2026-07-06T00:00:00Z",),
+            ).fetchall()]
+            self.assertIn("follow_line", stages)
+            self.assertIn("watchlist", stages)
+            self.assertIn("auto_tune", stages)
+
 
 if __name__ == "__main__":
     unittest.main()

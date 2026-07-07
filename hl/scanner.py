@@ -521,6 +521,16 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
     )
 
 
+def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before_auto_tune=None) -> int:
+    """Rebuild watchlist, choose the follow line, then tune sizing/add on the final followed set."""
+    n_active = refresh_watchlist(db, stamp, source=source)
+    if before_auto_tune:
+        before_auto_tune()
+        db.commit()
+    _maybe_auto_tune_margins(db, source, stamp)
+    return n_active
+
+
 def _active_profile_addrs(db):
     return [r[0] for r in db.execute(
         "SELECT addr FROM profile WHERE status='active' ORDER BY score DESC, addr").fetchall()]
@@ -662,10 +672,15 @@ def regate(db, p) -> int:
         )
         n_active += 1 if ok else 0
     db.commit()
-    n = refresh_watchlist(db, stamp, source="regate")
-    pipeline_audit.record_profile_snapshot(db, stamp, "regate")
-    db.commit()
-    _maybe_auto_tune_margins(db, "regate", stamp)
+    def _record_regate_profile_audit():
+        pipeline_audit.record_profile_snapshot(db, stamp, "regate")
+
+    n = refresh_watchlist_and_auto_tune(
+        db,
+        stamp,
+        source="regate",
+        before_auto_tune=_record_regate_profile_audit,
+    )
     print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
     return n
 
@@ -777,11 +792,16 @@ def scan(db, p) -> None:
                                   "scanned": done, "total": len(workset)})    # dashboard isn't "心跳超时"
 
     _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
-    n_active = refresh_watchlist(db, stamp, source="scan")
-    pipeline_audit.record_profile_snapshot(db, stamp, "scan", workset)
-    db.commit()
-    _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
-    _maybe_auto_tune_margins(db, "scan", stamp)
+    def _scan_before_auto_tune():
+        pipeline_audit.record_profile_snapshot(db, stamp, "scan", workset)
+        _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
+
+    n_active = refresh_watchlist_and_auto_tune(
+        db,
+        stamp,
+        source="scan",
+        before_auto_tune=_scan_before_auto_tune,
+    )
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
     pruned = _prune_discovery_cache(db)
