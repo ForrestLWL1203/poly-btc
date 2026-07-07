@@ -84,6 +84,14 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("setInterval", dashboard)
         self.assertNotIn("/api/scan-status", dashboard)
 
+    def test_dashboard_build_bundles_source_modules(self):
+        build = (ROOT / "web" / "build.sh").read_text(encoding="utf-8")
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+
+        self.assertIn('from "./lib/format.js"', jsx)
+        self.assertIn("--bundle", build)
+        self.assertIn("--format=iife", build)
+
 
 if __name__ == "__main__":
     unittest.main()

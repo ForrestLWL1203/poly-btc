@@ -3,4 +3,4 @@
 cd "$(dirname "$0")"
 npx --yes esbuild app.jsx --loader:.jsx=jsx --jsx=transform \
   --jsx-factory=React.createElement --jsx-fragment=React.Fragment \
-  --minify --outfile=app.js --log-level=warning && echo "built app.js ($(wc -c < app.js) bytes)"
+  --bundle --format=iife --minify --outfile=app.js --log-level=warning && echo "built app.js ($(wc -c < app.js) bytes)"
