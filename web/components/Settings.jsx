@@ -7,7 +7,7 @@ import { ADD_KEYS } from "./settings/paramMeta.js";
 import { useSettingsParams } from "./settings/useSettingsParams.js";
 import { validateFollowParams } from "./settings/validation.js";
 
-const { useState } = React;
+const { useEffect, useState } = React;
 
 export function Settings({ startRescan, confirm }) {
   const {
@@ -16,6 +16,7 @@ export function Settings({ startRescan, confirm }) {
     dirty,
     scoreDist,
     loadParams,
+    loadScoreDist,
     setValue,
     clearDirty,
     discard,
@@ -30,6 +31,10 @@ export function Settings({ startRescan, confirm }) {
   const tabDirty = list.filter(p => dirty[p.key]);
   const followValidation = tab === "follow" ? validateFollowParams(vals) : { errors: [], badKeys: new Set() };
   const validationErrors = followValidation.errors;
+
+  useEffect(() => {
+    if (tab === "follow") loadScoreDist().catch(() => {});
+  }, [tab, loadScoreDist]);
 
   const apply = async () => {
     if (validationErrors.length) return;

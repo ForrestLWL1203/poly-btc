@@ -1,6 +1,6 @@
 import { api } from "../../lib/api.js";
 
-const { useState, useEffect } = React;
+const { useCallback, useState, useEffect } = React;
 
 const valuesFromParams = (params) => {
   const vals = {};
@@ -16,25 +16,23 @@ export function useSettingsParams() {
   const [dirty, setDirty] = useState({});
   const [scoreDist, setScoreDist] = useState(null);
 
-  const loadParams = async () => {
-    try {
-      const next = await api.get("/api/params?includeScoreDist=1");
-      setParams(next);
-      setVals(valuesFromParams(next));
-      if (next.scoreDist) setScoreDist(next.scoreDist);
-      return next;
-    } catch (_e) {
-      const next = await api.get("/api/params");
-      setParams(next);
-      setVals(valuesFromParams(next));
-      api.get("/api/score-dist").then(setScoreDist).catch(() => {});
-      return next;
-    }
-  };
+  const loadParams = useCallback(async () => {
+    const next = await api.get("/api/params");
+    setParams(next);
+    setVals(valuesFromParams(next));
+    return next;
+  }, []);
+
+  const loadScoreDist = useCallback(async () => {
+    if (scoreDist) return scoreDist;
+    const next = await api.get("/api/score-dist");
+    setScoreDist(next);
+    return next;
+  }, [scoreDist]);
 
   useEffect(() => {
     loadParams().catch(() => {});
-  }, []);
+  }, [loadParams]);
 
   const setValue = (key, val) => {
     setVals(v => ({ ...v, [key]: val }));
@@ -59,6 +57,7 @@ export function useSettingsParams() {
     dirty,
     scoreDist,
     loadParams,
+    loadScoreDist,
     setValue,
     clearDirty,
     discard,
