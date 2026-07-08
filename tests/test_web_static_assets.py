@@ -132,17 +132,30 @@ class WebStaticAssetsTests(unittest.TestCase):
 
     def test_settings_internals_are_split(self):
         settings = (ROOT / "web" / "components" / "Settings.jsx").read_text(encoding="utf-8")
-        parts = {
-            "settings/paramMeta.js": "export const PARAM_META",
+        top_level_parts = {
+            "settings/useSettingsParams.js": "export function useSettingsParams(",
+            "settings/validation.js": "export function validateFollowParams(",
+            "settings/AddSettingsPanel.jsx": "export function AddSettingsPanel(",
+            "settings/FollowSettingsPanel.jsx": "export function FollowSettingsPanel(",
+            "settings/ScannerSettingsPanel.jsx": "export function ScannerSettingsPanel(",
             "settings/SizingPreview.jsx": "export function SizingPreview(",
+        }
+        internal_parts = {
+            "settings/paramMeta.js": "export const PARAM_META",
+            "settings/ParamRow.jsx": "export function ParamRow(",
             "settings/EditableValue.jsx": "export function EditableValue(",
             "settings/CoinBlacklistEditor.jsx": "export function CoinBlacklistEditor(",
         }
 
-        for rel, marker in parts.items():
+        for rel, marker in {**top_level_parts, **internal_parts}.items():
             body = (ROOT / "web" / "components" / rel).read_text(encoding="utf-8")
             self.assertIn(marker, body)
+
+        for rel in top_level_parts:
             self.assertIn(f'from "./{rel}"', settings)
+
+        self.assertIn('from "./EditableValue.jsx"', (ROOT / "web" / "components" / "settings/ParamRow.jsx").read_text(encoding="utf-8"))
+        self.assertIn('from "./CoinBlacklistEditor.jsx"', (ROOT / "web" / "components" / "settings/FollowSettingsPanel.jsx").read_text(encoding="utf-8"))
 
         self.assertNotIn("const PARAM_META = {", settings)
 
