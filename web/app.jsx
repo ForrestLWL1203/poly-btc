@@ -19,7 +19,7 @@ import {
   short,
 } from "./lib/format.js";
 import { IC, Ico } from "./lib/icons.jsx";
-import { useDashboardRefresh, usePolling } from "./lib/refresh.js";
+import { useApiResource, useDashboardRefresh } from "./lib/refresh.js";
 
 /* 跟单监控台 — precompiled React dashboard. Talks to the live dashboard API. */
 const { useState, useEffect, useRef, useCallback } = React;
@@ -29,9 +29,8 @@ const DASH_PW = "mock123";
 
 /* ----------------------------------------------------------------- shell */
 function ShadowCompare() {
-  const [d, setD] = useState(null);
-  const loadShadow = useCallback(() => { api.get("/api/shadow").then(setD).catch(() => {}); }, []);
-  usePolling(loadShadow, 10000);
+  const loadShadow = useCallback(() => api.get("/api/shadow"), []);
+  const { data: d } = useApiResource(loadShadow, { intervalMs: 10000 });
   if (!d) return <div className="content"><div className="loading">加载中…</div></div>;
   const roi = b => (b.equity / 10000 - 1) * 100;
   const Acct = ({ b, name, tint }) => (

@@ -13,7 +13,7 @@ import {
   short,
 } from "../lib/format.js";
 import { BanIcon, IC, Ico } from "../lib/icons.jsx";
-import { usePolling } from "../lib/refresh.js";
+import { useApiResource } from "../lib/refresh.js";
 
 const { useState, useEffect, useCallback } = React;
 
@@ -55,7 +55,6 @@ export function PositionDetail({ d }) {
 }
 
 export function Positions({ confirm, toast, streamOpen }) {
-  const [polledOpen, setPolledOpen] = useState(null);
   const [closing, setClosing] = useState({});
   const [blacklist, setBlacklist] = useState([]);
   const [blacklisting, setBlacklisting] = useState({});
@@ -70,9 +69,10 @@ export function Positions({ confirm, toast, streamOpen }) {
     setExpandedId(pid);
     if (!details[pid]) api.get(`/api/positions/${pid}`).then(d => setDetails(m => ({ ...m, [pid]: d }))).catch(() => {});
   };
+  const openLoader = useCallback(() => api.get("/api/positions?status=open"), []);
+  const { data: polledOpen, reload: loadOpen } = useApiResource(openLoader, { intervalMs: 6000, enabled: !streamOpen });
   const open = streamOpen || polledOpen;
   const cyclePnlSort = () => { setPnlSort(d => d === null ? "asc" : d === "asc" ? "desc" : null); setOpage(0); };
-  const loadOpen = useCallback(() => { api.get("/api/positions?status=open").then(setPolledOpen).catch(() => {}); }, []);
   const load = loadOpen;
   const loadBlacklist = useCallback(() => {
     api.get("/api/params").then(p => {
@@ -80,7 +80,6 @@ export function Positions({ confirm, toast, streamOpen }) {
       setBlacklist(parseCoinList(row ? row.value : ""));
     }).catch(() => {});
   }, []);
-  usePolling(loadOpen, 6000, !streamOpen);
   useEffect(() => { loadBlacklist(); }, [loadBlacklist]);
 
   const doClose = (p) => confirm({

@@ -1,7 +1,7 @@
 import { api } from "../lib/api.js";
 import { agoText, cls, fNum, fSign, fTime, short } from "../lib/format.js";
 import { IC, Ico } from "../lib/icons.jsx";
-import { usePolling } from "../lib/refresh.js";
+import { useApiResource } from "../lib/refresh.js";
 import { PositionDetail } from "./Positions.jsx";
 
 const { useState, useEffect, useCallback } = React;
@@ -9,14 +9,13 @@ const { useState, useEffect, useCallback } = React;
 const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平", liquidated: "爆仓" };
 
 export function Wallets({ confirm, toast }) {
-  const [data, setData] = useState(null);
   const [drawer, setDrawer] = useState(null);
   const [auditOpen, setAuditOpen] = useState({});
   const [audits, setAudits] = useState({});
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
-  const load = useCallback(() => { api.get("/api/wallets?tab=" + tab + "&size=500").then(setData).catch(() => {}); }, [tab]);
-  usePolling(load, 12000);
+  const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
+  const { data, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   useEffect(() => { setAuditOpen({}); setAudits({}); }, [tab]);
   const dropped = tab === "dropped";
   const allRows = (data && data.wallets) || [];
@@ -90,7 +89,7 @@ export function Wallets({ confirm, toast }) {
   const toggle = (w) => {
     const next = !w.enabled;
     const act = () => api.cmd("wallet_toggle", { address: w.address, enabled: next })
-      .then(() => { toast((next ? "启用" : "停用") + " " + short(w.address)); setTimeout(load, 1800); });
+      .then(() => { toast((next ? "启用" : "停用") + " " + short(w.address)); setTimeout(reload, 1800); });
     if (next) act(); else confirm({ title: "停用钱包", danger: true, ok: "停用",
       body: `停用后不再对 ${short(w.address)} 开新仓,存量持仓继续跟到平仓。`, onConfirm: act });
   };
@@ -184,12 +183,12 @@ export function Wallets({ confirm, toast }) {
 }
 
 function WalletDrawer({ address, onClose }) {
-  const [d, setD] = useState(null);
   const [recPage, setRecPage] = useState(0);
   const [exp, setExp] = useState({});
   const [details, setDetails] = useState({});
   useEffect(() => { setRecPage(0); setExp({}); setDetails({}); }, [address]);
-  useEffect(() => { api.get(`/api/wallets/${address}?recPage=${recPage}&recSize=20`).then(setD).catch(() => {}); }, [address, recPage]);
+  const loadDrawer = useCallback(() => api.get(`/api/wallets/${address}?recPage=${recPage}&recSize=20`), [address, recPage]);
+  const { data: d } = useApiResource(loadDrawer, { clearOnLoadChange: true });
   const toggleRecord = (id) => {
     const next = !exp[id];
     setExp(e => ({ ...e, [id]: next }));

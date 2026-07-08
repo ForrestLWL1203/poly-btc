@@ -64,7 +64,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertRegex(body, r'/app\.js\?v=\d+')
         self.assertRegex(body, r'/app\.css\?v=\d+')
 
-    def test_dashboard_repeating_refreshes_use_shared_polling_hook(self):
+    def test_dashboard_repeating_refreshes_use_shared_resource_hook(self):
         jsx = "\n".join(
             p.read_text(encoding="utf-8")
             for p in (ROOT / "web").glob("**/*.jsx")
@@ -72,8 +72,11 @@ class WebStaticAssetsTests(unittest.TestCase):
         refresh = (ROOT / "web" / "lib" / "refresh.js").read_text(encoding="utf-8")
 
         self.assertIn("function usePolling(", refresh)
+        self.assertIn("function useApiResource(", refresh)
+        self.assertIn("requestId", refresh)
         self.assertIn("clearInterval", refresh)
-        self.assertGreaterEqual((jsx + refresh).count("usePolling("), 6)
+        self.assertGreaterEqual((jsx + refresh).count("useApiResource("), 7)
+        self.assertNotIn('import { usePolling }', jsx)
 
     def test_dashboard_refresh_layer_owns_stream_and_transition_polling(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
@@ -84,6 +87,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("function useDashboardStream(", refresh)
         self.assertIn("function useManualScanProgress(", refresh)
         self.assertIn("function useObserverTransition(", refresh)
+        self.assertIn("useApiResource(loadOverview", refresh)
         self.assertIn("useDashboardRefresh(api)", dashboard)
         self.assertNotIn("new EventSource", dashboard)
         self.assertNotIn("setInterval", dashboard)

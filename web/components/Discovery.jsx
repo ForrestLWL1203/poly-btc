@@ -1,9 +1,9 @@
 import { api } from "../lib/api.js";
 import { SCANNER_LABEL, agoText, fNum, fSign, scannerColor, short } from "../lib/format.js";
 import { IC, Ico } from "../lib/icons.jsx";
-import { usePolling } from "../lib/refresh.js";
+import { useApiResource } from "../lib/refresh.js";
 
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 
 const STAGES_FE = [["scan_leaderboard", "扫描排行榜"], ["fetch_history", "拉取历史 & 算指标"],
   ["score_filter", "评分 · 网格/扛单过滤"], ["rebuild_watchlist", "重建被跟名单"],
@@ -113,17 +113,24 @@ function PipelineSummary({ p }) {
 }
 
 export function Discovery({ scanning, startRescan, confirm }) {
-  const [d, setD] = useState(null);
-  const [runs, setRuns] = useState(null);
-  const [pipeline, setPipeline] = useState(null);
   const [fullScan, setFullScan] = useState(false);
-  const load = useCallback(() => {
-    api.get("/api/discovery").then(setD).catch(() => {});
-    api.get("/api/scan-runs?limit=8").then(r => setRuns(r.runs)).catch(() => {});
-    api.get("/api/pipeline-summary").then(setPipeline).catch(() => {});
+  const load = useCallback(async () => {
+    const [discovery, scanRuns, pipeline] = await Promise.all([
+      api.get("/api/discovery"),
+      api.get("/api/scan-runs?limit=8"),
+      api.get("/api/pipeline-summary"),
+    ]);
+    return { discovery, runs: scanRuns.runs, pipeline };
   }, []);
-  usePolling(load, 4000);
-  useEffect(() => { if (!scanning) load(); }, [scanning, load]);
+  const { data, reload } = useApiResource(load, { intervalMs: 4000 });
+  const wasScanning = useRef(scanning);
+  useEffect(() => {
+    if (wasScanning.current && !scanning) reload();
+    wasScanning.current = scanning;
+  }, [scanning, reload]);
+  const d = data && data.discovery;
+  const runs = data && data.runs;
+  const pipeline = data && data.pipeline;
 
   const doRescan = () => confirm({
     title: fullScan ? "触发全量采集" : "触发增量采集",

@@ -1,8 +1,8 @@
 import { api } from "../lib/api.js";
 import { cls, fNum, fPct, fSign, fUsd, short } from "../lib/format.js";
-import { usePolling } from "../lib/refresh.js";
+import { useApiResource } from "../lib/refresh.js";
 
-const { useState, useEffect, useCallback } = React;
+const { useState, useCallback } = React;
 
 function EquityChart({ points }) {
   const W = 920, H = 230, PAD = 8;
@@ -32,11 +32,10 @@ function EquityChart({ points }) {
 
 export function Overview({ ov }) {
   const [range, setRange] = useState("7d");
-  const [eq, setEq] = useState(null);
-  const [ins, setIns] = useState(null);
-  useEffect(() => { api.get("/api/equity?range=" + range).then(setEq).catch(() => {}); }, [range]);
-  const loadInsights = useCallback(() => { api.get("/api/insights").then(setIns).catch(() => {}); }, []);
-  usePolling(loadInsights, 15000);
+  const loadEquity = useCallback(() => api.get("/api/equity?range=" + range), [range]);
+  const loadInsights = useCallback(() => api.get("/api/insights"), []);
+  const { data: eq } = useApiResource(loadEquity);
+  const { data: ins } = useApiResource(loadInsights, { intervalMs: 15000 });
   if (!ov) return <div className="loading">加载中…</div>;
   const r = ov.risk, f = ov.fees;
   return (

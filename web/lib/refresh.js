@@ -1,4 +1,4 @@
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useCallback, useRef } = React;
 
 export function usePolling(load, intervalMs, enabled = true) {
   useEffect(() => {
@@ -9,6 +9,40 @@ export function usePolling(load, intervalMs, enabled = true) {
     const t = setInterval(tick, intervalMs);
     return () => { cancelled = true; clearInterval(t); };
   }, [load, intervalMs, enabled]);
+}
+
+export function useApiResource(loadFn, { initial = null, intervalMs = null, enabled = true, clearOnLoadChange = false } = {}) {
+  const [data, setData] = useState(initial);
+  const [loading, setLoading] = useState(false);
+  const requestId = useRef(0);
+
+  const reload = useCallback(async () => {
+    if (!enabled) return null;
+    const id = ++requestId.current;
+    setLoading(true);
+    try {
+      const next = await loadFn();
+      if (id === requestId.current) setData(next);
+      return next;
+    } catch (_e) {
+      return null;
+    } finally {
+      if (id === requestId.current) setLoading(false);
+    }
+  }, [loadFn, enabled]);
+
+  useEffect(() => {
+    if (clearOnLoadChange) setData(initial);
+    return () => { requestId.current += 1; };
+  }, [loadFn, enabled, clearOnLoadChange]);
+  useEffect(() => {
+    if (!enabled || intervalMs) return;
+    reload();
+  }, [reload, enabled, intervalMs]);
+
+  usePolling(reload, intervalMs || 0, enabled && !!intervalMs);
+
+  return { data, setData, loading, reload };
 }
 
 function useDashboardStream(token) {
@@ -30,10 +64,8 @@ function useDashboardStream(token) {
 }
 
 function useOverviewRefresh(api, live, streamOk) {
-  const [polledOverview, setPolledOverview] = useState(null);
-  const loadOverview = useCallback(() => { api.get("/api/overview").then(setPolledOverview).catch(() => {}); }, [api]);
-
-  usePolling(loadOverview, 7000, !streamOk);
+  const loadOverview = useCallback(() => api.get("/api/overview"), [api]);
+  const { data: polledOverview, setData: setPolledOverview } = useApiResource(loadOverview, { intervalMs: 7000, enabled: !streamOk });
 
   return {
     overview: (streamOk && live && live.overview) || polledOverview,

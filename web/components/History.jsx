@@ -1,6 +1,6 @@
 import { api } from "../lib/api.js";
 import { cls, fDur, fNum, fPrice, fSign, fTime, fUsd, short } from "../lib/format.js";
-import { usePolling } from "../lib/refresh.js";
+import { useApiResource } from "../lib/refresh.js";
 import { PositionDetail } from "./Positions.jsx";
 
 const { useState, useCallback } = React;
@@ -12,7 +12,6 @@ const CLOSE_TYPE = {
 };
 
 export function History() {
-  const [data, setData] = useState(null);
   const [filter, setFilter] = useState("all");
   const [ctype, setCtype] = useState("all");
   const [page, setPage] = useState(0);
@@ -24,8 +23,8 @@ export function History() {
     setExpandedId(pid);
     if (!details[pid]) api.get(`/api/positions/${pid}`).then(d => setDetails(m => ({ ...m, [pid]: d }))).catch(() => {});
   };
-  const loadClosed = useCallback(() => { api.get("/api/positions?status=closed").then(setData).catch(() => {}); }, []);
-  usePolling(loadClosed, 15000);
+  const loadClosed = useCallback(() => api.get("/api/positions?status=closed"), []);
+  const { data } = useApiResource(loadClosed, { intervalMs: 15000 });
   const PER = 25;
   const st = data && data.stats;
   const all = (data && data.positions) || [];
