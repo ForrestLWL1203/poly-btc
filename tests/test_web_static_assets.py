@@ -130,6 +130,22 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function Settings(", jsx)
         self.assertIn('from "./components/Settings.jsx"', jsx)
 
+    def test_settings_internals_are_split(self):
+        settings = (ROOT / "web" / "components" / "Settings.jsx").read_text(encoding="utf-8")
+        parts = {
+            "settings/paramMeta.js": "export const PARAM_META",
+            "settings/SizingPreview.jsx": "export function SizingPreview(",
+            "settings/EditableValue.jsx": "export function EditableValue(",
+            "settings/CoinBlacklistEditor.jsx": "export function CoinBlacklistEditor(",
+        }
+
+        for rel, marker in parts.items():
+            body = (ROOT / "web" / "components" / rel).read_text(encoding="utf-8")
+            self.assertIn(marker, body)
+            self.assertIn(f'from "./{rel}"', settings)
+
+        self.assertNotIn("const PARAM_META = {", settings)
+
 
 if __name__ == "__main__":
     unittest.main()

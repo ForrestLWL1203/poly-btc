@@ -206,7 +206,7 @@ function Dashboard({ onLogout }) {
         {page === "shadow" && <ShadowCompare />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} toast={toast} />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
-        {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} toast={toast} />}
+        {page === "settings" && <Settings startRescan={startRescan} confirm={setConfirmCfg} />}
       </main>
 
       <nav className="mobile-nav" aria-label="移动端导航" ref={mobileNavRef}>
