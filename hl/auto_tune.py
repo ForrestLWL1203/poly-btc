@@ -132,6 +132,10 @@ def _capacity_skips(result: dict) -> int:
 def _min_closed_for_days(days: int) -> int:
     base_days = int(getattr(config, "COPY_BT_DAYS", 30) or 30)
     base_min = int(getattr(config, "COPY_BT_MIN_CLOSED", 0) or 0)
+    if int(days) <= 7 and hasattr(config, "COPY_BT_MIN_CLOSED_7D"):
+        return int(getattr(config, "COPY_BT_MIN_CLOSED_7D") or base_min)
+    if int(days) <= 14 and hasattr(config, "COPY_BT_MIN_CLOSED_14D"):
+        return int(getattr(config, "COPY_BT_MIN_CLOSED_14D") or base_min)
     if days >= base_days or base_days <= 0:
         return base_min
     return max(1, int(math.ceil(base_min * days / base_days)))
@@ -348,9 +352,38 @@ def _follow_line_candidate_valid(candidate: dict) -> bool:
     if _capacity_fit(primary) < min_open_fit:
         return False
     for days, result in windows.items():
-        if _enough_sample(result, int(days)) and _result_pnl(result) <= 0:
+        if not _enough_sample(result, int(days)):
+            return False
+        if _result_pnl(result) <= 0:
             return False
     return True
+
+
+def _recent_pnl_cliff(prev: dict, cur: dict) -> bool:
+    prev_windows = prev.get("windows") or {}
+    cur_windows = cur.get("windows") or {}
+    min_abs = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_ABS", 250.0))
+    min_rel = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_REL", 0.25))
+    for days in (14, 7):
+        prev_pnl = _result_pnl(prev_windows.get(days, {}))
+        cur_pnl = _result_pnl(cur_windows.get(days, {}))
+        drop = prev_pnl - cur_pnl
+        if drop <= 0:
+            continue
+        hurdle = max(min_abs, abs(prev_pnl) * min_rel)
+        if drop >= hurdle:
+            return True
+    return False
+
+
+def _cap_before_recent_cliff(candidates: list[dict]) -> tuple[list[dict], dict | None]:
+    ordered = sorted(candidates, key=lambda c: int(c.get("n") or 0))
+    kept = []
+    for c in ordered:
+        if kept and _recent_pnl_cliff(kept[-1], c):
+            return kept, c
+        kept.append(c)
+    return kept, None
 
 
 def _follow_line_candidate_key(candidate: dict, target_n: int) -> tuple:
@@ -435,14 +468,34 @@ def choose_follow_line_by_portfolio(db, ranked: list[dict], follow: dict | None 
             "reason": "no_valid_portfolio_prefix",
             "candidates": [_compact_follow_line_candidate(c) for c in candidates],
         }
+    uncapped_valid = valid
+    uncapped_reference = next((c for c in uncapped_valid if int(c["n"]) == target_n), None)
+    if uncapped_reference is None:
+        uncapped_reference = min(uncapped_valid, key=lambda c: abs(int(c["n"]) - target_n))
+    uncapped_best = max(uncapped_valid, key=lambda c: _follow_line_candidate_key(c, target_n))
 
-    reference = next((c for c in valid if int(c["n"]) == target_n), None)
-    if reference is None:
-        reference = min(valid, key=lambda c: abs(int(c["n"]) - target_n))
-    best = max(valid, key=lambda c: _follow_line_candidate_key(c, target_n))
-    use_best = best is not reference and _meaningfully_better(best, reference)
-    selected = best if use_best else reference
-    reason = "portfolio_topn" if use_best else "portfolio_flat_capacity"
+    valid, cliff_candidate = _cap_before_recent_cliff(uncapped_valid)
+    if not valid:
+        return {
+            "status": "fallback",
+            "reason": "no_valid_portfolio_prefix",
+            "candidates": [_compact_follow_line_candidate(c) for c in candidates],
+        }
+    if cliff_candidate is not None and uncapped_best in valid and _meaningfully_better(uncapped_best, uncapped_reference):
+        selected = uncapped_best
+        reference = uncapped_reference
+        best = uncapped_best
+        reason = "portfolio_topn"
+    else:
+        reference = next((c for c in valid if int(c["n"]) == target_n), None)
+        if reference is None:
+            reference = min(valid, key=lambda c: abs(int(c["n"]) - target_n))
+        best = max(valid, key=lambda c: _follow_line_candidate_key(c, target_n))
+        use_best = best is not reference and _meaningfully_better(best, reference)
+        selected = best if use_best else reference
+        reason = "portfolio_topn" if use_best else "portfolio_flat_capacity"
+        if cliff_candidate is not None and not use_best and int(selected["n"]) == int(valid[-1]["n"]):
+            reason = "portfolio_recent_cliff"
     result = {
         "status": "ok",
         "reason": reason,
@@ -454,6 +507,7 @@ def choose_follow_line_by_portfolio(db, ranked: list[dict], follow: dict | None 
         "selected": _compact_follow_line_candidate(selected),
         "reference": _compact_follow_line_candidate(reference),
         "best": _compact_follow_line_candidate(best),
+        "recent_cliff_blocked": _compact_follow_line_candidate(cliff_candidate) if cliff_candidate else None,
         "candidates": [_compact_follow_line_candidate(c) for c in candidates],
     }
     _state_set(db, "follow_line_last_choice", {**result, "stamp": stamp or now_iso()})
