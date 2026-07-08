@@ -248,6 +248,22 @@ class PipelineAuditTests(unittest.TestCase):
     def test_pipeline_summary_endpoint_compacts_latest_scan_decisions(self):
         db = self._db()
         self._insert_profiles(db)
+        pipeline_audit.record_workset_summary(db, "2026-07-07T00:00:00Z", "scan", {
+            "mode": "INCREMENTAL daily-tier",
+            "counts": {
+                "candidate": 12,
+                "profiled_before": 9,
+                "active_total": 3,
+                "active_candidate": 2,
+                "new_candidate": 4,
+                "top_recheck": 5,
+                "off_list_active": 1,
+                "workset": 12,
+                "deferred_tail": 0,
+            },
+            "full_scan": False,
+            "limit": 100,
+        })
         pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa", "0xbbb"])
         pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
             "status": "ok",
@@ -268,6 +284,13 @@ class PipelineAuditTests(unittest.TestCase):
             "candidates": [{"score": 1}],
             "add_candidates": [],
         })
+        pipeline_audit.record_prune_summary(db, "2026-07-07T00:00:00Z", "scan", {
+            "stale_profiles": 2,
+            "profiles": 2,
+            "fills": 7,
+            "episodes": 3,
+            "leaderboard": 5,
+        })
         db.commit()
 
         res = api_discovery.ep_pipeline_summary(db, {})
@@ -284,6 +307,12 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertTrue(res["autoTune"]["applied"])
         self.assertTrue(res["autoTune"]["appliedSizing"])
         self.assertFalse(res["autoTune"]["appliedAdd"])
+        self.assertEqual(res["workset"]["profiled"], 12)
+        self.assertEqual(res["workset"]["new"], 4)
+        self.assertEqual(res["workset"]["topRecheck"], 5)
+        self.assertEqual(res["workset"]["offListActive"], 1)
+        self.assertEqual(res["prune"]["profiles"], 2)
+        self.assertEqual(res["prune"]["fills"], 7)
 
     def test_pipeline_summary_prefers_latest_complete_decision_over_profile_only_backfill(self):
         db = self._db()

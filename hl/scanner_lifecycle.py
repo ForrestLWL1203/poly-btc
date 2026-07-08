@@ -64,8 +64,8 @@ def prune_discovery_cache(db):
     }
 
 
-def profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily_recheck_top=None):
-    """Choose wallets to profile this scan.
+def profile_workset_breakdown(candidates, active_addrs, profiled, full_scan, limit, daily_recheck_top=None):
+    """Choose wallets to profile this scan and return an auditable breakdown.
 
     Full scans sweep every current candidate plus off-list actives. Daily incremental scans still keep the
     cheap active/new path, but also re-check the current leaderboard's top old candidates so recovered wallets
@@ -81,7 +81,27 @@ def profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily_
     off_active = [a for a in active_addrs if a not in candidate_set]
     all_eligible = dedupe_preserve(candidates + off_active)
     if full_scan:
-        return all_eligible[:limit], "FULL (30d re-fetch, all candidates)"
+        workset = all_eligible[:limit]
+        workset_set = set(workset)
+        counts = {
+            "candidate": len(candidates),
+            "profiled_before": len(profiled_set),
+            "active_total": len(active_addrs),
+            "active_candidate": len([a for a in candidates if a in active_set and a in workset_set]),
+            "new_candidate": len([a for a in candidates if a not in profiled_set and a in workset_set]),
+            "top_recheck": 0,
+            "off_list_active": len([a for a in off_active if a in workset_set]),
+            "workset": len(workset),
+            "deferred_tail": max(0, len(all_eligible) - len(workset)),
+        }
+        return {
+            "workset": workset,
+            "mode": "FULL (30d re-fetch, all candidates)",
+            "counts": counts,
+            "full_scan": True,
+            "limit": limit,
+            "daily_recheck_top": 0,
+        }
 
     active_candidates = [a for a in candidates if a in active_set]
     new_candidates = [a for a in candidates if a not in profiled_set]
@@ -98,6 +118,7 @@ def profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily_
             top_recheck.append(addr)
             already.add(addr)
     workset = dedupe_preserve(active_new + top_recheck + off_active)[:limit]
+    workset_set = set(workset)
     covered = len(set(active_new) | set(top_recheck))
     deferred = max(0, len(candidates) - covered)
     mode = (
@@ -105,4 +126,35 @@ def profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily_
         f"+ {len(top_recheck)} top-recheck "
         f"of {len(candidates)} cand; {deferred} deferred-tail -> weekly full)"
     )
-    return workset, mode
+    counts = {
+        "candidate": len(candidates),
+        "profiled_before": len(profiled_set),
+        "active_total": len(active_addrs),
+        "active_candidate": len([a for a in active_candidates if a in workset_set]),
+        "new_candidate": len([a for a in new_candidates if a in workset_set]),
+        "top_recheck": len([a for a in top_recheck if a in workset_set]),
+        "off_list_active": len([a for a in off_active if a in workset_set]),
+        "workset": len(workset),
+        "deferred_tail": deferred,
+    }
+    return {
+        "workset": workset,
+        "mode": mode,
+        "counts": counts,
+        "full_scan": False,
+        "limit": limit,
+        "daily_recheck_top": daily_recheck_top,
+    }
+
+
+def profile_workset(candidates, active_addrs, profiled, full_scan, limit, daily_recheck_top=None):
+    """Choose wallets to profile this scan."""
+    breakdown = profile_workset_breakdown(
+        candidates,
+        active_addrs,
+        profiled,
+        full_scan,
+        limit,
+        daily_recheck_top=daily_recheck_top,
+    )
+    return breakdown["workset"], breakdown["mode"]

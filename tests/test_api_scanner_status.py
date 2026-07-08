@@ -75,6 +75,21 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertEqual(bins[15], 1)
         self.assertEqual(res["scoreHistogram"]["followLineBinIndex"], 8)
 
+    def test_scan_runs_exposes_profiled_count_not_legacy_probed_new_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.execute(
+                "INSERT INTO scan_runs "
+                "(started_at,finished_at,duration_s,candidates,probed_new,profiled,added,retired,kept,rejected,n_active) "
+                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8)"
+            )
+            db.commit()
+
+            res = api_discovery.ep_scan_runs(db, 1)
+
+        self.assertEqual(res["runs"][0]["profiled"], 42)
+        self.assertNotIn("probedNew", res["runs"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

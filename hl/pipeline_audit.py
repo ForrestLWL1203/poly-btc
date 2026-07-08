@@ -59,6 +59,43 @@ def _fetch_dicts(cur) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def record_workset_summary(db: sqlite3.Connection, stamp: str, source: str, breakdown: dict) -> None:
+    """Snapshot why this scan profiled this wallet set size."""
+    _delete_stage(db, stamp, source, "workset")
+    counts = dict(breakdown.get("counts") or {})
+    payload = {
+        "mode": breakdown.get("mode"),
+        "fullScan": bool(breakdown.get("full_scan")),
+        "limit": breakdown.get("limit"),
+        "dailyRecheckTop": breakdown.get("daily_recheck_top"),
+        "counts": counts,
+    }
+    _insert_event(
+        db,
+        stamp=stamp,
+        source=source,
+        stage="workset",
+        status="ok",
+        reason="profile_workset",
+        payload=payload,
+    )
+
+
+def record_prune_summary(db: sqlite3.Connection, stamp: str, source: str, counts: dict) -> None:
+    """Snapshot discovery cache pruning performed at scan end."""
+    _delete_stage(db, stamp, source, "prune")
+    payload = {k: int(v or 0) for k, v in (counts or {}).items()}
+    _insert_event(
+        db,
+        stamp=stamp,
+        source=source,
+        stage="prune",
+        status="ok",
+        reason="discovery_cache_prune",
+        payload=payload,
+    )
+
+
 def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                             addrs: Iterable[str] | None = None) -> None:
     """Snapshot profile gate results for scanned/regated wallets."""

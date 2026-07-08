@@ -21,7 +21,7 @@ from .scanner_copy_bt import (
     sector_copy_bt_results as _sector_copy_bt_results,
 )
 from .scanner_lifecycle import (
-    profile_workset as _profile_workset,
+    profile_workset_breakdown as _profile_workset_breakdown,
     prune_discovery_cache as _prune_discovery_cache,
 )
 from .util import f, now_iso
@@ -629,11 +629,11 @@ def ensure_watchlist_current(db, stamp=None) -> int:
     return refresh_watchlist(db, stamp or now_iso(), source="repair")
 
 
-def _record_run(db, started, t0, candidates, probed, added, retired, kept, rejected, n_active, full=0):
+def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rejected, n_active, full=0):
     db.execute(
-        "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,probed_new,added,"
-        "retired,kept,rejected,n_active,full) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (started, now_iso(), round(time.time() - t0, 1), candidates, probed, added, retired,
+        "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,profiled,probed_new,added,"
+        "retired,kept,rejected,n_active,full) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (started, now_iso(), round(time.time() - t0, 1), candidates, profiled, profiled, added, retired,
          kept, rejected, n_active, 1 if full else 0))
     db.commit()
 
@@ -795,7 +795,7 @@ def scan(db, p) -> None:
     # locks the page ONLY for manual scans; the auto scan runs SILENTLY in the background (it must be slow
     # since the observer owns the rate budget, so locking the UI for its full duration is unacceptable).
     manual = bool(rescan_ids)
-    for tbl, col in (("scan_progress", "manual"), ("scan_runs", "full")):
+    for tbl, col in (("scan_progress", "manual"), ("scan_runs", "full"), ("scan_runs", "profiled")):
         try:
             db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT 0"); db.commit()
         except Exception:  # noqa: BLE001 — column already exists
@@ -827,7 +827,10 @@ def scan(db, p) -> None:
     # FULL re-fetch when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
     p.full_scan = getattr(p, "full_scan", False) or (not config.INCREMENTAL_SCAN) or _due_for_full_resync(db)
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
-    workset, mode = _profile_workset(cand, active_addrs, profiled, p.full_scan, p.limit)
+    workset_info = _profile_workset_breakdown(cand, active_addrs, profiled, p.full_scan, p.limit)
+    pipeline_audit.record_workset_summary(db, stamp, "scan", workset_info)
+    db.commit()
+    workset, mode = workset_info["workset"], workset_info["mode"]
     cand_set = set(cand)
     off_active_n = len([a for a in active_addrs if a not in cand_set])
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
@@ -888,6 +891,8 @@ def scan(db, p) -> None:
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
     pruned = _prune_discovery_cache(db)
+    pipeline_audit.record_prune_summary(db, stamp, "scan", pruned)
+    db.commit()
     if any(pruned.values()):
         print(f"pruned discovery cache: {pruned}", flush=True)
     _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active,

@@ -260,6 +260,61 @@ th.sortable:hover .sort-ind { opacity: .85; }
   border-radius: 6px; background: rgba(255,255,255,.06); color: var(--t2); font-size: 11px; padding: 0 6px; }
 .row-off { opacity: .5; }
 
+/* wallet score detail */
+.score-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 58px; }
+.score-info-btn { width: 18px; height: 18px; border-radius: 50%; padding: 0; flex: 0 0 18px;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+  border: 1px solid rgba(139,228,184,.32); background: rgba(139,228,184,.08); color: var(--green-l);
+  font-family: var(--mono); font-size: 11px; font-weight: 800; line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.16); transition: transform .14s, background .14s, border-color .14s, color .14s; }
+.score-info-btn:hover { transform: translateY(-1px); background: rgba(139,228,184,.16); border-color: rgba(139,228,184,.52); color: #d8ffe9; }
+.score-info-btn:focus-visible { outline: 2px solid rgba(139,228,184,.55); outline-offset: 2px; }
+.score-detail-overlay { position: fixed; inset: 0; z-index: 45; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(2,3,5,.54); backdrop-filter: blur(10px) saturate(130%); -webkit-backdrop-filter: blur(10px) saturate(130%);
+  animation: fade .16s; }
+.score-detail-modal { position: relative; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 56px);
+  overflow: hidden auto; padding: 18px; border-radius: 18px;
+  background: linear-gradient(180deg, rgba(30,31,36,.76), rgba(16,17,21,.62));
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 24px 80px rgba(0,0,0,.58);
+  backdrop-filter: blur(28px) saturate(165%); -webkit-backdrop-filter: blur(28px) saturate(165%);
+  animation: score-pop .18s ease-out; }
+.score-detail-modal::before { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(120deg, rgba(255,255,255,.12), rgba(255,255,255,0) 34%, rgba(139,228,184,.08) 100%);
+  opacity: .55; }
+@keyframes score-pop { from { opacity: 0; transform: translateY(8px) scale(.985); } }
+.score-detail-head { position: relative; display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+.score-detail-kicker { color: var(--green-l); font-size: 10.5px; letter-spacing: .7px; text-transform: uppercase; font-weight: 700; }
+.score-detail-head h3 { margin: 4px 0 0; font-family: var(--mono); font-size: 18px; color: var(--t1); }
+.score-detail-close { width: 32px; height: 32px; border-radius: 10px; border: 1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.06); color: var(--t2); cursor: pointer; font-size: 20px; line-height: 1;
+  transition: background .14s, color .14s; }
+.score-detail-close:hover { background: rgba(255,255,255,.11); color: var(--t1); }
+.score-hero { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+.score-hero > div { min-width: 0; padding: 10px 9px; border-radius: 12px;
+  background: rgba(255,255,255,.055); border: 1px solid rgba(255,255,255,.08); }
+.score-hero span { display: block; color: var(--t3); font-size: 10.5px; margin-bottom: 5px; }
+.score-hero b { display: block; font-family: var(--mono); font-size: 18px; color: var(--t1); line-height: 1.1; }
+.score-hero > div:first-child { background: rgba(139,228,184,.10); border-color: rgba(139,228,184,.18); }
+.score-hero > div:first-child b { color: var(--green-l); }
+.score-section { position: relative; padding: 13px 0 0; margin-top: 13px; border-top: 1px solid rgba(255,255,255,.08); }
+.score-section-title { color: var(--t2); font-size: 11px; font-weight: 700; letter-spacing: .4px; margin-bottom: 9px; }
+.score-window-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.score-window { padding: 10px; border-radius: 12px; background: rgba(0,0,0,.22); border: 1px solid rgba(255,255,255,.08); }
+.score-window span, .score-window small { display: block; color: var(--t3); font-size: 10.5px; }
+.score-window b { display: block; margin: 4px 0 2px; font-family: var(--mono); font-size: 17px; }
+.score-sector-list { display: flex; flex-direction: column; gap: 8px; }
+.score-sector { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 11px;
+  border-radius: 12px; background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.075); }
+.score-sector.allow { border-color: rgba(139,228,184,.18); background: rgba(139,228,184,.07); }
+.score-sector.deny { border-color: rgba(255,125,125,.18); background: rgba(255,125,125,.055); }
+.score-sector b { display: block; color: var(--t1); font-size: 12.5px; margin-bottom: 3px; }
+.score-sector span { display: block; color: var(--t2); font-size: 11.5px; line-height: 1.35; }
+.score-sector small { flex: 0 0 auto; color: var(--t3); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.score-reasons { display: flex; flex-wrap: wrap; gap: 7px; }
+.score-reasons span { display: inline-flex; align-items: center; max-width: 100%; padding: 6px 9px; border-radius: 999px;
+  background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); color: var(--t2); font-size: 11.5px; line-height: 1.25; }
+
 /* sparkline */
 .spark { display: inline-block; vertical-align: middle; }
 
@@ -553,6 +608,12 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .fills-tbl { min-width: 620px; }
   .pos-detail { padding: 12px; }
   .pos-detail-sum { gap: 8px 14px; }
+  .score-detail-overlay { padding: 14px; align-items: flex-end; }
+  .score-detail-modal { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 14px 14px; padding: 16px; }
+  .score-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .score-window-grid { grid-template-columns: minmax(0, 1fr); }
+  .score-sector { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .score-sector small { white-space: normal; }
 
   .bar-row { gap: 8px; }
   .bar-row .bl { width: 72px; }

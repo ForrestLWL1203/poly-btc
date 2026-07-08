@@ -21,6 +21,20 @@ Live VPS host/user/key details are private and belong in local `CLAUDE.md`, not 
 Use the launcher-managed SSH key referenced there, and do not rely on the default SSH identity.
 Do not print key contents.
 
+## Codex Ops Pitfalls
+
+- For VPS SSH, copy the known-good command/options from private local notes; do not hand-type or improvise
+  `KexAlgorithms`. A single invalid token makes SSH fail locally before any command reaches the VPS.
+- For complex remote SQL/Python, do not nest heredocs inside a quoted SSH command from local zsh. Pipe a
+  local heredoc to remote stdin instead, e.g. `cat <<'PY' | <known-good ssh> 'cd /root/poly-btc && .venv/bin/python -'`.
+- If an SSH/local shell command fails before reaching the VPS, state that clearly and rerun with the safer
+  stdin-pipe pattern before drawing conclusions from VPS state.
+- To verify whether a dashboard-triggered scan is truly a forced full re-fetch, do not infer from
+  `manual=1` or the UI label. Check `commands.payload_json` contains `{"full": true}`, or the scanner
+  process/CLI used `--full`, or the completed `scan_runs.full=1`. Otherwise it may be only a manual full
+  workset scan while profile fill fetching still uses incremental `candidate_fills` cache unless
+  `_due_for_full_resync()` is true.
+
 ## Secrets And Data
 
 Never print, summarize, commit, or copy secret values.

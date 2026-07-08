@@ -84,11 +84,14 @@ def ep_discovery(db):
 
 
 def ep_scan_runs(db, limit):
-    rows = qall(db, "SELECT started_at,finished_at,candidates,added,retired,kept,rejected,n_active "
+    rows = qall(db, "SELECT started_at,finished_at,candidates,COALESCE(profiled,probed_new) AS profiled,"
+                    "added,retired,kept,rejected,n_active "
                     "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
-    return {"runs": [{"at": r["started_at"], "finishedAt": r["finished_at"],
-                      "candidates": r["candidates"], "added": r["added"], "retired": r["retired"],
-                      "kept": r["kept"], "rejected": r["rejected"], "active": r["n_active"]}
+    return {"runs": [{"at": _col(r, "started_at", 0), "finishedAt": _col(r, "finished_at", 1),
+                      "candidates": _col(r, "candidates", 2), "profiled": _col(r, "profiled", 3),
+                      "added": _col(r, "added", 4), "retired": _col(r, "retired", 5),
+                      "kept": _col(r, "kept", 6), "rejected": _col(r, "rejected", 7),
+                      "active": _col(r, "n_active", 8)}
                      for r in rows]}
 
 
@@ -299,7 +302,7 @@ def ep_pipeline_summary(db, qs):
     stamp, source = _latest_pipeline_key(db, qs)
     if not stamp:
         return {"stamp": None, "source": None, "profile": {}, "watchlist": {},
-                "followLine": None, "autoTune": None}
+                "followLine": None, "autoTune": None, "workset": None, "prune": None}
     base = [stamp] + ([source] if source else [])
     src_where = " AND source=?" if source else ""
 
@@ -322,6 +325,31 @@ def ep_pipeline_summary(db, qs):
         tuple(base),
     )
     watch_counts = {(_col(r, "status", 0) or "unknown"): _col(r, "n", 1) for r in watch_rows}
+
+    workset_row = q1(db,
+        "SELECT payload_json FROM pipeline_audit "
+        f"WHERE stamp=?{src_where} AND stage='workset' ORDER BY id DESC LIMIT 1",
+        tuple(base),
+    )
+    workset_payload = _payload(workset_row)
+    work_counts = workset_payload.get("counts") or {}
+    workset = None
+    if workset_row:
+        workset = {
+            "mode": workset_payload.get("mode"),
+            "fullScan": bool(workset_payload.get("fullScan")),
+            "limit": workset_payload.get("limit"),
+            "dailyRecheckTop": workset_payload.get("dailyRecheckTop"),
+            "candidates": work_counts.get("candidate"),
+            "profiledBefore": work_counts.get("profiled_before"),
+            "activeTotal": work_counts.get("active_total"),
+            "active": work_counts.get("active_candidate"),
+            "new": work_counts.get("new_candidate"),
+            "topRecheck": work_counts.get("top_recheck"),
+            "offListActive": work_counts.get("off_list_active"),
+            "profiled": work_counts.get("workset"),
+            "deferredTail": work_counts.get("deferred_tail"),
+        }
 
     follow_row = q1(db,
         "SELECT status,reason,follow_score,payload_json FROM pipeline_audit "
@@ -364,6 +392,13 @@ def ep_pipeline_summary(db, qs):
             "addParams": tune_payload.get("addParams") or {},
         }
 
+    prune_row = q1(db,
+        "SELECT payload_json FROM pipeline_audit "
+        f"WHERE stamp=?{src_where} AND stage='prune' ORDER BY id DESC LIMIT 1",
+        tuple(base),
+    )
+    prune = _payload(prune_row) if prune_row else None
+
     return {
         "stamp": stamp,
         "source": source,
@@ -383,4 +418,6 @@ def ep_pipeline_summary(db, qs):
         },
         "followLine": follow_line,
         "autoTune": auto_tune,
+        "workset": workset,
+        "prune": prune,
     }

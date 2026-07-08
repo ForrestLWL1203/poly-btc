@@ -184,6 +184,49 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertIn("1 active + 1 new + 1 top-recheck", mode)
         self.assertIn("top-recheck", mode)
 
+    def test_incremental_workset_breakdown_separates_new_recheck_and_off_list_active(self):
+        cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]
+        active = ["0xactive", "0xoff"]
+        profiled = {"0xactive", "0xold_good", "0xold_tail", "0xoff"}
+
+        breakdown = scanner_lifecycle.profile_workset_breakdown(
+            cand,
+            active,
+            profiled,
+            full_scan=False,
+            limit=100,
+            daily_recheck_top=2,
+        )
+
+        self.assertEqual(breakdown["workset"], ["0xactive", "0xnew", "0xold_good", "0xoff"])
+        self.assertEqual(breakdown["counts"]["active_candidate"], 1)
+        self.assertEqual(breakdown["counts"]["new_candidate"], 1)
+        self.assertEqual(breakdown["counts"]["top_recheck"], 1)
+        self.assertEqual(breakdown["counts"]["off_list_active"], 1)
+        self.assertEqual(breakdown["counts"]["workset"], 4)
+        self.assertEqual(breakdown["counts"]["deferred_tail"], 1)
+
+    def test_workset_breakdown_counts_only_wallets_inside_limit(self):
+        cand = ["0xactive", "0xnew", "0xold_good"]
+        active = ["0xactive", "0xoff"]
+        profiled = {"0xactive", "0xold_good", "0xoff"}
+
+        breakdown = scanner_lifecycle.profile_workset_breakdown(
+            cand,
+            active,
+            profiled,
+            full_scan=False,
+            limit=2,
+            daily_recheck_top=3,
+        )
+
+        self.assertEqual(breakdown["workset"], ["0xactive", "0xnew"])
+        self.assertEqual(breakdown["counts"]["active_candidate"], 1)
+        self.assertEqual(breakdown["counts"]["new_candidate"], 1)
+        self.assertEqual(breakdown["counts"]["top_recheck"], 0)
+        self.assertEqual(breakdown["counts"]["off_list_active"], 0)
+        self.assertEqual(breakdown["counts"]["workset"], 2)
+
     def test_incremental_scan_workset_keeps_off_list_actives_and_dedupes_recheck(self):
         cand = ["0xactive", "0xold_good", "0xnew"]
         active = ["0xactive", "0xoff"]

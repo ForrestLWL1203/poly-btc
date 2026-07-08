@@ -197,6 +197,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     finished_at TEXT,
     duration_s  REAL,
     candidates  INTEGER,
+    profiled    INTEGER,
     probed_new  INTEGER,
     added       INTEGER,
     retired     INTEGER,
@@ -571,6 +572,7 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN payoff_ratio REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
     "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% → score g_thick 因子
+    "ALTER TABLE scan_runs ADD COLUMN profiled INTEGER",
 )
 
 

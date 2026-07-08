@@ -3,28 +3,13 @@ import { fNum, fSign, fTime, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
 import { useWalletAudit } from "./wallets/WalletAudit.jsx";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
+import { WalletScoreCell, WalletScoreDetailModal } from "./wallets/WalletScoreDetail.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
-const SECTOR_LABEL = { crypto: "加密", stock: "美股/指数" };
-
-const sectorTitleLines = (policy) => {
-  if (!policy) return [];
-  return ["crypto", "stock"].map(k => {
-    const item = policy[k] || {};
-    if (item.allow == null && !item.status && !item.reason) return null;
-    const mark = item.allow ? "✓" : "×";
-    const status = item.reason || item.status || "无策略";
-    const pnl = item.pnl || {};
-    const closed = item.closed || {};
-    const p14 = pnl["14"], n14 = closed["14"];
-    const sample = (p14 != null || n14 != null) ? ` · 14天 ${fSign(p14 || 0, 0)} / ${n14 || 0}笔` : "";
-    return `${SECTOR_LABEL[k] || k} ${mark} ${status}${sample}`;
-  }).filter(Boolean);
-};
-
 export function Wallets({ confirm, toast }) {
   const [drawer, setDrawer] = useState(null);
+  const [scoreModal, setScoreModal] = useState(null);
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
@@ -35,28 +20,6 @@ export function Wallets({ confirm, toast }) {
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
-  const scoreTitle = (w) => {
-    const b = w.scoreBreakdown || {};
-    const pnl = b.copyPnl || {};
-    const n = b.closedN || {};
-    const lines = [
-      `最终跟单分 ${fNum(w.score, 1)}`,
-      `原始评分 ${fNum(w.rawScore, 1)}`,
-    ];
-    if (pnl["30d"] != null || pnl["14d"] != null || pnl["7d"] != null) {
-      lines.push(`copy回测 30天 ${fSign(pnl["30d"] || 0, 0)} / ${n["30d"] || 0}笔`);
-      lines.push(`copy回测 14天 ${fSign(pnl["14d"] || 0, 0)} / ${n["14d"] || 0}笔`);
-      lines.push(`copy回测 7天 ${fSign(pnl["7d"] || 0, 0)} / ${n["7d"] || 0}笔`);
-    }
-    const sectors = sectorTitleLines(b.sectorPolicy || w.sectorPolicy);
-    if (sectors.length) {
-      lines.push("跟单板块");
-      sectors.forEach(s => lines.push("· " + s));
-    }
-    if (b.copyScore != null) lines.push(`copy分 ${fNum(b.copyScore, 1)} · 置信 ${fNum(b.confidencePct, 0)}%`);
-    (b.reasons || []).slice(0, 4).forEach(r => lines.push("· " + r));
-    return lines.join("\n");
-  };
 
   const toggle = (w) => {
     const next = !w.enabled;
@@ -95,7 +58,7 @@ export function Wallets({ confirm, toast }) {
                     <tr className={open ? "row-open" : ""} style={{ cursor: "pointer" }} onClick={() => toggleAudit(w.address)}>
                       <td className="addr"><span className="row-caret">{open ? "▴" : "▾"}</span>{short(w.address)}</td>
                       <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                      <td className="num" title={scoreTitle(w)}><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                      <td className="num"><WalletScoreCell wallet={w} color="var(--t2)" onOpen={setScoreModal} /></td>
                       <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
                       <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
                       <td className="num">{fNum(w.winRatePct, 0)}%</td>
@@ -124,7 +87,7 @@ export function Wallets({ confirm, toast }) {
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
                   <td className="addr">{short(w.address)}</td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num" title={scoreTitle(w)}><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
+                  <td className="num"><WalletScoreCell wallet={w} color={w.score >= data.followLine ? "var(--green-l)" : "var(--t2)"} onOpen={setScoreModal} /></td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
                   <td className="num">{fNum(w.winRatePct, 0)}%</td>
                   <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
@@ -150,6 +113,7 @@ export function Wallets({ confirm, toast }) {
         </div>
       )}
       {drawer && <WalletDrawer address={drawer} onClose={() => setDrawer(null)} />}
+      {scoreModal && <WalletScoreDetailModal wallet={scoreModal} onClose={() => setScoreModal(null)} />}
     </div>
   );
 }
