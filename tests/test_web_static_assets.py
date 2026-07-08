@@ -114,6 +114,50 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function Positions(", jsx)
         self.assertIn('from "./components/Positions.jsx"', jsx)
 
+    def test_discovery_internals_are_split(self):
+        discovery = (ROOT / "web" / "components" / "Discovery.jsx").read_text(encoding="utf-8")
+        parts = {
+            "discovery/ScanMask.jsx": "export function ScanMask(",
+            "discovery/ScanStatusCard.jsx": "export function ScanStatusCard(",
+            "discovery/DiscoveryFunnel.jsx": "export function DiscoveryFunnel(",
+            "discovery/PipelineSummary.jsx": "export function PipelineSummary(",
+            "discovery/ScanHistoryTable.jsx": "export function ScanHistoryTable(",
+        }
+
+        for rel, marker in parts.items():
+            body = (ROOT / "web" / "components" / rel).read_text(encoding="utf-8")
+            self.assertIn(marker, body)
+
+        for rel in parts:
+            self.assertIn(f'from "./{rel}"', discovery)
+
+        self.assertIn('export { ScanMask } from "./discovery/ScanMask.jsx"', discovery)
+        self.assertNotIn("function PipelineSummary(", discovery)
+        self.assertNotIn("const STAGES_FE", discovery)
+
+    def test_positions_and_history_internals_are_split(self):
+        positions = (ROOT / "web" / "components" / "Positions.jsx").read_text(encoding="utf-8")
+        history = (ROOT / "web" / "components" / "History.jsx").read_text(encoding="utf-8")
+        drawer = (ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx").read_text(encoding="utf-8")
+
+        parts = {
+            "positions/PositionDetail.jsx": "export function PositionDetail(",
+            "positions/OpenPositionsTable.jsx": "export function OpenPositionsTable(",
+            "history/HistoryStats.jsx": "export function HistoryStats(",
+            "history/ClosedPositionsTable.jsx": "export function ClosedPositionsTable(",
+        }
+
+        for rel, marker in parts.items():
+            body = (ROOT / "web" / "components" / rel).read_text(encoding="utf-8")
+            self.assertIn(marker, body)
+
+        self.assertIn('from "./positions/OpenPositionsTable.jsx"', positions)
+        self.assertIn('from "./history/HistoryStats.jsx"', history)
+        self.assertIn('from "./history/ClosedPositionsTable.jsx"', history)
+        self.assertIn('from "../positions/PositionDetail.jsx"', drawer)
+        self.assertNotIn("export function PositionDetail(", positions)
+        self.assertNotIn("const CLOSE_TYPE", history)
+
     def test_dashboard_shell_imports_observer_mask_component(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
         obs_mask = ROOT / "web" / "components" / "ObsMask.jsx"

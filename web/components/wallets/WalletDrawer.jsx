@@ -2,7 +2,7 @@ import { api } from "../../lib/api.js";
 import { agoText, cls, fNum, fSign, short } from "../../lib/format.js";
 import { IC, Ico } from "../../lib/icons.jsx";
 import { useApiResource } from "../../lib/refresh.js";
-import { PositionDetail } from "../Positions.jsx";
+import { PositionDetail } from "../positions/PositionDetail.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
