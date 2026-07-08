@@ -1,12 +1,13 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
-import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
 from hl import storage
 from hl.observer import Observer
+from hl.util import now_ms
 
 
 class ObserverMarkRefreshTests(unittest.TestCase):
@@ -155,6 +156,98 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         finally:
             asyncio.set_event_loop(None)
             loop.close()
+
+    def test_pending_maker_open_fills_when_price_later_trades_through(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs._load_account(obs.maker)
+            obs.vol["BTC"] = 0.03
+            for tier in obs.tier_min_notional:
+                obs.tier_min_notional[tier] = 0
+
+            async def ensure_vol(_coin):
+                return None
+
+            obs._ensure_vol = ensure_vol
+            t = now_ms()
+            obs.px_ext["BTC"] = [100.0, 101.0, t]
+
+            with patch.object(obs, "_target_snapshot", return_value=(5, 5, 1000, 100)):
+                obs._dispatch_fill(
+                    obs.maker,
+                    "0xmaker",
+                    "BTC",
+                    ("0xmaker", "BTC"),
+                    t,
+                    1,
+                    0,
+                    1,
+                    100,
+                    False,
+                    True,
+                    123,
+                )
+
+                self.assertEqual(
+                    db.execute("SELECT COUNT(*) FROM shadow_position").fetchone()[0],
+                    0,
+                )
+
+                obs.on_bbo({"coin": "BTC", "bbo": [{"px": "99"}, {"px": "101"}]})
+                await asyncio.sleep(0.1)
+
+            row = db.execute(
+                "SELECT status,entry_px,master_open_px FROM shadow_position WHERE addr='0xmaker'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "open")
+            self.assertEqual(row["entry_px"], 100)
+            self.assertEqual(row["master_open_px"], 100)
+            act = db.execute("SELECT action,maker,our_px FROM shadow_action").fetchone()
+            self.assertEqual(act["action"], "open")
+            self.assertEqual(act["maker"], 1)
+            self.assertEqual(act["our_px"], 100)
+
+        asyncio.run(run())
+
+    def test_pending_maker_open_is_cancelled_when_target_leaves_side(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs._load_account(obs.maker)
+            obs.vol["BTC"] = 0.03
+            for tier in obs.tier_min_notional:
+                obs.tier_min_notional[tier] = 0
+
+            async def ensure_vol(_coin):
+                return None
+
+            obs._ensure_vol = ensure_vol
+            t = now_ms()
+            obs.px_ext["BTC"] = [100.0, 101.0, t]
+            with patch.object(obs, "_target_snapshot", return_value=(5, 5, 1000, 100)):
+                obs._dispatch_fill(
+                    obs.maker, "0xmaker", "BTC", ("0xmaker", "BTC"),
+                    t, 1, 0, 1, 100, False, True, 123,
+                )
+                self.assertIn(("0xmaker", "BTC"), obs.pending_maker_opens)
+
+                obs._dispatch_fill(
+                    obs.maker, "0xmaker", "BTC", ("0xmaker", "BTC"),
+                    t + 1000, -1, 1, 0, 99, False, False, 124,
+                )
+                self.assertNotIn(("0xmaker", "BTC"), obs.pending_maker_opens)
+
+                obs.on_bbo({"coin": "BTC", "bbo": [{"px": "99"}, {"px": "101"}]})
+                await asyncio.sleep(0.1)
+
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM shadow_position").fetchone()[0],
+                0,
+            )
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":
