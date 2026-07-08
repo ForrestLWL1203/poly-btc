@@ -144,7 +144,10 @@ class Observer:
         self.taker = Book("taker", "copy_position", "copy_action", "copy_account", match_exec=False)
         self.maker = Book("maker", "shadow_position", "shadow_action", "shadow_account", match_exec=True)
         self.books = [self.taker] + ([self.maker] if config.SHADOW_MAKER_ENABLED else [])
-        self.pending_maker_opens: dict = {}  # (addr,coin) -> target maker open waiting for price to trade through
+        # Maker-shadow orders that the target got filled but our simulated queue position has not filled yet.
+        # Open actions keep the legacy pending_maker_opens view for tests/debugging; execution uses the generic map.
+        self.pending_maker_actions: dict = {}
+        self.pending_maker_opens: dict = {}
         self.ws = None
         self.stop = False
         self.paused = False              # dashboard pause: stop opening NEW copies; existing keep to close
@@ -250,61 +253,114 @@ class Observer:
             return True
         return (e[0] < px) if is_buy else (e[1] > px)
 
-    def _queue_pending_maker_open(self, addr, coin, t, pos1, px, oid):
-        """Target maker-open filled, but our shadow order is still behind it in the queue.
+    def _pending_maker_key(self, addr, coin, action, oid, t):
+        return (addr, coin, action, oid if oid is not None else t)
 
-        Keep the shadow order alive until a later book tick trades strictly through the same limit price,
-        or until a target fill shows the master no longer holds that side.
-        """
-        if not px or abs(pos1) < config.FLAT:
+    def _drop_pending_maker_action(self, key):
+        pending = self.pending_maker_actions.pop(key, None)
+        if pending and pending.get("action") == "open":
+            self.pending_maker_opens.pop((pending["addr"], pending["coin"]), None)
+        return pending
+
+    def _queue_pending_maker_action(self, action, addr, coin, t, signed, pos0, pos1, px, oid,
+                                    closing=False, liq=False):
+        """Keep a maker-shadow order alive until a later book tick trades strictly through its limit price."""
+        if not px:
             return
-        key = (addr, coin)
-        if key in self.pending_maker_opens or key in self.maker.open_ep:
+        if action == "open":
+            open_key = (addr, coin)
+            if abs(pos1) < config.FLAT or open_key in self.pending_maker_opens or open_key in self.maker.open_ep:
+                return
+        key = self._pending_maker_key(addr, coin, action, oid, t)
+        if key in self.pending_maker_actions:
             return
-        side = "long" if pos1 > 0 else "short"
-        self.pending_maker_opens[key] = {
+        is_buy = signed > 0
+        side = "long" if pos1 > 0 else "short" if pos1 < 0 else None
+        pending = {
+            "key": key,
+            "action": action,
             "addr": addr,
             "coin": coin,
             "side": side,
-            "sign": 1 if side == "long" else -1,
+            "sign": 1 if (pos1 or signed) > 0 else -1,
+            "is_buy": is_buy,
             "t": t,
+            "signed": signed,
+            "pos0": pos0,
             "pos1": pos1,
             "px": px,
             "oid": oid,
+            "closing": closing,
+            "liq": liq,
             "queued_ms": now_ms(),
         }
+        self.pending_maker_actions[key] = pending
+        if action == "open":
+            self.pending_maker_opens[(addr, coin)] = pending
+
+    def _queue_pending_maker_open(self, addr, coin, t, pos1, px, oid):
+        self._queue_pending_maker_action("open", addr, coin, t, pos1, 0.0, pos1, px, oid)
 
     def _cancel_pending_maker_open_if_target_left(self, addr, coin, pos1):
         pending = self.pending_maker_opens.get((addr, coin))
         if not pending:
             return
         if pos1 * pending["sign"] <= config.FLAT:
-            self.pending_maker_opens.pop((addr, coin), None)
+            self._drop_pending_maker_action(pending["key"])
 
-    def _fill_pending_maker_opens(self, coin, bid, ask):
-        if not self.pending_maker_opens:
+    def _fill_pending_maker_actions(self, coin, bid, ask):
+        if not self.pending_maker_actions:
             return
-        for key, pending in list(self.pending_maker_opens.items()):
-            if key[1] != coin:
+        pending_items = sorted(
+            list(self.pending_maker_actions.items()),
+            key=lambda kv: (kv[1].get("queued_ms") or 0, kv[0]),
+        )
+        for key, pending in pending_items:
+            if pending["coin"] != coin:
                 continue
             px = pending["px"]
-            hit = (bid < px) if pending["sign"] > 0 else (ask > px)
+            hit = (bid < px) if pending["is_buy"] else (ask > px)
             if not hit:
                 continue
-            self.pending_maker_opens.pop(key, None)
-            if key in self.maker.open_ep:
+            pending = self._drop_pending_maker_action(key)
+            if not pending:
                 continue
-            self._open_position(
-                pending["addr"],
-                coin,
-                pending["t"],
-                px,
-                pending["pos1"],
-                True,
-                pending["oid"],
-                self.maker,
-                forced_entry_px=px,
-            )
+            addr = pending["addr"]
+            ep_key = (addr, coin)
+            action = pending["action"]
+            if action == "open":
+                if ep_key in self.maker.open_ep:
+                    continue
+                self._open_position(
+                    addr,
+                    coin,
+                    pending["t"],
+                    px,
+                    pending["pos1"],
+                    True,
+                    pending["oid"],
+                    self.maker,
+                    forced_entry_px=px,
+                )
+            elif action == "add":
+                ep = self.maker.open_ep.get(ep_key)
+                if ep is not None:
+                    asyncio.create_task(self._apply_add(
+                        addr, coin, ep, pending["t"], px, pending["signed"], pending["pos1"],
+                        True, pending["oid"], book=self.maker, forced_px=px))
+            elif action == "flip":
+                ep = self.maker.open_ep.get(ep_key)
+                if ep is not None:
+                    asyncio.create_task(self._apply_flip(
+                        addr, coin, ep, pending["t"], px, pending["pos0"], pending["pos1"],
+                        pending["liq"], True, pending["oid"], book=self.maker, forced_px=px))
+            else:
+                ep = self.maker.open_ep.get(ep_key)
+                if ep is not None:
+                    asyncio.create_task(self._apply_reduce(
+                        addr, coin, ep, pending["t"], px, pending["signed"], pending["pos1"],
+                        closing=pending["closing"], liq=pending["liq"], maker=True,
+                        oid=pending["oid"], forced_px=px, book=self.maker))
 
     def _tally(self, key, book=None):
         """Count one heartbeat event for the diagnostic rollup. Only the taker (real copy) book counts;
@@ -935,7 +991,7 @@ class Observer:
                     if ba:
                         self.bbo[coin] = ba                              # used for execution bid/ask
                         self._track_px(coin, ba[0], ba[1])               # roll extreme for the maker 戳破 check
-                        self._fill_pending_maker_opens(coin, ba[0], ba[1])
+                        self._fill_pending_maker_actions(coin, ba[0], ba[1])
             await asyncio.sleep(2 if self.stock_coins else 5)
 
     @staticmethod
@@ -1011,7 +1067,7 @@ class Observer:
         self.bbo[coin] = (bid, ask)
         self._refresh_coin_marks_throttled(coin)
         self._track_px(coin, bid, ask)             # roll the recent extreme for the maker 戳破 check
-        self._fill_pending_maker_opens(coin, bid, ask)
+        self._fill_pending_maker_actions(coin, bid, ask)
         mid = (bid + ask) / 2
         for book in self.books:                    # both accounts: track MAE + run stops per book
             for (a, c), ep in book.open_ep.items():    # track worst adverse excursion while open
@@ -1066,12 +1122,35 @@ class Observer:
         if book is self.maker:
             self._cancel_pending_maker_open_if_target_left(addr, coin, pos1)
         if our_maker and not self._maker_filled(coin, signed > 0, px):
-            if (book is self.maker and ep is None and transition in ("open", "flip")
-                    and abs(pos1) >= config.FLAT
-                    and addr not in self.held_off
-                    and not self.paused
-                    and self._sector_allowed(addr, coin)):
-                self._queue_pending_maker_open(addr, coin, t, pos1, px, oid)
+            if book is self.maker:
+                if ep is None:
+                    if (transition in ("open", "flip") and abs(pos1) >= config.FLAT
+                            and addr not in self.held_off
+                            and not self.paused
+                            and self._sector_allowed(addr, coin)):
+                        self._queue_pending_maker_open(addr, coin, t, pos1, px, oid)
+                elif transition == "flip":
+                    ep["master_peak"] = max(ep["master_peak"], abs(pos0))
+                    self._queue_pending_maker_action(
+                        "flip", addr, coin, t, signed, pos0, pos1, px, oid, closing=True, liq=liq)
+                elif transition == "add":
+                    ep["master_peak"] = max(ep["master_peak"], abs(pos1))
+                    if oid is not None and oid in ep.get("seen_oids", ()):
+                        return
+                    ep.setdefault("seen_oids", set()).add(oid)
+                    if self.paused or addr in self.held_off or not self._sector_allowed(addr, coin):
+                        self._tally("skip_paused_add" if self.paused else
+                                    "skip_heldoff_add" if addr in self.held_off else
+                                    "skip_sector_add", book)
+                        return
+                    self._queue_pending_maker_action(
+                        "add", addr, coin, t, signed, pos0, pos1, px, oid)
+                else:
+                    ep["master_peak"] = max(ep["master_peak"], abs(pos1))
+                    closing = abs(pos1) < config.FLAT
+                    self._queue_pending_maker_action(
+                        "close" if closing else "reduce", addr, coin, t, signed, pos0, pos1,
+                        px, oid, closing=closing, liq=liq)
             return   # v2 戳破: price didn't trade THROUGH our resting price → our maker order didn't fill (miss)
         if ep is None:
             if (transition in ("open", "flip") and abs(pos1) >= config.FLAT
@@ -1110,15 +1189,16 @@ class Observer:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
                                                    closing=abs(pos1) < config.FLAT, liq=liq, maker=our_maker, oid=oid, book=book))
 
-    async def _apply_flip(self, addr, coin, ep, t, master_px, pos0, pos1, liq, maker, oid, book=None):
+    async def _apply_flip(self, addr, coin, ep, t, master_px, pos0, pos1, liq, maker, oid,
+                          book=None, forced_px=None):
         book = book or self.taker
         await self._apply_reduce(addr, coin, ep, t, master_px, -pos0, 0.0,
-                                 closing=True, liq=liq, maker=maker, oid=oid, book=book)
+                                 closing=True, liq=liq, maker=maker, oid=oid, book=book, forced_px=forced_px)
         if (addr, coin) in book.open_ep:
             return
         if addr in self.held_off or self.paused or not self._sector_allowed(addr, coin):
             return
-        self._open_position(addr, coin, t, master_px, pos1, maker, oid, book)
+        self._open_position(addr, coin, t, master_px, pos1, maker, oid, book, forced_entry_px=forced_px)
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None, forced_entry_px=None):
         book = book or self.taker
@@ -1240,7 +1320,8 @@ class Observer:
                             msz, msz, size * ep["sign"], px, 0.0, chase, book=book)
         self.db.commit()                                      # the open is in copy_position/copy_action
 
-    async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, maker, oid, book=None):
+    async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, maker, oid,
+                         book=None, forced_px=None):
         """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
         first_margin × ADD_FRAC (half the first-open by default) at the current price; avg entry + liq_px recompute.
         Past the cap we record his add but don't follow (the delta-based exit still mirrors him)."""
@@ -1261,7 +1342,9 @@ class Observer:
                 ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * master_px) / m_now
             is_buy = ep["side"] == "long"             # adding to a long => buy more
             stale = (now_ms() - t) > STALE_MS
-            px = master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
+            px = forced_px if forced_px is not None else (
+                master_px if stale else self._fill_px(coin, is_buy, maker, master_px)
+            )
             lev = ep["leverage"]
             sigma = self._sigma(coin); tier = self._tier(sigma, coin)
             fm = ep.get("first_margin", ep["margin"])
