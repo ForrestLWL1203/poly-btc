@@ -135,8 +135,8 @@ def _compact_audit_payload(payload):
     if not payload:
         return {}
     keep = {}
-    for key in ("copyBt", "followEligibility"):
-        if key in payload:
+    for key in ("copyBt", "followEligibility", "sectorCopy", "sectorPolicy"):
+        if key in payload and payload[key] not in (None, {}, []):
             keep[key] = payload[key]
     return keep
 

@@ -1,5 +1,6 @@
 """Wallet list/detail endpoints for the dashboard API."""
 
+import json
 import time
 
 from . import config
@@ -15,6 +16,32 @@ def _col(row, key, default=None):
         return default
 
 
+def _json_obj(raw):
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _sector_policy(row):
+    policy = _json_obj(_col(row, "sector_policy_json"))
+    if not policy:
+        return None
+    allowed = policy.get("allowed")
+    if not isinstance(allowed, list):
+        allowed = [
+            sector for sector in ("crypto", "stock")
+            if isinstance(policy.get(sector), dict) and policy[sector].get("allow")
+        ]
+        policy = {**policy, "allowed": allowed}
+    return policy
+
+
 def _score_breakdown(row):
     _score, detail = follow_score.compute_follow_score({
         "score": _col(row, "raw_score", _col(row, "profile_score")),
@@ -28,6 +55,8 @@ def _score_breakdown(row):
         "copy_bt_14d_closed_n": _col(row, "copy_bt_14d_closed_n"),
         "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
         "copy_bt_7d_closed_n": _col(row, "copy_bt_7d_closed_n"),
+        "sector_policy_json": _col(row, "sector_policy_json"),
+        "sector_copy_json": _col(row, "sector_copy_json"),
     })
     return {
         "rawScore": score100(detail.get("rawScore")),
@@ -35,6 +64,7 @@ def _score_breakdown(row):
         "confidencePct": round((detail.get("confidence") or 0.0) * 100, 0),
         "copyPnl": detail.get("copyPnl"),
         "closedN": detail.get("closedN"),
+        "sectorPolicy": _sector_policy(row),
         "reasons": detail.get("reasons") or [],
     }
 
@@ -58,7 +88,7 @@ def ep_wallets(db, qs=None):
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
             "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
             "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-            "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,"
+            "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
             "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
@@ -69,6 +99,7 @@ def ep_wallets(db, qs=None):
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["follow_score"] or 0.0), "rawScore": score100(r["raw_score"] or 0.0),
             "scoreBreakdown": _score_breakdown(r),
+            "sectorPolicy": _sector_policy(r),
             "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
             "lastFollowedAt": iso_epoch(r["last_followed_at"]),
             "dropReason": ("掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
@@ -101,7 +132,7 @@ def ep_wallets(db, qs=None):
         "COALESCE(c.enabled,1) AS enabled,pr.score AS raw_score,pr.worst_loss_pct,"
         "pr.copy_bt_net_pnl,pr.copy_bt_win_rate,pr.copy_bt_closed_n,pr.copy_bt_open_fill_rate,"
         "pr.copy_bt_liquidations,pr.copy_bt_fee_drag,pr.copy_bt_14d_net_pnl,pr.copy_bt_14d_closed_n,"
-        "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,"
+        "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,pr.sector_copy_json,pr.sector_policy_json,"
         "l.week_roi,l.mon_roi,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,"
         "COALESCE(cs.follow_count,0) AS follow_count,"
@@ -126,6 +157,7 @@ def ep_wallets(db, qs=None):
             "score": score100(r["score"] or 0.0),
             "rawScore": score100(r["raw_score"] or 0.0),
             "scoreBreakdown": _score_breakdown(r),
+            "sectorPolicy": _sector_policy(r),
             "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),
             "winRatePct": (r["win_rate"] or 0.0) * 100,
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],

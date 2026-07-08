@@ -150,14 +150,30 @@ class PipelineAuditTests(unittest.TestCase):
     def test_pipeline_audit_endpoint_can_return_compact_payload(self):
         db = self._db()
         self._insert_profiles(db)
+        db.execute(
+            "UPDATE profile SET sector_policy_json=?, sector_copy_json=? WHERE addr='0xaaa'",
+            (
+                json.dumps({
+                    "allowed": ["crypto"],
+                    "crypto": {"allow": True, "status": "allowed"},
+                    "stock": {"allow": False, "status": "recent_loss"},
+                }),
+                json.dumps({
+                    "crypto": {"14": {"copy_net_pnl": 500, "closed_n": 6}},
+                    "stock": {"14": {"copy_net_pnl": -300, "closed_n": 6}},
+                }),
+            ),
+        )
         pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa"])
         db.commit()
 
         res = api_discovery.ep_pipeline_audit(db, {"limit": ["5"], "compact": ["1"]})
 
         payload = res["events"][0]["payload"]
-        self.assertEqual(sorted(payload.keys()), ["copyBt"])
+        self.assertEqual(sorted(payload.keys()), ["copyBt", "sectorCopy", "sectorPolicy"])
         self.assertEqual(payload["copyBt"]["14dNetPnl"], 500)
+        self.assertEqual(payload["sectorPolicy"]["allowed"], ["crypto"])
+        self.assertFalse(payload["sectorPolicy"]["stock"]["allow"])
         self.assertNotIn("marketType", payload)
         self.assertNotIn("openState", payload)
 

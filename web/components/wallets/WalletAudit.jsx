@@ -13,6 +13,18 @@ const auditCopyText = (payload) => {
   return `copy 30d ${fSign(v30 || 0, 0)} / 14d ${fSign(v14 || 0, 0)} / 7d ${fSign(v7 || 0, 0)}`;
 };
 
+const auditSectorText = (payload) => {
+  const p = payload && payload.sectorPolicy;
+  if (!p) return null;
+  const labels = { crypto: "加密", stock: "美股/指数" };
+  const rows = ["crypto", "stock"].map(k => {
+    const item = p[k] || {};
+    if (item.allow == null && !item.status) return null;
+    return `${labels[k]} ${item.allow ? "✓" : "×"}${item.status ? " " + item.status : ""}`;
+  }).filter(Boolean);
+  return rows.length ? rows.join(" · ") : null;
+};
+
 function WalletAuditBox({ state }) {
   const audit = state || { loading: true, events: [] };
   if (audit.loading) return <div className="audit-box muted">加载审计记录…</div>;
@@ -22,6 +34,7 @@ function WalletAuditBox({ state }) {
     <div className="audit-box">
       {audit.events.map(e => {
         const copy = auditCopyText(e.payload);
+        const sectors = auditSectorText(e.payload);
         return (
           <div className="audit-event" key={e.id}>
             <div>
@@ -32,6 +45,7 @@ function WalletAuditBox({ state }) {
               <span>{e.stamp ? e.stamp.slice(5, 16).replace("T", " ") : "—"}</span>
               {e.rawScore != null && <span>raw {fNum(e.rawScore, 1)}</span>}
               {e.followScore != null && <span>follow {fNum(e.followScore, 1)}</span>}
+              {sectors && <span>{sectors}</span>}
               {copy && <span>{copy}</span>}
             </div>
           </div>

@@ -6,6 +6,23 @@ import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
+const SECTOR_LABEL = { crypto: "加密", stock: "美股/指数" };
+
+const sectorTitleLines = (policy) => {
+  if (!policy) return [];
+  return ["crypto", "stock"].map(k => {
+    const item = policy[k] || {};
+    if (item.allow == null && !item.status && !item.reason) return null;
+    const mark = item.allow ? "✓" : "×";
+    const status = item.reason || item.status || "无策略";
+    const pnl = item.pnl || {};
+    const closed = item.closed || {};
+    const p14 = pnl["14"], n14 = closed["14"];
+    const sample = (p14 != null || n14 != null) ? ` · 14天 ${fSign(p14 || 0, 0)} / ${n14 || 0}笔` : "";
+    return `${SECTOR_LABEL[k] || k} ${mark} ${status}${sample}`;
+  }).filter(Boolean);
+};
+
 export function Wallets({ confirm, toast }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);
@@ -30,6 +47,11 @@ export function Wallets({ confirm, toast }) {
       lines.push(`copy回测 30天 ${fSign(pnl["30d"] || 0, 0)} / ${n["30d"] || 0}笔`);
       lines.push(`copy回测 14天 ${fSign(pnl["14d"] || 0, 0)} / ${n["14d"] || 0}笔`);
       lines.push(`copy回测 7天 ${fSign(pnl["7d"] || 0, 0)} / ${n["7d"] || 0}笔`);
+    }
+    const sectors = sectorTitleLines(b.sectorPolicy || w.sectorPolicy);
+    if (sectors.length) {
+      lines.push("跟单板块");
+      sectors.forEach(s => lines.push("· " + s));
     }
     if (b.copyScore != null) lines.push(`copy分 ${fNum(b.copyScore, 1)} · 置信 ${fNum(b.confidencePct, 0)}%`);
     (b.reasons || []).slice(0, 4).forEach(r => lines.push("· " + r));

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -65,7 +66,15 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,n_trades,updated_at) "
                 "VALUES (1,'0xaaa',0.9,'crypto',0.75,'BTC',10,'now')"
             )
-            db.execute("INSERT INTO profile (addr,status,score,active_days) VALUES ('0xaaa','active',0.9,5)")
+            db.execute(
+                "INSERT INTO profile (addr,status,score,active_days,sector_policy_json) "
+                "VALUES ('0xaaa','active',0.9,5,?)",
+                (json.dumps({
+                    "allowed": ["crypto"],
+                    "crypto": {"allow": True, "status": "allowed", "reason": "板块copy回测盈利"},
+                    "stock": {"allow": False, "status": "recent_loss", "reason": "板块近期copy亏损"},
+                }),),
+            )
             db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
             db.execute(
                 "INSERT INTO episode (addr,coin,side,open_ms,seq,close_ms) "
@@ -86,6 +95,8 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["forwardNetPnl"], 12)
         self.assertEqual(wallet["rawScore"], 90.0)
         self.assertIn("scoreBreakdown", wallet)
+        self.assertEqual(wallet["sectorPolicy"]["allowed"], ["crypto"])
+        self.assertFalse(wallet["scoreBreakdown"]["sectorPolicy"]["stock"]["allow"])
         self.assertNotIn("evidenceHeld", wallet)
 
     def test_dropped_wallets_omit_unused_profile_columns(self):
