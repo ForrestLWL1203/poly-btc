@@ -8,25 +8,54 @@ from hl import config, params, storage
 
 
 class ScannerSettingsParamTests(unittest.TestCase):
-    def test_scanner_settings_expose_only_operator_knobs(self):
+    def test_scanner_settings_expose_basic_and_folded_advanced_knobs(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
             params.seed_params(db)
 
-            scanner_keys = [p["key"] for p in params.get_all(db)["scanner"]]
+            scanner_params = params.get_all(db)["scanner"]
+            scanner_keys = [p["key"] for p in scanner_params]
+            levels = {p["key"]: p["level"] for p in scanner_params}
 
-            self.assertEqual(
-                scanner_keys,
-                [
-                    "HARVEST_MIN_ACCT",
-                    "HARVEST_WEEK_VLM_MIN",
-                    "HARVEST_WEEK_VLM_MAX",
-                    "EXCLUDE_HFT",
-                    "inactive_days",
-                ],
-            )
+            self.assertEqual(scanner_keys[:5], [
+                "HARVEST_MIN_ACCT",
+                "HARVEST_WEEK_VLM_MIN",
+                "HARVEST_WEEK_VLM_MAX",
+                "EXCLUDE_HFT",
+                "inactive_days",
+            ])
+            self.assertIn("PORTFOLIO_MAX_TURNOVER", scanner_keys)
+            self.assertIn("PORTFOLIO_MIN_EDGE_BPS", scanner_keys)
+            self.assertIn("MAX_CONCURRENT_POS", scanner_keys)
+            self.assertIn("MIN_ACTIVE_SCORE", scanner_keys)
+            self.assertIn("EVIDENCE_MIN_DAYS", scanner_keys)
+            self.assertIn("EVIDENCE_MIN_TRADES", scanner_keys)
+            self.assertEqual(levels["PORTFOLIO_MAX_TURNOVER"], "blue")
+            self.assertEqual(levels["EVIDENCE_MIN_TRADES"], "blue")
             self.assertFalse(any(k.startswith("SCORE_") for k in scanner_keys))
+
+    def test_seed_params_refreshes_metadata_without_overwriting_operator_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                ("MAX_CONCURRENT_POS", "42", "scanner", "hidden", "int", "rescan", "15", "old"),
+            )
+            db.commit()
+
+            params.seed_params(db)
+
+            row = db.execute(
+                "SELECT value,category,level,type,effect FROM params WHERE key='MAX_CONCURRENT_POS'"
+            ).fetchone()
+            self.assertEqual(row["value"], "42")
+            self.assertEqual(row["category"], "scanner")
+            self.assertEqual(row["level"], "blue")
+            self.assertEqual(row["type"], "int")
+            self.assertEqual(row["effect"], "rescan")
 
     def test_db_score_rows_do_not_override_code_score_weights(self):
         original = {

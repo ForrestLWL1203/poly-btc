@@ -43,18 +43,18 @@ PARAM_SPEC = [
         "重DCA判定:单回合加仓上限(超过=偶发但不可复制的重仓摊价)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
     ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
-    ("PORTFOLIO_MAX_TURNOVER","scanner", "hidden", "x",       "rescan", config.PORTFOLIO_MAX_TURNOVER,
+    ("PORTFOLIO_MAX_TURNOVER","scanner", "blue",   "x",       "rescan", config.PORTFOLIO_MAX_TURNOVER,
         "换手率上限 (x/周)", "周成交量÷账户权益。超过=高频机器人(我们延迟跟不了+手续费拖累)。趋势客一般<40x,机器人>100x"),
-    ("PORTFOLIO_MIN_EDGE_BPS","scanner", "hidden", "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
+    ("PORTFOLIO_MIN_EDGE_BPS","scanner", "blue",   "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
         "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
     # (MIN_PAYOFF removed v10 — the small_win_big_loss hard gate is gone; 盈亏比 now a smooth g_payoff factor in score)
-    ("MAX_CONCURRENT_POS",   "scanner", "hidden", "int",     "rescan", config.MAX_CONCURRENT_POS,
+    ("MAX_CONCURRENT_POS",   "scanner", "blue",   "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
-    ("MIN_ACTIVE_SCORE",     "scanner", "hidden", "float",   "rescan", config.MIN_ACTIVE_SCORE,
+    ("MIN_ACTIVE_SCORE",     "scanner", "blue",   "float",   "rescan", config.MIN_ACTIVE_SCORE,
         "入选质量线", "综合评分 < 此 → 不进 active。让 active(watchlist)=全是够优质的好钱包,跟单再从中按资金取前N。低质量尾巴在这一刀切掉"),
-    ("EVIDENCE_MIN_DAYS",    "scanner", "hidden", "int",     "rescan", config.EVIDENCE_MIN_DAYS,
+    ("EVIDENCE_MIN_DAYS",    "scanner", "blue",   "int",     "rescan", config.EVIDENCE_MIN_DAYS,
         "证据·最低活跃天数", "14天窗口内活跃天数 < 此 = 战绩太少无从评判 → 排除(取消旧的纯持有豁免)"),
-    ("EVIDENCE_MIN_TRADES",  "scanner", "hidden", "int",     "rescan", config.EVIDENCE_MIN_TRADES,
+    ("EVIDENCE_MIN_TRADES",  "scanner", "blue",   "int",     "rescan", config.EVIDENCE_MIN_TRADES,
         "证据·最低回合数", "14天窗口内已平回合 < 此 = 样本太小 → 排除。配合活跃天数=证据硬闸"),
     ("COPY_BT_GATE_ENABLE",  "scanner", "hidden", "bool",    "rescan", config.COPY_BT_GATE_ENABLE,
         "copy回测准入", "用历史 fills 按当前跟单规则回放;目标赚但我们复制亏的钱包不进 active"),
@@ -186,7 +186,7 @@ def parse(value, ptype):
 
 
 def seed_params(db):
-    """Insert any missing params from PARAM_SPEC (idempotent — never overwrites operator edits)."""
+    """Insert missing params and refresh metadata without overwriting operator-edited values."""
     stamp = now_iso()
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
@@ -194,6 +194,9 @@ def seed_params(db):
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (key, dv, category, level, ptype, effect, dv, stamp))
+        db.execute(
+            "UPDATE params SET category=?,level=?,type=?,effect=?,default_value=? WHERE key=?",
+            (category, level, ptype, effect, dv, key))
     db.commit()
 
 
