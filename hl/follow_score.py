@@ -11,6 +11,8 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
+from .sector import apply_allowed_sector_copy_metrics
+
 
 def _num(v, default: float = 0.0) -> float:
     try:
@@ -60,6 +62,7 @@ def evaluate_follow_eligibility(
     ensuring clear copyability failures cannot sit above the automatic follow
     line just because their raw profile score is high.
     """
+    metrics = apply_allowed_sector_copy_metrics(metrics)
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
     c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
     c7 = int(_num(metrics.get("copy_bt_7d_closed_n")))
@@ -129,6 +132,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     partially seeded DBs keep their current behaviour until the next scan fills
     the replay fields.
     """
+    metrics = apply_allowed_sector_copy_metrics(metrics)
     raw = _clamp(_num(metrics.get("score")))
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
     c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))

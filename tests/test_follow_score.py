@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from hl.follow_score import choose_follow_line, compute_follow_score, evaluate_follow_eligibility
@@ -148,6 +149,41 @@ class FollowScoreTests(unittest.TestCase):
 
         self.assertLess(score, 0.72)
         self.assertTrue(any("近期copy亏损" in r for r in detail["reasons"]))
+
+    def test_follow_score_uses_allowed_sector_copy_metrics(self):
+        mixed = {
+            "score": 0.70,
+            "copy_bt_net_pnl": -1000.0,
+            "copy_bt_14d_net_pnl": -600.0,
+            "copy_bt_7d_net_pnl": -250.0,
+            "copy_bt_closed_n": 20,
+            "copy_bt_14d_closed_n": 12,
+            "copy_bt_7d_closed_n": 8,
+            "copy_bt_open_fill_rate": 0.90,
+            "sector_policy_json": json.dumps({
+                "crypto": {"allow": True},
+                "stock": {"allow": False},
+            }),
+            "sector_copy_json": json.dumps({
+                "crypto": {
+                    "30": {"copy_net_pnl": 1500, "closed_n": 10, "wins": 7, "target_open_events": 10, "opened_n": 10},
+                    "14": {"copy_net_pnl": 700, "closed_n": 6, "wins": 4, "target_open_events": 6, "opened_n": 6},
+                    "7": {"copy_net_pnl": 300, "closed_n": 5, "wins": 3, "target_open_events": 5, "opened_n": 5},
+                },
+                "stock": {
+                    "30": {"copy_net_pnl": -2500, "closed_n": 10, "wins": 2, "target_open_events": 10, "opened_n": 10},
+                    "14": {"copy_net_pnl": -1300, "closed_n": 6, "wins": 1, "target_open_events": 6, "opened_n": 6},
+                    "7": {"copy_net_pnl": -550, "closed_n": 5, "wins": 1, "target_open_events": 5, "opened_n": 5},
+                },
+            }),
+        }
+
+        eligibility = evaluate_follow_eligibility(mixed)
+        score, detail = compute_follow_score(mixed)
+
+        self.assertTrue(eligibility["eligible"])
+        self.assertEqual(detail["copyPnl"], {"30d": 1500.0, "14d": 700.0, "7d": 300.0})
+        self.assertGreater(score, 0.70)
 
     def test_choose_follow_line_cuts_before_quality_cliff(self):
         ranked = [{"follow_score": s} for s in (0.90, 0.86, 0.83, 0.80, 0.70, 0.68)]

@@ -14,9 +14,11 @@ from . import auto_tune, config, follow_score, metrics, params, pipeline_audit, 
 from .fills import build_episodes, is_spot
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
+    apply_sector_copy_bt_gate as _apply_sector_copy_bt_gate,
     copy_bt_overrides as _copy_bt_overrides,
     copy_bt_results as _copy_bt_results,
     copy_bt_sigmas as _copy_bt_sigmas,
+    sector_copy_bt_results as _sector_copy_bt_results,
 )
 from .scanner_lifecycle import (
     profile_workset as _profile_workset,
@@ -390,7 +392,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
         m["pf_turnover"], m["pf_edge_bps"] = _pw.get("turnover"), _pw.get("edge_bps")
         ok, reason = metrics.gates_state(m, now_ms, p)
     if ok:
-        ok, reason = _apply_copy_bt_gate(m, _copy_bt_results(addr, perp_full, now_ms, p), p)
+        copy_results = _copy_bt_results(addr, perp_full, now_ms, p)
+        sector_results = _sector_copy_bt_results(addr, perp_full, now_ms, p)
+        ok, reason = _apply_sector_copy_bt_gate(m, copy_results, sector_results, p)
     if ok:
         ok, reason = _apply_follow_eligibility_gate(m)
     m["times_active"] += 1 if ok else 0
@@ -452,7 +456,7 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         "p.times_active, p.first_added, p.last_fill_ms, "
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n "
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
         "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
         "WHERE p.status='active' ORDER BY p.score DESC, p.addr")
     row_cols = [d[0] for d in cur.description]
@@ -495,15 +499,16 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
             "INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,mon_roi,net_pnl,acct_value,"
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
             "market_type,tp_move_pct,roi_total,open_loss_frac,open_win_frac,"
-            "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,sector_copy_json,sector_policy_json,"
+            "times_active,first_added,last_fill_ms,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rank, r["addr"], r["display_name"], r["follow_score"], r["roi_equity"], r["mon_roi"],
                 r["net_pnl"], r["acct_value"], r["n_trades"], r["trades_per_day"], r["taker_frac_notl"],
                 r["median_hold_s"], r["win_rate"], r["max_drawdown"], r["age_days"], r["top_coin"],
                 r["market_type"], r["tp_move_pct"], r["roi_total"], r["open_loss_frac"], r["open_win_frac"],
                 r["perp_frac"], r["lev_proxy"], r["margin_type"], r["cur_leverage"], r["liq_worst_pct"],
-                r["times_active"], r["first_added"], r["last_fill_ms"], stamp,
+                r["sector_copy_json"], r["sector_policy_json"], r["times_active"], r["first_added"], r["last_fill_ms"], stamp,
             ))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r["addr"], stamp))
@@ -651,7 +656,7 @@ def regate(db, p) -> int:
         "p.payoff_ratio,p.pf_week_vlm,"   # v9: needed so regate applies the SAME payoff + edge-decay gates as a scan
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n "
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr").fetchall()
     # p90 per-episode fill count per wallet, from the stored episode table (regate has no fills to rebuild
     # from) — feeds the algo-slicer gate. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
@@ -684,7 +689,7 @@ def regate(db, p) -> int:
          roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
          wkroi, moroi, alroi, pf_turn, pf_mpnl, pf_mvlm, pf_wpnl, pf_eq, pay, pf_wvlm,
          copy_net, copy_wr, copy_closed, copy_open_fill_rate, copy_liqs, copy_fee,
-         copy14_net, copy14_closed, copy7_net, copy7_closed) = r
+         copy14_net, copy14_closed, copy7_net, copy7_closed, sector_copy_json, sector_policy_json) = r
         m = {"n_trades": n_tr or 0, "n_fills": n_fills or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -715,7 +720,8 @@ def regate(db, p) -> int:
              "copy_bt_closed_n": copy_closed, "copy_bt_open_fill_rate": copy_open_fill_rate,
              "copy_bt_liquidations": copy_liqs, "copy_bt_fee_drag": copy_fee,
              "copy_bt_14d_net_pnl": copy14_net, "copy_bt_14d_closed_n": copy14_closed,
-             "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_closed_n": copy7_closed}
+             "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_closed_n": copy7_closed,
+             "sector_copy_json": sector_copy_json, "sector_policy_json": sector_policy_json}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
         m["loss_pain"] = metrics.loss_pain(
@@ -724,11 +730,10 @@ def regate(db, p) -> int:
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
         if ok:
-            ok, reason = _apply_copy_bt_gate(
-                m,
-                _copy_bt_results(addr, _copy_bt_cached_fills(db, addr, now, p), now, p),
-                p,
-            )
+            replay_fills = _copy_bt_cached_fills(db, addr, now, p)
+            copy_results = _copy_bt_results(addr, replay_fills, now, p)
+            sector_results = _sector_copy_bt_results(addr, replay_fills, now, p)
+            ok, reason = _apply_sector_copy_bt_gate(m, copy_results, sector_results, p)
         if ok:
             ok, reason = _apply_follow_eligibility_gate(m)
         score = metrics.score(m) if ok else 0.0
@@ -739,12 +744,13 @@ def regate(db, p) -> int:
             "UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
             "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_14d_net_pnl=?,copy_bt_14d_closed_n=?,"
-            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=? WHERE addr=?",
+            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=? WHERE addr=?",
             (status, reason, score, m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
              m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_closed_n"),
              m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_closed_n"),
+             m.get("sector_copy_json"), m.get("sector_policy_json"),
              addr),
         )
         n_active += 1 if ok else 0

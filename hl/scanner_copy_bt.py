@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import math
 
 from . import config, params
 from .copy_backtest import run_backtest
+from .sector import SECTORS, compact_sector_results, evaluate_sector_policy, filter_fills
 
 
 def copy_bt_sigmas(db):
@@ -71,6 +73,13 @@ def copy_bt_results(addr, fills, now_ms, p):
     return {days: copy_bt_result(addr, fills, now_ms, p, days=days) for days in copy_bt_window_days(p)}
 
 
+def sector_copy_bt_results(addr, fills, now_ms, p):
+    return {
+        sector: copy_bt_results(addr, filter_fills(fills, sector), now_ms, p)
+        for sector in SECTORS
+    }
+
+
 def record_primary_copy_bt(metrics, result):
     if not result:
         return
@@ -95,6 +104,29 @@ def record_recent_copy_bt(metrics, days, result):
     elif days == 7:
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
         metrics["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
+
+
+def record_copy_bt_windows(metrics, result, p):
+    if not result:
+        return
+    if "copy_net_pnl" in result:
+        record_primary_copy_bt(metrics, result)
+        return
+    by_days = {}
+    for days, res in result.items():
+        try:
+            day = int(days)
+        except (TypeError, ValueError):
+            continue
+        if res:
+            by_days[day] = res
+    if not by_days:
+        return
+    primary_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    primary = by_days.get(primary_days) or by_days.get(max(by_days))
+    record_primary_copy_bt(metrics, primary)
+    for days, res in by_days.items():
+        record_recent_copy_bt(metrics, days, res)
 
 
 def copy_bt_target_perp_positive(metrics):
@@ -187,3 +219,26 @@ def apply_copy_bt_gate(metrics, result, p):
                 continue
             return False, "copy_backtest_loss" if days == primary_days else f"copy_backtest_loss_{days}d"
     return True, "ok"
+
+
+def apply_sector_copy_bt_gate(metrics, result, sector_results, p):
+    """Record global copy replay, then gate followability by profitable sector.
+
+    A wallet can stay active when one sector is copyable even if another sector
+    loses. The observer later enforces the resulting sector policy per fill.
+    """
+    record_copy_bt_windows(metrics, result, p)
+    compact = compact_sector_results(sector_results or {})
+    policy = evaluate_sector_policy(
+        sector_results or {},
+        min_net=float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0),
+    )
+    metrics["sector_copy_json"] = json.dumps(compact, sort_keys=True)
+    metrics["sector_policy_json"] = json.dumps(policy, sort_keys=True)
+    if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
+        return True, "ok"
+    if policy.get("allowed"):
+        return True, "ok"
+    if any(compact.get(sector) for sector in SECTORS):
+        return False, "copy_backtest_no_profitable_sector"
+    return apply_copy_bt_gate(metrics, result, p)

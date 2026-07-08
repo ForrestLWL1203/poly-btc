@@ -374,6 +374,9 @@ COPY_BT_MIN_CLOSED = 7      # copy 回测至少有这么多已平仓才作为硬
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
 COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
+SECTOR_COPY_MIN_CLOSED_30D = 7   # 板块级 copy 能力样本门槛: crypto/stock 分别判断
+SECTOR_COPY_MIN_CLOSED_14D = 5
+SECTOR_COPY_MIN_CLOSED_7D = 5
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled

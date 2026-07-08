@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import asyncio
 from pathlib import Path
+from unittest.mock import patch
 
 from hl import storage
 from hl.observer import Observer
@@ -100,6 +101,60 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertEqual(row["was_liq"], 0)
 
         asyncio.run(run())
+
+    def test_reload_targets_loads_sector_policy(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO watchlist (rank,addr,score,acct_value,sector_policy_json,updated_at) "
+            "VALUES (1,'0xsector',0.9,10000,?,'now')",
+            ('{"crypto":{"allow":true},"stock":{"allow":false},"allowed":["crypto"]}',),
+        )
+        db.commit()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {}, top_n=10, min_score=0.5)
+
+            obs._reload_targets(init=True)
+
+            self.assertIn("0xsector", obs.addrs)
+            self.assertFalse(obs.target_sector_policy["0xsector"]["stock"]["allow"])
+            self.assertTrue(obs.target_sector_policy["0xsector"]["crypto"]["allow"])
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_disallowed_sector_open_is_skipped(self):
+        db = self._db()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs.target_sector_policy = {
+                "0xsector": {"crypto": {"allow": True}, "stock": {"allow": False}, "allowed": ["crypto"]},
+            }
+
+            with patch.object(obs, "_open_position") as open_position:
+                obs._dispatch_fill(
+                    obs.taker,
+                    "0xsector",
+                    "xyz:MU",
+                    ("0xsector", "xyz:MU"),
+                    1_000,
+                    10,
+                    0,
+                    10,
+                    900,
+                    False,
+                    False,
+                    1,
+                )
+
+            open_position.assert_not_called()
+            self.assertEqual(obs.hb.get("skip_sector_disabled"), 1)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -81,6 +82,27 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertTrue(reset)
         self.assertEqual(resolved, manual)
+
+    def test_load_portfolio_fills_filters_disallowed_wallet_sectors(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO watchlist (rank,addr,score,sector_policy_json,updated_at) VALUES "
+            "(1,'0xaaa',0.9,?,'now')",
+            (json.dumps({"crypto": {"allow": True}, "stock": {"allow": False}, "allowed": ["crypto"]}),),
+        )
+        rows = [
+            ("0xaaa", 1, 1_000, {"time": 1_000, "tid": 1, "coin": "BTC", "side": "B", "sz": "1", "px": "100", "startPosition": "0"}),
+            ("0xaaa", 2, 2_000, {"time": 2_000, "tid": 2, "coin": "xyz:MU", "side": "B", "sz": "1", "px": "900", "startPosition": "0"}),
+        ]
+        db.executemany(
+            "INSERT INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)",
+            [(addr, tid, ts, json.dumps(fill)) for addr, tid, ts, fill in rows],
+        )
+        db.commit()
+
+        fills = auto_tune._load_portfolio_fills(db, ["0xaaa"], 0)
+
+        self.assertEqual([x["coin"] for x in fills], ["BTC"])
 
     def test_candidate_margin_tune_changes_max_bounds_only(self):
         follow = {

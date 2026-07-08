@@ -374,6 +374,78 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(reason, "ok")
         self.assertEqual(m["copy_bt_7d_closed_n"], 2)
 
+    def test_sector_copy_gate_keeps_wallet_when_crypto_copy_wins_and_stock_loses(self):
+        m = {"net_pnl": 1000.0, "roi_total": 0.1, "net_30d": 1000.0, "net_life": 3000.0}
+        p = SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
+                            copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0)
+
+        ok, reason = scanner_copy_bt.apply_sector_copy_bt_gate(
+            m,
+            {
+                30: {"copy_net_pnl": -600.0, "copy_win_rate": 0.4, "closed_n": 20,
+                     "opened_n": 20, "target_open_events": 20, "liquidations": 0, "fee_drag": 15.0},
+                14: {"copy_net_pnl": -300.0, "copy_win_rate": 0.4, "closed_n": 12,
+                     "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 8.0},
+                7: {"copy_net_pnl": -120.0, "copy_win_rate": 0.4, "closed_n": 8,
+                    "opened_n": 8, "target_open_events": 8, "liquidations": 0, "fee_drag": 4.0},
+            },
+            {
+                "crypto": {
+                    30: {"copy_net_pnl": 1200.0, "copy_win_rate": 0.7, "closed_n": 10, "wins": 7,
+                         "opened_n": 10, "target_open_events": 10, "liquidations": 0, "fee_drag": 7.0},
+                    14: {"copy_net_pnl": 600.0, "copy_win_rate": 0.67, "closed_n": 6, "wins": 4,
+                         "opened_n": 6, "target_open_events": 6, "liquidations": 0, "fee_drag": 4.0},
+                    7: {"copy_net_pnl": 240.0, "copy_win_rate": 0.6, "closed_n": 5, "wins": 3,
+                        "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
+                },
+                "stock": {
+                    30: {"copy_net_pnl": -1800.0, "copy_win_rate": 0.2, "closed_n": 10, "wins": 2,
+                         "opened_n": 10, "target_open_events": 10, "liquidations": 0, "fee_drag": 8.0},
+                    14: {"copy_net_pnl": -900.0, "copy_win_rate": 0.17, "closed_n": 6, "wins": 1,
+                         "opened_n": 6, "target_open_events": 6, "liquidations": 0, "fee_drag": 4.0},
+                    7: {"copy_net_pnl": -360.0, "copy_win_rate": 0.2, "closed_n": 5, "wins": 1,
+                        "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
+                },
+            },
+            p,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        policy = json.loads(m["sector_policy_json"])
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertFalse(policy["stock"]["allow"])
+        self.assertEqual(m["copy_bt_net_pnl"], -600.0)
+
+    def test_sector_copy_gate_rejects_wallet_with_no_profitable_sector(self):
+        m = {"net_pnl": 100.0, "roi_total": 0.1, "net_30d": 100.0, "net_life": 300.0}
+        p = SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
+                            copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0)
+
+        ok, reason = scanner_copy_bt.apply_sector_copy_bt_gate(
+            m,
+            {
+                30: {"copy_net_pnl": -100.0, "closed_n": 14, "opened_n": 14, "target_open_events": 14},
+                14: {"copy_net_pnl": -60.0, "closed_n": 8, "opened_n": 8, "target_open_events": 8},
+                7: {"copy_net_pnl": -30.0, "closed_n": 6, "opened_n": 6, "target_open_events": 6},
+            },
+            {
+                "crypto": {
+                    30: {"copy_net_pnl": -40.0, "closed_n": 7, "opened_n": 7, "target_open_events": 7},
+                    14: {"copy_net_pnl": -20.0, "closed_n": 5, "opened_n": 5, "target_open_events": 5},
+                },
+                "stock": {
+                    30: {"copy_net_pnl": -60.0, "closed_n": 7, "opened_n": 7, "target_open_events": 7},
+                    14: {"copy_net_pnl": -40.0, "closed_n": 5, "opened_n": 5, "target_open_events": 5},
+                },
+            },
+            p,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "copy_backtest_no_profitable_sector")
+
     def test_regate_rejects_profile_when_copy_backtest_loses(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -627,6 +699,47 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual([(r[0], r[1], r[2], r[3]) for r in rows],
                              [(1, "0xaaa", 0.93, "2026-07-06T00:00:00Z"),
                               (2, "0xbbb", 0.82, "2026-07-06T00:00:00Z")])
+
+    def test_refresh_watchlist_denormalizes_sector_policy_for_observer(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row(
+                    "0xsector",
+                    "active",
+                    0.80,
+                    copy_bt_net_pnl=1000,
+                    copy_bt_14d_net_pnl=600,
+                    copy_bt_7d_net_pnl=250,
+                    copy_bt_closed_n=12,
+                    copy_bt_14d_closed_n=6,
+                    copy_bt_7d_closed_n=5,
+                    sector_policy_json=json.dumps({
+                        "crypto": {"allow": True},
+                        "stock": {"allow": False},
+                        "allowed": ["crypto"],
+                    }),
+                    sector_copy_json=json.dumps({
+                        "crypto": {"30": {"copy_net_pnl": 1000, "closed_n": 12}},
+                        "stock": {"30": {"copy_net_pnl": -500, "closed_n": 12}},
+                    }),
+                ),
+            )
+            db.commit()
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok", "reason": "portfolio_topn", "line": 0.60, "count": 1,
+            }):
+                scanner.refresh_watchlist(db, "2026-07-06T00:00:00Z")
+
+            row = db.execute(
+                "SELECT sector_policy_json,sector_copy_json FROM watchlist WHERE addr='0xsector'"
+            ).fetchone()
+            self.assertIn('"stock"', row[0])
+            self.assertIn('"crypto"', row[1])
 
     def test_ensure_watchlist_current_ignores_rank_order_changes(self):
         with tempfile.TemporaryDirectory() as td:

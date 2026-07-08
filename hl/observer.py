@@ -30,6 +30,7 @@ from . import config, rest, volatility, ws
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
 from .copy_engine import OpenSizingParams, plan_open_sizing, stop_px as engine_stop_px, tier_for_sigma
 from .fill_transition import classify_fill_transition
+from .sector import parse_json_obj, policy_allows_coin
 from .util import f, now_iso, now_ms
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
@@ -126,6 +127,7 @@ class Observer:
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
         #                                  EXIT-ONLY: follow their reduce/close, never open a NEW position
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
+        self.target_sector_policy: dict = {}  # addr -> sector allow/deny policy from watchlist
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.mark_mid: dict = {}         # coin -> authoritative display/risk mark (builder allMids, etc.)
         self.mark_write_ms: dict = {}    # coin -> last DB mark write ms (throttle BBO-triggered writes)
@@ -200,6 +202,9 @@ class Observer:
         """A coin we can copy + price: crypto perp, or transparent builder perp (stock/commodity).
         Opaque/unknown names are skipped (and subscribing their bbo would close the WS anyway)."""
         return bool(coin) and (not self.valid_coins or coin in self.valid_coins)
+
+    def _sector_allowed(self, addr: str, coin: str) -> bool:
+        return policy_allows_coin(self.target_sector_policy.get((addr or "").lower()), coin, default=True)
 
     # -- pricing off the live book -------------------------------------------
     def _fill_px(self, coin, is_buy, maker, fallback):
@@ -384,6 +389,10 @@ class Observer:
         self.seed_coins = seed
         self.target_acct = {a: v for a, v in                 # conviction denominator (target's account)
                             self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
+        self.target_sector_policy = {
+            (r[0] or "").lower(): parse_json_obj(r[1])
+            for r in self.db.execute("SELECT addr, sector_policy_json FROM watchlist").fetchall()
+        }
         # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
         held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
@@ -1000,13 +1009,15 @@ class Observer:
         if ep is None:
             if (transition in ("open", "flip") and abs(pos1) >= config.FLAT
                     and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
-                    and not self.paused):               # dashboard pause = no new opens (existing keep to close)
+                    and not self.paused                 # dashboard pause = no new opens (existing keep to close)
+                    and self._sector_allowed(addr, coin)):
                 self._open_position(addr, coin, t, px, pos1, our_maker, oid, book)
             elif abs(pos1) < config.FLAT:
                 pass                                    # target closed a position we never held — nothing to copy
             else:                                       # a fresh open we chose not to take → tally the reason
                 self._tally("skip_paused" if self.paused else
                             "skip_heldoff" if addr in self.held_off else
+                            "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
                             "skip_midway", book)         # midway = target already in the position when we saw it
             return
         if transition == "flip":
@@ -1022,6 +1033,11 @@ class Observer:
             if oid is not None and oid in ep.get("seen_oids", ()):
                 return
             ep.setdefault("seen_oids", set()).add(oid)
+            if self.paused or addr in self.held_off or not self._sector_allowed(addr, coin):
+                self._tally("skip_paused_add" if self.paused else
+                            "skip_heldoff_add" if addr in self.held_off else
+                            "skip_sector_add", book)
+                return
             asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, our_maker, oid, book))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
@@ -1033,7 +1049,7 @@ class Observer:
                                  closing=True, liq=liq, maker=maker, oid=oid, book=book)
         if (addr, coin) in book.open_ep:
             return
-        if addr in self.held_off or self.paused:
+        if addr in self.held_off or self.paused or not self._sector_allowed(addr, coin):
             return
         self._open_position(addr, coin, t, master_px, pos1, maker, oid, book)
 

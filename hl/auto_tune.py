@@ -17,6 +17,7 @@ from typing import Iterable
 from . import config, params
 from .copy_backtest import run_backtest
 from .fills import is_spot
+from .sector import parse_json_obj, policy_allows_coin
 from .util import now_iso
 
 MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
@@ -272,6 +273,10 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
     if not addrs:
         return []
     qs = ",".join("?" for _ in addrs)
+    policies = {
+        (r[0] or "").lower(): parse_json_obj(r[1])
+        for r in db.execute(f"SELECT addr,sector_policy_json FROM watchlist WHERE addr IN ({qs})", addrs).fetchall()
+    }
     rows = db.execute(
         f"SELECT addr,fill_json FROM candidate_fills WHERE addr IN ({qs}) AND time>=? ORDER BY time",
         (*addrs, int(start_ms or 0)),
@@ -286,6 +291,8 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
             continue
         coin = fill.get("coin") or ""
         if not coin or is_spot(coin):
+            continue
+        if not policy_allows_coin(policies.get((addr or "").lower()), coin, default=True):
             continue
         fill["user"] = (addr or "").lower()
         out.append(fill)

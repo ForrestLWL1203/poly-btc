@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_bt_14d_closed_n INTEGER DEFAULT 0,
     copy_bt_7d_net_pnl REAL,              -- short-term copy replay net PnL (7d confirmation)
     copy_bt_7d_closed_n INTEGER DEFAULT 0,
+    sector_copy_json TEXT,                -- per-sector copy replay summaries (crypto/stock windows)
+    sector_policy_json TEXT,              -- per-sector allow/deny policy consumed by observer
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -159,6 +161,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     margin_type    TEXT,
     cur_leverage   REAL,
     liq_worst_pct  REAL,
+    sector_copy_json TEXT,
+    sector_policy_json TEXT,
     times_active   INTEGER,
     first_added    TEXT,
     last_fill_ms   INTEGER,
@@ -242,8 +246,9 @@ PROFILE_COLS = (
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_max_dd,pf_turnover,pf_edge_bps,"
     "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,copy_bt_liquidations,copy_bt_fee_drag,"
     "copy_bt_14d_net_pnl,copy_bt_14d_closed_n,copy_bt_7d_net_pnl,copy_bt_7d_closed_n,"
+    "sector_copy_json,sector_policy_json,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 85 columns
+)  # 87 columns
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -556,6 +561,10 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_bt_14d_closed_n INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_bt_7d_net_pnl REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_7d_closed_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN sector_copy_json TEXT",
+    "ALTER TABLE profile ADD COLUMN sector_policy_json TEXT",
+    "ALTER TABLE watchlist ADD COLUMN sector_copy_json TEXT",
+    "ALTER TABLE watchlist ADD COLUMN sector_policy_json TEXT",
     # 盈亏比 (avg_win/avg_loss) + 平均赢/亏 — 大亏小赚 & 低胜率真趋势客的判据
     "ALTER TABLE profile ADD COLUMN avg_win REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN avg_loss REAL DEFAULT 0",
