@@ -509,8 +509,15 @@ function WalletDrawer({ address, onClose }) {
     <React.Fragment>
       <div className="scrim" onClick={onClose} />
       <div className="drawer">
-        <h3>{short(address)}</h3>
-        <div className="muted" style={{ marginBottom: 18 }}>排名 #{d ? (d.rank != null ? d.rank : "—") : "—"} · {d ? d.marketType : ""}</div>
+        <div className="drawer-head">
+          <div>
+            <h3>{short(address)}</h3>
+            <div className="muted">排名 #{d ? (d.rank != null ? d.rank : "—") : "—"} · {d ? d.marketType : ""}</div>
+          </div>
+          <button className="drawer-close" type="button" onClick={onClose} aria-label="关闭跟单记录" title="关闭">
+            <Ico d={IC.close} />
+          </button>
+        </div>
         {!d ? <div className="loading">加载中…</div> : (
           <React.Fragment>
             <div className="card" style={{ marginBottom: 14 }}>

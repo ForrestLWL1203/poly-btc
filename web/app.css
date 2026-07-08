@@ -268,6 +268,12 @@ th.sortable:hover .sort-ind { opacity: .85; }
   overflow-y: auto; animation: slide .26s; }
 @keyframes slide { from { transform: translateX(30px); opacity: .4; } }
 .drawer h3 { margin: 0 0 4px; font-size: 16px; }
+.drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.drawer-close { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--glass-border);
+  background: rgba(255,255,255,.06); color: var(--t2); cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; flex: 0 0 auto; transition: background .15s, color .15s; }
+.drawer-close:hover { background: rgba(255,255,255,.1); color: var(--t1); }
+.drawer-close svg { width: 16px; height: 16px; }
 
 /* modal */
 .modal { width: 380px; padding: 22px; border-radius: 18px; background: rgba(20,20,24,.96);
@@ -590,6 +596,18 @@ th.sortable:hover .sort-ind { opacity: .85; }
     padding: 18px 14px calc(96px + env(safe-area-inset-bottom));
     border-left: none;
   }
+  .drawer-head {
+    position: sticky;
+    top: -18px;
+    z-index: 2;
+    margin: -18px -14px 16px;
+    padding: calc(18px + env(safe-area-inset-top)) 14px 12px;
+    background: linear-gradient(180deg, rgba(18,18,22,.98), rgba(18,18,22,.92));
+    border-bottom: 1px solid var(--glass-border);
+    backdrop-filter: blur(22px) saturate(145%);
+    -webkit-backdrop-filter: blur(22px) saturate(145%);
+  }
+  .drawer-close { width: 38px; height: 38px; border-radius: 12px; color: var(--t1); }
   .drawer .card { padding: 13px; }
   .modal {
     width: calc(100vw - 28px);
