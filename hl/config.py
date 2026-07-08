@@ -49,6 +49,8 @@ AUTO_FOLLOW_PORTFOLIO_ENABLE = True   # before final line, replay top-N prefixes
 AUTO_FOLLOW_PORTFOLIO_MIN_OPEN_FIT = 0.70
 AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN = 250.0
 AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN = 0.08
+AUTO_FOLLOW_KEEP_BONUS = 0.020    # hysteresis: previous followed wallet gets +2 display points if still eligible
+AUTO_FOLLOW_KEEP_MIN_SCORE = 0.60 # never stabilize a wallet below the hard quality floor
 # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — evidence is enforced once at profile time by the
 #  scanner EVIDENCE gate (EVIDENCE_MIN_DAYS / EVIDENCE_MIN_TRADES); no separate follow-time re-check needed)
 #                             A 100%-win-on-3-trades wallet scores low (evidence multiplier) but still clears

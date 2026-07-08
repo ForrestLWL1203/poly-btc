@@ -591,7 +591,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual(n, 2)
             rows = db.execute("SELECT rank,addr,score,updated_at FROM watchlist ORDER BY rank").fetchall()
             self.assertEqual([(r[0], r[1], r[2], r[3]) for r in rows],
-                             [(1, "0xaaa", 0.91, "2026-07-06T00:00:00Z"),
+                             [(1, "0xaaa", 0.93, "2026-07-06T00:00:00Z"),
                               (2, "0xbbb", 0.82, "2026-07-06T00:00:00Z")])
 
     def test_ensure_watchlist_current_ignores_rank_order_changes(self):
@@ -806,6 +806,99 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertAlmostEqual(float(line), 0.799999999)
             self.assertIn("portfolio_topn", cmd)
             self.assertIn('"count": 2', cmd)
+
+    def test_refresh_watchlist_applies_keep_bonus_to_previous_followed_wallet(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute("UPDATE params SET value='0.70' WHERE key='MIN_FOLLOW_SCORE'")
+            db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xold',0.72,'old')")
+            cols = storage.PROFILE_COLS.split(",")
+            ready = dict(
+                copy_bt_net_pnl=1000,
+                copy_bt_14d_net_pnl=500,
+                copy_bt_7d_net_pnl=200,
+                copy_bt_closed_n=12,
+                copy_bt_14d_closed_n=8,
+                copy_bt_7d_closed_n=5,
+                copy_bt_open_fill_rate=0.9,
+            )
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xnew", "active", 0.90, **ready),
+                    _profile_row("0xold", "active", 0.80, **ready),
+                    _profile_row("0xtail", "active", 0.70, **ready),
+                ],
+            )
+            db.commit()
+
+            def fake_score(row):
+                return {
+                    "0xnew": (0.75, {"reasons": ["mock"]}),
+                    "0xold": (0.72, {"reasons": ["mock"]}),
+                    "0xtail": (0.68, {"reasons": ["mock"]}),
+                }[row["addr"]]
+
+            with patch.object(scanner.follow_score, "compute_follow_score", side_effect=fake_score), \
+                    patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                        "status": "ok",
+                        "reason": "portfolio_topn",
+                        "line": 0.735,
+                        "count": 2,
+                    }):
+                scanner.refresh_watchlist(db, "2026-07-08T00:00:00Z", source="scan")
+
+            line = float(db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0])
+            rows = db.execute("SELECT addr,score FROM watchlist WHERE score>=? ORDER BY rank", (line,)).fetchall()
+            self.assertEqual([r[0] for r in rows], ["0xnew", "0xold"])
+            self.assertAlmostEqual(dict(rows)["0xold"], 0.74)
+            audit = db.execute(
+                "SELECT payload_json FROM pipeline_audit WHERE stage='watchlist' AND addr='0xold'"
+            ).fetchone()
+            self.assertEqual(json.loads(audit[0])["followDetail"]["stability"]["status"], "keep_bonus")
+
+    def test_refresh_watchlist_does_not_stabilize_thin_recent_wallet(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute("UPDATE params SET value='0.70' WHERE key='MIN_FOLLOW_SCORE'")
+            db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xold',0.72,'old')")
+            cols = storage.PROFILE_COLS.split(",")
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row(
+                    "0xold",
+                    "active",
+                    0.80,
+                    copy_bt_net_pnl=1000,
+                    copy_bt_14d_net_pnl=500,
+                    copy_bt_7d_net_pnl=200,
+                    copy_bt_closed_n=12,
+                    copy_bt_14d_closed_n=8,
+                    copy_bt_7d_closed_n=2,
+                    copy_bt_open_fill_rate=0.9,
+                ),
+            )
+            db.commit()
+
+            with patch.object(scanner.follow_score, "compute_follow_score", return_value=(0.72, {"reasons": ["mock"]})), \
+                    patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                        "status": "ok",
+                        "reason": "portfolio_topn",
+                        "line": 0.70,
+                        "count": 1,
+                    }):
+                scanner.refresh_watchlist(db, "2026-07-08T00:00:00Z", source="scan")
+
+            line = float(db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0])
+            score = db.execute("SELECT score FROM watchlist WHERE addr='0xold'").fetchone()[0]
+            self.assertLess(score, line)
+            audit = db.execute(
+                "SELECT reason,payload_json FROM pipeline_audit WHERE stage='watchlist' AND addr='0xold'"
+            ).fetchone()
+            self.assertEqual(audit[0], "thin_recent")
+            self.assertEqual(json.loads(audit[1])["followDetail"]["stability"]["status"], "ineligible")
 
     def test_post_scan_pipeline_sets_follow_line_before_auto_tune(self):
         with tempfile.TemporaryDirectory() as td:

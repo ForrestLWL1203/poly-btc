@@ -127,7 +127,8 @@ def record_follow_line_choice(db: sqlite3.Connection, stamp: str, source: str, c
     )
 
 
-def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, follow_line: float) -> None:
+def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, follow_line: float,
+                              detail_by_addr: dict | None = None) -> None:
     _delete_stage(db, stamp, source, "watchlist")
     rows = _fetch_dicts(db.execute(
         "SELECT w.rank,w.addr,w.score AS follow_score,p.score AS raw_score,p.reason,"
@@ -138,9 +139,10 @@ def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, f
         "LEFT JOIN target_controls c ON c.addr=w.addr ORDER BY w.rank"
     ))
     for r in rows:
+        detail = (detail_by_addr or {}).get(r["addr"]) or {}
         enabled = int(r["enabled"] if r["enabled"] is not None else 1) == 1
         followed = enabled and float(r["follow_score"] or 0.0) >= float(follow_line or 0.0)
-        eligibility = follow_score.evaluate_follow_eligibility(r)
+        eligibility = detail.get("follow_eligibility") or follow_score.evaluate_follow_eligibility(r)
         if not enabled:
             status, reason = "disabled", "operator_disabled"
         elif not eligibility.get("eligible"):
@@ -165,6 +167,7 @@ def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, f
                 "feeDrag": r["copy_bt_fee_drag"],
             },
             "followEligibility": eligibility,
+            "followDetail": detail.get("follow_detail"),
         }
         _insert_event(
             db,

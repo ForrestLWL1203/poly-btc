@@ -425,6 +425,15 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     """Rebuild OUR tiny leaderboard (watchlist) from active profiles. Derived view —
     profile stays the source of truth; operator settings in target_controls survive."""
     params.seed_params(db)
+    prev_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
+    prev_followed = {
+        (r[0] or "").lower()
+        for r in db.execute(
+            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
+            "WHERE w.score>=? AND COALESCE(c.enabled,1)=1",
+            (prev_line,),
+        ).fetchall()
+    }
     db.execute("DELETE FROM watchlist")
     cur = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
@@ -442,11 +451,31 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     ranked = []
     for r in rows:
         score, detail = follow_score.compute_follow_score(r)
+        detail = dict(detail or {})
         eligibility = follow_score.evaluate_follow_eligibility(r)
+        base_score = float(score or 0.0)
+        stability = {
+            "previouslyFollowed": (r["addr"] or "").lower() in prev_followed,
+            "baseFollowScore": base_score,
+            "bonus": 0.0,
+            "status": "new_or_unfollowed",
+        }
         if not eligibility.get("eligible"):
             floor = float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60))
             score = min(score, max(0.0, floor - 1e-9))
             detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
+            stability["status"] = "ineligible" if stability["previouslyFollowed"] else "new_or_unfollowed"
+        elif stability["previouslyFollowed"]:
+            keep_min = float(getattr(config, "AUTO_FOLLOW_KEEP_MIN_SCORE", 0.60))
+            if base_score >= keep_min:
+                bonus = float(getattr(config, "AUTO_FOLLOW_KEEP_BONUS", 0.0) or 0.0)
+                if bonus > 0:
+                    score = min(1.0, base_score + bonus)
+                    stability["bonus"] = score - base_score
+                    stability["status"] = "keep_bonus"
+            else:
+                stability["status"] = "too_weak_to_keep"
+        detail["stability"] = stability
         r["follow_detail"] = detail
         r["follow_eligibility"] = eligibility
         r["follow_score"] = score
@@ -501,7 +530,14 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
     # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
     line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    pipeline_audit.record_watchlist_snapshot(db, stamp, source, line)
+    detail_by_addr = {
+        r["addr"]: {
+            "follow_detail": r.get("follow_detail"),
+            "follow_eligibility": r.get("follow_eligibility"),
+        }
+        for r in ranked
+    }
+    pipeline_audit.record_watchlist_snapshot(db, stamp, source, line, detail_by_addr)
     db.executemany(
         "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) VALUES (?,?,?) "
         "ON CONFLICT(addr) DO UPDATE SET last_followed_at=excluded.last_followed_at, "
