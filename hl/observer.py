@@ -1011,13 +1011,9 @@ class Observer:
             return
         if transition == "flip":
             ep["master_peak"] = max(ep["master_peak"], abs(pos0))
-            if liq:
-                ep["was_liq"] = 1
             asyncio.create_task(self._apply_flip(addr, coin, ep, t, px, pos0, pos1, liq, our_maker, oid, book))
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
-        if liq:
-            ep["was_liq"] = 1
         if transition == "add":
             # A scale-in is a NEW ORDER (new oid) growing the position. Same-oid continued fills are
             # one resting order filling over time (slices) — aggregateByTime only merges same-INSTANT
@@ -1293,10 +1289,14 @@ class Observer:
                                 -close_size * ep["sign"], exit_px, pnl, slip, book=book)
             status = ("liquidated" if (closing and liq) else "stopped" if (closing and stop)
                       else "gap_closed" if (closing and gap) else "closed" if closing else "open")
+            was_liq = 1 if (closing and liq) else 0
+            was_stopped = 1 if (closing and stop) else 0
+            ep["was_liq"] = was_liq
+            ep["was_stopped"] = was_stopped
             self.db.execute(
                 f"UPDATE {book.pos_table} SET rem_size=?,realized_pnl=?,mae_pct=?,was_liq=?,was_stopped=?,status=?,"
                 "closed_at=? WHERE pos_id=?", (ep["rem_size"], ep["realized_pnl"], ep["mae"],
-                ep.get("was_liq", 0), ep.get("was_stopped", 0), status,
+                was_liq, was_stopped, status,
                 now_iso() if closing else None, ep["pos_id"]))
             self._save_account(book)
             self.db.commit()
@@ -1312,7 +1312,6 @@ class Observer:
         if ep.get("liquidating") or (addr, coin) not in book.open_ep:
             return
         ep["liquidating"] = True
-        ep["was_liq"] = 1                             # isolated stop-out at liq_px: loss = remaining margin
         await self._apply_reduce(addr, coin, ep, now_ms(), ep["liq_px"], 0.0, 0.0,
                                  closing=True, liq=True, maker=False, forced_px=ep["liq_px"], book=book)
 
@@ -1334,7 +1333,6 @@ class Observer:
         if ep.get("stopping") or ep.get("liquidating") or (addr, coin) not in book.open_ep:
             return
         ep["stopping"] = True
-        ep["was_stopped"] = 1
         await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
                                  closing=True, liq=False, maker=False, forced_px=mid, stop=True, book=book)
 

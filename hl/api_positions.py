@@ -15,6 +15,15 @@ def _follow_set_cte() -> str:
     )
 
 
+def _close_type(row) -> str:
+    status = row["status"] if "status" in row.keys() else None
+    if status == "liquidated":
+        return "liq"
+    if status == "stopped":
+        return "stop"
+    return "mirror"
+
+
 def ep_positions(db, qs):
     status = (qs.get("status", ["open"])[0])
     line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
@@ -25,14 +34,25 @@ def ep_positions(db, qs):
                 where.append(f"{col}=?")
                 args.append(qs[key][0])
         rows = qall(db, _follow_set_cte() +
-                    "SELECT cp.pos_id,cp.coin,cp.side,cp.realized_pnl,cp.opened_at,cp.closed_at,"
+                    ", closed_base AS ("
+                    "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                     "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
-                    "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,w.rank AS wrank,fs.follow_pos "
-                    "FROM copy_position cp "
-                    "LEFT JOIN watchlist w ON w.addr=cp.addr "
-                    "LEFT JOIN follow_set fs ON fs.addr=cp.addr "
-                    "WHERE " + " AND ".join(where) +
-                    " ORDER BY cp.closed_at DESC LIMIT 100", tuple([line] + args))
+                    "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr "
+                    "FROM copy_position cp WHERE " + " AND ".join(where) +
+                    " ORDER BY cp.closed_at DESC LIMIT 100"
+                    "), exit_fills AS ("
+                    "SELECT ca.pos_id,"
+                    "SUM(ABS(ca.our_qty_delta)*ca.our_px)/NULLIF(SUM(ABS(ca.our_qty_delta)),0) AS exit_px "
+                    "FROM copy_action ca JOIN closed_base cb ON cb.pos_id=ca.pos_id "
+                    "WHERE ca.action IN ('reduce','close') AND ABS(ca.our_qty_delta)>1e-12 "
+                    "AND ca.our_px IS NOT NULL GROUP BY ca.pos_id"
+                    ") "
+                    "SELECT cb.*,w.rank AS wrank,fs.follow_pos,ef.exit_px "
+                    "FROM closed_base cb "
+                    "LEFT JOIN watchlist w ON w.addr=cb.addr "
+                    "LEFT JOIN follow_set fs ON fs.addr=cb.addr "
+                    "LEFT JOIN exit_fills ef ON ef.pos_id=cb.pos_id "
+                    "ORDER BY cb.closed_at DESC", tuple([line] + args))
         out = []
         for r in rows:
             o, c = iso_epoch(r["opened_at"]), iso_epoch(r["closed_at"])
@@ -40,12 +60,14 @@ def ep_positions(db, qs):
             entry = r["entry_px"]
             notl = r["notional"] or 0.0
             size = (notl / entry) if entry else 0.0
-            close_px = (entry + (1 if r["side"] == "long" else -1) * pnl / size) if size else None
+            close_px = r["exit_px"]
+            if close_px is None:
+                close_px = (entry + (1 if r["side"] == "long" else -1) * pnl / size) if size else None
             out.append({"id": f"cls_{r['pos_id']}", "coin": r["coin"], "side": r["side"],
                         "realizedPnl": pnl, "durationSec": int(c - o) if (o and c) else None,
                         "closedAt": c,
                         "result": "win" if pnl > 0 else "loss", "wallet": r["addr"],
-                        "closeType": "liq" if r["was_liq"] else ("stop" if r["was_stopped"] else "mirror"),
+                        "closeType": _close_type(r),
                         "walletRank": r["wrank"],
                         "followPos": r["follow_pos"],
                         "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
@@ -164,7 +186,7 @@ def ep_position_detail(db, pos_id):
         })
     return {
         "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"],
-        "closeType": "liq" if p["was_liq"] else ("stop" if p["was_stopped"] else "mirror"),
+        "closeType": _close_type(p),
         "masterAdds": (c["m_adds"] if c else 0) or 0, "ourAdds": (c["our_adds"] if c else 0) or 0,
         "masterEntry": p["master_open_px"], "ourEntry": p["entry_px"], "ourLeverage": lev,
         "ourMargin": p["margin"] or 0.0,

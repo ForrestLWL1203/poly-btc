@@ -69,6 +69,45 @@ class ApiPositionsPerfTests(unittest.TestCase):
 
         self.assertEqual(res["positions"][0]["followPos"], 1)
 
+    def test_closed_position_close_type_follows_terminal_status_not_stale_flag(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO copy_position "
+            "(addr,coin,side,status,realized_pnl,entry_px,leverage,notional,master_peak_sz,"
+            "master_open_px,was_stopped,was_liq,opened_at,closed_at,add_count) "
+            "VALUES ('0xaaa','DOGE','long','closed',-10,100,4,400,4,100,0,1,"
+            "'2026-01-01T00:00:00Z','2026-01-01T02:00:00Z',0)"
+        )
+        db.commit()
+
+        res = api_positions.ep_positions(db, {"status": ["closed"], "coin": ["DOGE"]})
+
+        self.assertEqual(res["positions"][0]["closeType"], "mirror")
+
+    def test_closed_position_uses_actual_exit_action_average_for_close_px(self):
+        db = self._db()
+        pos_id = db.execute(
+            "INSERT INTO copy_position "
+            "(addr,coin,side,status,realized_pnl,entry_px,leverage,notional,master_peak_sz,"
+            "master_open_px,was_stopped,was_liq,opened_at,closed_at,add_count) "
+            "VALUES ('0xaaa','SOL','long','closed',-10,100,4,1000,10,100,0,0,"
+            "'2026-01-01T00:00:00Z','2026-01-01T02:00:00Z',0)"
+        ).lastrowid
+        db.executemany(
+            "INSERT INTO copy_action "
+            "(pos_id,addr,coin,ts,action,our_px,our_qty_delta,realized_pnl) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [
+                (pos_id, "0xaaa", "SOL", 1000, "reduce", 90, -3, -30),
+                (pos_id, "0xaaa", "SOL", 2000, "close", 96, -1, 20),
+            ],
+        )
+        db.commit()
+
+        res = api_positions.ep_positions(db, {"status": ["closed"], "coin": ["SOL"]})
+
+        self.assertAlmostEqual(res["positions"][0]["closePx"], 91.5)
+
     def test_positions_endpoints_are_split_from_api_module(self):
         self.assertIsNotNone(util.find_spec("hl.api_positions"))
         api_positions = import_module("hl.api_positions")

@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+import asyncio
 from pathlib import Path
 
 from hl import storage
@@ -56,6 +57,49 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         mu = db.execute("SELECT mark_px,unrealized_pnl FROM copy_position WHERE coin='xyz:MU'").fetchone()
         self.assertEqual(mu["mark_px"], 937)
         self.assertEqual(mu["unrealized_pnl"], 37)
+
+    def test_normal_close_does_not_persist_stale_liquidation_flag(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
+                "VALUES ('0xliq','DOGE','long','open',100,4,100,400,4,4,'2026-01-01T00:00:00Z')"
+            ).lastrowid
+            db.commit()
+            obs = Observer(db, [], {})
+            ready = asyncio.Event()
+            ready.set()
+            ep = {
+                "pos_id": pos_id,
+                "side": "long",
+                "sign": 1,
+                "entry_px": 100,
+                "leverage": 4,
+                "margin": 100,
+                "notional": 400,
+                "size": 4,
+                "rem_size": 4,
+                "realized_pnl": 0.0,
+                "mae": 0.0,
+                "num_actions": 0,
+                "master_peak": 4,
+                "entries_ready": ready,
+                "lock": asyncio.Lock(),
+                "was_liq": 1,
+            }
+            obs.taker.open_ep[("0xliq", "DOGE")] = ep
+
+            await obs._apply_reduce(
+                "0xliq", "DOGE", ep, 1_000, 99, -4, 0,
+                closing=True, liq=False, maker=False, forced_px=99,
+            )
+
+            row = db.execute("SELECT status,was_liq FROM copy_position WHERE pos_id=?", (pos_id,)).fetchone()
+            self.assertEqual(row["status"], "closed")
+            self.assertEqual(row["was_liq"], 0)
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":
