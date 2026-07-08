@@ -78,7 +78,7 @@ class SSHExecutor(Executor):
         self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         self._client.connect(host, port=port, username=user, password=password,
                              key_filename=key_filename, timeout=timeout,
-                             allow_agent=bool(key_filename), look_for_keys=bool(key_filename))
+                             allow_agent=False, look_for_keys=False)
         self._sftp = None
 
     def run(self, cmd, on_line=None, timeout=None):

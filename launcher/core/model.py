@@ -15,7 +15,7 @@ class DeployConfig:
     user: str = "root"
     password: str | None = None          # first-login password (dropped after key install)
     ssh_port: int = 22
-    key_path: str | None = None          # local private key (used once installed)
+    key_path: str | None = None          # local private key (launcher-managed by default, or operator-supplied)
     pubkey: str | None = None            # local public key text (installed into authorized_keys)
 
     # target layout

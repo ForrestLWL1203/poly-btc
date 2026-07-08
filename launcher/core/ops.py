@@ -69,14 +69,26 @@ def update(cfg):
 
 
 def reset_params(cfg, category=None):
-    """恢复默认参数 on the target — force-overwrite the params table to config defaults, then nudge
-    the observer to reload. category None = all; 'follow'/'scanner' = one tab."""
+    """恢复默认参数 on the target — force-overwrite the params table to config defaults, then enqueue
+    a follow-param reload command when relevant. category None = all; 'follow'/'scanner' = one tab."""
     ex, _ = _conn(cfg)
     try:
         cat = "None" if not category else repr(category)
-        py = ("from hl import storage, params; "
+        py = ("import json; "
+              "from hl import storage, params; "
+              "from hl.util import now_iso; "
               "db=storage.connect('data/hl.db', storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA); "
-              f"print('reset', params.reset_defaults(db, {cat}))")
+              f"cat={cat}; "
+              "n=params.reset_defaults(db, cat); "
+              "reload_needed = cat in (None, 'follow'); "
+              "rescan_needed = cat in (None, 'scanner'); "
+              "if reload_needed: "
+              " db.execute('INSERT INTO commands (type,payload_json,owner,status,created_at) "
+              "VALUES (?,?,?,\\'pending\\',?)', "
+              "('reload_params', json.dumps({'by':'launcher_reset_params','category':cat or 'all'}), "
+              "'launcher', now_iso())); "
+              " db.commit(); "
+              "print('reset', n, 'reload', int(reload_needed), 'rescan', int(rescan_needed))")
         r = ex.run(f'cd {cfg.app_dir} && .venv/bin/python -c "{py}"')
         return {"ok": r.ok, "out": r.out.strip()}
     finally:

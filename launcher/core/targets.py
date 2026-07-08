@@ -17,15 +17,34 @@ TARGETS_JSON = os.path.join(DATA, "targets.json")
 KEY_PATH = os.path.join(KEYS, "id_ed25519")
 
 
-def keypair():
-    """Return (private_key_path, public_key_text), generating the launcher keypair on first use."""
+def _read_pubkey_for(private_key_path):
+    pub_path = private_key_path + ".pub"
+    if os.path.exists(pub_path):
+        with open(pub_path) as f:
+            return f.read().strip()
+    r = subprocess.run(["ssh-keygen", "-y", "-f", private_key_path],
+                       check=True, capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def keypair(private_key_path=None):
+    """Return (private_key_path, public_key_text).
+
+    If a private key path is supplied, reuse it and derive/read its public key. Otherwise generate
+    the launcher-managed keypair on first use.
+    """
+    if private_key_path:
+        path = os.path.expanduser(private_key_path)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"SSH private key not found: {path}")
+        return path, _read_pubkey_for(path)
+
     os.makedirs(KEYS, exist_ok=True)
     if not os.path.exists(KEY_PATH):
         subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-q", "-f", KEY_PATH,
                         "-C", "poly-launcher"], check=True)
         os.chmod(KEY_PATH, 0o600)
-    with open(KEY_PATH + ".pub") as f:
-        return KEY_PATH, f.read().strip()
+    return KEY_PATH, _read_pubkey_for(KEY_PATH)
 
 
 def load():
@@ -44,7 +63,7 @@ def _write(items):
     os.replace(tmp, TARGETS_JSON)
 
 
-_SAVE_FIELDS = ("name", "mode", "host", "user", "ssh_port", "app_dir", "branch",
+_SAVE_FIELDS = ("name", "mode", "host", "user", "ssh_port", "key_path", "app_dir", "branch",
                 "port", "domain", "dash_user", "keyInstalled")
 
 

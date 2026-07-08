@@ -19,9 +19,10 @@ _MIME = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".j
 
 def _cfg_from_target(t, extra=None):
     """Build a DeployConfig from a saved target (+ optional per-request extras like passwords)."""
-    kp, pub = targets.keypair()
     d = dict(t or {})
     d.update(extra or {})
+    key_path_input = d.get("key_path") if d.get("mode", "vps") == "vps" else None
+    kp, pub = targets.keypair(key_path_input)
     return DeployConfig(
         mode=d.get("mode", "vps"), host=d.get("host", ""), user=d.get("user", "root"),
         password=d.get("password"), ssh_port=int(d.get("ssh_port", 22) or 22),

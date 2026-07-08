@@ -131,7 +131,7 @@ function Deploy({ meta, onDone, say }) {
     <React.Fragment>
       <div className="card">
         <h2>① 选择部署方式</h2>
-        <div className="hint">本地无需任何连接信息;远程 VPS 需要 IP 和 root 密码(仅首次用于装公钥)</div>
+        <div className="hint">本地无需任何连接信息;远程 VPS 需要 IP 和 root 密码或可用 SSH 私钥</div>
         <div className="modes">
           <div className={"mode-c" + (mode === "local" ? " on" : "")} onClick={() => pickMode("local")}>
             <div className="em">🖥</div><div className="t">本地部署</div>
@@ -155,7 +155,7 @@ function Deploy({ meta, onDone, say }) {
           </div>
           <div className="grid2">
             {F("user", "登录用户", { note: "通常 root" })}
-            {F("password", "root 密码 *", { pw: true, note: "仅首次装公钥用,不保存" })}
+            {F("password", "root 密码", { pw: true, note: "首次无可用私钥时需要,不保存" })}
           </div>
           {F("domain", "域名", { note: "可选,配了才有 HTTPS", ph: "dashboard.example.com" })}
         </React.Fragment>}
@@ -165,17 +165,18 @@ function Deploy({ meta, onDone, say }) {
         </div>
         {mode === "local" && F("app_dir", "代码目录", { note: "默认当前仓库" })}
         {mode === "vps" && <details style={{ marginTop: 4 }}>
-          <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>高级(代码目录 / 端口)</summary>
+          <summary className="muted" style={{ fontSize: 12, cursor: "pointer" }}>高级(代码目录 / 端口 / SSH key)</summary>
           <div className="grid2" style={{ marginTop: 10 }}>
             {F("app_dir", "代码目录", { note: "默认 /root/poly-btc" })}
             {F("port", "dashboard 端口", { note: "默认8810" })}
           </div>
+          {F("key_path", "SSH 私钥路径", { note: "可选;留空用 launcher 自动生成", ph: "~/.ssh/id_ed25519" })}
         </details>}
         {mode === "vps" && f.domain && <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
           ⚠ 部署前请先把 <b className="mono">{f.domain}</b> 的 DNS A 记录指向 <b className="mono">{f.host || "服务器IP"}</b>,Caddy 才能自动签发证书。</div>}
         <div className="divider" />
         <button className="btn btn-accent" onClick={start}
-          disabled={mode === "vps" && (!f.host || !f.password)}>开始部署 →</button>
+          disabled={mode === "vps" && (!f.host || (!f.password && !f.key_path))}>开始部署 →</button>
       </div>}
     </React.Fragment>
   );
