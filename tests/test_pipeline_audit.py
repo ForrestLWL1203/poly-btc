@@ -147,6 +147,20 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(event["status"], "active")
         self.assertEqual(event["payload"]["copyBt"]["14dNetPnl"], 500)
 
+    def test_pipeline_audit_endpoint_can_return_compact_payload(self):
+        db = self._db()
+        self._insert_profiles(db)
+        pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa"])
+        db.commit()
+
+        res = api_discovery.ep_pipeline_audit(db, {"limit": ["5"], "compact": ["1"]})
+
+        payload = res["events"][0]["payload"]
+        self.assertEqual(sorted(payload.keys()), ["copyBt"])
+        self.assertEqual(payload["copyBt"]["14dNetPnl"], 500)
+        self.assertNotIn("marketType", payload)
+        self.assertNotIn("openState", payload)
+
     def test_pipeline_summary_endpoint_compacts_latest_scan_decisions(self):
         db = self._db()
         self._insert_profiles(db)

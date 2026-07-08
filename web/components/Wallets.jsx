@@ -53,7 +53,7 @@ export function Wallets({ confirm, toast }) {
     setAuditOpen(s => ({ ...s, [key]: !s[key] }));
     if (!audits[key]) {
       setAudits(s => ({ ...s, [key]: { loading: true, events: [] } }));
-      api.get("/api/pipeline-audit?addr=" + encodeURIComponent(key) + "&limit=8")
+      api.get("/api/pipeline-audit?addr=" + encodeURIComponent(key) + "&limit=8&compact=1")
         .then(res => setAudits(s => ({ ...s, [key]: { loading: false, events: res.events || [] } })))
         .catch(() => setAudits(s => ({ ...s, [key]: { loading: false, error: true, events: [] } })));
     }

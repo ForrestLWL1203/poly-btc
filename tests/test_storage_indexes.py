@@ -25,6 +25,7 @@ class StorageIndexTests(unittest.TestCase):
             "idx_follow_history_last_followed",
             "idx_ep_addr_close",
             "idx_scan_runs_finished",
+            "idx_pipeline_audit_stamp_stage_id",
             "idx_pipeline_audit_stamp_source_stage_id",
             "idx_pipeline_audit_stage_id",
             "idx_pipeline_audit_addr_id",

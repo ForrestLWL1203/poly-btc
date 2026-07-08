@@ -126,9 +126,25 @@ def _limit(qs, default=100, max_limit=500):
     return max(1, min(max_limit, val))
 
 
+def _truthy(qs, key):
+    return str((qs.get(key, [""]) or [""])[0]).lower() in {"1", "true", "yes", "on"}
+
+
+def _compact_audit_payload(payload):
+    """Small payload shape used by dashboard rows; full payload remains available by default."""
+    if not payload:
+        return {}
+    keep = {}
+    for key in ("copyBt", "followEligibility"):
+        if key in payload:
+            keep[key] = payload[key]
+    return keep
+
+
 def ep_pipeline_audit(db, qs):
     """Recent scanner/follow pipeline decisions for ops debugging."""
     where, args = [], []
+    compact = _truthy(qs, "compact")
     for key in ("stamp", "source", "stage", "addr"):
         val = (qs.get(key, [None]) or [None])[0]
         if not val:
@@ -150,6 +166,8 @@ def ep_pipeline_audit(db, qs):
             payload = json.loads(r.pop("payload_json") or "{}")
         except (TypeError, ValueError):
             payload = {}
+        if compact:
+            payload = _compact_audit_payload(payload)
         events.append({
             "id": r["id"],
             "stamp": r["stamp"],
