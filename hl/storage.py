@@ -224,6 +224,9 @@ CREATE TABLE IF NOT EXISTS pipeline_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stamp_stage ON pipeline_audit(stamp DESC, stage, rank);
 CREATE INDEX IF NOT EXISTS idx_pipeline_audit_addr ON pipeline_audit(addr, stamp DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stamp_source_stage_id ON pipeline_audit(stamp DESC, source, stage, id DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stage_id ON pipeline_audit(stage, id DESC);
+CREATE INDEX IF NOT EXISTS idx_pipeline_audit_addr_id ON pipeline_audit(addr, id DESC);
 """
 
 PROFILE_COLS = (

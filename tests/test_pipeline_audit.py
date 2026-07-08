@@ -205,6 +205,32 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(res["source"], "scan")
         self.assertEqual(res["followLine"]["reason"], "portfolio_topn")
 
+    def test_pipeline_summary_does_not_group_all_audit_rows_to_find_latest_decision(self):
+        class GuardedDb:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def execute(self, sql, args=()):
+                normalized = " ".join(sql.split())
+                if "GROUP BY stamp,source" in normalized:
+                    raise AssertionError("latest pipeline decision should use indexed latest-row lookup")
+                return self.inner.execute(sql, args)
+
+        db = self._db()
+        self._insert_profiles(db)
+        pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa"])
+        pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
+            "status": "ok",
+            "reason": "portfolio_topn",
+            "line": 0.735,
+        })
+        db.commit()
+
+        res = api_discovery.ep_pipeline_summary(GuardedDb(db), {})
+
+        self.assertEqual(res["stamp"], "2026-07-07T00:00:00Z")
+        self.assertEqual(res["source"], "scan")
+
 
 if __name__ == "__main__":
     unittest.main()
