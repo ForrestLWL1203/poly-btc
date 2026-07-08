@@ -188,6 +188,8 @@ def record_auto_tune_result(db: sqlite3.Connection, stamp: str, source: str, res
     _delete_stage(db, stamp, source, "auto_tune")
     payload = {
         "status": result.get("status"),
+        "reason": result.get("reason"),
+        "error": result.get("error"),
         "applied": result.get("applied"),
         "appliedSizing": result.get("applied_sizing"),
         "appliedAdd": result.get("applied_add"),
@@ -204,6 +206,6 @@ def record_auto_tune_result(db: sqlite3.Connection, stamp: str, source: str, res
         source=source,
         stage="auto_tune",
         status=result.get("status"),
-        reason="applied" if result.get("applied") else "unchanged",
+        reason=result.get("reason") or ("applied" if result.get("applied") else "unchanged"),
         payload=payload,
     )

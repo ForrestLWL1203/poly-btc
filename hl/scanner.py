@@ -552,6 +552,14 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
     try:
         res = auto_tune.maybe_tune_margins(db, source=source, stamp=stamp)
     except Exception as exc:  # noqa: BLE001 — auto tuning must never abort discovery
+        res = {
+            "status": "error",
+            "reason": "auto_tune_exception",
+            "error": str(exc),
+            "applied": False,
+        }
+        pipeline_audit.record_auto_tune_result(db, stamp, source, res)
+        db.commit()
         print(f"auto-tune margin: skipped after {source}: {exc}", flush=True)
         return
     if res.get("status") != "ok":

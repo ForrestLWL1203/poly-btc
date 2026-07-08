@@ -1062,6 +1062,169 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchall()
             self.assertEqual([r[0] for r in followed], ["0xaaa", "0xbbb"])
 
+    def test_post_scan_pipeline_audits_auto_tune_exception(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.90),
+                    _profile_row("0xbbb", "active", 0.80),
+                ],
+            )
+            db.commit()
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok",
+                "reason": "portfolio_topn",
+                "line": 0.799999999,
+                "count": 2,
+            }), patch.object(scanner.auto_tune, "maybe_tune_margins", side_effect=RuntimeError("grid blew up")):
+                n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
+
+            self.assertEqual(n, 2)
+            row = db.execute(
+                "SELECT status,reason,payload_json FROM pipeline_audit "
+                "WHERE stamp=? AND stage='auto_tune'",
+                ("2026-07-06T00:00:00Z",),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "error")
+            self.assertEqual(row[1], "auto_tune_exception")
+            payload = json.loads(row[2])
+            self.assertIn("grid blew up", payload["error"])
+
+    def test_post_scan_pipeline_real_auto_tune_updates_params_and_reload(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xaaa", "active", 0.95, copy_bt_net_pnl=1200, copy_bt_14d_net_pnl=900,
+                                 copy_bt_7d_net_pnl=350, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
+                    _profile_row("0xbbb", "active", 0.90, copy_bt_net_pnl=1000, copy_bt_14d_net_pnl=700,
+                                 copy_bt_7d_net_pnl=250, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
+                    _profile_row("0xccc", "active", 0.70, copy_bt_net_pnl=400, copy_bt_14d_net_pnl=200,
+                                 copy_bt_7d_net_pnl=80, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
+                ],
+            )
+            db.commit()
+            seen = {"tune_addrs": [], "add_addrs": []}
+
+            def ok_window(pnl):
+                return {
+                    "copy_net_pnl": pnl,
+                    "closed_n": 12,
+                    "capacity_open_fit": 0.99,
+                    "open_fill_rate": 0.99,
+                    "liquidations": 0,
+                    "target_open_events": 12,
+                    "skip_reasons": {},
+                }
+
+            def tune_axes(base):
+                return [
+                    scanner.auto_tune.build_tune_candidate(
+                        base, 1.0, tuple(base[k] for k in scanner.auto_tune.LEV_KEYS), base["DEPLOY_FULL_PCT"]
+                    ),
+                    scanner.auto_tune.build_tune_candidate(base, 1.2, (30, 12, 5), 0.50),
+                ]
+
+            def add_axes(base):
+                return [
+                    scanner.auto_tune.build_add_candidate(base, base["ADD_GAP_K"], base["ADD_GAP_SHRINK_G"],
+                                                          int(base["ADD_MAX_HARD"])),
+                    scanner.auto_tune.build_add_candidate(base, 0.06, 1.3, 6),
+                ]
+
+            def eval_tune(_db, addrs, _follow, candidate, **_kw):
+                seen["tune_addrs"].append(list(addrs))
+                out = dict(candidate)
+                out["params"] = candidate["params"]
+                out["margins"] = {k: candidate["params"][k] for k in scanner.auto_tune.MARGIN_KEYS}
+                out["lev_caps"] = {k: candidate["params"][k] for k in scanner.auto_tune.LEV_KEYS}
+                out["deploy_full_pct"] = candidate["params"]["DEPLOY_FULL_PCT"]
+                pnl = 500 if candidate.get("mult") == 1.2 else 100
+                out["windows"] = {days: ok_window(pnl) for days in (30, 14, 7)}
+                return out
+
+            def eval_add(_db, addrs, _follow, candidate, **_kw):
+                seen["add_addrs"].append(list(addrs))
+                out = dict(candidate)
+                out["params"] = candidate["params"]
+                out["add_params"] = candidate["params"]
+                pnl = 600 if candidate.get("gap_k") == 0.06 and candidate.get("max_hard") == 6 else 120
+                out["windows"] = {days: ok_window(pnl) for days in (30, 14, 7)}
+                return out
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok",
+                "reason": "portfolio_topn",
+                "line": 0.787598641,
+                "count": 2,
+            }), patch.object(scanner.auto_tune, "tune_candidates_from_axes", side_effect=tune_axes), \
+                    patch.object(scanner.auto_tune, "evaluate_tune_candidate", side_effect=eval_tune), \
+                    patch.object(scanner.auto_tune, "add_candidates_from_axes", side_effect=add_axes), \
+                    patch.object(scanner.auto_tune, "evaluate_add_candidate", side_effect=eval_add), \
+                    patch.object(scanner.auto_tune, "_load_sigmas", return_value={}), \
+                    patch.object(scanner.auto_tune, "_portfolio_window_fills",
+                                 return_value={30: [{}], 14: [{}], 7: [{}]}):
+                n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
+
+            self.assertEqual(n, 3)
+            self.assertTrue(seen["tune_addrs"])
+            self.assertTrue(seen["add_addrs"])
+            self.assertTrue(all(addrs == ["0xaaa", "0xbbb"] for addrs in seen["tune_addrs"]))
+            self.assertTrue(all(addrs == ["0xaaa", "0xbbb"] for addrs in seen["add_addrs"]))
+
+            follow = params.load_follow(db)
+            self.assertAlmostEqual(follow["MIN_FOLLOW_SCORE"], 0.787598641)
+            self.assertAlmostEqual(follow["STABLE_MARGIN_PCT"], 0.042)
+            self.assertAlmostEqual(follow["MID_MARGIN_PCT"], 0.036)
+            self.assertAlmostEqual(follow["HIGH_MARGIN_PCT"], 0.024)
+            self.assertEqual(follow["STABLE_LEV_CAP"], 30)
+            self.assertEqual(follow["MID_LEV_CAP"], 12)
+            self.assertEqual(follow["HIGH_LEV_CAP"], 5)
+            self.assertAlmostEqual(follow["DEPLOY_FULL_PCT"], 0.50)
+            self.assertAlmostEqual(follow["ADD_GAP_K"], 0.06)
+            self.assertAlmostEqual(follow["ADD_GAP_SHRINK_G"], 1.3)
+            self.assertEqual(follow["ADD_MAX_HARD"], 6)
+
+            commands = db.execute(
+                "SELECT owner,type,payload_json FROM commands WHERE type='reload_params' ORDER BY id"
+            ).fetchall()
+            self.assertEqual([r[0] for r in commands], ["scanner", "auto_tune"])
+            self.assertEqual(json.loads(commands[0][2])["by"], "auto_follow_line")
+            self.assertEqual(json.loads(commands[1][2])["by"], "auto_tune_margin")
+
+            run = db.execute(
+                "SELECT applied,followed_n,result_json FROM auto_tune_runs WHERE source='scan'"
+            ).fetchone()
+            self.assertEqual(run[0], 1)
+            self.assertEqual(run[1], 2)
+            result = json.loads(run[2])
+            self.assertTrue(result["applied_sizing"])
+            self.assertTrue(result["applied_add"])
+
+            audit = db.execute(
+                "SELECT status,reason,payload_json FROM pipeline_audit "
+                "WHERE stamp=? AND stage='auto_tune'",
+                ("2026-07-06T00:00:00Z",),
+            ).fetchone()
+            self.assertEqual(audit[0], "ok")
+            self.assertEqual(audit[1], "applied")
+            payload = json.loads(audit[2])
+            self.assertEqual(payload["followedN"], 2)
+            self.assertTrue(payload["appliedSizing"])
+            self.assertTrue(payload["appliedAdd"])
+
 
 if __name__ == "__main__":
     unittest.main()
