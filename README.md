@@ -1,40 +1,49 @@
 # poly-btc
 
-Read-only collector and analyzer for Polymarket **BTC 5-minute up/down** markets.
+Hyperliquid copy-trade scanner, paper observer, dashboard, and launcher.
 
-It polls the public market trade feed for each 5-minute window, attaches order-book
-context (top-of-book reconstructed as of each fill's exchange timestamp), reconstructs
-per-wallet / per-window PnL directly from the trade feed, and surfaces recurring
-two-sided wallets for further analysis.
+This repository used to contain Polymarket BTC 5-minute research tooling. That code is now archived and
+not part of the active runtime unless explicitly needed for historical analysis.
 
-No private keys, no orders — observation only.
+## Active Runtime
 
-## Layout
-
-| file | role |
+| Area | Entry points |
 |---|---|
-| `collect.py` | single async loop: discover windows, buffer fills with context, settle & aggregate |
-| `profile.py` | rank recurring two-sided wallets; per-wallet window breakdown |
-| `schema.sql` | SQLite schema (`windows`, `wallet_window`, `trades`) |
-| `lib/` | infra: market discovery, Chainlink price feed, CLOB book stream, data API, crypto price |
+| Scanner/discovery | `hl_discover.py`, `hl/scanner.py`, `hl/metrics.py`, `hl/fills.py` |
+| Observer/paper copy | `hl_observe.py`, `hl/observer.py` |
+| Dashboard API | `hl_dashboard.py`, `hl/api.py`, `hl/api_*.py` |
+| Dashboard frontend | `web/app.jsx`, `web/components/*`, compiled to `web/app.js` |
+| Launcher/ops | `launcher/launcher.py`, `launcher/server.py`, `launcher/core/*` |
 
-## Setup
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Run
+## Common Commands
 
 ```bash
-# collect (Ctrl-C to stop; runs indefinitely without --seconds)
-python collect.py --db btc5min.db
-
-# analyze
-python profile.py --db btc5min.db rank --min-windows 5
-python profile.py --db btc5min.db wallet <address>
+python3 hl_dashboard.py --db data/hl.db --static web --host 127.0.0.1 --port 8810
+python3 hl_discover.py --db data/hl.db scan --days 14 --scan-interval 8
+python3 hl_observe.py --db data/hl.db observe
+python3 launcher/launcher.py --port 8799 --no-browser
 ```
 
-PnL is reconstructed only from the unbiased market trade feed and self-computed
-settlement (crypto-price open/close); per-wallet positions endpoints are never used.
+## Frontend Build
+
+Dashboard React is precompiled without bundling React itself. Edit JSX, then build:
+
+```bash
+web/build.sh
+```
+
+Launcher frontend is built separately:
+
+```bash
+launcher/web/build.sh
+```
+
+## Verification
+
+```bash
+python3 -m py_compile hl/*.py hl_*.py launcher/*.py launcher/core/*.py
+python3 -m unittest discover tests
+```
+
+Secrets and live deployment details belong in local/private files only. Do not commit `secret/`,
+`launcher/data/keys/`, `launcher/data/targets.json`, or live DB snapshots.

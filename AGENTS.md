@@ -176,8 +176,6 @@ Before changing deployment logic, read:
 
 ## Known Caveats
 
-- Some docs/comments still mention old score scales or browser-Babel preview mode. Current score is native
-  `[0, 1]`, displayed as `0-100`; frontend JS is precompiled.
 - `hl/api.py` and legacy supervisor code can resolve process command failures with status `"error"`,
   while the normal command contract uses `"failed"`.
 - Keep public docs free of private hosts, credentials, keys, and operational secrets.

@@ -177,6 +177,74 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertNotIn("marketType", payload)
         self.assertNotIn("openState", payload)
 
+    def test_pipeline_audit_compact_payload_strips_nested_detail(self):
+        db = self._db()
+        heavy = list(range(50))
+        full_payload = {
+            "marketType": "crypto",
+            "copyBt": {
+                "30dNetPnl": 900,
+                "30dClosedN": 12,
+                "14dNetPnl": 500,
+                "14dClosedN": 8,
+                "7dNetPnl": 200,
+                "7dClosedN": 5,
+                "openFillRate": 0.9,
+                "liquidations": 0,
+                "perEpisode": heavy,
+            },
+            "followEligibility": {
+                "eligible": False,
+                "status": "low_fill_rate",
+                "reasons": ["开仓跟随率低"],
+                "debug": {"episodes": heavy},
+            },
+            "sectorCopy": {
+                "crypto": {
+                    "14": {"copy_net_pnl": 500, "closed_n": 6, "episodes": heavy},
+                },
+                "stock": {
+                    "14": {"copy_net_pnl": -300, "closed_n": 6, "episodes": heavy},
+                },
+            },
+            "sectorPolicy": {
+                "allowed": ["crypto"],
+                "crypto": {"allow": True, "status": "allowed", "pnl": {"14": 500}, "closed": {"14": 6},
+                           "samples": heavy},
+                "stock": {"allow": False, "status": "recent_loss", "pnl": {"14": -300}, "closed": {"14": 6},
+                          "samples": heavy},
+            },
+            "openState": {"bags": heavy},
+        }
+        db.execute(
+            "INSERT INTO pipeline_audit "
+            "(stamp,source,stage,addr,status,reason,payload_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "2026-07-07T00:00:00Z",
+                "scan",
+                "watchlist",
+                "0xaaa",
+                "below_line",
+                "low_fill_rate",
+                json.dumps(full_payload),
+                "2026-07-07T00:00:01Z",
+            ),
+        )
+        db.commit()
+
+        compact = api_discovery.ep_pipeline_audit(db, {"limit": ["1"], "compact": ["1"]})["events"][0]["payload"]
+        full = api_discovery.ep_pipeline_audit(db, {"limit": ["1"]})["events"][0]["payload"]
+
+        self.assertIn("perEpisode", full["copyBt"])
+        self.assertNotIn("perEpisode", compact["copyBt"])
+        self.assertNotIn("debug", compact["followEligibility"])
+        self.assertNotIn("episodes", compact["sectorCopy"]["crypto"]["14"])
+        self.assertNotIn("samples", compact["sectorPolicy"]["stock"])
+        self.assertNotIn("openState", compact)
+        self.assertEqual(compact["sectorPolicy"]["stock"]["status"], "recent_loss")
+        self.assertEqual(compact["sectorCopy"]["crypto"]["14"]["copy_net_pnl"], 500)
+
     def test_pipeline_summary_endpoint_compacts_latest_scan_decisions(self):
         db = self._db()
         self._insert_profiles(db)

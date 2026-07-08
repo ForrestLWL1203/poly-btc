@@ -95,7 +95,8 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["forwardNetPnl"], 12)
         self.assertEqual(wallet["rawScore"], 90.0)
         self.assertIn("scoreBreakdown", wallet)
-        self.assertEqual(wallet["sectorPolicy"]["allowed"], ["crypto"])
+        self.assertNotIn("sectorPolicy", wallet)
+        self.assertEqual(wallet["scoreBreakdown"]["sectorPolicy"]["allowed"], ["crypto"])
         self.assertFalse(wallet["scoreBreakdown"]["sectorPolicy"]["stock"]["allow"])
         self.assertNotIn("evidenceHeld", wallet)
 

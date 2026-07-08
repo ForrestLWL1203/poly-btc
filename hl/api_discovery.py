@@ -130,15 +130,67 @@ def _truthy(qs, key):
     return str((qs.get(key, [""]) or [""])[0]).lower() in {"1", "true", "yes", "on"}
 
 
+def _pick_nonempty(obj, keys):
+    if not isinstance(obj, dict):
+        return {}
+    return {
+        key: obj[key]
+        for key in keys
+        if key in obj and obj[key] not in (None, {}, [])
+    }
+
+
+def _compact_sector_copy(sector_copy):
+    if not isinstance(sector_copy, dict):
+        return {}
+    out = {}
+    metric_keys = (
+        "copy_net_pnl", "closed_n", "win_rate", "open_fill_rate",
+        "liquidations", "fee_drag",
+    )
+    for sector, windows in sector_copy.items():
+        if not isinstance(windows, dict):
+            continue
+        sector_out = {}
+        for window, metrics in windows.items():
+            slim = _pick_nonempty(metrics, metric_keys)
+            if slim:
+                sector_out[str(window)] = slim
+        if sector_out:
+            out[sector] = sector_out
+    return out
+
+
+def _compact_sector_policy(policy):
+    if not isinstance(policy, dict):
+        return {}
+    out = {}
+    allowed = policy.get("allowed")
+    if isinstance(allowed, list):
+        out["allowed"] = allowed
+    for sector in ("crypto", "stock"):
+        slim = _pick_nonempty(policy.get(sector), ("allow", "status", "reason", "pnl", "closed"))
+        if slim:
+            out[sector] = slim
+    return out
+
+
 def _compact_audit_payload(payload):
     """Small payload shape used by dashboard rows; full payload remains available by default."""
-    if not payload:
+    if not isinstance(payload, dict) or not payload:
         return {}
-    keep = {}
-    for key in ("copyBt", "followEligibility", "sectorCopy", "sectorPolicy"):
-        if key in payload and payload[key] not in (None, {}, []):
-            keep[key] = payload[key]
-    return keep
+    compact = {
+        "copyBt": _pick_nonempty(payload.get("copyBt"), (
+            "30dNetPnl", "30dClosedN", "14dNetPnl", "14dClosedN", "7dNetPnl", "7dClosedN",
+            "winRate", "openFillRate", "liquidations", "feeDrag",
+        )),
+        "followEligibility": _pick_nonempty(payload.get("followEligibility"), (
+            "eligible", "status", "reasons",
+        )),
+        "sectorCopy": _compact_sector_copy(payload.get("sectorCopy")),
+        "sectorPolicy": _compact_sector_policy(payload.get("sectorPolicy")),
+    }
+    return {key: val for key, val in compact.items() if val not in (None, {}, [])}
 
 
 def ep_pipeline_audit(db, qs):
