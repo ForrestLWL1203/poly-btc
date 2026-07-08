@@ -207,6 +207,17 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertNotIn("const PARAM_META = {", settings)
 
+    def test_settings_hooks_are_not_after_loading_return(self):
+        settings = (ROOT / "web" / "components" / "Settings.jsx").read_text(encoding="utf-8")
+        body = settings.split("export function Settings(", 1)[1]
+        loading_return = body.index("if (!params) return")
+        hooks_after_loading = [
+            name for name in ("useEffect(", "useState(", "useCallback(", "useMemo(")
+            if name in body[loading_return:]
+        ]
+
+        self.assertEqual([], hooks_after_loading, "Settings must not call hooks after a conditional loading return")
+
     def test_wallets_internals_are_split(self):
         wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
         drawer = ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx"

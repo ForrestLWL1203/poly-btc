@@ -25,16 +25,16 @@ export function Settings({ startRescan, confirm }) {
   const [saving, setSaving] = useState(false);
   const [openTiers, setOpenTiers] = useState({});
 
+  useEffect(() => {
+    if (tab === "follow") loadScoreDist().catch(() => {});
+  }, [tab, loadScoreDist]);
+
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
 
   const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const tabDirty = list.filter(p => dirty[p.key]);
   const followValidation = tab === "follow" ? validateFollowParams(vals) : { errors: [], badKeys: new Set() };
   const validationErrors = followValidation.errors;
-
-  useEffect(() => {
-    if (tab === "follow") loadScoreDist().catch(() => {});
-  }, [tab, loadScoreDist]);
 
   const apply = async () => {
     if (validationErrors.length) return;
