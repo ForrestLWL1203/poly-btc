@@ -40,6 +40,15 @@ class ApiRouteTests(unittest.TestCase):
         ep.assert_called_once()
         self.assertEqual(ep.call_args.args[1], "7d")
 
+    def test_dispatch_get_params_can_include_score_distribution(self):
+        db = object()
+        with patch.object(api_routes, "ep_params", return_value={"ok": True}) as ep:
+            handled, data = api_routes.dispatch_get(db, "/api/params", {"includeScoreDist": ["1"]})
+
+        self.assertTrue(handled)
+        self.assertEqual(data, {"ok": True})
+        ep.assert_called_once_with(db, include_score_dist=True)
+
     def test_dispatch_get_calls_dynamic_detail_route(self):
         with patch.object(api_routes, "ep_position_detail", return_value={"id": 42}) as ep:
             handled, data = api_routes.dispatch_get(object(), "/api/positions/42", {})

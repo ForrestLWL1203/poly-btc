@@ -40,6 +40,10 @@ def _command_payload(db, path, qs):
     return ep_command(db, int(path.rsplit("/", 1)[1]))
 
 
+def _truthy(qs, key):
+    return str((qs.get(key, [""]) or [""])[0]).lower() in {"1", "true", "yes", "on"}
+
+
 GET_ROUTES = {
     "/api/overview": lambda db, qs: ep_overview(db),
     "/api/equity": lambda db, qs: ep_equity(db, qs.get("range", ["all"])[0]),
@@ -48,7 +52,7 @@ GET_ROUTES = {
     "/api/wallets": lambda db, qs: ep_wallets(db, qs),
     "/api/discovery": lambda db, qs: ep_discovery(db),
     "/api/scan-runs": lambda db, qs: ep_scan_runs(db, int(qs.get("limit", [20])[0])),
-    "/api/params": lambda db, qs: ep_params(db),
+    "/api/params": lambda db, qs: ep_params(db, include_score_dist=_truthy(qs, "includeScoreDist")),
     "/api/scan-status": lambda db, qs: ep_scan_status(db),
     "/api/score-dist": lambda db, qs: ep_score_dist(db),
     "/api/pipeline-audit": lambda db, qs: ep_pipeline_audit(db, qs),

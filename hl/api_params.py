@@ -57,7 +57,14 @@ def reset_params(db_path, category):
         db.close()
 
 
-def ep_params(db):
+def _score_dist(db):
+    """All watchlist display scores (0-100), sorted desc."""
+    scores = [round(score100(r["score"] or 0.0), 1)
+              for r in db.execute("SELECT score FROM watchlist ORDER BY score DESC").fetchall()]
+    return {"scores": scores, "total": len(scores)}
+
+
+def ep_params(db, include_score_dist=False):
     data = params_mod.get_all(db)
     # MIN_FOLLOW_SCORE is stored native [0,1], but displayed on the 0-100 score ruler.
     for pr in data.get("follow", []):
@@ -65,4 +72,9 @@ def ep_params(db):
             pr["value"] = score100(pr["value"])
             pr["default"] = score100(pr["default"])
             pr["scaled"] = True
+    if include_score_dist:
+        try:
+            data["scoreDist"] = _score_dist(db)
+        except sqlite3.OperationalError:
+            data["scoreDist"] = {"scores": [], "total": 0}
     return data

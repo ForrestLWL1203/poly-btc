@@ -65,7 +65,10 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertRegex(body, r'/app\.css\?v=\d+')
 
     def test_dashboard_repeating_refreshes_use_shared_polling_hook(self):
-        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        jsx = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in (ROOT / "web").glob("**/*.jsx")
+        )
         refresh = (ROOT / "web" / "lib" / "refresh.js").read_text(encoding="utf-8")
 
         self.assertIn("function usePolling(", refresh)
@@ -106,6 +109,26 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("export function Positions(", body)
         self.assertNotIn("function Positions(", jsx)
         self.assertIn('from "./components/Positions.jsx"', jsx)
+
+    def test_dashboard_shell_imports_observer_mask_component(self):
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        obs_mask = ROOT / "web" / "components" / "ObsMask.jsx"
+
+        self.assertTrue(obs_mask.exists(), "Observer transition mask should be an explicit component")
+        self.assertIn("export function ObsMask(", obs_mask.read_text(encoding="utf-8"))
+        self.assertIn('from "./components/ObsMask.jsx"', jsx)
+        self.assertIn("<ObsMask", jsx)
+
+    def test_settings_page_is_split_from_dashboard_shell(self):
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        settings = ROOT / "web" / "components" / "Settings.jsx"
+
+        self.assertTrue(settings.exists(), "Settings page should live in web/components/Settings.jsx")
+        body = settings.read_text(encoding="utf-8") if settings.exists() else ""
+        self.assertIn('from "../lib/api.js"', body)
+        self.assertIn("export function Settings(", body)
+        self.assertNotIn("function Settings(", jsx)
+        self.assertIn('from "./components/Settings.jsx"', jsx)
 
 
 if __name__ == "__main__":

@@ -76,6 +76,34 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_ep_params_can_include_score_distribution(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            db.execute("CREATE TABLE watchlist (addr TEXT PRIMARY KEY,score REAL)")
+            db.executemany(
+                "INSERT INTO watchlist (addr,score) VALUES (?,?)",
+                [("0x1", 0.723), ("0x2", 0.681)],
+            )
+            db.commit()
+
+            out = api_params.ep_params(db, include_score_dist=True)
+
+            self.assertEqual(out["scoreDist"], {"scores": [72.3, 68.1], "total": 2})
+            db.close()
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
 
 if __name__ == "__main__":
     unittest.main()
