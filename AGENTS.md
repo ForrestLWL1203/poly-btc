@@ -2,17 +2,8 @@
 
 ## Current Project
 
-This repo is now a Hyperliquid copy-trade product. Ignore old non-Hyperliquid research tooling unless
-the user explicitly asks for it.
-
-Archived legacy files:
-
-- `collect.py`
-- `discover.py`
-- `watch.py`
-- `profile.py`
-- `schema.sql`
-- `lib/`
+This repo is a Hyperliquid copy-trade product. Old non-Hyperliquid research tooling has been removed
+from the active tree.
 
 Active Hyperliquid product:
 

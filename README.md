@@ -2,8 +2,7 @@
 
 Hyperliquid copy-trade scanner, paper observer, dashboard, and launcher.
 
-This repository used to contain Polymarket BTC 5-minute research tooling. That code is now archived and
-not part of the active runtime unless explicitly needed for historical analysis.
+The active tree is scoped to Hyperliquid runtime code and ops tooling.
 
 ## Active Runtime
 
