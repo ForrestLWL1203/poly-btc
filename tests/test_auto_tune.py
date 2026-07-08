@@ -365,6 +365,46 @@ class AutoTuneTests(unittest.TestCase):
         self.assertLessEqual(choice["line"], 0.84)
         self.assertGreater(choice["line"], 0.83)
 
+    def test_choose_follow_line_by_portfolio_skips_ineligible_wallets(self):
+        db = self._db()
+        params.seed_params(db)
+        ranked = [
+            {"addr": "0xaaa", "follow_score": 0.90, "follow_eligibility": {"eligible": True}},
+            {"addr": "0xbad", "follow_score": 0.88, "follow_eligibility": {"eligible": False, "status": "low_fill_rate"}},
+            {"addr": "0xbbb", "follow_score": 0.84, "follow_eligibility": {"eligible": True}},
+            {"addr": "0xccc", "follow_score": 0.78, "follow_eligibility": {"eligible": True}},
+        ]
+        seen_prefixes = []
+
+        def fake_windows(_db, addrs, _sigmas, _overrides, _now_ms, window_fills=None):
+            seen_prefixes.append(tuple(addrs))
+            return {
+                day: {
+                    "copy_net_pnl": pnl,
+                    "closed_n": 10,
+                    "capacity_open_fit": 0.95,
+                    "open_fill_rate": 0.95,
+                    "liquidations": 0,
+                    "target_open_events": 10,
+                    "skip_reasons": {},
+                }
+                for day, pnl in {30: 1200, 14: 800, 7: 300}.items()
+            }
+
+        with patch.object(auto_tune.config, "AUTO_FOLLOW_MIN_N", 2), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_TARGET_N", 3), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_MAX_N", 4), \
+                patch.object(auto_tune.config, "AUTO_FOLLOW_MIN_SCORE", 0.60), \
+                patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                patch.object(auto_tune, "_load_sigmas", return_value={}), \
+                patch.object(auto_tune, "_candidate_windows", side_effect=fake_windows):
+            choice = auto_tune.choose_follow_line_by_portfolio(db, ranked, stamp="2026-07-07T00:00:00Z")
+
+        self.assertEqual(choice["status"], "ok")
+        self.assertNotIn("0xbad", choice["selected"]["addrs"])
+        self.assertTrue(all("0xbad" not in prefix for prefix in seen_prefixes))
+        self.assertEqual(choice["max_n"], 3)
+
     def test_choose_follow_line_by_portfolio_keeps_capacity_when_edge_is_small(self):
         db = self._db()
         params.seed_params(db)

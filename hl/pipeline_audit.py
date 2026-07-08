@@ -132,7 +132,8 @@ def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, f
     rows = _fetch_dicts(db.execute(
         "SELECT w.rank,w.addr,w.score AS follow_score,p.score AS raw_score,p.reason,"
         "COALESCE(c.enabled,1) AS enabled,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
-        "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,p.market_type "
+        "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,p.copy_bt_open_fill_rate,"
+        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.market_type "
         "FROM watchlist w LEFT JOIN profile p ON p.addr=w.addr "
         "LEFT JOIN target_controls c ON c.addr=w.addr ORDER BY w.rank"
     ))
@@ -159,6 +160,9 @@ def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, f
                 "14dClosedN": r["copy_bt_14d_closed_n"],
                 "7dNetPnl": r["copy_bt_7d_net_pnl"],
                 "7dClosedN": r["copy_bt_7d_closed_n"],
+                "openFillRate": r["copy_bt_open_fill_rate"],
+                "liquidations": r["copy_bt_liquidations"],
+                "feeDrag": r["copy_bt_fee_drag"],
             },
             "followEligibility": eligibility,
         }

@@ -540,6 +540,14 @@ class ScannerWatchlistTests(unittest.TestCase):
             rows = {r[0]: r[1] for r in db.execute("SELECT addr,score FROM watchlist").fetchall()}
             self.assertGreaterEqual(rows["0xcopy"], line)
             self.assertLess(rows["0xlowfill"], line)
+            audit = db.execute(
+                "SELECT reason,payload_json FROM pipeline_audit "
+                "WHERE stage='watchlist' AND addr=?",
+                ("0xlowfill",),
+            ).fetchone()
+            self.assertEqual(audit[0], "low_fill_rate")
+            payload = json.loads(audit[1])
+            self.assertEqual(payload["followEligibility"]["status"], "low_fill_rate")
 
     def test_refresh_watchlist_auto_moves_follow_line_to_target_rank(self):
         with tempfile.TemporaryDirectory() as td:

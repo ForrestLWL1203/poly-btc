@@ -228,6 +228,7 @@ def _compact_follow_line_candidate(candidate: dict) -> dict:
         "n": candidate.get("n"),
         "line": candidate.get("line"),
         "score_floor": candidate.get("score_floor"),
+        "addrs": candidate.get("addrs") or [],
         "score": _portfolio_line_score(candidate),
         "windows": {
             str(days): _compact_backtest(result)
@@ -387,7 +388,11 @@ def choose_follow_line_by_portfolio(db, ranked: list[dict], follow: dict | None 
         return {"status": "disabled", "reason": "portfolio_selector_disabled"}
 
     min_score = float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60))
-    rows = [r for r in ranked if float(r.get("follow_score", r.get("score")) or 0.0) >= min_score]
+    rows = [
+        r for r in ranked
+        if float(r.get("follow_score", r.get("score")) or 0.0) >= min_score
+        and (r.get("follow_eligibility") or {}).get("eligible", True)
+    ]
     if not rows:
         return {"status": "fallback", "reason": "no_wallet_above_floor"}
 
