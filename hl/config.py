@@ -279,7 +279,7 @@ SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) —
 SCORE_W_WIN  = 0.35    # 胜率权重
 SCORE_W_ACT  = 0.30    # 活跃度权重(成交数 + 活跃天数,升为核心项) —— W_* 之和自动归一
 SCORE_W_ROI  = 0.35    # ROI 权重(收敛后;ROI 本身就把"小赚大亏"量化为低分)
-SCORE_STRETCH = 1.227  # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。调大→top 更贴近 100(operator-tuned)
+SCORE_STRETCH = 1.227  # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。改评分公式时由代码重标
 ROI_NOTL_FLOOR    = 1000.0 # 名义额下限(仅用于把 max_drawdown 归一成 dd_eq;防除零/噪音)
 SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效edge越低(回撤按名义额归一)
 SCORE_ROI_SCALE   = 0.35  # roiS = 1 − exp(−roi_adj/此):综合ROI 分布~0.05–1.5,此值让有效区拉得开(0.3→0.58,0.5→0.76,1.0→0.94)
@@ -316,7 +316,7 @@ SCORE_MANUF_PEN       = 0.5    # 满罚强度(评分 ×(1−此))
 # 1×(historical forced liquidations). A clean fast-cutter (no open loss, never liquidated) is untouched
 # however high its win rate; a wallet sitting on several deep bags for days, or that's been force-closed,
 # is demoted. SOFT: sinks the worst toward/below the follow line, never zeroes a profitable wallet. 0 =
-# off. Tunable via dashboard (apply_scanner_params pushes it onto config so scan + regate both honor it).
+# off. Code-calibrated for now; keep out of the operator settings page unless we add evidence UI.
 DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disc)
 # REALIZED-asymmetry sub-term of disc — catches "小赚大亏 / 不及时止损" (the twins, #17, RESOLV) by the
 # tail directly: |worst realized loss| vs the median win. v5 (2026-06-29): the OLD win-rate gate

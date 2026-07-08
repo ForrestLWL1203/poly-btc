@@ -30,23 +30,10 @@ export const PARAM_META = {
   VOL_FALLBACK_SIGMA: { name: "默认波动率", desc: "无数据时的兜底σ", range: "—" },
   // scanner
   HARVEST_MIN_ACCT: { name: "钱包最低资金门槛", desc: "账户≥此金额才看", range: "$2k–$10k", up: "只看大资金", dn: "纳入小资金、更杂" },
-  HARVEST_MAX_TURNOVER: { name: "最高日换手率", desc: "高于此判为做市商,排除", range: "5–20", up: "放进更高频", dn: "更严留低频" },
-  HARVEST_WEEK_VLM_MIN: { name: "近7天最低成交量", desc: "一周太冷清不要", range: "$25k–$200k", up: "只要近周活跃", dn: "纳入更安静" },
-  HARVEST_MON_ROI_MIN: { name: "近30天最低收益率", desc: "月收益下限", range: "5%–20%", up: "只要高收益", dn: "纳入低收益" },
-  HARVEST_MON_ROI_MAX: { name: "近30天最高收益率", desc: "反赌徒上限", range: "100%–500%", up: "放进更猛的", dn: "更严防赌徒" },
-  HARVEST_WEEK_ROI_MIN: { name: "近7天最低收益率", desc: "近周也要在赚", range: "0%–5%", up: "更严", dn: "更宽" },
-  min_perp: { name: "合约交易占比下限", desc: "合约占比太低不可跟", range: "—" },
+  HARVEST_WEEK_VLM_MIN: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$25k–$10m" },
+  HARVEST_WEEK_VLM_MAX: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$25k–$10m" },
   inactive_days: { name: "最长不活跃天数", desc: "超过此天数没成交则剔除", range: "1–7 天", up: "更宽容沉默", dn: "更快剔除" },
-  max_daily_eps: { name: "每日最多交易次数", desc: "反机器人上限", range: "—" },
-  min_activity: { name: "最低活跃度", desc: "≈活跃天/14", range: "—" },
-  grid_max_adds: { name: "单笔最多加仓次数", desc: "反网格", range: "—" },
   EXCLUDE_HFT: { name: "过滤高频HFT(开关)", desc: "剔除秒级快炒钱包——他们赚钱但我们延迟太大抄不了;接入高频WS后可关掉", range: "—" },
-  HFT_MIN_HOLD_MIN: { name: "HFT最短中位持仓", desc: "开关开启时,中位持仓低于此分钟数判为HFT剔除", range: "2–5 分钟" },
-  SCORE_W_WIN: { name: "评分·胜率权重", desc: "综合评分里胜率的占比(三权重相对生效,无需凑100)", range: "—", up: "更看重持续胜率", dn: "更看重收益/稳定" },
-  SCORE_W_ROI: { name: "评分·收益权重", desc: "综合评分里风险调整收益的占比", range: "—", up: "更看重赚得多", dn: "更看重胜率/稳定" },
-  SCORE_W_ACT: { name: "评分·活跃度权重", desc: "综合评分里活跃度(成交数+活跃天数)的占比", range: "—", up: "更看重高频活跃", dn: "更看重胜率/收益" },
-  SCORE_STRETCH: { name: "评分·标度拉伸", desc: "线性拉伸使最强钱包≈100、平滑下滑,便于设跟单线", range: "1.0–1.3", up: "top更贴近100", dn: "整体压低" },
-  UW_TOL: { name: "浮亏容忍线 / 危险线", desc: "只读展示", range: "—" },
 };
 
 export const UNIT = { usd: "$", pct: "%", x: "×" };

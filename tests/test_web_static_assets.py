@@ -218,6 +218,15 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertEqual([], hooks_after_loading, "Settings must not call hooks after a conditional loading return")
 
+    def test_scanner_settings_collapse_volume_and_hide_score_tuning(self):
+        scanner = (ROOT / "web" / "components" / "settings" / "ScannerSettingsPanel.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("周成交量范围", scanner)
+        self.assertIn("HARVEST_WEEK_VLM_MIN", scanner)
+        self.assertIn("HARVEST_WEEK_VLM_MAX", scanner)
+        self.assertNotIn("SCORE_W_WIN", scanner)
+        self.assertNotIn("SCORE_THICK_REF", scanner)
+
     def test_wallets_internals_are_split(self):
         wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
         drawer = ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx"

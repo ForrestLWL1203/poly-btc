@@ -17,8 +17,8 @@ from .util import now_iso
 
 # (key, category, level, type, effect, default, name, desc) — default in UI-facing units; name = 中文显示名,
 # desc = 一句话影响说明(UI 在参数后以灰色字体直接展示). level "hidden" = 底层参数,UI 不渲染(引擎仍读取).
-# ONLY green/yellow render in the UI (the 12 high-impact). Everything else is "hidden" — kept here so the
-# engine wiring (apply_scanner_params / _reload_params) still resolves them, but the operator never sees them.
+# ONLY green/yellow render in the UI. Everything else is "hidden" — kept here so the engine wiring
+# (apply_scanner_params / _reload_params) still resolves them, but the operator never sees them.
 PARAM_SPEC = [
     # ── ① 采集 watchlist 参数 (effect = rescan) ──────────────────────────────────
     ("HARVEST_MIN_ACCT",     "scanner", "yellow", "usd",     "rescan", config.HARVEST_MIN_ACCT,
@@ -33,17 +33,6 @@ PARAM_SPEC = [
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", 3,
         "最长不活跃天数", "超此天数没成交且无持仓 = 失活淘汰"),
-    # 评分权重(v6:综合评分 = 胜率·活跃度·ROI 加权 → 平滑分布;小赚大亏由ROI自然体现,不再单设反噬门槛)
-    ("SCORE_W_WIN",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_WIN * 100),
-        "评分·胜率权重", "综合评分里胜率的占比(三个权重相对生效,无需凑100)"),
-    ("SCORE_W_ACT",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_ACT * 100),
-        "评分·活跃度权重", "综合评分里活跃度(成交数+活跃天数)的占比"),
-    ("SCORE_W_ROI",          "scanner", "yellow", "pct",     "rescan", round(config.SCORE_W_ROI * 100),
-        "评分·收益权重", "综合评分里风险调整收益的占比"),
-    ("SCORE_STRETCH",        "scanner", "hidden", "float",   "rescan", config.SCORE_STRETCH,
-        "评分·标度拉伸", ""),   # v10: 藏 —— 内部标定(改评分公式后由开发重标使顶分≈100),非操作员策略
-    ("SCORE_THICK_REF",      "scanner", "yellow", "float",   "rescan", config.SCORE_THICK_REF,
-        "评分·厚度满分线(赢单每笔%)", "赢单每笔名义收益% ≥ 此 = 厚度满分;越低于此越降分(剥蒜)。调高=对厚度更苛刻,更多薄单被压"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
@@ -54,18 +43,18 @@ PARAM_SPEC = [
         "重DCA判定:单回合加仓上限(超过=偶发但不可复制的重仓摊价)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
     ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
-    ("PORTFOLIO_MAX_TURNOVER","scanner", "yellow", "x",       "rescan", config.PORTFOLIO_MAX_TURNOVER,
+    ("PORTFOLIO_MAX_TURNOVER","scanner", "hidden", "x",       "rescan", config.PORTFOLIO_MAX_TURNOVER,
         "换手率上限 (x/周)", "周成交量÷账户权益。超过=高频机器人(我们延迟跟不了+手续费拖累)。趋势客一般<40x,机器人>100x"),
-    ("PORTFOLIO_MIN_EDGE_BPS","scanner", "yellow", "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
+    ("PORTFOLIO_MIN_EDGE_BPS","scanner", "hidden", "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
         "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
     # (MIN_PAYOFF removed v10 — the small_win_big_loss hard gate is gone; 盈亏比 now a smooth g_payoff factor in score)
-    ("MAX_CONCURRENT_POS",   "scanner", "yellow", "int",     "rescan", config.MAX_CONCURRENT_POS,
+    ("MAX_CONCURRENT_POS",   "scanner", "hidden", "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
-    ("MIN_ACTIVE_SCORE",     "scanner", "yellow", "float",   "rescan", config.MIN_ACTIVE_SCORE,
+    ("MIN_ACTIVE_SCORE",     "scanner", "hidden", "float",   "rescan", config.MIN_ACTIVE_SCORE,
         "入选质量线", "综合评分 < 此 → 不进 active。让 active(watchlist)=全是够优质的好钱包,跟单再从中按资金取前N。低质量尾巴在这一刀切掉"),
-    ("EVIDENCE_MIN_DAYS",    "scanner", "yellow", "int",     "rescan", config.EVIDENCE_MIN_DAYS,
+    ("EVIDENCE_MIN_DAYS",    "scanner", "hidden", "int",     "rescan", config.EVIDENCE_MIN_DAYS,
         "证据·最低活跃天数", "14天窗口内活跃天数 < 此 = 战绩太少无从评判 → 排除(取消旧的纯持有豁免)"),
-    ("EVIDENCE_MIN_TRADES",  "scanner", "yellow", "int",     "rescan", config.EVIDENCE_MIN_TRADES,
+    ("EVIDENCE_MIN_TRADES",  "scanner", "hidden", "int",     "rescan", config.EVIDENCE_MIN_TRADES,
         "证据·最低回合数", "14天窗口内已平回合 < 此 = 样本太小 → 排除。配合活跃天数=证据硬闸"),
     ("COPY_BT_GATE_ENABLE",  "scanner", "hidden", "bool",    "rescan", config.COPY_BT_GATE_ENABLE,
         "copy回测准入", "用历史 fills 按当前跟单规则回放;目标赚但我们复制亏的钱包不进 active"),
@@ -303,15 +292,11 @@ SCANNER_ARG_MAP = {
 
 
 def apply_scanner_params(db, ns):
-    """Overlay DB scanner params (engine units) onto a scan args namespace so a scan uses UI-tuned gates,
-    and push the v5 score weights onto config (score() reads config directly, not via ns)."""
+    """Overlay DB scanner params (engine units) onto a scan args namespace so a scan uses UI-tuned gates."""
     vals = load_category(db, "scanner")
     for key, attr in SCANNER_ARG_MAP.items():
         if vals.get(key) is not None:
             setattr(ns, attr, vals[key])
-    for key in ("SCORE_W_WIN", "SCORE_W_ACT", "SCORE_W_ROI", "SCORE_STRETCH", "SCORE_THICK_REF"):
-        if vals.get(key) is not None:                     # pct params already ÷100 by load_category; STRETCH is float
-            setattr(config, key, vals[key])
     return ns
 
 
