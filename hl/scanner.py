@@ -44,8 +44,8 @@ def _apply_follow_eligibility_gate(m: dict) -> tuple[bool, str]:
     """Final profile-level copyability gate after copy replay evidence is recorded.
 
     `apply_copy_bt_gate` handles copy PnL loss. This catches other clear followability failures
-    such as too many target opens we could not copy. Thin/missing evidence is annotated downstream
-    but remains active so we do not churn wallets on tiny samples or transient cache gaps.
+    such as too many target opens we could not copy or too little recent sample to trust.
+    Missing copy evidence stays annotated downstream for old/incomplete DBs.
     """
     eligibility = follow_score.evaluate_follow_eligibility(m)
     if not eligibility.get("eligible"):

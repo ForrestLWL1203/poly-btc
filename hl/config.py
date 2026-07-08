@@ -364,8 +364,10 @@ MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active 
 #                          (operator-tuned 0.60: 质量线切掉 ~72 个尾巴,active 只留够优质的)
 COPY_BT_GATE_ENABLE = True  # active 准入二次校验: 用历史 fills 按当前 observer 规则回放,目标赚但我们亏 → 不跟
 COPY_BT_DAYS = 30           # copy 回测窗口。用 30d 覆盖 14d 评分外的复制不稳定性,但仍是近期窗口
-COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到按比例缩放的样本数后,近期 copy 亏损也不进 active
+COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数后,近期 copy 亏损也不进 active
 COPY_BT_MIN_CLOSED = 7      # copy 回测至少有这么多已平仓才作为硬闸,样本太少先只记录不否决
+COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
+COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add

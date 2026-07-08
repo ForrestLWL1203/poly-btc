@@ -40,7 +40,7 @@ def _profile_row(addr, status, score, **overrides):
         copy_bt_7d_net_pnl=200,
         copy_bt_closed_n=12,
         copy_bt_14d_closed_n=8,
-        copy_bt_7d_closed_n=4,
+        copy_bt_7d_closed_n=5,
         copy_bt_open_fill_rate=0.9,
         copy_bt_liquidations=0,
         copy_bt_fee_drag=30,
@@ -91,7 +91,7 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertAlmostEqual(active["raw_score"], 0.82)
         active_payload = json.loads(active["payload_json"])
         self.assertEqual(active_payload["copyBt"]["14dNetPnl"], 500)
-        self.assertEqual(active_payload["copyBt"]["7dClosedN"], 4)
+        self.assertEqual(active_payload["copyBt"]["7dClosedN"], 5)
         self.assertEqual(rejected["status"], "rejected")
         self.assertEqual(rejected["reason"], "copy_bt_loss")
         self.assertEqual(json.loads(rejected["payload_json"])["copyBt"]["14dNetPnl"], -120)
@@ -113,7 +113,7 @@ class PipelineAuditTests(unittest.TestCase):
         with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
             "status": "ok",
             "reason": "portfolio_topn",
-            "line": 0.735,
+            "line": 0.734,
             "count": 2,
             "selected": {"n": 2, "score": 1200},
         }):

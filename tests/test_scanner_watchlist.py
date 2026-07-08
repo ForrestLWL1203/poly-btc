@@ -229,8 +229,8 @@ class ScannerWatchlistTests(unittest.TestCase):
             {
                 30: {"copy_net_pnl": 100.0, "copy_win_rate": 0.6, "closed_n": 8,
                      "opened_n": 8, "target_open_events": 8, "liquidations": 0, "fee_drag": 5.0},
-                14: {"copy_net_pnl": -12.0, "copy_win_rate": 0.25, "closed_n": 4,
-                     "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
+                14: {"copy_net_pnl": -12.0, "copy_win_rate": 0.25, "closed_n": 5,
+                     "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
                 7: {"copy_net_pnl": 3.0, "copy_win_rate": 0.5, "closed_n": 2,
                     "opened_n": 2, "target_open_events": 2, "liquidations": 0, "fee_drag": 1.0},
             },
@@ -243,7 +243,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_net_pnl"], 100.0)
         self.assertEqual(m["copy_bt_closed_n"], 8)
         self.assertEqual(m["copy_bt_14d_net_pnl"], -12.0)
-        self.assertEqual(m["copy_bt_14d_closed_n"], 4)
+        self.assertEqual(m["copy_bt_14d_closed_n"], 5)
 
     def test_copy_backtest_gate_allows_primary_loss_when_recent_windows_recover(self):
         m = {"net_pnl": 50.0, "roi_total": 0.05, "net_30d": 200.0, "net_life": 500.0}
@@ -252,10 +252,10 @@ class ScannerWatchlistTests(unittest.TestCase):
             {
                 30: {"copy_net_pnl": -80.0, "copy_win_rate": 0.45, "closed_n": 12,
                      "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 6.0},
-                14: {"copy_net_pnl": 35.0, "copy_win_rate": 0.6, "closed_n": 4,
-                     "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
-                7: {"copy_net_pnl": 8.0, "copy_win_rate": 0.5, "closed_n": 2,
-                    "opened_n": 2, "target_open_events": 2, "liquidations": 0, "fee_drag": 1.0},
+                14: {"copy_net_pnl": 35.0, "copy_win_rate": 0.6, "closed_n": 5,
+                     "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
+                7: {"copy_net_pnl": 8.0, "copy_win_rate": 0.5, "closed_n": 5,
+                    "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 1.0},
             },
             SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
                             copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
@@ -321,6 +321,24 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(reason, "ok")
         self.assertEqual(m["copy_bt_7d_net_pnl"], -3.0)
         self.assertEqual(m["copy_bt_7d_closed_n"], 1)
+
+    def test_copy_backtest_gate_does_not_treat_two_7d_closes_as_enough_sample(self):
+        m = {}
+        ok, reason = scanner_copy_bt.apply_copy_bt_gate(
+            m,
+            {
+                30: {"copy_net_pnl": 100.0, "copy_win_rate": 0.6, "closed_n": 8,
+                     "opened_n": 8, "target_open_events": 8, "liquidations": 0, "fee_drag": 5.0},
+                7: {"copy_net_pnl": -3.0, "copy_win_rate": 0.0, "closed_n": 2,
+                    "opened_n": 2, "target_open_events": 2, "liquidations": 0, "fee_drag": 1.0},
+            },
+            SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
+                            copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(m["copy_bt_7d_closed_n"], 2)
 
     def test_regate_rejects_profile_when_copy_backtest_loses(self):
         with tempfile.TemporaryDirectory() as td:
@@ -474,7 +492,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual(row[1], "low_fill_rate")
             self.assertAlmostEqual(row[2], 0.4)
 
-    def test_regate_keeps_thin_recent_copy_loss_active(self):
+    def test_regate_retires_thin_recent_copy_sample(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             cols = storage.PROFILE_COLS.split(",")
@@ -546,7 +564,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_7d_net_pnl,copy_bt_7d_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("active", "ok", -5.0, 1))
+            self.assertEqual(tuple(row), ("retired", "thin_recent", -5.0, 1))
 
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):
         with tempfile.TemporaryDirectory() as td:
@@ -661,7 +679,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                         copy_bt_7d_net_pnl=200,
                         copy_bt_closed_n=12,
                         copy_bt_14d_closed_n=6,
-                        copy_bt_7d_closed_n=3,
+                        copy_bt_7d_closed_n=5,
                         copy_bt_open_fill_rate=0.55,
                     ),
                     _profile_row(
@@ -673,7 +691,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                         copy_bt_7d_net_pnl=200,
                         copy_bt_closed_n=12,
                         copy_bt_14d_closed_n=6,
-                        copy_bt_7d_closed_n=3,
+                        copy_bt_7d_closed_n=5,
                         copy_bt_open_fill_rate=0.9,
                     ),
                 ],
@@ -855,10 +873,18 @@ class ScannerWatchlistTests(unittest.TestCase):
             db.executemany(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
                 [
-                    _profile_row("0xaaa", "active", 0.95, copy_bt_net_pnl=1200, copy_bt_14d_net_pnl=800, copy_bt_7d_net_pnl=300),
-                    _profile_row("0xbbb", "active", 0.90, copy_bt_net_pnl=1000, copy_bt_14d_net_pnl=700, copy_bt_7d_net_pnl=250),
-                    _profile_row("0xccc", "active", 0.85, copy_bt_net_pnl=900, copy_bt_14d_net_pnl=650, copy_bt_7d_net_pnl=200),
-                    _profile_row("0xddd", "active", 0.80, copy_bt_net_pnl=800, copy_bt_14d_net_pnl=600, copy_bt_7d_net_pnl=150),
+                    _profile_row("0xaaa", "active", 0.95, copy_bt_net_pnl=1200, copy_bt_14d_net_pnl=800,
+                                 copy_bt_7d_net_pnl=300, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
+                    _profile_row("0xbbb", "active", 0.90, copy_bt_net_pnl=1000, copy_bt_14d_net_pnl=700,
+                                 copy_bt_7d_net_pnl=250, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
+                    _profile_row("0xccc", "active", 0.85, copy_bt_net_pnl=900, copy_bt_14d_net_pnl=650,
+                                 copy_bt_7d_net_pnl=200, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
+                    _profile_row("0xddd", "active", 0.80, copy_bt_net_pnl=800, copy_bt_14d_net_pnl=600,
+                                 copy_bt_7d_net_pnl=150, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
+                                 copy_bt_7d_closed_n=5),
                 ],
             )
             db.commit()

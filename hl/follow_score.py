@@ -50,7 +50,7 @@ def evaluate_follow_eligibility(
     *,
     min_closed30: int = 7,
     min_closed14: int = 5,
-    min_closed7: int = 3,
+    min_closed7: int = 5,
     min_open_fill_rate: float = 0.60,
 ) -> dict:
     """Classify whether an active profile is eligible for real follow-line selection.
@@ -111,7 +111,7 @@ def evaluate_follow_eligibility(
         thin_reasons.append("7天copy亏损但样本不足")
     if thin_reasons:
         return {
-            "eligible": True,
+            "eligible": False,
             "status": "thin_recent",
             "reasons": thin_reasons,
         }
@@ -165,7 +165,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     if p30 > 0 and p14 > 0 and p7 > 0:
         score += 0.03
         reasons.append("30/14/7天copy均为正")
-    if c7 < 3:
+    if c7 < 5:
         score -= 0.12
         reasons.append(f"7天样本偏少({c7}笔)")
     if c14 < 5:

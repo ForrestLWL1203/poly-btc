@@ -45,7 +45,9 @@ def copy_bt_min_closed_for_days(p, days):
     base_min = int(getattr(p, "copy_bt_min_closed", config.COPY_BT_MIN_CLOSED) or 0)
     if base_days <= 0 or days >= base_days:
         return base_min
-    return max(1, int(math.ceil(base_min * days / base_days)))
+    scaled = int(math.ceil(base_min * days / base_days))
+    recent_floor = int(getattr(config, f"COPY_BT_MIN_CLOSED_{int(days)}D", 0) or 0)
+    return max(1, scaled, recent_floor)
 
 
 def copy_bt_result(addr, fills, now_ms, p, days=None):

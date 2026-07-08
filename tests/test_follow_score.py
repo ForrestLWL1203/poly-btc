@@ -25,14 +25,29 @@ class FollowScoreTests(unittest.TestCase):
             "copy_bt_7d_net_pnl": 200,
             "copy_bt_closed_n": 12,
             "copy_bt_14d_closed_n": 6,
-            "copy_bt_7d_closed_n": 3,
+            "copy_bt_7d_closed_n": 5,
             "copy_bt_open_fill_rate": 0.9,
         })
 
         self.assertTrue(result["eligible"])
         self.assertEqual(result["status"], "eligible")
 
-    def test_follow_eligibility_marks_thin_recent_loss_without_hard_rejecting(self):
+    def test_follow_eligibility_rejects_thin_7d_sample_even_when_positive(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.70,
+            "copy_bt_net_pnl": 1200,
+            "copy_bt_14d_net_pnl": 600,
+            "copy_bt_7d_net_pnl": 200,
+            "copy_bt_closed_n": 12,
+            "copy_bt_14d_closed_n": 6,
+            "copy_bt_7d_closed_n": 3,
+            "copy_bt_open_fill_rate": 0.9,
+        })
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "thin_recent")
+
+    def test_follow_eligibility_rejects_thin_recent_loss(self):
         result = evaluate_follow_eligibility({
             "score": 0.70,
             "copy_bt_net_pnl": 1200,
@@ -44,7 +59,7 @@ class FollowScoreTests(unittest.TestCase):
             "copy_bt_open_fill_rate": 0.9,
         })
 
-        self.assertTrue(result["eligible"])
+        self.assertFalse(result["eligible"])
         self.assertEqual(result["status"], "thin_recent")
 
     def test_follow_eligibility_rejects_low_fill_rate_with_enough_sample(self):
@@ -55,7 +70,7 @@ class FollowScoreTests(unittest.TestCase):
             "copy_bt_7d_net_pnl": 200,
             "copy_bt_closed_n": 12,
             "copy_bt_14d_closed_n": 6,
-            "copy_bt_7d_closed_n": 3,
+            "copy_bt_7d_closed_n": 5,
             "copy_bt_open_fill_rate": 0.55,
         })
 
