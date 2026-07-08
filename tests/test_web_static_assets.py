@@ -125,6 +125,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("export function WalletScoreCell(", body)
         self.assertNotIn("title={scoreTitle(w)}", wallets)
         self.assertIn("score-info-btn", body)
+        self.assertIn("<InfoIcon />", body)
+        self.assertNotIn(">!", body)
         self.assertIn(".score-detail-modal", css)
         self.assertIn("backdrop-filter", css)
 

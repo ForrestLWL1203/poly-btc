@@ -1,4 +1,5 @@
 import { fNum, fSign, short } from "../../lib/format.js";
+import { InfoIcon } from "../../lib/icons.jsx";
 
 const { useEffect } = React;
 
@@ -42,7 +43,7 @@ export function WalletScoreCell({ wallet, color, onOpen }) {
         aria-label={"查看 " + short(wallet.address) + " 的评分细节"}
         onClick={(e) => { e.stopPropagation(); onOpen(wallet); }}
       >
-        !
+        <InfoIcon />
       </button>
     </span>
   );
