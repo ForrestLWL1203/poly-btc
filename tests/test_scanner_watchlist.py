@@ -397,6 +397,157 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(tuple(row), ("retired", "copy_backtest_loss", -25.0, 9))
 
+    def test_regate_retires_low_copy_fill_rate_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            now_ms = int(time.time() * 1000)
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row(
+                    "0xaaa",
+                    "active",
+                    0.91,
+                    n_trades=10,
+                    n_fills=20,
+                    active_days=8,
+                    activity_ratio=0.8,
+                    median_eps=1,
+                    median_hold_s=3600,
+                    win_rate=0.7,
+                    net_pnl=100,
+                    roi_equity=0.1,
+                    roi_total=0.1,
+                    net_30d=100,
+                    net_life=500,
+                    pf_equity=10_000,
+                    pf_mon_pnl=800,
+                    pf_mon_vlm=20_000,
+                    pf_week_pnl=100,
+                    pf_week_vlm=5_000,
+                    pf_turnover=1,
+                    payoff_ratio=1.2,
+                    avg_notional=1_000,
+                    last_fill_ms=now_ms,
+                ),
+            )
+            db.commit()
+            p = SimpleNamespace(
+                min_perp=0.3,
+                evidence_min_days=5,
+                evidence_min_trades=7,
+                max_daily_eps=10,
+                exclude_hft=True,
+                hft_min_hold_min=3.0,
+                grid_max_adds=5,
+                max_single_adds=20,
+                max_fills_per_ep=50,
+                max_concurrent_pos=15,
+                inactive_days=7,
+                min_activity=0.1,
+                portfolio_max_turnover=80,
+                portfolio_min_edge_bps=10,
+                windfall_conc=0.8,
+                windfall_win_max=0.6,
+                min_active_score=0.0,
+                copy_bt_gate_enable=True,
+                copy_bt_days=30,
+                copy_bt_min_closed=7,
+                copy_bt_min_net_pnl=0.0,
+            )
+
+            with patch.object(scanner, "_copy_bt_results", return_value={
+                "copy_net_pnl": 120.0,
+                "copy_win_rate": 0.6,
+                "closed_n": 9,
+                "opened_n": 4,
+                "target_open_events": 10,
+                "liquidations": 0,
+                "fee_drag": 4.0,
+            }):
+                scanner.regate(db, p)
+
+            row = db.execute(
+                "SELECT status,reason,copy_bt_open_fill_rate FROM profile WHERE addr='0xaaa'"
+            ).fetchone()
+            self.assertEqual(row[0], "retired")
+            self.assertEqual(row[1], "low_fill_rate")
+            self.assertAlmostEqual(row[2], 0.4)
+
+    def test_regate_keeps_thin_recent_copy_loss_active(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            now_ms = int(time.time() * 1000)
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row(
+                    "0xaaa",
+                    "active",
+                    0.91,
+                    n_trades=10,
+                    n_fills=20,
+                    active_days=8,
+                    activity_ratio=0.8,
+                    median_eps=1,
+                    median_hold_s=3600,
+                    win_rate=0.7,
+                    net_pnl=100,
+                    roi_equity=0.1,
+                    roi_total=0.1,
+                    net_30d=100,
+                    net_life=500,
+                    pf_equity=10_000,
+                    pf_mon_pnl=800,
+                    pf_mon_vlm=20_000,
+                    pf_week_pnl=100,
+                    pf_week_vlm=5_000,
+                    pf_turnover=1,
+                    payoff_ratio=1.2,
+                    avg_notional=1_000,
+                    last_fill_ms=now_ms,
+                ),
+            )
+            db.commit()
+            p = SimpleNamespace(
+                min_perp=0.3,
+                evidence_min_days=5,
+                evidence_min_trades=7,
+                max_daily_eps=10,
+                exclude_hft=True,
+                hft_min_hold_min=3.0,
+                grid_max_adds=5,
+                max_single_adds=20,
+                max_fills_per_ep=50,
+                max_concurrent_pos=15,
+                inactive_days=7,
+                min_activity=0.1,
+                portfolio_max_turnover=80,
+                portfolio_min_edge_bps=10,
+                windfall_conc=0.8,
+                windfall_win_max=0.6,
+                min_active_score=0.0,
+                copy_bt_gate_enable=True,
+                copy_bt_days=30,
+                copy_bt_min_closed=7,
+                copy_bt_min_net_pnl=0.0,
+            )
+
+            with patch.object(scanner, "_copy_bt_results", return_value={
+                30: {"copy_net_pnl": 200.0, "copy_win_rate": 0.6, "closed_n": 9,
+                     "opened_n": 9, "target_open_events": 9, "liquidations": 0, "fee_drag": 4.0},
+                14: {"copy_net_pnl": 50.0, "copy_win_rate": 0.5, "closed_n": 4,
+                     "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
+                7: {"copy_net_pnl": -5.0, "copy_win_rate": 0.0, "closed_n": 1,
+                    "opened_n": 1, "target_open_events": 1, "liquidations": 0, "fee_drag": 1.0},
+            }):
+                scanner.regate(db, p)
+
+            row = db.execute(
+                "SELECT status,reason,copy_bt_7d_net_pnl,copy_bt_7d_closed_n FROM profile WHERE addr='0xaaa'"
+            ).fetchone()
+            self.assertEqual(tuple(row), ("active", "ok", -5.0, 1))
+
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

@@ -40,6 +40,19 @@ def _episode_rows(addr: str, eps: list) -> list:
     return rows
 
 
+def _apply_follow_eligibility_gate(m: dict) -> tuple[bool, str]:
+    """Final profile-level copyability gate after copy replay evidence is recorded.
+
+    `apply_copy_bt_gate` handles copy PnL loss. This catches other clear followability failures
+    such as too many target opens we could not copy. Thin/missing evidence is annotated downstream
+    but remains active so we do not churn wallets on tiny samples or transient cache gaps.
+    """
+    eligibility = follow_score.evaluate_follow_eligibility(m)
+    if not eligibility.get("eligible"):
+        return False, eligibility.get("status") or "follow_ineligible"
+    return True, "ok"
+
+
 def _load_cached_fills(db, addr, since):
     """Cached raw fills for addr in the [since, now] window (ASC). Empty for a never-scanned candidate."""
     with _db_lock:
@@ -369,6 +382,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
         ok, reason = metrics.gates_state(m, now_ms, p)
     if ok:
         ok, reason = _apply_copy_bt_gate(m, _copy_bt_results(addr, perp_full, now_ms, p), p)
+    if ok:
+        ok, reason = _apply_follow_eligibility_gate(m)
     m["times_active"] += 1 if ok else 0
 
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
@@ -661,6 +676,8 @@ def regate(db, p) -> int:
                 _copy_bt_results(addr, _copy_bt_cached_fills(db, addr, now, p), now, p),
                 p,
             )
+        if ok:
+            ok, reason = _apply_follow_eligibility_gate(m)
         score = metrics.score(m) if ok else 0.0
         if ok and score < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
             ok, reason, score = False, "low_quality", 0.0      # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
