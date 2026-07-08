@@ -17,6 +17,8 @@ class GuardedDb:
             raise AssertionError("positions endpoint should not run a separate follow-position query")
         if "cp.master_margin" in normalized:
             raise AssertionError("positions endpoint should not select unused master_margin")
+        if "FROM copy_action ca JOIN closed_base cb" in normalized:
+            raise AssertionError("closed positions should start from the 100 closed positions, not scan copy_action")
         return self.db.execute(sql, args)
 
 

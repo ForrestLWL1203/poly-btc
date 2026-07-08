@@ -40,18 +40,15 @@ def ep_positions(db, qs):
                     "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr "
                     "FROM copy_position cp WHERE " + " AND ".join(where) +
                     " ORDER BY cp.closed_at DESC LIMIT 100"
-                    "), exit_fills AS ("
-                    "SELECT ca.pos_id,"
-                    "SUM(ABS(ca.our_qty_delta)*ca.our_px)/NULLIF(SUM(ABS(ca.our_qty_delta)),0) AS exit_px "
-                    "FROM copy_action ca JOIN closed_base cb ON cb.pos_id=ca.pos_id "
-                    "WHERE ca.action IN ('reduce','close') AND ABS(ca.our_qty_delta)>1e-12 "
-                    "AND ca.our_px IS NOT NULL GROUP BY ca.pos_id"
                     ") "
-                    "SELECT cb.*,w.rank AS wrank,fs.follow_pos,ef.exit_px "
+                    "SELECT cb.*,w.rank AS wrank,fs.follow_pos,"
+                    "(SELECT SUM(ABS(ca.our_qty_delta)*ca.our_px)/NULLIF(SUM(ABS(ca.our_qty_delta)),0) "
+                    " FROM copy_action ca INDEXED BY idx_ca_pos_action_ts "
+                    " WHERE ca.pos_id=cb.pos_id AND ca.action IN ('reduce','close') "
+                    " AND ABS(ca.our_qty_delta)>1e-12 AND ca.our_px IS NOT NULL) AS exit_px "
                     "FROM closed_base cb "
                     "LEFT JOIN watchlist w ON w.addr=cb.addr "
                     "LEFT JOIN follow_set fs ON fs.addr=cb.addr "
-                    "LEFT JOIN exit_fills ef ON ef.pos_id=cb.pos_id "
                     "ORDER BY cb.closed_at DESC", tuple([line] + args))
         out = []
         for r in rows:
