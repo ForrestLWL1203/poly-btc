@@ -33,10 +33,93 @@ def _pnl_signal(pnl: float, scale: float) -> float:
     return math.tanh(pnl / scale) if scale > 0 else 0.0
 
 
+def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
+    return any(metrics.get(k) is not None for k in (
+        "copy_bt_net_pnl", "copy_bt_14d_net_pnl", "copy_bt_7d_net_pnl",
+    )) or c30 > 0 or c14 > 0 or c7 > 0
+
+
 @dataclass(frozen=True)
 class FollowScore:
     score: float
     detail: dict
+
+
+def evaluate_follow_eligibility(
+    metrics: Mapping,
+    *,
+    min_closed30: int = 7,
+    min_closed14: int = 5,
+    min_closed7: int = 3,
+    min_open_fill_rate: float = 0.60,
+) -> dict:
+    """Classify whether an active profile is eligible for real follow-line selection.
+
+    The profile gate remains the binary quality gate. This layer is deliberately
+    narrower: it keeps missing/thin-but-not-yet-disproven wallets visible, while
+    ensuring clear copyability failures cannot sit above the automatic follow
+    line just because their raw profile score is high.
+    """
+    c30 = int(_num(metrics.get("copy_bt_closed_n")))
+    c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
+    c7 = int(_num(metrics.get("copy_bt_7d_closed_n")))
+    p30 = _num(metrics.get("copy_bt_net_pnl"))
+    p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
+    p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
+    if not _has_copy_evidence(metrics, c30, c14, c7):
+        return {
+            "eligible": True,
+            "status": "no_copy_evidence",
+            "reasons": ["缺少copy回测证据"],
+        }
+
+    recent_recovered = p14 > 0 and c14 >= min_closed14 and p7 > 0 and c7 >= min_closed7
+    if p14 < 0 and c14 >= min_closed14:
+        return {
+            "eligible": False,
+            "status": "copy_backtest_loss_14d",
+            "reasons": [f"14天copy亏损且样本足够({c14}笔)"],
+        }
+    if p7 < 0 and c7 >= min_closed7:
+        return {
+            "eligible": False,
+            "status": "copy_backtest_loss_7d",
+            "reasons": [f"7天copy亏损且样本足够({c7}笔)"],
+        }
+    if p30 <= 0 and c30 >= min_closed30 and not recent_recovered:
+        return {
+            "eligible": False,
+            "status": "copy_backtest_loss",
+            "reasons": [f"30天copy亏损且近期未充分恢复({c30}笔)"],
+        }
+    open_fill_rate = metrics.get("copy_bt_open_fill_rate")
+    if open_fill_rate is not None and c30 >= min_closed30 and _num(open_fill_rate, 1.0) < min_open_fill_rate:
+        return {
+            "eligible": False,
+            "status": "low_fill_rate",
+            "reasons": [f"开仓跟随率低于{min_open_fill_rate * 100:.0f}%"],
+        }
+
+    thin_reasons = []
+    if c14 < min_closed14:
+        thin_reasons.append(f"14天样本偏少({c14}笔)")
+    if c7 < min_closed7:
+        thin_reasons.append(f"7天样本偏少({c7}笔)")
+    if p14 < 0 and c14 > 0:
+        thin_reasons.append("14天copy亏损但样本不足")
+    if p7 < 0 and c7 > 0:
+        thin_reasons.append("7天copy亏损但样本不足")
+    if thin_reasons:
+        return {
+            "eligible": True,
+            "status": "thin_recent",
+            "reasons": thin_reasons,
+        }
+    return {
+        "eligible": True,
+        "status": "eligible",
+        "reasons": ["copy回测证据足够"],
+    }
 
 
 def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
@@ -54,9 +137,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
 
-    has_copy = any(metrics.get(k) is not None for k in (
-        "copy_bt_net_pnl", "copy_bt_14d_net_pnl", "copy_bt_7d_net_pnl",
-    )) or c30 > 0 or c14 > 0 or c7 > 0
+    has_copy = _has_copy_evidence(metrics, c30, c14, c7)
     if not has_copy:
         return raw, {
             "rawScore": raw,

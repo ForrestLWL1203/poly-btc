@@ -1,6 +1,6 @@
 import unittest
 
-from hl.follow_score import choose_follow_line, compute_follow_score
+from hl.follow_score import choose_follow_line, compute_follow_score, evaluate_follow_eligibility
 
 
 class FollowScoreTests(unittest.TestCase):
@@ -10,6 +10,57 @@ class FollowScoreTests(unittest.TestCase):
         self.assertAlmostEqual(score, 0.73)
         self.assertEqual(detail["rawScore"], 0.73)
         self.assertIn("暂无copy回测", detail["reasons"][0])
+
+    def test_follow_eligibility_marks_missing_copy_evidence_without_hard_rejecting(self):
+        result = evaluate_follow_eligibility({"score": 0.95})
+
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["status"], "no_copy_evidence")
+
+    def test_follow_eligibility_allows_recent_positive_copy(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.70,
+            "copy_bt_net_pnl": 1200,
+            "copy_bt_14d_net_pnl": 600,
+            "copy_bt_7d_net_pnl": 200,
+            "copy_bt_closed_n": 12,
+            "copy_bt_14d_closed_n": 6,
+            "copy_bt_7d_closed_n": 3,
+            "copy_bt_open_fill_rate": 0.9,
+        })
+
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["status"], "eligible")
+
+    def test_follow_eligibility_marks_thin_recent_loss_without_hard_rejecting(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.70,
+            "copy_bt_net_pnl": 1200,
+            "copy_bt_14d_net_pnl": 600,
+            "copy_bt_7d_net_pnl": -20,
+            "copy_bt_closed_n": 12,
+            "copy_bt_14d_closed_n": 6,
+            "copy_bt_7d_closed_n": 1,
+            "copy_bt_open_fill_rate": 0.9,
+        })
+
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["status"], "thin_recent")
+
+    def test_follow_eligibility_rejects_low_fill_rate_with_enough_sample(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.70,
+            "copy_bt_net_pnl": 1200,
+            "copy_bt_14d_net_pnl": 600,
+            "copy_bt_7d_net_pnl": 200,
+            "copy_bt_closed_n": 12,
+            "copy_bt_14d_closed_n": 6,
+            "copy_bt_7d_closed_n": 3,
+            "copy_bt_open_fill_rate": 0.55,
+        })
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "low_fill_rate")
 
     def test_copy_stronger_wallet_beats_slightly_higher_raw_wallet(self):
         weak = {

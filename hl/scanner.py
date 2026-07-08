@@ -426,7 +426,14 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     rows = [dict(zip(row_cols, r)) for r in cur.fetchall()]
     ranked = []
     for r in rows:
-        score, _detail = follow_score.compute_follow_score(r)
+        score, detail = follow_score.compute_follow_score(r)
+        eligibility = follow_score.evaluate_follow_eligibility(r)
+        if not eligibility.get("eligible"):
+            floor = float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60))
+            score = min(score, max(0.0, floor - 1e-9))
+            detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
+        r["follow_detail"] = detail
+        r["follow_eligibility"] = eligibility
         r["follow_score"] = score
         ranked.append(r)
     ranked.sort(key=lambda r: (-(r["follow_score"] or 0.0), r["addr"]))
