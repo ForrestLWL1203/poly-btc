@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS profile (
     pos_day_ratio    REAL DEFAULT 0,      -- v3: fraction of active days that were net-positive
     profit_conc      REAL DEFAULT 0,      -- v3: best single day's share of gross profit (1 = one-lucky-day)
     hold_skew        REAL DEFAULT 0,      -- v3: median hold(losers)/hold(winners) (>1 = 扛单/disposition)
-    open_underwater  REAL DEFAULT 0,      -- v3: worst current open position underwater (fraction, <=0)
+    open_underwater  REAL DEFAULT 0,      -- v3: worst material current open position underwater (fraction, <=0)
     max_adds_per_ep    INTEGER DEFAULT 0, -- GRID signature: most scale-in ORDERS in a single round-trip
     median_adds_per_ep INTEGER DEFAULT 0, -- typical scale-ins/round-trip (swing 0-few, grid dozens)
     worst_loss_pct   REAL DEFAULT 0,      -- loss discipline: worst single round-trip loss / acct (<=0)

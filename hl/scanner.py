@@ -225,10 +225,12 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
     funnel to live positions (a trend trader's winning holds AND a 扛单's losing holds). clearinghouse-
     State is PER-DEX (standard call omits builder/stock xyz:* positions), so we query each dex and
     combine. Returns a dict (None if no dex answered):
-      margin_type, cur_leverage, worst_underwater (<=0, most-negative adverse — kept for Health),
+      margin_type, cur_leverage, worst_underwater (<=0, most-negative adverse among material positions),
       open_unrealized (total signed $), open_loss_frac / open_win_frac (underwater / winning unrealized
-      ÷ acct), bag_count (# underwater positions), max_bag_days / max_win_days (longest hold, from the
-      in-window open episodes' open_ms). Durations are a LOWER bound for positions opened pre-window."""
+      ÷ acct), bag_count (# material underwater positions), max_bag_days / max_win_days (longest hold,
+      from the in-window open episodes' open_ms). Durations are a LOWER bound for positions opened
+      pre-window. Tiny dust positions still count toward total unrealized, but do not drive the deep-bag
+      score guard."""
     open_ms = {e["coin"]: e["open_ms"] for e in (open_eps or [])}    # coin -> when the live run started
     types, worst_uw = set(), 0.0
     tot_ntl, acct_val, answered, has_pos = 0.0, 0.0, False, False
@@ -253,11 +255,18 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             perp_notl += abs(pv)
             if szi < 0:                                          # a SHORT — candidate hedge of a spot long
                 perp_short[(coin or "").upper()] = perp_short.get((coin or "").upper(), 0.0) + abs(pv)
-            if entry and szi:
+            risk_acct = acct or acct_val or 0.0
+            material = True
+            if risk_acct > 0:
+                material = abs(pv) / risk_acct >= config.OPEN_RISK_MIN_POSITION_EQUITY_FRAC
+            if entry and szi and material:
                 mark = pv / abs(szi)
                 worst_uw = min(worst_uw, (mark - entry) / entry * (1 if szi > 0 else -1))
             if upnl < 0:
-                up_loss += upnl;  bag_n += 1;  max_bag_d = max(max_bag_d, days)   # a carried LOSS = a bag
+                up_loss += upnl
+                if material:
+                    bag_n += 1
+                    max_bag_d = max(max_bag_d, days)   # a material carried LOSS = a bag
             elif upnl > 0:
                 up_win += upnl;   max_win_d = max(max_win_d, days)               # a carried WIN = trend value
     if not answered:

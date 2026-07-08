@@ -57,6 +57,40 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 
 
 class ScannerWatchlistTests(unittest.TestCase):
+    def test_open_snapshot_uses_material_position_for_underwater_risk(self):
+        def position(coin, szi, entry_px, mark_px, unrealized_pnl):
+            return {
+                "position": {
+                    "coin": coin,
+                    "szi": str(szi),
+                    "entryPx": str(entry_px),
+                    "positionValue": str(abs(szi) * mark_px),
+                    "unrealizedPnl": str(unrealized_pnl),
+                    "leverage": {"type": "cross", "value": 3},
+                }
+            }
+
+        clearinghouse = {
+            "marginSummary": {"accountValue": "100000", "totalNtlPos": "105008.4"},
+            "assetPositions": [
+                position("KAITO", -100000, 1.0, 1.05, -5000.0),
+                position("XPL", 10, 1.0, 0.84, -1.6),
+            ],
+        }
+
+        with patch.object(scanner.rest, "clearinghouse_state", return_value=clearinghouse), \
+                patch.object(scanner.rest, "spot_clearinghouse_state", return_value={"balances": []}):
+            snap = scanner._open_snapshot(
+                "0xwallet",
+                {None},
+                [{"coin": "KAITO", "open_ms": 1}, {"coin": "XPL", "open_ms": 1}],
+                scanner._DAY_MS * 4,
+                100000,
+            )
+
+        self.assertAlmostEqual(snap["worst_underwater"], -0.05, places=6)
+        self.assertEqual(snap["bag_count"], 1)
+
     def test_harvest_clears_stale_candidate_flags_before_current_leaderboard(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
