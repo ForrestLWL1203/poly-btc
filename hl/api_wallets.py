@@ -84,6 +84,7 @@ def ep_wallets(db, qs=None):
         total = (total_row["c"] if total_row else 0) or 0
         rows = qall(db,
             "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,"
+            "COALESCE(da.drop_at,p.last_refreshed,fh.last_followed_at) AS drop_at,"
             "COALESCE(w.score,p.score) AS follow_score,p.score AS raw_score,p.status,p.reason,"
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
             "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
@@ -93,14 +94,21 @@ def ep_wallets(db, qs=None):
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
             "LEFT JOIN leaderboard l ON l.addr=fh.addr "
+            "LEFT JOIN ("
+            "  SELECT addr,MAX(created_at) AS drop_at FROM pipeline_audit "
+            "  WHERE (stage='profile' AND status IN ('retired','rejected')) "
+            "     OR (stage='watchlist' AND status IN ('below_line','disabled')) "
+            "  GROUP BY addr"
+            ") da ON da.addr=fh.addr "
             "WHERE NOT (w.addr IS NOT NULL AND w.score >= ?) "
-            "ORDER BY fh.last_followed_at DESC LIMIT ? OFFSET ?", (line_native, size, page * size))
+            "ORDER BY drop_at DESC LIMIT ? OFFSET ?", (line_native, size, page * size))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["follow_score"] or 0.0), "rawScore": score100(r["raw_score"] or 0.0),
             "scoreBreakdown": _score_breakdown(r),
             "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
             "lastFollowedAt": iso_epoch(r["last_followed_at"]),
+            "dropAt": iso_epoch(r["drop_at"]),
             "dropReason": ("掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
                 "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
                 "bot_frequency": "高频", "hft_uncopyable": "高频", "spot_dominant": "现货为主"}.get(r["reason"], r["reason"] or "淘汰")),

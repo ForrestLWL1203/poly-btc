@@ -64,7 +64,7 @@ export function Wallets({ confirm, toast }) {
                       <td className="num">{fNum(w.winRatePct, 0)}%</td>
                       <td><b>{w.mainCoin}</b></td>
                       <td><span className="tint tint-red">{w.dropReason}</span></td>
-                      <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.lastFollowedAt)}</td>
+                      <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.dropAt || w.lastFollowedAt)}</td>
                     </tr>
                     {open && <tr className="detail-row"><td colSpan="9">{auditBox(w.address)}</td></tr>}
                   </React.Fragment>

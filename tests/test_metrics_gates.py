@@ -75,6 +75,29 @@ def state_metrics(**overrides):
 
 
 class MetricsGateTests(unittest.TestCase):
+    def test_win_pt_no_longer_changes_raw_profile_score(self):
+        """Portfolio edge and copy replay handle thin-edge risk; win_pt stays observational."""
+        base = {
+            "win_rate": 0.52,
+            "pf_equity": 100_000.0,
+            "pf_week_pnl": 40_000.0,
+            "pf_mon_pnl": 180_000.0,
+            "avg_notional": 25_000.0,
+            "max_drawdown": 0.0,
+            "open_win_frac": 0.0,
+            "n_trades": 72,
+            "bag_count": 0,
+            "active_days": 10,
+            "worst_loss_pct": 0.01,
+            "open_underwater": 0.0,
+            "payoff_ratio": 3.0,
+        }
+
+        thin = metrics.score({**base, "win_pt": 0.2})
+        thick = metrics.score({**base, "win_pt": 3.0})
+
+        self.assertAlmostEqual(thin, thick, places=9)
+
     def test_rejects_one_off_heavy_dca_even_when_median_is_low(self):
         ok, reason = metrics.gates_structural(
             gate_metrics(median_adds_per_ep=0, max_adds_per_ep=23),

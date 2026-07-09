@@ -121,6 +121,32 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
         self.assertIn("scoreBreakdown", res["wallets"][0])
 
+    def test_dropped_wallet_time_uses_latest_drop_audit_not_last_followed_at(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) "
+                "VALUES ('0xaaa','2026-01-01T00:00:00Z',0.8)"
+            )
+            db.execute(
+                "INSERT INTO profile (addr,status,reason,score,market_type,win_rate,top_coin,last_refreshed) "
+                "VALUES ('0xaaa','rejected','not_profitable',0.4,'crypto',0.5,'BTC','2026-01-02T00:00:00Z')"
+            )
+            db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            db.execute(
+                "INSERT INTO pipeline_audit (stamp,source,stage,addr,status,reason,created_at) "
+                "VALUES ('2026-01-03T00:00:00Z','scan','profile','0xaaa','rejected','not_profitable',"
+                "'2026-01-03T01:23:00Z')"
+            )
+            db.commit()
+
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
+
+        self.assertEqual(res["wallets"][0]["lastFollowedAt"], 1767225600)
+        self.assertEqual(res["wallets"][0]["dropAt"], 1767403380)
+
     def test_dropped_wallet_uses_follow_score_not_raw_profile_score(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

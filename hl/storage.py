@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS profile (
     avg_win          REAL DEFAULT 0,      -- 平均赢单 ($)
     avg_loss         REAL DEFAULT 0,      -- 平均亏单 ($, 正值)
     payoff_ratio     REAL DEFAULT 0,      -- 盈亏比 avg_win/avg_loss (<1 = 大亏小赚; 无亏封顶 999)
-    win_pt           REAL DEFAULT 0,      -- 赢单每笔中位名义收益% → score g_thick 因子 (剥蒜降分)
+    win_pt           REAL DEFAULT 0,      -- 赢单每笔中位名义收益% (审计指标; 不再作为 raw score 乘法降分)
     max_concurrent   INTEGER DEFAULT 0,   -- 峰值同时持仓数 (>阈值 = 组合客,我们装不下 → too_many_concurrent)
     net_pnl          REAL,
     roi_equity       REAL,
@@ -571,7 +571,7 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN avg_loss REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN payoff_ratio REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
-    "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% → score g_thick 因子
+    "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% (审计指标)
     "ALTER TABLE scan_runs ADD COLUMN profiled INTEGER",
 )
 

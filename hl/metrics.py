@@ -128,8 +128,8 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
     _avg_win = (sum(_wins) / len(_wins)) if _wins else 0.0
     _avg_loss = (sum(_losses) / len(_losses)) if _losses else 0.0
     _payoff = min(999.0, _avg_win / _avg_loss) if _avg_loss > 0 else 999.0
-    # 赢单每笔中位名义收益% = 典型赢单吃到几个点的价格波动(杠杆无关、和手续费同口径)。剥蒜(赚一点就跑)的钱包
-    # 这个值很低 → score 的 g_thick 因子据此降分(我们跟单有滑点,薄边际吃不到)。
+    # 赢单每笔中位名义收益% = 典型赢单吃到几个点的价格波动(杠杆无关、和手续费同口径)。
+    # 保留为审计指标；薄边际风险由 portfolio edge bps 和 copy replay 判断。
     _win_pt_list = sorted(e["net_pnl"] / e["max_notl"] * 100 for e in eps if e["net_pnl"] > 0 and e.get("max_notl"))
     _win_pt = _win_pt_list[len(_win_pt_list) // 2] if _win_pt_list else 0.0
     _max_concurrent = _peak_concurrent(eps)   # 峰值同时持仓数 → "开仓太多我们装不下" 的可复制性闸
@@ -315,11 +315,12 @@ def score(m: dict) -> float:
     g_deep = _clip(1.0 - max(0.0, bag - config.SCORE_BAG_REF) / config.SCORE_BAG_SPAN, config.SCORE_DEEP_FLOOR, 1.0)
 
     # ── v10 QUALITY-MAGNITUDE factors (folded INTO score, NOT末尾 hard gates — those double-count & over-cut) ──
-    # 每笔厚度(核心,用户点5): 剥蒜(赢单每笔 <~0.5% 名义)重罚→×0.33; ≥REF(1.5%) 满分. 我们跟单有滑点,薄边际吃不到.
-    g_thick = _clip(g("win_pt") / config.SCORE_THICK_REF, config.SCORE_THICK_FLOOR, 1.0)
+    # `win_pt` remains an audit metric only. Thin-edge risk is already handled by PORTFOLIO_MIN_EDGE_BPS
+    # and by copy replay; making winning-trade thickness a hidden multiplicative penalty double-punished
+    # wallets that our own copy replay can follow profitably.
     # 盈亏比: 只罚真·大亏小赚(payoff<1); payoff≥REF(1.0) 满分 → 不误伤 payoff 1.0 的高胜率盘. 高地板(0.6)=轻推.
     #   edge 厚度不单列因子(和 ROI 支柱重复); 手续费硬底线在闸门(10bp),ROI 支柱已奖励回报.
     g_payoff = _clip(g("payoff_ratio", 1.0) / config.SCORE_PAYOFF_REF, config.SCORE_PAYOFF_FLOOR, 1.0)
 
     # linear STRETCH → best real wallet ≈ 100, smooth decline (stable/absolute, not max-relative)
-    return _clip(core * g_manuf * g_deep * g_thick * g_payoff * config.SCORE_STRETCH, 0.0, 1.0)
+    return _clip(core * g_manuf * g_deep * g_payoff * config.SCORE_STRETCH, 0.0, 1.0)

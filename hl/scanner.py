@@ -677,7 +677,7 @@ def regate(db, p) -> int:
             cur += d; pk = max(pk, cur)
         return pk
     concw = {a: _peakc(v) for a, v in _iv.items()}
-    # win_pt (median winning per-trade % on notional) from the episode table → score's g_thick factor (same as scan)
+    # win_pt (median winning per-trade % on notional) from the episode table → audit metric (same as scan)
     _wpt = {}
     for a, npnl, mnotl in db.execute("SELECT addr, net_pnl, max_notl FROM episode WHERE net_pnl>0 AND max_notl>0"):
         _wpt.setdefault(a, []).append(npnl / mnotl * 100)
@@ -699,7 +699,7 @@ def regate(db, p) -> int:
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
              "p90_fills_ep": p90fe.get(addr, 0),   # p90 single-episode fills → algo-slicer gate (from episode table)
              "max_concurrent": concw.get(addr, 0), # peak simultaneous positions → too_many_concurrent gate
-             "win_pt": winptw.get(addr, 0.0),       # median winning per-trade % → score g_thick factor
+             "win_pt": winptw.get(addr, 0.0),       # median winning per-trade % → audit metric
              "worst_loss_pct": wloss or 0.0,
              # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),

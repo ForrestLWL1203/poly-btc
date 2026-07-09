@@ -63,7 +63,6 @@ class ScannerSettingsParamTests(unittest.TestCase):
             "SCORE_W_ACT": config.SCORE_W_ACT,
             "SCORE_W_ROI": config.SCORE_W_ROI,
             "SCORE_STRETCH": config.SCORE_STRETCH,
-            "SCORE_THICK_REF": config.SCORE_THICK_REF,
         }
         try:
             with tempfile.TemporaryDirectory() as td:

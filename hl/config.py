@@ -359,8 +359,8 @@ GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量
 # === v10: quality magnitude lives in score() as smooth factors (NOT末尾 hard gates — those fight the composite
 # score + over-cut). gates stay binary (copyability + validity + evidence). A single MIN_ACTIVE_SCORE quality
 # line then makes `active` = the pool of genuinely-good, followable wallets (watchlist); we follow the top-N. ===
-SCORE_THICK_REF   = 1.5   # 赢单每笔名义收益% 达此=满分厚度; 剥蒜(0.5%)→×0.33. 我们的滑点吃薄边际,故厚度直接进分
-SCORE_THICK_FLOOR = 0.3
+# Winning-trade thickness (`win_pt`) is intentionally observational only. Portfolio edge bps is the hard
+# thin-edge gate, and copy replay is the authoritative copyability check.
 SCORE_PAYOFF_REF  = 1.0   # 盈亏比≥此(1.0)=满分,只罚真·大亏小赚(payoff<1); payoff 和胜率联动,高胜率天生不需高盈亏比
 SCORE_PAYOFF_FLOOR= 0.6    # → 轻推,不双重惩罚高胜率盘(0x770493 payoff1.0/胜78% 不再被压)
 EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 → insufficient_evidence(无战绩无从评判,取消趋势豁免)
