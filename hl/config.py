@@ -135,6 +135,9 @@ STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz
 COIN_BLACKLIST = ""         # comma/newline separated exact coin ids to never open anew (e.g. XYZ:SHKX).
 #                           Existing copy positions still reduce/close normally; flips close old side, then skip
 #                           the new blacklisted side. Prefer adding from the position row to avoid symbol aliases.
+LOW_LIQUIDITY_FILTER_ENABLE = True
+MIN_COIN_DAY_NTL_VLM = 5_000_000.0  # crypto perp 24h notional volume floor; blocks thin meme/alt perps
+MIN_COIN_OI_NOTIONAL = 2_000_000.0  # crypto perp open-interest notional floor; volume alone can be one-day noise
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 #                           (per-coin cap now lives entirely in the σ-tiered STABLE/MID/HIGH_COIN_CAP_PCT below;
 #                           the old flat COIN_MARGIN_CAP_PCT was removed 2026-07-02 — the tiered caps fully cover it)

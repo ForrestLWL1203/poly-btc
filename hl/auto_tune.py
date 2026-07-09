@@ -258,6 +258,17 @@ def _load_sigmas(db) -> dict:
         return {}
 
 
+def _load_market_ctx(db) -> dict:
+    try:
+        rows = db.execute(
+            "SELECT coin,day_ntl_vlm,oi_notional FROM coin_vol "
+            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2]} for r in rows}
+
+
 def _load_followed_wallets(db, follow: dict) -> list[str]:
     line = float(follow.get("MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     rows = db.execute(
@@ -651,14 +662,16 @@ def follow_overrides_for_margin_candidate(follow: dict, margins: dict) -> dict:
 
 
 def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
-                       window_fills: dict[int, list[dict]] | None = None) -> dict:
+                       window_fills: dict[int, list[dict]] | None = None,
+                       market_ctx: dict | None = None) -> dict:
+    market_ctx = _load_market_ctx(db) if market_ctx is None else market_ctx
     windows = {}
     for days in _tune_days():
         fills = list((window_fills or {}).get(days) or [])
         if window_fills is None:
             start_ms = now_ms - int(days) * 86400_000
             fills = _load_portfolio_fills(db, addrs, start_ms)
-        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides)
+        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {})
         result["fills"] = len(fills)
         windows[int(days)] = result
     return windows

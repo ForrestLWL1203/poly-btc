@@ -177,6 +177,21 @@ def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
 def asset_volumes(dex: str = None) -> dict:
     """{coin: 24h notional volume} from metaAndAssetCtxs (optionally a builder dex). Used to pick the
     most-traded coins to pre-warm σ for — the names match candleSnapshot + fill coin names exactly."""
+    out = {}
+    for coin, ctx in asset_contexts(dex).items():
+        try:
+            out[coin] = float((ctx or {}).get("dayNtlVlm") or 0.0)
+        except (TypeError, ValueError):
+            out[coin] = 0.0
+    return out
+
+
+def asset_contexts(dex: str = None) -> dict:
+    """{coin: ctx+universe fields} from metaAndAssetCtxs.
+
+    Standard perps use bare names (BTC, VINE). Builder-dex callers pass dex and receive names exactly as
+    Hyperliquid returns them; the observer's low-liquidity gate only applies to standard crypto perps.
+    """
     body = {"type": "metaAndAssetCtxs"}
     if dex:
         body["dex"] = dex
@@ -187,11 +202,16 @@ def asset_volumes(dex: str = None) -> dict:
     for u, c in zip(m[0].get("universe", []), m[1]):
         name = u.get("name")
         if name:
-            try:
-                out[name] = float((c or {}).get("dayNtlVlm") or 0)
-            except (TypeError, ValueError):
-                out[name] = 0.0
+            row = dict(c or {})
+            row.update({f"universe_{k}": v for k, v in (u or {}).items()})
+            out[name] = row
     return out
+
+
+def asset_context(coin: str):
+    if not coin or ":" in coin:
+        return None
+    return asset_contexts().get(coin)
 
 
 def perp_universe() -> set:

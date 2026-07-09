@@ -15,6 +15,7 @@ from .fills import build_episodes, is_spot
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
     apply_sector_copy_bt_gate as _apply_sector_copy_bt_gate,
+    copy_bt_market_ctx as _copy_bt_market_ctx,
     copy_bt_overrides as _copy_bt_overrides,
     copy_bt_results as _copy_bt_results,
     copy_bt_sigmas as _copy_bt_sigmas,
@@ -651,6 +652,7 @@ def regate(db, p) -> int:
     now = int(time.time() * 1000)
     stamp = now_iso()
     p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
+    p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
     p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
     rows = db.execute(
         "SELECT p.addr,status,n_trades,n_fills,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
@@ -810,6 +812,7 @@ def scan(db, p) -> None:
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
                        candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
     p.copy_bt_sigmas = _copy_bt_sigmas(db)
+    p.copy_bt_market_ctx = _copy_bt_market_ctx(db)
     p.copy_bt_overrides = _copy_bt_overrides(db)
 
     universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)

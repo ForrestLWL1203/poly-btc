@@ -24,6 +24,24 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_low_liquidity_crypto_open_is_skipped(self):
+        fills = [
+            fill(1_000, "VINE", "A", 100_000, 0, 0.0098, 1),
+            fill(2_000, "VINE", "B", 100_000, -100_000, 0.0100, 2),
+        ]
+
+        result = run_backtest(
+            "0xabc",
+            fills,
+            sigmas={"VINE": 0.12},
+            market_ctx={"VINE": {"day_ntl_vlm": 1_600_000, "oi_notional": 588_000}},
+        )
+
+        self.assertEqual(result["target_open_events"], 1)
+        self.assertEqual(result["opened_n"], 0)
+        self.assertEqual(result["closed_n"], 0)
+        self.assertEqual(result["skip_reasons"].get("skip_low_liquidity"), 1)
+
     def test_coin_blacklist_skips_new_open(self):
         fills = [
             fill(1_000, "xyz:SHKX", "B", 100, 0, 100.0, 1),

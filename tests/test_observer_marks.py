@@ -234,6 +234,31 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_low_liquidity_crypto_open_is_skipped(self):
+        async def run():
+            db = self._db()
+            db.execute(
+                "INSERT INTO coin_vol "
+                "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,updated_at,market_ctx_updated_at) "
+                "VALUES ('VINE',0.12,0.12,0.10,30,1600000,60000000,0.0098,588000,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+            )
+            db.commit()
+            obs = Observer(db, [], {})
+            obs.vol["VINE"] = 0.12
+
+            with patch.object(obs, "_target_snapshot") as target_snapshot:
+                obs._open_position("0xaaa", "VINE", now_ms(), 0.0098, -1000, False, 1, obs.taker)
+                await asyncio.sleep(0.05)
+
+            target_snapshot.assert_not_called()
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM copy_position WHERE coin='VINE'").fetchone()[0],
+                0,
+            )
+            self.assertEqual(obs.hb.get("skip_low_liquidity"), 1)
+
+        asyncio.run(run())
+
     def test_normal_close_does_not_persist_stale_liquidation_flag(self):
         async def run():
             db = self._db()

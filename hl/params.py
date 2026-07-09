@@ -74,6 +74,12 @@ PARAM_SPEC = [
         "跟单评分线", "评分 ≥ 此线的钱包才实际跟单(见下方实时达标数)"),
     ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
         "币种黑名单", "命中的币种不再新开仓;已有仓位仍继续跟随减仓/平仓。建议从持仓行一键加入,避免符号别名写错"),
+    ("LOW_LIQUIDITY_FILTER_ENABLE", "follow", "hidden", "bool", "immediate", config.LOW_LIQUIDITY_FILTER_ENABLE,
+        "低流动性币过滤", "标准 crypto perp 低于24h成交量/OI名义额阈值时不新开仓"),
+    ("MIN_COIN_DAY_NTL_VLM", "follow", "hidden", "usd", "immediate", config.MIN_COIN_DAY_NTL_VLM,
+        "币种24h成交量下限", "crypto perp 24h名义成交量低于此值不新开仓"),
+    ("MIN_COIN_OI_NOTIONAL", "follow", "hidden", "usd", "immediate", config.MIN_COIN_OI_NOTIONAL,
+        "币种OI名义额下限", "crypto perp OI名义额低于此值不新开仓"),
     # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — redundant with the scanner EVIDENCE gate,
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with

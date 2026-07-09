@@ -272,6 +272,11 @@ CREATE TABLE IF NOT EXISTS coin_vol (
     sigma      REAL,              -- used for sizing = max(fast, slow), daily realized vol
     sigma_fast REAL, sigma_slow REAL,
     n          INTEGER,           -- daily candles used
+    day_ntl_vlm REAL,             -- 24h notional volume from metaAndAssetCtxs; low-liquidity gate
+    open_interest REAL,           -- base open interest from metaAndAssetCtxs
+    mark_px    REAL,              -- mark used to value OI
+    oi_notional REAL,             -- open_interest * mark_px; low-liquidity gate
+    market_ctx_updated_at TEXT,
     updated_at TEXT
 );
 
@@ -588,6 +593,11 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% (审计指标)
     "ALTER TABLE scan_runs ADD COLUMN profiled INTEGER",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
+    "ALTER TABLE coin_vol ADD COLUMN day_ntl_vlm REAL",
+    "ALTER TABLE coin_vol ADD COLUMN open_interest REAL",
+    "ALTER TABLE coin_vol ADD COLUMN mark_px REAL",
+    "ALTER TABLE coin_vol ADD COLUMN oi_notional REAL",
+    "ALTER TABLE coin_vol ADD COLUMN market_ctx_updated_at TEXT",
 )
 
 

@@ -101,6 +101,9 @@ class Observer:
         self.min_lev = config.MIN_LEV
         self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
         self.coin_blacklist = parse_coin_blacklist(config.COIN_BLACKLIST)
+        self.low_liquidity_filter_enable = config.LOW_LIQUIDITY_FILTER_ENABLE
+        self.min_coin_day_ntl_vlm = config.MIN_COIN_DAY_NTL_VLM
+        self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
         self.deploy_full_pct = config.DEPLOY_FULL_PCT        # <= this deployed margin: use tier margin upper bound
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
@@ -421,6 +424,9 @@ class Observer:
             f = P.load_follow(self.db)
             if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
             if f.get("COIN_BLACKLIST") is not None: self.coin_blacklist = parse_coin_blacklist(f["COIN_BLACKLIST"])
+            if f.get("LOW_LIQUIDITY_FILTER_ENABLE") is not None: self.low_liquidity_filter_enable = bool(f["LOW_LIQUIDITY_FILTER_ENABLE"])
+            if f.get("MIN_COIN_DAY_NTL_VLM") is not None: self.min_coin_day_ntl_vlm = f["MIN_COIN_DAY_NTL_VLM"]
+            if f.get("MIN_COIN_OI_NOTIONAL") is not None: self.min_coin_oi_notional = f["MIN_COIN_OI_NOTIONAL"]
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
             # (v10: FOLLOW_MIN_TRADES/FOLLOW_MIN_ACTIVE_DAYS dropped — evidence enforced once at profile time)
             if f.get("ADD_FRAC") is not None: self.add_frac = f["ADD_FRAC"]
@@ -615,13 +621,38 @@ class Observer:
             stop_margin_pct=self.stop_margin_pct,
         )
 
+    def _coin_liquidity_block_reason(self, coin: str):
+        if not self.low_liquidity_filter_enable or not coin or ":" in coin:
+            return None
+        row = self.db.execute(
+            "SELECT day_ntl_vlm,oi_notional FROM coin_vol WHERE coin=?",
+            (coin,),
+        ).fetchone()
+        if not row:
+            return None
+        day_ntl_vlm, oi_notional = row[0], row[1]
+        if day_ntl_vlm is None or oi_notional is None:
+            return None
+        if day_ntl_vlm < self.min_coin_day_ntl_vlm:
+            return "day_volume"
+        if oi_notional < self.min_coin_oi_notional:
+            return "open_interest"
+        return None
+
     async def _ensure_vol(self, coin: str):
         """Track coin for the periodic σ refresh, and fetch it NOW if we have no fresh value (so a
         first-seen coin gets a real σ within seconds; sizing uses the fallback only in the meantime)."""
         if not coin:
             return
         self.vol_coins.add(coin)
-        if coin not in self.vol:
+        needs_market_ctx = False
+        if self.low_liquidity_filter_enable and ":" not in coin:
+            row = self.db.execute(
+                "SELECT day_ntl_vlm,oi_notional FROM coin_vol WHERE coin=?",
+                (coin,),
+            ).fetchone()
+            needs_market_ctx = (not row) or row[0] is None or row[1] is None
+        if coin not in self.vol or needs_market_ctx:
             self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
 
     async def prewarm_vol(self):
@@ -629,13 +660,18 @@ class Observer:
         the liquid coins our targets are likeliest to trade get σ before their first fill — no first-open
         latency, warm restart. The long tail is still lazy-fetched on first fill. Skips already-warm coins."""
         for dex in (None, *rest.BUILDER_DEXES):
-            vols = await asyncio.to_thread(rest.asset_volumes, dex)
-            for coin, _ in sorted(vols.items(), key=lambda kv: -kv[1])[:config.VOL_PREWARM_TOP]:
+            ctxs = await asyncio.to_thread(rest.asset_contexts, dex)
+            def _day_vlm(item):
+                try:
+                    return float((item[1] or {}).get("dayNtlVlm") or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+            for coin, ctx in sorted(ctxs.items(), key=_day_vlm, reverse=True)[:config.VOL_PREWARM_TOP]:
                 if coin in self.vol or self.stop:
                     continue
                 self.vol_coins.add(coin)
                 try:
-                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
+                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin, ctx)
                 except Exception:  # noqa: BLE001
                     pass
         _log(f"vol prewarmed: {len(self.vol)} coins (top {config.VOL_PREWARM_TOP}/pool by 24h vol)")
@@ -645,9 +681,10 @@ class Observer:
         sizing only ever reads the cache. Catches a calm→volatile regime change within VOL_REFRESH_S."""
         while not self.stop:
             await asyncio.sleep(config.VOL_REFRESH_S)
+            ctxs = await asyncio.to_thread(rest.asset_contexts)
             for coin in list(self.vol_coins):
                 try:
-                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
+                    self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin, ctxs.get(coin))
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -1310,13 +1347,21 @@ class Observer:
             book.open_ep.pop((addr, coin), None)
             self._tally("skip_chase", book)
             return                                            # chase-skip: price ran past master before we detected
+        await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
+        liquidity_reason = self._coin_liquidity_block_reason(coin)
+        if liquidity_reason:
+            self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
+            self.db.commit()
+            book.open_ep.pop((addr, coin), None)
+            self._tally("skip_low_liquidity", book)
+            _log(f"skip {coin} {ep['side']} {addr[:10]}: low liquidity ({liquidity_reason})")
+            return
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
         # v10 sizing: σ → tier (stable/mid/high) → margin% + leverage = the tier's LEV CAP
         #  margin = equity × <tier>_margin_pct
         #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ master lev + stock cap)
         #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
-        await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
         sigma = self._sigma(coin)
         async with book.acct_lock:                   # serialize margin allocation across opens
             # Dynamic equity-based sizing: below DEPLOY_FULL_PCT, use the tier's upper-bound margin; between

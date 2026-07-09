@@ -17,6 +17,17 @@ def load_sigmas(db) -> dict:
         return {}
 
 
+def load_market_ctx(db) -> dict:
+    try:
+        rows = db.execute(
+            "SELECT coin,day_ntl_vlm,oi_notional FROM coin_vol "
+            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2]} for r in rows}
+
+
 def load_cached_fills(db, addr: str, start_ms: int = 0) -> list:
     rows = db.execute(
         "SELECT fill_json FROM candidate_fills WHERE addr=? AND time>=? ORDER BY time",
@@ -76,7 +87,7 @@ def run_wallet(db, addr: str, days: int = 30, start_ms: int | None = None) -> di
         start_ms = int(time.time() * 1000) - int(days * 86400_000)
     sigmas = load_sigmas(db)
     fills = load_cached_fills(db, addr, start_ms)
-    result = run_backtest(addr, fills, sigmas=sigmas, overrides=load_follow_overrides(db))
+    result = run_backtest(addr, fills, sigmas=sigmas, overrides=load_follow_overrides(db), market_ctx=load_market_ctx(db))
     used = {p["coin"] for p in result.get("positions", [])} | {p["coin"] for p in result.get("open_positions", [])}
     result.update(wallet_context(db, addr))
     result["fills"] = len(fills)

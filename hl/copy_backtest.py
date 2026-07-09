@@ -76,7 +76,7 @@ def _price_events(price_path) -> list[dict]:
 
 
 class Backtest:
-    def __init__(self, addr, sigmas=None, initial_balance=None, overrides=None):
+    def __init__(self, addr, sigmas=None, initial_balance=None, overrides=None, market_ctx=None):
         overrides = overrides or {}
         self.addr = (addr or "").lower()
         self.sigmas = sigmas or {}
@@ -143,6 +143,11 @@ class Backtest:
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
         self.coin_blacklist = parse_coin_blacklist(overrides.get("COIN_BLACKLIST", config.COIN_BLACKLIST))
+        self.low_liquidity_filter_enable = bool(overrides.get(
+            "LOW_LIQUIDITY_FILTER_ENABLE", config.LOW_LIQUIDITY_FILTER_ENABLE))
+        self.min_coin_day_ntl_vlm = overrides.get("MIN_COIN_DAY_NTL_VLM", config.MIN_COIN_DAY_NTL_VLM)
+        self.min_coin_oi_notional = overrides.get("MIN_COIN_OI_NOTIONAL", config.MIN_COIN_OI_NOTIONAL)
+        self.market_ctx = market_ctx or {}
         self.price_path_points = 0
         self.master_leverage_known = 0
         self.master_leverage_missing = 0
@@ -179,6 +184,22 @@ class Backtest:
 
     def coin_cap_pct(self, tier):
         return self.tier_coin_cap[tier]
+
+    def liquidity_block_reason(self, coin):
+        if not self.low_liquidity_filter_enable or not coin or ":" in coin:
+            return None
+        ctx = self.market_ctx.get(coin)
+        if not ctx:
+            return None
+        day_ntl_vlm = ctx.get("day_ntl_vlm")
+        oi_notional = ctx.get("oi_notional")
+        if day_ntl_vlm is None or oi_notional is None:
+            return None
+        if day_ntl_vlm < self.min_coin_day_ntl_vlm:
+            return "day_volume"
+        if oi_notional < self.min_coin_oi_notional:
+            return "open_interest"
+        return None
 
     def run(self, fills, price_path=None):
         path_events = _price_events(price_path)
@@ -268,6 +289,9 @@ class Backtest:
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
         if coin_is_blacklisted(coin, self.coin_blacklist):
             self.skip_reasons["skip_coin_blacklist"] += 1
+            return
+        if self.liquidity_block_reason(coin):
+            self.skip_reasons["skip_low_liquidity"] += 1
             return
         sigma = self.sigma(coin)
         side = "long" if pos1 > 0 else "short"
@@ -556,5 +580,6 @@ def summarize_position(p):
     }
 
 
-def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None):
-    return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance, overrides=overrides).run(fills, price_path=price_path)
+def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None, market_ctx=None):
+    return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance,
+                    overrides=overrides, market_ctx=market_ctx).run(fills, price_path=price_path)

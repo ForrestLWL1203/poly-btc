@@ -17,6 +17,17 @@ def copy_bt_sigmas(db):
         return {}
 
 
+def copy_bt_market_ctx(db):
+    try:
+        rows = db.execute(
+            "SELECT coin,day_ntl_vlm,oi_notional FROM coin_vol "
+            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL"
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return {}
+    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2]} for r in rows}
+
+
 def copy_bt_overrides(db):
     try:
         vals = params.load_follow(db)
@@ -64,6 +75,7 @@ def copy_bt_result(addr, fills, now_ms, p, days=None):
             replay_fills,
             sigmas=getattr(p, "copy_bt_sigmas", None) or {},
             overrides=getattr(p, "copy_bt_overrides", None) or {},
+            market_ctx=getattr(p, "copy_bt_market_ctx", None) or {},
         )
     except Exception:  # noqa: BLE001 - backtest is a quality aid; never kill discovery on a replay bug
         return {}

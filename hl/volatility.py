@@ -42,18 +42,41 @@ def compute(coin: str):
     return max(fast, slow), fast, slow, len(cs)
 
 
-def refresh(db, coin: str):
+def _market_fields(asset_ctx):
+    if not isinstance(asset_ctx, dict):
+        return None, None, None, None, None
+    day_ntl_vlm = f(asset_ctx.get("dayNtlVlm"))
+    open_interest = f(asset_ctx.get("openInterest"))
+    mark_px = f(asset_ctx.get("markPx")) or f(asset_ctx.get("oraclePx")) or f(asset_ctx.get("midPx"))
+    oi_notional = open_interest * mark_px if open_interest > 0 and mark_px > 0 else None
+    return day_ntl_vlm, open_interest, mark_px or None, oi_notional, now_iso()
+
+
+def refresh(db, coin: str, asset_ctx=None):
     """Recompute coin's σ and upsert its coin_vol row. Returns sigma_used, or the FALLBACK (also
     persisted, briefly) when candles are unavailable so we don't refetch a dead coin every signal."""
     res = compute(coin)
+    if asset_ctx is None and coin and ":" not in coin:
+        asset_ctx = rest.asset_context(coin)
+    day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at = _market_fields(asset_ctx)
     if res is None:
         sigma = config.VOL_FALLBACK_SIGMA
-        db.execute("INSERT OR REPLACE INTO coin_vol (coin,sigma,sigma_fast,sigma_slow,n,updated_at) "
-                   "VALUES (?,?,?,?,?,?)", (coin, sigma, None, None, 0, now_iso()))
+        db.execute(
+            "INSERT OR REPLACE INTO coin_vol "
+            "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,market_ctx_updated_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (coin, sigma, None, None, 0, day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
+             now_iso()),
+        )
     else:
         sigma, fast, slow, n = res
-        db.execute("INSERT OR REPLACE INTO coin_vol (coin,sigma,sigma_fast,sigma_slow,n,updated_at) "
-                   "VALUES (?,?,?,?,?,?)", (coin, sigma, fast, slow, n, now_iso()))
+        db.execute(
+            "INSERT OR REPLACE INTO coin_vol "
+            "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,market_ctx_updated_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (coin, sigma, fast, slow, n, day_ntl_vlm, open_interest, mark_px, oi_notional, market_ctx_updated_at,
+             now_iso()),
+        )
     db.commit()
     return sigma
 
