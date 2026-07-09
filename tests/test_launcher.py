@@ -10,6 +10,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LauncherTests(unittest.TestCase):
+    def test_root_launcher_shortcuts_exist(self):
+        mac = ROOT / "launcher.command"
+        win = ROOT / "launcher.cmd"
+
+        self.assertTrue(mac.exists(), "macOS double-click launcher should exist at repo root")
+        self.assertTrue(os.access(mac, os.X_OK), "launcher.command should be directly executable")
+        self.assertTrue(win.exists(), "Windows double-click launcher should exist at repo root")
+        self.assertIn("launcher\\launcher.py", win.read_text(encoding="utf-8"))
+
     def test_launcher_build_script_is_executable(self):
         script = ROOT / "launcher" / "web" / "build.sh"
         self.assertTrue(script.exists())

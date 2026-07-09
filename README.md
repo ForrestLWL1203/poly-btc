@@ -16,6 +16,16 @@ The active tree is scoped to Hyperliquid runtime code and ops tooling.
 
 ## Common Commands
 
+For a non-agent operator, start the deployment/ops launcher directly from the repo root:
+
+- macOS: double-click `launcher.command`
+- Windows: double-click `launcher.cmd`
+- Terminal fallback: `python3 launcher/launcher.py`
+
+The launcher starts only the local ops UI. On first deploy, the dashboard process initializes
+`data/hl.db` by running storage migrations and seeding default params. Scanner and observer are then
+started from the dashboard or systemd timer, not during launcher boot.
+
 ```bash
 python3 hl_dashboard.py --db data/hl.db --static web --host 127.0.0.1 --port 8810
 python3 hl_discover.py --db data/hl.db scan --days 14 --scan-interval 8
