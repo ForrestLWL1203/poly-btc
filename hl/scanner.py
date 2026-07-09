@@ -552,12 +552,17 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         for r in ranked
     }
     pipeline_audit.record_watchlist_snapshot(db, stamp, source, line, detail_by_addr)
+    followed_rows = []
+    for a, s in db.execute("SELECT addr, score FROM watchlist WHERE score >= ?", (line,)).fetchall():
+        addr_l = (a or "").lower()
+        followed_rows.append((addr_l, None if addr_l in prev_followed else stamp, stamp, s))
     db.executemany(
-        "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) VALUES (?,?,?) "
-        "ON CONFLICT(addr) DO UPDATE SET last_followed_at=excluded.last_followed_at, "
+        "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) VALUES (?,?,?,?) "
+        "ON CONFLICT(addr) DO UPDATE SET "
+        "first_followed_at=COALESCE(excluded.first_followed_at,follow_history.first_followed_at), "
+        "last_followed_at=excluded.last_followed_at, "
         "last_followed_score=excluded.last_followed_score",
-        [(a, stamp, s) for (a, s) in
-         db.execute("SELECT addr, score FROM watchlist WHERE score >= ?", (line,)).fetchall()])
+        followed_rows)
     db.commit()
     return len(rows)
 

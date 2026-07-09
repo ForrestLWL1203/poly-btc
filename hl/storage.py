@@ -176,6 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_watchlist_rank ON watchlist(rank);
 -- can show "was followed, recently dropped". A recovered wallet climbing back re-stamps and leaves the list.
 CREATE TABLE IF NOT EXISTS follow_history (
     addr                TEXT PRIMARY KEY,
+    first_followed_at   TEXT,
     last_followed_at    TEXT,
     last_followed_score REAL
 );
@@ -573,6 +574,7 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
     "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% (审计指标)
     "ALTER TABLE scan_runs ADD COLUMN profiled INTEGER",
+    "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
 )
 
 

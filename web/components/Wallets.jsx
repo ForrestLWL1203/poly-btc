@@ -85,7 +85,7 @@ export function Wallets({ confirm, toast }) {
                 <tr key={w.address} className={w.enabled ? "" : "row-off"}
                   style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
-                  <td className="addr">{short(w.address)}</td>
+                  <td className="addr"><span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span></td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
                   <td className="num"><WalletScoreCell wallet={w} color={w.score >= data.followLine ? "var(--green-l)" : "var(--t2)"} onOpen={setScoreModal} /></td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>

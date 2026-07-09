@@ -8,6 +8,8 @@ from . import follow_score
 from . import params as params_mod
 from .api_common import iso_epoch, q1, qall, recent_roi_pct, score100
 
+NEW_WATCHLIST_WINDOW_SEC = 12 * 3600
+
 
 def _col(row, key, default=None):
     try:
@@ -67,6 +69,11 @@ def _score_breakdown(row):
         "sectorPolicy": _sector_policy(row),
         "reasons": detail.get("reasons") or [],
     }
+
+
+def _is_new_followed(first_followed_at):
+    ts = iso_epoch(first_followed_at)
+    return bool(ts and time.time() - ts <= NEW_WATCHLIST_WINDOW_SEC)
 
 
 def ep_wallets(db, qs=None):
@@ -137,6 +144,7 @@ def ep_wallets(db, qs=None):
         ") "
         "SELECT w.addr,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,w.worst_single_loss_pct,"
         "COALESCE(c.enabled,1) AS enabled,pr.score AS raw_score,pr.worst_loss_pct,"
+        "fh.first_followed_at,"
         "pr.copy_bt_net_pnl,pr.copy_bt_win_rate,pr.copy_bt_closed_n,pr.copy_bt_open_fill_rate,"
         "pr.copy_bt_liquidations,pr.copy_bt_fee_drag,pr.copy_bt_14d_net_pnl,pr.copy_bt_14d_closed_n,"
         "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,pr.sector_copy_json,pr.sector_policy_json,"
@@ -148,6 +156,7 @@ def ep_wallets(db, qs=None):
         "FROM page_followed w "
         "LEFT JOIN target_controls c ON c.addr=w.addr "
         "LEFT JOIN profile pr ON pr.addr=w.addr "
+        "LEFT JOIN follow_history fh ON fh.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
         "LEFT JOIN ep7 ON ep7.addr=w.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=w.addr "
@@ -171,6 +180,8 @@ def ep_wallets(db, qs=None):
             "closed7d": r["closed_7d"],
             "closedN": r["closed_n"],
             "forwardNetPnl": r["fwd_net"] or 0,
+            "firstFollowedAt": iso_epoch(r["first_followed_at"]),
+            "isNew": _is_new_followed(r["first_followed_at"]),
         })
     return {"followLine": score100(line_native), "tab": "followed", "total": total,
             "followed": total, "page": page, "size": size, "wallets": out}

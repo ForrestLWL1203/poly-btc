@@ -852,6 +852,38 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual([r[1] for r in rows], ["0xstrong", "0xweak"])
             self.assertGreater(rows[0][2], rows[1][2])
 
+    def test_refresh_watchlist_marks_only_newly_followed_wallet_first_time(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row("0xold", "active", 0.90),
+                    _profile_row("0xnew", "active", 0.88),
+                ],
+            )
+            db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xold',0.90,'old')")
+            db.execute(
+                "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
+                "VALUES ('0xold','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',0.90)"
+            )
+            db.commit()
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok", "reason": "portfolio_topn", "line": 0.70, "count": 2,
+            }):
+                scanner.refresh_watchlist(db, "2026-01-02T00:00:00Z")
+
+            rows = {
+                r[0]: {"first_followed_at": r[1], "last_followed_at": r[2]}
+                for r in db.execute("SELECT addr,first_followed_at,last_followed_at FROM follow_history")
+            }
+            self.assertEqual(rows["0xold"]["first_followed_at"], "2026-01-01T00:00:00Z")
+            self.assertEqual(rows["0xnew"]["first_followed_at"], "2026-01-02T00:00:00Z")
+            self.assertEqual(rows["0xold"]["last_followed_at"], "2026-01-02T00:00:00Z")
+            self.assertEqual(rows["0xnew"]["last_followed_at"], "2026-01-02T00:00:00Z")
+
     def test_refresh_watchlist_keeps_low_fill_rate_wallet_below_follow_line(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

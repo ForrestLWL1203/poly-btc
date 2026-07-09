@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hl import api_wallets, params, storage
 
@@ -99,6 +100,32 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["scoreBreakdown"]["sectorPolicy"]["allowed"], ["crypto"])
         self.assertFalse(wallet["scoreBreakdown"]["sectorPolicy"]["stock"]["allow"])
         self.assertNotIn("evidenceHeld", wallet)
+
+    def test_followed_wallet_marks_recent_first_follow_as_new(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
+                "VALUES (1,'0xaaa',0.9,'crypto',0.75,'BTC','now')"
+            )
+            db.execute("INSERT INTO profile (addr,status,score) VALUES ('0xaaa','active',0.9)")
+            db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            db.execute(
+                "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
+                "VALUES ('0xaaa','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z',0.9)"
+            )
+            db.commit()
+
+            with patch.object(api_wallets.time, "time", return_value=1767430800):
+                recent = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})["wallets"][0]
+            with patch.object(api_wallets.time, "time", return_value=1767484801):
+                stale = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})["wallets"][0]
+
+        self.assertTrue(recent["isNew"])
+        self.assertEqual(recent["firstFollowedAt"], 1767398400)
+        self.assertFalse(stale["isNew"])
 
     def test_dropped_wallets_omit_unused_profile_columns(self):
         with tempfile.TemporaryDirectory() as td:
