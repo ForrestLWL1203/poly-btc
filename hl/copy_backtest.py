@@ -11,7 +11,7 @@ from collections import Counter
 
 from . import config
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
-from .copy_engine import OpenSizingParams, extract_master_leverage, plan_open_sizing, stop_px
+from .copy_engine import OpenSizingParams, extract_master_leverage, plan_open_sizing, reduce_leaves_dust, stop_px
 from .fill_transition import classify_fill_transition
 from .util import f
 
@@ -459,6 +459,10 @@ class Backtest:
                 return
             reduce_frac = min(1.0, reduce_frac)
             ep["reduce_anchor"] = abs(pos1)
+        if not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, px):
+            reduce_frac = 1.0
+            closing = True
+            status = "closed"
         close_size = ep["rem_size"] * reduce_frac
         gross = close_size * (px - ep["entry_px"]) * ep["sign"]
         fee = abs(close_size * px) * config.TAKER_FEE

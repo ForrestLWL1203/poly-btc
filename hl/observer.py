@@ -28,7 +28,7 @@ import websockets
 
 from . import config, rest, volatility, ws
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
-from .copy_engine import OpenSizingParams, plan_open_sizing, stop_px as engine_stop_px, tier_for_sigma
+from .copy_engine import OpenSizingParams, plan_open_sizing, reduce_leaves_dust, stop_px as engine_stop_px, tier_for_sigma
 from .fill_transition import classify_fill_transition
 from .sector import parse_json_obj, policy_allows_coin
 from .util import f, now_iso, now_ms
@@ -468,9 +468,18 @@ class Observer:
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
             "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
             f"master_margin,master_leverage FROM {book.pos_table} WHERE status='open'").fetchall()
+        loaded = 0
+        closed_dust = 0
         for r in rows:
             (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, adds, mae, na, stopx,
              m_mgn, m_lev) = r
+            rem = rem or 0.0
+            sz = sz or 0.0
+            dust_px = epx or ((notl or 0.0) / sz if sz else 0.0)
+            if dust_px > 0 and reduce_leaves_dust(rem, 0.0, dust_px):
+                self._close_reloaded_dust(book, pid, addr, coin, side, rem, dust_px)
+                closed_dust += 1
+                continue
             ev = asyncio.Event()
             if epx is not None:
                 ev.set()
@@ -478,7 +487,7 @@ class Observer:
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
                 "open_maker": False, "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
-                "notional": notl or 0.0, "entry_px": epx, "size": sz or 0.0, "rem_size": rem or 0.0,
+                "notional": notl or 0.0, "entry_px": epx, "size": sz, "rem_size": rem,
                 "liq_px": liq or 0.0, "stop_px": stopx or 0.0, "realized_pnl": rpnl or 0.0,
                 "add_count": adds or 0, "entries_ready": ev, "lock": asyncio.Lock(),
                 # smart-add restart recovery: first_margin ≈ margin/(1+adds·frac); master首仓额 from open snapshot;
@@ -489,8 +498,28 @@ class Observer:
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
                     f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "
                     "('open','add')", (pid,)).fetchall() if o is not None}}
-        if rows:
-            _log(f"reloaded {len(rows)} open {book.name} copy positions from db")
+            loaded += 1
+        if loaded or closed_dust:
+            extra = f", closed {closed_dust} dust" if closed_dust else ""
+            _log(f"reloaded {loaded} open {book.name} copy positions from db{extra}")
+
+    def _close_reloaded_dust(self, book, pos_id, addr, coin, side, rem_size, px):
+        sign = 1 if side == "long" else -1
+        t = now_ms()
+        self.db.execute(
+            f"INSERT INTO {book.act_table} "
+            "(pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,master_sz_delta,"
+            "master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (pos_id, addr, coin, t, t, "close", 0, None, px, 0.0, 0.0,
+             -rem_size * sign, px, 0.0, 0.0),
+        )
+        self.db.execute(
+            f"UPDATE {book.pos_table} SET rem_size=0,status='closed',closed_at=?,"
+            "num_actions=COALESCE(num_actions,0)+1,mark_px=?,unrealized_pnl=0 WHERE pos_id=?",
+            (now_iso(), px, pos_id),
+        )
+        self.db.commit()
 
     async def _reconcile_open(self):
         """Startup state-reconcile (replaces the deleted time-based backfill for EXITS). Forward-only
@@ -1558,6 +1587,9 @@ class Observer:
                     return
                 reduce_frac = min(1.0, cum_frac)              # rem still matches `anchor` → cut the whole ratio
                 ep["reduce_anchor"] = abs(pos1)               # open a fresh 10% window from here
+            if not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, exit_px):
+                reduce_frac = 1.0
+                closing = True
             close_size = ep["rem_size"] * reduce_frac
             fee = abs(close_size * exit_px) * (config.MAKER_FEE if maker else config.TAKER_FEE)  # exit fee (per our_maker)
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"] - fee    # NET of our exit fee

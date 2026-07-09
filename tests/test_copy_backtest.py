@@ -261,6 +261,22 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual([p["side"] for p in result["positions"]], ["short", "long"])
         self.assertEqual([p["closed_at"] for p in result["positions"]], [2_000, 3_000])
 
+    def test_near_full_reduce_closes_remaining_dust(self):
+        fills = [
+            fill(1_000, "ETH", "B", 100, 0, 100.0, 90),
+            fill(2_000, "ETH", "A", 99.9999, 100, 101.0, 91),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ETH": 0.08}, overrides={
+            "COPY_STOP_ENABLE": False,
+            "MID_MIN_NOTIONAL": 0.0,
+        })
+
+        self.assertEqual(result["closed_n"], 1)
+        self.assertEqual(len(result["open_positions"]), 0)
+        self.assertEqual(result["positions"][0]["status"], "closed")
+        self.assertEqual(result["positions"][0]["closed_at"], 2_000)
+
 
 if __name__ == "__main__":
     unittest.main()

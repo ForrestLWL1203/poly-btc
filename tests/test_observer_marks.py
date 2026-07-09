@@ -120,6 +120,78 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_near_full_target_reduce_closes_our_dust_position(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            await obs._apply_reduce(
+                "0xaaa",
+                "BTC",
+                ep,
+                now_ms(),
+                101.0,
+                -99.9999,
+                0.0001,
+                closing=False,
+                liq=False,
+                maker=False,
+                forced_px=101.0,
+            )
+
+            row = db.execute(
+                "SELECT status,rem_size,realized_pnl FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "closed")
+            self.assertEqual(row["rem_size"], 0)
+            self.assertGreater(row["realized_pnl"], 0)
+            self.assertNotIn(("0xaaa", "BTC"), obs.taker.open_ep)
+            action = db.execute(
+                "SELECT action,our_qty_delta FROM copy_action WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertEqual(action["action"], "close")
+            self.assertAlmostEqual(action["our_qty_delta"], -2)
+
+        asyncio.run(run())
+
+    def test_reload_closes_existing_open_dust_position(self):
+        db = self._db()
+        pos_id = db.execute(
+            "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+        ).fetchone()["pos_id"]
+        db.execute("UPDATE copy_position SET rem_size=? WHERE pos_id=?", (0.0001, pos_id))
+        db.commit()
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs._reload_open()
+
+            row = db.execute(
+                "SELECT status,rem_size FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "closed")
+            self.assertEqual(row["rem_size"], 0)
+            self.assertNotIn(("0xaaa", "BTC"), obs.taker.open_ep)
+            action = db.execute(
+                "SELECT action,our_qty_delta FROM copy_action WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertEqual(action["action"], "close")
+            self.assertAlmostEqual(action["our_qty_delta"], -0.0001)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
     def test_manual_full_close_adds_wallet_coin_cooldown(self):
         async def run():
             db = self._db()

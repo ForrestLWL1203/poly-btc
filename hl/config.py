@@ -127,6 +127,8 @@ REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge 
 #                             (10% → at most ~10 partial reduces/position). Smaller unwinds accumulate; the next
 #                             reduce cuts the whole accumulated ratio (self-correcting proportional mirror), and
 #                             a FULL close always executes (exact flat). If he dumps it in 2 big fills, we follow both.
+DUST_CLOSE_NOTIONAL = 1.0    # after a mirrored reduce, if our leftover position is below this notional, close it
+#                             immediately instead of leaving a $0 open-row dust position on the dashboard.
 STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz:*), regardless of σ-tier or
 #                           master lev. Stocks GAP (earnings/news) and their calm realized σ (e.g. TSLA 4%)
 #                           badly understates tail risk — mean-daily-range σ let TSLA into the STABLE tier at

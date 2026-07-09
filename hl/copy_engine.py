@@ -60,6 +60,14 @@ def stop_px(entry_px: float, is_buy: bool, leverage: float, copy_stop_enable: bo
     return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
 
 
+def reduce_leaves_dust(rem_size: float, reduce_frac: float, px: float,
+                       dust_notional: float = config.DUST_CLOSE_NOTIONAL) -> bool:
+    if not dust_notional or dust_notional <= 0 or reduce_frac >= 1.0:
+        return False
+    remaining_size = max(0.0, abs(rem_size) * (1.0 - max(0.0, reduce_frac)))
+    return remaining_size * abs(px) <= dust_notional
+
+
 def extract_master_leverage(fill: dict | None) -> float | None:
     if not isinstance(fill, dict):
         return None
