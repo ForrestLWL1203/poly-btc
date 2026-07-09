@@ -861,12 +861,18 @@ class ScannerWatchlistTests(unittest.TestCase):
                 [
                     _profile_row("0xold", "active", 0.90),
                     _profile_row("0xnew", "active", 0.88),
+                    _profile_row("0xlegacy", "active", 0.86),
                 ],
             )
             db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xold',0.90,'old')")
+            db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (2,'0xlegacy',0.86,'old')")
             db.execute(
                 "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
                 "VALUES ('0xold','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',0.90)"
+            )
+            db.execute(
+                "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
+                "VALUES ('0xlegacy',NULL,'2026-01-01T06:00:00Z',0.86)"
             )
             db.commit()
 
@@ -880,8 +886,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                 for r in db.execute("SELECT addr,first_followed_at,last_followed_at FROM follow_history")
             }
             self.assertEqual(rows["0xold"]["first_followed_at"], "2026-01-01T00:00:00Z")
+            self.assertEqual(rows["0xlegacy"]["first_followed_at"], "2026-01-01T06:00:00Z")
             self.assertEqual(rows["0xnew"]["first_followed_at"], "2026-01-02T00:00:00Z")
             self.assertEqual(rows["0xold"]["last_followed_at"], "2026-01-02T00:00:00Z")
+            self.assertEqual(rows["0xlegacy"]["last_followed_at"], "2026-01-02T00:00:00Z")
             self.assertEqual(rows["0xnew"]["last_followed_at"], "2026-01-02T00:00:00Z")
 
     def test_refresh_watchlist_keeps_low_fill_rate_wallet_below_follow_line(self):

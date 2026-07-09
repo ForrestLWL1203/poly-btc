@@ -559,7 +559,8 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     db.executemany(
         "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) VALUES (?,?,?,?) "
         "ON CONFLICT(addr) DO UPDATE SET "
-        "first_followed_at=COALESCE(excluded.first_followed_at,follow_history.first_followed_at), "
+        "first_followed_at=COALESCE(follow_history.first_followed_at,excluded.first_followed_at,"
+        "follow_history.last_followed_at,excluded.last_followed_at), "
         "last_followed_at=excluded.last_followed_at, "
         "last_followed_score=excluded.last_followed_score",
         followed_rows)
