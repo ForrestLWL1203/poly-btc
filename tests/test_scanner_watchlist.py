@@ -757,12 +757,45 @@ class ScannerWatchlistTests(unittest.TestCase):
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute("UPDATE params SET value='0' WHERE key='MIN_ACTIVE_SCORE'")
             cols = storage.PROFILE_COLS.split(",")
+            now_ms = int(time.time() * 1000)
+            quality = dict(
+                n_trades=12,
+                n_fills=24,
+                active_days=8,
+                activity_ratio=0.8,
+                median_eps=1,
+                median_hold_s=3600,
+                win_rate=0.7,
+                net_pnl=500,
+                roi_equity=0.10,
+                roi_total=0.10,
+                net_30d=500,
+                net_life=900,
+                pf_equity=10_000,
+                pf_mon_pnl=700,
+                pf_mon_vlm=20_000,
+                pf_week_pnl=250,
+                pf_week_vlm=8_000,
+                pf_turnover=1,
+                payoff_ratio=1.5,
+                avg_notional=1_000,
+                last_fill_ms=now_ms,
+                copy_bt_net_pnl=900,
+                copy_bt_14d_net_pnl=500,
+                copy_bt_7d_net_pnl=200,
+                copy_bt_closed_n=20,
+                copy_bt_14d_closed_n=10,
+                copy_bt_7d_closed_n=5,
+                copy_bt_open_fill_rate=1.0,
+            )
             db.executemany(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
                 [
-                    _profile_row("0xaaa", "active", 0.91),
-                    _profile_row("0xbbb", "active", 0.82),
+                    _profile_row("0xaaa", "active", 0.91, **quality),
+                    _profile_row("0xbbb", "active", 0.82, **quality),
                     _profile_row("0xold", "retired", 0.0),
                 ],
             )
@@ -778,9 +811,73 @@ class ScannerWatchlistTests(unittest.TestCase):
 
             self.assertEqual(n, 2)
             rows = db.execute("SELECT rank,addr,score,updated_at FROM watchlist ORDER BY rank").fetchall()
-            self.assertEqual([(r[0], r[1], r[2], r[3]) for r in rows],
-                             [(1, "0xaaa", 0.93, "2026-07-06T00:00:00Z"),
-                              (2, "0xbbb", 0.82, "2026-07-06T00:00:00Z")])
+            self.assertEqual({r[1] for r in rows}, {"0xaaa", "0xbbb"})
+            self.assertTrue(all(r[3] == "2026-07-06T00:00:00Z" for r in rows))
+
+    def test_ensure_watchlist_current_replays_copy_bt_before_repairing_watchlist(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute("UPDATE params SET value='0' WHERE key='MIN_ACTIVE_SCORE'")
+            cols = storage.PROFILE_COLS.split(",")
+            now_ms = int(time.time() * 1000)
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row(
+                    "0xstale",
+                    "active",
+                    0.90,
+                    n_trades=12,
+                    n_fills=24,
+                    active_days=8,
+                    activity_ratio=0.8,
+                    median_eps=1,
+                    median_hold_s=3600,
+                    win_rate=0.7,
+                    net_pnl=500,
+                    roi_equity=0.10,
+                    roi_total=0.10,
+                    net_30d=500,
+                    net_life=900,
+                    pf_equity=10_000,
+                    pf_mon_pnl=700,
+                    pf_mon_vlm=20_000,
+                    pf_week_pnl=250,
+                    pf_week_vlm=8_000,
+                    pf_turnover=1,
+                    payoff_ratio=1.5,
+                    avg_notional=1_000,
+                    last_fill_ms=now_ms,
+                    copy_bt_net_pnl=1200,
+                    copy_bt_14d_net_pnl=800,
+                    copy_bt_7d_net_pnl=300,
+                    copy_bt_closed_n=20,
+                    copy_bt_14d_closed_n=10,
+                    copy_bt_7d_closed_n=5,
+                    copy_bt_open_fill_rate=0.95,
+                ),
+            )
+            db.commit()
+            losing_windows = {
+                30: {"copy_net_pnl": -120.0, "closed_n": 12, "copy_win_rate": 0.25,
+                     "opened_n": 12, "target_open_events": 12, "liquidations": 0, "fee_drag": 12.0},
+                14: {"copy_net_pnl": -80.0, "closed_n": 8, "copy_win_rate": 0.25,
+                     "opened_n": 8, "target_open_events": 8, "liquidations": 0, "fee_drag": 8.0},
+                7: {"copy_net_pnl": -30.0, "closed_n": 5, "copy_win_rate": 0.0,
+                    "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 4.0},
+            }
+
+            with patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"coin": "BTC", "time": 1}]), \
+                    patch.object(scanner, "_copy_bt_results", return_value=losing_windows), \
+                    patch.object(scanner, "_sector_copy_bt_results", return_value={"crypto": losing_windows, "stock": {}}):
+                n = scanner.ensure_watchlist_current(db, "2026-07-06T00:00:00Z")
+
+            self.assertEqual(n, 0)
+            stale = db.execute(
+                "SELECT status,reason,copy_bt_net_pnl FROM profile WHERE addr='0xstale'"
+            ).fetchone()
+            self.assertEqual(tuple(stale), ("retired", "copy_backtest_no_profitable_sector", -120.0))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0], 0)
 
     def test_refresh_watchlist_denormalizes_sector_policy_for_observer(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1193,9 +1290,9 @@ class ScannerWatchlistTests(unittest.TestCase):
                 seen["addrs"] = scanner.auto_tune._load_followed_wallets(db_arg, follow)
                 return {
                     "status": "ok",
-                    "applied": True,
-                    "applied_sizing": True,
-                    "applied_add": True,
+                    "applied": False,
+                    "applied_sizing": False,
+                    "applied_add": False,
                     "followed_n": len(seen["addrs"]),
                     "selected_mult": 1.0,
                     "margins": {"STABLE_MARGIN_PCT": 0.04, "MID_MARGIN_PCT": 0.03, "HIGH_MARGIN_PCT": 0.03},
@@ -1226,6 +1323,159 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertIn("follow_line", stages)
             self.assertIn("watchlist", stages)
             self.assertIn("auto_tune", stages)
+
+    def test_post_scan_pipeline_replays_copy_bt_after_auto_tune_applies_params(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute("UPDATE params SET value='0' WHERE key='MIN_ACTIVE_SCORE'")
+            cols = storage.PROFILE_COLS.split(",")
+            quality = dict(
+                n_trades=12,
+                n_fills=24,
+                active_days=8,
+                activity_ratio=0.8,
+                median_eps=1,
+                median_hold_s=3600,
+                win_rate=0.7,
+                net_pnl=500,
+                roi_equity=0.10,
+                roi_total=0.10,
+                net_30d=500,
+                net_life=900,
+                pf_equity=10_000,
+                pf_mon_pnl=700,
+                pf_mon_vlm=20_000,
+                pf_week_pnl=250,
+                pf_week_vlm=8_000,
+                pf_turnover=1,
+                payoff_ratio=1.5,
+                avg_notional=1_000,
+                last_fill_ms=int(time.time() * 1000),
+            )
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [
+                    _profile_row(
+                        "0xstale",
+                        "active",
+                        0.90,
+                        copy_bt_net_pnl=1200,
+                        copy_bt_14d_net_pnl=800,
+                        copy_bt_7d_net_pnl=300,
+                        copy_bt_closed_n=20,
+                        copy_bt_14d_closed_n=10,
+                        copy_bt_7d_closed_n=5,
+                        copy_bt_open_fill_rate=0.95,
+                        **quality,
+                    ),
+                    _profile_row(
+                        "0xkeep",
+                        "active",
+                        0.80,
+                        copy_bt_net_pnl=900,
+                        copy_bt_14d_net_pnl=500,
+                        copy_bt_7d_net_pnl=200,
+                        copy_bt_closed_n=20,
+                        copy_bt_14d_closed_n=10,
+                        copy_bt_7d_closed_n=5,
+                        copy_bt_open_fill_rate=0.95,
+                        **quality,
+                    ),
+                ],
+            )
+            db.commit()
+
+            def fake_tune(_db, source, stamp):
+                return {
+                    "status": "ok",
+                    "applied": True,
+                    "applied_sizing": True,
+                    "applied_add": False,
+                    "followed_n": 2,
+                    "selected_mult": 1.0,
+                    "margins": {"STABLE_MARGIN_PCT": 0.04, "MID_MARGIN_PCT": 0.03, "HIGH_MARGIN_PCT": 0.03},
+                    "lev_caps": {"STABLE_LEV_CAP": 25, "MID_LEV_CAP": 10, "HIGH_LEV_CAP": 4},
+                    "deploy_full_pct": 0.40,
+                    "params": {},
+                    "add_params": {},
+                    "candidates": [],
+                    "add_candidates": [],
+                }
+
+            losing_windows = {
+                30: {
+                    "copy_net_pnl": -120.0,
+                    "closed_n": 12,
+                    "copy_win_rate": 0.25,
+                    "opened_n": 12,
+                    "target_open_events": 12,
+                    "liquidations": 0,
+                    "fee_drag": 12.0,
+                },
+                14: {
+                    "copy_net_pnl": -80.0,
+                    "closed_n": 8,
+                    "copy_win_rate": 0.25,
+                    "opened_n": 8,
+                    "target_open_events": 8,
+                    "liquidations": 0,
+                    "fee_drag": 8.0,
+                },
+                7: {
+                    "copy_net_pnl": -30.0,
+                    "closed_n": 4,
+                    "copy_win_rate": 0.0,
+                    "opened_n": 4,
+                    "target_open_events": 4,
+                    "liquidations": 0,
+                    "fee_drag": 4.0,
+                },
+            }
+
+            def fake_copy_results(addr, _fills, _now, _p):
+                if addr == "0xstale":
+                    return losing_windows
+                return {
+                    30: {"copy_net_pnl": 900, "copy_win_rate": 0.7, "wins": 14, "closed_n": 20,
+                         "opened_n": 20, "target_open_events": 20, "liquidations": 0, "fee_drag": 10},
+                    14: {"copy_net_pnl": 500, "copy_win_rate": 0.7, "wins": 7, "closed_n": 10,
+                         "opened_n": 10, "target_open_events": 10, "liquidations": 0, "fee_drag": 5},
+                    7: {"copy_net_pnl": 200, "copy_win_rate": 0.8, "wins": 4, "closed_n": 5,
+                        "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 3},
+                }
+
+            def fake_sector_results(addr, _fills, _now, _p):
+                if addr == "0xstale":
+                    return {"crypto": losing_windows, "stock": {}}
+                return {"crypto": fake_copy_results(addr, _fills, _now, _p), "stock": {}}
+
+            with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
+                "status": "ok",
+                "reason": "portfolio_topn",
+                "line": 0.60,
+                "count": 2,
+            }), patch.object(scanner.auto_tune, "maybe_tune_margins", side_effect=fake_tune), \
+                    patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"coin": "BTC", "time": 1}]), \
+                    patch.object(scanner, "_copy_bt_results", side_effect=fake_copy_results), \
+                    patch.object(scanner, "_sector_copy_bt_results", side_effect=fake_sector_results):
+                n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
+
+            self.assertEqual(n, 1)
+            stale = db.execute(
+                "SELECT status,reason,copy_bt_net_pnl,copy_bt_7d_net_pnl FROM profile WHERE addr='0xstale'"
+            ).fetchone()
+            self.assertEqual(stale[0], "retired")
+            self.assertEqual(stale[1], "copy_backtest_no_profitable_sector")
+            self.assertEqual(stale[2], -120.0)
+            self.assertEqual(stale[3], -30.0)
+            self.assertIsNone(db.execute("SELECT 1 FROM watchlist WHERE addr='0xstale'").fetchone())
+            stages = [r[0] for r in db.execute(
+                "SELECT DISTINCT stage FROM pipeline_audit WHERE stamp=?",
+                ("2026-07-06T00:00:00Z",),
+            ).fetchall()]
+            self.assertIn("profile", stages)
+            self.assertIn("watchlist", stages)
 
     def test_post_scan_pipeline_replays_topn_prefix_before_auto_tune(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1370,18 +1620,42 @@ class ScannerWatchlistTests(unittest.TestCase):
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
             cols = storage.PROFILE_COLS.split(",")
+            now_ms = int(time.time() * 1000)
+            quality = dict(
+                n_trades=12,
+                n_fills=24,
+                active_days=8,
+                activity_ratio=0.8,
+                median_eps=1,
+                median_hold_s=3600,
+                win_rate=0.7,
+                net_pnl=500,
+                roi_equity=0.10,
+                roi_total=0.10,
+                net_30d=500,
+                net_life=900,
+                pf_equity=10_000,
+                pf_mon_pnl=700,
+                pf_mon_vlm=20_000,
+                pf_week_pnl=250,
+                pf_week_vlm=8_000,
+                pf_turnover=1,
+                payoff_ratio=1.5,
+                avg_notional=1_000,
+                last_fill_ms=now_ms,
+            )
             db.executemany(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
                 [
                     _profile_row("0xaaa", "active", 0.95, copy_bt_net_pnl=1200, copy_bt_14d_net_pnl=900,
                                  copy_bt_7d_net_pnl=350, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
-                                 copy_bt_7d_closed_n=5),
+                                 copy_bt_7d_closed_n=5, copy_bt_open_fill_rate=1.0, **quality),
                     _profile_row("0xbbb", "active", 0.90, copy_bt_net_pnl=1000, copy_bt_14d_net_pnl=700,
                                  copy_bt_7d_net_pnl=250, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
-                                 copy_bt_7d_closed_n=5),
+                                 copy_bt_7d_closed_n=5, copy_bt_open_fill_rate=1.0, **quality),
                     _profile_row("0xccc", "active", 0.70, copy_bt_net_pnl=400, copy_bt_14d_net_pnl=200,
                                  copy_bt_7d_net_pnl=80, copy_bt_closed_n=20, copy_bt_14d_closed_n=10,
-                                 copy_bt_7d_closed_n=5),
+                                 copy_bt_7d_closed_n=5, copy_bt_open_fill_rate=1.0, **quality),
                 ],
             )
             db.commit()
@@ -1469,9 +1743,10 @@ class ScannerWatchlistTests(unittest.TestCase):
             commands = db.execute(
                 "SELECT owner,type,payload_json FROM commands WHERE type='reload_params' ORDER BY id"
             ).fetchall()
-            self.assertEqual([r[0] for r in commands], ["scanner", "auto_tune"])
+            self.assertEqual([r[0] for r in commands], ["scanner", "auto_tune", "scanner"])
             self.assertEqual(json.loads(commands[0][2])["by"], "auto_follow_line")
             self.assertEqual(json.loads(commands[1][2])["by"], "auto_tune_margin")
+            self.assertEqual(json.loads(commands[2][2])["by"], "auto_follow_membership")
 
             run = db.execute(
                 "SELECT applied,followed_n,result_json FROM auto_tune_runs WHERE source='scan'"

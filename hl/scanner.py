@@ -9,6 +9,7 @@ import json
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 from . import auto_tune, config, follow_score, metrics, params, pipeline_audit, rest, storage
 from .fills import build_episodes, is_spot
@@ -563,7 +564,9 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         desired = choice["line"]
         pipeline_audit.record_follow_line_choice(db, stamp, source, choice)
         prev = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+        line_changed = False
         if abs(float(prev) - desired) > 0.0005:
+            line_changed = True
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.9f}", stamp))
             db.execute(
                 "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
@@ -573,6 +576,8 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
                     "status": choice.get("status"),
                     "count": choice.get("count"),
                 }), "scanner", stamp))
+    else:
+        line_changed = False
     # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
     # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
     line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
@@ -585,9 +590,24 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     }
     pipeline_audit.record_watchlist_snapshot(db, stamp, source, line, detail_by_addr)
     followed_rows = []
-    for a, s in db.execute("SELECT addr, score FROM watchlist WHERE score >= ?", (line,)).fetchall():
+    current_followed = set()
+    for a, s in db.execute(
+        "SELECT w.addr, w.score FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
+        "WHERE w.score >= ? AND COALESCE(c.enabled,1)=1",
+        (line,),
+    ).fetchall():
         addr_l = (a or "").lower()
+        current_followed.add(addr_l)
         followed_rows.append((addr_l, None if addr_l in prev_followed else stamp, stamp, s))
+    if current_followed != prev_followed and not line_changed:
+        db.execute(
+            "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
+            ("reload_params", json.dumps({
+                "by": "auto_follow_membership",
+                "source": source,
+                "previous": len(prev_followed),
+                "current": len(current_followed),
+            }), "scanner", stamp))
     db.executemany(
         "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) VALUES (?,?,?,?) "
         "ON CONFLICT(addr) DO UPDATE SET "
@@ -600,7 +620,7 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
     return len(rows)
 
 
-def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
+def _maybe_auto_tune_margins(db, source: str, stamp: str) -> dict:
     try:
         res = auto_tune.maybe_tune_margins(db, source=source, stamp=stamp)
     except Exception as exc:  # noqa: BLE001 — auto tuning must never abort discovery
@@ -613,12 +633,12 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
         pipeline_audit.record_auto_tune_result(db, stamp, source, res)
         db.commit()
         print(f"auto-tune margin: skipped after {source}: {exc}", flush=True)
-        return
+        return res
     if res.get("status") != "ok":
         pipeline_audit.record_auto_tune_result(db, stamp, source, res)
         db.commit()
         print(f"auto-tune margin: {res.get('status')}", flush=True)
-        return
+        return res
     pipeline_audit.record_auto_tune_result(db, stamp, source, res)
     db.commit()
     margins = res.get("margins") or {}
@@ -637,6 +657,7 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> None:
         f"hard{add_params.get('ADD_MAX_HARD')}",
         flush=True,
     )
+    return res
 
 
 def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before_auto_tune=None) -> int:
@@ -645,7 +666,17 @@ def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before
     if before_auto_tune:
         before_auto_tune()
         db.commit()
-    _maybe_auto_tune_margins(db, source, stamp)
+    tune_res = _maybe_auto_tune_margins(db, source, stamp)
+    if tune_res.get("applied"):
+        p = params.apply_scanner_params(db, SimpleNamespace())
+        return regate(
+            db,
+            p,
+            stamp=stamp,
+            source=f"{source}_post_tune",
+            auto_tune_enabled=False,
+            quiet=True,
+        )
     return n_active
 
 
@@ -664,7 +695,15 @@ def ensure_watchlist_current(db, stamp=None) -> int:
     current = _watchlist_addrs(db)
     if set(current) == set(active):
         return len(current)
-    return refresh_watchlist(db, stamp or now_iso(), source="repair")
+    p = params.apply_scanner_params(db, SimpleNamespace())
+    return regate(
+        db,
+        p,
+        stamp=stamp or now_iso(),
+        source="repair",
+        auto_tune_enabled=False,
+        quiet=True,
+    )
 
 
 def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rejected, n_active, full=0):
@@ -676,12 +715,13 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
     db.commit()
 
 
-def regate(db, p) -> int:
+def regate(db, p, *, stamp=None, source: str = "regate",
+           auto_tune_enabled: bool = True, quiet: bool = False) -> int:
     """Re-apply gates() + score() on ALREADY-STORED profile metrics (no network, no re-fetch) and
     rebuild the watchlist. Thresholds (win/roiEq/dd/tpd/hold/...) can be tuned in seconds without a
     full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
     now = int(time.time() * 1000)
-    stamp = now_iso()
+    stamp = stamp or now_iso()
     p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
     p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
     p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
@@ -798,15 +838,20 @@ def regate(db, p) -> int:
         n_active += 1 if ok else 0
     db.commit()
     def _record_regate_profile_audit():
-        pipeline_audit.record_profile_snapshot(db, stamp, "regate")
+        pipeline_audit.record_profile_snapshot(db, stamp, source)
 
-    n = refresh_watchlist_and_auto_tune(
-        db,
-        stamp,
-        source="regate",
-        before_auto_tune=_record_regate_profile_audit,
-    )
-    print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
+    if auto_tune_enabled:
+        n = refresh_watchlist_and_auto_tune(
+            db,
+            stamp,
+            source=source,
+            before_auto_tune=_record_regate_profile_audit,
+        )
+    else:
+        _record_regate_profile_audit()
+        n = refresh_watchlist(db, stamp, source=source)
+    if not quiet:
+        print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
     return n
 
 
