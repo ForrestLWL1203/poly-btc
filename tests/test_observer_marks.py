@@ -259,6 +259,42 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_low_liquidity_crypto_add_is_observe_only(self):
+        async def run():
+            db = self._db()
+            db.execute(
+                "INSERT OR REPLACE INTO coin_vol "
+                "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,updated_at,market_ctx_updated_at) "
+                "VALUES ('BTC',0.04,0.04,0.04,30,1000000,10,100,1000,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+            )
+            db.commit()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            ep.update(master_open_px=100, first_margin=100, master_first_notl=200, last_add_px=100,
+                      add_count=0, seen_oids={1})
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            await obs._apply_add("0xaaa", "BTC", ep, now_ms(), 101, 1, 3, False, 2, obs.taker)
+
+            row = db.execute(
+                "SELECT add_count,margin,master_open_px FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            act = db.execute(
+                "SELECT our_qty_delta FROM copy_action WHERE pos_id=? AND action='add'",
+                (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["add_count"], 0)
+            self.assertEqual(row["margin"], 50)
+            self.assertGreater(row["master_open_px"], 100)
+            self.assertEqual(act["our_qty_delta"], 0)
+            self.assertEqual(obs.hb.get("skip_low_liquidity_add"), 1)
+
+        asyncio.run(run())
+
     def test_normal_close_does_not_persist_stale_liquidation_flag(self):
         async def run():
             db = self._db()

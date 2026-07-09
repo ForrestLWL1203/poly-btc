@@ -1461,6 +1461,10 @@ class Observer:
                                 (ep["master_open_px"], ep["pos_id"]))
                 self.db.commit()
 
+            if self._coin_liquidity_block_reason(coin):
+                self._tally("skip_low_liquidity_add", book)
+                return _observe_only()
+
             if self.add_strategy == "smart":
                 # 逆向(adv>0=价格朝我们不利方向,摊低)走 ADD_GAP_K;
                 # 正向(adv<0=顺势加仓)也要过 POS_ADD_GAP_K,避免 1.01/1.02/1.03 这类小碎追单全跟。
