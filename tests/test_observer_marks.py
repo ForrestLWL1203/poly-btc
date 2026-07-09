@@ -120,6 +120,120 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_manual_full_close_adds_wallet_coin_cooldown(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
+            obs.bbo["BTC"] = (99.0, 101.0)
+
+            res = await obs._cmd_close(pos_id)
+
+            row = db.execute(
+                "SELECT addr,coin,pos_id,created_at,expires_at FROM manual_close_cooldown "
+                "WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["pos_id"], pos_id)
+            self.assertGreater(row["expires_at"], row["created_at"])
+            self.assertEqual(res["cooldownUntil"], row["expires_at"])
+
+        asyncio.run(run())
+
+    def test_manual_partial_close_does_not_add_cooldown(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
+            obs.bbo["BTC"] = (99.0, 101.0)
+
+            res = await obs._cmd_close(pos_id, frac=0.5)
+
+            n = db.execute("SELECT COUNT(*) FROM manual_close_cooldown").fetchone()[0]
+            self.assertEqual(n, 0)
+            self.assertFalse(res["closed"])
+            self.assertIsNone(res.get("cooldownUntil"))
+
+        asyncio.run(run())
+
+    def test_manual_cooldown_blocks_new_open_same_wallet_coin(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES ('0xaaa','BTC',123,'manual_close','2026-01-01T00:00:00Z','2999-01-01T00:00:00Z')"
+        )
+        db.commit()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+
+            with patch.object(obs, "_open_position") as open_position:
+                obs._dispatch_fill(
+                    obs.taker,
+                    "0xaaa",
+                    "BTC",
+                    ("0xaaa", "BTC"),
+                    1_000,
+                    1,
+                    0,
+                    1,
+                    100,
+                    False,
+                    False,
+                    1,
+                )
+
+            open_position.assert_not_called()
+            self.assertEqual(obs.hb.get("skip_manual_cooldown"), 1)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_expired_manual_cooldown_allows_new_open(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES ('0xaaa','BTC',123,'manual_close','2026-01-01T00:00:00Z','2026-01-02T00:00:00Z')"
+        )
+        db.commit()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+
+            with patch.object(obs, "_open_position") as open_position:
+                obs._dispatch_fill(
+                    obs.taker,
+                    "0xaaa",
+                    "BTC",
+                    ("0xaaa", "BTC"),
+                    1_000,
+                    1,
+                    0,
+                    1,
+                    100,
+                    False,
+                    False,
+                    1,
+                )
+
+            open_position.assert_called_once()
+            self.assertIsNone(
+                db.execute(
+                    "SELECT expires_at FROM manual_close_cooldown WHERE addr='0xaaa' AND coin='BTC'"
+                ).fetchone()
+            )
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
     def test_normal_close_does_not_persist_stale_liquidation_flag(self):
         async def run():
             db = self._db()

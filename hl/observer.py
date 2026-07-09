@@ -36,6 +36,7 @@ from .util import f, now_iso, now_ms
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
 STALE_MS = 30_000          # a detected fill older than this priced at master px (book unreliable)
 MARK_WRITE_MIN_MS = 1_000  # dashboard mark freshness: persist at most once/sec/coin from live book ticks
+MANUAL_CLOSE_COOLDOWN_S = 24 * 60 * 60
 
 
 def _log(msg: str):
@@ -210,6 +211,46 @@ class Observer:
     def _sector_allowed(self, addr: str, coin: str) -> bool:
         return policy_allows_coin(self.target_sector_policy.get((addr or "").lower()), coin, default=True)
 
+    def _manual_close_cooldown_until(self, addr: str, coin: str):
+        """Return the active manual-close cooldown expiry for wallet+coin, or None.
+
+        Manual closes are an operator override: after we flatten a wallet's risky coin, the observer should
+        stay out of that wallet+coin for a full day even if the master adds, flips, or reopens.
+        """
+        addr = (addr or "").lower()
+        if not addr or not coin:
+            return None
+        row = self.db.execute(
+            "SELECT expires_at FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?)",
+            (addr, coin),
+        ).fetchone()
+        if not row:
+            return None
+        expires_at = row[0]
+        if expires_at > now_iso():
+            return expires_at
+        self.db.execute(
+            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?)",
+            (addr, coin),
+        )
+        self.db.commit()
+        return None
+
+    def _add_manual_close_cooldown(self, addr: str, coin: str, pos_id: int):
+        addr = (addr or "").lower()
+        created_at = now_iso()
+        expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + MANUAL_CLOSE_COOLDOWN_S))
+        self.db.execute(
+            "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
+            "VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(addr,coin) DO UPDATE SET "
+            "pos_id=excluded.pos_id,reason=excluded.reason,created_at=excluded.created_at,"
+            "expires_at=excluded.expires_at",
+            (addr, coin, pos_id, "manual_close", created_at, expires_at),
+        )
+        self.db.commit()
+        return expires_at
+
     # -- pricing off the live book -------------------------------------------
     def _fill_px(self, coin, is_buy, maker, fallback):
         ba = self.bbo.get(coin)
@@ -329,7 +370,7 @@ class Observer:
             ep_key = (addr, coin)
             action = pending["action"]
             if action == "open":
-                if ep_key in self.maker.open_ep:
+                if ep_key in self.maker.open_ep or self._manual_close_cooldown_until(addr, coin):
                     continue
                 self._open_position(
                     addr,
@@ -850,10 +891,12 @@ class Observer:
                                  closing=(frac >= 0.999), liq=False, maker=False,
                                  forced_px=exit_px, forced_frac=frac)
         full = frac >= 0.999
+        cooldown_until = self._add_manual_close_cooldown(addr, coin, pos_id) if full else None
         _log(f"MANUAL-{'CLOSE' if full else f'REDUCE {int(round(frac*100))}%'} {addr[:10]} {coin} {ep['side']} "
              f"@ {exit_px:g}  pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
         return {"positionId": pos_id, "exit": exit_px, "fraction": frac, "closed": full,
-                "realizedPnl": round(ep["realized_pnl"], 2), "remSize": round(ep["rem_size"], 8)}
+                "realizedPnl": round(ep["realized_pnl"], 2), "remSize": round(ep["rem_size"], 8),
+                "cooldownUntil": cooldown_until}
 
     async def _cmd_close_all(self):
         pos_ids = [ep["pos_id"] for ep in self.open_ep.values()]
@@ -1122,13 +1165,17 @@ class Observer:
         # matches the target (their maker fill → we rest; their taker fill → we cross). Drives fill price + fee.
         our_maker = maker if book.match_exec else False
         transition = classify_fill_transition(pos0, pos1)
+        target_in_position = abs(pos1) >= config.FLAT
+        cooldown_until = self._manual_close_cooldown_until(addr, coin) if target_in_position else None
         ep = book.open_ep.get(key)
         if book is self.maker:
             self._cancel_pending_maker_open_if_target_left(addr, coin, pos1)
         if our_maker and not self._maker_filled(coin, signed > 0, px):
             if book is self.maker:
                 if ep is None:
-                    if (transition in ("open", "flip") and abs(pos1) >= config.FLAT
+                    if cooldown_until:
+                        self._tally("skip_manual_cooldown", book)
+                    elif (transition in ("open", "flip") and target_in_position
                             and addr not in self.held_off
                             and not self.paused
                             and self._sector_allowed(addr, coin)):
@@ -1157,15 +1204,23 @@ class Observer:
                         px, oid, closing=closing, liq=liq)
             return   # v2 戳破: price didn't trade THROUGH our resting price → our maker order didn't fill (miss)
         if ep is None:
-            if (transition in ("open", "flip") and abs(pos1) >= config.FLAT
-                    and addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
-                    and not self.paused                 # dashboard pause = no new opens (existing keep to close)
-                    and self._sector_allowed(addr, coin)):
-                self._open_position(addr, coin, t, px, pos1, our_maker, oid, book)
+            if transition in ("open", "flip") and target_in_position:
+                if cooldown_until:
+                    self._tally("skip_manual_cooldown", book)
+                elif (addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
+                        and not self.paused           # dashboard pause = no new opens (existing keep to close)
+                        and self._sector_allowed(addr, coin)):
+                    self._open_position(addr, coin, t, px, pos1, our_maker, oid, book)
+                else:
+                    self._tally("skip_paused" if self.paused else
+                                "skip_heldoff" if addr in self.held_off else
+                                "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
+                                "skip_midway", book)
             elif abs(pos1) < config.FLAT:
                 pass                                    # target closed a position we never held — nothing to copy
             else:                                       # a fresh open we chose not to take → tally the reason
-                self._tally("skip_paused" if self.paused else
+                self._tally("skip_manual_cooldown" if cooldown_until else
+                            "skip_paused" if self.paused else
                             "skip_heldoff" if addr in self.held_off else
                             "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
                             "skip_midway", book)         # midway = target already in the position when we saw it
@@ -1200,7 +1255,8 @@ class Observer:
                                  closing=True, liq=liq, maker=maker, oid=oid, book=book, forced_px=forced_px)
         if (addr, coin) in book.open_ep:
             return
-        if addr in self.held_off or self.paused or not self._sector_allowed(addr, coin):
+        if (addr in self.held_off or self.paused or not self._sector_allowed(addr, coin)
+                or self._manual_close_cooldown_until(addr, coin)):
             return
         self._open_position(addr, coin, t, master_px, pos1, maker, oid, book, forced_entry_px=forced_px)
 
