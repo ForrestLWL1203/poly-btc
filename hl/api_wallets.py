@@ -46,7 +46,7 @@ def _sector_policy(row):
 
 def _score_breakdown(row):
     _score, detail = follow_score.compute_follow_score({
-        "score": _col(row, "raw_score", _col(row, "profile_score")),
+        "score": _col(row, "raw_score", _col(row, "profile_score", _col(row, "score"))),
         "copy_bt_net_pnl": _col(row, "copy_bt_net_pnl"),
         "copy_bt_win_rate": _col(row, "copy_bt_win_rate"),
         "copy_bt_closed_n": _col(row, "copy_bt_closed_n"),
@@ -136,6 +136,9 @@ def ep_wallets(db, qs=None):
         "), ep7 AS ("
         "  SELECT f.addr, COUNT(e.addr) AS closed_7d "
         "  FROM page_followed f LEFT JOIN episode e ON e.addr=f.addr AND e.close_ms>=? GROUP BY f.addr"
+        "), ep_all AS ("
+        "  SELECT f.addr, COUNT(e.addr) AS episode_total "
+        "  FROM page_followed f LEFT JOIN episode e ON e.addr=f.addr GROUP BY f.addr"
         "), copy_stats AS ("
         "  SELECT f.addr, COUNT(cp.pos_id) AS follow_count,"
         "         SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) AS closed_n,"
@@ -150,6 +153,7 @@ def ep_wallets(db, qs=None):
         "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,pr.sector_copy_json,pr.sector_policy_json,"
         "l.week_roi,l.mon_roi,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,"
+        "COALESCE(ep_all.episode_total,0) AS episode_total,"
         "COALESCE(cs.follow_count,0) AS follow_count,"
         "COALESCE(cs.closed_n,0) AS closed_n,"
         "COALESCE(cs.fwd_net,0) AS fwd_net "
@@ -159,6 +163,7 @@ def ep_wallets(db, qs=None):
         "LEFT JOIN follow_history fh ON fh.addr=w.addr "
         "LEFT JOIN leaderboard l ON l.addr=w.addr "
         "LEFT JOIN ep7 ON ep7.addr=w.addr "
+        "LEFT JOIN ep_all ON ep_all.addr=w.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=w.addr "
         "ORDER BY w.rank", (line_native, size, page * size, cutoff7d))
 
@@ -167,6 +172,9 @@ def ep_wallets(db, qs=None):
         worst = r["worst_single_loss_pct"]
         if worst is None:
             worst = (r["worst_loss_pct"] or 0.0) * 100
+        closed7d = r["closed_7d"]
+        if (closed7d or 0) == 0 and (r["episode_total"] or 0) == 0:
+            closed7d = r["copy_bt_7d_closed_n"] or 0
         out.append({
             "followPos": page * size + i + 1,
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
@@ -177,7 +185,7 @@ def ep_wallets(db, qs=None):
             "winRatePct": (r["win_rate"] or 0.0) * 100,
             "worstSingleLossPct": worst, "mainCoin": r["top_coin"],
             "followCount": r["follow_count"], "enabled": bool(r["enabled"]),
-            "closed7d": r["closed_7d"],
+            "closed7d": closed7d,
             "closedN": r["closed_n"],
             "forwardNetPnl": r["fwd_net"] or 0,
             "firstFollowedAt": iso_epoch(r["first_followed_at"]),
@@ -189,7 +197,12 @@ def ep_wallets(db, qs=None):
 
 def ep_wallet_detail(db, addr, qs=None):
     w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
-    pr = q1(db, "SELECT score,win_rate,n_trades,market_type FROM profile WHERE addr=?", (addr,))
+    pr = q1(db,
+            "SELECT score,win_rate,n_trades,market_type,"
+            "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
+            "copy_bt_liquidations,copy_bt_fee_drag,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
+            "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,sector_copy_json,sector_policy_json "
+            "FROM profile WHERE addr=?", (addr,))
     agg = q1(db,
              "SELECT COUNT(*) total_n,"
              "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) closed_n,"
@@ -214,6 +227,7 @@ def ep_wallet_detail(db, addr, qs=None):
         "address": addr, "rank": (w["rank"] if w else None),
         "marketType": (pr["market_type"] if pr else None),
         "score": score100(pr["score"]) if pr else None,
+        "scoreBreakdown": _score_breakdown(pr) if pr else {},
         "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
         "scoredTrades": (pr["n_trades"] if pr else None),
         "forwardWinRatePct": (win_n / n * 100) if n else None,

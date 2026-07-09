@@ -101,6 +101,26 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertFalse(wallet["scoreBreakdown"]["sectorPolicy"]["stock"]["allow"])
         self.assertNotIn("evidenceHeld", wallet)
 
+    def test_wallets_falls_back_to_copy_7d_closed_when_episode_rows_are_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
+                "VALUES (1,'0xaaa',0.9,'crypto',0.75,'BTC','now')"
+            )
+            db.execute(
+                "INSERT INTO profile (addr,status,score,copy_bt_7d_closed_n,copy_bt_7d_net_pnl) "
+                "VALUES ('0xaaa','active',0.9,8,123)"
+            )
+            db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            db.commit()
+
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
+
+        self.assertEqual(res["wallets"][0]["closed7d"], 8)
+
     def test_followed_wallet_marks_recent_first_follow_as_new(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

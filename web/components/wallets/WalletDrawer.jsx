@@ -10,6 +10,16 @@ const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平"
 
 const marketLabel = (m) => ({ crypto: "加密", stock: "美股/指数", mixed: "混合" }[m] || m || "—");
 
+const copyWindowRows = (breakdown) => {
+  const pnl = breakdown.copyPnl || {};
+  const closed = breakdown.closedN || {};
+  return [
+    ["30 天", pnl["30d"], closed["30d"]],
+    ["14 天", pnl["14d"], closed["14d"]],
+    ["7 天", pnl["7d"], closed["7d"]],
+  ].filter((row) => Number(row[2] || 0) > 0 || Math.abs(Number(row[1] || 0)) > 0);
+};
+
 function DecisionCard({ title, tone = "", children }) {
   return (
     <div className={"wallet-decision-card " + tone}>
@@ -39,6 +49,9 @@ export function WalletDrawer({ address, onClose }) {
   const liveWinDelta = d && d.forwardWinRatePct != null && d.scoredWinRatePct != null
     ? d.forwardWinRatePct - d.scoredWinRatePct
     : null;
+  const scoreBreakdown = (d && d.scoreBreakdown) || {};
+  const copyRows = copyWindowRows(scoreBreakdown);
+  const scoreReasons = (scoreBreakdown.reasons || []).slice(0, 6);
   const evidenceTone = !d || d.closedN >= 5 ? "good" : d.closedN > 0 ? "warn" : "muted";
   const riskItems = !d ? [] : [
     losing && ["实盘亏损", fSign(d.netPnl, 1), "danger"],
@@ -85,8 +98,30 @@ export function WalletDrawer({ address, onClose }) {
             <div className="wallet-decision-grid">
               <DecisionCard title="跟单理由" tone={d.score >= 70 ? "good" : ""}>
                 <p>评分 {fNum(d.score, 1)}，{d.rank != null ? "当前名单排名 #" + d.rank : "当前未在排名内"}，市场类型为 {marketLabel(d.marketType)}。</p>
+                <div className="wallet-mini-row"><span>原始评分</span><b>{scoreBreakdown.rawScore != null ? fNum(scoreBreakdown.rawScore, 1) : "—"}</b></div>
+                <div className="wallet-mini-row"><span>copy 分</span><b>{scoreBreakdown.copyScore != null ? fNum(scoreBreakdown.copyScore, 1) : "—"}</b></div>
+                <div className="wallet-mini-row"><span>置信度</span><b>{scoreBreakdown.confidencePct != null ? fNum(scoreBreakdown.confidencePct, 0) + "%" : "—"}</b></div>
                 <div className="wallet-mini-row"><span>历史样本</span><b>{d.scoredTrades || 0} 笔</b></div>
                 <div className="wallet-mini-row"><span>历史胜率</span><b>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}</b></div>
+                {scoreReasons.length > 0 && (
+                  <div className="score-reasons" style={{ marginTop: 9 }}>
+                    {scoreReasons.map((r, i) => <span key={i}>{r}</span>)}
+                  </div>
+                )}
+              </DecisionCard>
+
+              <DecisionCard title="历史 copy 回测" tone={copyRows.length ? "good" : "muted"}>
+                {copyRows.length ? (
+                  <div className="score-window-grid">
+                    {copyRows.map(([label, pnl, n]) => (
+                      <div className="score-window" key={label}>
+                        <span>{label}</span>
+                        <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
+                        <small>{n || 0} 笔</small>
+                      </div>
+                    ))}
+                  </div>
+                ) : <p>暂无可用 copy 回测窗口，先按历史评分和实盘记录观察。</p>}
               </DecisionCard>
 
               <DecisionCard title="证据质量" tone={evidenceTone}>

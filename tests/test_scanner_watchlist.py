@@ -57,6 +57,45 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 
 
 class ScannerWatchlistTests(unittest.TestCase):
+    def test_repair_missing_episode_rows_rebuilds_from_cached_fills(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            fills = [
+                {
+                    "tid": 1,
+                    "time": 1_000,
+                    "coin": "BTC",
+                    "side": "B",
+                    "sz": "1",
+                    "startPosition": "0",
+                    "px": "100",
+                    "closedPnl": "0",
+                    "fee": "0.1",
+                },
+                {
+                    "tid": 2,
+                    "time": 2_000,
+                    "coin": "BTC",
+                    "side": "A",
+                    "sz": "1",
+                    "startPosition": "1",
+                    "px": "101",
+                    "closedPnl": "1",
+                    "fee": "0.1",
+                },
+            ]
+            db.executemany(
+                "INSERT INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                [("0xaaa", x["tid"], x["time"], json.dumps(x)) for x in fills],
+            )
+            db.commit()
+
+            repaired = scanner.repair_missing_episode_rows(db, ["0xaaa"])
+
+            self.assertEqual(repaired, 1)
+            row = db.execute("SELECT addr,coin,side,open_ms,close_ms,n_fills FROM episode").fetchone()
+            self.assertEqual(tuple(row), ("0xaaa", "BTC", "long", 1_000, 2_000, 2))
+
     def test_open_snapshot_uses_material_position_for_underwater_risk(self):
         def position(coin, szi, entry_px, mark_px, unrealized_pnl):
             return {

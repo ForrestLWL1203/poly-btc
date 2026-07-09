@@ -3,13 +3,11 @@ import { fNum, fSign, fTime, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
 import { useWalletAudit } from "./wallets/WalletAudit.jsx";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
-import { WalletScoreCell, WalletScoreDetailModal } from "./wallets/WalletScoreDetail.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
 export function Wallets({ confirm, toast }) {
   const [drawer, setDrawer] = useState(null);
-  const [scoreModal, setScoreModal] = useState(null);
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
@@ -58,7 +56,7 @@ export function Wallets({ confirm, toast }) {
                     <tr className={open ? "row-open" : ""} style={{ cursor: "pointer" }} onClick={() => toggleAudit(w.address)}>
                       <td className="addr"><span className="row-caret">{open ? "▴" : "▾"}</span>{short(w.address)}</td>
                       <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                      <td className="num"><WalletScoreCell wallet={w} color="var(--t2)" onOpen={setScoreModal} /></td>
+                      <td className="num"><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                       <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
                       <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
                       <td className="num">{fNum(w.winRatePct, 0)}%</td>
@@ -87,7 +85,7 @@ export function Wallets({ confirm, toast }) {
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
                   <td className="addr"><span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span></td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                  <td className="num"><WalletScoreCell wallet={w} color={w.score >= data.followLine ? "var(--green-l)" : "var(--t2)"} onOpen={setScoreModal} /></td>
+                  <td className="num"><b style={{ color: w.score >= data.followLine ? "var(--green-l)" : "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
                   <td className="num">{fNum(w.winRatePct, 0)}%</td>
                   <td className="num">{w.closed7d != null ? w.closed7d : "—"}</td>
@@ -113,7 +111,6 @@ export function Wallets({ confirm, toast }) {
         </div>
       )}
       {drawer && <WalletDrawer address={drawer} onClose={() => setDrawer(null)} />}
-      {scoreModal && <WalletScoreDetailModal wallet={scoreModal} onClose={() => setScoreModal(null)} />}
     </div>
   );
 }

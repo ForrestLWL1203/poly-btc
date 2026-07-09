@@ -78,6 +78,47 @@ def _store_cached_fills(db, addr, fills, window_start):
     db.execute("DELETE FROM candidate_fills WHERE addr=? AND time<?", (addr, window_start))
 
 
+def _replace_episode_rows(db, addr: str, eps: list) -> None:
+    erows = _episode_rows(addr, eps)
+    db.execute("DELETE FROM episode WHERE addr=?", (addr,))
+    if erows:
+        db.executemany(
+            "INSERT OR REPLACE INTO episode "
+            "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            erows)
+    stored = db.execute("SELECT COUNT(*) FROM episode WHERE addr=?", (addr,)).fetchone()[0]
+    if stored != len(eps):
+        raise RuntimeError(f"episode consistency failed for {addr}: stored {stored}, built {len(eps)}")
+
+
+def repair_missing_episode_rows(db, addrs) -> int:
+    """Rebuild missing episode rows from cached fills.
+
+    Older scans could update profile/copy backtest evidence while leaving no episode detail rows.
+    Regate and the wallet UI depend on episode detail for activity and risk signals, so repair only
+    wallets that have cached fills but no stored episodes.
+    """
+    repaired = 0
+    for addr in dict.fromkeys(a for a in addrs if a):
+        has_episode = db.execute("SELECT 1 FROM episode WHERE addr=? LIMIT 1", (addr,)).fetchone()
+        if has_episode:
+            continue
+        fills = _load_cached_fills(db, addr, 0)
+        if not fills:
+            continue
+        perp = [x for x in fills if not is_spot(x.get("coin") or "")]
+        eps, _open_eps = build_episodes(perp)
+        if not eps:
+            continue
+        with _db_lock:
+            _replace_episode_rows(db, addr, eps)
+        repaired += 1
+    if repaired:
+        db.commit()
+    return repaired
+
+
 def _due_for_full_resync(db):
     """True if no FULL re-sync in the last FULL_RESYNC_DAYS (fresh db / missing col → True). A full re-sync
     re-fetches everyone's window to heal any incremental gap (append-only fills → gap can only be missing)."""
@@ -417,17 +458,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     cols = storage.PROFILE_COLS.split(",")
     with _db_lock:
         _store_cached_fills(db, addr, new_fills, window_start)   # persist the delta + prune the window
-        if ok:
-            erows = _episode_rows(addr, eps)
-            db.execute("DELETE FROM episode WHERE addr=?", (addr,))
-            db.executemany(
-                "INSERT OR REPLACE INTO episode "
-                "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                erows)
-            stored = db.execute("SELECT COUNT(*) FROM episode WHERE addr=?", (addr,)).fetchone()[0]
-            if stored != len(eps):
-                raise RuntimeError(f"episode consistency failed for {addr}: stored {stored}, built {len(eps)}")
+        _replace_episode_rows(db, addr, eps)
         db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
                    f"VALUES ({','.join('?' * len(cols))})", [row.get(c) for c in cols])
         db.commit()
@@ -666,8 +697,11 @@ def regate(db, p) -> int:
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
         "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr").fetchall()
-    # p90 per-episode fill count per wallet, from the stored episode table (regate has no fills to rebuild
-    # from) — feeds the algo-slicer gate. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
+    repaired_eps = repair_missing_episode_rows(db, [r[0] for r in rows])
+    if repaired_eps:
+        print(f"regate: repaired {repaired_eps} missing episode caches from candidate_fills")
+    # p90 per-episode fill count per wallet, from the stored episode table. Missing episode rows are repaired
+    # above from cached fills before this gate runs. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
     # isn't killed for a single outlier; only SYSTEMATIC slicing (≥10% heavy round-trips) trips it.
     _epw = {}
     for a, nf in db.execute("SELECT addr, n_fills FROM episode WHERE n_fills IS NOT NULL"):

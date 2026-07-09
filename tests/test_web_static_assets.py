@@ -114,21 +114,22 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function Positions(", jsx)
         self.assertIn('from "./components/Positions.jsx"', jsx)
 
-    def test_wallet_score_details_are_explicit_click_ui_not_native_tooltips(self):
+    def test_wallet_score_details_are_merged_into_wallet_drawer(self):
         wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
-        detail = ROOT / "web" / "components" / "wallets" / "WalletScoreDetail.jsx"
+        drawer = (ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx").read_text(encoding="utf-8")
         css = (ROOT / "web" / "app.css").read_text(encoding="utf-8")
 
-        self.assertTrue(detail.exists(), "wallet score detail should live in its own component")
-        body = detail.read_text(encoding="utf-8") if detail.exists() else ""
-        self.assertIn("export function WalletScoreDetailModal(", body)
-        self.assertIn("export function WalletScoreCell(", body)
+        self.assertFalse((ROOT / "web" / "components" / "wallets" / "WalletScoreDetail.jsx").exists())
+        self.assertNotIn("WalletScoreDetailModal", wallets)
+        self.assertNotIn("WalletScoreCell", wallets)
+        self.assertNotIn("scoreModal", wallets)
         self.assertNotIn("title={scoreTitle(w)}", wallets)
-        self.assertIn("score-info-btn", body)
-        self.assertIn("<InfoIcon />", body)
-        self.assertNotIn(">!", body)
-        self.assertIn(".score-detail-modal", css)
-        self.assertIn("backdrop-filter", css)
+        self.assertNotIn("score-info-btn", css)
+        self.assertNotIn(".score-detail-modal", css)
+        self.assertIn("历史 copy 回测", drawer)
+        self.assertIn("copyWindowRows", drawer)
+        self.assertIn("scoreBreakdown", drawer)
+        self.assertIn(".score-window-grid", css)
 
     def test_discovery_internals_are_split(self):
         discovery = (ROOT / "web" / "components" / "Discovery.jsx").read_text(encoding="utf-8")
