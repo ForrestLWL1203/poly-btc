@@ -179,8 +179,8 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertIn('api.cmd("close_all"', positions)
         self.assertIn("一键平仓", positions)
-        self.assertIn("positions-close-all-icon", positions)
-        self.assertIn("coin-ban-tip", positions)
+        self.assertIn("positions-close-all-btn", positions)
+        self.assertIn("btn btn-stop btn-sm positions-close-all-btn", positions)
 
     def test_dashboard_shell_imports_observer_mask_component(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
