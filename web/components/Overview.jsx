@@ -38,9 +38,23 @@ export function Overview({ ov }) {
   const { data: ins } = useApiResource(loadInsights, { intervalMs: 15000 });
   if (!ov) return <div className="loading">加载中…</div>;
   const r = ov.risk, f = ov.fees;
+  const walletContrib = (ins && ins.walletContrib) || [];
+  const winners = walletContrib.filter(w => (w.netPnl || 0) >= 0)
+    .sort((a, b) => (b.netPnl || 0) - (a.netPnl || 0)).slice(0, 3);
+  const draggers = walletContrib.filter(w => (w.netPnl || 0) < 0)
+    .sort((a, b) => (a.netPnl || 0) - (b.netPnl || 0)).slice(0, 3);
+  const sourceNet = walletContrib.reduce((s, w) => s + (w.netPnl || 0), 0);
+  const draggerNet = draggers.reduce((s, w) => s + (w.netPnl || 0), 0);
   return (
     <div className="content">
-      <div className="grid4">
+      <div className="overview-alert">
+        <div><span>运行摘要</span><b>{ov.openCount} 笔在持 · 被跟 {ov.system.watchlistCount} 钱包</b></div>
+        <div><span>浮动盈亏</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl, 0)}</b></div>
+        <div><span>账户火力</span><b>{fNum(ov.availablePctOfEquity, 0)}% 可用</b></div>
+        <div><span>方向风险</span><b>{Math.abs(r.netGrossRatioPct) < 25 ? "多空基本对冲" : Math.abs(r.netGrossRatioPct) < 60 ? "略偏单边" : "明显单边"}</b></div>
+      </div>
+
+      <div className="grid4 overview-kpis">
         <div className="card">
           <div className="card-lbl">总权益</div>
           <div className="kpi">{fUsd(ov.equity, 0)}</div>
@@ -64,7 +78,7 @@ export function Overview({ ov }) {
         </div>
       </div>
 
-      <div className="grid2" style={{ marginTop: 14, alignItems: "stretch" }}>
+      <div className="overview-primary">
         <div className="card chart-card" style={{ marginTop: 0, display: "flex", flexDirection: "column" }}>
           <div className="section-h" style={{ margin: "0 0 8px" }}>
             <h2>权益曲线</h2>
@@ -108,21 +122,60 @@ export function Overview({ ov }) {
         </div>
       </div>
 
-      <div className="grid2" style={{ marginTop: 14, alignItems: "stretch" }}>
-        <div className="card">
-          <div className="card-lbl" style={{ marginBottom: 8 }}>跟单钱包贡献榜 <span className="muted">· 实盘净盈亏(已实现+浮动)</span></div>
-          {!ins ? <div className="loading">加载中…</div> : ins.walletContrib.length === 0 ? <div className="empty">暂无</div> : (
-            <div className="tbl-wrap"><table>
-              <thead><tr><th>#</th><th>地址</th><th className="num">净盈亏</th><th className="num">实盘胜率</th><th className="num">笔数</th></tr></thead>
-              <tbody>{ins.walletContrib.map(w => (
-                <tr key={w.address}>
-                  <td>{w.rank != null ? <span className="rankbadge">{w.rank}</span> : <span className="tint tint-gray">脱榜</span>}</td>
-                  <td className="addr">{short(w.address)}</td>
-                  <td className={"num " + cls(w.netPnl)}>{fSign(w.netPnl, 1)}</td>
-                  <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
-                  <td className="num">{w.closedN}</td>
-                </tr>))}</tbody>
-            </table></div>)}
+      <div className="overview-bottom">
+        <div className="card contrib-card">
+          <div className="contrib-head">
+            <div>
+              <div className="card-lbl">盈亏来源</div>
+              <h2>跟单钱包贡献榜</h2>
+            </div>
+            <div className="contrib-total">
+              <span>实盘净盈亏</span>
+              <b className={cls(sourceNet)}>{ins ? fSign(sourceNet, 1) : "—"}</b>
+            </div>
+          </div>
+
+          {!ins ? <div className="loading">加载中…</div> : walletContrib.length === 0 ? <div className="empty">暂无</div> : (
+            <React.Fragment>
+              <div className="contrib-split">
+                <div className="contrib-lane">
+                  <div className="contrib-lane-title"><span className="dot" style={{ background: "var(--green)" }} /> 赚钱贡献</div>
+                  {winners.length === 0 ? <div className="contrib-empty">暂无正贡献</div> : winners.map(w => (
+                    <div className="contrib-row" key={"win-" + w.address}>
+                      <span>{w.rank != null ? "#" + w.rank : "脱榜"}</span>
+                      <b className="addr">{short(w.address)}</b>
+                      <strong className="up">{fSign(w.netPnl, 1)}</strong>
+                      <em>{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"} · {w.closedN} 笔</em>
+                    </div>
+                  ))}
+                </div>
+                <div className="contrib-lane">
+                  <div className="contrib-lane-title"><span className="dot" style={{ background: draggerNet < 0 ? "var(--red)" : "var(--gray)" }} /> 亏损拖累</div>
+                  {draggers.length === 0 ? <div className="contrib-empty">暂无负贡献</div> : draggers.map(w => (
+                    <div className="contrib-row" key={"drag-" + w.address}>
+                      <span>{w.rank != null ? "#" + w.rank : "脱榜"}</span>
+                      <b className="addr">{short(w.address)}</b>
+                      <strong className="down">{fSign(w.netPnl, 1)}</strong>
+                      <em>{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"} · {w.closedN} 笔</em>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="contrib-table">
+                <table>
+                  <thead><tr><th>#</th><th>地址</th><th className="num">净盈亏</th><th className="num">实盘胜率</th><th className="num">笔数</th></tr></thead>
+                  <tbody>{walletContrib.map(w => (
+                    <tr key={w.address}>
+                      <td>{w.rank != null ? <span className="rankbadge">{w.rank}</span> : <span className="tint tint-gray">脱榜</span>}</td>
+                      <td className="addr">{short(w.address)}</td>
+                      <td className={"num " + cls(w.netPnl)}>{fSign(w.netPnl, 1)}</td>
+                      <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
+                      <td className="num">{w.closedN}</td>
+                    </tr>))}</tbody>
+                </table>
+              </div>
+            </React.Fragment>)}
         </div>
         <div className="card">
           <div className="card-lbl" style={{ marginBottom: 8 }}>币种盈亏 <span className="muted">· 实盘净盈亏</span></div>

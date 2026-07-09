@@ -8,6 +8,17 @@ const { useState, useEffect, useCallback } = React;
 
 const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平", liquidated: "爆仓" };
 
+const marketLabel = (m) => ({ crypto: "加密", stock: "美股/指数", mixed: "混合" }[m] || m || "—");
+
+function DecisionCard({ title, tone = "", children }) {
+  return (
+    <div className={"wallet-decision-card " + tone}>
+      <div className="wallet-decision-title">{title}</div>
+      {children}
+    </div>
+  );
+}
+
 export function WalletDrawer({ address, onClose }) {
   const [recPage, setRecPage] = useState(0);
   const [exp, setExp] = useState({});
@@ -25,14 +36,26 @@ export function WalletDrawer({ address, onClose }) {
   const net = d && (d.netPnl || 0);
   const losing = d && net < -5;
   const recPages = d ? Math.max(1, Math.ceil(d.recordsTotal / d.recSize)) : 1;
+  const liveWinDelta = d && d.forwardWinRatePct != null && d.scoredWinRatePct != null
+    ? d.forwardWinRatePct - d.scoredWinRatePct
+    : null;
+  const evidenceTone = !d || d.closedN >= 5 ? "good" : d.closedN > 0 ? "warn" : "muted";
+  const riskItems = !d ? [] : [
+    losing && ["实盘亏损", fSign(d.netPnl, 1), "danger"],
+    d.openUnrealized < -5 && ["在持浮亏", fSign(d.openUnrealized, 1), "danger"],
+    d.closedN === 0 && ["无平仓样本", "先观察", "warn"],
+    liveWinDelta != null && liveWinDelta < -20 && ["实盘胜率低于历史", fNum(liveWinDelta, 0) + "pt", "warn"],
+    d.lossN > d.winN && ["亏损笔数偏多", d.lossN + " 负", "warn"],
+  ].filter(Boolean);
+  const quietRisk = d && riskItems.length === 0;
   return (
     <React.Fragment>
       <div className="scrim" onClick={onClose} />
-      <div className="drawer">
+      <div className="drawer wallet-drawer">
         <div className="drawer-head">
           <div>
             <h3>{short(address)}</h3>
-            <div className="muted">排名 #{d ? (d.rank != null ? d.rank : "—") : "—"} · {d ? d.marketType : ""}</div>
+            <div className="muted">排名 #{d ? (d.rank != null ? d.rank : "—") : "—"} · {d ? marketLabel(d.marketType) : ""}</div>
           </div>
           <button className="drawer-close" type="button" onClick={onClose} aria-label="关闭跟单记录" title="关闭">
             <Ico d={IC.close} />
@@ -40,18 +63,64 @@ export function WalletDrawer({ address, onClose }) {
         </div>
         {!d ? <div className="loading">加载中…</div> : (
           <React.Fragment>
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="card-lbl" style={{ marginBottom: 10 }}>历史评分 vs 实盘对账 {losing && <span style={{ color: "var(--red-l)" }}>· ⚠ 实盘亏损</span>}</div>
-              <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
-                <div><div className="muted">评分</div><div className="mono" style={{ fontSize: 18 }}>{fNum(d.score, 1)}</div></div>
-                <div><div className="muted">历史胜率</div><div className="mono" style={{ fontSize: 18 }}>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.scoredTrades || 0}笔</span></div></div>
-                <div><div className="muted">实盘胜率</div><div className="mono" style={{ fontSize: 18, color: "var(--t1)" }}>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}<span className="muted" style={{ fontSize: 11 }}> /{d.closedN}笔</span></div></div>
+            <div className={"wallet-decision-hero " + (losing ? "danger" : net > 0 ? "good" : "neutral")}>
+              <div>
+                <div className="card-lbl">钱包决策</div>
+                <div className="wallet-decision-status">{losing ? "需要复核" : net > 0 ? "贡献为正" : "继续观察"}</div>
+                <div className="muted">以现有实盘跟单记录评估，不改变跟单逻辑</div>
               </div>
-              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 14, borderTop: "1px solid var(--glass-border)", paddingTop: 12 }}>
-                <div><div className="muted">实盘战绩</div><div className="mono" style={{ fontSize: 15 }}><span className="up">{d.winN}胜</span> / <span className="down">{d.lossN}负</span></div></div>
-                <div><div className="muted">已实现</div><div className={"mono " + cls(d.realizedPnl)} style={{ fontSize: 15 }}>{fSign(d.realizedPnl, 1)}</div></div>
-                <div><div className="muted">在持({d.openN})浮动</div><div className={"mono " + cls(d.openUnrealized)} style={{ fontSize: 15 }}>{fSign(d.openUnrealized, 1)}</div></div>
-                <div><div className="muted">净盈亏</div><div className={"mono " + cls(d.netPnl)} style={{ fontSize: 16, fontWeight: 700 }}>{fSign(d.netPnl, 1)}</div></div>
+              <div className="wallet-decision-net">
+                <span>净盈亏</span>
+                <b className={cls(d.netPnl)}>{fSign(d.netPnl, 1)}</b>
+              </div>
+            </div>
+
+            <div className="wallet-stat-grid">
+              <div><span>最终评分</span><b>{fNum(d.score, 1)}</b></div>
+              <div><span>历史胜率</span><b>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}</b><em>{d.scoredTrades || 0} 笔</em></div>
+              <div><span>实盘胜率</span><b>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}</b><em>{d.closedN} 平仓</em></div>
+              <div><span>实盘记录</span><b>{d.recordsTotal}</b><em>{d.openN} 在持</em></div>
+            </div>
+
+            <div className="wallet-decision-grid">
+              <DecisionCard title="跟单理由" tone={d.score >= 70 ? "good" : ""}>
+                <p>评分 {fNum(d.score, 1)}，{d.rank != null ? "当前名单排名 #" + d.rank : "当前未在排名内"}，市场类型为 {marketLabel(d.marketType)}。</p>
+                <div className="wallet-mini-row"><span>历史样本</span><b>{d.scoredTrades || 0} 笔</b></div>
+                <div className="wallet-mini-row"><span>历史胜率</span><b>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}</b></div>
+              </DecisionCard>
+
+              <DecisionCard title="证据质量" tone={evidenceTone}>
+                <p>{d.closedN >= 5 ? "已有多笔实盘平仓记录，可用于对照历史评分。" : d.closedN > 0 ? "已有少量实盘记录，但样本仍偏薄，适合继续观察。" : "暂无实盘平仓样本，主要依赖历史评分。"}</p>
+                <div className="wallet-mini-row"><span>实盘战绩</span><b><span className="up">{d.winN}胜</span> / <span className="down">{d.lossN}负</span></b></div>
+                <div className="wallet-mini-row"><span>已实现</span><b className={cls(d.realizedPnl)}>{fSign(d.realizedPnl, 1)}</b></div>
+              </DecisionCard>
+
+              <DecisionCard title="风险信号" tone={losing ? "danger" : riskItems.length ? "warn" : "good"}>
+                {quietRisk ? <p>暂无明显红旗，继续看实盘记录是否稳定。</p> : (
+                  <div className="wallet-risk-list">
+                    {riskItems.map(([label, value, tone]) => (
+                      <div className={"wallet-risk " + tone} key={label}>
+                        <span>{label}</span><b>{value}</b>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="wallet-mini-row"><span>在持浮动</span><b className={cls(d.openUnrealized)}>{fSign(d.openUnrealized, 1)}</b></div>
+              </DecisionCard>
+            </div>
+
+            <div className="wallet-ledger">
+              <div>
+                <div className="muted">已实现</div>
+                <div className={"mono " + cls(d.realizedPnl)}>{fSign(d.realizedPnl, 1)}</div>
+              </div>
+              <div>
+                <div className="muted">在持({d.openN})浮动</div>
+                <div className={"mono " + cls(d.openUnrealized)}>{fSign(d.openUnrealized, 1)}</div>
+              </div>
+              <div>
+                <div className="muted">记录总数</div>
+                <div className="mono">{d.recordsTotal}</div>
               </div>
             </div>
 

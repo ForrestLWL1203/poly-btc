@@ -133,17 +133,17 @@ function Dashboard({ onLogout }) {
         </div>
 
         {ov && ov.system && (
-          <div className="ticker">
-            <div className="chip"><div className="k">权益</div><div className="v">{fUsd(ov.equity)}</div></div>
-            <div className="chip"><div className="k">ROI</div><div className={"v " + cls(ov.roiPct)}>{fPct(ov.roiPct)}</div></div>
-            <div className="chip"><div className="k">今日</div><div className={"v " + cls(ov.todayPct)}>{fPct(ov.todayPct)}</div></div>
-            <div className="chip"><div className="k">在持</div><div className="v">{ov.openCount}</div></div>
-            <div className="chip"><div className="k">可用</div><div className="v">{fUsd(ov.availableBalance)}</div></div>
-            <div className="chip"><div className="k">被跟</div><div className="v">{ov.system.watchlistCount}</div></div>
-            <div className="chip"><div className="k">浮动</div><div className={"v " + cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</div></div>
-            <div className="chip"><div className="k">Observer</div><div className="v" style={{ fontSize: 13, color: obs === "stopped" ? "var(--t3)" : obs === "paused" ? "var(--amber)" : "var(--green-l)" }}>{obs === "stopped" ? "已停止" : obs === "paused" ? "已暂停" : "运行中"}</div></div>
+          <div className="system-strip" aria-label="系统状态摘要">
+            <div className="strip-item"><span>权益</span><b>{fUsd(ov.equity)}</b></div>
+            <div className="strip-item"><span>ROI</span><b className={cls(ov.roiPct)}>{fPct(ov.roiPct)}</b></div>
+            <div className="strip-item"><span>今日</span><b className={cls(ov.todayPct)}>{fPct(ov.todayPct)}</b></div>
+            <div className="strip-item"><span>在持</span><b>{ov.openCount}</b></div>
+            <div className="strip-item"><span>可用</span><b>{fUsd(ov.availableBalance)}</b></div>
+            <div className="strip-item"><span>被跟</span><b>{ov.system.watchlistCount}</b></div>
+            <div className="strip-item"><span>浮动</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</b></div>
+            <div className="strip-item"><span>Observer</span><b style={{ color: obs === "stopped" ? "var(--t3)" : obs === "paused" ? "var(--amber)" : "var(--green-l)" }}>{obs === "stopped" ? "已停止" : obs === "paused" ? "已暂停" : "运行中"}</b></div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
-              return <div className="chip"><div className="k">采集</div><div className="v" style={{ fontSize: 13, color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</div></div>; })()}
+              return <div className="strip-item"><span>采集</span><b style={{ color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</b></div>; })()}
           </div>
         )}
 

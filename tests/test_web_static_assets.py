@@ -243,6 +243,14 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertEqual([], hooks_after_loading, "Settings must not call hooks after a conditional loading return")
 
+    def test_settings_param_rows_show_risk_levels(self):
+        param_row = (ROOT / "web" / "components" / "settings" / "ParamRow.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("LEVEL_META", param_row)
+        self.assertIn("param-risk-badge", param_row)
+        self.assertIn("prow level-", param_row)
+        self.assertIn("resolveLevel", param_row)
+
     def test_scanner_settings_collapse_volume_and_hide_score_tuning(self):
         scanner = (ROOT / "web" / "components" / "settings" / "ScannerSettingsPanel.jsx").read_text(encoding="utf-8")
 
@@ -270,6 +278,14 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn('from "./wallets/WalletAudit.jsx"', wallets)
         self.assertNotIn("function WalletDrawer(", wallets)
         self.assertNotIn("/api/pipeline-audit", wallets)
+
+    def test_wallet_drawer_has_decision_sections(self):
+        drawer = (ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("跟单理由", drawer)
+        self.assertIn("证据质量", drawer)
+        self.assertIn("风险信号", drawer)
+        self.assertIn("wallet-decision-grid", drawer)
 
 
 if __name__ == "__main__":

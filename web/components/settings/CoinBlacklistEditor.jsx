@@ -1,11 +1,13 @@
 import { formatCoinList, normalizeCoin, parseCoinList } from "../../lib/format.js";
 import { IC, Ico } from "../../lib/icons.jsx";
+import { ParamRiskBadge, resolveLevel } from "./ParamRow.jsx";
 
 const { useState } = React;
 
 export function CoinBlacklistEditor({ param, value, dirty, disabled, onCommit }) {
   const [draft, setDraft] = useState("");
   const coins = parseCoinList(value);
+  const level = resolveLevel(param);
   const commitCoins = (next) => onCommit(formatCoinList(next));
   const add = () => {
     const c = normalizeCoin(draft);
@@ -14,9 +16,9 @@ export function CoinBlacklistEditor({ param, value, dirty, disabled, onCommit })
     setDraft("");
   };
   return (
-    <div className={"prow coin-blacklist-row" + (dirty ? " dirty" : "")}>
-      <span className="lvl-dot lvl-green" />
-      <div className="pn"><b>{param.name}</b></div>
+    <div className={"prow level-" + level + " coin-blacklist-row" + (dirty ? " dirty" : "")}>
+      <span className={"lvl-dot lvl-" + level} />
+      <div className="pn"><b>{param.name}</b><ParamRiskBadge level={level} /></div>
       <div className="pd">{param.desc}</div>
       <div className="pctl coin-blacklist-ctl">
         <div className="coin-tags">
