@@ -196,7 +196,7 @@ def ep_wallets(db, qs=None):
 
 
 def ep_wallet_detail(db, addr, qs=None):
-    w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
+    w = q1(db, "SELECT rank,score FROM watchlist WHERE addr=?", (addr,))
     pr = q1(db,
             "SELECT score,win_rate,n_trades,market_type,"
             "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
@@ -223,10 +223,11 @@ def ep_wallet_detail(db, addr, qs=None):
         "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at "
         "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
         (addr, rs, rp * rs))
+    final_score = w["score"] if (w and w["score"] is not None) else (pr["score"] if pr else None)
     return {
         "address": addr, "rank": (w["rank"] if w else None),
         "marketType": (pr["market_type"] if pr else None),
-        "score": score100(pr["score"]) if pr else None,
+        "score": score100(final_score) if final_score is not None else None,
         "scoreBreakdown": _score_breakdown(pr) if pr else {},
         "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
         "scoredTrades": (pr["n_trades"] if pr else None),

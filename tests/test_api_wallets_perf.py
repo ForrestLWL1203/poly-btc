@@ -290,6 +290,26 @@ class ApiWalletsPerfTests(unittest.TestCase):
         for key in ("entry", "exit", "masterEntry", "leverage", "margin", "notional", "addCount", "closedAt"):
             self.assertNotIn(key, record)
 
+    def test_wallet_detail_score_uses_final_watchlist_score(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
+                "VALUES (1,'0xaaa',0.89,'crypto',0.28,'BTC','now')"
+            )
+            db.execute(
+                "INSERT INTO profile (addr,status,score,win_rate,n_trades,market_type) "
+                "VALUES ('0xaaa','active',0.65,0.28,29,'crypto')"
+            )
+            db.commit()
+
+            res = api_wallets.ep_wallet_detail(WalletDetailGuardedDb(db), "0xaaa")
+
+        self.assertEqual(res["score"], 89.0)
+        self.assertEqual(res["scoreBreakdown"]["rawScore"], 65.0)
+
 
 if __name__ == "__main__":
     unittest.main()
