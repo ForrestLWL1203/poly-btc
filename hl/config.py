@@ -51,6 +51,7 @@ AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN = 250.0
 AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN = 0.08
 AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_ABS = 250.0  # expanding top-N may not sacrifice this much 14d/7d copy PnL
 AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_REL = 0.25   # or this fraction of the prior prefix's recent PnL
+AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED = 15.0  # 10k paper account: per-closed-copy net edge below this is too thin
 AUTO_FOLLOW_KEEP_BONUS = 0.020    # hysteresis: previous followed wallet gets +2 display points if still eligible
 AUTO_FOLLOW_KEEP_MIN_SCORE = 0.60 # never stabilize a wallet below the hard quality floor
 # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — evidence is enforced once at profile time by the

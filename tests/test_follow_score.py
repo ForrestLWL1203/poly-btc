@@ -78,6 +78,50 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertEqual(result["status"], "low_fill_rate")
 
+    def test_follow_eligibility_rejects_thin_copy_edge_even_when_all_windows_positive(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.86,
+            "copy_bt_net_pnl": 171,
+            "copy_bt_14d_net_pnl": 171,
+            "copy_bt_7d_net_pnl": 4,
+            "copy_bt_closed_n": 13,
+            "copy_bt_14d_closed_n": 13,
+            "copy_bt_7d_closed_n": 5,
+            "copy_bt_open_fill_rate": 0.95,
+        })
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "thin_edge")
+        self.assertTrue(any("每笔收益太薄" in r for r in result["reasons"]))
+
+    def test_follow_eligibility_keeps_solid_primary_edge_even_when_recent_windows_are_thinner(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.66,
+            "copy_bt_net_pnl": 610.3,
+            "copy_bt_14d_net_pnl": 114.4,
+            "copy_bt_7d_net_pnl": 170.1,
+            "copy_bt_closed_n": 32,
+            "copy_bt_14d_closed_n": 23,
+            "copy_bt_7d_closed_n": 21,
+            "copy_bt_open_fill_rate": 0.95,
+        })
+
+        self.assertTrue(result["eligible"])
+
+    def test_follow_eligibility_keeps_borderline_recent_edge_when_primary_and_short_term_are_strong(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.72,
+            "copy_bt_net_pnl": 2847,
+            "copy_bt_14d_net_pnl": 585,
+            "copy_bt_7d_net_pnl": 344,
+            "copy_bt_closed_n": 80,
+            "copy_bt_14d_closed_n": 40,
+            "copy_bt_7d_closed_n": 12,
+            "copy_bt_open_fill_rate": 0.95,
+        })
+
+        self.assertTrue(result["eligible"])
+
     def test_copy_stronger_wallet_beats_slightly_higher_raw_wallet(self):
         weak = {
             "score": 0.674,

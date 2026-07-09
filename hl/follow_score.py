@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
+from . import config
 from .sector import apply_allowed_sector_copy_metrics
 
 
@@ -41,6 +42,71 @@ def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
     )) or c30 > 0 or c14 > 0 or c7 > 0
 
 
+def _copy_edge_reasons(
+    p30: float,
+    c30: int,
+    p14: float,
+    c14: int,
+    p7: float,
+    c7: int,
+    *,
+    min_closed30: int,
+    min_closed14: int,
+    min_closed7: int,
+    min_pnl_per_closed: float,
+) -> list[str]:
+    if min_pnl_per_closed <= 0:
+        return []
+    reasons = []
+    for label, pnl, closed, min_closed in (
+        ("30天", p30, c30, min_closed30),
+        ("14天", p14, c14, min_closed14),
+        ("7天", p7, c7, min_closed7),
+    ):
+        if closed < min_closed:
+            continue
+        avg = pnl / closed if closed else 0.0
+        if avg < min_pnl_per_closed:
+            reasons.append(f"{label}copy每笔收益太薄(${avg:.1f}/笔 < ${min_pnl_per_closed:.0f})")
+    return reasons
+
+
+def _hard_thin_edge_reasons(
+    p30: float,
+    c30: int,
+    p14: float,
+    c14: int,
+    p7: float,
+    c7: int,
+    *,
+    min_closed30: int,
+    min_closed14: int,
+    min_closed7: int,
+    min_pnl_per_closed: float,
+) -> list[str]:
+    """Hard-reject only persistently thin copy edge.
+
+    A thin 14d/7d window alone can be regime noise. The primary 30d replay must
+    be thin, then either 14d confirms the same thinness or 7d is near dust.
+    """
+    if min_pnl_per_closed <= 0 or c30 < min_closed30:
+        return []
+    avg30 = p30 / c30 if c30 else 0.0
+    if avg30 >= min_pnl_per_closed:
+        return []
+    reasons = [f"30天copy每笔收益太薄(${avg30:.1f}/笔 < ${min_pnl_per_closed:.0f})"]
+    avg14 = p14 / c14 if c14 else 0.0
+    if c14 >= min_closed14 and avg14 < min_pnl_per_closed:
+        reasons.append(f"14天copy每笔收益太薄(${avg14:.1f}/笔 < ${min_pnl_per_closed:.0f})")
+        return reasons
+    dust_floor = max(3.0, min_pnl_per_closed * 0.20)
+    avg7 = p7 / c7 if c7 else 0.0
+    if c7 >= min_closed7 and avg7 < dust_floor:
+        reasons.append(f"7天copy接近无边际(${avg7:.1f}/笔 < ${dust_floor:.0f})")
+        return reasons
+    return []
+
+
 @dataclass(frozen=True)
 class FollowScore:
     score: float
@@ -54,6 +120,7 @@ def evaluate_follow_eligibility(
     min_closed14: int = 5,
     min_closed7: int = 5,
     min_open_fill_rate: float = 0.60,
+    min_pnl_per_closed=None,
 ) -> dict:
     """Classify whether an active profile is eligible for real follow-line selection.
 
@@ -101,6 +168,24 @@ def evaluate_follow_eligibility(
             "eligible": False,
             "status": "low_fill_rate",
             "reasons": [f"开仓跟随率低于{min_open_fill_rate * 100:.0f}%"],
+        }
+    edge_floor = (
+        float(getattr(config, "AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED", 15.0))
+        if min_pnl_per_closed is None
+        else float(min_pnl_per_closed)
+    )
+    edge_reasons = _hard_thin_edge_reasons(
+        p30, c30, p14, c14, p7, c7,
+        min_closed30=min_closed30,
+        min_closed14=min_closed14,
+        min_closed7=min_closed7,
+        min_pnl_per_closed=edge_floor,
+    )
+    if edge_reasons:
+        return {
+            "eligible": False,
+            "status": "thin_edge",
+            "reasons": edge_reasons,
         }
 
     thin_reasons = []
@@ -187,6 +272,16 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     if p30 < 0 and c30 >= 7:
         score -= 0.10
         reasons.append("30天copy亏损")
+    edge_reasons = _copy_edge_reasons(
+        p30, c30, p14, c14, p7, c7,
+        min_closed30=7,
+        min_closed14=5,
+        min_closed7=5,
+        min_pnl_per_closed=float(getattr(config, "AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED", 15.0)),
+    )
+    if edge_reasons:
+        score -= 0.12
+        reasons.extend(edge_reasons)
 
     open_fill_rate = metrics.get("copy_bt_open_fill_rate")
     if open_fill_rate is not None:
