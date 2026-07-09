@@ -125,7 +125,7 @@ export function Positions({ confirm, toast, streamOpen }) {
           <button className="btn btn-stop btn-sm positions-close-all-btn" disabled={!(open && open.summary && open.summary.openCount) || closingAll}
             aria-label="一键平仓全部持仓" title="一键平仓全部持仓" onClick={doCloseAll}>
             {closingAll ? <span className="spin" /> : <Ico d={IC.close} />}
-            {closingAll ? "平仓中" : "平仓"}
+            {closingAll ? "平仓中" : "一键平仓"}
           </button>
         </div>
         <div className="range-tabs">
