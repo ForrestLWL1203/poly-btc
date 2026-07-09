@@ -34,6 +34,11 @@ Do not print key contents.
   process/CLI used `--full`, or the completed `scan_runs.full=1`. Otherwise it may be only a manual full
   workset scan while profile fill fetching still uses incremental `candidate_fills` cache unless
   `_due_for_full_resync()` is true.
+- Do not restart `hl-scan.service` during deploy just to pick up code. It is a one-shot scan unit
+  activated by `hl-scan.timer`, not a long-running daemon; `systemctl restart hl-scan.service` starts
+  a real scan immediately. Use `systemctl reset-failed hl-scan.service` to clear failed state, and use
+  `python3 hl_discover.py --db data/hl.db regate` when you only need no-network watchlist/copy-BT
+  recomputation from cached fills.
 - When deploying or restarting live services, never include `hl-scan.service` in a broad restart command
   unless the user explicitly asked to start a scan. `hl-scan.service` is a one-shot scanner, so
   `systemctl restart hl-scan.service` immediately launches a new discovery scan even if the 24h cadence
