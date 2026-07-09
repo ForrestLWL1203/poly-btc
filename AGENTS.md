@@ -34,6 +34,11 @@ Do not print key contents.
   process/CLI used `--full`, or the completed `scan_runs.full=1`. Otherwise it may be only a manual full
   workset scan while profile fill fetching still uses incremental `candidate_fills` cache unless
   `_due_for_full_resync()` is true.
+- When deploying or restarting live services, never include `hl-scan.service` in a broad restart command
+  unless the user explicitly asked to start a scan. `hl-scan.service` is a one-shot scanner, so
+  `systemctl restart hl-scan.service` immediately launches a new discovery scan even if the 24h cadence
+  has not elapsed. For ordinary code deploys, restart only the affected long-running service, usually
+  `hl-observe.service` and/or `hl-dashboard.service`; leave `hl-scan.timer` alone.
 
 ## Secrets And Data
 
