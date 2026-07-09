@@ -122,10 +122,10 @@ export function Positions({ confirm, toast, streamOpen }) {
       <div className="section-h" style={{ marginTop: 6 }}>
         <div className="positions-title-row">
           <h2>当前持仓 {open && <span className="muted">· 浮动 <span className={cls(open.summary.floatingPnl)}>{fSign(open.summary.floatingPnl, 1)}</span> · {open.summary.openCount} 笔</span>}</h2>
-          <button className="btn btn-danger btn-close-all" disabled={!(open && open.summary && open.summary.openCount) || closingAll}
-            title="以 taker 方式平掉当前全部持仓" onClick={doCloseAll}>
+          <button className="coin-ban-btn positions-close-all-icon" disabled={!(open && open.summary && open.summary.openCount) || closingAll}
+            aria-label="一键平仓" title="一键平仓" onClick={doCloseAll}>
             {closingAll ? <span className="spin" /> : <Ico d={IC.close} />}
-            {closingAll ? "平仓中" : "一键平仓"}
+            <span className="coin-ban-tip">{closingAll ? "平仓中" : "一键平仓"}</span>
           </button>
         </div>
         <div className="range-tabs">
