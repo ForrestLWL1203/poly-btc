@@ -842,13 +842,17 @@ class Observer:
         if frac <= 0:
             raise ValueError("fraction must be > 0")
         ba = self.bbo.get(coin)
-        mid = ((ba[0] + ba[1]) / 2) if (ba and ba[0] and ba[1]) else ep["entry_px"]
-        await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
-                                 closing=(frac >= 0.999), liq=False, maker=False, forced_px=mid, forced_frac=frac)
+        if ba and ba[0] and ba[1]:
+            exit_px = ba[0] if ep.get("sign", 1) > 0 else ba[1]
+        else:
+            exit_px = ep["entry_px"]
+        await self._apply_reduce(addr, coin, ep, now_ms(), exit_px, 0.0, 0.0,
+                                 closing=(frac >= 0.999), liq=False, maker=False,
+                                 forced_px=exit_px, forced_frac=frac)
         full = frac >= 0.999
         _log(f"MANUAL-{'CLOSE' if full else f'REDUCE {int(round(frac*100))}%'} {addr[:10]} {coin} {ep['side']} "
-             f"@ {mid:g}  pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
-        return {"positionId": pos_id, "exit": mid, "fraction": frac, "closed": full,
+             f"@ {exit_px:g}  pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
+        return {"positionId": pos_id, "exit": exit_px, "fraction": frac, "closed": full,
                 "realizedPnl": round(ep["realized_pnl"], 2), "remSize": round(ep["rem_size"], 8)}
 
     async def _cmd_close_all(self):

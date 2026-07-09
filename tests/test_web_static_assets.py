@@ -174,6 +174,13 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("export function PositionDetail(", positions)
         self.assertNotIn("const CLOSE_TYPE", history)
 
+    def test_positions_exposes_close_all_command(self):
+        positions = (ROOT / "web" / "components" / "Positions.jsx").read_text(encoding="utf-8")
+
+        self.assertIn('api.cmd("close_all"', positions)
+        self.assertIn("一键平仓", positions)
+        self.assertIn("btn-close-all", positions)
+
     def test_dashboard_shell_imports_observer_mask_component(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
         obs_mask = ROOT / "web" / "components" / "ObsMask.jsx"

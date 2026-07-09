@@ -132,6 +132,9 @@ body {
 /* compact size modifier for in-table gradient buttons (e.g. 平仓 = .btn .btn-stop .btn-sm) */
 .btn-sm { padding: 2px 8px; font-size: 10.5px; border-radius: 7px; gap: 3px; box-shadow: 0 2px 6px rgba(226, 82, 74, .22); }
 .btn-sm svg { width: 11px; height: 11px; }
+.positions-title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.btn-close-all { padding: 4px 9px; border-radius: 8px; font-size: 11px; gap: 5px; white-space: nowrap; }
+.btn-close-all svg { width: 12px; height: 12px; }
 .coin-ban-btn { position: relative; display: inline-flex; align-items: center; justify-content: center;
   width: 16px; height: 16px; margin-left: 6px; padding: 0; border: 0; background: transparent;
   color: var(--t3); opacity: .58; vertical-align: -3px; cursor: pointer;
@@ -591,6 +594,8 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .pipe-metric small { white-space: normal; }
   .section-h { align-items: flex-start; gap: 10px; flex-direction: column; margin: 16px 0 10px; }
   .section-h h2 { line-height: 1.35; }
+  .positions-title-row { width: 100%; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .btn-close-all { flex: 0 0 auto; margin-top: 1px; }
   .range-tabs,
   .hfilters {
     width: 100%;

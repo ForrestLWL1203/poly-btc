@@ -29,6 +29,27 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         db.commit()
         return db
 
+    def _live_ep(self, pos_id, side, entry_px, size):
+        ready = asyncio.Event()
+        ready.set()
+        return {
+            "pos_id": pos_id,
+            "side": side,
+            "sign": 1 if side == "long" else -1,
+            "entry_px": entry_px,
+            "leverage": 5,
+            "margin": 100,
+            "notional": entry_px * size,
+            "size": size,
+            "rem_size": size,
+            "realized_pnl": 0.0,
+            "mae": 0.0,
+            "num_actions": 0,
+            "master_peak": size,
+            "entries_ready": ready,
+            "lock": asyncio.Lock(),
+        }
+
     def test_bbo_tick_immediately_persists_that_coin_marks(self):
         db = self._db()
         obs = Observer(db, [], {})
@@ -59,6 +80,45 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         mu = db.execute("SELECT mark_px,unrealized_pnl FROM copy_position WHERE coin='xyz:MU'").fetchone()
         self.assertEqual(mu["mark_px"], 937)
         self.assertEqual(mu["unrealized_pnl"], 37)
+
+    def test_manual_close_uses_taker_bid_for_long(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
+            obs.bbo["BTC"] = (99.0, 101.0)
+
+            res = await obs._cmd_close(pos_id)
+
+            self.assertEqual(res["exit"], 99.0)
+            action = db.execute("SELECT our_px FROM copy_action WHERE pos_id=?", (pos_id,)).fetchone()
+            self.assertEqual(action["our_px"], 99.0)
+
+        asyncio.run(run())
+
+    def test_manual_close_uses_taker_ask_for_short(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
+                "VALUES ('0xshort','ETH','short','open',200,5,100,200,1,1,'2026-01-01T00:00:00Z')"
+            ).lastrowid
+            db.commit()
+            obs = Observer(db, [], {})
+            obs.taker.open_ep[("0xshort", "ETH")] = self._live_ep(pos_id, "short", 200, 1)
+            obs.bbo["ETH"] = (198.0, 202.0)
+
+            res = await obs._cmd_close(pos_id)
+
+            self.assertEqual(res["exit"], 202.0)
+            action = db.execute("SELECT our_px FROM copy_action WHERE pos_id=?", (pos_id,)).fetchone()
+            self.assertEqual(action["our_px"], 202.0)
+
+        asyncio.run(run())
 
     def test_normal_close_does_not_persist_stale_liquidation_flag(self):
         async def run():

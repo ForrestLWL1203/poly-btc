@@ -7,6 +7,7 @@ import {
   normalizeCoin,
   parseCoinList,
 } from "../lib/format.js";
+import { IC, Ico } from "../lib/icons.jsx";
 import { useApiResource } from "../lib/refresh.js";
 import { OpenPositionsTable } from "./positions/OpenPositionsTable.jsx";
 
@@ -14,6 +15,7 @@ const { useState, useEffect, useCallback } = React;
 
 export function Positions({ confirm, toast, streamOpen }) {
   const [closing, setClosing] = useState({});
+  const [closingAll, setClosingAll] = useState(false);
   const [blacklist, setBlacklist] = useState([]);
   const [blacklisting, setBlacklisting] = useState({});
   const [filter, setFilter] = useState("all");
@@ -53,6 +55,33 @@ export function Positions({ confirm, toast, streamOpen }) {
       setClosing(c => { const m = { ...c }; delete m[pid]; return m; });
     },
   });
+  const doCloseAll = () => {
+    const positions = open ? (open.positions || []) : [];
+    const summary = (open && open.summary) || {};
+    const count = summary.openCount || positions.length;
+    if (!count || closingAll) return;
+    confirm({
+      title: "一键平仓",
+      danger: true,
+      ok: "全部平仓",
+      body: `以 taker 方式平掉当前全部 ${count} 笔持仓。当前浮动盈亏 ${fSign(summary.floatingPnl, 1)}，提交后不可撤销。`,
+      onConfirm: async () => {
+        const ids = positions.map(p => Number(String(p.id).replace("pos_", ""))).filter(Number.isFinite);
+        setClosingAll(true);
+        setClosing(Object.fromEntries(ids.map(pid => [pid, true])));
+        try {
+          await api.cmd("close_all", {});
+          if (toast) toast(`已提交一键平仓 · ${count} 笔`);
+        } catch (_e) {
+          if (toast) toast("一键平仓提交失败");
+        }
+        await new Promise(r => setTimeout(r, 2500));
+        load();
+        setClosing({});
+        setClosingAll(false);
+      },
+    });
+  };
   const addBlacklist = async (coin) => {
     const normalized = normalizeCoin(coin);
     if (!normalized) return;
@@ -91,7 +120,14 @@ export function Positions({ confirm, toast, streamOpen }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>当前持仓 {open && <span className="muted">· 浮动 <span className={cls(open.summary.floatingPnl)}>{fSign(open.summary.floatingPnl, 1)}</span> · {open.summary.openCount} 笔</span>}</h2>
+        <div className="positions-title-row">
+          <h2>当前持仓 {open && <span className="muted">· 浮动 <span className={cls(open.summary.floatingPnl)}>{fSign(open.summary.floatingPnl, 1)}</span> · {open.summary.openCount} 笔</span>}</h2>
+          <button className="btn btn-danger btn-close-all" disabled={!(open && open.summary && open.summary.openCount) || closingAll}
+            title="以 taker 方式平掉当前全部持仓" onClick={doCloseAll}>
+            {closingAll ? <span className="spin" /> : <Ico d={IC.close} />}
+            {closingAll ? "平仓中" : "一键平仓"}
+          </button>
+        </div>
         <div className="range-tabs">
           {[["all", "全部"], ["crypto", "Crypto"], ["stock", "股票"], ["long", "多"], ["short", "空"]].map(([k, l]) =>
             <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}
