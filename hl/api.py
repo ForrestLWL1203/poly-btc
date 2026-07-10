@@ -294,7 +294,7 @@ def make_handler(db_path, auth, static_dir=None):
 def serve(db_path, host="127.0.0.1", port=8787, static_dir=None):
     auth = Auth()
     procman.reconcile(db_path)                    # drop stale pidfiles; re-attach to a still-live observer
-    procman.start_auto_scan_ticker(db_path)       # 24h auto-scan now lives here (no separate supervisor daemon)
+    procman.start_auto_scan_ticker(db_path)       # status sync only; scans are manual locally / timer on VPS
     handler = make_handler(db_path, auth, static_dir)
     httpd = ThreadingHTTPServer((host, port), handler)
     print(f"dashboard API on http://{host}:{port}  (db={db_path}, static={static_dir or '-'})", flush=True)

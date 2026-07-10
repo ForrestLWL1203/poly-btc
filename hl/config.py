@@ -60,7 +60,6 @@ AUTO_FOLLOW_KEEP_MIN_SCORE = 0.60 # never stabilize a wallet below the hard qual
 #                             the line; this floor keeps it OUT of the follow set until it has real history.
 #                             It stays on the watchlist (observed) — promoted automatically once it qualifies.
 OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
-AUTO_SCAN_EVERY_H = 24.0   # dashboard auto-scan cadence: spawn a silent full scan this long after the last one
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
 #                            it) so a fill landing between poll rounds isn't missed. This is the ONLY

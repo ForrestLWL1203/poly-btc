@@ -10,10 +10,10 @@ observer and trigger scans INDEPENDENTLY —
   启动跟单 → start_observer()  (spawns `hl_observe.py observe`, detached)
   停止跟单 → stop_observer()   (SIGTERM the observer's process group, immediately)
 
-A 24h auto-scan ticker (start_auto_scan_ticker) lives in the dashboard's serve(). Because children are
-detached + pidfile-tracked, a dashboard restart re-attaches to a still-running observer (never a double
-spawn, never an orphan kill). Money-critical isolation: killing/restarting the dashboard NEVER stops
-live copying.
+There is intentionally NO in-process auto-scan in the dashboard. A brand-new local launcher install
+starts only the dashboard; the first full scan is an explicit operator action. On VPS installs, daily
+background scans belong to systemd's hl-scan.timer. The dashboard's small background ticker only
+reconciles process status/pidfiles.
 
 Design notes:
 - start_new_session=True → child is a session leader; os.killpg(pgid) stops the whole tree.
@@ -31,8 +31,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-
-from . import config
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root (…/hl/..)
 PYTHON = sys.executable                                              # the venv python running us
@@ -189,14 +187,18 @@ def _scan_progress_scanning(db_path):
 
 
 def hours_since_last_scan(db_path):
-    """Hours since the last COMPLETED scan (scan_runs.finished_at). 1e9 if never scanned (→ scan now).
-    On any read error return 0 so the auto-ticker does NOT spuriously fire."""
+    """Hours since the last COMPLETED scan, or None when no scan has completed yet.
+
+    The "never scanned" case must not look overdue. First-run discovery is intentionally manual so
+    launcher/local deployments do not start a silent incremental scan before the operator clicks
+    full collection.
+    """
     try:
         c = _db(db_path)
         r = c.execute("SELECT MAX(finished_at) FROM scan_runs").fetchone()
         c.close()
         if not r or not r[0]:
-            return 1e9
+            return None
         last = datetime.strptime(r[0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         return (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
     except (sqlite3.Error, ValueError):
@@ -305,16 +307,19 @@ def reconcile(db_path):
 
 
 def auto_scan_tick(db_path):
-    return   # the daily auto-scan is the systemd timer hl-scan.timer now, not an in-process tick
+    return   # no dashboard auto-scan; VPS daily scans are hl-scan.timer, local scans are manual
 
 
-def start_auto_scan_ticker(db_path, interval=60.0):
-    """Kept for API compatibility (dashboard boot calls it). Light status-sync only — real supervision and
-    the daily scan belong to systemd (hl-observe Restart=always, hl-scan.timer)."""
+def start_auto_scan_ticker(db_path, interval=60.0, stop_event=None):
+    """Kept for API compatibility (dashboard boot calls it). Light status-sync only.
+
+    Do not start scans here. Local launcher deployments must remain idle until the operator triggers
+    the first full collection from the dashboard.
+    """
     import threading
 
     def loop():
-        while True:
+        while stop_event is None or not stop_event.is_set():
             try:
                 reconcile(db_path)
             except Exception:  # noqa: BLE001 — a ticker error must never kill the thread
