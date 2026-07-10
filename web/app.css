@@ -1,3 +1,5 @@
+@import url("./fonts/fonts.css");
+
 /* 跟单监控台 — glassmorphism design system (tokens from design_handoff README §7). */
 :root {
   --bg: #0A0A0B;
@@ -14,7 +16,7 @@
   --blue: #5E9BFF; --blue-l: #9DC0FF;
   --gray: #7A7A82;
   --t1: #F5F5F7; --t2: #9A9AA2; --t3: #7A7A82; --t4: #5E5E66;
-  --sans: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --sans: "MiSans", -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 
