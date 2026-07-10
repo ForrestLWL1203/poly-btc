@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hl import storage
+from hl import config, storage
 from hl.observer import Observer
 from hl.util import now_ms
 
@@ -49,6 +49,42 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "entries_ready": ready,
             "lock": asyncio.Lock(),
         }
+
+    def test_stats_snapshot_reuses_startup_lifetime_counters(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO copy_account (id,initial_balance,balance,updated_at) VALUES (1,10000,10010,'now')"
+        )
+        db.execute(
+            "INSERT INTO copy_position (addr,coin,side,status,realized_pnl,opened_at,closed_at) "
+            "VALUES ('0xclosed','SOL','long','closed',10,'2026-01-01','2026-01-02')"
+        )
+        db.execute(
+            "INSERT INTO copy_action (pos_id,addr,coin,ts,action,our_qty_delta,our_px) "
+            "VALUES (99,'0xclosed','SOL',1,'close',-2,100)"
+        )
+        db.commit()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs._load_account()
+            statements = []
+            db.set_trace_callback(statements.append)
+
+            obs._write_stats()
+            db.set_trace_callback(None)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+        snap = db.execute("SELECT closed_n,win_rate,fees_cum FROM account_stats ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(snap["closed_n"], 1)
+        self.assertEqual(snap["win_rate"], 1.0)
+        self.assertAlmostEqual(snap["fees_cum"], 200 * config.TAKER_FEE)
+        sql = " ".join(statements)
+        self.assertNotIn("FROM copy_position WHERE status!='open'", sql)
+        self.assertNotIn("FROM copy_action", sql)
 
     def test_bbo_tick_immediately_persists_that_coin_marks(self):
         db = self._db()

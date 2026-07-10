@@ -70,13 +70,21 @@ def copy_bt_result(addr, fills, now_ms, p, days=None):
     if not replay_fills:
         return {}
     try:
-        return run_backtest(
+        result = run_backtest(
             addr,
             replay_fills,
             sigmas=getattr(p, "copy_bt_sigmas", None) or {},
             overrides=getattr(p, "copy_bt_overrides", None) or {},
             market_ctx=getattr(p, "copy_bt_market_ctx", None) or {},
         )
+        # Keep window boundaries on the in-memory replay result so recent-loss
+        # checks can compare the latest seven days with a non-overlapping
+        # historical baseline. These private fields are not persisted by the
+        # compact sector payload.
+        result["_window_days"] = days
+        result["_window_start_ms"] = start_ms
+        result["_window_end_ms"] = now_ms
+        return result
     except Exception:  # noqa: BLE001 - backtest is a quality aid; never kill discovery on a replay bug
         return {}
 
@@ -233,7 +241,7 @@ def apply_copy_bt_gate(metrics, result, p):
     return True, "ok"
 
 
-def apply_sector_copy_bt_gate(metrics, result, sector_results, p):
+def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_policy=None):
     """Record global copy replay, then gate followability by profitable sector.
 
     A wallet can stay active when one sector is copyable even if another sector
@@ -244,6 +252,7 @@ def apply_sector_copy_bt_gate(metrics, result, sector_results, p):
     policy = evaluate_sector_policy(
         sector_results or {},
         min_net=float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0),
+        previous_policy=previous_policy,
     )
     metrics["sector_copy_json"] = json.dumps(compact, sort_keys=True)
     metrics["sector_policy_json"] = json.dumps(policy, sort_keys=True)

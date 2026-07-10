@@ -97,7 +97,7 @@ def _post_command_payload(db_path, auth, path, body, authed):
         return 400, {"error": "bad_command_type", "detail": ctype}
     try:
         if ctype in PROCESS_COMMANDS:
-            cmd_id, status = exec_process_command(db_path, ctype)
+            cmd_id, status = exec_process_command(db_path, ctype, body.get("payload"))
         else:
             cmd_id, status = insert_command(db_path, ctype, body.get("payload"), body.get("idempotencyKey"))
         return 202, {"commandId": cmd_id, "status": status}

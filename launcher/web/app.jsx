@@ -2,7 +2,13 @@ const { useState, useEffect, useRef } = React;
 
 const api = {
   async get(p) { return (await fetch(p)).json(); },
-  async post(p, body) { return (await fetch(p, { method: "POST", body: JSON.stringify(body || {}) })).json(); },
+  async post(p, body) {
+    return (await fetch(p, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    })).json();
+  },
 };
 const SVC_LABEL = {
   dashboard: ["监控台", "读取面板 · 常开"],
@@ -157,6 +163,10 @@ function Deploy({ meta, onDone, say }) {
             {F("user", "登录用户", { note: "通常 root" })}
             {F("password", "root 密码", { pw: true, note: "首次无可用私钥时需要,不保存" })}
           </div>
+          {F("host_fingerprint", "SSH 主机指纹", {
+            note: "首次连接必核对;格式 SHA256:…",
+            ph: "从 VPS 控制台运行 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+          })}
           {F("domain", "域名", { note: "可选,配了才有 HTTPS", ph: "dashboard.example.com" })}
         </React.Fragment>}
         <div className="grid2">
@@ -176,7 +186,7 @@ function Deploy({ meta, onDone, say }) {
           ⚠ 部署前请先把 <b className="mono">{f.domain}</b> 的 DNS A 记录指向 <b className="mono">{f.host || "服务器IP"}</b>,Caddy 才能自动签发证书。</div>}
         <div className="divider" />
         <button className="btn btn-accent" onClick={start}
-          disabled={mode === "vps" && (!f.host || (!f.password && !f.key_path))}>开始部署 →</button>
+          disabled={!f.dash_password || (mode === "vps" && (!f.host || (!f.password && !f.key_path)))}>开始部署 →</button>
       </div>}
     </React.Fragment>
   );
@@ -259,6 +269,7 @@ function Ops({ target, onBack, say }) {
   const [busy, setBusy] = useState(null);
   const [logUnit, setLogUnit] = useState(null);
   const [logText, setLogText] = useState("");
+  const [fingerprint, setFingerprint] = useState(target.host_fingerprint || "");
 
   const refresh = async () => { setSt(await api.post("/api/ops/status", { id: target.id })); };
   useEffect(() => { refresh(); }, [target.id]);
@@ -283,6 +294,16 @@ function Ops({ target, onBack, say }) {
     const r = await api.post("/api/ops/logs", { id: target.id, unit, lines: 120 });
     setLogText(r.log || r.error || "(空)");
   };
+  const saveFingerprint = async () => {
+    const r = await api.post("/api/targets/save", { id: target.id, host_fingerprint: fingerprint });
+    if (r.target) {
+      target.host_fingerprint = fingerprint;
+      say("SSH 主机指纹已保存");
+      refresh();
+    } else {
+      say("保存失败: " + (r.error || "?"));
+    }
+  };
 
   const units = target.mode === "local" ? ["dashboard", "observe", "scan"]
     : ["dashboard", "observe", "scan", "timer"];
@@ -306,7 +327,13 @@ function Ops({ target, onBack, say }) {
 
       <div className="card">
         <h2>服务状态</h2>
-        <div className="hint">{st ? (st.dashboardHttp ? "监控台 HTTP " + st.dashboardHttp : "") : "读取中…"}</div>
+        <div className="hint">{st ? (st.error || (st.dashboardHttp ? "监控台 HTTP " + st.dashboardHttp : "")) : "读取中…"}</div>
+        {target.mode === "vps" && (!target.host_fingerprint || (st && st.error && st.error.includes("主机"))) &&
+          <div className="row" style={{ marginBottom: 12 }}>
+            <input className="i" style={{ flex: 1 }} value={fingerprint}
+              onChange={(e) => setFingerprint(e.target.value)} placeholder="核对后填写 SHA256:… 主机指纹" />
+            <button className="btn btn-sm" onClick={saveFingerprint}>保存指纹并重试</button>
+          </div>}
         {st && st.services && units.map((u) => {
           const state = st.services[u] || "unknown";
           const on = state === "active" || state === "running";

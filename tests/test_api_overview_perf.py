@@ -3,8 +3,9 @@ import tempfile
 import unittest
 from importlib import import_module, util
 from pathlib import Path
+from unittest.mock import patch
 
-from hl import api_overview, storage
+from hl import api, api_overview, storage
 
 
 class GuardedDb:
@@ -59,6 +60,17 @@ class EquityGuardedDb:
 
 
 class ApiOverviewPerfTests(unittest.TestCase):
+    def test_sse_clients_share_one_fast_bundle_per_tick(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            api._fast_bundle_cache.clear()
+            with patch("hl.api._fast_bundle", return_value={"ok": True}) as build:
+                first = api._shared_fast_bundle(db)
+                second = api._shared_fast_bundle(db)
+
+        self.assertEqual(first, second)
+        build.assert_called_once()
+
     def test_overview_endpoints_are_split_from_api_module(self):
         self.assertIsNotNone(util.find_spec("hl.api_overview"))
         api_overview = import_module("hl.api_overview")

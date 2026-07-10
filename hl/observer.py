@@ -56,8 +56,26 @@ class Book:
         self.acct_table = acct_table        # copy_account   / shadow_account
         self.match_exec = match_exec        # False = always taker; True = match the target's maker/taker per fill
         self.balance = config.INITIAL_BALANCE
+        self.initial_balance = config.INITIAL_BALANCE
+        self.wallet_initial_balance = config.PAPER_WALLET_INITIAL_BALANCE
+        self.protected_reserve = max(0.0, self.wallet_initial_balance - self.initial_balance)
         self.open_ep: dict = {}             # (addr,coin) -> position state
-        self.acct_lock = asyncio.Lock()     # serialize margin allocation across concurrent opens on THIS book
+        self._acct_lock = None              # created lazily inside the running loop (sync inspection creates none)
+        # Lifetime dashboard counters. Initialized once from history at startup, then maintained per action/close
+        # so the 5-minute stats snapshot never rescans the ever-growing action/position tables.
+        self.closed_n = 0
+        self.wins_n = 0
+        self.gross_traded = 0.0
+        self.fees_cum = 0.0
+        self.stats_loaded = False
+
+    @property
+    def acct_lock(self):
+        """Serialize margin allocation across opens without creating an orphan event loop at construction."""
+        loop = asyncio.get_running_loop()
+        if self._acct_lock is None or getattr(self._acct_lock, "_loop", loop) not in (None, loop):
+            self._acct_lock = asyncio.Lock()
+        return self._acct_lock
 
 
 class Observer:
@@ -87,8 +105,8 @@ class Observer:
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
-        # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap; leverage scales ∝1/σ within the
-        # tier (full at σ=stable_sigma_max), capped by the tier. margin = available × <tier>_margin_pct.
+        # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap. Margin uses the adaptive strategy
+        # equity base; real risk equity and available cash enforce coin/deployment caps.
         self.add_frac = config.ADD_FRAC if add_frac is None else add_frac  # each ADD = first-open margin × this
         self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ≤this → stable tier (also lev-formula σ ref)
         self.high_sigma_min = config.HIGH_SIGMA_MIN       # σ≥this → high-vol tier; between → mid tier
@@ -170,19 +188,52 @@ class Observer:
 
     def _load_account(self, book=None):
         book = book or self.taker
-        row = self.db.execute(f"SELECT balance FROM {book.acct_table} WHERE id=1").fetchone()
+        row = self.db.execute(f"SELECT initial_balance,balance FROM {book.acct_table} WHERE id=1").fetchone()
         if row:
-            book.balance = row[0]
+            book.initial_balance = row[0] or config.INITIAL_BALANCE
+            book.balance = row[1]
         else:
             self.db.execute(f"INSERT INTO {book.acct_table} (id,initial_balance,balance,updated_at) "
                             "VALUES (1,?,?,?)", (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now_iso()))
             self.db.commit()
+        book.protected_reserve = max(0.0, book.wallet_initial_balance - book.initial_balance)
+        closed = self.db.execute(
+            f"SELECT COUNT(*),COALESCE(SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END),0) "
+            f"FROM {book.pos_table} WHERE status!='open'"
+        ).fetchone()
+        traded = self.db.execute(
+            f"SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) FROM {book.act_table}"
+        ).fetchone()[0]
+        book.closed_n, book.wins_n = int(closed[0] or 0), int(closed[1] or 0)
+        book.gross_traded = float(traded or 0.0)
+        book.fees_cum = book.gross_traded * config.TAKER_FEE
+        book.stats_loaded = True
         _log(f"account[{book.name}]: balance ${book.balance:,.2f} / available ${self._available(book):,.2f}")
 
     def _save_account(self, book=None):
         book = book or self.taker
         self.db.execute(f"UPDATE {book.acct_table} SET balance=?, updated_at=? WHERE id=1",
                         (book.balance, now_iso()))
+
+    def _book_unrealized(self, book=None) -> float:
+        book = book or self.taker
+        total = 0.0
+        for (_addr, coin), ep in book.open_ep.items():
+            if not ep.get("rem_size"):
+                continue
+            entry = ep.get("entry_px") or 0.0
+            mark = self._mark_px(coin, entry)
+            sign = 1 if ep.get("side") == "long" else -1
+            total += ep["rem_size"] * (mark - entry) * sign
+        return total
+
+    def _risk_equity(self, book=None) -> float:
+        book = book or self.taker
+        return max(0.0, book.balance + min(0.0, self._book_unrealized(book)))
+
+    def _risk_available(self, book=None) -> float:
+        book = book or self.taker
+        return max(0.0, self._available(book) + min(0.0, self._book_unrealized(book)))
 
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
@@ -519,6 +570,10 @@ class Observer:
             "num_actions=COALESCE(num_actions,0)+1,mark_px=?,unrealized_pnl=0 WHERE pos_id=?",
             (now_iso(), px, pos_id),
         )
+        if book.stats_loaded:
+            book.closed_n += 1
+            book.gross_traded += abs(rem_size * px)
+            book.fees_cum += abs(rem_size * px) * config.TAKER_FEE
         self.db.commit()
 
     async def _reconcile_open(self):
@@ -632,7 +687,8 @@ class Observer:
             return 0.0
         return engine_stop_px(entry_px, is_buy, leverage, self.copy_stop_enable, self.stop_margin_pct)
 
-    def _open_sizing_params(self):
+    def _open_sizing_params(self, book=None):
+        book = book or self.taker
         return OpenSizingParams(
             stable_sigma_max=self.stable_sigma_max,
             high_sigma_min=self.high_sigma_min,
@@ -648,6 +704,9 @@ class Observer:
             min_open_margin_pct=self.min_open_margin_pct,
             copy_stop_enable=self.copy_stop_enable,
             stop_margin_pct=self.stop_margin_pct,
+            capital_anchor=book.initial_balance,
+            drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
+            drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
         )
 
     def _coin_liquidity_block_reason(self, coin: str):
@@ -746,6 +805,7 @@ class Observer:
         win rate, hedge ratio = net/gross, fee drag). Mark-to-market open positions off the live book."""
         init = config.INITIAL_BALANCE or 1.0
         upnl = locked = gross = net = 0.0
+        mark_updates = []
         for pos_id, coin, side, rem, size, entry, margin, notional in self.db.execute(
                 "SELECT pos_id,coin,side,rem_size,size,entry_px,margin,notional FROM copy_position "
                 "WHERE status='open' AND size>0").fetchall():
@@ -757,28 +817,29 @@ class Observer:
             cur_notl = notional * rem / size
             gross += cur_notl
             net += cur_notl * sgn
-            self.db.execute(                          # persist per-position realtime fields for the dashboard
-                "UPDATE copy_position SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
-                (mark, pos_upnl, pos_id))
+            mark_updates.append((mark, pos_upnl, pos_id))
+        if mark_updates:
+            self.db.executemany(                      # one prepared statement/transaction for all live positions
+                "UPDATE copy_position SET mark_px=?, unrealized_pnl=? WHERE pos_id=?", mark_updates)
         open_n = self.db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
-        closed = [r[0] for r in self.db.execute(
-            "SELECT realized_pnl FROM copy_position WHERE status!='open'").fetchall()]
-        win_rate = (sum(1 for r in closed if r > 0) / len(closed)) if closed else 0.0
-        fees = self.db.execute("SELECT COALESCE(SUM(ABS(our_qty_delta*our_px))*?,0) FROM copy_action",
-                               (config.TAKER_FEE,)).fetchone()[0]
+        if not self.taker.stats_loaded:
+            self._load_account(self.taker)
+        closed_n = self.taker.closed_n
+        win_rate = self.taker.wins_n / closed_n if closed_n else 0.0
         equity = self.balance + upnl
         self.db.execute(
             "INSERT INTO account_stats (ts,balance,unrealized_pnl,equity,realized_pnl_cum,roi,open_n,"
             "closed_n,win_rate,locked_margin,available,gross_notional,net_notional,fees_cum) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (now_iso(), self.balance, upnl, equity, self.balance - init, equity / init - 1,
-             open_n, len(closed), win_rate, locked, self.balance - locked, gross, net, fees))
+             open_n, closed_n, win_rate, locked, self.balance - locked, gross, net, self.taker.fees_cum))
         self.db.commit()
 
     def _refresh_marks(self, book=None):
         """Mark-to-market open positions into the book's position table (mark_px/unrealized_pnl) WITHOUT
         appending an account_stats row. Lets the read-only dashboard show near-real-time浮盈. Per-book."""
         book = book or self.taker
+        updates = []
         for pos_id, coin, side, rem, size, entry in self.db.execute(
                 f"SELECT pos_id,coin,side,rem_size,size,entry_px FROM {book.pos_table} "
                 "WHERE status='open' AND size>0").fetchall():
@@ -786,8 +847,10 @@ class Observer:
             if not mark:
                 continue
             sgn = 1 if side == "long" else -1
-            self.db.execute(f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
-                            (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
+            updates.append((mark, rem * (mark - (entry or 0)) * sgn, pos_id))
+        if updates:
+            self.db.executemany(
+                f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?", updates)
         self.db.commit()
 
     def _refresh_coin_marks(self, coin: str, book=None) -> int:
@@ -798,14 +861,16 @@ class Observer:
         if not (coin and mark):
             return 0
         n = 0
+        updates = []
         for pos_id, side, rem, entry in self.db.execute(
                 f"SELECT pos_id,side,rem_size,entry_px FROM {book.pos_table} "
                 "WHERE status='open' AND coin=? AND size>0", (coin,)).fetchall():
             sgn = 1 if side == "long" else -1
-            self.db.execute(f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?",
-                            (mark, rem * (mark - (entry or 0)) * sgn, pos_id))
+            updates.append((mark, rem * (mark - (entry or 0)) * sgn, pos_id))
             n += 1
         if n:
+            self.db.executemany(
+                f"UPDATE {book.pos_table} SET mark_px=?, unrealized_pnl=? WHERE pos_id=?", updates)
             self.db.commit()
         return n
 
@@ -832,8 +897,9 @@ class Observer:
     async def _announce(self):
         while not self.stop:
             await asyncio.sleep(300)
-            o = self.db.execute("SELECT count(*) FROM copy_position WHERE status='open'").fetchone()[0]
-            c = self.db.execute("SELECT count(*) FROM copy_position WHERE status!='open'").fetchone()[0]
+            if not self.taker.stats_loaded:
+                self._load_account(self.taker)
+            o, c = len(self.open_ep), self.taker.closed_n
             h, self.hb = self.hb, {}           # snapshot + reset this interval's diagnostic tally
             seen = h.get("seen", 0)
             acts = {k[4:]: v for k, v in h.items() if k.startswith("act_")}   # open/add/reduce/stop/close
@@ -854,6 +920,11 @@ class Observer:
         while not self.stop:
             cutoff = now_ms() - config.LIVE_FILLS_RETENTION_DAYS * 86400_000
             n = self.db.execute("DELETE FROM live_fills WHERE time_ms < ?", (cutoff,)).rowcount
+            stats_cutoff = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(time.time() - config.ACCOUNT_STATS_RETENTION_DAYS * 86400),
+            )
+            self.db.execute("DELETE FROM account_stats WHERE ts < ?", (stats_cutoff,))
             self.db.commit()
             if n:
                 _log(f"pruned {n} live_fills older than {config.LIVE_FILLS_RETENTION_DAYS}d")
@@ -1387,7 +1458,7 @@ class Observer:
             return
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
         # v10 sizing: σ → tier (stable/mid/high) → margin% + leverage = the tier's LEV CAP
-        #  margin = equity × <tier>_margin_pct
+        #  margin = adaptive sizing equity × <tier>_margin_pct
         #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ master lev + stock cap)
         #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
@@ -1396,7 +1467,8 @@ class Observer:
             # Dynamic equity-based sizing: below DEPLOY_FULL_PCT, use the tier's upper-bound margin; between
             # DEPLOY_FULL_PCT and MAX_DEPLOY_PCT, linearly shrink new opens toward the lower bound. Adds still
             # may dip into the reserve because they usually matter more to copy fidelity than fresh opens.
-            avail = self._available(book)                # CASH gate: can't deploy more margin than we hold free
+            risk_equity = self._risk_equity(book)
+            avail = self._risk_available(book)           # cash gate after recognizing floating losses
             # PER-COIN cap (catastrophe backstop, NOT a per-wallet tax): total margin across our open positions
             # on this coin IN THE SAME DIRECTION ≤ the σ-tier's per-coin cap (STABLE/MID/HIGH_COIN_CAP_PCT).
             # Bounds how much of the account one coin's single move can destroy when N wallets pile the SAME way
@@ -1412,12 +1484,12 @@ class Observer:
                 side=ep["side"],
                 entry_px=px,
                 sigma=sigma,
-                balance=book.balance,
+                balance=risk_equity,
                 available=avail,
                 existing_coin_margin=existing_coin,
                 master_notional=master_notl,
                 master_leverage=m_lev,
-                params=self._open_sizing_params(),
+                params=self._open_sizing_params(book),
             )
             if not plan.ok:
                 self._tally(f"skip_{plan.reason}", book)
@@ -1513,18 +1585,30 @@ class Observer:
                 # ③ 比例镜像(目标本次加仓额 ÷ 目标首仓额)× 我们首仓,封顶到该币"三档单币预算"剩余
                 ratio = (abs(signed) * master_px) / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
                 async with book.acct_lock:
-                    coin_cap = self.tier_coin_cap[tier] * book.balance
+                    risk_equity = self._risk_equity(book)
+                    coin_cap = self.tier_coin_cap[tier] * risk_equity
                     existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                    for (a2, c2), e in book.open_ep.items()
                                    if c2 == coin and e.get("side") == ep["side"])   # incl THIS ep (its current margin)
-                    add_margin = max(0.0, min(ratio * fm, coin_cap - existing, self._available(book)))
-                if add_margin < self.min_open_margin_pct * book.balance:  # 预算用尽 / 太小,不值得
+                    add_margin = max(0.0, min(ratio * fm, coin_cap - existing, self._risk_available(book)))
+                if add_margin < self.min_open_margin_pct * risk_equity:  # 预算用尽 / 太小,不值得
                     return _observe_only()
             else:                                     # hardcap: 分档次数上限 + 固定 ADD_FRAC(老逻辑)
                 if ep["add_count"] >= self.tier_max_adds.get(tier, 0):
                     return _observe_only()
                 async with book.acct_lock:
-                    add_margin = max(0.0, min(fm * self.add_frac, self._available(book)))
+                    risk_equity = self._risk_equity(book)
+                    coin_cap = self.tier_coin_cap[tier] * risk_equity
+                    existing = sum(
+                        e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
+                        for (a2, c2), e in book.open_ep.items()
+                        if c2 == coin and e.get("side") == ep["side"]
+                    )
+                    add_margin = max(0.0, min(
+                        fm * self.add_frac,
+                        coin_cap - existing,
+                        self._risk_available(book),
+                    ))
                 if add_margin <= 0:
                     return _observe_only()
             add_size = (add_margin * lev / px) if px else 0.0
@@ -1614,6 +1698,9 @@ class Observer:
             self._save_account(book)
             self.db.commit()
             if closing:
+                if book.stats_loaded:
+                    book.closed_n += 1
+                    book.wins_n += 1 if ep["realized_pnl"] > 0 else 0
                 book.open_ep.pop((addr, coin), None)         # normal closes are in the position table; only
                 if liq:                                       # liquidation (our isolated stop-out) is logged
                     _log(f"[{book.name}] LIQUIDATED {addr[:10]} {coin} {ep['side']} -${ep['margin']:,.0f}  bal=${book.balance:,.0f}")
@@ -1673,6 +1760,11 @@ class Observer:
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ep["pos_id"], addr, coin, t, now_ms(), action, 1 if maker else 0, oid, master_px, sz_delta,
              pos_after, our_qty_delta, our_px, realized, slip))
+        if book.stats_loaded:
+            traded = abs((our_qty_delta or 0.0) * (our_px or 0.0))
+            book.gross_traded += traded
+            # Preserve the dashboard's historical definition: taker-equivalent fee drag for the primary book.
+            book.fees_cum += traded * config.TAKER_FEE
         self.db.execute(f"UPDATE {book.pos_table} SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
 

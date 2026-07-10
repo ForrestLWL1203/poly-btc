@@ -15,6 +15,7 @@ DATA = os.path.join(_HERE, "data")
 KEYS = os.path.join(DATA, "keys")
 TARGETS_JSON = os.path.join(DATA, "targets.json")
 KEY_PATH = os.path.join(KEYS, "id_ed25519")
+KNOWN_HOSTS = os.path.join(KEYS, "known_hosts")
 
 
 def _read_pubkey_for(private_key_path):
@@ -63,8 +64,8 @@ def _write(items):
     os.replace(tmp, TARGETS_JSON)
 
 
-_SAVE_FIELDS = ("name", "mode", "host", "user", "ssh_port", "key_path", "app_dir", "branch",
-                "port", "domain", "dash_user", "keyInstalled")
+_SAVE_FIELDS = ("name", "mode", "host", "user", "ssh_port", "key_path", "host_fingerprint",
+                "app_dir", "branch", "port", "domain", "dash_user", "keyInstalled")
 
 
 def save(t):

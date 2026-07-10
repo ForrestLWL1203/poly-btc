@@ -179,7 +179,6 @@ def main() -> int:
     s.add_argument("--limit", type=int, default=100000, help="cap workset size (default ~unbounded = full sweep)")
     s.add_argument("--order", choices=["mon_roi", "week_roi", "mon_pnl"], default="mon_roi")
     add_harvest_args(s)
-    s.add_argument("--min-crypto", type=float, default=0.3, help="(unused) legacy prescreen arg")
     s.add_argument("--max-pages", type=int, default=5, help="cap fill pages/wallet (aggregateByTime -> "
                    "14d is ~1 page; >5 pages of trade-level fills = HFT/MM we reject anyway)")
     s.add_argument("--workers", type=int, default=4, help="concurrent profiling threads (rate is capped by --scan-interval)")

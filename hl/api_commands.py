@@ -48,16 +48,16 @@ def _resolve_command(db_path, cmd_id, status, result):
         pass
 
 
-def exec_process_command(db_path, ctype):
+def exec_process_command(db_path, ctype, payload=None):
     """Run a process-lifecycle command inline and record the result in commands."""
-    cmd_id, _ = insert_command(db_path, ctype, None, None)
+    cmd_id, _ = insert_command(db_path, ctype, payload, None)
     try:
         if ctype == "observer_start":
             res = procman.start_observer(db_path)
         elif ctype == "observer_stop":
             res = procman.stop_observer(db_path)
         else:
-            procman.start_scan(db_path)
+            procman.start_scan(db_path, full=bool((payload or {}).get("full")))
             return cmd_id, "pending"
         _resolve_command(db_path, cmd_id, "done", res)
         return cmd_id, "done"

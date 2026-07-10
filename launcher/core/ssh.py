@@ -8,6 +8,10 @@ callback so the UI can show live progress, and returns (exit_code, full_text).
 from __future__ import annotations
 
 import io
+import base64
+import hashlib
+import hmac
+import os
 import subprocess
 
 
@@ -71,11 +75,34 @@ def ensure_paramiko(emit=None):
 
 # ───────────────────────────────────────────────────────────── remote (paramiko)
 class SSHExecutor(Executor):
-    def __init__(self, host, user="root", password=None, key_filename=None, port=22, timeout=25):
+    def __init__(self, host, user="root", password=None, key_filename=None, port=22, timeout=25,
+                 host_fingerprint=None, known_hosts_path=None):
         import paramiko                                    # lazy — LocalExecutor needs no dep
         self.host, self.user = host, user
         self._client = paramiko.SSHClient()
-        self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        self._client.load_system_host_keys()
+        if known_hosts_path and os.path.exists(known_hosts_path):
+            self._client.load_host_keys(known_hosts_path)
+
+        class FingerprintPolicy(paramiko.MissingHostKeyPolicy):
+            def missing_host_key(policy_self, client, hostname, key):
+                observed = "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+                expected = (host_fingerprint or "").strip()
+                if not expected:
+                    raise paramiko.SSHException(
+                        f"未知 SSH 主机密钥 {hostname}; 观测指纹 {observed}。"
+                        "请先从 VPS 控制台独立核对，再把该 SHA256 指纹填入部署向导。"
+                    )
+                if not hmac.compare_digest(observed, expected):
+                    raise paramiko.SSHException(
+                        f"SSH 主机指纹不匹配: 期望 {expected}, 实际 {observed}"
+                    )
+                client.get_host_keys().add(hostname, key.get_name(), key)
+                if known_hosts_path:
+                    os.makedirs(os.path.dirname(known_hosts_path), exist_ok=True)
+                    client.save_host_keys(known_hosts_path)
+
+        self._client.set_missing_host_key_policy(FingerprintPolicy())
         self._client.connect(host, port=port, username=user, password=password,
                              key_filename=key_filename, timeout=timeout,
                              allow_agent=False, look_for_keys=False)

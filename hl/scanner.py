@@ -124,7 +124,9 @@ def _due_for_full_resync(db):
     """True if no FULL re-sync in the last FULL_RESYNC_DAYS (fresh db / missing col → True). A full re-sync
     re-fetches everyone's window to heal any incremental gap (append-only fills → gap can only be missing)."""
     try:
-        r = db.execute("SELECT MAX(finished_at) FROM scan_runs WHERE full=1").fetchone()
+        r = db.execute(
+            "SELECT MAX(finished_at) FROM scan_runs WHERE full=1 AND COALESCE(complete,1)=1"
+        ).fetchone()
     except Exception:  # noqa: BLE001 — `full` column not yet added (old db)
         return True
     if not r or not r[0]:
@@ -174,25 +176,75 @@ def _fetch_profile_fills(db, addr, window_start, p, full):
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
 def _set_scanner_proc(db, state, detail=None):
     try:
-        db.execute("INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
-                   "('scanner',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
-                   "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
-                   (state, os.getpid(), now_iso(), json.dumps(detail or {})))
-        db.commit()
+        with _db_lock:
+            db.execute("INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
+                       "('scanner',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
+                       "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
+                       (state, os.getpid(), now_iso(), json.dumps(detail or {})))
+            db.commit()
     except Exception:  # noqa: BLE001
         pass
 
 
 def _set_scan_progress(db, **kw):
     try:
-        cur = db.execute("SELECT id FROM scan_progress WHERE id=1").fetchone()
-        if cur is None:
-            db.execute("INSERT INTO scan_progress (id,state,updated_at) VALUES (1,'idle',?)", (now_iso(),))
-        sets = ",".join(f"{k}=?" for k in kw) + ",updated_at=?"
-        db.execute(f"UPDATE scan_progress SET {sets} WHERE id=1", tuple(kw.values()) + (now_iso(),))
-        db.commit()
+        with _db_lock:
+            cur = db.execute("SELECT id FROM scan_progress WHERE id=1").fetchone()
+            if cur is None:
+                db.execute("INSERT INTO scan_progress (id,state,updated_at) VALUES (1,'idle',?)", (now_iso(),))
+            sets = ",".join(f"{k}=?" for k in kw) + ",updated_at=?"
+            db.execute(f"UPDATE scan_progress SET {sets} WHERE id=1", tuple(kw.values()) + (now_iso(),))
+            db.commit()
     except Exception:  # noqa: BLE001
         pass
+
+
+def _payload_requests_full(payload_json) -> bool:
+    try:
+        return bool(payload_json and json.loads(payload_json).get("full"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, active):
+    """Finish only rescan commands this run actually satisfied.
+
+    Requests arriving during the run can be absorbed when they are no stronger than the work just
+    completed. A full request arriving during an incremental run is explicitly failed as retryable.
+    """
+    pending_after = db.execute(
+        "SELECT id,payload_json FROM commands WHERE type='rescan' AND status='pending'"
+    ).fetchall()
+    if complete:
+        satisfied = set(initial_ids)
+        stronger = []
+        for cid, payload_json in pending_after:
+            if run_full or not _payload_requests_full(payload_json):
+                satisfied.add(cid)
+            else:
+                stronger.append(cid)
+        if satisfied:
+            marks = ",".join("?" for _ in satisfied)
+            db.execute(
+                f"UPDATE commands SET status='done',done_at=?,result_json=? WHERE id IN ({marks})",
+                (now_iso(), json.dumps({"active": active, "full": run_full}), *sorted(satisfied)),
+            )
+        if stronger:
+            marks = ",".join("?" for _ in stronger)
+            db.execute(
+                f"UPDATE commands SET status='failed',done_at=?,error=?,result_json=? WHERE id IN ({marks})",
+                (now_iso(), "full_rescan_not_satisfied_by_incremental_run",
+                 json.dumps({"retry": True, "full": False}), *stronger),
+            )
+        return
+    failed_ids = sorted(set(initial_ids) | {r[0] for r in pending_after})
+    if failed_ids:
+        marks = ",".join("?" for _ in failed_ids)
+        db.execute(
+            f"UPDATE commands SET status='failed',done_at=?,error=?,result_json=? WHERE id IN ({marks})",
+            (now_iso(), f"scan_incomplete:{failed}_wallets_failed",
+             json.dumps({"retry": True, "failed": failed}), *failed_ids),
+        )
 
 
 # -------------------------------------------------------------------------- harvest
@@ -437,7 +489,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     if ok:
         copy_results = _copy_bt_results(addr, perp_full, now_ms, p)
         sector_results = _sector_copy_bt_results(addr, perp_full, now_ms, p)
-        ok, reason = _apply_sector_copy_bt_gate(m, copy_results, sector_results, p)
+        ok, reason = _apply_sector_copy_bt_gate(
+            m, copy_results, sector_results, p,
+            previous_policy=(prior or {}).get("sector_policy_json"),
+        )
     if ok:
         ok, reason = _apply_follow_eligibility_gate(m)
     m["times_active"] += 1 if ok else 0
@@ -706,12 +761,13 @@ def ensure_watchlist_current(db, stamp=None) -> int:
     )
 
 
-def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rejected, n_active, full=0):
+def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rejected, n_active,
+                full=0, failed=0, complete=True):
     db.execute(
         "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,profiled,probed_new,added,"
-        "retired,kept,rejected,n_active,full) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        "retired,kept,rejected,n_active,full,failed,complete) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (started, now_iso(), round(time.time() - t0, 1), candidates, profiled, profiled, added, retired,
-         kept, rejected, n_active, 1 if full else 0))
+         kept, rejected, n_active, 1 if full else 0, failed, 1 if complete else 0))
     db.commit()
 
 
@@ -743,15 +799,22 @@ def regate(db, p, *, stamp=None, source: str = "regate",
     # p90 per-episode fill count per wallet, from the stored episode table. Missing episode rows are repaired
     # above from cached fills before this gate runs. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
     # isn't killed for a single outlier; only SYSTEMATIC slicing (≥10% heavy round-trips) trips it.
-    _epw = {}
-    for a, nf in db.execute("SELECT addr, n_fills FROM episode WHERE n_fills IS NOT NULL"):
-        _epw.setdefault(a, []).append(nf)
+    # Load episode-derived regate inputs in one pass. Previously loss_pain issued one extra SELECT per
+    # profile after the three table sweeps below, making a no-network regate progressively query-bound.
+    _epw, _iv, _wpt, _pnl = {}, {}, {}, {}
+    for a, nf, om, cm, npnl, mnotl in db.execute(
+            "SELECT addr,n_fills,open_ms,close_ms,net_pnl,max_notl FROM episode"):
+        if nf is not None:
+            _epw.setdefault(a, []).append(nf)
+        if om is not None and cm is not None:
+            _iv.setdefault(a, []).append((om, cm))
+        if npnl is not None:
+            _pnl.setdefault(a, []).append(npnl)
+            if npnl > 0 and mnotl is not None and mnotl > 0:
+                _wpt.setdefault(a, []).append(npnl / mnotl * 100)
     p90fe = {a: sorted(xs)[min(len(xs) - 1, int(len(xs) * 0.9))] for a, xs in _epw.items() if xs}
     # peak concurrent positions per wallet (sweep line over each episode's [open,close]) — the too_many_concurrent
     # gate. Computed HERE from the episode table (not a stored col) so regate applies the SAME gate as a scan.
-    _iv = {}
-    for a, om, cm in db.execute("SELECT addr, open_ms, close_ms FROM episode WHERE open_ms IS NOT NULL AND close_ms IS NOT NULL"):
-        _iv.setdefault(a, []).append((om, cm))
     def _peakc(ivs):
         evts = sorted([(o, 1) for o, _c in ivs] + [(_c, -1) for _o, _c in ivs], key=lambda x: (x[0], x[1]))
         cur = pk = 0
@@ -760,9 +823,6 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         return pk
     concw = {a: _peakc(v) for a, v in _iv.items()}
     # win_pt (median winning per-trade % on notional) from the episode table → audit metric (same as scan)
-    _wpt = {}
-    for a, npnl, mnotl in db.execute("SELECT addr, net_pnl, max_notl FROM episode WHERE net_pnl>0 AND max_notl>0"):
-        _wpt.setdefault(a, []).append(npnl / mnotl * 100)
     winptw = {a: sorted(v)[len(v) // 2] for a, v in _wpt.items() if v}
     n_active = 0
     for r in rows:
@@ -806,8 +866,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
              "sector_copy_json": sector_copy_json, "sector_policy_json": sector_policy_json}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
-        m["loss_pain"] = metrics.loss_pain(
-            [r0 for (r0,) in db.execute("SELECT net_pnl FROM episode WHERE addr=?", (addr,)).fetchall()])
+        m["loss_pain"] = metrics.loss_pain(_pnl.get(addr, ()))
         ok, reason = metrics.gates_structural(m, p)
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
@@ -815,7 +874,10 @@ def regate(db, p, *, stamp=None, source: str = "regate",
             replay_fills = _copy_bt_cached_fills(db, addr, now, p)
             copy_results = _copy_bt_results(addr, replay_fills, now, p)
             sector_results = _sector_copy_bt_results(addr, replay_fills, now, p)
-            ok, reason = _apply_sector_copy_bt_gate(m, copy_results, sector_results, p)
+            ok, reason = _apply_sector_copy_bt_gate(
+                m, copy_results, sector_results, p,
+                previous_policy=sector_policy_json,
+            )
         if ok:
             ok, reason = _apply_follow_eligibility_gate(m)
         score = metrics.score(m) if ok else 0.0
@@ -873,18 +935,17 @@ def scan(db, p) -> None:
     # a rescan command may request a FULL sweep (dashboard 全量 checkbox) via its payload → re-profile
     # EVERYONE (not just the daily active+new tier); picked up by p.full_scan at the workset split below.
     for _, pj in rescan_rows:
-        try:
-            if pj and json.loads(pj).get("full"):
-                p.full_scan = True
-        except (ValueError, TypeError):
-            pass
+        if _payload_requests_full(pj):
+            p.full_scan = True
     # MANUAL (dashboard button → pending rescan command) vs AUTO (24h schedule, no command). The frontend
     # locks the page ONLY for manual scans; the auto scan runs SILENTLY in the background (it must be slow
     # since the observer owns the rate budget, so locking the UI for its full duration is unacceptable).
     manual = bool(rescan_ids)
-    for tbl, col in (("scan_progress", "manual"), ("scan_runs", "full"), ("scan_runs", "profiled")):
+    for tbl, col, default in (("scan_progress", "manual", 0), ("scan_runs", "full", 0),
+                              ("scan_runs", "profiled", 0), ("scan_runs", "failed", 0),
+                              ("scan_runs", "complete", 1)):
         try:
-            db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT 0"); db.commit()
+            db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT {default}"); db.commit()
         except Exception:  # noqa: BLE001 — column already exists
             pass
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
@@ -914,6 +975,7 @@ def scan(db, p) -> None:
     active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
     # FULL re-fetch when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
     p.full_scan = getattr(p, "full_scan", False) or (not config.INCREMENTAL_SCAN) or _due_for_full_resync(db)
+    run_full = bool(p.full_scan)
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
     workset_info = _profile_workset_breakdown(cand, active_addrs, profiled, p.full_scan, p.limit)
     pipeline_audit.record_workset_summary(db, stamp, "scan", workset_info)
@@ -933,7 +995,8 @@ def scan(db, p) -> None:
     lbs = {a: {"account_value": av} for a, av in
            db.execute("SELECT addr, account_value FROM leaderboard").fetchall()}
 
-    added = retired = rejected = kept = 0
+    added = retired = rejected = kept = failed = profiled_ok = 0
+    profiled_addrs = []
     workers = max(1, getattr(p, "workers", 8))      # I/O-bound; the REST pacer still caps total rate
 
     def _work(addr):
@@ -947,8 +1010,11 @@ def scan(db, p) -> None:
             try:
                 addr, prior, (status, reason, m, hit_cap) = fut.result()
             except Exception as exc:  # noqa: BLE001
+                failed += 1
                 print(f"  [{done}/{len(workset)}] FAIL: {exc}")
                 continue
+            profiled_ok += 1
+            profiled_addrs.append(addr)
             if status == "active":                # per-wallet detail is in the profile table, not the log
                 if (prior or {}).get("status") == "active":
                     kept += 1
@@ -967,7 +1033,7 @@ def scan(db, p) -> None:
 
     _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
     def _scan_before_auto_tune():
-        pipeline_audit.record_profile_snapshot(db, stamp, "scan", workset)
+        pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
         _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
 
     n_active = refresh_watchlist_and_auto_tune(
@@ -978,23 +1044,27 @@ def scan(db, p) -> None:
     )
     candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
     _set_scan_progress(db, stage="persist")
-    pruned = _prune_discovery_cache(db)
-    pipeline_audit.record_prune_summary(db, stamp, "scan", pruned)
-    db.commit()
-    if any(pruned.values()):
-        print(f"pruned discovery cache: {pruned}", flush=True)
-    _record_run(db, started, t0, candidates, len(workset), added, retired, kept, rejected, n_active,
-                full=getattr(p, "full_scan", False))
+    complete = failed == 0
+    _record_run(db, started, t0, candidates, profiled_ok, added, retired, kept, rejected, n_active,
+                full=run_full, failed=failed, complete=complete)
+    try:
+        pruned = _prune_discovery_cache(db)
+        pipeline_audit.record_prune_summary(db, stamp, "scan", pruned)
+        db.commit()
+        if any(pruned.values()):
+            print(f"pruned discovery cache: {pruned}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        print(f"prune discovery cache skipped after scan success: {exc}", flush=True)
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
-          f"{rejected} rejected. watchlist now: {n_active} active.", flush=True)
-    # dashboard: scan finished -> idle + resolve ALL queued rescan(s), INCLUDING any clicked DURING this
-    # scan: a full sweep just completed so they're already satisfied -> absorb them instead of triggering
-    # a redundant back-to-back scan.
+          f"{rejected} rejected, {failed} failed. watchlist now: {n_active} active.", flush=True)
+    # Dashboard: resolve only requests this completed run actually satisfied. A full request arriving
+    # during an incremental run is stronger than the current work and must be reported as retryable failure.
     _set_scan_progress(db, state="idle", candidates_scanned=len(workset))
     _set_scanner_proc(db, "idle", {"last_scan_at": now_iso(), "active": n_active})
-    db.execute("UPDATE commands SET status='done',done_at=?,result_json=? "
-               "WHERE type='rescan' AND status IN ('pending','acked')",
-               (now_iso(), json.dumps({"active": n_active})))
+    _resolve_rescan_commands(
+        db, rescan_ids, run_full=run_full, complete=complete, failed=failed, active=n_active
+    )
     db.commit()
 
 

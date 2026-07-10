@@ -12,6 +12,7 @@ One db file (data/hl.db), layered by concern:
                 paper_legs (simulated copy outcomes per latency)
 """
 import sqlite3
+import re
 from pathlib import Path
 
 DISCOVERY_SCHEMA = """
@@ -204,7 +205,10 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     retired     INTEGER,
     kept        INTEGER,
     rejected    INTEGER,
-    n_active    INTEGER
+    n_active    INTEGER,
+    full        INTEGER DEFAULT 0,
+    failed      INTEGER DEFAULT 0,
+    complete    INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
 
@@ -280,9 +284,9 @@ CREATE TABLE IF NOT EXISTS coin_vol (
     updated_at TEXT
 );
 
--- Our paper account: ONE row. balance = realized equity (starts at initial_balance, += closed
--- PnL); available = balance - sum(margin of open positions); each new copy locks margin_pct of
--- available. Persisted so the simulated wallet survives restarts.
+-- Our paper strategy account: ONE row. initial_balance is the allocation/sizing anchor; balance is
+-- realized strategy equity (starts at initial_balance, += closed PnL). New-copy margin compounds above
+-- the anchor and shrinks on a bounded curve below it; real equity/available still enforce hard caps.
 CREATE TABLE IF NOT EXISTS copy_account (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     initial_balance REAL,
@@ -592,6 +596,9 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
     "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% (审计指标)
     "ALTER TABLE scan_runs ADD COLUMN profiled INTEGER",
+    "ALTER TABLE scan_runs ADD COLUMN full INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN failed INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN complete INTEGER DEFAULT 1",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
     "ALTER TABLE coin_vol ADD COLUMN day_ntl_vlm REAL",
     "ALTER TABLE coin_vol ADD COLUMN open_interest REAL",
@@ -608,14 +615,42 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout=30000")                          # serialized by a lock)
     for s in schemas:
         db.executescript(s)
-    for stmt in _MIGRATIONS:
-        try:
-            db.execute(stmt)
-        except sqlite3.OperationalError:
-            pass                          # column already exists (fresh DB or prior run) — fine
+    _apply_migrations(db)
     _migrate_episode_seq(db)
     db.commit()
     return db
+
+
+_ADD_COLUMN_RE = re.compile(
+    r"^ALTER TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    re.IGNORECASE,
+)
+
+
+def _apply_migrations(db: sqlite3.Connection) -> None:
+    """Apply only missing column migrations without using exceptions as normal control flow.
+
+    Connections are opened frequently by CLI/tests. The old implementation retried every historical ALTER
+    and swallowed every OperationalError, which was noisy and could hide a malformed migration or I/O error.
+    """
+    tables = {r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    columns = {}
+    for stmt in _MIGRATIONS:
+        match = _ADD_COLUMN_RE.match(stmt)
+        if not match:
+            db.execute(stmt)
+            continue
+        table, column = match.groups()
+        if table not in tables:
+            continue
+        if table not in columns:
+            columns[table] = {r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column in columns[table]:
+            continue
+        db.execute(stmt)
+        columns[table].add(column)
 
 
 def _migrate_episode_seq(db: sqlite3.Connection) -> None:

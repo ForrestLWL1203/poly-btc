@@ -5,6 +5,7 @@ no build needed on the target because web/app.js is committed pre-compiled.
 """
 from . import services
 from .pipeline import connect
+from .ssh import _q
 
 
 def _conn(cfg):
@@ -16,7 +17,7 @@ def status(cfg):
     ex, svc = _conn(cfg)
     try:
         st = svc.status()
-        commit = ex.run(f"cd {cfg.app_dir} && git log -1 --format='%h %s' 2>/dev/null").out.strip()
+        commit = ex.run(f"cd {_q(cfg.app_dir)} && git log -1 --format='%h %s' 2>/dev/null").out.strip()
         code = ex.run(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{cfg.port}/ "
                       f"--max-time 6 2>/dev/null || true").out.strip()[-3:]
         return {"services": st, "commit": commit,
@@ -28,6 +29,8 @@ def status(cfg):
 
 def action(cfg, op, unit):
     """op ∈ start|stop|restart, unit ∈ dashboard|observe|scan|timer."""
+    if op not in {"start", "stop", "restart"} or unit not in services.SYSTEMD_UNITS:
+        raise ValueError("invalid service action")
     ex, svc = _conn(cfg)
     try:
         fn = {"start": svc.start, "stop": svc.stop, "restart": svc.restart}[op]
@@ -38,6 +41,9 @@ def action(cfg, op, unit):
 
 
 def logs(cfg, unit, lines=120):
+    if unit not in services.SYSTEMD_UNITS:
+        raise ValueError("invalid service unit")
+    lines = max(1, min(1000, int(lines)))
     ex, svc = _conn(cfg)
     try:
         return {"unit": unit, "log": svc.logs(unit, lines)}
@@ -52,10 +58,10 @@ def update(cfg):
     try:
         out = []
         if cfg.mode == "vps":
-            r = ex.run(f"cd {cfg.app_dir} && git fetch -q origin && git reset --hard origin/{cfg.branch} "
+            r = ex.run(f"cd {_q(cfg.app_dir)} && git fetch -q origin && git reset --hard {_q('origin/' + cfg.branch)} "
                        f"&& git log -1 --format='%h %s'")
         else:
-            r = ex.run(f"cd {cfg.app_dir} && git pull -q --ff-only && git log -1 --format='%h %s'")
+            r = ex.run(f"cd {_q(cfg.app_dir)} && git pull -q --ff-only && git log -1 --format='%h %s'")
         out.append(r.out.strip())
         observing = svc.status().get("observe") in ("active", "running")
         svc.restart("dashboard")
@@ -89,7 +95,7 @@ def reset_params(cfg, category=None):
               "'launcher', now_iso())); "
               " db.commit(); "
               "print('reset', n, 'reload', int(reload_needed), 'rescan', int(rescan_needed))")
-        r = ex.run(f'cd {cfg.app_dir} && .venv/bin/python -c "{py}"')
+        r = ex.run(f"cd {_q(cfg.app_dir)} && .venv/bin/python -c {_q(py)}")
         return {"ok": r.ok, "out": r.out.strip()}
     finally:
         ex.close()

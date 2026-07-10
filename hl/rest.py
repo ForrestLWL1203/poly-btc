@@ -174,18 +174,6 @@ def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
                               "startTime": now - days * 86400_000, "endTime": now}})
 
 
-def asset_volumes(dex: str = None) -> dict:
-    """{coin: 24h notional volume} from metaAndAssetCtxs (optionally a builder dex). Used to pick the
-    most-traded coins to pre-warm σ for — the names match candleSnapshot + fill coin names exactly."""
-    out = {}
-    for coin, ctx in asset_contexts(dex).items():
-        try:
-            out[coin] = float((ctx or {}).get("dayNtlVlm") or 0.0)
-        except (TypeError, ValueError):
-            out[coin] = 0.0
-    return out
-
-
 def asset_contexts(dex: str = None) -> dict:
     """{coin: ctx+universe fields} from metaAndAssetCtxs.
 

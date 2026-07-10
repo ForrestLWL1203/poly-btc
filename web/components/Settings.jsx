@@ -51,7 +51,7 @@ export function Settings({ startRescan, confirm }) {
       }
       await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
       setSaving(false);
-      if (tab === "scanner") startRescan();
+      if (tab === "scanner") startRescan(true);
     };
     if (tab === "scanner") {
       confirm({
@@ -100,7 +100,7 @@ export function Settings({ startRescan, confirm }) {
         }
         await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
         setSaving(false);
-        if (category === "scanner") startRescan();
+        if (category === "scanner") startRescan(true);
       },
     });
   };

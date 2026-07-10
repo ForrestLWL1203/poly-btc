@@ -72,13 +72,20 @@ ORDER_POLL_S = 60          # frontendOpenOrders (target limit-order INTENTIONS �
 #                            hot path) polled at most this often. Was ~continuous (5s) and cost 1 weight-20 call
 #                            PER wallet, stealing ~half the REST budget from the fill signal → doubled copy LAG.
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap
+ACCOUNT_STATS_RETENTION_DAYS = 365  # keep the dashboard equity curve bounded (5-minute snapshots)
 #                                window; the rest is audit) — keeps the only unbounded table bounded
 
 # Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
 # balance. Each copy commits isolated margin out of CURRENT AVAILABLE balance, sized by VOLATILITY
 # TARGETING (below) — never a fixed $ amount, always a fraction of available. notional = margin *
 # leverage; isolated liquidation (loss = margin). No stop-loss in v1.
-INITIAL_BALANCE = 10000.0   # simulated wallet starting equity ($)
+PAPER_WALLET_INITIAL_BALANCE = 10000.0  # paper wallet balance before strategy allocation
+INITIAL_BALANCE = 10000.0   # paper strategy initial allocation / drawdown sizing anchor ($)
+# Profits compound at full current strategy equity. Below the allocation anchor,
+# position size contracts by this exponent instead of shrinking dollar-for-dollar.
+# The multiplier prevents a deeply depleted account from taking recovery-sized risk.
+SIZING_DRAWDOWN_EXPONENT = 0.50
+SIZING_DRAWDOWN_MAX_MULTIPLIER = 1.50
 ADD_FRAC = 0.5              # each follow-on ADD commits this fraction of the position's FIRST-OPEN margin
 #                             (NOT the tier margin% again — so BTC 3% first + 3×(3%·0.5) = 7.5% max, not 12%).
 #                             One knob, auto-scales per tier off each position's own first entry.
@@ -94,8 +101,9 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #   stable  σ ≤ STABLE_SIGMA_MAX        (BTC + anything calmer incl low-σ stocks like GOLD) → big
 #   mid     STABLE_SIGMA_MAX < σ < HIGH_SIGMA_MIN  (ETH/SOL/HYPE/majors)
 #   high    σ ≥ HIGH_SIGMA_MIN          (ZEC/memes/wild) → small
-#   margin   = EQUITY × <tier>_MARGIN_PCT   (v10 2026-07-02: equity, NOT shrinking available — so a wallet's
-#              copy is the same size regardless of open order; free cash only gates it as a hard backstop)
+#   margin   = SIZING_EQUITY × <tier>_MARGIN_PCT. Profits compound from current realized equity; below the
+#              initial strategy allocation a bounded sqrt curve slows shrinkage. Real risk equity still owns
+#              coin/deploy caps, and free cash remains the final hard backstop.
 #   leverage = the σ-tier's LEV CAP (v10: σ-scaled RISK_BUDGET/σ dropped as redundant with tier cap +
 #              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV; the caller
 #              further caps to the master's own leverage and the stock cap. σ still selects the tier.
@@ -168,8 +176,8 @@ MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positio
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
 #                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
-MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if its formula margin (= MAX_MARGIN_PCT·scale·available) is below this
-#                             fraction of equity: once free balance is too low to fund a MEANINGFUL
+MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy if the post-cap margin is below this fraction of real risk equity:
+#                             once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay
 #                             managed/exited. High-conviction signals (bigger rf) still open later than
 #                             low-conviction ones, which is intended. UI-tunable.

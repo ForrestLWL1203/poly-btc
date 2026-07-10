@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
+
 from . import config
 
 
@@ -16,12 +19,29 @@ def dedupe_preserve(items):
     return out
 
 
-def prune_discovery_cache(db):
+def prune_discovery_cache(db, *, attempts: int = 3, retry_sleep_s: float = 2.0):
     """Bound discovery state after a scan.
 
     Keep current candidates for incremental rechecks, and keep active profiles even if they fell off the
     leaderboard candidate set. Drop disappeared non-active profiles and their derived/cache rows.
     """
+    last_exc = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return _prune_discovery_cache_once(db)
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            if "locked" not in str(exc).lower() or attempt >= attempts - 1:
+                raise
+            try:
+                db.rollback()
+            except sqlite3.Error:
+                pass
+            time.sleep(retry_sleep_s * (attempt + 1))
+    raise last_exc
+
+
+def _prune_discovery_cache_once(db):
     db.execute("CREATE TEMP TABLE IF NOT EXISTS prune_discovery_addrs (addr TEXT PRIMARY KEY)")
     db.execute("DELETE FROM prune_discovery_addrs")
     db.execute(

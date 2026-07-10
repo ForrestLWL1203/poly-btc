@@ -63,6 +63,49 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertEqual(result["status"], "thin_recent")
 
+    def test_follow_eligibility_keeps_sector_loss_classified_as_shallow(self):
+        metrics = {
+            "score": 0.70,
+            "copy_bt_net_pnl": 1671,
+            "copy_bt_14d_net_pnl": 1773,
+            "copy_bt_7d_net_pnl": -154,
+            "copy_bt_closed_n": 40,
+            "copy_bt_14d_closed_n": 25,
+            "copy_bt_7d_closed_n": 6,
+            "copy_bt_open_fill_rate": 1.0,
+            "sector_policy_json": json.dumps({
+                "allowed": ["crypto"],
+                "crypto": {
+                    "allow": True,
+                    "status": "recent_soft_loss",
+                    "pnl": {"30": 1671, "14": 1773, "7": -154},
+                },
+            }),
+        }
+
+        result = evaluate_follow_eligibility(metrics)
+        score, detail = compute_follow_score(metrics)
+
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["status"], "recent_soft_loss")
+        self.assertGreater(score, 0.60)
+        self.assertFalse(any("7天copy每笔收益太薄" in reason for reason in detail["reasons"]))
+
+    def test_follow_eligibility_still_rejects_unclassified_recent_loss(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.70,
+            "copy_bt_net_pnl": 1671,
+            "copy_bt_14d_net_pnl": 1773,
+            "copy_bt_7d_net_pnl": -500,
+            "copy_bt_closed_n": 40,
+            "copy_bt_14d_closed_n": 25,
+            "copy_bt_7d_closed_n": 8,
+            "copy_bt_open_fill_rate": 1.0,
+        })
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "copy_backtest_loss_7d")
+
     def test_follow_eligibility_rejects_low_fill_rate_with_enough_sample(self):
         result = evaluate_follow_eligibility({
             "score": 0.70,

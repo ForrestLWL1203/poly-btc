@@ -66,8 +66,7 @@ class Auth:
             s = cls._read(p)
             if s:
                 return s
-        print("WARN: no DASH_PASSWORD / secret/dash_password — using insecure default 'changeme'")
-        return "changeme"
+        raise RuntimeError("dashboard password is required: set DASH_PASSWORD or secret/dash_password")
 
     def login(self, username, password):
         now = time.time()
@@ -120,6 +119,8 @@ STREAM_TICK = 1.0            # server-side read cadence; we push only on CHANGE 
 STREAM_HEARTBEAT = 15.0
 _stream_lock = threading.Lock()
 _stream_clients = 0
+_fast_bundle_lock = threading.Lock()
+_fast_bundle_cache = {}       # db path -> (monotonic timestamp, bundle); shared by all SSE clients
 
 
 def _fast_bundle(db):
@@ -127,6 +128,25 @@ def _fast_bundle(db):
     Slow data (wallets/discovery/params/scan-runs) stays on-demand GET."""
     return {"overview": ep_overview(db), "positions": ep_positions(db, {"status": ["open"]}),
             "serverTime": now_iso()}
+
+
+def _shared_fast_bundle(db):
+    """Compute the SSE query bundle at most once per tick, regardless of tabs/reconnecting clients."""
+    try:
+        row = db.execute("PRAGMA database_list").fetchone()
+        key = row[2] if row else id(db)
+    except sqlite3.Error:
+        key = id(db)
+    now = time.monotonic()
+    with _fast_bundle_lock:
+        cached = _fast_bundle_cache.get(key)
+        if cached and now - cached[0] < STREAM_TICK:
+            return cached[1]
+        bundle = _fast_bundle(db)
+        if len(_fast_bundle_cache) > 32:
+            _fast_bundle_cache.clear()
+        _fast_bundle_cache[key] = (now, bundle)
+        return bundle
 
 
 # ─────────────────────────────────────────────────────────────────────── http handler
@@ -229,7 +249,7 @@ def make_handler(db_path, auth, static_dir=None):
                 prev, last_hb = None, 0.0
                 while True:
                     try:
-                        body = json.dumps(_fast_bundle(db), default=float)
+                        body = json.dumps(_shared_fast_bundle(db), default=float)
                     except Exception:  # noqa: BLE001 — a transient query error shouldn't drop the stream
                         body = None
                     now = time.time()

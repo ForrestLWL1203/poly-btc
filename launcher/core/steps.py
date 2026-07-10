@@ -6,6 +6,7 @@ local deploy simply skips ssh_key / apt / caddy. Every step is safe to re-run (t
 resume after a fix): clones become pulls, venvs are reused, unit files are overwritten in place.
 """
 from . import services
+from .ssh import _q
 
 
 class StepError(Exception):
@@ -35,9 +36,12 @@ def probe(ctx):
 def ssh_key(ctx):
     if not ctx.cfg.pubkey:
         ctx.emit("无公钥可安装,跳过(将继续用密码)"); return
-    key = ctx.cfg.pubkey.strip().replace('"', '')
+    key = ctx.cfg.pubkey.strip()
+    if "\n" in key or not key.startswith(("ssh-ed25519 ", "ecdsa-sha2-", "ssh-rsa ")):
+        raise StepError("SSH 公钥格式无效")
+    qkey = _q(key)
     ctx.sh(f'umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; '
-           f'grep -qF "{key}" ~/.ssh/authorized_keys || echo "{key}" >> ~/.ssh/authorized_keys; '
+           f'grep -qF {qkey} ~/.ssh/authorized_keys || printf "%s\\n" {qkey} >> ~/.ssh/authorized_keys; '
            f'chmod 600 ~/.ssh/authorized_keys')
     ctx.emit("✓ 公钥已安装,之后可免密登录")
 
@@ -59,33 +63,34 @@ def base_pkgs(ctx):
 
 def repo(ctx):
     c = ctx.cfg
+    app_dir, branch, repo_url = _q(c.app_dir), _q(c.branch), _q(c.repo_url)
     if c.mode == "vps":
-        ctx.sh(f"if [ -d {c.app_dir}/.git ]; then cd {c.app_dir} && git fetch -q origin && "
-               f"git reset --hard origin/{c.branch}; else "
-               f"git clone -q --branch {c.branch} {c.repo_url} {c.app_dir}; fi", timeout=300)
+        ctx.sh(f"if [ -d {app_dir}/.git ]; then cd {app_dir} && git fetch -q origin && "
+               f"git reset --hard {_q('origin/' + c.branch)}; else "
+               f"git clone -q --branch {branch} {repo_url} {app_dir}; fi", timeout=300)
     else:                                          # local: never hard-reset (may hold uncommitted work)
-        r = ctx.sh(f"if [ -d {c.app_dir}/.git ]; then cd {c.app_dir} && "
-                   f"git rev-parse --short HEAD; else git clone -q --branch {c.branch} "
-                   f"{c.repo_url} {c.app_dir} && echo cloned; fi", timeout=300)
+        r = ctx.sh(f"if [ -d {app_dir}/.git ]; then cd {app_dir} && "
+                   f"git rev-parse --short HEAD; else git clone -q --branch {branch} "
+                   f"{repo_url} {app_dir} && echo cloned; fi", timeout=300)
         ctx.emit(f"代码就绪 @ {r.out.strip().splitlines()[-1] if r.out.strip() else c.app_dir}")
 
 
 def venv(ctx):
     c = ctx.cfg
     ctx.emit("创建/复用 venv 并安装依赖…")
-    ctx.sh(f"cd {c.app_dir} && [ -d .venv ] || python3 -m venv .venv && "
+    ctx.sh(f"cd {_q(c.app_dir)} && [ -d .venv ] || python3 -m venv .venv && "
            f".venv/bin/pip install -q --upgrade pip && "
            f".venv/bin/pip install -q -r requirements.txt", timeout=300)
 
 
 def config_step(ctx):
     c = ctx.cfg
-    ctx.sh(f"mkdir -p {c.app_dir}/data {c.app_dir}/secret {c.app_dir}/data/run")
+    if not c.dash_password:
+        raise StepError("必须设置 dashboard 密码")
+    ctx.sh("mkdir -p " + " ".join(_q(f"{c.app_dir}/{p}") for p in ("data", "secret", "data/run")))
     ctx.ex.put_text(f"{c.app_dir}/secret/dash_user", (c.dash_user or "admin") + "\n", 0o600)
     ctx.ex.put_text(f"{c.app_dir}/secret/dash_password", (c.dash_password or "") + "\n", 0o600)
     ctx.emit(f"✓ dashboard 账号写入 secret/(用户 {c.dash_user or 'admin'})")
-    if not c.dash_password:
-        ctx.emit("⚠ 未设置密码 —— 登录将使用不安全默认 'changeme',请尽快在向导里补上")
 
 
 def services_step(ctx):

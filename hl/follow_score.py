@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from . import config
-from .sector import apply_allowed_sector_copy_metrics
+from .sector import apply_allowed_sector_copy_metrics, parse_json_obj
 
 
 def _num(v, default: float = 0.0) -> float:
@@ -40,6 +40,23 @@ def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
     return any(metrics.get(k) is not None for k in (
         "copy_bt_net_pnl", "copy_bt_14d_net_pnl", "copy_bt_7d_net_pnl",
     )) or c30 > 0 or c14 > 0 or c7 > 0
+
+
+def _sector_recent_loss_is_soft(metrics: Mapping) -> bool:
+    policy = parse_json_obj(metrics.get("sector_policy_json"))
+    allowed = policy.get("allowed") if isinstance(policy.get("allowed"), list) else []
+    negative_items = []
+    for sector in allowed:
+        item = policy.get(sector)
+        if not isinstance(item, dict):
+            continue
+        pnl = item.get("pnl") if isinstance(item.get("pnl"), dict) else {}
+        if _num(pnl.get("7")) < 0:
+            negative_items.append(item)
+    return bool(negative_items) and all(
+        item.get("status") in {"recent_soft_loss", "recent_degradation_watch"}
+        for item in negative_items
+    )
 
 
 def _copy_edge_reasons(
@@ -136,6 +153,7 @@ def evaluate_follow_eligibility(
     p30 = _num(metrics.get("copy_bt_net_pnl"))
     p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
+    soft_recent_loss = _sector_recent_loss_is_soft(metrics)
     if not _has_copy_evidence(metrics, c30, c14, c7):
         return {
             "eligible": True,
@@ -150,7 +168,7 @@ def evaluate_follow_eligibility(
             "status": "copy_backtest_loss_14d",
             "reasons": [f"14天copy亏损且样本足够({c14}笔)"],
         }
-    if p7 < 0 and c7 >= min_closed7:
+    if p7 < 0 and c7 >= min_closed7 and not soft_recent_loss:
         return {
             "eligible": False,
             "status": "copy_backtest_loss_7d",
@@ -195,7 +213,7 @@ def evaluate_follow_eligibility(
         thin_reasons.append(f"7天样本偏少({c7}笔)")
     if p14 < 0 and c14 > 0:
         thin_reasons.append("14天copy亏损但样本不足")
-    if p7 < 0 and c7 > 0:
+    if p7 < 0 and c7 > 0 and not soft_recent_loss:
         thin_reasons.append("7天copy亏损但样本不足")
     if thin_reasons:
         return {
@@ -205,8 +223,8 @@ def evaluate_follow_eligibility(
         }
     return {
         "eligible": True,
-        "status": "eligible",
-        "reasons": ["copy回测证据足够"],
+        "status": "recent_soft_loss" if soft_recent_loss else "eligible",
+        "reasons": ["7天copy浅亏，仍在自身历史波动范围" if soft_recent_loss else "copy回测证据足够"],
     }
 
 
@@ -225,6 +243,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     p30 = _num(metrics.get("copy_bt_net_pnl"))
     p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
+    soft_recent_loss = _sector_recent_loss_is_soft(metrics)
 
     has_copy = _has_copy_evidence(metrics, c30, c14, c7)
     if not has_copy:
@@ -267,8 +286,8 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         score -= 0.12
         reasons.append("近期copy亏损(14天)")
     if p7 < 0 and c7 >= 3:
-        score -= 0.08
-        reasons.append("近期copy亏损(7天)")
+        score -= 0.04 if soft_recent_loss else 0.08
+        reasons.append("近期copy浅亏(7天)" if soft_recent_loss else "近期copy亏损(7天)")
     if p30 < 0 and c30 >= 7:
         score -= 0.10
         reasons.append("30天copy亏损")
@@ -279,6 +298,11 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         min_closed7=5,
         min_pnl_per_closed=float(getattr(config, "AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED", 15.0)),
     )
+    if soft_recent_loss:
+        # The negative 7d window is already represented in the blended copy
+        # score and the shallow-loss penalty above. Treating the same window as
+        # thin edge would double-charge one piece of evidence by another 12%.
+        edge_reasons = [reason for reason in edge_reasons if not reason.startswith("7天")]
     if edge_reasons:
         score -= 0.12
         reasons.extend(edge_reasons)
@@ -316,11 +340,6 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "feeDrag": fee_drag,
         "reasons": reasons,
     }
-
-
-def score_from_row(row) -> tuple[float, dict]:
-    """Small adapter for sqlite rows/tuples converted to dicts by callers."""
-    return compute_follow_score(row)
 
 
 def choose_follow_line(

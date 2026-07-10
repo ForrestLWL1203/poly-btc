@@ -17,6 +17,7 @@ class DeployConfig:
     ssh_port: int = 22
     key_path: str | None = None          # local private key (launcher-managed by default, or operator-supplied)
     pubkey: str | None = None            # local public key text (installed into authorized_keys)
+    host_fingerprint: str | None = None   # expected OpenSSH SHA256 host-key fingerprint on first connect
 
     # target layout
     app_dir: str = "/root/poly-btc"

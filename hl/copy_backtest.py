@@ -168,6 +168,9 @@ class Backtest:
             min_open_margin_pct=self.min_open_margin_pct,
             copy_stop_enable=self.copy_stop_enable,
             stop_margin_pct=self.stop_margin_pct,
+            capital_anchor=self.initial_balance,
+            drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
+            drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
         )
 
     def sigma(self, coin):
@@ -181,6 +184,21 @@ class Backtest:
     def available(self):
         locked = sum(p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0) for p in self.open.values())
         return self.balance - locked
+
+    def unrealized(self):
+        total = 0.0
+        for (_, coin), ep in self.open.items():
+            px = self.last_px.get(coin) or ep["entry_px"]
+            total += ep["rem_size"] * (px - ep["entry_px"]) * ep["sign"]
+        return total
+
+    def risk_equity(self):
+        # Unbanked gains do not increase the next trade; floating losses reduce
+        # risk immediately, matching the live sizing path.
+        return max(0.0, self.balance + min(0.0, self.unrealized()))
+
+    def risk_available(self):
+        return max(0.0, self.available() + min(0.0, self.unrealized()))
 
     def coin_cap_pct(self, tier):
         return self.tier_coin_cap[tier]
@@ -297,7 +315,8 @@ class Backtest:
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
         target_notl = abs(pos1) * px
-        avail = self.available()
+        risk_equity = self.risk_equity()
+        avail = self.risk_available()
         existing_coin = sum(
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
             for (addr, c), p in self.open.items()
@@ -313,7 +332,7 @@ class Backtest:
             side=side,
             entry_px=px,
             sigma=sigma,
-            balance=self.balance,
+            balance=risk_equity,
             available=avail,
             existing_coin_margin=existing_coin,
             master_notional=target_notl,
@@ -387,6 +406,13 @@ class Backtest:
         sigma = self.sigma(coin)
         tier = self.tier(sigma, coin)
         is_buy = ep["side"] == "long"
+        risk_equity = self.risk_equity()
+        existing = sum(
+            p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
+            for (addr, c), p in self.open.items()
+            if c == coin and p["side"] == ep["side"]
+        )
+        coin_room = max(0.0, self.coin_cap_pct(tier) * risk_equity - existing)
         if self.add_strategy == "smart":
             last = ep.get("last_add_px") or ep["entry_px"]
             adv = (((last - px) if is_buy else (px - last)) / last) if last else 0.0
@@ -402,21 +428,20 @@ class Backtest:
             if ep["add_count"] >= self.add_max_hard:
                 return self._observe_add(ep)
             ratio = add_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
-            existing = sum(
-                p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
-                for (addr, c), p in self.open.items()
-                if c == coin and p["side"] == ep["side"]
-            )
             add_margin = max(0.0, min(ratio * ep["first_margin"],
-                                      self.coin_cap_pct(tier) * self.balance - existing,
-                                      self.available()))
-            if add_margin < self.min_open_margin_pct * self.balance:
+                                      coin_room,
+                                      self.risk_available()))
+            if add_margin < self.min_open_margin_pct * risk_equity:
                 return self._observe_add(ep)
         else:
             max_adds = self.tier_max_adds[tier]
             if ep["add_count"] >= max_adds:
                 return self._observe_add(ep)
-            add_margin = max(0.0, min(ep["first_margin"] * self.add_frac, self.available()))
+            add_margin = max(0.0, min(
+                ep["first_margin"] * self.add_frac,
+                coin_room,
+                self.risk_available(),
+            ))
             if add_margin <= 0:
                 return self._observe_add(ep)
 

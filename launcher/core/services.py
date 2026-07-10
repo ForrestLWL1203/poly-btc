@@ -1,12 +1,13 @@
 """Service supervision — one interface, two backends.
 
-VPS  (SystemdServices): the 4 systemd units (dashboard常开 / scan.timer每日 / observe仅enable).
+VPS  (SystemdServices): dashboard常开 / scan.timer每日 / observe安装但禁用开机自启.
 Local (LocalServices):  the launcher directly runs only the DASHBOARD (detached, pidfile). The
 observer + scan are driven from inside the dashboard by its own procman, which — since the earlier
 procman change — spawns them locally when systemd is absent. So locally the launcher owns the
 dashboard; the dashboard owns copy-trading. Status/logs still surface all three via procman pidfiles.
 """
 from . import templates
+from .ssh import _q
 
 SYSTEMD_UNITS = {"dashboard": "hl-dashboard.service", "observe": "hl-observe.service",
                  "scan": "hl-scan.service", "timer": "hl-scan.timer"}
@@ -32,8 +33,8 @@ class SystemdServices:
         self.ex.run("systemctl enable --now hl-dashboard.service", on_line=emit)
         emit("启用 scan 定时器(每日 04:00)…")
         self.ex.run("systemctl enable --now hl-scan.timer", on_line=emit)
-        emit("启用 observe(跟单引擎;不自动启动,由 dashboard 手动开)…")
-        self.ex.run("systemctl enable hl-observe.service", on_line=emit)
+        emit("禁用 observe 开机自启(仍可由 dashboard 手动启动)…")
+        self.ex.run("systemctl disable hl-observe.service", on_line=emit)
 
     def start(self, unit):   return self.ex.run(f"systemctl start {SYSTEMD_UNITS[unit]}")
     def stop(self, unit):    return self.ex.run(f"systemctl stop {SYSTEMD_UNITS[unit]}")
@@ -61,18 +62,21 @@ class LocalServices:
     def start(self, unit, emit=None):
         if unit != "dashboard":                    # observe/scan 走 dashboard 内的 procman(本地 spawn)
             return self.ex.run("true")             # no-op: use the dashboard's 启动跟单/扫描 buttons
-        cmd = (f"cd {self.cfg.app_dir} && mkdir -p data/run && "
-               f"if [ -f {self.rd}/dashboard.pid ] && kill -0 $(cat {self.rd}/dashboard.pid) 2>/dev/null; "
+        pidfile = _q(f"{self.rd}/dashboard.pid")
+        logfile = _q(f"{self.rd}/dashboard.log")
+        cmd = (f"cd {_q(self.cfg.app_dir)} && mkdir -p data/run && "
+               f"if [ -f {pidfile} ] && kill -0 $(cat {pidfile}) 2>/dev/null; "
                f"then echo 'dashboard 已在运行'; else "
-               f"nohup {self.cfg.py} hl_dashboard.py --db data/hl.db --static web "
-               f"--host 127.0.0.1 --port {self.cfg.port} >> {self.rd}/dashboard.log 2>&1 & "
-               f"echo $! > {self.rd}/dashboard.pid; echo 'dashboard 已启动 pid='$(cat {self.rd}/dashboard.pid); fi")
+               f"nohup {_q(self.cfg.py)} hl_dashboard.py --db data/hl.db --static web "
+               f"--host 127.0.0.1 --port {int(self.cfg.port)} >> {logfile} 2>&1 & "
+               f"echo $! > {pidfile}; echo 'dashboard 已启动 pid='$(cat {pidfile}); fi")
         return self.ex.run(cmd, on_line=emit)
 
     def stop(self, unit):
         name = PID_NAMES.get(unit, unit)
-        return self.ex.run(f"[ -f {self.rd}/{name}.pid ] && kill $(cat {self.rd}/{name}.pid) 2>/dev/null; "
-                           f"rm -f {self.rd}/{name}.pid; true")
+        pidfile = _q(f"{self.rd}/{name}.pid")
+        return self.ex.run(f"[ -f {pidfile} ] && kill $(cat {pidfile}) 2>/dev/null; "
+                           f"rm -f {pidfile}; true")
 
     def restart(self, unit):
         self.stop(unit)
@@ -81,7 +85,7 @@ class LocalServices:
     def status(self):
         out = {}
         for k, name in PID_NAMES.items():
-            r = self.ex.run(f"cat {self.rd}/{name}.pid 2>/dev/null")
+            r = self.ex.run(f"cat {_q(f'{self.rd}/{name}.pid')} 2>/dev/null")
             pid = r.out.strip()
             out[k] = "active" if (pid and self.ex.run(f"kill -0 {pid} 2>/dev/null").ok) else "inactive"
         out["timer"] = "n/a"                        # no daily timer locally (manual scans)
@@ -89,4 +93,4 @@ class LocalServices:
 
     def logs(self, unit, lines=80):
         name = PID_NAMES.get(unit, unit)
-        return self.ex.run(f"tail -n {lines} {self.rd}/{name}.log 2>/dev/null").out
+        return self.ex.run(f"tail -n {int(lines)} {_q(f'{self.rd}/{name}.log')} 2>/dev/null").out

@@ -19,9 +19,5 @@ def user_fills(addr: str) -> dict:
     return {"type": "userFills", "user": addr}
 
 
-def user_events(addr: str) -> dict:
-    return {"type": "userEvents", "user": addr}
-
-
 def bbo(coin: str) -> dict:
     return {"type": "bbo", "coin": coin}

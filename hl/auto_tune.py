@@ -307,7 +307,6 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
             continue
         fill["user"] = (addr or "").lower()
         out.append(fill)
-    out.sort(key=lambda x: int(x.get("time") or 0))
     return out
 
 
@@ -705,18 +704,6 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     out["add_params"] = params_
     out["windows"] = _candidate_windows(db, addrs, sigmas, overrides, now_ms, window_fills=window_fills)
     return out
-
-
-def evaluate_margin_candidate(db, addrs: list[str], follow: dict, base: dict, mult: float,
-                              sigmas: dict | None = None, now_ms: int | None = None,
-                              window_fills: dict[int, list[dict]] | None = None) -> dict:
-    tune_base = {**{k: float(base[k]) for k in MARGIN_KEYS},
-                 **{k: float(follow[k]) for k in LEV_KEYS},
-                 "DEPLOY_FULL_PCT": float(follow["DEPLOY_FULL_PCT"])}
-    candidate = build_tune_candidate(tune_base, mult, tuple(tune_base[k] for k in LEV_KEYS),
-                                     tune_base["DEPLOY_FULL_PCT"])
-    return evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                   window_fills=window_fills)
 
 
 def _write_margin_params(db, margins: dict) -> None:

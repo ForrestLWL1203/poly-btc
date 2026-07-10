@@ -16,6 +16,27 @@ def bt(net, closed, wins=None, target_open=None, opened=None):
     }
 
 
+DAY_MS = 86400_000
+
+
+def replay_window(net, returns, *, now_ms, liquidations=0):
+    positions = []
+    for index, value in enumerate(returns):
+        positions.append({
+            "net_pnl": value * 100.0,
+            "margin": 100.0,
+            "closed_at": now_ms - (len(returns) - index) * DAY_MS,
+        })
+    return {
+        **bt(net, len(returns)),
+        "liquidations": liquidations,
+        "positions": positions,
+        "open_positions": [],
+        "unrealized_pnl": 0.0,
+        "_window_end_ms": now_ms,
+    }
+
+
 class SectorPolicyTests(unittest.TestCase):
     def test_classifies_crypto_and_xyz_stock_sectors(self):
         self.assertEqual(sector.classify_coin("BTC"), "crypto")
@@ -44,6 +65,91 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertFalse(policy["stock"]["allow"])
         self.assertEqual(policy["stock"]["status"], "recent_loss")
         self.assertEqual(policy["allowed"], ["crypto"])
+
+    def test_six_recent_losses_are_insufficient_for_hard_rejection(self):
+        sector_results = {
+            "crypto": {
+                30: bt(1671, 40),
+                14: bt(1773, 25),
+                7: bt(-154, 6, wins=2),
+            },
+        }
+
+        policy = sector.evaluate_sector_policy(sector_results)
+
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["status"], "recent_soft_loss")
+        self.assertEqual(policy["crypto"]["recent"]["classification"], "insufficient_recent")
+
+    def test_recent_loss_uses_margin_normalized_wallet_distribution(self):
+        now_ms = 100 * DAY_MS
+        baseline_returns = [-0.20, -0.10, 0.00, 0.05, 0.10, 0.20, 0.30, 0.40]
+        recent_returns = [-0.01] * 8
+        primary = replay_window(1200, baseline_returns, now_ms=now_ms - 8 * DAY_MS)
+        primary["_window_end_ms"] = now_ms
+        recent = replay_window(-8, recent_returns, now_ms=now_ms)
+        sector_results = {
+            "crypto": {
+                30: primary,
+                14: bt(500, 12),
+                7: recent,
+            },
+        }
+
+        policy = sector.evaluate_sector_policy(sector_results)
+
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["status"], "recent_soft_loss")
+        self.assertEqual(policy["crypto"]["recent"]["classification"], "shallow_loss")
+        self.assertFalse(policy["crypto"]["recent"]["hard"])
+
+    def test_significant_recent_loss_gets_one_new_evidence_grace_for_existing_wallet(self):
+        now_ms = 100 * DAY_MS
+        baseline_returns = [0.08, 0.09, 0.10, 0.11, 0.12, 0.09, 0.10, 0.11]
+        recent_returns = [-0.10] * 8
+        primary = replay_window(1200, baseline_returns, now_ms=now_ms - 8 * DAY_MS)
+        primary["_window_end_ms"] = now_ms
+        recent = replay_window(-80, recent_returns, now_ms=now_ms)
+        sector_results = {
+            "crypto": {
+                30: primary,
+                14: bt(500, 12),
+                7: recent,
+            },
+        }
+        previous = {"crypto": {"allow": True, "status": "allowed"}, "allowed": ["crypto"]}
+
+        first = sector.evaluate_sector_policy(sector_results, previous_policy=previous)
+        repeated = sector.evaluate_sector_policy(sector_results, previous_policy=first)
+        changed_results = json.loads(json.dumps(sector_results))
+        changed_results["crypto"]["7"]["copy_net_pnl"] = -81
+        second = sector.evaluate_sector_policy(changed_results, previous_policy=first)
+
+        self.assertTrue(first["crypto"]["allow"])
+        self.assertEqual(first["crypto"]["status"], "recent_degradation_watch")
+        self.assertEqual(first["crypto"]["recent"]["streak"], 1)
+        self.assertTrue(repeated["crypto"]["allow"])
+        self.assertEqual(repeated["crypto"]["recent"]["streak"], 1)
+        self.assertFalse(second["crypto"]["allow"])
+        self.assertEqual(second["crypto"]["status"], "recent_loss")
+        self.assertEqual(second["crypto"]["recent"]["streak"], 2)
+
+    def test_recent_liquidation_has_no_grace(self):
+        now_ms = 100 * DAY_MS
+        sector_results = {
+            "crypto": {
+                30: replay_window(1200, [0.1] * 8, now_ms=now_ms - 8 * DAY_MS),
+                14: bt(500, 12),
+                7: replay_window(-100, [-0.1] * 8, now_ms=now_ms, liquidations=1),
+            },
+        }
+        sector_results["crypto"][30]["_window_end_ms"] = now_ms
+        previous = {"crypto": {"allow": True, "status": "allowed"}, "allowed": ["crypto"]}
+
+        policy = sector.evaluate_sector_policy(sector_results, previous_policy=previous)
+
+        self.assertFalse(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["recent"]["classification"], "liquidation")
 
     def test_allowed_sector_metrics_ignore_disallowed_losing_sector(self):
         metrics = {

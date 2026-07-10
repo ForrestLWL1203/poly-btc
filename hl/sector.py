@@ -85,6 +85,141 @@ def _compact_result(result: Mapping) -> dict:
     return {k: result.get(k) for k in keys if k in result}
 
 
+def _weighted_median(samples: list[tuple[float, float]]) -> float:
+    rows = sorted((value, max(0.0, weight)) for value, weight in samples if weight > 0)
+    total = sum(weight for _, weight in rows)
+    if not rows or total <= 0:
+        return 0.0
+    midpoint = total / 2.0
+    seen = 0.0
+    for value, weight in rows:
+        seen += weight
+        if seen >= midpoint:
+            return value
+    return rows[-1][0]
+
+
+def _position_return_samples(result: Mapping, *, closed_before_ms: int | None = None) -> list[tuple[float, float]]:
+    samples = []
+    for position in result.get("positions") or []:
+        margin = _num(position.get("margin"))
+        if margin <= 0:
+            continue
+        closed_at = _int(position.get("closed_at"))
+        if closed_before_ms is not None and (closed_at <= 0 or closed_at >= closed_before_ms):
+            continue
+        samples.append((_num(position.get("net_pnl")) / margin, margin))
+    return samples
+
+
+def _recent_return_samples(result: Mapping) -> list[tuple[float, float]]:
+    samples = _position_return_samples(result)
+    open_positions = result.get("open_positions") or []
+    open_margin = sum(max(0.0, _num(position.get("margin"))) for position in open_positions)
+    if open_margin > 0:
+        open_net = sum(_num(position.get("net_pnl")) for position in open_positions)
+        open_net += _num(result.get("unrealized_pnl"))
+        samples.append((open_net / open_margin, open_margin))
+    return samples
+
+
+def _weighted_return(samples: list[tuple[float, float]]) -> tuple[float, float]:
+    total_weight = sum(weight for _, weight in samples if weight > 0)
+    if total_weight <= 0:
+        return 0.0, 0.0
+    mean = sum(value * weight for value, weight in samples if weight > 0) / total_weight
+    sum_sq = sum(weight * weight for _, weight in samples if weight > 0)
+    effective_n = (total_weight * total_weight / sum_sq) if sum_sq > 0 else 0.0
+    return mean, effective_n
+
+
+def assess_recent_copy_loss(
+    windows: Mapping,
+    *,
+    min_net: float = 0.0,
+    min_recent_closed: int = 7,
+    min_baseline_closed: int = 7,
+    z_limit: float = -1.96,
+) -> dict:
+    """Classify a negative 7d replay against the wallet's own prior behavior.
+
+    Position PnL is normalized by the copy margin committed to that episode, so
+    the decision is independent of account dollars and changing sizing params.
+    The baseline excludes the latest seven days to avoid comparing overlapping
+    7d/14d/30d aggregates.
+    """
+    recent = _window_result(windows, 7)
+    primary = _window_result(windows, 30)
+    recent_pnl = _num(recent.get("copy_net_pnl"))
+    recent_closed = _int(recent.get("closed_n"))
+    liquidations = _int(recent.get("liquidations"))
+    latest_close = max((_int(p.get("closed_at")) for p in recent.get("positions") or []), default=0)
+    evidence_key = f"{recent_closed}:{latest_close}:{recent_pnl:.8g}"
+    base = {
+        "classification": "not_negative",
+        "hard": False,
+        "recentClosed": recent_closed,
+        "baselineClosed": 0,
+        "evidenceKey": evidence_key,
+    }
+    if recent_pnl > min_net:
+        return base
+    if liquidations > 0:
+        return {
+            **base,
+            "classification": "liquidation",
+            "hard": True,
+            "liquidations": liquidations,
+        }
+    if recent_closed < min_recent_closed:
+        return {
+            **base,
+            "classification": "insufficient_recent",
+            "reason": "近期亏损样本不足，不作硬否决",
+        }
+
+    window_end_ms = _int(primary.get("_window_end_ms")) or _int(recent.get("_window_end_ms"))
+    cutoff_ms = window_end_ms - 7 * 86400_000 if window_end_ms > 0 else None
+    baseline_samples = _position_return_samples(primary, closed_before_ms=cutoff_ms)
+    recent_samples = _recent_return_samples(recent)
+    base["baselineClosed"] = len(baseline_samples)
+    if len(baseline_samples) < min_baseline_closed or len(recent_samples) < min_recent_closed:
+        return {
+            **base,
+            "classification": "insufficient_distribution",
+            "hard": True,
+            "reason": "近期亏损且缺少足够的非重叠历史分布",
+        }
+
+    baseline_center = _weighted_median(baseline_samples)
+    deviations = [(abs(value - baseline_center), weight) for value, weight in baseline_samples]
+    robust_scale = 1.4826 * _weighted_median(deviations)
+    if robust_scale <= 1e-9:
+        baseline_mean, _ = _weighted_return(baseline_samples)
+        total_weight = sum(weight for _, weight in baseline_samples)
+        variance = (
+            sum(weight * (value - baseline_mean) ** 2 for value, weight in baseline_samples) / total_weight
+            if total_weight > 0 else 0.0
+        )
+        robust_scale = math.sqrt(max(0.0, variance))
+    # Numerical floor is relative to this wallet's own historical edge, not dollars.
+    robust_scale = max(robust_scale, abs(baseline_center) * 0.25, 1e-9)
+    recent_return, recent_effective_n = _weighted_return(recent_samples)
+    standard_error = robust_scale / math.sqrt(max(1.0, recent_effective_n))
+    z_score = (recent_return - baseline_center) / standard_error if standard_error > 0 else 0.0
+    hard = z_score <= z_limit
+    return {
+        **base,
+        "classification": "significant_loss" if hard else "shallow_loss",
+        "hard": hard,
+        "recentReturn": round(recent_return, 6),
+        "baselineReturn": round(baseline_center, 6),
+        "baselineScale": round(robust_scale, 6),
+        "zScore": round(z_score, 3),
+        "reason": "近期收益显著低于自身历史" if hard else "近期亏损仍在自身历史波动范围",
+    }
+
+
 def compact_sector_results(sector_results: Mapping) -> dict:
     out = {}
     for sector in SECTORS:
@@ -93,8 +228,13 @@ def compact_sector_results(sector_results: Mapping) -> dict:
     return out
 
 
-def evaluate_sector_policy(sector_results: Mapping, min_net: float | None = None) -> dict:
+def evaluate_sector_policy(
+    sector_results: Mapping,
+    min_net: float | None = None,
+    previous_policy=None,
+) -> dict:
     min_net = float(config.COPY_BT_MIN_NET_PNL if min_net is None else min_net)
+    previous_policy = parse_json_obj(previous_policy)
     policy = {}
     allowed = []
     for sector in SECTORS:
@@ -108,47 +248,91 @@ def evaluate_sector_policy(sector_results: Mapping, min_net: float | None = None
             pnl[days] = _num(result.get("copy_net_pnl"))
             enough[days] = closed[days] >= _min_closed_for_days(days)
 
+        recent_assessment = assess_recent_copy_loss(windows, min_net=min_net)
+        previous_item = previous_policy.get(sector) if isinstance(previous_policy.get(sector), dict) else {}
+        previous_recent = previous_item.get("recent") if isinstance(previous_item.get("recent"), dict) else {}
+        previous_streak = _int(previous_recent.get("streak"))
+        same_evidence = (
+            bool(recent_assessment.get("evidenceKey"))
+            and recent_assessment.get("evidenceKey") == previous_recent.get("evidenceKey")
+        )
+        if recent_assessment.get("classification") == "significant_loss":
+            streak = previous_streak if same_evidence else previous_streak + 1
+            recent_assessment["streak"] = max(1, streak)
+        else:
+            recent_assessment["streak"] = 0
+
+        item_base = {
+            "closed": {str(k): closed[k] for k in (30, 14, 7)},
+            "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
+            "recent": recent_assessment,
+        }
         enough_days = [days for days in (30, 14, 7) if enough[days]]
         if not enough_days:
             item = {
+                **item_base,
                 "allow": False,
                 "status": "thin_evidence",
                 "reason": "板块copy样本不足",
-                "closed": {str(k): closed[k] for k in (30, 14, 7)},
-                "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
             }
-        elif any(enough[days] and pnl[days] <= min_net for days in (14, 7)):
+        elif enough[14] and pnl[14] <= min_net:
             item = {
+                **item_base,
                 "allow": False,
                 "status": "recent_loss",
-                "reason": "板块近期copy亏损",
-                "closed": {str(k): closed[k] for k in (30, 14, 7)},
-                "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
+                "reason": "板块14天copy亏损",
             }
+        elif enough[7] and pnl[7] <= min_net and recent_assessment.get("hard"):
+            is_liquidation = recent_assessment.get("classification") == "liquidation"
+            has_grace = (
+                not is_liquidation
+                and bool(previous_item.get("allow"))
+                and recent_assessment.get("streak", 1) < 2
+                and ((enough[14] and pnl[14] > min_net) or (enough[30] and pnl[30] > min_net))
+            )
+            item = {
+                **item_base,
+                "allow": bool(has_grace),
+                "status": "recent_degradation_watch" if has_grace else "recent_loss",
+                "reason": (
+                    "板块近期显著恶化，保留一轮复核"
+                    if has_grace else
+                    ("板块近期copy出现爆仓" if is_liquidation else "板块近期copy显著恶化")
+                ),
+            }
+            if has_grace:
+                allowed.append(sector)
+        elif enough[7] and pnl[7] <= min_net and (
+            (enough[14] and pnl[14] > min_net) or (enough[30] and pnl[30] > min_net)
+        ):
+            item = {
+                **item_base,
+                "allow": True,
+                "status": "recent_soft_loss",
+                "reason": "板块7天浅亏，仍在自身历史波动范围",
+            }
+            allowed.append(sector)
         elif enough[30] and pnl[30] <= min_net:
             item = {
+                **item_base,
                 "allow": False,
                 "status": "primary_loss",
                 "reason": "板块30天copy亏损",
-                "closed": {str(k): closed[k] for k in (30, 14, 7)},
-                "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
             }
         elif (enough[14] and pnl[14] > min_net) or (enough[30] and pnl[30] > min_net):
             item = {
+                **item_base,
                 "allow": True,
                 "status": "allowed",
                 "reason": "板块copy回测盈利",
-                "closed": {str(k): closed[k] for k in (30, 14, 7)},
-                "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
             }
             allowed.append(sector)
         else:
             item = {
+                **item_base,
                 "allow": False,
                 "status": "thin_evidence",
                 "reason": "板块copy正收益证据不足",
-                "closed": {str(k): closed[k] for k in (30, 14, 7)},
-                "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
             }
         policy[sector] = item
     policy["allowed"] = allowed

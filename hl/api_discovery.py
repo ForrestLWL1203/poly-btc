@@ -85,13 +85,15 @@ def ep_discovery(db):
 
 def ep_scan_runs(db, limit):
     rows = qall(db, "SELECT started_at,finished_at,candidates,COALESCE(profiled,probed_new) AS profiled,"
-                    "added,retired,kept,rejected,n_active "
+                    "added,retired,kept,rejected,n_active,COALESCE(failed,0) AS failed,"
+                    "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full "
                     "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
     return {"runs": [{"at": _col(r, "started_at", 0), "finishedAt": _col(r, "finished_at", 1),
                       "candidates": _col(r, "candidates", 2), "profiled": _col(r, "profiled", 3),
                       "added": _col(r, "added", 4), "retired": _col(r, "retired", 5),
                       "kept": _col(r, "kept", 6), "rejected": _col(r, "rejected", 7),
-                      "active": _col(r, "n_active", 8)}
+                      "active": _col(r, "n_active", 8), "failed": _col(r, "failed", 9) or 0,
+                      "complete": bool(_col(r, "complete", 10)), "full": bool(_col(r, "full", 11))}
                      for r in rows]}
 
 

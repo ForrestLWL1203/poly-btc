@@ -16,8 +16,11 @@ def connect(cfg):
         return LocalExecutor()
     # Prefer key if we have one that works; else password (first deploy). key_filename+password can
     # both be passed to paramiko — it tries key then password — but we keep it explicit per what's set.
+    from . import targets
     return SSHExecutor(cfg.host, cfg.user, password=cfg.password,
-                       key_filename=cfg.key_path, port=cfg.ssh_port)
+                       key_filename=cfg.key_path, port=cfg.ssh_port,
+                       host_fingerprint=cfg.host_fingerprint,
+                       known_hosts_path=targets.KNOWN_HOSTS)
 
 
 class DeployRunner:
