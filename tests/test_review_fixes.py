@@ -190,9 +190,10 @@ class ReviewFixTests(unittest.TestCase):
             SSHExecutor("example.test", host_fingerprint=expected, known_hosts_path="/tmp/test-known-hosts")
         self.assertEqual(1, len(clients[-1].host_keys.added))
 
-    def test_scanner_settings_request_full_rescan(self):
+    def test_scanner_settings_never_start_scan_implicitly(self):
         source = (Path(__file__).resolve().parents[1] / "web" / "components" / "Settings.jsx").read_text()
-        self.assertGreaterEqual(source.count("startRescan(true)"), 2)
+        self.assertNotIn("startRescan", source)
+        self.assertIn("不会立即启动采集", source)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import { validateFollowParams } from "./settings/validation.js";
 
 const { useEffect, useState } = React;
 
-export function Settings({ startRescan, confirm }) {
+export function Settings({ confirm }) {
   const {
     params,
     vals,
@@ -51,14 +51,13 @@ export function Settings({ startRescan, confirm }) {
       }
       await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
       setSaving(false);
-      if (tab === "scanner") startRescan(true);
     };
     if (tab === "scanner") {
       confirm({
-        title: "应用并重采",
+        title: "保存采集参数",
         danger: false,
-        ok: "应用并重采",
-        body: "采集参数改动需重采才生效,将立即触发全量重采。",
+        ok: "保存",
+        body: "只保存参数，不会立即启动采集。新参数将在下一次自动采集或用户手动触发采集时生效。",
         onConfirm: doIt,
       });
     } else if (tabDirty.some(p => p.level === "yellow")) {
@@ -81,7 +80,7 @@ export function Settings({ startRescan, confirm }) {
       title: "恢复默认配置",
       danger: true,
       ok: "恢复默认",
-      body: `将把「${label}」全部参数强制恢复为代码默认值,覆盖你在此页的所有修改。不可撤销。`,
+      body: `将把「${label}」全部参数强制恢复为代码默认值,覆盖你在此页的所有修改。不会自动启动采集。`,
       onConfirm: async () => {
         setSaving(true);
         const t0 = Date.now();
@@ -100,7 +99,6 @@ export function Settings({ startRescan, confirm }) {
         }
         await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
         setSaving(false);
-        if (category === "scanner") startRescan(true);
       },
     });
   };
