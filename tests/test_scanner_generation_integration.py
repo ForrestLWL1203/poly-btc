@@ -325,6 +325,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
                 [profile.get(col) for col in cols],
             )
+            db.execute(
+                "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(1,'0xaaa',0.71,'now')"
+            )
             db.commit()
 
             rows, marginal = scanner._build_explicit_selection(db, "g1", "2026-01-03", 1000)
@@ -333,6 +336,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
                 ("0xaaa", "core", "above_follow_line"),
             ])
+            self.assertEqual(rows[0].utility, 0.71)
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:

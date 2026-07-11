@@ -1099,8 +1099,18 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     )
     names = [desc[0] for desc in cur.description]
     profiles = [dict(zip(names, row)) for row in cur.fetchall()]
+    # watchlist.score is the published final Copy-follow score.  Selection must consume that exact value
+    # rather than recomputing from a narrower row projection and creating an invisible second score line.
+    watch_scores = {
+        (addr or "").lower(): score
+        for addr, score in db.execute("SELECT addr,score FROM watchlist").fetchall()
+    }
     for row in profiles:
-        row["follow_score"] = follow_score.compute_follow_score(row)[0]
+        addr = (row.get("addr") or "").lower()
+        row["follow_score"] = (
+            f(watch_scores[addr]) if addr in watch_scores
+            else follow_score.compute_follow_score(row)[0]
+        )
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
