@@ -43,17 +43,16 @@ def main() -> int:
         seed = {a: seed.get(a, set()) for a in addrs}
         if not addrs:
             published = selection.latest_published_generation(db)
-            if published is None:
-                print("no enabled watchlist targets yet — run the scanner first.")
-                return 1
             held_n = sum(
                 db.execute(f"SELECT COUNT(DISTINCT addr) FROM {table} WHERE status='open'").fetchone()[0]
                 for table in ("copy_position", "shadow_position")
             )
-            if not held_n:
-                print(f"selection {published} has zero enabled Core wallets; observer is idle.")
-                return 0
-            print(f"selection {published} has zero enabled Core wallets; managing {held_n} exit-only wallet(s).")
+            if published is None:
+                print("no published Core yet; observer is running idle and waiting for the first scan.")
+            elif not held_n:
+                print(f"selection {published} has zero enabled Core wallets; observer is running idle.")
+            else:
+                print(f"selection {published} has zero enabled Core wallets; managing {held_n} exit-only wallet(s).")
         else:
             print(f"observing {len(addrs)} targets (cap {n}): {', '.join(a[:8] for a in addrs)}")
         try:
