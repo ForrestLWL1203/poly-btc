@@ -106,6 +106,9 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
         "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
         "copy_bt_liquidations,copy_bt_fee_drag,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
         "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,sector_copy_json,sector_policy_json,"
+        "copy_expected_return,copy_return_lcb,copy_positive_probability,copy_evidence_days,"
+        "copy_recent_return_14d,copy_recent_return_7d,copy_risk_score,execution_score,"
+        "last_copyable_open_ms,actionable_open_rate,capacity_fit,data_status,evidence_status,"
         "open_loss_frac,open_win_frac,bag_count,max_bag_days "
         f"FROM profile WHERE 1=1{where} ORDER BY addr",
         args,
@@ -130,6 +133,21 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "openFillRate": r["copy_bt_open_fill_rate"],
                 "liquidations": r["copy_bt_liquidations"],
                 "feeDrag": r["copy_bt_fee_drag"],
+                "expectedReturn": r["copy_expected_return"],
+                "returnLcb": r["copy_return_lcb"],
+                "positiveProbability": r["copy_positive_probability"],
+                "evidenceDays": r["copy_evidence_days"],
+                "recentReturn14d": r["copy_recent_return_14d"],
+                "recentReturn7d": r["copy_recent_return_7d"],
+                "riskScore": r["copy_risk_score"],
+                "executionScore": r["execution_score"],
+                "actionableOpenRate": r["actionable_open_rate"],
+                "capacityFit": r["capacity_fit"],
+            },
+            "qualification": {
+                "dataStatus": r["data_status"],
+                "evidenceStatus": r["evidence_status"],
+                "lastCopyableOpenMs": r["last_copyable_open_ms"],
             },
             "sectorCopy": json.loads(r["sector_copy_json"] or "{}"),
             "sectorPolicy": json.loads(r["sector_policy_json"] or "{}"),

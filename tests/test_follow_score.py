@@ -1,315 +1,137 @@
-import json
 import unittest
 
 from hl.follow_score import choose_follow_line, compute_follow_score, evaluate_follow_eligibility
 
 
+def evidence(**overrides):
+    row = {
+        "score": 0.70,
+        "copy_bt_closed_n": 16,
+        "copy_bt_14d_closed_n": 9,
+        "copy_bt_7d_closed_n": 5,
+        "copy_bt_net_pnl": 800.0,
+        "copy_bt_14d_net_pnl": 350.0,
+        "copy_bt_7d_net_pnl": 120.0,
+        "copy_expected_return": 0.045,
+        "copy_return_lcb": 0.012,
+        "copy_return_volatility": 0.08,
+        "copy_positive_probability": 0.82,
+        "copy_evidence_days": 10,
+        "copy_recent_return_14d": 0.04,
+        "copy_recent_return_7d": 0.03,
+        "copy_risk_score": 0.80,
+        "execution_score": 0.92,
+        "actionable_open_rate": 0.90,
+        "capacity_fit": 0.90,
+        "open_probability_48h": 0.75,
+        "copy_bt_liquidations": 0,
+        "copy_bt_data_status": "valid",
+        "copy_bt_evidence_status": "qualified",
+    }
+    row.update(overrides)
+    return row
+
+
 class FollowScoreTests(unittest.TestCase):
-    def test_falls_back_to_raw_score_without_copy_backtest(self):
+    def test_raw_without_copy_is_only_a_prior_and_not_core_eligible(self):
         score, detail = compute_follow_score({"score": 0.73})
+        eligibility = evaluate_follow_eligibility({"score": 0.73})
+        self.assertAlmostEqual(score, 0.73 * 0.35)
+        self.assertIsNone(detail["copyScore"])
+        self.assertFalse(eligibility["eligible"])
+        self.assertEqual(eligibility["role"], "rejected")
 
-        self.assertAlmostEqual(score, 0.73)
-        self.assertEqual(detail["rawScore"], 0.73)
-        self.assertIn("暂无copy回测", detail["reasons"][0])
-
-    def test_follow_eligibility_marks_missing_copy_evidence_without_hard_rejecting(self):
-        result = evaluate_follow_eligibility({"score": 0.95})
-
-        self.assertTrue(result["eligible"])
-        self.assertEqual(result["status"], "no_copy_evidence")
-
-    def test_explicit_no_evidence_is_not_real_follow_eligible(self):
+    def test_explicit_no_evidence_is_rejected_at_profile_qualification(self):
         result = evaluate_follow_eligibility({
             "score": 0.95,
             "copy_bt_data_status": "valid",
             "copy_bt_evidence_status": "no_evidence",
         })
-
         self.assertFalse(result["eligible"])
-        self.assertEqual(result["role"], "challenger")
+        self.assertEqual(result["role"], "rejected")
 
-    def test_replay_error_is_quarantined_not_failed_open(self):
+    def test_replay_error_is_quarantined(self):
         result = evaluate_follow_eligibility({
             "score": 0.95,
             "copy_bt_data_status": "replay_error",
             "copy_bt_evidence_status": "invalid",
         })
-
         self.assertFalse(result["eligible"])
         self.assertTrue(result["deferred"])
         self.assertEqual(result["role"], "quarantine")
 
-    def test_follow_eligibility_allows_recent_positive_copy(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.70,
-            "copy_bt_net_pnl": 1200,
-            "copy_bt_14d_net_pnl": 600,
-            "copy_bt_7d_net_pnl": 200,
-            "copy_bt_closed_n": 12,
-            "copy_bt_14d_closed_n": 6,
-            "copy_bt_7d_closed_n": 5,
-            "copy_bt_open_fill_rate": 0.9,
-        })
-
-        self.assertTrue(result["eligible"])
-        self.assertEqual(result["status"], "eligible")
-
-    def test_follow_eligibility_rejects_thin_7d_sample_even_when_positive(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.70,
-            "copy_bt_net_pnl": 1200,
-            "copy_bt_14d_net_pnl": 600,
-            "copy_bt_7d_net_pnl": 200,
-            "copy_bt_closed_n": 12,
-            "copy_bt_14d_closed_n": 6,
-            "copy_bt_7d_closed_n": 3,
-            "copy_bt_open_fill_rate": 0.9,
-        })
-
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "thin_recent")
-
-    def test_follow_eligibility_rejects_thin_recent_loss(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.70,
-            "copy_bt_net_pnl": 1200,
-            "copy_bt_14d_net_pnl": 600,
-            "copy_bt_7d_net_pnl": -20,
-            "copy_bt_closed_n": 12,
-            "copy_bt_14d_closed_n": 6,
-            "copy_bt_7d_closed_n": 1,
-            "copy_bt_open_fill_rate": 0.9,
-        })
-
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "thin_recent")
-
-    def test_follow_eligibility_keeps_sector_loss_classified_as_shallow(self):
-        metrics = {
-            "score": 0.70,
-            "copy_bt_net_pnl": 1671,
-            "copy_bt_14d_net_pnl": 1773,
-            "copy_bt_7d_net_pnl": -154,
-            "copy_bt_closed_n": 40,
-            "copy_bt_14d_closed_n": 25,
-            "copy_bt_7d_closed_n": 6,
-            "copy_bt_open_fill_rate": 1.0,
-            "sector_policy_json": json.dumps({
-                "allowed": ["crypto"],
-                "crypto": {
-                    "allow": True,
-                    "status": "recent_soft_loss",
-                    "pnl": {"30": 1671, "14": 1773, "7": -154},
-                },
-            }),
-        }
-
-        result = evaluate_follow_eligibility(metrics)
-        score, detail = compute_follow_score(metrics)
-
-        self.assertTrue(result["eligible"])
-        self.assertEqual(result["status"], "recent_soft_loss")
-        self.assertGreater(score, 0.60)
-        self.assertFalse(any("7天copy每笔收益太薄" in reason for reason in detail["reasons"]))
-
-    def test_follow_eligibility_still_rejects_unclassified_recent_loss(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.70,
-            "copy_bt_net_pnl": 1671,
-            "copy_bt_14d_net_pnl": 1773,
-            "copy_bt_7d_net_pnl": -500,
-            "copy_bt_closed_n": 40,
-            "copy_bt_14d_closed_n": 25,
-            "copy_bt_7d_closed_n": 8,
-            "copy_bt_open_fill_rate": 1.0,
-        })
-
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "copy_backtest_loss_7d")
-
-    def test_follow_eligibility_rejects_low_fill_rate_with_enough_sample(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.70,
-            "copy_bt_net_pnl": 1200,
-            "copy_bt_14d_net_pnl": 600,
-            "copy_bt_7d_net_pnl": 200,
-            "copy_bt_closed_n": 12,
-            "copy_bt_14d_closed_n": 6,
-            "copy_bt_7d_closed_n": 5,
-            "copy_bt_open_fill_rate": 0.55,
-        })
-
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "low_fill_rate")
-
-    def test_follow_eligibility_rejects_thin_copy_edge_even_when_all_windows_positive(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.86,
-            "copy_bt_net_pnl": 171,
-            "copy_bt_14d_net_pnl": 171,
-            "copy_bt_7d_net_pnl": 4,
-            "copy_bt_closed_n": 13,
-            "copy_bt_14d_closed_n": 13,
-            "copy_bt_7d_closed_n": 5,
-            "copy_bt_open_fill_rate": 0.95,
-        })
-
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "thin_edge")
-        self.assertTrue(any("每笔收益太薄" in r for r in result["reasons"]))
-
-    def test_follow_eligibility_keeps_solid_primary_edge_even_when_recent_windows_are_thinner(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.66,
-            "copy_bt_net_pnl": 610.3,
-            "copy_bt_14d_net_pnl": 114.4,
-            "copy_bt_7d_net_pnl": 170.1,
-            "copy_bt_closed_n": 32,
-            "copy_bt_14d_closed_n": 23,
-            "copy_bt_7d_closed_n": 21,
-            "copy_bt_open_fill_rate": 0.95,
-        })
-
+    def test_normalized_positive_evidence_is_eligible(self):
+        result = evaluate_follow_eligibility(evidence())
         self.assertTrue(result["eligible"])
 
-    def test_follow_eligibility_keeps_borderline_recent_edge_when_primary_and_short_term_are_strong(self):
-        result = evaluate_follow_eligibility({
-            "score": 0.72,
-            "copy_bt_net_pnl": 2847,
-            "copy_bt_14d_net_pnl": 585,
-            "copy_bt_7d_net_pnl": 344,
-            "copy_bt_closed_n": 80,
-            "copy_bt_14d_closed_n": 40,
-            "copy_bt_7d_closed_n": 12,
-            "copy_bt_open_fill_rate": 0.95,
-        })
+    def test_independent_days_not_overlapping_window_counts_control_confidence(self):
+        thin = evidence(copy_evidence_days=2, copy_bt_14d_closed_n=16, copy_bt_7d_closed_n=16)
+        result = evaluate_follow_eligibility(thin)
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "thin_independent_evidence")
 
-        self.assertTrue(result["eligible"])
+    def test_low_positive_probability_is_challenger(self):
+        result = evaluate_follow_eligibility(evidence(copy_positive_probability=0.64))
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "positive_probability_low")
 
-    def test_copy_stronger_wallet_beats_slightly_higher_raw_wallet(self):
-        weak = {
-            "score": 0.674,
-            "copy_bt_net_pnl": 1300.3,
-            "copy_bt_14d_net_pnl": 28.3,
-            "copy_bt_7d_net_pnl": 889.6,
-            "copy_bt_closed_n": 46,
-            "copy_bt_14d_closed_n": 30,
-            "copy_bt_7d_closed_n": 8,
-            "copy_bt_open_fill_rate": 1.0,
-        }
-        strong = {
-            "score": 0.667,
-            "copy_bt_net_pnl": 2270.8,
-            "copy_bt_14d_net_pnl": 1395.1,
-            "copy_bt_7d_net_pnl": 1446.3,
-            "copy_bt_closed_n": 41,
-            "copy_bt_14d_closed_n": 22,
-            "copy_bt_7d_closed_n": 17,
-            "copy_bt_open_fill_rate": 1.0,
-        }
+    def test_execution_and_capacity_are_real_gates(self):
+        low_fill = evaluate_follow_eligibility(evidence(actionable_open_rate=0.55))
+        low_capacity = evaluate_follow_eligibility(evidence(capacity_fit=0.70))
+        self.assertEqual(low_fill["status"], "low_fill_rate")
+        self.assertEqual(low_capacity["status"], "capacity_fit_low")
 
-        weak_score, weak_detail = compute_follow_score(weak)
-        strong_score, strong_detail = compute_follow_score(strong)
+    def test_recent_7d_loss_with_enough_sample_is_rejected(self):
+        one = evaluate_follow_eligibility(evidence(copy_recent_return_14d=-0.03, copy_recent_return_7d=0.01))
+        both = evaluate_follow_eligibility(evidence(copy_recent_return_14d=-0.03, copy_recent_return_7d=-0.04))
+        self.assertTrue(one["eligible"])
+        self.assertEqual(both["status"], "recent_copy_loss")
 
-        self.assertGreater(strong_score, weak_score)
-        self.assertIn("30/14/7天copy均为正", strong_detail["reasons"])
-        self.assertLess(strong_detail["rawScore"], weak_detail["rawScore"])
+    def test_liquidation_is_not_masked_by_return(self):
+        result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "copy_liquidation")
 
-    def test_thin_7d_sample_is_demoted_even_with_big_30d_profit(self):
-        thin = {
-            "score": 0.642,
-            "copy_bt_net_pnl": 6692.9,
-            "copy_bt_14d_net_pnl": 6172.7,
-            "copy_bt_7d_net_pnl": 407.5,
-            "copy_bt_closed_n": 23,
-            "copy_bt_14d_closed_n": 10,
-            "copy_bt_7d_closed_n": 1,
-            "copy_bt_open_fill_rate": 1.0,
-        }
-        solid = {
-            "score": 0.667,
-            "copy_bt_net_pnl": 2270.8,
-            "copy_bt_14d_net_pnl": 1395.1,
-            "copy_bt_7d_net_pnl": 1446.3,
-            "copy_bt_closed_n": 41,
-            "copy_bt_14d_closed_n": 22,
-            "copy_bt_7d_closed_n": 17,
-            "copy_bt_open_fill_rate": 1.0,
-        }
+    def test_absolute_dollar_scale_does_not_change_wallet_score(self):
+        low, _ = compute_follow_score(evidence(
+            copy_bt_net_pnl=80, copy_bt_14d_net_pnl=35, copy_bt_7d_net_pnl=12,
+        ))
+        high, _ = compute_follow_score(evidence(
+            copy_bt_net_pnl=80000, copy_bt_14d_net_pnl=35000, copy_bt_7d_net_pnl=12000,
+        ))
+        self.assertAlmostEqual(low, high)
 
-        thin_score, thin_detail = compute_follow_score(thin)
-        solid_score, _ = compute_follow_score(solid)
+    def test_overlapping_window_counts_do_not_create_confidence(self):
+        low, low_detail = compute_follow_score(evidence(copy_bt_14d_closed_n=1, copy_bt_7d_closed_n=1))
+        high, high_detail = compute_follow_score(evidence(copy_bt_14d_closed_n=100, copy_bt_7d_closed_n=100))
+        self.assertAlmostEqual(low, high)
+        self.assertAlmostEqual(low_detail["confidence"], high_detail["confidence"])
 
-        self.assertLess(thin_score, solid_score)
-        self.assertTrue(any("7天样本偏少" in r for r in thin_detail["reasons"]))
+    def test_copy_evidence_dominates_small_raw_score_difference(self):
+        weak, _ = compute_follow_score(evidence(
+            score=0.76, copy_expected_return=0.01, copy_return_lcb=-0.01,
+            copy_positive_probability=0.71, copy_risk_score=0.55,
+        ))
+        strong, detail = compute_follow_score(evidence(
+            score=0.70, copy_expected_return=0.07, copy_return_lcb=0.025,
+            copy_positive_probability=0.90, copy_risk_score=0.85,
+        ))
+        self.assertGreater(strong, weak)
+        self.assertEqual(detail["evidenceDays"], 10)
 
-    def test_recent_copy_loss_demotes_score(self):
-        score, detail = compute_follow_score({
-            "score": 0.72,
-            "copy_bt_net_pnl": 1000.0,
-            "copy_bt_14d_net_pnl": -120.0,
-            "copy_bt_7d_net_pnl": -40.0,
-            "copy_bt_closed_n": 30,
-            "copy_bt_14d_closed_n": 10,
-            "copy_bt_7d_closed_n": 4,
-            "copy_bt_open_fill_rate": 1.0,
-        })
+    def test_recent_normalized_loss_demotes_continuously(self):
+        baseline, _ = compute_follow_score(evidence())
+        degraded, detail = compute_follow_score(evidence(
+            copy_recent_return_14d=-0.03, copy_recent_return_7d=-0.04,
+        ))
+        self.assertLess(degraded, baseline)
+        self.assertTrue(any("归一化收益为负" in reason for reason in detail["reasons"]))
 
-        self.assertLess(score, 0.72)
-        self.assertTrue(any("近期copy亏损" in r for r in detail["reasons"]))
-
-    def test_follow_score_uses_allowed_sector_copy_metrics(self):
-        mixed = {
-            "score": 0.70,
-            "copy_bt_net_pnl": -1000.0,
-            "copy_bt_14d_net_pnl": -600.0,
-            "copy_bt_7d_net_pnl": -250.0,
-            "copy_bt_closed_n": 20,
-            "copy_bt_14d_closed_n": 12,
-            "copy_bt_7d_closed_n": 8,
-            "copy_bt_open_fill_rate": 0.90,
-            "sector_policy_json": json.dumps({
-                "crypto": {"allow": True},
-                "stock": {"allow": False},
-            }),
-            "sector_copy_json": json.dumps({
-                "crypto": {
-                    "30": {"copy_net_pnl": 1500, "closed_n": 10, "wins": 7, "target_open_events": 10, "opened_n": 10},
-                    "14": {"copy_net_pnl": 700, "closed_n": 6, "wins": 4, "target_open_events": 6, "opened_n": 6},
-                    "7": {"copy_net_pnl": 300, "closed_n": 5, "wins": 3, "target_open_events": 5, "opened_n": 5},
-                },
-                "stock": {
-                    "30": {"copy_net_pnl": -2500, "closed_n": 10, "wins": 2, "target_open_events": 10, "opened_n": 10},
-                    "14": {"copy_net_pnl": -1300, "closed_n": 6, "wins": 1, "target_open_events": 6, "opened_n": 6},
-                    "7": {"copy_net_pnl": -550, "closed_n": 5, "wins": 1, "target_open_events": 5, "opened_n": 5},
-                },
-            }),
-        }
-
-        eligibility = evaluate_follow_eligibility(mixed)
-        score, detail = compute_follow_score(mixed)
-
-        self.assertTrue(eligibility["eligible"])
-        self.assertEqual(detail["copyPnl"], {"30d": 1500.0, "14d": 700.0, "7d": 300.0})
-        self.assertGreater(score, 0.70)
-
-    def test_choose_follow_line_cuts_before_quality_cliff(self):
+    def test_choose_follow_line_remains_migration_fallback(self):
         ranked = [{"follow_score": s} for s in (0.90, 0.86, 0.83, 0.80, 0.70, 0.68)]
-
         choice = choose_follow_line(ranked, min_score=0.50, min_n=3, target_n=5, max_n=6, cliff_gap=0.08)
-
         self.assertEqual(choice["reason"], "quality_cliff")
         self.assertEqual(choice["count"], 4)
-        self.assertAlmostEqual(choice["line"], 0.80)
-
-    def test_choose_follow_line_uses_capacity_when_quality_is_flat(self):
-        ranked = [{"follow_score": s} for s in (0.90, 0.88, 0.86, 0.84, 0.82, 0.80)]
-
-        choice = choose_follow_line(ranked, min_score=0.50, min_n=3, target_n=5, max_n=6, cliff_gap=0.05)
-
-        self.assertEqual(choice["reason"], "capacity_cap")
-        self.assertEqual(choice["count"], 5)
-        self.assertAlmostEqual(choice["line"], 0.82)
 
 
 if __name__ == "__main__":

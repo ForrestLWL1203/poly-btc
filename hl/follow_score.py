@@ -13,7 +13,7 @@ from typing import Mapping
 
 from . import config
 from .copy_policy import load_copy_policy
-from .sector import apply_allowed_sector_copy_metrics, parse_json_obj
+from .sector import apply_allowed_sector_copy_metrics
 
 
 def _num(v, default: float = 0.0) -> float:
@@ -32,97 +32,10 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
-def _pnl_signal(pnl: float, scale: float) -> float:
-    """Smooth copy PnL into [-1, 1] without letting one huge win dominate."""
-    return math.tanh(pnl / scale) if scale > 0 else 0.0
-
-
 def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
     return any(metrics.get(k) is not None for k in (
-        "copy_bt_net_pnl", "copy_bt_14d_net_pnl", "copy_bt_7d_net_pnl",
-    )) or c30 > 0 or c14 > 0 or c7 > 0
-
-
-def _sector_recent_loss_is_soft(metrics: Mapping) -> bool:
-    policy = parse_json_obj(metrics.get("sector_policy_json"))
-    allowed = policy.get("allowed") if isinstance(policy.get("allowed"), list) else []
-    negative_items = []
-    for sector in allowed:
-        item = policy.get(sector)
-        if not isinstance(item, dict):
-            continue
-        pnl = item.get("pnl") if isinstance(item.get("pnl"), dict) else {}
-        if _num(pnl.get("7")) < 0:
-            negative_items.append(item)
-    return bool(negative_items) and all(
-        item.get("status") in {"recent_soft_loss", "recent_degradation_watch"}
-        for item in negative_items
-    )
-
-
-def _copy_edge_reasons(
-    p30: float,
-    c30: int,
-    p14: float,
-    c14: int,
-    p7: float,
-    c7: int,
-    *,
-    min_closed30: int,
-    min_closed14: int,
-    min_closed7: int,
-    min_pnl_per_closed: float,
-) -> list[str]:
-    if min_pnl_per_closed <= 0:
-        return []
-    reasons = []
-    for label, pnl, closed, min_closed in (
-        ("30天", p30, c30, min_closed30),
-        ("14天", p14, c14, min_closed14),
-        ("7天", p7, c7, min_closed7),
-    ):
-        if closed < min_closed:
-            continue
-        avg = pnl / closed if closed else 0.0
-        if avg < min_pnl_per_closed:
-            reasons.append(f"{label}copy每笔收益太薄(${avg:.1f}/笔 < ${min_pnl_per_closed:.0f})")
-    return reasons
-
-
-def _hard_thin_edge_reasons(
-    p30: float,
-    c30: int,
-    p14: float,
-    c14: int,
-    p7: float,
-    c7: int,
-    *,
-    min_closed30: int,
-    min_closed14: int,
-    min_closed7: int,
-    min_pnl_per_closed: float,
-) -> list[str]:
-    """Hard-reject only persistently thin copy edge.
-
-    A thin 14d/7d window alone can be regime noise. The primary 30d replay must
-    be thin, then either 14d confirms the same thinness or 7d is near dust.
-    """
-    if min_pnl_per_closed <= 0 or c30 < min_closed30:
-        return []
-    avg30 = p30 / c30 if c30 else 0.0
-    if avg30 >= min_pnl_per_closed:
-        return []
-    reasons = [f"30天copy每笔收益太薄(${avg30:.1f}/笔 < ${min_pnl_per_closed:.0f})"]
-    avg14 = p14 / c14 if c14 else 0.0
-    if c14 >= min_closed14 and avg14 < min_pnl_per_closed:
-        reasons.append(f"14天copy每笔收益太薄(${avg14:.1f}/笔 < ${min_pnl_per_closed:.0f})")
-        return reasons
-    dust_floor = max(3.0, min_pnl_per_closed * 0.20)
-    avg7 = p7 / c7 if c7 else 0.0
-    if c7 >= min_closed7 and avg7 < dust_floor:
-        reasons.append(f"7天copy接近无边际(${avg7:.1f}/笔 < ${dust_floor:.0f})")
-        return reasons
-    return []
+        "copy_expected_return", "copy_return_lcb", "copy_positive_probability",
+    )) and c30 > 0
 
 
 @dataclass(frozen=True)
@@ -138,28 +51,30 @@ def evaluate_follow_eligibility(
     min_closed14: int | None = None,
     min_closed7: int | None = None,
     min_open_fill_rate: float | None = None,
+    min_expected_return: float | None = None,
+    min_evidence_days: int | None = None,
     min_pnl_per_closed=None,
 ) -> dict:
-    """Classify whether an active profile is eligible for real follow-line selection.
-
-    The profile gate remains the binary quality gate. This layer is deliberately
-    narrower: it keeps missing/thin-but-not-yet-disproven wallets visible, while
-    ensuring clear copyability failures cannot sit above the automatic follow
-    line just because their raw profile score is high.
-    """
+    """Classify Core eligibility from normalized, non-overlapping evidence."""
     policy = load_copy_policy()
     min_closed30 = policy.min_closed_30d if min_closed30 is None else int(min_closed30)
     min_closed14 = policy.min_closed_14d if min_closed14 is None else int(min_closed14)
     min_closed7 = policy.min_closed_7d if min_closed7 is None else int(min_closed7)
     min_open_fill_rate = policy.min_actionable_open_rate if min_open_fill_rate is None else float(min_open_fill_rate)
+    min_expected_return = (
+        policy.min_expected_margin_return if min_expected_return is None else float(min_expected_return)
+    )
+    min_evidence_days = min(5, min_closed30) if min_evidence_days is None else int(min_evidence_days)
     metrics = apply_allowed_sector_copy_metrics(metrics)
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
     c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
     c7 = int(_num(metrics.get("copy_bt_7d_closed_n")))
-    p30 = _num(metrics.get("copy_bt_net_pnl"))
-    p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
-    p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
-    soft_recent_loss = _sector_recent_loss_is_soft(metrics)
+    expected_return = metrics.get("copy_expected_return")
+    return_lcb = metrics.get("copy_return_lcb")
+    positive_probability = metrics.get("copy_positive_probability")
+    evidence_days = int(_num(metrics.get("copy_evidence_days")))
+    recent14 = metrics.get("copy_recent_return_14d")
+    recent7 = metrics.get("copy_recent_return_7d")
     data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
     if data_status and data_status not in {"valid", "ok"}:
@@ -174,194 +89,163 @@ def evaluate_follow_eligibility(
         return {
             "eligible": False,
             "status": "no_copy_evidence" if evidence_status != "invalid" else "copy_data_error",
-            "role": "challenger" if evidence_status != "invalid" else "quarantine",
+            "role": "rejected" if evidence_status != "invalid" else "quarantine",
             "deferred": evidence_status == "invalid",
-            "reasons": ["缺少有效copy回测证据，暂留挑战池"],
+            "reasons": ["缺少有效copy回测证据，资格阶段排除"],
         }
     if not _has_copy_evidence(metrics, c30, c14, c7):
         return {
-            "eligible": True,
-            "status": "no_copy_evidence",
-            "reasons": ["缺少copy回测证据"],
+            "eligible": False,
+            "status": "normalized_evidence_missing",
+            "role": "rejected",
+            "reasons": ["缺少保证金归一化的非重叠copy证据"],
         }
-
-    recent_recovered = p14 > 0 and c14 >= min_closed14 and p7 > 0 and c7 >= min_closed7
-    if p14 < 0 and c14 >= min_closed14:
+    if c30 < min_closed30 or evidence_days < min_evidence_days:
         return {
             "eligible": False,
-            "status": "copy_backtest_loss_14d",
-            "reasons": [f"14天copy亏损且样本足够({c14}笔)"],
+            "status": "thin_independent_evidence",
+            "role": "rejected",
+            "reasons": [f"独立证据不足({c30}笔/{evidence_days}天)"],
         }
-    if p7 < 0 and c7 >= min_closed7 and not soft_recent_loss:
+    if _num(expected_return) < min_expected_return:
         return {
             "eligible": False,
-            "status": "copy_backtest_loss_7d",
-            "reasons": [f"7天copy亏损且样本足够({c7}笔)"],
+            "status": "thin_copy_edge",
+            "role": "rejected",
+            "reasons": [f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%经济底线"],
         }
-    if p30 <= 0 and c30 >= min_closed30 and not recent_recovered:
+    if _num(return_lcb) < policy.min_return_lcb:
         return {
             "eligible": False,
-            "status": "copy_backtest_loss",
-            "reasons": [f"30天copy亏损且近期未充分恢复({c30}笔)"],
+            "status": "copy_return_lcb_low",
+            "role": "rejected",
+            "reasons": ["按日Bootstrap收益下置信界仍为负"],
         }
-    open_fill_rate = metrics.get("copy_bt_open_fill_rate")
-    if open_fill_rate is not None and c30 >= min_closed30 and _num(open_fill_rate, 1.0) < min_open_fill_rate:
+    if _num(positive_probability, 0.5) < policy.entry_positive_probability:
+        return {
+            "eligible": False,
+            "status": "positive_probability_low",
+            "role": "rejected",
+            "reasons": [f"未来copy盈利概率低于{policy.entry_positive_probability * 100:.0f}%"],
+        }
+    execution = metrics.get("execution_score")
+    open_fill_rate = metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate"))
+    capacity = metrics.get("capacity_fit")
+    if open_fill_rate is not None and _num(open_fill_rate, 1.0) < min_open_fill_rate:
         return {
             "eligible": False,
             "status": "low_fill_rate",
+            "role": "rejected",
             "reasons": [f"开仓跟随率低于{min_open_fill_rate * 100:.0f}%"],
         }
-    edge_floor = (
-        float(getattr(config, "AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED", 15.0))
-        if min_pnl_per_closed is None
-        else float(min_pnl_per_closed)
-    )
-    edge_reasons = _hard_thin_edge_reasons(
-        p30, c30, p14, c14, p7, c7,
-        min_closed30=min_closed30,
-        min_closed14=min_closed14,
-        min_closed7=min_closed7,
-        min_pnl_per_closed=edge_floor,
-    )
-    if edge_reasons:
+    if capacity is not None and _num(capacity) < policy.min_capacity_fit:
         return {
             "eligible": False,
-            "status": "thin_edge",
-            "reasons": edge_reasons,
+            "status": "capacity_fit_low",
+            "role": "rejected",
+            "reasons": [f"资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%"],
         }
-
-    thin_reasons = []
-    if c14 < min_closed14:
-        thin_reasons.append(f"14天样本偏少({c14}笔)")
-    if c7 < min_closed7:
-        thin_reasons.append(f"7天样本偏少({c7}笔)")
-    if p14 < 0 and c14 > 0:
-        thin_reasons.append("14天copy亏损但样本不足")
-    if p7 < 0 and c7 > 0 and not soft_recent_loss:
-        thin_reasons.append("7天copy亏损但样本不足")
-    if thin_reasons:
+    if int(_num(metrics.get("copy_bt_liquidations"))) > 0:
         return {
             "eligible": False,
-            "status": "thin_recent",
-            "reasons": thin_reasons,
+            "status": "copy_liquidation",
+            "role": "rejected",
+            "reasons": ["回放出现爆仓"],
+        }
+    if recent7 is not None and c7 >= min_closed7 and _num(recent7) <= 0.0:
+        return {
+            "eligible": False,
+            "status": "recent_copy_loss",
+            "role": "rejected",
+            "reasons": ["7天有效样本的保证金净收益不为正"],
         }
     return {
         "eligible": True,
-        "status": "recent_soft_loss" if soft_recent_loss else "eligible",
-        "reasons": ["7天copy浅亏，仍在自身历史波动范围" if soft_recent_loss else "copy回测证据足够"],
+        "status": "eligible",
+        "returnLcb": return_lcb,
+        "executionScore": execution,
+        "reasons": ["非重叠copy证据、执行与容量均合格"],
     }
 
 
 def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
-    """Return `(score01, detail)` for final follow ranking.
-
-    Missing copy-backtest data intentionally falls back to raw score so old or
-    partially seeded DBs keep their current behaviour until the next scan fills
-    the replay fields.
-    """
+    """Rank copyability without absolute-dollar PnL or overlapping-window confidence."""
     metrics = apply_allowed_sector_copy_metrics(metrics)
     raw = _clamp(_num(metrics.get("score")))
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
     c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
     c7 = int(_num(metrics.get("copy_bt_7d_closed_n")))
-    p30 = _num(metrics.get("copy_bt_net_pnl"))
-    p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
-    p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
-    soft_recent_loss = _sector_recent_loss_is_soft(metrics)
-
     has_copy = _has_copy_evidence(metrics, c30, c14, c7)
     if not has_copy:
-        return raw, {
+        return raw * 0.35, {
             "rawScore": raw,
             "copyScore": None,
             "confidence": 0.0,
             "copyPnl": {"30d": None, "14d": None, "7d": None},
             "closedN": {"30d": c30, "14d": c14, "7d": c7},
-            "reasons": ["暂无copy回测,使用原始评分"],
+            "reasons": ["暂无归一化copy证据，仅保留Raw先验"],
         }
-
-    s30 = _pnl_signal(p30, 3000.0)
-    s14 = _pnl_signal(p14, 1800.0)
-    s7 = _pnl_signal(p7, 800.0)
-    pnl_signal = 0.35 * s30 + 0.40 * s14 + 0.25 * s7
-    copy_score = _clamp(0.5 + 0.5 * pnl_signal)
-
-    confidence = (
-        0.25 * _clamp(c30 / 20.0) +
-        0.45 * _clamp(c14 / 14.0) +
-        0.30 * _clamp(c7 / 6.0)
+    expected = _num(metrics.get("copy_expected_return"))
+    lcb = _num(metrics.get("copy_return_lcb"))
+    probability = _num(metrics.get("copy_positive_probability"), 0.5)
+    risk = _clamp(_num(metrics.get("copy_risk_score"), 0.5))
+    execution = metrics.get("execution_score")
+    if execution is None:
+        execution = (
+            _num(metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")), 0.0)
+            + _num(metrics.get("capacity_fit"), 0.0)
+        ) / 2.0
+    execution = _clamp(_num(execution))
+    evidence_days = int(_num(metrics.get("copy_evidence_days")))
+    confidence = 0.55 * _clamp(c30 / 20.0) + 0.45 * _clamp(evidence_days / 10.0)
+    edge_score = _clamp(0.5 + 0.5 * math.tanh(expected / 0.05))
+    lcb_score = _clamp(0.5 + 0.5 * math.tanh(lcb / 0.03))
+    probability_score = _clamp((probability - 0.5) / 0.5)
+    copy_score = (
+        0.25 * edge_score + 0.25 * lcb_score + 0.20 * probability_score
+        + 0.15 * risk + 0.15 * execution
     )
-    score = raw * (0.55 - 0.20 * confidence) + copy_score * (0.45 + 0.20 * confidence)
-
-    reasons = []
-    if p30 > 0 and p14 > 0 and p7 > 0:
-        score += 0.03
-        reasons.append("30/14/7天copy均为正")
-    if c7 < 5:
-        score -= 0.12
-        reasons.append(f"7天样本偏少({c7}笔)")
-    if c14 < 5:
-        score -= 0.05
-        reasons.append(f"14天样本偏少({c14}笔)")
-    if c30 < 7:
-        score -= 0.04
-        reasons.append(f"30天样本偏少({c30}笔)")
-    if p14 < 0 and c14 >= 4:
-        score -= 0.12
-        reasons.append("近期copy亏损(14天)")
-    if p7 < 0 and c7 >= 3:
-        score -= 0.04 if soft_recent_loss else 0.08
-        reasons.append("近期copy浅亏(7天)" if soft_recent_loss else "近期copy亏损(7天)")
-    if p30 < 0 and c30 >= 7:
-        score -= 0.10
-        reasons.append("30天copy亏损")
-    edge_reasons = _copy_edge_reasons(
-        p30, c30, p14, c14, p7, c7,
-        min_closed30=7,
-        min_closed14=5,
-        min_closed7=5,
-        min_pnl_per_closed=float(getattr(config, "AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED", 15.0)),
-    )
-    if soft_recent_loss:
-        # The negative 7d window is already represented in the blended copy
-        # score and the shallow-loss penalty above. Treating the same window as
-        # thin edge would double-charge one piece of evidence by another 12%.
-        edge_reasons = [reason for reason in edge_reasons if not reason.startswith("7天")]
-    if edge_reasons:
-        score -= 0.12
-        reasons.extend(edge_reasons)
-
-    open_fill_rate = metrics.get("copy_bt_open_fill_rate")
-    if open_fill_rate is not None:
-        fill_rate = _num(open_fill_rate)
-        if fill_rate < 0.75:
-            score -= 0.06
-            reasons.append(f"开仓跟随率偏低({fill_rate * 100:.0f}%)")
-
+    shrunk_copy = 0.5 + confidence * (copy_score - 0.5)
+    activity = _clamp(_num(metrics.get("open_probability_48h"), 0.0))
+    score = 0.15 * raw + 0.75 * shrunk_copy + 0.10 * activity
+    reasons = [
+        f"预期保证金收益{expected * 100:+.1f}%",
+        f"LCB {lcb * 100:+.1f}%",
+        f"盈利概率{probability * 100:.0f}%",
+        f"独立证据{evidence_days}天/{c30}笔",
+    ]
+    recent14 = metrics.get("copy_recent_return_14d")
+    recent7 = metrics.get("copy_recent_return_7d")
+    if recent14 is not None and _num(recent14) < 0:
+        score -= min(0.08, abs(_num(recent14)) * 0.5)
+        reasons.append("14天归一化收益为负")
+    if recent7 is not None and _num(recent7) < 0:
+        score -= min(0.06, abs(_num(recent7)) * 0.4)
+        reasons.append("7天归一化收益为负")
     liqs = int(_num(metrics.get("copy_bt_liquidations")))
     if liqs > 0:
         score -= min(0.15, 0.05 * liqs)
         reasons.append(f"copy爆仓{liqs}次")
-
-    fee_drag = _num(metrics.get("copy_bt_fee_drag"))
-    gross_abs = abs(p30) + abs(fee_drag)
-    if gross_abs > 0 and fee_drag / gross_abs > 0.35:
-        score -= 0.04
-        reasons.append("手续费拖累偏高")
-
     score = _clamp(score)
-    if not reasons:
-        reasons.append("copy表现与原始评分基本一致")
-
     return score, {
         "rawScore": raw,
         "copyScore": copy_score,
         "confidence": confidence,
-        "copyPnl": {"30d": p30, "14d": p14, "7d": p7},
+        "copyPnl": {
+            "30d": metrics.get("copy_bt_net_pnl"),
+            "14d": metrics.get("copy_bt_14d_net_pnl"),
+            "7d": metrics.get("copy_bt_7d_net_pnl"),
+        },
         "closedN": {"30d": c30, "14d": c14, "7d": c7},
-        "openFillRate": _num(open_fill_rate, default=1.0) if open_fill_rate is not None else None,
+        "expectedReturn": expected,
+        "returnLcb": lcb,
+        "positiveProbability": probability,
+        "evidenceDays": evidence_days,
+        "riskScore": risk,
+        "executionScore": execution,
+        "openFillRate": metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")),
         "liquidations": liqs,
-        "feeDrag": fee_drag,
+        "feeDrag": metrics.get("copy_bt_fee_drag"),
         "reasons": reasons,
     }
 

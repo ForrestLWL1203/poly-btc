@@ -93,12 +93,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "times_active": 1,
                 }
                 cols = storage.PROFILE_COLS.split(",")
-                db_.execute(
-                    f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                    f"VALUES ({','.join('?' for _ in cols)})",
-                    [row.get(col) for col in cols],
-                )
-                db_.commit()
+                with scanner._db_lock:
+                    db_.execute(
+                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
+                        f"VALUES ({','.join('?' for _ in cols)})",
+                        [row.get(col) for col in cols],
+                    )
+                    db_.commit()
                 return "active", "ok", row, False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
@@ -132,18 +133,23 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "evidence_status": "qualified", "last_copyable_open_ms": now_ms,
                     "copy_bt_closed_n": 12, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 8,
                     "copy_positive_probability": 0.85, "copy_expected_return": 0.05,
+                    "copy_return_lcb": 0.015, "copy_return_volatility": 0.08,
+                    "copy_evidence_days": 10, "copy_recent_return_14d": 0.04,
+                    "copy_recent_return_7d": 0.03, "copy_risk_score": 0.85,
+                    "execution_score": 0.95, "open_probability_48h": 0.8,
                     "copy_bt_open_fill_rate": 0.95, "actionable_open_rate": 0.95,
                     "capacity_fit": 0.95, "copy_bt_net_pnl": 800,
                     "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 200,
                     "times_seen": 1, "times_active": 1,
                 }
                 cols = storage.PROFILE_COLS.split(",")
-                db_.execute(
-                    f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                    f"VALUES ({','.join('?' for _ in cols)})",
-                    [row.get(col) for col in cols],
-                )
-                db_.commit()
+                with scanner._db_lock:
+                    db_.execute(
+                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
+                        f"VALUES ({','.join('?' for _ in cols)})",
+                        [row.get(col) for col in cols],
+                    )
+                    db_.commit()
                 return "active", "ok", row, False
 
             metrics = scanner.selection.PortfolioMetrics(
@@ -198,12 +204,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "times_seen": 1, "times_active": 1,
                 }
                 cols = storage.PROFILE_COLS.split(",")
-                db_.execute(
-                    f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                    f"VALUES ({','.join('?' for _ in cols)})",
-                    [row.get(col) for col in cols],
-                )
-                db_.commit()
+                with scanner._db_lock:
+                    db_.execute(
+                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
+                        f"VALUES ({','.join('?' for _ in cols)})",
+                        [row.get(col) for col in cols],
+                    )
+                    db_.commit()
                 return "active", "ok", row, False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \

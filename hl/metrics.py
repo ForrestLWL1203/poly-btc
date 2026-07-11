@@ -183,11 +183,8 @@ def gates_structural(m: dict, p) -> tuple:
     e.g. a pure-hold trend trader) — judged on open positions in gates_state instead."""
     if m["perp_frac"] < p.min_perp:
         return False, "spot_dominant"                          # not copyable enough
-    # v10 有效性硬闸: 14天窗口内战绩太少 → 无从评判其胜率/盈亏比/厚度. 取消旧的"趋势豁免"(纯持有一个浮盈仓就放行)
-    # 漏洞 —— 那类 0 战绩钱包正是尾巴主体. 5天/7回合 ≈ 0.5单/天,砍尾不误伤好钱包(数据校准).
-    if (m.get("active_days") or 0) < getattr(p, "evidence_min_days", config.EVIDENCE_MIN_DAYS) \
-            or (m.get("n_trades") or 0) < getattr(p, "evidence_min_trades", config.EVIDENCE_MIN_TRADES):
-        return False, "insufficient_evidence"
+    # Sample depth and trading frequency are continuous evidence.  They decide
+    # Challenger/Core confidence later; they are not structural uncopyability.
     if (m.get("n_trades") or 0) > 0:                           # structure from closed round-trips
         if m["median_eps"] > p.max_daily_eps:
             return False, "bot_frequency"                      # mid-freq OK; HFT/MM excluded
@@ -217,34 +214,13 @@ def gates_structural(m: dict, p) -> tuple:
 
 
 def gates_state(m: dict, now_ms: int, p) -> tuple:
-    """STATE eligibility — uses LIVE positions (open_*) + realized+unrealized performance. This is where
-    a held-position trader is treated as ACTIVE (not 'inactive'), profit is judged on realized+unrealized
-    (so a 扛单 carrying deep bags reads as not-profitable while a trend trader's winning holds count),
-    and a low-frequency wallet is kept when it holds a real WINNING position."""
-    # A real open position remains active even when it is flat or only trivially +/-; the old proxy used
-    # losing bags or positive unrealized PnL and therefore treated a flat live position as inactivity.
-    has_open = (m.get("open_position_count") or 0) > 0
-    if "open_position_count" not in m:  # migration compatibility for profiles not refreshed by vNext yet
-        has_open = (m.get("bag_count") or 0) > 0 or abs(m.get("open_win_frac") or 0.0) > 1e-9
-    trend = (m.get("open_win_frac") or 0.0) >= config.TREND_OPEN_MIN     # a real winning hold = trend value
-    if (now_ms - m["last_fill_ms"]) / DAY_MS > p.inactive_days and not has_open:
-        return False, "inactive"                               # no recent fills AND no live position
-    if (m.get("roi_total") if m.get("roi_total") is not None else m.get("net_pnl", 0)) <= 0:
-        return False, "not_profitable"                         # realized + UNREALIZED net loss (catches 扛单)
-    if config.GATE_REQUIRE_WINDOW_NET and m.get("net_pnl") is not None and m["net_pnl"] <= 0:
-        return False, "recent_window_loss"                      # recent copyable contract leg is losing
-    if m["activity_ratio"] < p.min_activity and not trend:     # low-freq noise — but a genuine trend
-        return False, "irregular"                              # holder (winning open) is exempt
-    # NOTE (v5 2026-06-30): the loss_pain/hold_skew/profit_conc/blow-up HARD gates were REMOVED — they
-    # double-counted and FOUGHT the composite score (a score-63 wallet vetoed while score-20 ones stayed).
-    # Those behaviours are now SMOOTH factors inside score(): 反噬→g_frag, 深度抗单/爆仓→g_deep. The only
-    # remaining hard floors are COPYABILITY (above) + NET>0 (below) — unambiguous, score-independent.
-    # LIFETIME / 30d realized net (the full-history datum). Skipped when absent (old profiles) so `regate`
-    # is safe BEFORE a re-profile populates net_life — the gate activates once the scan refetches.
-    if config.GATE_REQUIRE_LIFETIME_NET and m.get("net_life") is not None and m["net_life"] <= 0:
-        return False, "lifetime_loss"                          # 长期净亏 (#47: clean 14d, -123k over 287d)
-    if config.GATE_REQUIRE_30D_NET and m.get("net_30d") is not None and m["net_30d"] <= 0:
-        return False, "cooling_off"                            # 近30天净亏 — recent edge has decayed
+    """Hard state gates only.
+
+    Profit sign, recency, activity, sample depth, win rate and thin-but-real
+    edge are deliberately absent.  They remain visible in raw/Copy scores and
+    lifecycle evidence, preventing several overlapping hard cuts from erasing
+    a recoverable Challenger before OOS replay can judge it.
+    """
     if (m.get("hedge_ratio") or 0.0) > config.HEDGE_MAX_FRAC:  # perp shorts offset by spot longs of the
         return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
     #                                                            directional trade — copying the naked perp
@@ -257,19 +233,10 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
     _turn = m.get("pf_turnover")                               # 换手率 = 周成交量/权益
     if _turn is not None and _turn > getattr(p, "portfolio_max_turnover", config.PORTFOLIO_MAX_TURNOVER):
         return False, "hft_turnover"                           # HFT churner — unreplicable + fee-drag
-    _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")    # 边际bps = 30d 净利/成交量
-    if _mvlm and _mvlm > 0 and (_mpnl / _mvlm * 1e4) < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
-        return False, "thin_edge"                              # 手续费打平硬底线(10bp). 厚度交给 score 的 g_edge.
-    # v10: small_win_big_loss 硬闸移除 → 盈亏比改由 score 的 g_payoff 平滑降分(硬砍会误杀高胜率好钱包).
-    # v9 单日 windfall: 利润高度集中在一天 且 胜率不高 = 靠一笔偶然大赚撑着(亏损未覆盖,ROI 此刻还正 → 单列)。
-    if (m.get("profit_conc") or 0.0) >= getattr(p, "windfall_conc", config.WINDFALL_CONC) \
-            and (m.get("win_rate") or 0.0) < getattr(p, "windfall_win_max", config.WINDFALL_WIN_MAX):
-        return False, "windfall_dependent"
-    # v9 edge 衰减: 月 edge 达标但近一周 edge 已转负(且这周有真实成交量 = 在活跃地亏,非歇着)。月度光环掩盖近期反转。
-    if config.GATE_REQUIRE_WEEK_EDGE_POS:
-        _wvlm, _wpnl = m.get("pf_week_vlm"), m.get("pf_week_pnl")
-        if _wvlm and _wvlm > 0 and (_wpnl or 0.0) < 0:
-            return False, "edge_decayed"
+    _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")
+    if _mvlm and _mvlm > 0 and (_mpnl or 0.0) / _mvlm * 1e4 \
+            < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
+        return False, "thin_edge"  # 权威净Edge低于成本线，结构上不值得跟
     return True, "ok"
 
 
@@ -308,8 +275,10 @@ def score(m: dict) -> float:
     # Open-position evidence uses all real positions, never only losing bags (which created a reverse
     # incentive where carrying more losses raised the quality score).
     open_n = g("open_position_count")
-    act = (0.5 * min(1.0, (g("n_trades") + open_n) / config.SCORE_EV_TRADES)
-           + 0.5 * min(1.0, g("active_days") / config.SCORE_EV_DAYS))     # 活跃度(核心项:成交数 + 活跃天数)
+    actionable_opens = g("actionable_open_events_30d", g("open_events_30d", g("n_trades")))
+    open_days = g("open_days_30d", g("active_days"))
+    act = (0.5 * min(1.0, (actionable_opens + open_n) / config.SCORE_EV_TRADES)
+           + 0.5 * min(1.0, open_days / config.SCORE_EV_DAYS))
     wsum = config.SCORE_W_WIN + config.SCORE_W_ACT + config.SCORE_W_ROI or 1.0   # relative weights (UI-safe)
     core = (config.SCORE_W_WIN * win + config.SCORE_W_ACT * act + config.SCORE_W_ROI * roi_s) / wsum
 

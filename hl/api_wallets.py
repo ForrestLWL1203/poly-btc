@@ -57,6 +57,18 @@ def _score_breakdown(row):
         "copy_bt_14d_closed_n": _col(row, "copy_bt_14d_closed_n"),
         "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
         "copy_bt_7d_closed_n": _col(row, "copy_bt_7d_closed_n"),
+        "copy_expected_return": _col(row, "copy_expected_return"),
+        "copy_return_lcb": _col(row, "copy_return_lcb"),
+        "copy_return_volatility": _col(row, "copy_return_volatility"),
+        "copy_positive_probability": _col(row, "copy_positive_probability"),
+        "copy_evidence_days": _col(row, "copy_evidence_days"),
+        "copy_recent_return_14d": _col(row, "copy_recent_return_14d"),
+        "copy_recent_return_7d": _col(row, "copy_recent_return_7d"),
+        "copy_risk_score": _col(row, "copy_risk_score"),
+        "execution_score": _col(row, "execution_score"),
+        "actionable_open_rate": _col(row, "actionable_open_rate"),
+        "capacity_fit": _col(row, "capacity_fit"),
+        "open_probability_48h": _col(row, "open_probability_48h"),
         "sector_policy_json": _col(row, "sector_policy_json"),
         "sector_copy_json": _col(row, "sector_copy_json"),
     })
@@ -66,6 +78,12 @@ def _score_breakdown(row):
         "confidencePct": round((detail.get("confidence") or 0.0) * 100, 0),
         "copyPnl": detail.get("copyPnl"),
         "closedN": detail.get("closedN"),
+        "expectedReturnPct": round(detail.get("expectedReturn") * 100, 2) if detail.get("expectedReturn") is not None else None,
+        "returnLcbPct": round(detail.get("returnLcb") * 100, 2) if detail.get("returnLcb") is not None else None,
+        "positiveProbabilityPct": round(detail.get("positiveProbability") * 100, 1) if detail.get("positiveProbability") is not None else None,
+        "evidenceDays": detail.get("evidenceDays"),
+        "riskScore": score100(detail.get("riskScore")) if detail.get("riskScore") is not None else None,
+        "executionScore": score100(detail.get("executionScore")) if detail.get("executionScore") is not None else None,
         "sectorPolicy": _sector_policy(row),
         "reasons": detail.get("reasons") or [],
     }
@@ -147,7 +165,10 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
         "p.copy_bt_14d_closed_n,p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,"
         "p.sector_policy_json,p.data_status,p.evidence_status,p.profile_generation,p.evaluated_at,"
         "p.last_copyable_open_ms,p.actionable_open_rate,p.capacity_fit,p.oos_net_pnl,p.oos_max_drawdown,"
-        "p.oos_cvar95,p.selection_marginal_utility,l.week_roi,l.mon_roi,"
+        "p.oos_cvar95,p.selection_marginal_utility,p.copy_expected_return,p.copy_return_lcb,"
+        "p.copy_return_volatility,p.copy_positive_probability,p.copy_evidence_days,"
+        "p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,"
+        "p.open_probability_48h,l.week_roi,l.mon_roi,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
         "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.closed_n,0) AS closed_n,"
         "COALESCE(cs.fwd_net,0) AS fwd_net "
@@ -257,7 +278,11 @@ def ep_wallets(db, qs=None):
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
             "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
             "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-            "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+            "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.copy_expected_return,p.copy_return_lcb,"
+            "p.copy_return_volatility,p.copy_positive_probability,p.copy_evidence_days,"
+            "p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,"
+            "p.actionable_open_rate,p.capacity_fit,p.open_probability_48h,"
+            "p.sector_copy_json,p.sector_policy_json,"
             "fs.role AS selection_role,fs.reason AS selection_reason,"
             "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
@@ -314,7 +339,11 @@ def ep_wallets(db, qs=None):
         "fh.first_followed_at,"
         "pr.copy_bt_net_pnl,pr.copy_bt_win_rate,pr.copy_bt_closed_n,pr.copy_bt_open_fill_rate,"
         "pr.copy_bt_liquidations,pr.copy_bt_fee_drag,pr.copy_bt_14d_net_pnl,pr.copy_bt_14d_closed_n,"
-        "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,pr.sector_copy_json,pr.sector_policy_json,"
+        "pr.copy_bt_7d_net_pnl,pr.copy_bt_7d_closed_n,pr.copy_expected_return,pr.copy_return_lcb,"
+        "pr.copy_return_volatility,pr.copy_positive_probability,pr.copy_evidence_days,"
+        "pr.copy_recent_return_14d,pr.copy_recent_return_7d,pr.copy_risk_score,pr.execution_score,"
+        "pr.actionable_open_rate,pr.capacity_fit,pr.open_probability_48h,"
+        "pr.sector_copy_json,pr.sector_policy_json,"
         "l.week_roi,l.mon_roi,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,"
         "COALESCE(ep_all.episode_total,0) AS episode_total,"
@@ -365,7 +394,11 @@ def ep_wallet_detail(db, addr, qs=None):
             "SELECT score,win_rate,n_trades,market_type,"
             "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
             "copy_bt_liquidations,copy_bt_fee_drag,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
-            "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,sector_copy_json,sector_policy_json "
+            "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,copy_expected_return,copy_return_lcb,"
+            "copy_return_volatility,copy_positive_probability,copy_evidence_days,"
+            "copy_recent_return_14d,copy_recent_return_7d,copy_risk_score,execution_score,"
+            "actionable_open_rate,capacity_fit,open_probability_48h,"
+            "sector_copy_json,sector_policy_json "
             "FROM profile WHERE addr=?", (addr,))
     agg = q1(db,
              "SELECT COUNT(*) total_n,"

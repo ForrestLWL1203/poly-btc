@@ -20,6 +20,8 @@ class CopyPolicy:
     min_closed_30d: int
     min_closed_14d: int
     min_closed_7d: int
+    min_expected_margin_return: float
+    min_return_lcb: float
     entry_positive_probability: float
     entry_max_open_age_h: float
     keep_max_open_age_h: float
@@ -61,6 +63,8 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_closed_30d=int(_value(values, "COPY_BT_MIN_CLOSED", 7) or 0),
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
         min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
+        min_expected_margin_return=float(_value(values, "COPY_MIN_EXPECTED_MARGIN_RETURN", 0.02)),
+        min_return_lcb=float(_value(values, "COPY_MIN_RETURN_LCB", 0.0)),
         entry_positive_probability=float(_value(values, "CORE_ENTRY_MIN_POSITIVE_PROB", 0.70)),
         entry_max_open_age_h=float(_value(values, "CORE_ENTRY_MAX_OPEN_AGE_H", 24.0)),
         keep_max_open_age_h=float(_value(values, "CORE_KEEP_MAX_OPEN_AGE_H", 72.0)),

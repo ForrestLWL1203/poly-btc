@@ -47,7 +47,7 @@ WantedBy=multi-user.target
 
 def scan_service(app_dir, py, db, days=14, scan_interval=8):
     return f"""[Unit]
-Description=Hyperliquid copy-trade rolling scanner (perps)
+Description=Hyperliquid copy-trade daily incremental / weekly full scanner
 After=network-online.target
 Wants=network-online.target
 
@@ -63,7 +63,7 @@ ExecStopPost={py} {app_dir}/hl_discover.py --db {db} repair-watchlist
 
 def scan_timer(on_calendar="*-*-* 04:00:00"):
     return f"""[Unit]
-Description=Run HL scanner once a day (full sweep trickles over ~12h)
+Description=Run HL scanner daily (incremental; weekly full refresh selected by scanner)
 
 [Timer]
 OnCalendar={on_calendar}

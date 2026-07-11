@@ -101,6 +101,10 @@ export function WalletDrawer({ address, onClose }) {
                 <div className="wallet-mini-row"><span>原始评分</span><b>{scoreBreakdown.rawScore != null ? fNum(scoreBreakdown.rawScore, 1) : "—"}</b></div>
                 <div className="wallet-mini-row"><span>copy 分</span><b>{scoreBreakdown.copyScore != null ? fNum(scoreBreakdown.copyScore, 1) : "—"}</b></div>
                 <div className="wallet-mini-row"><span>置信度</span><b>{scoreBreakdown.confidencePct != null ? fNum(scoreBreakdown.confidencePct, 0) + "%" : "—"}</b></div>
+                <div className="wallet-mini-row"><span>预期保证金收益</span><b className={cls(scoreBreakdown.expectedReturnPct)}>{scoreBreakdown.expectedReturnPct != null ? fSign(scoreBreakdown.expectedReturnPct, 2) + "%" : "—"}</b></div>
+                <div className="wallet-mini-row"><span>收益下置信界</span><b className={cls(scoreBreakdown.returnLcbPct)}>{scoreBreakdown.returnLcbPct != null ? fSign(scoreBreakdown.returnLcbPct, 2) + "%" : "—"}</b></div>
+                <div className="wallet-mini-row"><span>未来盈利概率</span><b>{scoreBreakdown.positiveProbabilityPct != null ? fNum(scoreBreakdown.positiveProbabilityPct, 1) + "%" : "—"}</b></div>
+                <div className="wallet-mini-row"><span>独立证据</span><b>{scoreBreakdown.evidenceDays != null ? scoreBreakdown.evidenceDays + " 天" : "—"}</b></div>
                 <div className="wallet-mini-row"><span>历史样本</span><b>{d.scoredTrades || 0} 笔</b></div>
                 <div className="wallet-mini-row"><span>历史胜率</span><b>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}</b></div>
                 {scoreReasons.length > 0 && (

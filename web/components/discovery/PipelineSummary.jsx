@@ -53,7 +53,7 @@ export function PipelineSummary({ p }) {
       </div>
       <div className="pipeline-detail">
         <div>
-          <div className="muted">Selection / 旧评分线参考</div>
+          <div className="muted">Selection / Core候选线</div>
           <div className="pipeline-line">
             {sel.generation ? <React.Fragment>{sel.generation} · Core {sel.core || 0} · Challenger {sel.challenger || 0}</React.Fragment>
               : selected.n ? <React.Fragment>旧 top {selected.n} · 14d {fSign(pnl14 || 0, 0)} · 7d {fSign(pnl7 || 0, 0)}</React.Fragment>

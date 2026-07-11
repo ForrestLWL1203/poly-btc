@@ -57,9 +57,19 @@ def followed_count(db, line):
 
 # gate reason -> the 4 UI buckets (kept here so it's tweakable in one place)
 _REJECT_BUCKETS = [
-    ("不活跃 / 成交不足", {"inactive", "spot_dominant", "bot_frequency", "irregular"}),
-    ("网格度过高", {"grid_dca"}),
-    ("扛单 / 单笔大亏", {"blowup_loss", "not_profitable"}),
+    ("样本 / 开仓活跃不足", {
+        "inactive", "inactive_copyable_open", "thin_independent_evidence",
+        "normalized_evidence_missing", "no_copy_evidence", "low_quality",
+    }),
+    ("净Edge不足 / 近期亏损", {
+        "thin_edge", "thin_copy_edge", "recent_copy_loss", "copy_return_lcb_low",
+        "positive_probability_low", "not_profitable",
+    }),
+    ("执行结构 / 容量不可跟", {
+        "spot_dominant", "bot_frequency", "hft_uncopyable", "hft_turnover", "grid_dca",
+        "heavy_dca", "too_many_concurrent", "low_fill_rate", "capacity_fit_low",
+    }),
+    ("爆仓 / 灾难风险", {"blowup_loss", "copy_liquidation"}),
 ]
 
 

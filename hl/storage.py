@@ -197,7 +197,12 @@ CREATE TABLE IF NOT EXISTS profile (
     material_open_count INTEGER DEFAULT 0,
     raw_quality_score REAL,
     copy_expected_return REAL,
+    copy_return_lcb REAL,
+    copy_return_volatility REAL,
     copy_positive_probability REAL,
+    copy_evidence_days INTEGER DEFAULT 0,
+    copy_recent_return_14d REAL,
+    copy_recent_return_7d REAL,
     copy_risk_score REAL,
     execution_score REAL,
     selection_marginal_utility REAL,
@@ -405,7 +410,9 @@ PROFILE_COLS = (
     "actionable_open_events_7d,actionable_open_events_14d,actionable_open_events_30d,"
     "open_days_7d,open_days_14d,open_days_30d,avg_open_interval_h,median_open_interval_h,"
     "open_probability_24h,open_probability_48h,open_position_count,material_open_count,"
-    "raw_quality_score,copy_expected_return,copy_positive_probability,copy_risk_score,execution_score,"
+    "raw_quality_score,copy_expected_return,copy_return_lcb,copy_return_volatility,"
+    "copy_positive_probability,copy_evidence_days,copy_recent_return_14d,copy_recent_return_7d,"
+    "copy_risk_score,execution_score,"
     "selection_marginal_utility,model_coverage,oos_net_pnl,oos_max_drawdown,oos_cvar95,"
     "actionable_open_rate,capacity_fit,"
     "first_added,last_refreshed,times_seen,times_active"
@@ -793,7 +800,12 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN material_open_count INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN raw_quality_score REAL",
     "ALTER TABLE profile ADD COLUMN copy_expected_return REAL",
+    "ALTER TABLE profile ADD COLUMN copy_return_lcb REAL",
+    "ALTER TABLE profile ADD COLUMN copy_return_volatility REAL",
     "ALTER TABLE profile ADD COLUMN copy_positive_probability REAL",
+    "ALTER TABLE profile ADD COLUMN copy_evidence_days INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_recent_return_14d REAL",
+    "ALTER TABLE profile ADD COLUMN copy_recent_return_7d REAL",
     "ALTER TABLE profile ADD COLUMN copy_risk_score REAL",
     "ALTER TABLE profile ADD COLUMN execution_score REAL",
     "ALTER TABLE profile ADD COLUMN selection_marginal_utility REAL",

@@ -19,6 +19,8 @@ from . import auto_tune, config, follow_score, generation, metrics, params, pipe
 from .fills import build_episodes, is_spot
 from .copy_data import normalize_copyable_fills
 from .copy_policy import load_copy_policy
+from .copy_evidence import summarize_copy_evidence, summarize_portfolio_pnl
+from .sector import classify_coin
 from .fill_transition import classify_fill_transition
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
@@ -51,19 +53,6 @@ def _episode_rows(addr: str, eps: list) -> list:
         rows.append((addr, e["coin"], e["side"], e["open_ms"], seq, e["close_ms"], e["hold_s"],
                      e["net_pnl"], e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]))
     return rows
-
-
-def _apply_follow_eligibility_gate(m: dict) -> tuple[bool, str]:
-    """Final profile-level copyability gate after copy replay evidence is recorded.
-
-    `apply_copy_bt_gate` handles copy PnL loss. This catches other clear followability failures
-    such as too many target opens we could not copy or too little recent sample to trust.
-    Missing copy evidence stays annotated downstream for old/incomplete DBs.
-    """
-    eligibility = follow_score.evaluate_follow_eligibility(m)
-    if not eligibility.get("eligible"):
-        return False, eligibility.get("status") or "follow_ineligible"
-    return True, "ok"
 
 
 def _load_cached_fills(db, addr, since):
@@ -263,14 +252,13 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         wk, mo, al = w.get("week", {}), w.get("month", {}), w.get("allTime", {})
         acct = f(r.get("accountValue"))
         wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
-        pnl_vol = (wk_pnl / wk_vlm) if wk_vlm > 0 else 0.0
-        cand = (
+        ratio = wk_pnl / wk_vlm if wk_vlm > 0 else 0.0
+        r["is_candidate"] = int(
             acct >= min_acct
             and vlm_min <= wk_vlm <= vlm_max
             and wk_pnl > 0 and f(mo.get("pnl")) > 0 and f(al.get("pnl")) > 0
-            and pv_min <= pnl_vol <= pv_max
+            and pv_min <= ratio <= pv_max
         )
-        r["is_candidate"] = 1 if cand else 0
         r["fetched_at"] = fetched_at
         mon_vlm = f(mo.get("vlm"))
         r["daily_turnover"] = (mon_vlm / acct / 30.0) if acct > 0 else 0.0
@@ -419,8 +407,8 @@ def _open_flow_metrics(fills: list, now_ms: int) -> dict:
     }
 
 
-def _copy_profile_evidence(m, results, p):
-    """Derive normalized, shrinkage-aware profile fields from one canonical replay result set."""
+def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
+    """Derive non-overlapping, normalized OOS evidence from canonical replay positions."""
     if not isinstance(results, dict):
         results = {}
     by_days = {}
@@ -439,23 +427,16 @@ def _copy_profile_evidence(m, results, p):
         return
 
     positions = list(primary.get("positions") or [])
-    samples = []
-    for pos in positions:
-        margin = f(pos.get("margin"))
-        if margin > 0:
-            samples.append(f(pos.get("net_pnl")) / margin)
-    n = len(samples)
-    # A weak zero-centered prior prevents seven lucky tiny samples from looking certain.  The result is
-    # the estimated probability that the next-episode mean return on occupied margin is positive.
-    prior_n, prior_sigma = 5.0, 0.05
-    denom = n + prior_n
-    mean = (sum(samples) / denom) if denom else 0.0
-    second = (sum(x * x for x in samples) + prior_n * prior_sigma * prior_sigma) / max(1.0, denom)
-    variance = max(1e-12, second - mean * mean)
-    stderr = math.sqrt(variance / max(1.0, denom))
-    positive_probability = statistics.NormalDist().cdf(mean / stderr) if stderr > 0 else (1.0 if mean > 0 else 0.5)
+    evidence_summary = summarize_copy_evidence(
+        positions,
+        seed=f"{addr}:{getattr(p, 'scan_generation', '')}:{primary_days}",
+        now_ms=now_ms,
+    )
     dd = max(0.0, f(primary.get("max_drawdown")))
-    worst_return = min(samples, default=0.0)
+    worst_return = min(
+        (f(pos.get("net_pnl")) / f(pos.get("margin")) for pos in positions if f(pos.get("margin")) > 0),
+        default=0.0,
+    )
     actionable_rate = primary.get("open_fill_rate")
     capacity_fit = primary.get("capacity_open_fit")
     master_coverage = primary.get("master_leverage_coverage")
@@ -472,8 +453,13 @@ def _copy_profile_evidence(m, results, p):
     m.update(
         data_status="valid",
         evidence_status=evidence_status,
-        copy_expected_return=mean if n else None,
-        copy_positive_probability=positive_probability if n else None,
+        copy_expected_return=evidence_summary.expected_return,
+        copy_return_lcb=evidence_summary.return_lcb,
+        copy_return_volatility=evidence_summary.return_volatility,
+        copy_positive_probability=evidence_summary.positive_probability,
+        copy_evidence_days=evidence_summary.evidence_days,
+        copy_recent_return_14d=evidence_summary.recent_return_14d,
+        copy_recent_return_7d=evidence_summary.recent_return_7d,
         copy_risk_score=max(0.0, min(1.0, 1.0 - max(dd, abs(min(0.0, worst_return))))),
         execution_score=(
             (f(actionable_rate) + f(capacity_fit)) / 2.0
@@ -490,6 +476,32 @@ def _copy_profile_evidence(m, results, p):
         result = by_days.get(days) or {}
         if result:
             m[f"actionable_open_events_{days}d"] = int(result.get("opened_n") or 0)
+
+
+def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
+    """One authoritative Profile qualification for evidence, activity and economics."""
+    copy_gate_enabled = getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE)
+    if copy_gate_enabled:
+        enriched = dict(m)
+        enriched["copy_bt_data_status"] = m.get("data_status")
+        enriched["copy_bt_evidence_status"] = m.get("evidence_status")
+        result = follow_score.evaluate_follow_eligibility(
+            enriched,
+            min_closed30=getattr(p, "evidence_min_trades", config.EVIDENCE_MIN_TRADES),
+            min_evidence_days=getattr(p, "evidence_min_days", config.EVIDENCE_MIN_DAYS),
+            min_expected_return=getattr(
+                p, "copy_min_expected_margin_return", config.COPY_MIN_EXPECTED_MARGIN_RETURN
+            ),
+        )
+        if not result.get("eligible"):
+            if result.get("deferred"):
+                return True, "copy_backtest_deferred_data_error"
+            return False, result.get("status") or "copy_unqualified"
+    last_open = int(m.get("last_copyable_open_ms") or 0)
+    max_age_ms = int(getattr(p, "inactive_days", 1.0) * 86_400_000)
+    if not last_open or now_ms - last_open > max_age_ms:
+        return False, "inactive_copyable_open"
+    return True, "ok" if copy_gate_enabled else "copy_gate_disabled"
 
 
 def _defer_profile(db, addr, prior, stamp, reason):
@@ -722,15 +734,25 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             m, copy_results, sector_results, p,
             previous_policy=(prior or {}).get("sector_policy_json"),
         )
-        _copy_profile_evidence(m, copy_results, p)
         try:
             sector_policy = json.loads(m.get("sector_policy_json") or "{}")
         except (TypeError, ValueError):
             sector_policy = {}
+        allowed_sectors = set(sector_policy.get("allowed") or [])
+        evidence_results = copy_results
+        evidence_fills = perp_full
+        if allowed_sectors and allowed_sectors != {"crypto", "stock"}:
+            allowed_fills = [x for x in perp_full if classify_coin(x.get("coin")) in allowed_sectors]
+            evidence_fills = allowed_fills
+            evidence_results = _copy_bt_results(addr, allowed_fills, now_ms, p)
+        m.update(_open_flow_metrics(evidence_fills, now_ms))
+        _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now_ms)
         if not sector_policy.get("allowed") and m.get("evidence_status") not in {"missing", "invalid"}:
             m["evidence_status"] = "economically_disqualified"
         if m.get("data_status") == "deferred_data_error":
             return _defer_profile(db, addr, prior, stamp, "copy_replay_unavailable")
+        if ok:
+            ok, reason = _profile_copy_qualification(m, now_ms, p)
     m["times_active"] += 1 if ok else 0
 
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
@@ -741,6 +763,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     prev_status = (prior or {}).get("status")
     m["score"] = metrics.score(m) if ok else 0.0
     m["raw_quality_score"] = m["score"]
+    if ok and m["score"] < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
+        ok, reason, m["score"] = False, "low_quality", 0.0
     status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
     row = dict(m)                                    # keys match column names -> robust positional build
     row.update(addr=addr, status=status, reason=reason, last_refreshed=stamp,
@@ -790,7 +814,10 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
         "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
-        "p.profile_generation,p.evaluated_at,p.data_status,p.evidence_status "
+        "p.profile_generation,p.evaluated_at,p.data_status,p.evidence_status,"
+        "p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,p.copy_positive_probability,"
+        "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
+        "p.execution_score,p.actionable_open_rate,p.capacity_fit,p.open_probability_48h "
         f"FROM profile p {leaderboard_join} "
         "WHERE p.status='active' ORDER BY p.score DESC, p.addr",
         (leaderboard_generation,) if leaderboard_generation else (),
@@ -951,13 +978,11 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
         if closed < max(1, load_copy_policy().min_closed_7d):
             continue
         positions = list(result.get("positions") or [])
-        pnl_samples = [f(pos.get("net_pnl")) for pos in positions]
-        net = f(result.get("copy_net_pnl"))
-        if len(pnl_samples) > 1:
-            sd = statistics.stdev(pnl_samples)
-            lcb = net - 1.645 * sd * math.sqrt(len(pnl_samples))
-        else:
-            lcb = net
+        pnl_evidence = summarize_portfolio_pnl(
+            positions,
+            seed=f"selection:{days}:{baseline_n}:{selected_n}",
+        )
+        lcb = pnl_evidence.pnl_lcb
         usable.append((int(days), result, lcb))
     if not usable:
         # Empty baseline is a valid starting portfolio; any candidate still needs real evidence.
@@ -1039,7 +1064,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
     cur = db.execute(
         "SELECT p.addr,p.status,p.reason,p.score,p.profile_generation,p.data_status,p.evidence_status,p.last_copyable_open_ms,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
-        "p.copy_positive_probability,p.copy_expected_return,"
+        "p.copy_positive_probability,p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
+        "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
+        "p.execution_score,p.open_probability_48h,"
         "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
         "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json "
         "FROM profile p"
@@ -1053,6 +1080,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
         row["rank"] = rank
     evidences = []
     row_by_addr = {}
+    follow_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     for row in profiles:
         addr = (row["addr"] or "").lower()
         row_by_addr[addr] = row
@@ -1064,14 +1092,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
         lifecycle_data_status = (
             "valid" if effective_data_status in {"valid", "rejected"} else effective_data_status
         )
-        enriched = dict(row)
-        enriched["copy_bt_data_status"] = data_status
-        enriched["copy_bt_evidence_status"] = row.get("evidence_status")
-        eligibility = follow_score.evaluate_follow_eligibility(enriched)
+        above_follow_line = f(row.get("follow_score")) >= follow_line
         soft_bad = (
             row.get("status") not in {"active", "qualified"}
-            or not eligibility.get("eligible")
             or row.get("evidence_status") in {"economically_disqualified", "invalid"}
+            or not above_follow_line
         )
         hard_exit = row.get("reason") in _HARD_EXIT_REASONS
         good_now = lifecycle_data_status == "valid" and row.get("status") in {"active", "qualified"} and not soft_bad
@@ -1088,7 +1113,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
             positive_probability=f(row.get("copy_positive_probability")),
             challenger_since_ms=_iso_ms(prior_reg.get("first_qualified_at")),
             soft_bad=soft_bad,
-            soft_bad_reason=eligibility.get("status") or row.get("reason") or "soft_bad",
+            soft_bad_reason=("below_follow_line" if not above_follow_line else row.get("reason") or "soft_bad"),
             hard_exit=hard_exit,
             hard_exit_reason=row.get("reason") or "hard_exit",
             has_open_copy=addr in held,
@@ -1549,23 +1574,59 @@ def regate(db, p, *, stamp=None, source: str = "regate",
                 m, copy_results, sector_results, p,
                 previous_policy=sector_policy_json,
             )
-        if ok:
-            ok, reason = _apply_follow_eligibility_gate(m)
+            try:
+                current_policy = json.loads(m.get("sector_policy_json") or "{}")
+            except (TypeError, ValueError):
+                current_policy = {}
+            allowed_sectors = set(current_policy.get("allowed") or [])
+            evidence_results = copy_results
+            if allowed_sectors and allowed_sectors != {"crypto", "stock"}:
+                allowed_fills = [
+                    x for x in replay_fills if classify_coin(x.get("coin")) in allowed_sectors
+                ]
+                evidence_results = _copy_bt_results(addr, allowed_fills, now, p)
+            _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now)
+            qualification = follow_score.evaluate_follow_eligibility(
+                {
+                    **m,
+                    "copy_bt_data_status": m.get("data_status"),
+                    "copy_bt_evidence_status": m.get("evidence_status"),
+                },
+                min_closed30=getattr(p, "evidence_min_trades", config.EVIDENCE_MIN_TRADES),
+                min_evidence_days=getattr(p, "evidence_min_days", config.EVIDENCE_MIN_DAYS),
+                min_expected_return=getattr(
+                    p, "copy_min_expected_margin_return", config.COPY_MIN_EXPECTED_MARGIN_RETURN
+                ),
+            )
+            if not qualification.get("eligible") and not qualification.get("deferred"):
+                ok, reason = False, qualification.get("status") or "copy_unqualified"
         score = metrics.score(m) if ok else 0.0
         if ok and score < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
-            ok, reason, score = False, "low_quality", 0.0      # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
-        status = "active" if ok else ("retired" if old == "active" else "rejected")
+            ok, reason, score = False, "low_quality", 0.0
+        # A cached/manual regate may retire an old Active, but cannot reactivate
+        # a rejected wallet without a fresh network generation.
+        status = ("active" if ok else "retired") if old == "active" else old
         db.execute(
             "UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
             "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_14d_net_pnl=?,copy_bt_14d_closed_n=?,"
-            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=? WHERE addr=?",
+            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=?,"
+            "copy_expected_return=?,copy_return_lcb=?,copy_return_volatility=?,copy_positive_probability=?,"
+            "copy_evidence_days=?,copy_recent_return_14d=?,copy_recent_return_7d=?,copy_risk_score=?,"
+            "execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
+            "actionable_open_rate=?,capacity_fit=?,evidence_status=? WHERE addr=?",
             (status, reason, score, m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
              m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_closed_n"),
              m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_closed_n"),
              m.get("sector_copy_json"), m.get("sector_policy_json"),
+             m.get("copy_expected_return"), m.get("copy_return_lcb"), m.get("copy_return_volatility"),
+             m.get("copy_positive_probability"), m.get("copy_evidence_days"),
+             m.get("copy_recent_return_14d"), m.get("copy_recent_return_7d"),
+             m.get("copy_risk_score"), m.get("execution_score"), m.get("model_coverage"),
+             m.get("oos_net_pnl"), m.get("oos_max_drawdown"), m.get("oos_cvar95"),
+             m.get("actionable_open_rate"), m.get("capacity_fit"), m.get("evidence_status"),
              addr),
         )
         n_active += 1 if ok else 0
@@ -1674,7 +1735,9 @@ def scan(db, p) -> None:
     )
     cand = [r[0] for r in db.execute(
         f"SELECT addr FROM leaderboard_staging WHERE generation=? AND is_candidate=1 "
-        f"ORDER BY {order} DESC", (generation_id,)).fetchall()]
+        f"ORDER BY {order} DESC",
+        (generation_id,),
+    ).fetchall()]
     active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
     current_selection_generation = selection.latest_published_generation(db)
@@ -1763,7 +1826,8 @@ def scan(db, p) -> None:
     lbs = {
         a: {"account_value": av, "week_roi": wr, "mon_roi": mr, "all_roi": ar}
         for a, av, wr, mr, ar in db.execute(
-            "SELECT addr,account_value,week_roi,mon_roi,all_roi FROM leaderboard_staging WHERE generation=?",
+            "SELECT addr,account_value,week_roi,mon_roi,all_roi "
+            "FROM leaderboard_staging WHERE generation=?",
             (generation_id,),
         ).fetchall()
     }

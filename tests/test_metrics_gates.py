@@ -125,15 +125,15 @@ class MetricsGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "grid_dca")
 
-    def test_rejects_recent_copyable_window_loss_even_when_portfolio_is_positive(self):
+    def test_recent_copyable_loss_is_left_for_authoritative_copy_profile_gate(self):
         ok, reason = metrics.gates_state(
             state_metrics(net_pnl=-1.0, roi_total=0.1, net_30d=100.0, pf_mon_pnl=20_000.0),
             1000,
             state_params(),
         )
 
-        self.assertFalse(ok)
-        self.assertEqual(reason, "recent_window_loss")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
 
 
 if __name__ == "__main__":

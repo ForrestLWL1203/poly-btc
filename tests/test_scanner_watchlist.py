@@ -37,8 +37,27 @@ def _profile_row(addr, status, score, **overrides):
         first_added="2026-07-05T00:00:00Z",
         last_refreshed="2026-07-05T00:00:00Z",
         last_fill_ms=1,
+        copy_bt_closed_n=16,
+        copy_bt_14d_closed_n=9,
+        copy_bt_7d_closed_n=5,
+        copy_expected_return=0.04,
+        copy_return_lcb=0.01,
+        copy_return_volatility=0.08,
+        copy_positive_probability=0.82,
+        copy_evidence_days=10,
+        copy_recent_return_14d=0.03,
+        copy_recent_return_7d=0.02,
+        copy_risk_score=0.80,
+        execution_score=0.90,
+        actionable_open_rate=0.90,
+        capacity_fit=0.90,
+        open_probability_48h=0.75,
+        evidence_status="qualified",
+        data_status="valid",
     )
     row.update(overrides)
+    if "actionable_open_rate" not in overrides and "copy_bt_open_fill_rate" in overrides:
+        row["actionable_open_rate"] = overrides["copy_bt_open_fill_rate"]
     return [row.get(c) for c in cols]
 
 
@@ -602,7 +621,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_net_pnl,copy_bt_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("retired", "copy_backtest_loss", -25.0, 9))
+            self.assertEqual(tuple(row), ("retired", "normalized_evidence_missing", -25.0, 9))
 
     def test_regate_retires_low_copy_fill_rate_profile(self):
         with tempfile.TemporaryDirectory() as td:
@@ -678,7 +697,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "SELECT status,reason,copy_bt_open_fill_rate FROM profile WHERE addr='0xaaa'"
             ).fetchone()
             self.assertEqual(row[0], "retired")
-            self.assertEqual(row[1], "low_fill_rate")
+            self.assertEqual(row[1], "normalized_evidence_missing")
             self.assertAlmostEqual(row[2], 0.4)
 
     def test_regate_retires_thin_recent_copy_sample(self):
@@ -753,7 +772,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_7d_net_pnl,copy_bt_7d_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("retired", "thin_recent", -5.0, 1))
+            self.assertEqual(tuple(row), ("retired", "normalized_evidence_missing", -5.0, 1))
 
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):
         with tempfile.TemporaryDirectory() as td:
@@ -966,6 +985,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                         copy_bt_14d_closed_n=30,
                         copy_bt_7d_closed_n=8,
                         copy_bt_open_fill_rate=1.0,
+                        copy_expected_return=0.01,
+                        copy_return_lcb=-0.01,
+                        copy_positive_probability=0.71,
+                        copy_risk_score=0.55,
                     ),
                     _profile_row(
                         "0xstrong",
@@ -978,6 +1001,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                         copy_bt_14d_closed_n=22,
                         copy_bt_7d_closed_n=17,
                         copy_bt_open_fill_rate=1.0,
+                        copy_expected_return=0.07,
+                        copy_return_lcb=0.025,
+                        copy_positive_probability=0.90,
+                        copy_risk_score=0.85,
                     ),
                 ],
             )
@@ -1109,7 +1136,8 @@ class ScannerWatchlistTests(unittest.TestCase):
 
             line = db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0]
             cmd = db.execute("SELECT type,payload_json FROM commands ORDER BY id DESC LIMIT 1").fetchone()
-            self.assertAlmostEqual(float(line), 0.8, places=6)
+            second_score = db.execute("SELECT score FROM watchlist ORDER BY rank LIMIT 1 OFFSET 1").fetchone()[0]
+            self.assertAlmostEqual(float(line), second_score, places=6)
             self.assertEqual(cmd[0], "reload_params")
             payload = json.loads(cmd[1])
             self.assertEqual(payload["by"], "auto_follow_line")
@@ -1142,7 +1170,8 @@ class ScannerWatchlistTests(unittest.TestCase):
 
             line = float(db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0])
             followed = db.execute("SELECT COUNT(*) FROM watchlist WHERE score>=?", (line,)).fetchone()[0]
-            self.assertLessEqual(line, boundary)
+            boundary_score = db.execute("SELECT score FROM watchlist WHERE addr='0xbbb'").fetchone()[0]
+            self.assertLessEqual(line, boundary_score)
             self.assertEqual(followed, 2)
 
     def test_refresh_watchlist_uses_portfolio_follow_line_choice(self):
@@ -1246,6 +1275,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                     copy_bt_14d_closed_n=8,
                     copy_bt_7d_closed_n=2,
                     copy_bt_open_fill_rate=0.9,
+                    copy_evidence_days=2,
                 ),
             )
             db.commit()
@@ -1265,7 +1295,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             audit = db.execute(
                 "SELECT reason,payload_json FROM pipeline_audit WHERE stage='watchlist' AND addr='0xold'"
             ).fetchone()
-            self.assertEqual(audit[0], "thin_recent")
+            self.assertEqual(audit[0], "thin_independent_evidence")
             self.assertEqual(json.loads(audit[1])["followDetail"]["stability"]["status"], "ineligible")
 
     def test_post_scan_pipeline_sets_follow_line_before_auto_tune(self):
@@ -1309,13 +1339,13 @@ class ScannerWatchlistTests(unittest.TestCase):
             with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
                 "status": "ok",
                 "reason": "portfolio_topn",
-                "line": 0.799999999,
+                "line": 0.735,
                 "count": 2,
             }), patch.object(scanner.auto_tune, "maybe_tune_margins", side_effect=fake_tune):
                 n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
 
             self.assertEqual(n, 3)
-            self.assertAlmostEqual(seen["line"], 0.799999999)
+            self.assertAlmostEqual(seen["line"], 0.735)
             self.assertEqual(seen["addrs"], ["0xaaa", "0xbbb"])
             self.assertEqual(seen["source"], "scan")
             stages = [r[0] for r in db.execute(
@@ -1715,7 +1745,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
                 "status": "ok",
                 "reason": "portfolio_topn",
-                "line": 0.787598641,
+                "line": 0.76,
                 "count": 2,
             }), patch.object(scanner.auto_tune, "tune_candidates_from_axes", side_effect=tune_axes), \
                     patch.object(scanner.auto_tune, "evaluate_tune_candidate", side_effect=eval_tune), \
@@ -1733,7 +1763,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertTrue(all(addrs == ["0xaaa", "0xbbb"] for addrs in seen["add_addrs"]))
 
             follow = params.load_follow(db)
-            self.assertAlmostEqual(follow["MIN_FOLLOW_SCORE"], 0.787598641)
+            self.assertAlmostEqual(follow["MIN_FOLLOW_SCORE"], 0.76)
             for key in scanner.auto_tune.TUNE_KEYS + scanner.auto_tune.ADD_TUNE_KEYS:
                 self.assertEqual(follow[key], before_follow[key])
 

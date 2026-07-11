@@ -30,13 +30,13 @@ export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons, selecti
           </div>
         </div>
         <div className="card">
-          <div className="card-lbl">评分分布({selectionMode ? "评分线仅供参考" : "标出跟单线"})</div>
+          <div className="card-lbl">评分分布({selectionMode ? "Active池 / Core候选线" : "标出跟单线"})</div>
           <div className="histo">
             {h.bins.map((b, i) => (
               <div key={i} className={"hb" + (i < h.followLineBinIndex ? " below" : "")} style={{ height: (b / maxBin * 100) + "%" }} />
             ))}
             <div className="histo-line" style={{ left: (h.followLineBinIndex / h.bins.length * 100) + "%" }}>
-              <span className="lbl">{selectionMode ? "旧评分参考线" : "跟单线"}</span></div>
+              <span className="lbl">{selectionMode ? "Core候选线" : "跟单线"}</span></div>
           </div>
         </div>
       </div>

@@ -399,8 +399,10 @@ MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active 
 COPY_BT_GATE_ENABLE = True  # active 准入二次校验: 用历史 fills 按当前 observer 规则回放,目标赚但我们亏 → 不跟
 COPY_BT_DAYS = 30           # copy 回测窗口。用 30d 覆盖 14d 评分外的复制不稳定性,但仍是近期窗口
 COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数后,近期 copy 亏损也不进 active
-COPY_BT_MIN_CLOSED = 7      # copy 回测至少有这么多已平仓才作为硬闸,样本太少先只记录不否决
+COPY_BT_MIN_CLOSED = 7      # copy资格最低已平样本；不足则不进入Active
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
+COPY_MIN_EXPECTED_MARGIN_RETURN = 0.02  # 回放扣成本后、向零收缩的每episode保证金收益；低于2%=薄利排除
+COPY_MIN_RETURN_LCB = 0.0              # Core要求按日Bootstrap收益下置信界不为负
 COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 SECTOR_COPY_MIN_CLOSED_30D = 7   # 板块级 copy 能力样本门槛: crypto/stock 分别判断

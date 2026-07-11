@@ -9,6 +9,7 @@ rest, fills, storage). Run from the repo root so `import hl` resolves.
 import argparse
 import calendar
 import json
+import sqlite3
 import subprocess
 import time
 from types import SimpleNamespace
@@ -25,8 +26,36 @@ def _start_adaptive_pace(db_path, slow_interval):
     Observer STOPPED → full speed (SCAN_IDLE_INTERVAL) — nothing else is competing, so a manual rescan
     finishes in ~15min instead of ~2h. Re-polls every 20s so it adapts if you start/stop the observer
     mid-scan (config.MIN_POST_INTERVAL is read live by rest.post)."""
+    def _observer_has_work():
+        if not procman.observer_running(db_path):
+            return False
+        try:
+            con = sqlite3.connect(db_path, timeout=2)
+            generation = con.execute(
+                "SELECT generation FROM scan_generation WHERE status='published' AND complete=1 "
+                "AND is_current=1 ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            open_n = sum(con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE status='open'"
+            ).fetchone()[0] for table in ("copy_position", "shadow_position"))
+            if generation:
+                target_n = con.execute(
+                    "SELECT COUNT(*) FROM follow_selection fs LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+                    "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1",
+                    (generation[0],),
+                ).fetchone()[0]
+            else:
+                target_n = con.execute(
+                    "SELECT COUNT(*) FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+                    "WHERE COALESCE(tc.enabled,1)=1"
+                ).fetchone()[0]
+            con.close()
+            return bool(open_n or target_n)
+        except Exception:  # old/in-flight DB: preserve observer priority conservatively
+            return True
+
     def _pace():
-        return slow_interval if procman.observer_running(db_path) else config.SCAN_IDLE_INTERVAL
+        return slow_interval if _observer_has_work() else config.SCAN_IDLE_INTERVAL
     config.MIN_POST_INTERVAL = _pace()                      # set the starting pace before the sweep begins
     def _tick():
         while True:
@@ -36,6 +65,7 @@ def _start_adaptive_pace(db_path, slow_interval):
 
 
 AUTO_SCAN_EVERY_H = 24.0          # self-scheduled cadence (no systemd timer); reference = last scan_runs
+AUTO_FULL_SCAN_EVERY_H = 7 * 24.0 # Leaderboard + every strict candidate; intervening days are incremental
 
 
 def _scan_ns():
@@ -58,6 +88,28 @@ def _hours_since_last_scan(db):
         return (time.time() - calendar.timegm(time.strptime(r[0], "%Y-%m-%dT%H:%M:%SZ"))) / 3600.0
     except (ValueError, TypeError):
         return 1e9
+
+
+def _hours_since_last_full_scan(db):
+    row = db.execute(
+        "SELECT MAX(finished_at) FROM scan_runs WHERE complete=1 AND full=1"
+    ).fetchone()
+    if not row or not row[0]:
+        return 1e9
+    try:
+        return (time.time() - calendar.timegm(time.strptime(row[0], "%Y-%m-%dT%H:%M:%SZ"))) / 3600.0
+    except (ValueError, TypeError):
+        return 1e9
+
+
+def _configure_scan_cadence(db, ns, *, manual: bool):
+    """Daily automatic runs reuse Leaderboard; every seventh day is a true full refresh."""
+    if manual or getattr(ns, "full_scan", False):
+        return "manual" if manual else "explicit_full"
+    weekly_full = _hours_since_last_full_scan(db) >= AUTO_FULL_SCAN_EVERY_H
+    ns.full_scan = weekly_full
+    ns.no_harvest = not weekly_full
+    return "weekly_full" if weekly_full else "daily_incremental"
 
 
 def _serve_observer_cmds(db):
@@ -109,8 +161,11 @@ def _serve_rescan(db):
             due = _hours_since_last_scan(db) >= AUTO_SCAN_EVERY_H
             if (pend or due) and not scanning:
                 ns = params.apply_scanner_params(db, _scan_ns())
-                why = f"command #{pend[0]}" if pend else f"auto ({AUTO_SCAN_EVERY_H:g}h elapsed)"
-                print(f"-> running full scan [{why}]", flush=True)
+                cadence = _configure_scan_cadence(db, ns, manual=bool(pend))
+                why = f"command #{pend[0]}" if pend else (
+                    "auto weekly full" if cadence == "weekly_full" else "auto daily incremental"
+                )
+                print(f"-> running scan [{why}]", flush=True)
                 scanner.scan(db, ns)                 # consumes pending rescan(s) + writes progress/status
         except Exception as exc:  # noqa: BLE001
             print(f"scan daemon error: {exc}", flush=True)
@@ -211,6 +266,10 @@ def main() -> int:
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
     params.seed_params(db)                               # ensure UI-tunable params exist (idempotent)
     if args.cmd == "scan":
+        pending_manual = db.execute(
+            "SELECT 1 FROM commands WHERE status='pending' AND type='rescan' LIMIT 1"
+        ).fetchone()
+        _configure_scan_cadence(db, args, manual=bool(pending_manual))
         _start_adaptive_pace(args.db, args.scan_interval)  # observer live → slow trickle; idle → full speed
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
         try:
