@@ -8,6 +8,7 @@ from . import follow_score
 from . import params as params_mod
 from .api_common import iso_epoch, q1, qall, recent_roi_pct, score100
 from .copy_policy import load_copy_policy
+from .sector import apply_allowed_sector_copy_metrics
 
 NEW_WATCHLIST_WINDOW_SEC = 12 * 3600
 
@@ -45,15 +46,14 @@ def _selection_reason_text(row, *, now_ms=None):
         "portfolio_drawdown_worse": "加入后组合回撤过大",
         "portfolio_deploy_limit": "加入后超过总部署上限",
         "portfolio_cost_drag_high": "加入后成本占比过高",
-        "entry_generation_confirmation": "等待下一次完整采集确认",
         "entry_actionable_open_stale": "近期没有可跟随的新开仓",
         "entry_recent_copy_samples_low": "近7日有效Copy样本不足",
         "entry_positive_probability_low": "历史盈利稳定性不足",
-        "entry_observation_pending": "等待观察期完成",
         "deferred_data_error": "本轮数据异常，暂不跟随",
         "below_follow_line": "评分未达到跟单线",
         "operator_disabled": "已被手动停用",
         "exit_only_open_position": "仅管理已有持仓",
+        "above_follow_line": "达到跟单线",
         "actionable_open_stale": "近期没有可跟随的新开仓",
         "soft_bad_pending_confirmation": "近期质量下降，等待复核",
         "soft_change_budget": "等待下一轮名单调整",
@@ -232,6 +232,7 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
     out = []
     request_now_ms = int(time.time() * 1000)
     for i, r in enumerate(rows):
+        display_metrics = apply_allowed_sector_copy_metrics(dict(r))
         worst = _col(r, "worst_single_loss_pct")
         if worst is None:
             worst = (_col(r, "worst_loss_pct") or 0.0) * 100
@@ -266,12 +267,12 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
                 if _col(r, "open_events_7d") is not None
                 else (_col(r, "actionable_open_events_7d") or 0)
             ),
-            "copyBacktestNetPnl": _col(r, "copy_bt_net_pnl"),
-            "copyBacktestClosedN": _col(r, "copy_bt_closed_n") or 0,
-            "copyBacktest14dNetPnl": _col(r, "copy_bt_14d_net_pnl"),
-            "copyBacktest14dClosedN": _col(r, "copy_bt_14d_closed_n") or 0,
-            "copyBacktest7dNetPnl": _col(r, "copy_bt_7d_net_pnl"),
-            "copyBacktest7dClosedN": _col(r, "copy_bt_7d_closed_n") or 0,
+            "copyBacktestNetPnl": _col(display_metrics, "copy_bt_net_pnl"),
+            "copyBacktestClosedN": _col(display_metrics, "copy_bt_closed_n") or 0,
+            "copyBacktest14dNetPnl": _col(display_metrics, "copy_bt_14d_net_pnl"),
+            "copyBacktest14dClosedN": _col(display_metrics, "copy_bt_14d_closed_n") or 0,
+            "copyBacktest7dNetPnl": _col(display_metrics, "copy_bt_7d_net_pnl"),
+            "copyBacktest7dClosedN": _col(display_metrics, "copy_bt_7d_closed_n") or 0,
             "closedN": _col(r, "closed_n") or 0,
             "forwardNetPnl": _col(r, "fwd_net") or 0,
             "firstFollowedAt": iso_epoch(_col(r, "first_followed_at")),

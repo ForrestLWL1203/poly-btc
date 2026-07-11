@@ -40,13 +40,10 @@ MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load eve
 # migration fallback until the first successful selection generation is published.
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
 FOLLOW_SELECTION_BOOTSTRAP_ENABLE = True  # cold-start paper DB may form its first Core in one complete generation
-CORE_FROM_ACTIVE_SCORE_LINE = True    # Active已经过质量硬闸；Core只由启用状态+跟单线决定
-CORE_ENTRY_CONFIRM_GENERATIONS = 1    # legacy portfolio-lifecycle mode only
 CORE_ENTRY_MAX_OPEN_AGE_H = 24.0
 CORE_KEEP_MAX_OPEN_AGE_H = 72.0
 CORE_ENTRY_MIN_OOS_CLOSED = 7
 CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
-CORE_ENTRY_MIN_CHALLENGER_H = 0.0     # Paper不设置额外观察期
 CORE_SOFT_CONFIRM_GENERATIONS = 2
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 SELECTION_MIN_ACTIONABLE_RATE = 0.70

@@ -1115,7 +1115,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
     follow_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
-    if getattr(config, "CORE_FROM_ACTIVE_SCORE_LINE", True):
+    if True:  # sole production selection path; there is no observation-period mode
         # Profile qualification is the sole quality gate.  Selection controls only how many already-good
         # Active wallets are followed, using the operator's score line; it must not reintroduce observation,
         # generation-confirmation or portfolio-marginal gates that contradict the Active contract.
