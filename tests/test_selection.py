@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hl import selection, storage
+from hl import scanner, selection, storage
 from hl.observer import Observer, load_targets
 
 
@@ -197,6 +197,46 @@ class SelectionTests(unittest.TestCase):
         )
         self.assertEqual(result.selected, ("0xnew",))
         self.assertEqual(result.removed, ("0xold",))
+
+    def test_cold_bootstrap_adds_every_positive_marginal_wallet(self):
+        values = {
+            (): self._metrics(0, stress=0, dd=0, deploy=0, cost=0, latency=0),
+            ("0xa",): self._metrics(10, dd=.005),
+            ("0xb",): self._metrics(8, dd=.004),
+            ("0xbad",): self._metrics(50, cost=.40),
+            ("0xa", "0xb"): self._metrics(20, dd=.008),
+            ("0xa", "0xbad"): self._metrics(60, cost=.40),
+            ("0xb", "0xbad"): self._metrics(58, cost=.40),
+            ("0xa", "0xb", "0xbad"): self._metrics(70, cost=.40),
+        }
+
+        result = selection.select_bootstrap_core(
+            ["0xbad", "0xb", "0xa"], lambda addrs: values[addrs],
+        )
+
+        self.assertEqual(result.selected, ("0xa", "0xb"))
+        self.assertEqual(result.added, ("0xa", "0xb"))
+        self.assertEqual(result.action, "bootstrap")
+
+    def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
+        day = 86_400_000
+        result = scanner._portfolio_selection_metrics({
+            14: {
+                "closed_n": 5,
+                "positions": [
+                    {"closed_at": day * index, "net_pnl": 20.0, "margin": 100.0}
+                    for index in range(1, 6)
+                ],
+                "open_fill_rate": 0.8,
+                "fee_drag": 5.0,
+                "copy_gross_pnl": 100.0,
+            },
+        }, baseline_n=0, selected_n=1)
+
+        self.assertEqual(result.actionable_open_rate, 0.8)
+        self.assertEqual(result.capacity_fit, 0.8)
+        self.assertEqual(result.max_drawdown, 0.0)
+        self.assertEqual(result.cost_drag_ratio, 0.05)
 
 
 if __name__ == "__main__":

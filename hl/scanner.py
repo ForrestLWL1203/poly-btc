@@ -5,9 +5,11 @@ over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
+import hashlib
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -993,12 +995,15 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     net_lcb = primary[2]
     stress_lcb = min(row[2] for row in usable)
     liquidations = max(int(row[1].get("liquidations") or 0) for row in usable)
-    actionable = min(f(row[1].get("open_fill_rate"), 0.0) for row in usable)
-    capacity = min(f(row[1].get("capacity_open_fit"), actionable) for row in usable)
-    max_dd = max(f(row[1].get("max_drawdown"), 0.0) for row in usable)
-    peak_deploy = max(f(row[1].get("peak_deploy_pct"), 0.0) for row in usable)
+    def num(value, default=0.0):
+        return default if value is None else f(value)
+
+    actionable = min(num(row[1].get("open_fill_rate"), 0.0) for row in usable)
+    capacity = min(num(row[1].get("capacity_open_fit"), actionable) for row in usable)
+    max_dd = max(num(row[1].get("max_drawdown"), 0.0) for row in usable)
+    peak_deploy = max(num(row[1].get("peak_deploy_pct"), 0.0) for row in usable)
     cost_drag = max(
-        f(row[1].get("fee_slippage_drag"), f(row[1].get("fee_drag")))
+        num(row[1].get("fee_slippage_drag"), f(row[1].get("fee_drag")))
         / max(1.0, abs(f(row[1].get("copy_gross_pnl"))))
         for row in usable
     )
@@ -1011,10 +1016,10 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     )
 
 
-def _build_explicit_selection(db, generation_id, stamp, now_ms):
-    """Build stable Core + Challenger roles and evaluate at most one shared-account marginal action."""
+def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False):
+    """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     copy_policy = load_copy_policy()
-    previous_generation = selection.latest_published_generation(db)
+    previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
     previous_roles = {}
     if previous_generation:
         previous_roles = {
@@ -1035,7 +1040,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
         }
 
     cold_bootstrap = bool(
-        previous_generation is None
+        (force_cold_bootstrap or previous_generation is None)
         and not previous_roles
         and params.get(
             db, "FOLLOW_SELECTION_BOOTSTRAP_ENABLE", config.FOLLOW_SELECTION_BOOTSTRAP_ENABLE
@@ -1134,10 +1139,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
             ),
             keep_actionable_grace_ms=int(copy_policy.keep_max_open_age_h * 3_600_000),
             soft_bad_generations=int(getattr(config, "CORE_SOFT_CONFIRM_GENERATIONS", 2)),
-            max_soft_membership_changes=(
-                int(config.MAX_TARGETS) if cold_bootstrap
-                else int(getattr(config, "CORE_MAX_SOFT_CHANGES_PER_GENERATION", 1))
-            ),
+            max_soft_membership_changes=len(evidences),
         ),
     )}
     baseline_core = sorted(
@@ -1179,23 +1181,25 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms):
                 )
 
             try:
-                marginal = selection.select_marginal_core(
+                constraints = selection.SelectionConstraints(
+                    min_relative_lcb_improvement=copy_policy.min_marginal_gain,
+                    min_actionable_open_rate=copy_policy.min_actionable_open_rate,
+                    min_capacity_fit=copy_policy.min_capacity_fit,
+                    max_drawdown_worsening=copy_policy.max_drawdown_worsening,
+                    max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
+                    max_poll_latency_degradation=0.10,
+                    max_targets=int(config.MAX_TARGETS),
+                )
+                marginal = selection.select_core_until_stable(
                     baseline_core,
                     entry_candidates,
                     evaluate,
-                    selection.SelectionConstraints(
-                        min_relative_lcb_improvement=copy_policy.min_marginal_gain,
-                        min_actionable_open_rate=copy_policy.min_actionable_open_rate,
-                        min_capacity_fit=copy_policy.min_capacity_fit,
-                        max_drawdown_worsening=copy_policy.max_drawdown_worsening,
-                        max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
-                        max_poll_latency_degradation=0.10,
-                        max_targets=int(config.MAX_TARGETS),
-                    ),
+                    constraints,
+                    action="bootstrap" if cold_bootstrap else "rebalance",
                 )
                 selected_core = marginal.selected
-            except Exception as exc:  # noqa: BLE001 - selection failure keeps the stable Core unchanged
-                print(f"selection marginal replay skipped: {exc}", flush=True)
+            except Exception as exc:  # noqa: BLE001 - never publish a generation with fabricated empty Core
+                raise RuntimeError(f"selection_marginal_replay_failed:{exc}") from exc
 
     selected_set = set(selected_core)
     rows = []
@@ -1394,6 +1398,40 @@ def _launch_async_tuner(db, generation_id, stamp):
             pass
 
     try:
+        systemd_run = shutil.which("systemd-run")
+        if os.environ.get("INVOCATION_ID") and systemd_run:
+            unit = "hl-tune-" + hashlib.sha256(str(generation_id).encode()).hexdigest()[:12]
+            completed = subprocess.run(
+                [
+                    systemd_run,
+                    "--quiet",
+                    "--no-block",
+                    "--collect",
+                    f"--unit={unit}",
+                    f"--property=MemoryMax={limit_mb}M",
+                    f"--working-directory={Path(script).resolve().parent}",
+                    sys.executable,
+                    script,
+                    "--db",
+                    str(Path(db_path).resolve()),
+                    "tune",
+                    "--generation",
+                    generation_id,
+                    "--stamp",
+                    stamp,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+            )
+            if completed.returncode:
+                raise RuntimeError((completed.stderr or "systemd-run failed").strip()[:200])
+            return {
+                "status": "launched", "unit": unit, "generation": generation_id,
+                "memoryLimitMb": limit_mb,
+            }
         proc = subprocess.Popen(
             [sys.executable, script, "--db", db_path, "tune", "--generation", generation_id,
              "--stamp", stamp],
@@ -1407,6 +1445,93 @@ def _launch_async_tuner(db, generation_id, stamp):
         return {"status": "launched", "pid": proc.pid, "generation": generation_id, "memoryLimitMb": limit_mb}
     except Exception as exc:  # noqa: BLE001
         return {"status": "error", "reason": "tuner_launch_failed", "error": str(exc)[:200]}
+
+
+def repair_published_selection(db, generation_id=None, stamp=None):
+    """Repair a provably broken empty selection from the current complete generation.
+
+    This is intentionally narrow: it never fetches network data, never rewrites
+    profiles, and refuses to replace a non-empty Core.  It exists so an initial
+    Paper scan does not need to repeat an expensive full refetch after a
+    selection-code failure.
+    """
+    current = selection.latest_published_generation(db)
+    generation_id = generation_id or current
+    if not current or generation_id != current:
+        raise RuntimeError("selection_repair_requires_current_generation")
+    meta = db.execute(
+        "SELECT complete,profile_complete FROM scan_generation WHERE generation=? AND status='published'",
+        (generation_id,),
+    ).fetchone()
+    if not meta or not int(meta[0] or 0) or not int(meta[1] or 0):
+        raise RuntimeError("selection_repair_requires_complete_generation")
+    existing_core = selection.published_core_addrs(db) or []
+    if existing_core:
+        return {"status": "skipped", "reason": "core_already_present", "core": len(existing_core)}
+    stale_active = db.execute(
+        "SELECT COUNT(*) FROM profile WHERE status='active' AND COALESCE(profile_generation,'')<>?",
+        (generation_id,),
+    ).fetchone()[0]
+    if stale_active:
+        raise RuntimeError("selection_repair_has_stale_active_profiles")
+
+    stamp = stamp or now_iso()
+    rows, marginal = _build_explicit_selection(
+        db, generation_id, stamp, int(time.time() * 1000), force_cold_bootstrap=True,
+    )
+    previous_core = set(existing_core)
+    selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
+    current_core = _record_explicit_follow_history(db, rows, stamp, previous_core)
+    for row in rows:
+        pipeline_audit._insert_event(
+            db,
+            stamp=stamp,
+            source="selection_repair",
+            stage="selection",
+            addr=row.addr,
+            status=row.role,
+            reason=row.reason,
+            follow_score=row.utility,
+            payload={
+                "generation": generation_id,
+                "dataStatus": row.data_status,
+                "evidenceStatus": row.evidence_status,
+            },
+        )
+    pipeline_audit._insert_event(
+        db,
+        stamp=stamp,
+        source="selection_repair",
+        stage="selection_summary",
+        status="ok",
+        reason="repaired_cold_bootstrap",
+        payload={
+            "generation": generation_id,
+            "action": marginal.action if marginal else "keep",
+            "core": len(current_core),
+            "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
+        },
+    )
+    db.commit()
+    launch = _launch_async_tuner(db, generation_id, stamp)
+    pipeline_audit._insert_event(
+        db,
+        stamp=stamp,
+        source="selection_repair",
+        stage="tuner_launch",
+        status=launch.get("status"),
+        reason=launch.get("reason") or "generation_bound_async",
+        payload=launch,
+    )
+    db.commit()
+    return {
+        "status": "repaired",
+        "generation": generation_id,
+        "core": len(current_core),
+        "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
+        "selectionAction": marginal.action if marginal else "keep",
+        "tuner": launch,
+    }
 
 
 def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before_auto_tune=None,

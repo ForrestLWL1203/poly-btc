@@ -261,6 +261,9 @@ def main() -> int:
     t = sub.add_parser("tune", help=argparse.SUPPRESS)
     t.add_argument("--generation", required=True)
     t.add_argument("--stamp")
+    rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
+    rs.add_argument("--generation")
+    rs.add_argument("--stamp")
 
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
@@ -296,6 +299,9 @@ def main() -> int:
         print(f"watchlist {n} active")
     elif args.cmd == "tune":
         result = scanner.tune_published_generation(db, args.generation, stamp=args.stamp)
+        print(json.dumps(result, sort_keys=True, default=str))
+    elif args.cmd == "repair-selection":
+        result = scanner.repair_published_selection(db, args.generation, stamp=args.stamp)
         print(json.dumps(result, sort_keys=True, default=str))
     db.close()
     return 0

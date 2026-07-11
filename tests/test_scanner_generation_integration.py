@@ -165,7 +165,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
-                    patch.object(scanner.selection, "select_marginal_core", return_value=marginal), \
+                    patch.object(scanner.selection, "select_core_until_stable", return_value=marginal), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -177,6 +177,73 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (current,)
             ).fetchone()
             self.assertEqual(row, ("0xaaa", "core"))
+
+    def test_systemd_scan_launches_tuner_in_independent_transient_unit(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            completed = SimpleNamespace(returncode=0, stderr="")
+
+            with patch.dict(scanner.os.environ, {"INVOCATION_ID": "scan-service"}), \
+                    patch.object(scanner.shutil, "which", return_value="/usr/bin/systemd-run"), \
+                    patch.object(scanner.subprocess, "run", return_value=completed) as run:
+                result = scanner._launch_async_tuner(db, "generation-1", "2026-01-02T00:00:00Z")
+
+            command = run.call_args.args[0]
+            self.assertEqual(result["status"], "launched")
+            self.assertTrue(result["unit"].startswith("hl-tune-"))
+            self.assertIn("--property=MemoryMax=512M", command)
+            self.assertIn("--generation", command)
+            self.assertIn("generation-1", command)
+
+    def test_repair_empty_published_selection_uses_cached_generation_and_launches_tuner(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_valid,profile_complete) "
+                "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02',1,1)"
+            )
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.execute(
+                "INSERT INTO follow_selection (generation,addr,role,enabled,selected_at) "
+                "VALUES ('g1','0xaaa','challenger',1,'2026-01-02')"
+            )
+            db.commit()
+            core_row = scanner.selection.SelectionRow(
+                "0xaaa", "core", reason="core_entry", data_status="valid", evidence_status="qualified",
+            )
+            marginal = scanner.selection.MarginalSelectionResult(
+                selected=("0xaaa",),
+                baseline=scanner.selection.PortfolioMetrics(0, 0, 0, 1, 1, 0, 0, 0),
+                metrics=scanner.selection.PortfolioMetrics(10, 5, 0, 1, 1, .005, .1, .1),
+                action="bootstrap", added=("0xaaa",),
+            )
+
+            with patch.object(scanner, "_build_explicit_selection", return_value=([core_row], marginal)) as build, \
+                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}) as launch:
+                result = scanner.repair_published_selection(db, "g1", "2026-01-03")
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["core"], 1)
+            self.assertEqual(db.execute(
+                "SELECT role FROM follow_selection WHERE generation='g1' AND addr='0xaaa'"
+            ).fetchone()[0], "core")
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM commands WHERE type='reload_params' AND status='pending'"
+            ).fetchone()[0], 1)
+            build.assert_called_once()
+            launch.assert_called_once()
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:

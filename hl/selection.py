@@ -450,3 +450,62 @@ def select_marginal_core(current_core: Sequence[str], challengers: Sequence[str]
     trials.sort(key=lambda x: (-x[1].net_lcb, x[1].max_drawdown, x[2], x[0]))
     selected, metrics, action, added, removed = trials[0]
     return MarginalSelectionResult(selected, baseline, metrics, action, added, removed, len(cache))
+
+
+def select_bootstrap_core(challengers: Sequence[str],
+                          evaluator: Callable[[Tuple[str, ...]], PortfolioMetrics],
+                          constraints: SelectionConstraints = SelectionConstraints()) -> MarginalSelectionResult:
+    """Greedily form the first Core from an empty account.
+
+    Bootstrap repeatedly adds the best positive-marginal wallet until no
+    remaining candidate clears every portfolio constraint.
+    """
+    return select_core_until_stable((), challengers, evaluator, constraints, action="bootstrap")
+
+
+def select_core_until_stable(current_core: Sequence[str], challengers: Sequence[str],
+                             evaluator: Callable[[Tuple[str, ...]], PortfolioMetrics],
+                             constraints: SelectionConstraints = SelectionConstraints(),
+                             *, action: str = "rebalance") -> MarginalSelectionResult:
+    """Apply positive-marginal additions/replacements until the set is stable.
+
+    Lifecycle confirmation and portfolio constraints already provide the
+    membership hysteresis.  Artificially limiting a generation to one action
+    only delays profitable, independently-qualified wallets and leaves a cold
+    Paper account under-formed.
+    """
+    initial = tuple(sorted({a.lower() for a in current_core if a}))
+    universe = tuple(sorted({a.lower() for a in challengers if a} | set(initial)))
+    cache = {}
+
+    def evaluate(addrs):
+        key = tuple(sorted(addrs))
+        if key not in cache:
+            metrics = evaluator(key)
+            if not isinstance(metrics, PortfolioMetrics):
+                raise TypeError("portfolio evaluator must return PortfolioMetrics")
+            cache[key] = metrics
+        return cache[key]
+
+    selected = initial
+    baseline = evaluate(selected)
+    current = baseline
+    seen = {selected}
+    max_steps = max(1, len(universe) * 2 + constraints.max_targets)
+    for _ in range(max_steps):
+        candidates = [addr for addr in universe if addr not in set(selected)]
+        result = select_marginal_core(selected, candidates, evaluate, constraints)
+        if result.action == "keep" or result.selected == selected or result.selected in seen:
+            break
+        selected, current = result.selected, result.metrics
+        seen.add(selected)
+
+    return MarginalSelectionResult(
+        selected=selected,
+        baseline=baseline,
+        metrics=current,
+        action=action if selected != initial else "keep",
+        added=tuple(sorted(set(selected) - set(initial))),
+        removed=tuple(sorted(set(initial) - set(selected))),
+        evaluated=len(cache),
+    )
