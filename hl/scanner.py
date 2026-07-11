@@ -71,12 +71,30 @@ def _load_cached_fills(db, addr, since):
     return out
 
 
-def _store_cached_fills(db, addr, fills, window_start):
+def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=False, coverage_end=None):
     """Upsert fills (dedup by tid) + prune anything older than the window. CALLER HOLDS _db_lock."""
     rows = [(addr, x.get("tid"), x["time"], json.dumps(x)) for x in fills if x.get("tid") is not None]
     if rows:
         db.executemany("INSERT OR IGNORE INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)", rows)
     db.execute("DELETE FROM candidate_fills WHERE addr=? AND time<?", (addr, window_start))
+    if coverage_complete:
+        db.execute(
+            "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(addr) DO UPDATE SET coverage_start_ms=MIN(fill_cache_state.coverage_start_ms,excluded.coverage_start_ms),"
+            "coverage_end_ms=MAX(COALESCE(fill_cache_state.coverage_end_ms,0),excluded.coverage_end_ms),"
+            "updated_at=excluded.updated_at",
+            (addr, int(window_start), int(coverage_end or window_start), now_iso()),
+        )
+
+
+def _copy_warmup_backfill_addrs(db, desired_start_ms):
+    """Wallets with real Copy evidence whose cache has never been confirmed to cover the warm-up prefix."""
+    return [r[0] for r in db.execute(
+        "SELECT p.addr FROM profile p LEFT JOIN fill_cache_state s ON s.addr=p.addr "
+        "WHERE (COALESCE(p.copy_bt_closed_n,0)>0 OR p.copy_bt_net_pnl IS NOT NULL) "
+        "AND (s.coverage_start_ms IS NULL OR s.coverage_start_ms>?) ORDER BY p.addr",
+        (int(desired_start_ms),),
+    ).fetchall()]
 
 
 def _replace_episode_rows(db, addr: str, eps: list) -> None:
@@ -142,6 +160,7 @@ def _due_for_full_resync(db):
 def _copy_bt_cached_fills(db, addr, now_ms, p):
     """Cached copyable fills for regate's no-network copy replay."""
     days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    days += int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
     start_ms = now_ms - days * 86400_000
     return normalize_copyable_fills(_load_cached_fills(db, addr, start_ms), addr=addr)
 
@@ -639,7 +658,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     if not universe:
         return _defer_profile(db, addr, prior, stamp, "universe_unavailable")
     window_start = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
-    full = bool(force_full or getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
+    # Workset scope and fill-fetch mode are independent.  A UI "full scan" may evaluate every candidate
+    # while only the scheduler-selected migration/repair wallets perform a complete historical refetch.
+    full = bool(force_full or not config.INCREMENTAL_SCAN)
     try:
         raw_full, hit_cap, new_fills = _fetch_profile_fills(db, addr, window_start, p, full)
     except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
@@ -777,7 +798,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                times_seen=(prior or {}).get("times_seen", 0) + 1)
     cols = storage.PROFILE_COLS.split(",")
     with _db_lock:
-        _store_cached_fills(db, addr, new_fills, window_start)   # persist the delta + prune the window
+        _store_cached_fills(
+            db, addr, new_fills, window_start,
+            coverage_complete=bool(full and not hit_cap), coverage_end=now_ms,
+        )   # persist the delta + prune the window
         _replace_episode_rows(db, addr, eps)
         db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
                    f"VALUES ({','.join('?' * len(cols))})", [row.get(c) for c in cols])
@@ -989,8 +1013,8 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     if not usable:
         # Empty baseline is a valid starting portfolio; any candidate still needs real evidence.
         if selected_n == 0:
-            return selection.PortfolioMetrics(0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
-        return selection.PortfolioMetrics(-1e12, -1e12, 0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)
+            return selection.PortfolioMetrics(0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0)
+        return selection.PortfolioMetrics(-1e12, -1e12, 0, 0.0, 0.0, 1.0, 1.0, 1.0)
     primary = next((row for row in usable if row[0] == 14), max(usable, key=lambda row: row[0]))
     net_lcb = primary[2]
     stress_lcb = min(row[2] for row in usable)
@@ -1007,12 +1031,9 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
         / max(1.0, abs(f(row[1].get("copy_gross_pnl"))))
         for row in usable
     )
-    # Until live telemetry supplies a fitted curve, reserve two percentage points of latency budget per
-    # additional polled Core. Replacements do not inflate the poll set.
-    latency_degradation = max(0, selected_n - baseline_n) * 0.02
     return selection.PortfolioMetrics(
         net_lcb, stress_lcb, liquidations, actionable, capacity, max_dd, peak_deploy,
-        cost_drag, latency_degradation,
+        cost_drag,
     )
 
 
@@ -1187,7 +1208,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     min_capacity_fit=copy_policy.min_capacity_fit,
                     max_drawdown_worsening=copy_policy.max_drawdown_worsening,
                     max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
-                    max_poll_latency_degradation=0.10,
                     max_targets=int(config.MAX_TARGETS),
                 )
                 marginal = selection.select_core_until_stable(
@@ -1202,6 +1222,20 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 raise RuntimeError(f"selection_marginal_replay_failed:{exc}") from exc
 
     selected_set = set(selected_core)
+    portfolio_rejections = {}
+    portfolio_utilities = {}
+    if marginal is not None:
+        final_metrics = evaluate(selected_core)
+        for addr in selected_core:
+            without = tuple(item for item in selected_core if item != addr)
+            portfolio_utilities[addr] = final_metrics.net_lcb - evaluate(without).net_lcb
+        for addr in entry_candidates:
+            if addr in selected_set:
+                continue
+            trial = evaluate(tuple(sorted(selected_set | {addr})))
+            portfolio_rejections[addr] = selection.portfolio_rejection_reason(
+                final_metrics, trial, constraints,
+            )
     rows = []
     for addr, decision in sorted(decisions.items()):
         profile = row_by_addr[addr]
@@ -1212,10 +1246,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             role, reason = selection.EXIT_ONLY, decision.reason
         else:
             role = selection.CHALLENGER
-            reason = "portfolio_no_positive_marginal" if decision.role == selection.CORE else decision.reason
-        utility = profile.get("selection_marginal_utility")
-        if marginal and addr in marginal.added:
-            utility = marginal.metrics.net_lcb - marginal.baseline.net_lcb
+            reason = portfolio_rejections.get(addr, decision.reason)
+        utility = portfolio_utilities.get(addr)
         include_selection = (
             role in {selection.CORE, selection.EXIT_ONLY}
             or profile.get("status") in {"active", "qualified"}
@@ -1257,12 +1289,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             reason=profile.get("reason"),
             last_actionable_open_ms=profile.get("last_copyable_open_ms"),
         )
-        if utility is not None:
-            db.execute("UPDATE profile SET selection_marginal_utility=? WHERE addr=?", (utility, addr))
+        db.execute("UPDATE profile SET selection_marginal_utility=? WHERE addr=?", (utility, addr))
     return rows, marginal
 
 
-def _record_explicit_follow_history(db, selection_rows, stamp, previous_core):
+def _record_explicit_follow_history(db, selection_rows, stamp, previous_core, generation_id):
     current_core = {row.addr for row in selection_rows if row.role == selection.CORE and row.enabled}
     scores = {
         addr: score for addr, score in db.execute(
@@ -1273,11 +1304,17 @@ def _record_explicit_follow_history(db, selection_rows, stamp, previous_core):
         ).fetchall()
     } if current_core else {}
     db.executemany(
-        "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
-        "VALUES (?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
+        "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score,"
+        "first_followed_generation,last_followed_generation) "
+        "VALUES (?,?,?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
         "first_followed_at=COALESCE(follow_history.first_followed_at,excluded.first_followed_at),"
-        "last_followed_at=excluded.last_followed_at,last_followed_score=excluded.last_followed_score",
-        [(addr, stamp if addr not in previous_core else None, stamp, scores.get(addr)) for addr in sorted(current_core)],
+        "last_followed_at=excluded.last_followed_at,last_followed_score=excluded.last_followed_score,"
+        "first_followed_generation=COALESCE(follow_history.first_followed_generation,"
+        "excluded.first_followed_generation),last_followed_generation=excluded.last_followed_generation",
+        [(
+            addr, stamp if addr not in previous_core else None, stamp, scores.get(addr),
+            generation_id if addr not in previous_core else None, generation_id,
+        ) for addr in sorted(current_core)],
     )
     if current_core != set(previous_core):
         db.execute(
@@ -1481,7 +1518,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     )
     previous_core = set(existing_core)
     selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
-    current_core = _record_explicit_follow_history(db, rows, stamp, previous_core)
+    current_core = _record_explicit_follow_history(db, rows, stamp, previous_core, generation_id)
     for row in rows:
         pipeline_audit._insert_event(
             db,
@@ -1879,6 +1916,12 @@ def scan(db, p) -> None:
             "SELECT addr FROM follow_selection WHERE generation=? AND role='challenger' AND enabled=1",
             (current_selection_generation,),
         ).fetchall()]
+    # vNext adds seven warm-up days to Copy replay.  Only wallets that already produced Copy evidence
+    # need the one-time 37-day backfill; front-funnel structural rejects remain incremental.
+    warmup_backfill_addrs = _copy_warmup_backfill_addrs(
+        db, now_ms - config.PROFILE_FETCH_DAYS * 86400_000,
+    )
+    challenger_addrs = list(dict.fromkeys(challenger_addrs + warmup_backfill_addrs))
     position_addrs = sorted({
         (addr or "").lower()
         for table in ("copy_position", "shadow_position")
@@ -1923,6 +1966,16 @@ def scan(db, p) -> None:
         exploration_seed=generation_id,
         full_scan=run_full,
     )
+    migration_backfill = set(warmup_backfill_addrs) & set(workset_info["workset"])
+    if migration_backfill:
+        refresh = workset_info["refresh"]
+        # On the migration scan, "all" still means all profiles are reevaluated; it no longer means
+        # wasting a 37-day network refetch on structural rejects that never reached Copy replay.
+        if run_full:
+            refresh["full_refetch"] = sorted(migration_backfill)
+        else:
+            refresh["full_refetch"] = sorted(set(refresh["full_refetch"]) | migration_backfill)
+        workset_info["fill_mode"] = "mixed"
     pipeline_audit.record_workset_summary(db, stamp, "scan", workset_info)
     generation.record_workset(
         db,
@@ -1932,7 +1985,9 @@ def scan(db, p) -> None:
         full_refresh_shard=workset_info["refresh"]["shard_index"],
         workset_n=len(workset_info["workset"]),
         deferred_n=workset_info["counts"]["deferred"],
-        metrics={"estimatedProfileSec": estimated_profile_s},
+        metrics={"estimatedProfileSec": estimated_profile_s,
+                 "warmupBackfillDue": len(warmup_backfill_addrs),
+                 "warmupBackfillScheduled": len(migration_backfill)},
     )
     db.commit()
     workset, mode = workset_info["workset"], workset_info["mode"]
@@ -2084,7 +2139,9 @@ def scan(db, p) -> None:
                 },
             )
             generation.publish_generation(db, generation_id, published_at=stamp)
-            current_core = _record_explicit_follow_history(db, selection_rows, stamp, previous_core)
+            current_core = _record_explicit_follow_history(
+                db, selection_rows, stamp, previous_core, generation_id,
+            )
             n_active = len(current_core)
             stage_metrics = {
                 "durationSec": round(time.time() - t0, 3),

@@ -327,7 +327,21 @@ def decide_lifecycle(e: LifecycleEvidence, policy: LifecyclePolicy = LifecyclePo
     if entry_ok:
         return LifecycleDecision(addr, previous, CORE, "core_entry", False, True)
     role = EXIT_ONLY if e.has_open_copy else CHALLENGER
-    return LifecycleDecision(addr, previous, role, "challenger_evidence")
+    if e.consecutive_complete_good < policy.entry_complete_generations:
+        reason = "entry_generation_confirmation"
+    elif last_age is None or last_age > policy.entry_actionable_age_ms:
+        reason = "entry_actionable_open_stale"
+    elif e.oos_closed_n < policy.entry_oos_closes:
+        reason = "entry_recent_copy_samples_low"
+    elif e.positive_probability < policy.entry_positive_probability:
+        reason = "entry_positive_probability_low"
+    elif observed_ms < policy.challenger_observation_ms:
+        reason = "entry_observation_pending"
+    elif e.soft_bad:
+        reason = e.soft_bad_reason
+    else:
+        reason = "entry_conditions_unmet"
+    return LifecycleDecision(addr, previous, role, reason)
 
 
 def decide_lifecycles(evidence: Iterable[LifecycleEvidence],
@@ -361,7 +375,6 @@ class PortfolioMetrics:
     max_drawdown: float
     peak_deploy_pct: float
     cost_drag_ratio: float
-    poll_latency_degradation: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -372,7 +385,6 @@ class SelectionConstraints:
     max_drawdown_worsening: float = 0.01
     max_deploy_pct: float = 0.80
     max_cost_drag_ratio: float = 0.25
-    max_poll_latency_degradation: float = 0.10
     max_targets: int = 40
 
 
@@ -402,8 +414,33 @@ def _portfolio_passes(base: PortfolioMetrics, trial: PortfolioMetrics,
         and trial.max_drawdown <= base.max_drawdown + c.max_drawdown_worsening
         and trial.peak_deploy_pct <= c.max_deploy_pct
         and trial.cost_drag_ratio <= c.max_cost_drag_ratio
-        and trial.poll_latency_degradation <= c.max_poll_latency_degradation
     )
+
+
+def portfolio_rejection_reason(base: PortfolioMetrics, trial: PortfolioMetrics,
+                               c: SelectionConstraints) -> str:
+    """Return the first concrete failed portfolio constraint for dashboard/audit use."""
+    improvement = trial.net_lcb - base.net_lcb
+    required = abs(base.net_lcb) * c.min_relative_lcb_improvement
+    if trial.net_lcb <= 0 or improvement <= 0:
+        return "portfolio_no_profit_improvement"
+    if improvement + 1e-12 < required:
+        return "portfolio_gain_below_floor"
+    if trial.stress_net_lcb <= 0:
+        return "portfolio_recent_stress_loss"
+    if trial.liquidations > base.liquidations:
+        return "portfolio_new_liquidation"
+    if trial.actionable_open_rate < c.min_actionable_open_rate:
+        return "portfolio_open_rate_low"
+    if trial.capacity_fit < c.min_capacity_fit:
+        return "portfolio_capacity_low"
+    if trial.max_drawdown > base.max_drawdown + c.max_drawdown_worsening:
+        return "portfolio_drawdown_worse"
+    if trial.peak_deploy_pct > c.max_deploy_pct:
+        return "portfolio_deploy_limit"
+    if trial.cost_drag_ratio > c.max_cost_drag_ratio:
+        return "portfolio_cost_drag_high"
+    return "portfolio_not_selected"
 
 
 def select_marginal_core(current_core: Sequence[str], challengers: Sequence[str],

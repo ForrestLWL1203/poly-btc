@@ -162,12 +162,11 @@ class SelectionTests(unittest.TestCase):
 
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,
-                 deploy=.7, cost=.10, latency=.05):
+                 deploy=.7, cost=.10, latency=None):
         return selection.PortfolioMetrics(
             net_lcb=net, stress_net_lcb=net if stress is None else stress,
             liquidations=liqs, actionable_open_rate=actionable, capacity_fit=capacity,
             max_drawdown=dd, peak_deploy_pct=deploy, cost_drag_ratio=cost,
-            poll_latency_degradation=latency,
         )
 
     def test_marginal_selector_can_choose_one_or_keep_empty(self):

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from . import config, params, selection
-from .copy_backtest import run_backtest
+from .copy_backtest import run_backtest, slice_backtest_result
 from .copy_data import load_copyable_fills
 from .copy_policy import load_copy_policy
 from .sector import parse_json_obj
@@ -200,7 +200,17 @@ def _candidate_distance(candidate: dict, baseline: dict) -> float:
 
 def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     windows = candidate.get("windows") or {}
+    weighted_net = _candidate_score(candidate)
+    max_drawdown = max(
+        (float(result.get("max_drawdown") or 0.0) for result in windows.values()),
+        default=0.0,
+    )
+    # Compare profit and drawdown in the same dollars. A profitable candidate
+    # is not rejected merely because drawdown rises by an arbitrary percentage
+    # point; the extra downside must be paid for by extra net profit.
+    risk_adjusted_utility = weighted_net - max_drawdown * float(config.INITIAL_BALANCE)
     return (
+        risk_adjusted_utility,
         _result_pnl(windows.get(14, {})),
         _result_pnl(windows.get(7, {})),
         _result_pnl(windows.get(30, {})),
@@ -327,14 +337,15 @@ def _tune_days() -> list[int]:
 def _portfolio_window_fills(db, addrs: list[str], now_ms: int) -> dict[int, list[dict]] | None:
     days = _tune_days()
     max_days = max(days)
-    start_ms = now_ms - max_days * 86400_000
+    warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+    start_ms = now_ms - (max_days + warmup_days) * 86400_000
     max_bytes = int(getattr(config, "AUTO_TUNE_FILL_CACHE_MAX_BYTES", 64 * 1024 * 1024) or 0)
     if max_bytes > 0 and _portfolio_fill_json_bytes(db, addrs, start_ms) > max_bytes:
         return None
     fills = _load_portfolio_fills(db, addrs, start_ms)
     windows = {}
     for day in days:
-        start_ms = now_ms - day * 86400_000
+        start_ms = now_ms - (day + warmup_days) * 86400_000
         windows[day] = [x for x in fills if int(x.get("time") or 0) >= start_ms]
     return windows
 
@@ -590,7 +601,10 @@ def _unique_lev_sets(values, current=None):
 
 
 def tune_candidates_from_axes(base: dict) -> list[dict]:
-    margin_mults = _unique_values(getattr(config, "AUTO_TUNE_MARGIN_MULTS", (0.8, 1.0, 1.2, 1.4, 1.6)), 1.0)
+    margin_mults = _unique_values(getattr(
+        config, "AUTO_TUNE_MARGIN_FACTORS",
+        getattr(config, "AUTO_TUNE_MARGIN_MULTS", (0.8, 1.0, 1.2, 1.4, 1.6)),
+    ), 1.0)
     lev_sets = _unique_lev_sets(
         getattr(config, "AUTO_TUNE_LEV_CAP_SETS", ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))),
         tuple(float(base[k]) for k in LEV_KEYS),
@@ -602,6 +616,70 @@ def tune_candidates_from_axes(base: dict) -> list[dict]:
     return [
         build_tune_candidate(base, mult, levs, deploy)
         for mult, levs, deploy in itertools.product(margin_mults, lev_sets, deploy_fulls)
+    ]
+
+
+def _candidate_from_params(params_: dict, *, axis: str) -> dict:
+    params_ = {key: float(params_[key]) for key in TUNE_KEYS}
+    return {
+        "mult": None,
+        "axis": axis,
+        "margins": {key: params_[key] for key in MARGIN_KEYS},
+        "lev_caps": {key: params_[key] for key in LEV_KEYS},
+        "deploy_full_pct": params_["DEPLOY_FULL_PCT"],
+        "params": params_,
+        "windows": {},
+        "score": None,
+    }
+
+
+def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
+    """Search each volatility tier independently instead of one shared multiplier."""
+    factors = _unique_values(
+        getattr(
+            config, "AUTO_TUNE_MARGIN_FACTORS",
+            getattr(config, "AUTO_TUNE_MARGIN_MULTS", (0.8, 1.0, 1.2, 1.4, 1.6)),
+        ), 1.0
+    )
+    axes = []
+    for key in MARGIN_KEYS:
+        floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+        floor = float(follow.get(floor_key) or 0.0)
+        axes.append(sorted({max(floor, float(base[key]) * factor) for factor in factors}))
+    return [
+        _candidate_from_params(
+            {**base, **dict(zip(MARGIN_KEYS, values))},
+            axis="independent_margins",
+        )
+        for values in itertools.product(*axes)
+    ]
+
+
+def independent_leverage_candidates(base: dict) -> list[dict]:
+    configured = _unique_lev_sets(
+        getattr(config, "AUTO_TUNE_LEV_CAP_SETS", ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))),
+        tuple(float(base[key]) for key in LEV_KEYS),
+    )
+    axes = []
+    for index, key in enumerate(LEV_KEYS):
+        axes.append(sorted({float(values[index]) for values in configured} | {float(base[key])}))
+    return [
+        _candidate_from_params(
+            {**base, **dict(zip(LEV_KEYS, values))},
+            axis="independent_leverage",
+        )
+        for values in itertools.product(*axes)
+    ]
+
+
+def deploy_candidates(base: dict) -> list[dict]:
+    values = _unique_values(
+        getattr(config, "AUTO_TUNE_DEPLOY_FULL_PCTS", (0.30, 0.40, 0.50)),
+        float(base["DEPLOY_FULL_PCT"]),
+    )
+    return [
+        _candidate_from_params({**base, "DEPLOY_FULL_PCT": value}, axis="deploy_full")
+        for value in values
     ]
 
 
@@ -643,6 +721,7 @@ def follow_overrides_for_add_candidate(follow: dict, candidate: dict) -> dict:
     out["ADD_STRATEGY"] = "smart"
     out["SMART_ADD"] = True
     out["ADD_GAP_K"] = float(params_["ADD_GAP_K"])
+    out["POS_ADD_GAP_K"] = float(params_["POS_ADD_GAP_K"])
     out["ADD_GAP_SHRINK_G"] = float(params_["ADD_GAP_SHRINK_G"])
     out["ADD_MAX_HARD"] = int(params_["ADD_MAX_HARD"])
     return out
@@ -665,7 +744,14 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
         if window_fills is None:
             start_ms = now_ms - int(days) * 86400_000
             fills = _load_portfolio_fills(db, addrs, start_ms)
-        result = run_backtest("portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {})
+        warm_result = run_backtest(
+            "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {}
+        )
+        result = slice_backtest_result(
+            warm_result,
+            now_ms - int(days) * 86_400_000,
+            window_days=int(days),
+        )
         result["fills"] = len(fills)
         windows[int(days)] = result
     return windows
@@ -740,7 +826,7 @@ def _record_run(db, source: str, stamp: str, selected: dict | None, applied: boo
             generation_id,
             mode,
             result.get("status"),
-            float(selected.get("mult")) if selected else None,
+            float(selected.get("mult")) if selected and selected.get("mult") is not None else None,
             1 if applied else 0,
             1 if result.get("eligible_to_apply") else 0,
             followed_n,
@@ -821,23 +907,29 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
     base_overrides = dict(follow)
     proposal_overrides = {**follow, **proposal}
     folds = []
+    warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86400_000
     for older, newer in ((30, 20), (20, 10), (10, 0)):
         lo = now_ms - older * 86400_000
         hi = now_ms - newer * 86400_000 if newer else now_ms + 1
-        fold_fills = [row for row in fills if lo <= int(row.get("time") or 0) < hi]
-        baseline = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=base_overrides,
-                                market_ctx=market_ctx)
-        challenger = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=proposal_overrides,
-                                  market_ctx=market_ctx)
-        folds.append({"baseline": baseline, "challenger": challenger, "fills": len(fold_fills)})
-    holdout_fills = [row for row in fills if int(row.get("time") or 0) >= now_ms - 10 * 86400_000]
-    stress = run_backtest(
+        fold_fills = [row for row in fills if lo - warmup_ms <= int(row.get("time") or 0) < hi]
+        baseline_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=base_overrides,
+                                     market_ctx=market_ctx)
+        challenger_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=proposal_overrides,
+                                       market_ctx=market_ctx)
+        baseline = slice_backtest_result(baseline_warm, lo, window_days=10)
+        challenger = slice_backtest_result(challenger_warm, lo, window_days=10)
+        in_window_n = sum(lo <= int(row.get("time") or 0) < hi for row in fold_fills)
+        folds.append({"baseline": baseline, "challenger": challenger, "fills": in_window_n})
+    holdout_start = now_ms - 10 * 86400_000
+    holdout_fills = [row for row in fills if int(row.get("time") or 0) >= holdout_start - warmup_ms]
+    stress_warm = run_backtest(
         "portfolio",
         holdout_fills,
         sigmas=sigmas,
         overrides={**proposal_overrides, "REPLAY_COST_MULT": 1.5},
         market_ctx=market_ctx,
     )
+    stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
     compact_folds = []
     wins = 0
     for index, fold in enumerate(folds):
@@ -902,31 +994,9 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
     ).fetchone()
     cooldown_days = float(getattr(config, "AUTO_TUNE_APPLY_COOLDOWN_DAYS", 7))
     cooldown_ok = not last_apply or now_ts - (_iso_epoch(last_apply[0]) or 0) >= cooldown_days * 86400
-    folds = validation.get("folds") or []
-    holdout = validation.get("holdout") or {}
-    baseline_total = sum(float(fold.get("baselineNet") or 0.0) for fold in folds)
-    challenger_total = sum(float(fold.get("challengerNet") or 0.0) for fold in folds)
-    relative_gain = (
-        (challenger_total - baseline_total) / max(1.0, abs(baseline_total))
-    )
-    reasons = []
-    if validation.get("foldWins", 0) < 2:
-        reasons.append("fewer_than_two_fold_wins")
-    if float(holdout.get("challengerNet") or 0.0) <= max(0.0, float(holdout.get("baselineNet") or 0.0)):
-        reasons.append("holdout_not_better")
-    if validation.get("stressNet", 0.0) <= 0:
-        reasons.append("stress_not_profitable")
-    if validation.get("stressLiquidations", 0) > 0:
-        reasons.append("stress_liquidation")
-    if relative_gain < policy.tune_min_relative_gain:
-        reasons.append("relative_gain_below_floor")
-    if folds and max(float(fold.get("challengerMaxDD") or 0.0) - float(fold.get("baselineMaxDD") or 0.0)
-                     for fold in folds) > policy.tune_max_drawdown_worsening:
-        reasons.append("drawdown_worsened")
-    if folds and min(float(fold.get("challengerOpenRate") or 0.0) for fold in folds) < 0.70:
-        reasons.append("open_rate_below_floor")
-    if folds and min(float(fold.get("challengerCapacityFit") or 0.0) for fold in folds) < 0.85:
-        reasons.append("capacity_fit_below_floor")
+    model = _model_validation(validation, policy)
+    reasons = list(model["reasons"])
+    relative_gain = model["relativeGain"]
     if shadow_days < policy.tune_min_shadow_days:
         reasons.append("shadow_days_insufficient")
     if forward_closed < policy.tune_min_forward_closed:
@@ -966,6 +1036,31 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
         "cooldownOk": cooldown_ok,
         **validation,
     }
+
+
+def _model_validation(validation: dict, policy) -> dict:
+    """Pure historical replay validation used to compare every finalist."""
+    folds = validation.get("folds") or []
+    holdout = validation.get("holdout") or {}
+    baseline_total = sum(float(fold.get("baselineNet") or 0.0) for fold in folds)
+    challenger_total = sum(float(fold.get("challengerNet") or 0.0) for fold in folds)
+    relative_gain = (challenger_total - baseline_total) / max(1.0, abs(baseline_total))
+    reasons = []
+    if validation.get("foldWins", 0) < 2:
+        reasons.append("fewer_than_two_fold_wins")
+    if float(holdout.get("challengerNet") or 0.0) <= max(0.0, float(holdout.get("baselineNet") or 0.0)):
+        reasons.append("holdout_not_better")
+    if validation.get("stressNet", 0.0) <= 0:
+        reasons.append("stress_not_profitable")
+    if validation.get("stressLiquidations", 0) > 0:
+        reasons.append("stress_liquidation")
+    if relative_gain < policy.tune_min_relative_gain:
+        reasons.append("relative_gain_below_floor")
+    if folds and min(float(fold.get("challengerOpenRate") or 0.0) for fold in folds) < 0.70:
+        reasons.append("open_rate_below_floor")
+    if folds and min(float(fold.get("challengerCapacityFit") or 0.0) for fold in folds) < 0.85:
+        reasons.append("capacity_fit_below_floor")
+    return {"eligible": not reasons, "reasons": reasons, "relativeGain": relative_gain}
 
 
 def _maybe_rollback_applied(db, follow: dict, now_ms: int) -> dict | None:
@@ -1069,13 +1164,41 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         _record_run(db, source, stamp, None, False, len(addrs), base, result)
         db.commit()
         return result
-    candidates = [
+    margin_candidates = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
                                 window_fills=window_fills)
-        for candidate in tune_candidates_from_axes(base)
+        for candidate in independent_margin_candidates(base, follow)
     ]
-    baseline = next((c for c in candidates if _same_tune_values(c.get("params") or {}, base)), candidates[0])
-    selected = choose_margin_candidate(candidates, baseline)
+    baseline = next(
+        (candidate for candidate in margin_candidates if _same_tune_values(candidate.get("params") or {}, base)),
+        margin_candidates[0],
+    )
+    selected_margin = choose_margin_candidate(margin_candidates, baseline)
+
+    lev_candidates = [
+        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                                window_fills=window_fills)
+        for candidate in independent_leverage_candidates(selected_margin.get("params") or base)
+    ]
+    lev_baseline = next(
+        (candidate for candidate in lev_candidates
+         if _same_tune_values(candidate.get("params") or {}, selected_margin.get("params") or base)),
+        lev_candidates[0],
+    )
+    selected_lev = choose_margin_candidate(lev_candidates, lev_baseline)
+
+    deploy_grid = [
+        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                                window_fills=window_fills)
+        for candidate in deploy_candidates(selected_lev.get("params") or base)
+    ]
+    deploy_baseline = next(
+        (candidate for candidate in deploy_grid
+         if _same_tune_values(candidate.get("params") or {}, selected_lev.get("params") or base)),
+        deploy_grid[0],
+    )
+    selected = choose_margin_candidate(deploy_grid, deploy_baseline)
+    candidates = margin_candidates + lev_candidates + deploy_grid
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
 
@@ -1099,10 +1222,69 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             selected_add_params = selected_add.get("params") or add_base
 
     current_combined = {**current, **current_add}
-    proposal_combined = {**selected_params, **selected_add_params}
-    walk_forward = _walk_forward_validation(
-        addrs, follow, proposal_combined, sigmas, window_fills, now_ms,
-    )
+    # Validate ranked sizing/add combinations, not only the most profitable in-sample pair. If the first
+    # proposal fails, continue through alternative independent parameter combinations.
+    unique_finalists = {}
+    for candidate in sorted(candidates, key=lambda item: _candidate_rank_key(item, baseline), reverse=True):
+        key = tuple(round(float((candidate.get("params") or {})[name]), 12) for name in TUNE_KEYS)
+        unique_finalists.setdefault(key, candidate)
+    finalist_limit = int(getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16)
+    sizing_options = list(unique_finalists.values())[:max(1, finalist_limit)]
+    if add_candidates and add_baseline:
+        ranked_add = sorted(
+            add_candidates,
+            key=lambda item: _candidate_rank_key(item, add_baseline),
+            reverse=True,
+        )
+        add_options = []
+        seen_add = set()
+        for candidate in ([selected_add, add_baseline] + ranked_add):
+            if not candidate:
+                continue
+            params_ = candidate.get("params") or add_base
+            key = tuple(round(float(params_[name]), 12) for name in ADD_TUNE_KEYS)
+            if key not in seen_add:
+                seen_add.add(key)
+                add_options.append(params_)
+            if len(add_options) >= 4:
+                break
+    else:
+        add_options = [selected_add_params]
+    combined_options = sorted(
+        (
+            (sizing_rank + add_rank, sizing_rank, add_rank, sizing_candidate, add_params)
+            for sizing_rank, sizing_candidate in enumerate(sizing_options)
+            for add_rank, add_params in enumerate(add_options)
+        ),
+        key=lambda row: (row[0], row[1], row[2]),
+    )[:max(1, finalist_limit)]
+    finalist_results = []
+    chosen = None
+    for _rank, _sizing_rank, _add_rank, sizing_candidate, finalist_add_params in combined_options:
+        sizing_params = sizing_candidate.get("params") or base
+        combined = {**sizing_params, **finalist_add_params}
+        validation = _walk_forward_validation(
+            addrs, follow, combined, sigmas, window_fills, now_ms,
+        )
+        model = _model_validation(validation, load_copy_policy(follow))
+        finalist_results.append({
+            "params": combined,
+            "eligible": model["eligible"],
+            "reasons": model["reasons"],
+            "relativeGain": model["relativeGain"],
+        })
+        if model["eligible"]:
+            chosen = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
+            break
+    if chosen is None:
+        combined = {**selected_params, **selected_add_params}
+        validation = _walk_forward_validation(
+            addrs, follow, combined, sigmas, window_fills, now_ms,
+        )
+        chosen = (selected, selected_params, selected_add_params, combined, validation)
+    selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen
+    selected_margins = {key: selected_params[key] for key in MARGIN_KEYS}
+    follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     apply_validation = _proposal_apply_eligibility(
         db, addrs, follow, current_combined, proposal_combined, walk_forward, stamp,
     )
@@ -1149,7 +1331,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "baseline_reset": baseline_reset,
         "add_baseline_reset": add_baseline_reset,
         "followed_n": len(addrs),
-        "selected_mult": selected.get("mult"),
+        "selected_mult": None,
         "margins": selected_margins,
         "lev_caps": selected.get("lev_caps"),
         "deploy_full_pct": selected.get("deploy_full_pct"),
@@ -1158,6 +1340,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "eligible_to_apply": bool(apply_validation.get("eligible")),
         "validation": apply_validation,
         "proposal": proposal_combined,
+        "finalists": finalist_results,
         "rollback": rollback_result,
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],

@@ -8,6 +8,18 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_add_candidate_applies_positive_add_gap_independently(self):
+        follow = {
+            "ADD_GAP_K": 0.12, "POS_ADD_GAP_K": 0.08,
+            "ADD_GAP_SHRINK_G": 1.2, "ADD_MAX_HARD": 8,
+        }
+        candidate = auto_tune.build_add_candidate(follow, 0.06, 1.3, 6, pos_gap_k=0.11)
+
+        overrides = auto_tune.follow_overrides_for_add_candidate(follow, candidate)
+
+        self.assertEqual(overrides["ADD_GAP_K"], 0.06)
+        self.assertEqual(overrides["POS_ADD_GAP_K"], 0.11)
+
     def _db(self):
         td = tempfile.TemporaryDirectory()
         db = storage.connect(str(Path(td.name) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

@@ -90,8 +90,8 @@ export function Wallets({ confirm, toast }) {
           <table>
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
-              <th className="num" title="目标钱包近7天可跟随的新开仓次数 / 已平仓回合数">近7日 开 / 平</th>
-              <th>最近开仓</th><th className="num" title="按当前跟单策略回放最近30天，已扣手续费">30日回放</th>
+              <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
+              <th>最近开仓</th><th className="num" title="按当前跟单策略回放，已扣手续费；同时展示长期与近期结果">Copy回放</th>
               <th className="num">胜率</th><th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>
@@ -114,7 +114,10 @@ export function Wallets({ confirm, toast }) {
                     <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{w.lastActionableOpenAt ? fTime(w.lastActionableOpenAt) : "—"}</td>
                     <td className="num">
                       <b style={{ color: (w.copyBacktestNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.copyBacktestNetPnl != null ? fSign(w.copyBacktestNetPnl, 0) : "—"}</b>
-                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{w.copyBacktestClosedN || 0} 笔</div>
+                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>30日 · {w.copyBacktestClosedN || 0}笔</div>
+                      <div style={{ fontSize: 11, marginTop: 2, color: (w.copyBacktest7dNetPnl || 0) < 0 ? "var(--red-l)" : "var(--t2)" }}>
+                        7日 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"} · {w.copyBacktest7dClosedN || 0}笔
+                      </div>
                     </td>
                     <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
                     <td><b>{w.mainCoin || "—"}</b></td>

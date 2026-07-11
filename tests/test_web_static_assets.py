@@ -283,8 +283,10 @@ class WebStaticAssetsTests(unittest.TestCase):
     def test_explicit_wallet_list_uses_operator_facing_columns(self):
         wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
 
-        self.assertIn("近7日 开 / 平", wallets)
-        self.assertIn("30日回放", wallets)
+        self.assertIn("近7日钱包 开 / 平", wallets)
+        self.assertIn("Copy回放", wallets)
+        self.assertIn("30日 ·", wallets)
+        self.assertIn("7日 ", wallets)
         self.assertIn("未跟原因", wallets)
         self.assertIn("selectionReasonText", wallets)
         self.assertNotIn("角色 / 市场", wallets)

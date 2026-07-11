@@ -36,6 +36,30 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 
+    def test_warmup_backfill_targets_only_wallets_with_copy_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            cols = storage.PROFILE_COLS.split(",")
+            rows = []
+            for addr, closed, pnl in (("0xcopy", 8, 100.0), ("0xstructural", 0, None)):
+                row = {"addr": addr, "status": "active", "copy_bt_closed_n": closed,
+                       "copy_bt_net_pnl": pnl}
+                rows.append([row.get(col) for col in cols])
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                rows,
+            )
+            desired_start = 1_000
+            self.assertEqual(scanner._copy_warmup_backfill_addrs(db, desired_start), ["0xcopy"])
+
+            with scanner._db_lock:
+                scanner._store_cached_fills(
+                    db, "0xcopy", [], desired_start,
+                    coverage_complete=True, coverage_end=10_000,
+                )
+                db.commit()
+            self.assertEqual(scanner._copy_warmup_backfill_addrs(db, desired_start), [])
+
     def test_invalid_leaderboard_retains_old_published_selection_and_skips_finalize(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -153,11 +177,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 return "active", "ok", row, False
 
             metrics = scanner.selection.PortfolioMetrics(
-                100.0, 80.0, 0, 0.95, 0.95, 0.05, 0.20, 0.05, 0.0,
+                100.0, 80.0, 0, 0.95, 0.95, 0.05, 0.20, 0.05,
             )
             marginal = scanner.selection.MarginalSelectionResult(
                 selected=("0xaaa",), baseline=scanner.selection.PortfolioMetrics(
-                    0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0,
                 ), metrics=metrics, action="add", added=("0xaaa",), evaluated=1,
             )
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \

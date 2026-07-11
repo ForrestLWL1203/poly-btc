@@ -311,12 +311,13 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(core["wallets"][0]["role"], "core")
         self.assertEqual(core["wallets"][0]["profileGeneration"], "g1")
         self.assertEqual(core["wallets"][0]["actionableOpenRate"], 0.8)
-        self.assertEqual(core["wallets"][0]["openEvents7d"], 5)
+        # Activity is the target wallet's actual opens; copied/actionable opens remain a separate field.
+        self.assertEqual(core["wallets"][0]["openEvents7d"], 6)
         self.assertEqual(core["wallets"][0]["copyBacktestNetPnl"], 42)
         self.assertEqual(core["wallets"][0]["copyBacktestClosedN"], 9)
         self.assertEqual(challenger["wallets"][0]["role"], "challenger")
         self.assertEqual(challenger["wallets"][0]["selectionMarginalUtility"], 0.07)
-        self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "近7日平仓样本不足（4/5）")
+        self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
 
     def test_published_zero_core_selection_does_not_fall_back_to_score_line(self):
         with tempfile.TemporaryDirectory() as td:

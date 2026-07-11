@@ -331,7 +331,9 @@ CREATE TABLE IF NOT EXISTS follow_history (
     addr                TEXT PRIMARY KEY,
     first_followed_at   TEXT,
     last_followed_at    TEXT,
-    last_followed_score REAL
+    last_followed_score REAL,
+    first_followed_generation TEXT,
+    last_followed_generation  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_follow_history_last_followed ON follow_history(last_followed_at DESC, addr);
 
@@ -654,6 +656,16 @@ CREATE TABLE IF NOT EXISTS candidate_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_candidate_fills_addr_time ON candidate_fills(addr, time);
 
+-- Per-wallet cache coverage.  This deliberately separates a full PROFILE workset from a full
+-- historical FILL refetch: migrations can refresh every wallet while only backfilling wallets whose
+-- copy replay actually needs the additional warm-up context.
+CREATE TABLE IF NOT EXISTS fill_cache_state (
+    addr              TEXT PRIMARY KEY,
+    coverage_start_ms INTEGER,
+    coverage_end_ms   INTEGER,
+    updated_at        TEXT
+);
+
 -- UI-tunable strategy parameters. Seeded from code defaults (hl/params.py); the operator edits via
 -- the dashboard; Observer/Scanner read their category at run time (replacing config constants / CLI
 -- args). value is stored as TEXT and parsed by `type`. category: scanner(rescan) | follow(immediate).
@@ -771,6 +783,8 @@ _MIGRATIONS = (
     "ALTER TABLE scan_runs ADD COLUMN failed INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN complete INTEGER DEFAULT 1",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
+    "ALTER TABLE follow_history ADD COLUMN first_followed_generation TEXT",
+    "ALTER TABLE follow_history ADD COLUMN last_followed_generation TEXT",
     "ALTER TABLE coin_vol ADD COLUMN day_ntl_vlm REAL",
     "ALTER TABLE coin_vol ADD COLUMN open_interest REAL",
     "ALTER TABLE coin_vol ADD COLUMN mark_px REAL",

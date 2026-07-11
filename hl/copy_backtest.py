@@ -717,3 +717,79 @@ def summarize_position(p):
 def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None, market_ctx=None):
     return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance,
                     overrides=overrides, market_ctx=market_ctx).run(fills, price_path=price_path)
+
+
+def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> dict:
+    """Slice a warm replay into a closed-position evaluation window.
+
+    The replay starts before ``start_ms`` so positions already open at the
+    boundary are reconstructed. Only positions closed inside the requested
+    window contribute samples, PnL and drawdown.
+    """
+    out = dict(result or {})
+    positions = [
+        dict(position)
+        for position in (out.get("positions") or [])
+        if int(position.get("closed_at") or 0) >= int(start_ms)
+    ]
+    positions.sort(key=lambda position: int(position.get("closed_at") or 0))
+    closed_net = sum(f(position.get("net_pnl")) for position in positions)
+    gross = sum(f(position.get("gross_pnl")) for position in positions)
+    fees = sum(f(position.get("fee_drag")) for position in positions)
+    wins = sum(1 for position in positions if f(position.get("net_pnl")) > 0)
+
+    equity = float(config.INITIAL_BALANCE)
+    peak = equity
+    max_drawdown = 0.0
+    curve = []
+    daily_pnl = {}
+    for position in positions:
+        pnl = f(position.get("net_pnl"))
+        equity += pnl
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, (peak - equity) / peak if peak > 0 else 0.0)
+        closed_at = int(position.get("closed_at") or 0)
+        curve.append({"time": closed_at, "equity": equity})
+        day = closed_at // 86_400_000 if closed_at else 0
+        daily_pnl[day] = daily_pnl.get(day, 0.0) + pnl
+    daily_values = sorted(daily_pnl.values())
+    tail_n = max(1, int(math.ceil(len(daily_values) * 0.05))) if daily_values else 0
+
+    def concentration(key):
+        buckets = {}
+        total_abs = 0.0
+        for position in positions:
+            pnl = f(position.get("net_pnl"))
+            bucket = key(position)
+            buckets[bucket] = buckets.get(bucket, 0.0) + pnl
+            total_abs += abs(pnl)
+        return max((abs(value) for value in buckets.values()), default=0.0) / total_abs if total_abs else 0.0
+
+    out.update({
+        "closed_n": len(positions),
+        "wins": wins,
+        "stops": sum(1 for position in positions if position.get("status") == "stopped"),
+        "liquidations": sum(1 for position in positions if position.get("status") == "liquidated"),
+        "copy_win_rate": wins / len(positions) if positions else 0.0,
+        "copy_net_pnl": closed_net,
+        "closed_net_pnl": closed_net,
+        "copy_gross_pnl": gross,
+        "unrealized_pnl": 0.0,
+        "fee_drag": fees,
+        "fee_slippage_drag": fees,
+        "equity_curve": curve,
+        "max_drawdown": max_drawdown,
+        "worst_day": min(daily_values, default=0.0),
+        "cvar95": sum(daily_values[:tail_n]) / tail_n if tail_n else 0.0,
+        "positions": positions,
+        "pnl_concentration": {
+            "wallet": concentration(lambda position: position.get("addr")),
+            "coin": concentration(lambda position: position.get("coin")),
+            "side": concentration(lambda position: position.get("side")),
+            "day": concentration(lambda position: int(position.get("closed_at") or 0) // 86_400_000),
+        },
+        "_window_start_ms": int(start_ms),
+        "_window_days": int(window_days) if window_days is not None else None,
+        "_warmup_applied": True,
+    })
+    return out

@@ -6,7 +6,7 @@ import json
 import math
 
 from . import config, params
-from .copy_backtest import run_backtest
+from .copy_backtest import run_backtest, slice_backtest_result
 from .copy_data import market_evidence_key, normalize_copyable_fills
 from .copy_policy import load_copy_policy
 from .sector import SECTORS, compact_sector_results, evaluate_sector_policy, filter_fills
@@ -134,7 +134,40 @@ def copy_bt_result(addr, fills, now_ms, p, days=None):
 
 
 def copy_bt_results(addr, fills, now_ms, p):
-    return {days: copy_bt_result(addr, fills, now_ms, p, days=days) for days in copy_bt_window_days(p)}
+    days_list = copy_bt_window_days(p)
+    primary_days = max(days_list)
+    warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+    warm = copy_bt_result(addr, fills, now_ms, p, days=primary_days + warmup_days)
+    if warm.get("valid") is False:
+        return {days: dict(warm, _window_days=days) for days in days_list}
+
+    out = {}
+    for days in days_list:
+        direct = copy_bt_result(addr, fills, now_ms, p, days=days)
+        sliced = slice_backtest_result(
+            warm,
+            now_ms - int(days) * 86_400_000,
+            window_days=int(days),
+        )
+        # Activity/fillability belongs to the requested window. PnL and samples
+        # come from the warm replay so boundary-spanning positions are retained.
+        for key in (
+            "target_open_events", "opened_n", "open_fill_rate", "actionable_open_rate",
+            "execution_fill_rate", "capacity_open_fit", "target_adds", "followed_adds",
+            "missed_adds", "missed_add_rate", "skip_reasons",
+        ):
+            if key in direct:
+                sliced[key] = direct[key]
+        sliced["valid"] = bool(direct.get("valid", True))
+        sliced["data_status"] = direct.get("data_status", "valid")
+        sliced["has_evidence"] = bool(
+            int(sliced.get("target_open_events") or 0)
+            or int(sliced.get("closed_n") or 0)
+            or int(sliced.get("open_n") or 0)
+        )
+        sliced["evidence_status"] = "observed" if sliced["has_evidence"] else "no_open_events"
+        out[int(days)] = sliced
+    return out
 
 
 def sector_copy_bt_results(addr, fills, now_ms, p):

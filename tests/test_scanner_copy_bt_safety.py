@@ -40,6 +40,24 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
         self.assertEqual(result["evidence_status"], "invalid")
         self.assertNotIn("error", result)
 
+    def test_warmup_restores_position_opened_before_30_day_boundary(self):
+        day = 86_400_000
+        now = 40 * day
+        addr = "0xabc"
+        fills = [
+            {"user": addr, "time": now - 32 * day, "tid": 1, "coin": "BTC", "side": "B",
+             "sz": "100", "startPosition": "0", "px": "100", "oid": 1, "crossed": True},
+            {"user": addr, "time": now - 2 * day, "tid": 2, "coin": "BTC", "side": "A",
+             "sz": "100", "startPosition": "100", "px": "110", "oid": 2, "crossed": True},
+        ]
+
+        direct = scanner_copy_bt.copy_bt_result(addr, fills, now, self._params(), days=30)
+        windows = scanner_copy_bt.copy_bt_results(addr, fills, now, self._params())
+
+        self.assertEqual(direct["closed_n"], 0)
+        self.assertEqual(windows[30]["closed_n"], 1)
+        self.assertGreater(windows[30]["copy_net_pnl"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

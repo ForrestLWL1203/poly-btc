@@ -35,7 +35,21 @@ def _selection_reason_text(row, *, now_ms=None):
     """Translate internal selection states into one operator-facing explanation."""
     reason = str(_col(row, "selection_reason") or "").strip().lower()
     labels = {
-        "portfolio_no_positive_marginal": "加入后未改善整体收益/风险",
+        "portfolio_no_positive_marginal": "组合评估未通过（旧记录）",
+        "portfolio_no_profit_improvement": "加入后组合净收益没有提高",
+        "portfolio_gain_below_floor": "加入后的收益提升不足",
+        "portfolio_recent_stress_loss": "加入后近期组合回放亏损",
+        "portfolio_new_liquidation": "加入后组合出现爆仓",
+        "portfolio_open_rate_low": "加入后有效开仓率过低",
+        "portfolio_capacity_low": "加入后资金容量不足",
+        "portfolio_drawdown_worse": "加入后组合回撤过大",
+        "portfolio_deploy_limit": "加入后超过总部署上限",
+        "portfolio_cost_drag_high": "加入后成本占比过高",
+        "entry_generation_confirmation": "等待下一次完整采集确认",
+        "entry_actionable_open_stale": "近期没有可跟随的新开仓",
+        "entry_recent_copy_samples_low": "近7日有效Copy样本不足",
+        "entry_positive_probability_low": "历史盈利稳定性不足",
+        "entry_observation_pending": "等待观察期完成",
         "deferred_data_error": "本轮数据异常，暂不跟随",
         "below_follow_line": "评分未达到跟单线",
         "actionable_open_stale": "近期没有可跟随的新开仓",
@@ -50,7 +64,7 @@ def _selection_reason_text(row, *, now_ms=None):
     policy = load_copy_policy()
     closed_7d = int(_col(row, "copy_bt_7d_closed_n") or 0)
     if closed_7d < policy.min_closed_7d:
-        return f"近7日平仓样本不足（{closed_7d}/{policy.min_closed_7d}）"
+        return f"近7日有效Copy仅{closed_7d}笔（门槛{policy.min_closed_7d}笔）"
     last_open_ms = int(_col(row, "last_copyable_open_ms") or 0)
     if not last_open_ms:
         return "近期没有可跟随的新开仓"
@@ -246,12 +260,15 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
             "enabled": bool(_col(r, "enabled", True)),
             "closed7d": closed7d,
             "openEvents7d": (
-                _col(r, "actionable_open_events_7d")
-                if _col(r, "actionable_open_events_7d") is not None
-                else (_col(r, "open_events_7d") or 0)
+                _col(r, "open_events_7d")
+                if _col(r, "open_events_7d") is not None
+                else (_col(r, "actionable_open_events_7d") or 0)
             ),
             "copyBacktestNetPnl": _col(r, "copy_bt_net_pnl"),
             "copyBacktestClosedN": _col(r, "copy_bt_closed_n") or 0,
+            "copyBacktest14dNetPnl": _col(r, "copy_bt_14d_net_pnl"),
+            "copyBacktest14dClosedN": _col(r, "copy_bt_14d_closed_n") or 0,
+            "copyBacktest7dNetPnl": _col(r, "copy_bt_7d_net_pnl"),
             "copyBacktest7dClosedN": _col(r, "copy_bt_7d_closed_n") or 0,
             "closedN": _col(r, "closed_n") or 0,
             "forwardNetPnl": _col(r, "fwd_net") or 0,
@@ -302,8 +319,10 @@ def ep_wallets(db, qs=None):
             "WHERE (? IS NOT NULL AND NOT EXISTS ("
             "  SELECT 1 FROM follow_selection fs WHERE fs.generation=? AND fs.addr=fh.addr "
             "  AND fs.role='core' AND fs.enabled=1"
+            ") AND (fh.last_followed_generation IS NULL OR fh.last_followed_generation<>?"
             ")) OR (? IS NULL AND NOT (w.addr IS NOT NULL AND w.score >= ?))",
-            (selection_generation, selection_generation, selection_generation, line_native))
+            (selection_generation, selection_generation, selection_generation,
+             selection_generation, line_native))
         total = (total_row["c"] if total_row else 0) or 0
         rows = qall(db,
             "WITH drop_events AS ("
@@ -334,10 +353,12 @@ def ep_wallets(db, qs=None):
             "LEFT JOIN leaderboard l ON l.addr=fh.addr "
             "LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=fh.addr "
             "LEFT JOIN drop_events de ON de.addr=fh.addr AND de.rn=1 "
-            "WHERE (? IS NOT NULL AND NOT COALESCE(fs.role='core' AND fs.enabled=1,0)) "
+            "WHERE (? IS NOT NULL AND NOT COALESCE(fs.role='core' AND fs.enabled=1,0) "
+            "AND (fh.last_followed_generation IS NULL OR fh.last_followed_generation<>?)) "
             "OR (? IS NULL AND NOT (w.addr IS NOT NULL AND w.score >= ?)) "
             "ORDER BY drop_at DESC LIMIT ? OFFSET ?",
-            (selection_generation, selection_generation, selection_generation, line_native, size, page * size))
+            (selection_generation, selection_generation, selection_generation,
+             selection_generation, line_native, size, page * size))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["follow_score"] or 0.0), "rawScore": score100(r["raw_score"] or 0.0),

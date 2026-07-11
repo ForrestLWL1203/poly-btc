@@ -1784,7 +1784,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertFalse(result["applied_sizing"])
             self.assertFalse(result["applied_add"])
             self.assertFalse(result["eligible_to_apply"])
-            self.assertNotEqual(result["proposal"]["STABLE_MARGIN_PCT"], before_follow["STABLE_MARGIN_PCT"])
+            self.assertNotEqual(result["proposal"]["ADD_GAP_K"], before_follow["ADD_GAP_K"])
 
             audit = db.execute(
                 "SELECT status,reason,payload_json FROM pipeline_audit "

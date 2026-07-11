@@ -394,6 +394,7 @@ MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active 
 #                          (operator-tuned 0.60: 质量线切掉 ~72 个尾巴,active 只留够优质的)
 COPY_BT_GATE_ENABLE = True  # active 准入二次校验: 用历史 fills 按当前 observer 规则回放,目标赚但我们亏 → 不跟
 COPY_BT_DAYS = 30           # copy 回测窗口。用 30d 覆盖 14d 评分外的复制不稳定性,但仍是近期窗口
+COPY_BT_WARMUP_DAYS = 7     # 每个窗口额外预热7天，恢复窗口开始前已经打开的仓位
 COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数后,近期 copy 亏损也不进 active
 COPY_BT_MIN_CLOSED = 7      # copy资格最低已平样本；不足则不进入Active
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
@@ -417,11 +418,11 @@ AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED = 0 # Paper cold-start may apply;真钱环境
 AUTO_TUNE_MIN_DIRECTION_STREAK = 1     # one complete Paper generation;真钱环境建议2
 AUTO_TUNE_MIN_RELATIVE_GAIN = 0.05
 AUTO_TUNE_MAX_DD_WORSEN = 0.01
-AUTO_TUNE_APPLY_COOLDOWN_DAYS = 7
+AUTO_TUNE_APPLY_COOLDOWN_DAYS = 0  # Paper每次完整generation都可重新寻优；真钱环境再设冷却
 AUTO_TUNE_ROLLBACK_RELATIVE_DROP = 0.10
 AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE = 0.0  # Paper exploration;真钱环境建议0.80
 AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.0       # Paper exploration;真钱环境建议0.95
-AUTO_TUNE_MARGIN_MULTS = (0.8, 1.0, 1.2, 1.4, 1.6)
+AUTO_TUNE_MARGIN_FACTORS = (0.8, 1.0, 1.2, 1.4, 1.6)  # 每一档独立搜索，不再三档共用一个倍率
 AUTO_TUNE_LEV_CAP_SETS = ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50)
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.06, 0.08, 0.10, 0.12)
@@ -429,6 +430,7 @@ AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.08, 0.10, 0.12)
 AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3, 1.5)
 AUTO_TUNE_ADD_MAX_HARDS = (4, 6, 8, 10)
 AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
+AUTO_TUNE_FINALIST_LIMIT = 16  # 利润最高者验证失败后继续验证后续候选
 AUTO_TUNE_FILL_CACHE_MAX_BYTES = 64 * 1024 * 1024  # raw fill_json cache guard for 1GB VPS; fallback if exceeded
 AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08
@@ -441,9 +443,9 @@ MAX_SINGLE_ADDS_PER_EP = 20  # 单个 round-trip 最多允许的 scale-in 次数
 #                              max_adds 抓"偶发但关键的重DCA":20+ 到 100+ 次这类我们结构上跟不了,提前拒绝。
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
-# target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. 30d exactly
-# covers the 14d scoring slice + the 7/14/30d multi-window nets (net_life ≡ net over this 30d window).
-PROFILE_FETCH_DAYS = 30
+# target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. The extra 7d
+# is replay warm-up only; reported/scored windows remain 30/14/7d.
+PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 
 # INCREMENTAL scan (2026-07-01): the daily re-scan fetches only the fills SINCE our per-candidate cursor
 # (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling
