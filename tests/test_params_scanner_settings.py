@@ -8,6 +8,22 @@ from hl import config, params, storage
 
 
 class ScannerSettingsParamTests(unittest.TestCase):
+    def test_product_defaults_use_requested_volume_box_and_disable_copy_stop(self):
+        self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
+        self.assertEqual(config.HARVEST_WEEK_VLM_MAX, 30_000_000.0)
+        self.assertFalse(config.COPY_STOP_ENABLE)
+
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+
+            scanner = params.load_category(db, "scanner")
+            follow = params.load_follow(db)
+            self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
+            self.assertEqual(scanner["HARVEST_WEEK_VLM_MAX"], 30_000_000.0)
+            self.assertFalse(follow["COPY_STOP_ENABLE"])
+
     def test_scanner_settings_expose_basic_and_folded_advanced_knobs(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

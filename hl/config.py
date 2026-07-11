@@ -257,16 +257,13 @@ EXEC_MAKER_MIRROR = True      # maker book rests at the passive book side on the
 # leaderboard ROI is contaminated (deposits/withdrawals/spot/airdrop), empirically the top-ROI wallets
 # are $0-volume HODLers/ghosts. The one field that can't be faked by holding is VOLUME. Profit
 # JUDGMENT is deferred to the profile (real fills). Thresholds calibrated against 20 followed anchors +
-# a clean-strength cohort (see memory hl-copytrade.md): strong wallets sit at $0.5–30M wk vol, pnl/vol
-# 0.2–4%; ghosts pnl/vol >>8%; MMs vol >$100M & pnl/vol <0.1%.
+# a clean-strength cohort (see memory hl-copytrade.md): the production discovery box is intentionally
+# limited to $0.3–30M weekly volume; pnl/vol and the later profile gates remove thin-edge churners.
 HARVEST_MIN_ACCT = 10000.0          # real-capital floor (5k→10k; <10k mostly noise, but our proven
 #                                     small-account %-traders sit at ~$11-20k so don't raise further)
-HARVEST_WEEK_VLM_MIN = 500_000.0    # 7d VOLUME floor — genuinely trading this week (strong density is
-#                                     thin below $1M, but $0.5-1M still holds real talent → floor $0.5M)
-HARVEST_WEEK_VLM_MAX = 100_000_000.0 # 7d VOLUME ceiling (v9: 30M→100M). Absolute volume is a CRUDE churner cut —
-#                                     the turnover gate (vlm/equity) does it precisely at profile, so a big LEGIT
-#                                     account (deep pockets, low turnover) must not be pre-excluded here. Cheap
-#                                     stage-1 noise-cut only; churner judgment deferred to PORTFOLIO_MAX_TURNOVER.
+HARVEST_WEEK_VLM_MIN = 300_000.0     # 7d VOLUME floor — below this is too inactive for timely copy signals
+HARVEST_WEEK_VLM_MAX = 30_000_000.0  # 7d VOLUME ceiling — higher-volume accounts skew toward execution-heavy
+#                                      churn that a REST copy follower cannot reproduce reliably
 HARVEST_PNL_VOL_MIN = 0.001         # 7d pnl/volume FLOOR (0.1%) — below = razor-thin MM, not directional
 HARVEST_PNL_VOL_MAX = 0.08          # 7d pnl/volume CEILING (8%) — above = profit too big for the volume
 #                                     = NOT from trading (deposit/spot/airdrop ghost); real traders 0.2-4%
@@ -497,7 +494,7 @@ HEDGE_MAX_FRAC = 0.5
 # that is a wallet-SELECTION signal, not a stop signal. So the stop is now a pure catastrophe backstop in
 # MARGIN terms: cut at STOP_MARGIN_PCT of margin. Leverage-aware (adverse price move = STOP_MARGIN_PCT ÷ lev),
 # coin-agnostic, always BEFORE liquidation (liq = 100% of margin). COPY_STOP_ENABLE = master toggle (UI).
-COPY_STOP_ENABLE = True
+COPY_STOP_ENABLE = False
 STOP_MARGIN_PCT  = 0.70     # cut when unrealized loss ≥ this fraction of the position's margin (0.70 = bail
 #                             at 70% of the way to liquidation). Leverage-aware adverse price: 5x → ~14%,
 #                             3x → ~23%, 7x → ~10%. UI-tunable follow param. Disable → ride to liquidation.

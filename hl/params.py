@@ -177,7 +177,7 @@ PARAM_SPEC = [
     ("HIGH_COIN_CAP_PCT",    "follow",  "yellow", "pct",     "immediate", config.HIGH_COIN_CAP_PCT * 100,
         "剧烈档·单币上限", "剧烈档(meme/野币/高波股)单币保证金上限——波动大,绝不给到稳定档那么高"),
     ("COPY_STOP_ENABLE",     "follow",  "green",  "bool",    "immediate", config.COPY_STOP_ENABLE,
-        "启用止损", "逆向超过该币波动率就自动平仓,不陪目标死扛(默认开)"),
+        "启用止损", "亏损达到止损保证金比例时自动平仓；回测显示开启后收益更低，因此默认关闭"),
     ("STOP_MARGIN_PCT",      "follow",  "yellow", "pct",     "immediate", config.STOP_MARGIN_PCT * 100,
         "止损=亏损保证金%", "亏掉本仓这么多%保证金就平仓(70=亏到70%保证金,爆仓前兜底)。带杠杆自动换算逆向价格:5x→14%、3x→23%、7x→10%"),
     # (COIN_MARGIN_CAP_PCT removed 2026-07-02 — superseded by the σ-tiered 分档单笔上限 in the 加仓策略 tab)

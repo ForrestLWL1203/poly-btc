@@ -22,7 +22,7 @@ export const PARAM_META = {
   STABLE_MAX_ADDS: { name: "稳定档·最多加仓", desc: "BTC/大饼一笔最多跟几次加仓(波动小,可多摊)", range: "2–4", up: "跟更多加仓", dn: "更早停跟" },
   MID_MAX_ADDS: { name: "中档·最多加仓", desc: "ETH/SOL/HYPE一笔最多跟几次加仓", range: "1–3", up: "跟更多加仓", dn: "更早停跟" },
   HIGH_MAX_ADDS: { name: "剧烈档·最多加仓", desc: "meme/野币/高波股一笔最多跟几次加仓(波动大,少加/设0)", range: "0–2", up: "跟更多加仓", dn: "更早停跟" },
-  COPY_STOP_ENABLE: { name: "启用止损", desc: "总开关:逆向超过该币波动率自动平仓(默认开)", range: "—" },
+  COPY_STOP_ENABLE: { name: "启用止损", desc: "亏损达到止损保证金比例时自动平仓；回测收益较低，默认关闭", range: "—" },
   STOP_MARGIN_PCT: { name: "止损=亏损保证金%", desc: "亏掉本仓这么多%保证金就平仓(70=亏到70%保证金,爆仓前兜底);带杠杆自动换算逆向价格:5x→14%、3x→23%、7x→10%", range: "50–90", up: "更宽容、离爆仓更近", dn: "砍更早、单笔亏更少但易误杀恢复单" },
   MAX_ENTRY_CHASE_PCT: { name: "追价保护阈值", desc: "开仓价偏离超此%则放弃(空=关闭)", range: "0.3–1", up: "更宽容追价", dn: "更严防滑点" },
   EXEC_MAKER_MIRROR: { name: "镜像挂单模式", desc: "暂不开放", range: "—" },
@@ -30,8 +30,8 @@ export const PARAM_META = {
   VOL_FALLBACK_SIGMA: { name: "默认波动率", desc: "无数据时的兜底σ", range: "—" },
   // scanner
   HARVEST_MIN_ACCT: { name: "钱包最低资金门槛", desc: "账户≥此金额才看", range: "$2k–$10k", up: "只看大资金", dn: "纳入小资金、更杂" },
-  HARVEST_WEEK_VLM_MIN: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$25k–$10m" },
-  HARVEST_WEEK_VLM_MAX: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$25k–$10m" },
+  HARVEST_WEEK_VLM_MIN: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$300k–$30m" },
+  HARVEST_WEEK_VLM_MAX: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$300k–$30m" },
   inactive_days: { name: "最长不活跃天数", desc: "超过此天数没成交则剔除", range: "1–7 天", up: "更宽容沉默", dn: "更快剔除" },
   EXCLUDE_HFT: { name: "过滤高频HFT(开关)", desc: "剔除秒级快炒钱包——他们赚钱但我们延迟太大抄不了;接入高频WS后可关掉", range: "—" },
 };
