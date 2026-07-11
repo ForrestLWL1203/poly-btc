@@ -12,6 +12,7 @@ import math
 from typing import Mapping
 
 from . import config
+from .copy_policy import load_copy_policy
 
 SECTORS = ("crypto", "stock")
 
@@ -65,11 +66,7 @@ def _int(v, default: int = 0) -> int:
 
 
 def _min_closed_for_days(days: int) -> int:
-    if int(days) <= 7:
-        return int(getattr(config, "SECTOR_COPY_MIN_CLOSED_7D", config.COPY_BT_MIN_CLOSED_7D))
-    if int(days) <= 14:
-        return int(getattr(config, "SECTOR_COPY_MIN_CLOSED_14D", config.COPY_BT_MIN_CLOSED_14D))
-    return int(getattr(config, "SECTOR_COPY_MIN_CLOSED_30D", config.COPY_BT_MIN_CLOSED))
+    return load_copy_policy().min_closed(int(days))
 
 
 def _window_result(windows: Mapping, days: int) -> dict:

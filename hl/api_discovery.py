@@ -31,6 +31,24 @@ def scanner_status(db):
 
 def followed_count(db, line):
     """Count of wallets the observer will actually copy."""
+    try:
+        selected = q1(
+            db,
+            "SELECT sg.generation FROM scan_generation sg "
+            "WHERE sg.status='published' AND sg.complete=1 AND sg.is_current=1 "
+            "ORDER BY sg.id DESC LIMIT 1",
+        )
+    except Exception:  # noqa: BLE001 - compatibility with pre-generation read replicas
+        selected = None
+    if selected:
+        r = q1(
+            db,
+            "SELECT COUNT(*) cnt FROM follow_selection fs "
+            "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+            "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1",
+            (selected["generation"],),
+        )
+        return (r["cnt"] if r else 0)
     r = q1(db, "SELECT COUNT(*) cnt FROM watchlist w "
                "LEFT JOIN target_controls tc ON tc.addr=w.addr "
                "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=?", (line,))
@@ -46,11 +64,52 @@ _REJECT_BUCKETS = [
 
 
 def ep_discovery(db):
+    leaderboard = (q1(db, "SELECT COUNT(*) c FROM leaderboard") or {"c": 0})["c"]
     candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
     active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
     # Funnel's final stage = wallets ABOVE the follow line, not the whole watchlist.
     line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     watchlist = followed_count(db, line_native)
+    generation = q1(
+        db,
+        "SELECT generation,published_at,leaderboard_valid,profile_complete,workset_mode,fill_mode,"
+        "workset_n,deferred_n,metrics_json FROM scan_generation "
+        "WHERE status='published' AND complete=1 AND is_current=1 ORDER BY id DESC LIMIT 1",
+    )
+    qualified = active
+    challenger = 0
+    core = watchlist
+    generation_out = None
+    if generation:
+        roles = qall(
+            db,
+            "SELECT role,COUNT(*) n FROM follow_selection WHERE generation=? AND enabled=1 GROUP BY role",
+            (generation["generation"],),
+        )
+        role_counts = {r["role"]: r["n"] for r in roles}
+        challenger = role_counts.get("challenger", 0)
+        core = role_counts.get("core", 0)
+        qualified_row = q1(
+            db,
+            "SELECT COUNT(*) c FROM profile WHERE profile_generation=? AND data_status='valid'",
+            (generation["generation"],),
+        )
+        qualified = (qualified_row["c"] if qualified_row else 0) or 0
+        try:
+            perf = json.loads(generation["metrics_json"] or "{}")
+        except (TypeError, ValueError):
+            perf = {}
+        generation_out = {
+            "generation": generation["generation"],
+            "publishedAt": generation["published_at"],
+            "leaderboardValid": bool(generation["leaderboard_valid"]),
+            "profileComplete": bool(generation["profile_complete"]),
+            "worksetMode": generation["workset_mode"],
+            "fillMode": generation["fill_mode"],
+            "profiled": generation["workset_n"] or 0,
+            "deferred": generation["deferred_n"] or 0,
+            "performance": perf,
+        }
     reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
     counts = {row["reason"]: row["n"] for row in reason_rows}
     total_rej = sum(counts.values()) or 0
@@ -76,10 +135,12 @@ def ep_discovery(db):
             bins[idx] = row["n"]
     follow_idx = min(int(follow_line * nbins), nbins - 1)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    return {"funnel": {"candidates": candidates, "active": active, "watchlist": watchlist},
+    return {"funnel": {"leaderboard": leaderboard, "candidates": candidates, "qualified": qualified,
+                        "challenger": challenger, "core": core, "active": active, "watchlist": watchlist},
             "rejectReasons": reject_reasons,
             "scoreHistogram": {"bins": bins, "followLineBinIndex": follow_idx},
             "scanner": scanner_status(db),
+            "generation": generation_out,
             "lastScanAt": (last_scan["m"] if last_scan else None)}
 
 
@@ -250,8 +311,8 @@ def _latest_pipeline_key(db, qs):
             return stamp, source
         row = q1(db,
             "SELECT source FROM pipeline_audit "
-            "WHERE stamp=? AND stage IN (?,?) ORDER BY id DESC LIMIT 1",
-            (stamp, "follow_line", "auto_tune"),
+            "WHERE stamp=? AND stage IN (?,?,?) ORDER BY id DESC LIMIT 1",
+            (stamp, "follow_line", "auto_tune", "selection_summary"),
         )
         if not row:
             row = q1(db,
@@ -262,8 +323,8 @@ def _latest_pipeline_key(db, qs):
     if source:
         row = q1(db,
             "SELECT stamp,source FROM pipeline_audit "
-            "WHERE source=? AND stage IN (?,?) ORDER BY id DESC LIMIT 1",
-            (source, "follow_line", "auto_tune"),
+            "WHERE source=? AND stage IN (?,?,?) ORDER BY id DESC LIMIT 1",
+            (source, "follow_line", "auto_tune", "selection_summary"),
         )
         if not row:
             row = q1(db,
@@ -273,8 +334,8 @@ def _latest_pipeline_key(db, qs):
         return (_col(row, "stamp", 0), _col(row, "source", 1)) if row else (None, source)
     row = q1(db,
         "SELECT stamp,source FROM pipeline_audit "
-        "WHERE stage IN (?,?) ORDER BY id DESC LIMIT 1",
-        ("follow_line", "auto_tune"),
+        "WHERE stage IN (?,?,?) ORDER BY id DESC LIMIT 1",
+        ("follow_line", "auto_tune", "selection_summary"),
     )
     if not row:
         row = q1(db, "SELECT stamp,source FROM pipeline_audit ORDER BY id DESC LIMIT 1")
@@ -327,6 +388,18 @@ def ep_pipeline_summary(db, qs):
         tuple(base),
     )
     watch_counts = {(_col(r, "status", 0) or "unknown"): _col(r, "n", 1) for r in watch_rows}
+    selection_rows = qall(db,
+        "SELECT status,COUNT(*) n FROM pipeline_audit "
+        f"WHERE stamp=?{src_where} AND stage='selection' GROUP BY status",
+        tuple(base),
+    )
+    selection_counts = {(_col(r, "status", 0) or "unknown"): _col(r, "n", 1) for r in selection_rows}
+    selection_summary_row = q1(db,
+        "SELECT payload_json FROM pipeline_audit "
+        f"WHERE stamp=?{src_where} AND stage='selection_summary' ORDER BY id DESC LIMIT 1",
+        tuple(base),
+    )
+    selection_summary = _payload(selection_summary_row)
 
     workset_row = q1(db,
         "SELECT payload_json FROM pipeline_audit "
@@ -386,6 +459,12 @@ def ep_pipeline_summary(db, qs):
             "applied": bool(tune_payload.get("applied")),
             "appliedSizing": bool(tune_payload.get("appliedSizing")),
             "appliedAdd": bool(tune_payload.get("appliedAdd")),
+            "mode": tune_payload.get("mode"),
+            "shadow": bool(tune_payload.get("shadow")),
+            "eligibleToApply": bool(tune_payload.get("eligibleToApply")),
+            "validation": tune_payload.get("validation") or {},
+            "proposal": tune_payload.get("proposal") or {},
+            "rollback": tune_payload.get("rollback"),
             "followedN": tune_payload.get("followedN"),
             "selectedMult": tune_payload.get("selectedMult"),
             "candidateCount": tune_payload.get("candidateCount"),
@@ -417,6 +496,13 @@ def ep_pipeline_summary(db, qs):
             "followed": watch_counts.get("followed", 0),
             "belowLine": watch_counts.get("below_line", 0),
             "disabled": watch_counts.get("disabled", 0),
+        },
+        "selection": {
+            "generation": selection_summary.get("generation"),
+            "action": selection_summary.get("action"),
+            "core": selection_counts.get("core", 0),
+            "challenger": selection_counts.get("challenger", 0),
+            "exitOnly": selection_counts.get("exit_only", 0),
         },
         "followLine": follow_line,
         "autoTune": auto_tune,

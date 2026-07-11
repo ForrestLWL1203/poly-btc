@@ -1,4 +1,4 @@
-export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons }) {
+export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons, selectionMode }) {
   const h = scoreHistogram;
   const maxBin = Math.max(...h.bins, 1);
   return (
@@ -6,11 +6,15 @@ export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons }) {
       <div className="section-h"><h2>筛选漏斗</h2></div>
       <div className="card">
         <div className="funnel">
+          <div className="funnel-stage"><div className="fn">{funnel.leaderboard ?? "—"}</div><div className="fl">Leaderboard</div></div>
+          <div className="funnel-arrow">→</div>
           <div className="funnel-stage"><div className="fn">{funnel.candidates}</div><div className="fl">候选 candidates</div></div>
           <div className="funnel-arrow">→</div>
-          <div className="funnel-stage"><div className="fn" style={{ color: "var(--blue-l)" }}>{funnel.active}</div><div className="fl">active</div></div>
+          <div className="funnel-stage"><div className="fn" style={{ color: "var(--blue-l)" }}>{funnel.qualified ?? funnel.active}</div><div className="fl">Qualified</div></div>
           <div className="funnel-arrow">→</div>
-          <div className="funnel-stage"><div className="fn" style={{ color: "var(--green-l)" }}>{funnel.watchlist}</div><div className="fl">跟单线以上 watchlist</div></div>
+          <div className="funnel-stage"><div className="fn" style={{ color: "var(--amber)" }}>{funnel.challenger ?? 0}</div><div className="fl">Challenger</div></div>
+          <div className="funnel-arrow">→</div>
+          <div className="funnel-stage"><div className="fn" style={{ color: "var(--green-l)" }}>{funnel.core ?? funnel.watchlist}</div><div className="fl">Core · 实际开仓</div></div>
         </div>
       </div>
 
@@ -26,13 +30,13 @@ export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons }) {
           </div>
         </div>
         <div className="card">
-          <div className="card-lbl">评分分布(标出跟单线)</div>
+          <div className="card-lbl">评分分布({selectionMode ? "评分线仅供参考" : "标出跟单线"})</div>
           <div className="histo">
             {h.bins.map((b, i) => (
               <div key={i} className={"hb" + (i < h.followLineBinIndex ? " below" : "")} style={{ height: (b / maxBin * 100) + "%" }} />
             ))}
             <div className="histo-line" style={{ left: (h.followLineBinIndex / h.bins.length * 100) + "%" }}>
-              <span className="lbl">跟单线</span></div>
+              <span className="lbl">{selectionMode ? "旧评分参考线" : "跟单线"}</span></div>
           </div>
         </div>
       </div>

@@ -203,6 +203,9 @@ def main() -> int:
 
     sub.add_parser("repair-watchlist", help="rebuild watchlist if it drifted from active profiles")
     sub.add_parser("serve-rescan", help="daemon: run a full scan on demand when a dashboard rescan command is queued")
+    t = sub.add_parser("tune", help=argparse.SUPPRESS)
+    t.add_argument("--generation", required=True)
+    t.add_argument("--stamp")
 
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
@@ -232,6 +235,9 @@ def main() -> int:
                                    candidates_scanned=0, candidates_total=0)
         scanner._set_scanner_proc(db, "idle", {"last_repair_at": now_iso(), "active": n})
         print(f"watchlist {n} active")
+    elif args.cmd == "tune":
+        result = scanner.tune_published_generation(db, args.generation, stamp=args.stamp)
+        print(json.dumps(result, sort_keys=True, default=str))
     db.close()
     return 0
 

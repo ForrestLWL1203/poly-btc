@@ -500,7 +500,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertFalse(policy["stock"]["allow"])
         self.assertEqual(m["copy_bt_net_pnl"], -600.0)
 
-    def test_sector_copy_gate_rejects_wallet_with_no_profitable_sector(self):
+    def test_sector_copy_gate_keeps_no_profitable_sector_as_challenger_only(self):
         m = {"net_pnl": 100.0, "roi_total": 0.1, "net_30d": 100.0, "net_life": 300.0}
         p = SimpleNamespace(copy_bt_gate_enable=True, copy_bt_days=30,
                             copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0)
@@ -525,8 +525,9 @@ class ScannerWatchlistTests(unittest.TestCase):
             p,
         )
 
-        self.assertFalse(ok)
-        self.assertEqual(reason, "copy_backtest_no_profitable_sector")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "copy_backtest_challenger_only")
+        self.assertEqual(m["copy_bt_evidence_status"], "economically_disqualified")
 
     def test_regate_rejects_profile_when_copy_backtest_loses(self):
         with tempfile.TemporaryDirectory() as td:
@@ -814,7 +815,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual({r[1] for r in rows}, {"0xaaa", "0xbbb"})
             self.assertTrue(all(r[3] == "2026-07-06T00:00:00Z" for r in rows))
 
-    def test_ensure_watchlist_current_replays_copy_bt_before_repairing_watchlist(self):
+    def test_ensure_watchlist_current_repairs_derived_view_without_replaying_stale_copy_bt(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
@@ -872,12 +873,12 @@ class ScannerWatchlistTests(unittest.TestCase):
                     patch.object(scanner, "_sector_copy_bt_results", return_value={"crypto": losing_windows, "stock": {}}):
                 n = scanner.ensure_watchlist_current(db, "2026-07-06T00:00:00Z")
 
-            self.assertEqual(n, 0)
+            self.assertEqual(n, 1)
             stale = db.execute(
                 "SELECT status,reason,copy_bt_net_pnl FROM profile WHERE addr='0xstale'"
             ).fetchone()
-            self.assertEqual(tuple(stale), ("retired", "copy_backtest_no_profitable_sector", -120.0))
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0], 0)
+            self.assertEqual(tuple(stale), ("active", "ok", 1200.0))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0], 1)
 
     def test_refresh_watchlist_denormalizes_sector_policy_for_observer(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1173,7 +1174,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertIn("portfolio_topn", cmd)
             self.assertIn('"count": 2', cmd)
 
-    def test_refresh_watchlist_applies_keep_bonus_to_previous_followed_wallet(self):
+    def test_refresh_watchlist_uses_explicit_lifecycle_instead_of_score_bonus(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
@@ -1217,12 +1218,13 @@ class ScannerWatchlistTests(unittest.TestCase):
 
             line = float(db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0])
             rows = db.execute("SELECT addr,score FROM watchlist WHERE score>=? ORDER BY rank", (line,)).fetchall()
-            self.assertEqual([r[0] for r in rows], ["0xnew", "0xold"])
-            self.assertAlmostEqual(dict(rows)["0xold"], 0.74)
+            self.assertEqual([r[0] for r in rows], ["0xnew"])
+            old_score = db.execute("SELECT score FROM watchlist WHERE addr='0xold'").fetchone()[0]
+            self.assertAlmostEqual(old_score, 0.72)
             audit = db.execute(
                 "SELECT payload_json FROM pipeline_audit WHERE stage='watchlist' AND addr='0xold'"
             ).fetchone()
-            self.assertEqual(json.loads(audit[0])["followDetail"]["stability"]["status"], "keep_bonus")
+            self.assertEqual(json.loads(audit[0])["followDetail"]["stability"]["status"], "previously_followed")
 
     def test_refresh_watchlist_does_not_stabilize_thin_recent_wallet(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1324,7 +1326,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertIn("watchlist", stages)
             self.assertIn("auto_tune", stages)
 
-    def test_post_scan_pipeline_replays_copy_bt_after_auto_tune_applies_params(self):
+    def test_post_scan_pipeline_does_not_regate_stale_profiles_after_auto_tune(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
@@ -1456,25 +1458,27 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "line": 0.60,
                 "count": 2,
             }), patch.object(scanner.auto_tune, "maybe_tune_margins", side_effect=fake_tune), \
-                    patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"coin": "BTC", "time": 1}]), \
-                    patch.object(scanner, "_copy_bt_results", side_effect=fake_copy_results), \
-                    patch.object(scanner, "_sector_copy_bt_results", side_effect=fake_sector_results):
+                    patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"coin": "BTC", "time": 1}]) as cached, \
+                    patch.object(scanner, "_copy_bt_results", side_effect=fake_copy_results) as replay, \
+                    patch.object(scanner, "_sector_copy_bt_results", side_effect=fake_sector_results) as sector_replay:
                 n = scanner.refresh_watchlist_and_auto_tune(db, "2026-07-06T00:00:00Z", source="scan")
 
-            self.assertEqual(n, 1)
+            self.assertEqual(n, 2)
+            cached.assert_not_called()
+            replay.assert_not_called()
+            sector_replay.assert_not_called()
             stale = db.execute(
                 "SELECT status,reason,copy_bt_net_pnl,copy_bt_7d_net_pnl FROM profile WHERE addr='0xstale'"
             ).fetchone()
-            self.assertEqual(stale[0], "retired")
-            self.assertEqual(stale[1], "copy_backtest_no_profitable_sector")
-            self.assertEqual(stale[2], -120.0)
-            self.assertEqual(stale[3], -30.0)
-            self.assertIsNone(db.execute("SELECT 1 FROM watchlist WHERE addr='0xstale'").fetchone())
+            self.assertEqual(stale[0], "active")
+            self.assertEqual(stale[2], 1200.0)
+            self.assertEqual(stale[3], 300.0)
+            self.assertIsNotNone(db.execute("SELECT 1 FROM watchlist WHERE addr='0xstale'").fetchone())
             stages = [r[0] for r in db.execute(
                 "SELECT DISTINCT stage FROM pipeline_audit WHERE stamp=?",
                 ("2026-07-06T00:00:00Z",),
             ).fetchall()]
-            self.assertIn("profile", stages)
+            self.assertNotIn("profile", stages)
             self.assertIn("watchlist", stages)
 
     def test_post_scan_pipeline_replays_topn_prefix_before_auto_tune(self):
@@ -1615,7 +1619,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             payload = json.loads(row[2])
             self.assertIn("grid blew up", payload["error"])
 
-    def test_post_scan_pipeline_real_auto_tune_updates_params_and_reload(self):
+    def test_post_scan_pipeline_real_auto_tune_stays_unapplied_when_validation_fails(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
@@ -1659,6 +1663,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 ],
             )
             db.commit()
+            before_follow = params.load_follow(db)
             seen = {"tune_addrs": [], "add_addrs": []}
 
             def ok_window(pnl):
@@ -1729,33 +1734,27 @@ class ScannerWatchlistTests(unittest.TestCase):
 
             follow = params.load_follow(db)
             self.assertAlmostEqual(follow["MIN_FOLLOW_SCORE"], 0.787598641)
-            self.assertAlmostEqual(follow["STABLE_MARGIN_PCT"], 0.042)
-            self.assertAlmostEqual(follow["MID_MARGIN_PCT"], 0.036)
-            self.assertAlmostEqual(follow["HIGH_MARGIN_PCT"], 0.024)
-            self.assertEqual(follow["STABLE_LEV_CAP"], 30)
-            self.assertEqual(follow["MID_LEV_CAP"], 12)
-            self.assertEqual(follow["HIGH_LEV_CAP"], 5)
-            self.assertAlmostEqual(follow["DEPLOY_FULL_PCT"], 0.50)
-            self.assertAlmostEqual(follow["ADD_GAP_K"], 0.06)
-            self.assertAlmostEqual(follow["ADD_GAP_SHRINK_G"], 1.3)
-            self.assertEqual(follow["ADD_MAX_HARD"], 6)
+            for key in scanner.auto_tune.TUNE_KEYS + scanner.auto_tune.ADD_TUNE_KEYS:
+                self.assertEqual(follow[key], before_follow[key])
 
             commands = db.execute(
                 "SELECT owner,type,payload_json FROM commands WHERE type='reload_params' ORDER BY id"
             ).fetchall()
-            self.assertEqual([r[0] for r in commands], ["scanner", "auto_tune", "scanner"])
+            self.assertEqual([r[0] for r in commands], ["scanner"])
             self.assertEqual(json.loads(commands[0][2])["by"], "auto_follow_line")
-            self.assertEqual(json.loads(commands[1][2])["by"], "auto_tune_margin")
-            self.assertEqual(json.loads(commands[2][2])["by"], "auto_follow_membership")
 
             run = db.execute(
                 "SELECT applied,followed_n,result_json FROM auto_tune_runs WHERE source='scan'"
             ).fetchone()
-            self.assertEqual(run[0], 1)
+            self.assertEqual(run[0], 0)
             self.assertEqual(run[1], 2)
             result = json.loads(run[2])
-            self.assertTrue(result["applied_sizing"])
-            self.assertTrue(result["applied_add"])
+            self.assertEqual(result["mode"], "apply")
+            self.assertTrue(result["shadow"])
+            self.assertFalse(result["applied_sizing"])
+            self.assertFalse(result["applied_add"])
+            self.assertFalse(result["eligible_to_apply"])
+            self.assertNotEqual(result["proposal"]["STABLE_MARGIN_PCT"], before_follow["STABLE_MARGIN_PCT"])
 
             audit = db.execute(
                 "SELECT status,reason,payload_json FROM pipeline_audit "
@@ -1763,11 +1762,11 @@ class ScannerWatchlistTests(unittest.TestCase):
                 ("2026-07-06T00:00:00Z",),
             ).fetchone()
             self.assertEqual(audit[0], "ok")
-            self.assertEqual(audit[1], "applied")
+            self.assertNotEqual(audit[1], "applied")
             payload = json.loads(audit[2])
             self.assertEqual(payload["followedN"], 2)
-            self.assertTrue(payload["appliedSizing"])
-            self.assertTrue(payload["appliedAdd"])
+            self.assertFalse(payload["appliedSizing"])
+            self.assertFalse(payload["appliedAdd"])
 
 
 if __name__ == "__main__":

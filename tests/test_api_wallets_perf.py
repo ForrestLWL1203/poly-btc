@@ -168,7 +168,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
         self.assertIn("scoreBreakdown", res["wallets"][0])
 
-    def test_dropped_wallet_time_uses_latest_drop_audit_not_last_followed_at(self):
+    def test_dropped_wallet_uses_first_batch_after_last_followed(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
@@ -187,12 +187,20 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "VALUES ('2026-01-03T00:00:00Z','scan','profile','0xaaa','rejected','not_profitable',"
                 "'2026-01-03T01:23:00Z')"
             )
+            db.execute(
+                "INSERT INTO pipeline_audit (stamp,source,stage,addr,status,reason,created_at) "
+                "VALUES ('2026-01-04T00:00:00Z','scan_post_tune','profile','0xaaa','rejected','not_profitable',"
+                "'2026-01-04T01:23:00Z')"
+            )
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
 
         self.assertEqual(res["wallets"][0]["lastFollowedAt"], 1767225600)
-        self.assertEqual(res["wallets"][0]["dropAt"], 1767403380)
+        self.assertEqual(res["wallets"][0]["dropAt"], 1767398400)
+        self.assertEqual(res["wallets"][0]["dropSource"], "scan")
+        self.assertEqual(res["wallets"][0]["dropStage"], "profile")
+        self.assertEqual(res["wallets"][0]["dropDecidedAt"], 1767403380)
 
     def test_dropped_wallet_uses_follow_score_not_raw_profile_score(self):
         with tempfile.TemporaryDirectory() as td:
@@ -262,6 +270,75 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(res["followed"], 1)
         self.assertNotIn("observing", res)
         self.assertEqual(res["wallets"][0]["followPos"], 1)
+
+    def test_published_selection_serves_core_and_challenger_roles(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g1','published',1,1,1,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+            )
+            for addr, role, utility in (("0xaaa", "core", 0.12), ("0xbbb", "challenger", 0.07)):
+                db.execute(
+                    "INSERT INTO follow_selection "
+                    "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,selected_at) "
+                    "VALUES ('g1',?,?,1,'positive_marginal',?,'valid','qualified','2026-01-01T01:00:00Z')",
+                    (addr, role, utility),
+                )
+                db.execute(
+                    "INSERT INTO profile "
+                    "(addr,status,score,data_status,evidence_status,profile_generation,evaluated_at,"
+                    "last_copyable_open_ms,actionable_open_rate,capacity_fit,oos_net_pnl,oos_max_drawdown,oos_cvar95) "
+                    "VALUES (?,'active',0.8,'valid','qualified','g1','2026-01-01T00:30:00Z',"
+                    "1767225600000,0.8,0.9,42,0.03,-5)",
+                    (addr,),
+                )
+                db.execute(
+                    "INSERT INTO watchlist (rank,addr,score,market_type,updated_at) VALUES (1,?,0.8,'crypto','now')",
+                    (addr,),
+                )
+            db.commit()
+
+            core = api_wallets.ep_wallets(db, {"tab": ["followed"]})
+            challenger = api_wallets.ep_wallets(db, {"tab": ["challenger"]})
+
+        self.assertTrue(core["selectionMode"])
+        self.assertEqual(core["selectionGeneration"], "g1")
+        self.assertEqual(core["wallets"][0]["role"], "core")
+        self.assertEqual(core["wallets"][0]["profileGeneration"], "g1")
+        self.assertEqual(core["wallets"][0]["actionableOpenRate"], 0.8)
+        self.assertEqual(challenger["wallets"][0]["role"], "challenger")
+        self.assertEqual(challenger["wallets"][0]["selectionMarginalUtility"], 0.07)
+
+    def test_published_zero_core_selection_does_not_fall_back_to_score_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,updated_at) "
+                "VALUES (1,'0xlegacy',0.99,'crypto','now')"
+            )
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g-empty','published',1,1,1,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,reason,selected_at) "
+                "VALUES ('g-empty','0xchallenger','challenger',1,'shadow','2026-01-01T01:00:00Z')"
+            )
+            db.commit()
+
+            res = api_wallets.ep_wallets(db, {"tab": ["followed"]})
+
+        self.assertTrue(res["selectionMode"])
+        self.assertEqual(res["total"], 0)
+        self.assertEqual(res["wallets"], [])
 
     def test_wallet_detail_records_are_lean_and_lazy_load_position_detail(self):
         with tempfile.TemporaryDirectory() as td:

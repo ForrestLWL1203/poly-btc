@@ -27,11 +27,70 @@ CREATE TABLE IF NOT EXISTS leaderboard (
     all_pnl REAL,  all_roi REAL,  all_vlm REAL,
     daily_turnover REAL,
     is_candidate  INTEGER DEFAULT 0,
-    fetched_at    TEXT
+    fetched_at    TEXT,
+    generation    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_leaderboard_candidate_mon_roi ON leaderboard(is_candidate, mon_roi DESC, addr);
 CREATE INDEX IF NOT EXISTS idx_leaderboard_candidate_week_roi ON leaderboard(is_candidate, week_roi DESC, addr);
 CREATE INDEX IF NOT EXISTS idx_leaderboard_candidate_mon_pnl ON leaderboard(is_candidate, mon_pnl DESC, addr);
+
+-- Atomic discovery generations.  Network results are first written to leaderboard_staging, validated,
+-- profiled and selected; only a complete generation becomes current.  Keeping every generation row makes
+-- incomplete/failed scans auditable without exposing a half-built selection to the Observer.
+CREATE TABLE IF NOT EXISTS scan_generation (
+    id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation                    TEXT NOT NULL UNIQUE,
+    source                        TEXT,
+    status                        TEXT NOT NULL DEFAULT 'staging',
+    complete                      INTEGER NOT NULL DEFAULT 0,
+    publishable                   INTEGER NOT NULL DEFAULT 0,
+    is_current                    INTEGER NOT NULL DEFAULT 0,
+    started_at                    TEXT NOT NULL,
+    leaderboard_fetched_at        TEXT,
+    ready_at                      TEXT,
+    published_at                  TEXT,
+    failed_at                     TEXT,
+    previous_published_generation TEXT,
+    leaderboard_rows              INTEGER DEFAULT 0,
+    leaderboard_unique_rows       INTEGER DEFAULT 0,
+    leaderboard_complete_rows     INTEGER DEFAULT 0,
+    leaderboard_completeness      REAL DEFAULT 0,
+    leaderboard_valid             INTEGER DEFAULT 0,
+    profile_total                 INTEGER DEFAULT 0,
+    profile_valid                 INTEGER DEFAULT 0,
+    profile_deferred              INTEGER DEFAULT 0,
+    profile_rejected              INTEGER DEFAULT 0,
+    profile_complete              INTEGER DEFAULT 0,
+    workset_mode                  TEXT,
+    fill_mode                     TEXT,
+    full_refresh_shard            INTEGER,
+    workset_n                     INTEGER DEFAULT 0,
+    deferred_n                    INTEGER DEFAULT 0,
+    metrics_json                  TEXT,
+    error                         TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_generation_current
+    ON scan_generation(is_current) WHERE is_current=1;
+CREATE INDEX IF NOT EXISTS idx_scan_generation_status_published
+    ON scan_generation(status, published_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS leaderboard_staging (
+    generation    TEXT NOT NULL,
+    addr          TEXT NOT NULL,
+    display_name  TEXT,
+    account_value REAL,
+    day_pnl REAL,  day_roi REAL,  day_vlm REAL,
+    week_pnl REAL, week_roi REAL, week_vlm REAL,
+    mon_pnl REAL,  mon_roi REAL,  mon_vlm REAL,
+    all_pnl REAL,  all_roi REAL,  all_vlm REAL,
+    daily_turnover REAL,
+    is_candidate  INTEGER DEFAULT 0,
+    fetched_at    TEXT,
+    PRIMARY KEY (generation, addr)
+);
+CREATE INDEX IF NOT EXISTS idx_leaderboard_staging_generation_candidate
+    ON leaderboard_staging(generation, is_candidate, mon_roi DESC, addr);
+
 CREATE TABLE IF NOT EXISTS profile (
     addr             TEXT PRIMARY KEY,
     status           TEXT,
@@ -116,6 +175,38 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_bt_7d_closed_n INTEGER DEFAULT 0,
     sector_copy_json TEXT,                -- per-sector copy replay summaries (crypto/stock windows)
     sector_policy_json TEXT,              -- per-sector allow/deny policy consumed by observer
+    profile_generation TEXT,              -- last complete generation that evaluated this profile
+    evaluated_at TEXT,
+    data_status TEXT DEFAULT 'valid',     -- valid / deferred_data_error / rejected
+    evidence_status TEXT,                 -- qualified / thin / missing / invalid
+    last_copyable_open_ms INTEGER,
+    open_events_7d INTEGER DEFAULT 0,
+    open_events_14d INTEGER DEFAULT 0,
+    open_events_30d INTEGER DEFAULT 0,
+    actionable_open_events_7d INTEGER DEFAULT 0,
+    actionable_open_events_14d INTEGER DEFAULT 0,
+    actionable_open_events_30d INTEGER DEFAULT 0,
+    open_days_7d INTEGER DEFAULT 0,
+    open_days_14d INTEGER DEFAULT 0,
+    open_days_30d INTEGER DEFAULT 0,
+    avg_open_interval_h REAL,
+    median_open_interval_h REAL,
+    open_probability_24h REAL,
+    open_probability_48h REAL,
+    open_position_count INTEGER DEFAULT 0,
+    material_open_count INTEGER DEFAULT 0,
+    raw_quality_score REAL,
+    copy_expected_return REAL,
+    copy_positive_probability REAL,
+    copy_risk_score REAL,
+    execution_score REAL,
+    selection_marginal_utility REAL,
+    model_coverage REAL,
+    oos_net_pnl REAL,
+    oos_max_drawdown REAL,
+    oos_cvar95 REAL,
+    actionable_open_rate REAL,
+    capacity_fit REAL,
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -164,6 +255,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
     liq_worst_pct  REAL,
     sector_copy_json TEXT,
     sector_policy_json TEXT,
+    generation      TEXT,
+    profile_generation TEXT,
+    evaluated_at    TEXT,
+    data_status     TEXT DEFAULT 'valid',
+    evidence_status TEXT,
     times_active   INTEGER,
     first_added    TEXT,
     last_fill_ms   INTEGER,
@@ -171,6 +267,57 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 CREATE INDEX IF NOT EXISTS idx_watchlist_score_rank ON watchlist(score, rank);
 CREATE INDEX IF NOT EXISTS idx_watchlist_rank ON watchlist(rank);
+
+-- Durable wallet identity/lifecycle.  Heavy profile/fill history may be pruned, but registry rows are not.
+CREATE TABLE IF NOT EXISTS wallet_registry (
+    addr                       TEXT PRIMARY KEY,
+    state                      TEXT NOT NULL DEFAULT 'qualified',
+    current_role               TEXT,
+    first_seen_at              TEXT NOT NULL,
+    last_seen_at               TEXT NOT NULL,
+    first_qualified_at         TEXT,
+    last_qualified_at          TEXT,
+    first_core_at              TEXT,
+    last_core_at               TEXT,
+    last_rejected_at           TEXT,
+    last_reject_reason         TEXT,
+    cooldown_until             TEXT,
+    data_error_count           INTEGER NOT NULL DEFAULT 0,
+    consecutive_qualified      INTEGER NOT NULL DEFAULT 0,
+    consecutive_bad            INTEGER NOT NULL DEFAULT 0,
+    core_entries               INTEGER NOT NULL DEFAULT 0,
+    core_exits                 INTEGER NOT NULL DEFAULT 0,
+    recovery_count             INTEGER NOT NULL DEFAULT 0,
+    last_valid_generation      TEXT,
+    last_evaluated_generation  TEXT,
+    last_actionable_open_ms    INTEGER,
+    updated_at                 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_registry_state_role
+    ON wallet_registry(state, current_role, last_seen_at DESC, addr);
+CREATE INDEX IF NOT EXISTS idx_wallet_registry_last_evaluated
+    ON wallet_registry(last_evaluated_generation, addr);
+
+-- Explicit generation-scoped Observer target set.  Roles are core/challenger/exit_only; only enabled core
+-- rows from the current published generation may originate new positions.
+CREATE TABLE IF NOT EXISTS follow_selection (
+    generation      TEXT NOT NULL,
+    addr            TEXT NOT NULL,
+    role            TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    reason          TEXT,
+    utility         REAL,
+    data_status     TEXT,
+    evidence_status TEXT,
+    model_version   TEXT,
+    policy_version  TEXT,
+    selected_at     TEXT NOT NULL,
+    PRIMARY KEY (generation, addr)
+);
+CREATE INDEX IF NOT EXISTS idx_follow_selection_generation_role
+    ON follow_selection(generation, role, enabled, addr);
+CREATE INDEX IF NOT EXISTS idx_follow_selection_addr_generation
+    ON follow_selection(addr, generation);
 
 -- Follow-status history: last time each wallet was AT/ABOVE the follow line. Updated each scan/regate
 -- for the currently-followed set; a wallet that drops below the line keeps its old timestamp, so the UI
@@ -253,8 +400,16 @@ PROFILE_COLS = (
     "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,copy_bt_liquidations,copy_bt_fee_drag,"
     "copy_bt_14d_net_pnl,copy_bt_14d_closed_n,copy_bt_7d_net_pnl,copy_bt_7d_closed_n,"
     "sector_copy_json,sector_policy_json,"
+    "profile_generation,evaluated_at,data_status,evidence_status,last_copyable_open_ms,"
+    "open_events_7d,open_events_14d,open_events_30d,"
+    "actionable_open_events_7d,actionable_open_events_14d,actionable_open_events_30d,"
+    "open_days_7d,open_days_14d,open_days_30d,avg_open_interval_h,median_open_interval_h,"
+    "open_probability_24h,open_probability_48h,open_position_count,material_open_count,"
+    "raw_quality_score,copy_expected_return,copy_positive_probability,copy_risk_score,execution_score,"
+    "selection_marginal_utility,model_coverage,oos_net_pnl,oos_max_drawdown,oos_cvar95,"
+    "actionable_open_rate,capacity_fit,"
     "first_added,last_refreshed,times_seen,times_active"
-)  # 87 columns
+)
 
 OBSERVE_SCHEMA = """
 -- A target's TRADE-level fills (aggregateByTime merges an order's slices into one row). Serves as
@@ -517,11 +672,20 @@ CREATE TABLE IF NOT EXISTS auto_tune_runs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     source        TEXT,
     stamp         TEXT,
+    generation    TEXT,
+    mode          TEXT DEFAULT 'shadow',
+    status        TEXT,
     selected_mult REAL,
     applied       INTEGER DEFAULT 0,
+    eligible_to_apply INTEGER DEFAULT 0,
     followed_n    INTEGER DEFAULT 0,
     baseline_json TEXT,
+    proposal_json TEXT,
+    validation_json TEXT,
     result_json   TEXT,
+    applied_at    TEXT,
+    rollback_at   TEXT,
+    rollback_reason TEXT,
     created_at    TEXT
 );
 """
@@ -605,6 +769,55 @@ _MIGRATIONS = (
     "ALTER TABLE coin_vol ADD COLUMN mark_px REAL",
     "ALTER TABLE coin_vol ADD COLUMN oi_notional REAL",
     "ALTER TABLE coin_vol ADD COLUMN market_ctx_updated_at TEXT",
+    # vNext generation/freshness/evidence and actionable-open flow.
+    "ALTER TABLE leaderboard ADD COLUMN generation TEXT",
+    "ALTER TABLE profile ADD COLUMN profile_generation TEXT",
+    "ALTER TABLE profile ADD COLUMN evaluated_at TEXT",
+    "ALTER TABLE profile ADD COLUMN data_status TEXT DEFAULT 'valid'",
+    "ALTER TABLE profile ADD COLUMN evidence_status TEXT",
+    "ALTER TABLE profile ADD COLUMN last_copyable_open_ms INTEGER",
+    "ALTER TABLE profile ADD COLUMN open_events_7d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN open_events_14d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN open_events_30d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN actionable_open_events_7d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN actionable_open_events_14d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN actionable_open_events_30d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN open_days_7d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN open_days_14d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN open_days_30d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN avg_open_interval_h REAL",
+    "ALTER TABLE profile ADD COLUMN median_open_interval_h REAL",
+    "ALTER TABLE profile ADD COLUMN open_probability_24h REAL",
+    "ALTER TABLE profile ADD COLUMN open_probability_48h REAL",
+    "ALTER TABLE profile ADD COLUMN open_position_count INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN material_open_count INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN raw_quality_score REAL",
+    "ALTER TABLE profile ADD COLUMN copy_expected_return REAL",
+    "ALTER TABLE profile ADD COLUMN copy_positive_probability REAL",
+    "ALTER TABLE profile ADD COLUMN copy_risk_score REAL",
+    "ALTER TABLE profile ADD COLUMN execution_score REAL",
+    "ALTER TABLE profile ADD COLUMN selection_marginal_utility REAL",
+    "ALTER TABLE profile ADD COLUMN model_coverage REAL",
+    "ALTER TABLE profile ADD COLUMN oos_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN oos_max_drawdown REAL",
+    "ALTER TABLE profile ADD COLUMN oos_cvar95 REAL",
+    "ALTER TABLE profile ADD COLUMN actionable_open_rate REAL",
+    "ALTER TABLE profile ADD COLUMN capacity_fit REAL",
+    "ALTER TABLE watchlist ADD COLUMN generation TEXT",
+    "ALTER TABLE watchlist ADD COLUMN profile_generation TEXT",
+    "ALTER TABLE watchlist ADD COLUMN evaluated_at TEXT",
+    "ALTER TABLE watchlist ADD COLUMN data_status TEXT DEFAULT 'valid'",
+    "ALTER TABLE watchlist ADD COLUMN evidence_status TEXT",
+    # Auto-tune proposal lifecycle; legacy rows remain readable.
+    "ALTER TABLE auto_tune_runs ADD COLUMN generation TEXT",
+    "ALTER TABLE auto_tune_runs ADD COLUMN mode TEXT DEFAULT 'shadow'",
+    "ALTER TABLE auto_tune_runs ADD COLUMN status TEXT",
+    "ALTER TABLE auto_tune_runs ADD COLUMN eligible_to_apply INTEGER DEFAULT 0",
+    "ALTER TABLE auto_tune_runs ADD COLUMN proposal_json TEXT",
+    "ALTER TABLE auto_tune_runs ADD COLUMN validation_json TEXT",
+    "ALTER TABLE auto_tune_runs ADD COLUMN applied_at TEXT",
+    "ALTER TABLE auto_tune_runs ADD COLUMN rollback_at TEXT",
+    "ALTER TABLE auto_tune_runs ADD COLUMN rollback_reason TEXT",
 )
 
 
@@ -651,6 +864,11 @@ def _apply_migrations(db: sqlite3.Connection) -> None:
             continue
         db.execute(stmt)
         columns[table].add(column)
+    if "auto_tune_runs" in tables:
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_auto_tune_runs_generation "
+            "ON auto_tune_runs(generation, created_at DESC, id DESC)"
+        )
 
 
 def _migrate_episode_seq(db: sqlite3.Connection) -> None:

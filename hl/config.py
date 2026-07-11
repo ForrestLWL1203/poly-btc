@@ -36,6 +36,22 @@ MIN_FOLLOW_SCORE = 0.70     # follow watchlist wallets with score >= this. v10 (
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
+# vNext publishes an explicit Core/Challenger selection.  The legacy score-line path remains as a
+# migration fallback until the first successful selection generation is published.
+FOLLOW_SELECTION_MODE = "auto"       # auto | manual
+FOLLOW_SELECTION_BOOTSTRAP_ENABLE = True  # cold-start paper DB may form its first Core in one complete generation
+CORE_ENTRY_CONFIRM_GENERATIONS = 2
+CORE_ENTRY_MAX_OPEN_AGE_H = 24.0
+CORE_KEEP_MAX_OPEN_AGE_H = 72.0
+CORE_ENTRY_MIN_OOS_CLOSED = 7
+CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
+CORE_ENTRY_MIN_CHALLENGER_H = 24.0
+CORE_SOFT_CONFIRM_GENERATIONS = 2
+CORE_MAX_SOFT_CHANGES_PER_GENERATION = 1
+SELECTION_MIN_RELATIVE_GAIN = 0.05
+SELECTION_MIN_ACTIONABLE_RATE = 0.70
+SELECTION_MIN_CAPACITY_FIT = 0.85
+SELECTION_MAX_DD_WORSEN = 0.01
 # Post-scan follow-line adaptation. The watchlist is ranked by copy-follow score (raw profile score blended
 # with copy-backtest evidence); after each scan/regate we move MIN_FOLLOW_SCORE to the Nth copyable wallet,
 # with a floor so weak active tails do not get followed just because the pool is small.
@@ -395,10 +411,23 @@ SECTOR_COPY_MIN_CLOSED_7D = 5
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled
 # risk boundaries.
 AUTO_TUNE_MARGIN_ENABLE = True
+# `AUTO_TUNE_MARGIN_ENABLE` is retained for compatibility.  Mode is authoritative for vNext:
+# shadow computes and audits proposals but never writes live execution parameters.
+AUTO_TUNE_MODE = "apply"              # Paper product default: off | shadow | apply
+AUTO_TUNE_APPLY_MIN_SHADOW_DAYS = 0    # Paper validates by OOS/holdout/stress;真钱环境改回14
+AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED = 0 # Paper cold-start may apply;真钱环境改回100
+AUTO_TUNE_MIN_DIRECTION_STREAK = 1     # one complete Paper generation;真钱环境建议2
+AUTO_TUNE_MIN_RELATIVE_GAIN = 0.05
+AUTO_TUNE_MAX_DD_WORSEN = 0.01
+AUTO_TUNE_APPLY_COOLDOWN_DAYS = 7
+AUTO_TUNE_ROLLBACK_RELATIVE_DROP = 0.10
+AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE = 0.0  # Paper exploration;真钱环境建议0.80
+AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.0       # Paper exploration;真钱环境建议0.95
 AUTO_TUNE_MARGIN_MULTS = (0.8, 1.0, 1.2, 1.4, 1.6)
 AUTO_TUNE_LEV_CAP_SETS = ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50)
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.06, 0.08, 0.10, 0.12)
+AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.08, 0.10, 0.12)
 AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3, 1.5)
 AUTO_TUNE_ADD_MAX_HARDS = (4, 6, 8, 10)
 AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
@@ -429,6 +458,18 @@ PROFILE_FETCH_DAYS = 30
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
 FULL_RESYNC_DAYS = 7        # force a full-window re-fetch for all candidates at least this often (self-heal)
 DAILY_RECHECK_TOP_N = 80    # daily incremental scans also re-profile this many current top-ranked old candidates
+# vNext daily discovery budget.  Core/held/challenger wallets are outside the discovery cap; the
+# remaining budget is split new / near-miss / fair exploration and finalized before the wall-clock limit.
+DAILY_SCAN_TIME_BUDGET_MIN = 60
+CORE_REFRESH_DEADLINE_MIN = 15
+SCAN_FINALIZE_RESERVE_MIN = 15
+DAILY_PROFILE_BUDGET = 300
+CANDIDATE_MAX_RECHECK_DAYS = 7
+FULL_REFRESH_SHARDS = 7
+RANDOM_EXPLORATION_RATIO = 0.20
+TUNER_MEMORY_LIMIT_MB = 512
+LEADERBOARD_MIN_ROW_RATIO = 0.85
+LEADERBOARD_MIN_COMPLETE_RATIO = 0.99
 
 # TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
 # trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).

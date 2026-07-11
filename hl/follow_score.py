@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from . import config
+from .copy_policy import load_copy_policy
 from .sector import apply_allowed_sector_copy_metrics, parse_json_obj
 
 
@@ -133,10 +134,10 @@ class FollowScore:
 def evaluate_follow_eligibility(
     metrics: Mapping,
     *,
-    min_closed30: int = 7,
-    min_closed14: int = 5,
-    min_closed7: int = 5,
-    min_open_fill_rate: float = 0.60,
+    min_closed30: int | None = None,
+    min_closed14: int | None = None,
+    min_closed7: int | None = None,
+    min_open_fill_rate: float | None = None,
     min_pnl_per_closed=None,
 ) -> dict:
     """Classify whether an active profile is eligible for real follow-line selection.
@@ -146,6 +147,11 @@ def evaluate_follow_eligibility(
     ensuring clear copyability failures cannot sit above the automatic follow
     line just because their raw profile score is high.
     """
+    policy = load_copy_policy()
+    min_closed30 = policy.min_closed_30d if min_closed30 is None else int(min_closed30)
+    min_closed14 = policy.min_closed_14d if min_closed14 is None else int(min_closed14)
+    min_closed7 = policy.min_closed_7d if min_closed7 is None else int(min_closed7)
+    min_open_fill_rate = policy.min_actionable_open_rate if min_open_fill_rate is None else float(min_open_fill_rate)
     metrics = apply_allowed_sector_copy_metrics(metrics)
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
     c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
@@ -154,6 +160,24 @@ def evaluate_follow_eligibility(
     p14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     p7 = _num(metrics.get("copy_bt_7d_net_pnl"))
     soft_recent_loss = _sector_recent_loss_is_soft(metrics)
+    data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
+    evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
+    if data_status and data_status not in {"valid", "ok"}:
+        return {
+            "eligible": False,
+            "status": "copy_data_error",
+            "role": "quarantine",
+            "deferred": True,
+            "reasons": ["copy回放数据无效，禁止进入实跟集合"],
+        }
+    if evidence_status in {"invalid", "no_evidence", "no_fills", "no_open_events"}:
+        return {
+            "eligible": False,
+            "status": "no_copy_evidence" if evidence_status != "invalid" else "copy_data_error",
+            "role": "challenger" if evidence_status != "invalid" else "quarantine",
+            "deferred": evidence_status == "invalid",
+            "reasons": ["缺少有效copy回测证据，暂留挑战池"],
+        }
     if not _has_copy_evidence(metrics, c30, c14, c7):
         return {
             "eligible": True,

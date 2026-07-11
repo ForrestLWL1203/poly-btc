@@ -44,7 +44,8 @@ export function Discovery({ scanning, startRescan, confirm }) {
     <div className="content">
       <ScanControls fullScan={fullScan} setFullScan={setFullScan} busy={busy} doRescan={doRescan} />
       <ScanStatusCard discovery={d} scanning={scanning} />
-      <DiscoveryFunnel funnel={d.funnel} scoreHistogram={d.scoreHistogram} rejectReasons={d.rejectReasons} />
+      <DiscoveryFunnel funnel={d.funnel} scoreHistogram={d.scoreHistogram} rejectReasons={d.rejectReasons}
+        selectionMode={!!d.generation} />
 
       <PipelineSummary p={pipeline} />
       <ScanHistoryTable runs={runs} />

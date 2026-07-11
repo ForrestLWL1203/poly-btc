@@ -23,6 +23,12 @@ export function ScanStatusCard({ discovery, scanning }) {
   const cyclePct = det.cycle_total ? Math.round(det.cycle_pos / det.cycle_total * 100) : 0;
   const lastScanH = discovery.lastScanAt ? (Date.now() - new Date(discovery.lastScanAt).getTime()) / 3.6e6 : 1e9;
   const overdue = lastScanH > 26;
+  const gen = discovery.generation, perf = (gen && gen.performance) || {};
+  const first = (...keys) => keys.map(k => perf[k]).find(v => v != null);
+  const cacheHit = first("fillCacheHitRate", "fill_cache_hit_rate", "replayCacheHitRate", "replay_cache_hit_rate");
+  const observerP95 = first("observerPollP95Ms", "observer_poll_p95_ms", "observerP95OpenLatencyMs", "observer_p95_open_latency_ms");
+  const restWeight = first("restWeight", "rest_weight", "estimated_weight", "apiWeight", "api_weight");
+  const requests = first("requests", "requestCount", "request_count");
   return (
     <div className="card">
       <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" }}>
@@ -39,6 +45,16 @@ export function ScanStatusCard({ discovery, scanning }) {
       </div>
       {rolling && <div className="bar-track" style={{ marginTop: 14, height: 6 }}>
         <div className="bar-fill" style={{ width: cyclePct + "%", background: "var(--accent-grad)" }} /></div>}
+      {gen && <div style={{ display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap", marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+        <div><div className="muted">已发布 Generation</div><div className="mono" style={{ fontSize: 13, color: "var(--green-l)" }}>{gen.generation}</div></div>
+        <div><div className="muted">工作集 / Fills</div><div className="mono" style={{ fontSize: 13 }}>{gen.worksetMode || "—"} · {gen.fillMode || "—"}</div></div>
+        <div><div className="muted">画像 / 延期</div><div className="mono" style={{ fontSize: 13 }}>{gen.profiled ?? "—"} / {gen.deferred ?? 0}</div></div>
+        <div><div className="muted">Leaderboard / Profile</div><div className="mono" style={{ fontSize: 13, color: gen.leaderboardValid && gen.profileComplete ? "var(--green-l)" : "var(--red-l)" }}>{gen.leaderboardValid ? "valid" : "invalid"} · {gen.profileComplete ? "complete" : "incomplete"}</div></div>
+        {restWeight != null && <div><div className="muted">REST权重</div><div className="mono" style={{ fontSize: 13 }}>{restWeight}</div></div>}
+        {requests != null && <div><div className="muted">网络请求</div><div className="mono" style={{ fontSize: 13 }}>{requests}</div></div>}
+        {cacheHit != null && <div><div className="muted">缓存命中</div><div className="mono" style={{ fontSize: 13 }}>{Math.round(cacheHit * (cacheHit <= 1 ? 100 : 1))}%</div></div>}
+        {observerP95 != null && <div><div className="muted">Observer P95</div><div className="mono" style={{ fontSize: 13 }}>{Math.round(observerP95)}ms</div></div>}
+      </div>}
     </div>
   );
 }

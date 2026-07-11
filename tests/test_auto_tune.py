@@ -189,6 +189,7 @@ class AutoTuneTests(unittest.TestCase):
     def test_build_add_candidate_changes_smart_add_core_params(self):
         follow = {
             "ADD_GAP_K": 0.12,
+            "POS_ADD_GAP_K": 0.08,
             "ADD_GAP_SHRINK_G": 1.2,
             "ADD_MAX_HARD": 8,
             "SMART_ADD": True,
@@ -200,6 +201,7 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertEqual(overrides["ADD_STRATEGY"], "smart")
         self.assertAlmostEqual(overrides["ADD_GAP_K"], 0.06)
+        self.assertAlmostEqual(overrides["POS_ADD_GAP_K"], 0.08)
         self.assertAlmostEqual(overrides["ADD_GAP_SHRINK_G"], 1.3)
         self.assertEqual(overrides["ADD_MAX_HARD"], 6)
 
@@ -251,20 +253,23 @@ class AutoTuneTests(unittest.TestCase):
 
         with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
                 patch.object(auto_tune, "_load_sigmas", return_value={}), \
+                patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
                 patch.object(auto_tune, "tune_candidates_from_axes", side_effect=tune_axes), \
                 patch.object(auto_tune, "evaluate_tune_candidate", side_effect=eval_tune), \
                 patch.object(auto_tune, "add_candidates_from_axes", side_effect=add_axes), \
                 patch.object(auto_tune, "evaluate_add_candidate", side_effect=eval_add):
-            res = auto_tune.maybe_tune_margins(db, source="test")
+            res = auto_tune.maybe_tune_margins(db, source="test", mode="apply")
 
-        self.assertTrue(res["applied"])
+        self.assertFalse(res["applied"])
+        self.assertFalse(res["eligible_to_apply"])
+        self.assertIn("fewer_than_two_fold_wins", res["validation"]["reasons"])
         self.assertAlmostEqual(res["add_params"]["ADD_GAP_K"], 0.06)
         rows = dict(db.execute(
             "SELECT key,value FROM params WHERE key IN ('ADD_GAP_K','ADD_GAP_SHRINK_G','ADD_MAX_HARD')"
         ).fetchall())
-        self.assertEqual(rows["ADD_GAP_K"], "0.06")
-        self.assertEqual(rows["ADD_GAP_SHRINK_G"], "1.3")
-        self.assertEqual(rows["ADD_MAX_HARD"], "6")
+        self.assertEqual(rows["ADD_GAP_K"], "0.12")
+        self.assertEqual(rows["ADD_GAP_SHRINK_G"], "1.2")
+        self.assertEqual(rows["ADD_MAX_HARD"], "8")
 
     def test_maybe_tune_margins_loads_portfolio_fills_once_for_both_grids(self):
         db = self._db()
@@ -302,7 +307,7 @@ class AutoTuneTests(unittest.TestCase):
         self.assertIn(res["status"], ("applied", "unchanged", "ok"))
         self.assertEqual(len(load_calls), 1)
 
-    def test_maybe_tune_margins_falls_back_when_fill_cache_guard_exceeded(self):
+    def test_maybe_tune_margins_skips_when_fill_cache_guard_exceeded(self):
         db = self._db()
         params.seed_params(db)
         load_calls = []
@@ -337,8 +342,90 @@ class AutoTuneTests(unittest.TestCase):
                 patch.object(auto_tune.time, "time", return_value=10.0):
             res = auto_tune.maybe_tune_margins(db, source="test")
 
-        self.assertIn(res["status"], ("applied", "unchanged", "ok"))
-        self.assertEqual(len(load_calls), len(auto_tune._tune_days()) * 2)
+        self.assertEqual(res["status"], "skipped")
+        self.assertEqual(res["reason"], "fill_cache_guard")
+        self.assertFalse(res["applied"])
+        self.assertEqual(len(load_calls), 0)
+
+    def test_shadow_mode_builds_proposal_without_writing_params(self):
+        db = self._db()
+        params.seed_params(db)
+        before = dict(db.execute(
+            "SELECT key,value FROM params WHERE key IN ('ADD_GAP_K','ADD_GAP_SHRINK_G','ADD_MAX_HARD')"
+        ).fetchall())
+
+        base_windows = {
+            30: {"copy_net_pnl": 1000, "closed_n": 10, "capacity_open_fit": 0.9,
+                 "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
+            14: {"copy_net_pnl": 300, "closed_n": 5, "capacity_open_fit": 0.9,
+                 "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+            7: {"copy_net_pnl": 100, "closed_n": 5, "capacity_open_fit": 1.0,
+                "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
+        }
+
+        def one_tune(base):
+            return [auto_tune.build_tune_candidate(
+                base, 1.0, tuple(base[k] for k in auto_tune.LEV_KEYS), base["DEPLOY_FULL_PCT"]
+            )]
+
+        def fake_eval(_db, _addrs, follow, candidate, **_kwargs):
+            out = dict(candidate)
+            out["params"] = {k: follow[k] for k in auto_tune.TUNE_KEYS}
+            out["margins"] = {k: follow[k] for k in auto_tune.MARGIN_KEYS}
+            out["lev_caps"] = {k: follow[k] for k in auto_tune.LEV_KEYS}
+            out["deploy_full_pct"] = follow["DEPLOY_FULL_PCT"]
+            out["windows"] = base_windows
+            return out
+
+        with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
+                patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                patch.object(auto_tune, "tune_candidates_from_axes", side_effect=one_tune), \
+                patch.object(auto_tune, "evaluate_tune_candidate", side_effect=fake_eval), \
+                patch.object(auto_tune, "add_candidates_from_axes", return_value=[]):
+            result = auto_tune.maybe_tune_margins(db, source="test", mode="shadow")
+
+        after = dict(db.execute(
+            "SELECT key,value FROM params WHERE key IN ('ADD_GAP_K','ADD_GAP_SHRINK_G','ADD_MAX_HARD')"
+        ).fetchall())
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["shadow"])
+        self.assertFalse(result["applied"])
+        self.assertEqual(after, before)
+
+    def test_paper_apply_policy_can_activate_without_calendar_or_coverage_waits(self):
+        db = self._db()
+        params.seed_params(db)
+        current = {key: 1.0 for key in auto_tune.TUNE_KEYS + auto_tune.ADD_TUNE_KEYS}
+        proposal = dict(current)
+        proposal["STABLE_LEV_CAP"] = 2.0
+        folds = [
+            {
+                "baselineNet": 100.0, "challengerNet": 120.0,
+                "baselineMaxDD": 0.10, "challengerMaxDD": 0.10,
+                "challengerOpenRate": 0.90, "challengerCapacityFit": 0.90,
+            }
+            for _ in range(3)
+        ]
+        follow = params.load_follow(db)
+        follow.update({
+            "AUTO_TUNE_APPLY_MIN_SHADOW_DAYS": 0,
+            "AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED": 0,
+            "AUTO_TUNE_MIN_DIRECTION_STREAK": 1,
+            "AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE": 0.0,
+            "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE": 0.0,
+        })
+
+        result = auto_tune._proposal_apply_eligibility(
+            db, [], follow, current, proposal,
+            {
+                "folds": folds, "foldWins": 3, "holdout": folds[-1],
+                "stressNet": 50.0, "stressLiquidations": 0,
+                "masterLeverageCoverage": 0.0, "pricePathCoverage": 0.0,
+            },
+            "2026-07-11T00:00:00Z",
+        )
+
+        self.assertTrue(result["eligible"], result["reasons"])
 
     def test_choose_follow_line_by_portfolio_prefers_profitable_prefix(self):
         db = self._db()

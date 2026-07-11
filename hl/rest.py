@@ -13,11 +13,34 @@ from . import config
 _last_post = [0.0]
 _pace_lock = threading.Lock()   # serialize POST spacing across worker threads (the network call
 #                                 itself runs OUTSIDE the lock, so RTTs overlap = real concurrency)
+_stats_lock = threading.Lock()
+_request_stats = {"requests": 0, "retries": 0, "estimated_weight": 0}
+_WEIGHT_ESTIMATE = {
+    "userFills": 20, "userFillsByTime": 20, "portfolio": 20,
+    "clearinghouseState": 2, "spotClearinghouseState": 2,
+    "candleSnapshot": 2, "meta": 2, "metaAndAssetCtxs": 2,
+}
+
+
+def reset_request_stats():
+    with _stats_lock:
+        _request_stats.update(requests=0, retries=0, estimated_weight=0)
+
+
+def request_stats():
+    with _stats_lock:
+        return dict(_request_stats)
 
 
 def _get(url: str, retries: int = 3):
     err = None
+    with _stats_lock:
+        _request_stats["requests"] += 1
+        _request_stats["estimated_weight"] += 1
     for attempt in range(retries):
+        if attempt:
+            with _stats_lock:
+                _request_stats["retries"] += 1
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=config.UA), timeout=60) as r:
                 return json.loads(r.read().decode())
@@ -31,7 +54,13 @@ def post(body: dict, retries: int = 7):
     """POST to the info endpoint, globally paced and with 429-aware backoff."""
     data = json.dumps(body).encode()
     err = None
+    with _stats_lock:
+        _request_stats["requests"] += 1
+        _request_stats["estimated_weight"] += _WEIGHT_ESTIMATE.get(body.get("type"), 1)
     for attempt in range(retries):
+        if attempt:
+            with _stats_lock:
+                _request_stats["retries"] += 1
         with _pace_lock:                                   # only the spacing is serialized ...
             wait = config.MIN_POST_INTERVAL - (time.time() - _last_post[0])
             if wait > 0:

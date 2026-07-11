@@ -221,7 +221,11 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
     a held-position trader is treated as ACTIVE (not 'inactive'), profit is judged on realized+unrealized
     (so a 扛单 carrying deep bags reads as not-profitable while a trend trader's winning holds count),
     and a low-frequency wallet is kept when it holds a real WINNING position."""
-    has_open = (m.get("bag_count") or 0) > 0 or (m.get("open_win_frac") or 0.0) > 1e-9
+    # A real open position remains active even when it is flat or only trivially +/-; the old proxy used
+    # losing bags or positive unrealized PnL and therefore treated a flat live position as inactivity.
+    has_open = (m.get("open_position_count") or 0) > 0
+    if "open_position_count" not in m:  # migration compatibility for profiles not refreshed by vNext yet
+        has_open = (m.get("bag_count") or 0) > 0 or abs(m.get("open_win_frac") or 0.0) > 1e-9
     trend = (m.get("open_win_frac") or 0.0) >= config.TREND_OPEN_MIN     # a real winning hold = trend value
     if (now_ms - m["last_fill_ms"]) / DAY_MS > p.inactive_days and not has_open:
         return False, "inactive"                               # no recent fills AND no live position
@@ -295,10 +299,16 @@ def score(m: dict) -> float:
     roi = (sum(w * _clip(v, config.ROI_CLIP_LO, config.ROI_CLIP_HI) for w, v in _rp if v is not None) / _rw
            if _rw else 0.0)
     notl = max(g("avg_notional"), config.ROI_NOTL_FLOOR)                    # 仅用于把回撤归一成 dd_eq
-    dd_eq = g("max_drawdown") / notl + config.UNREAL_RISK_W * g("open_win_frac")
+    # Prefer Hyperliquid's account-equity drawdown when available.  Unrealized *gains* are not drawdown;
+    # open loss pressure is handled by the dedicated health guard below.
+    pf_dd = g("pf_max_dd", None)
+    dd_eq = max(0.0, pf_dd) if pf_dd is not None else g("max_drawdown") / notl
     roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效 edge
     roi_s = 1.0 - math.exp(-roi_adj / config.SCORE_ROI_SCALE)             # 平滑饱和 [0,1)
-    act = (0.5 * min(1.0, (g("n_trades") + g("bag_count")) / config.SCORE_EV_TRADES)
+    # Open-position evidence uses all real positions, never only losing bags (which created a reverse
+    # incentive where carrying more losses raised the quality score).
+    open_n = g("open_position_count")
+    act = (0.5 * min(1.0, (g("n_trades") + open_n) / config.SCORE_EV_TRADES)
            + 0.5 * min(1.0, g("active_days") / config.SCORE_EV_DAYS))     # 活跃度(核心项:成交数 + 活跃天数)
     wsum = config.SCORE_W_WIN + config.SCORE_W_ACT + config.SCORE_W_ROI or 1.0   # relative weights (UI-safe)
     core = (config.SCORE_W_WIN * win + config.SCORE_W_ACT * act + config.SCORE_W_ROI * roi_s) / wsum

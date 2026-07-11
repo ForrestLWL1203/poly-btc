@@ -107,6 +107,21 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["missed_adds"], 1)
         self.assertEqual(result["followed_adds"], 1)
 
+    def test_rejected_first_slice_does_not_consume_same_oid_add(self):
+        fills = [
+            fill(1, "ZEC", "B", 10, 0, 100.0, 1),
+            fill(2, "ZEC", "B", 1, 10, 99.9, 2),
+            fill(3, "ZEC", "B", 9, 11, 98.0, 2),
+            fill(4, "ZEC", "A", 20, 20, 101.0, 3),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ZEC": 0.10})
+
+        self.assertEqual(result["target_adds"], 1)
+        self.assertEqual(result["followed_adds"], 1)
+        self.assertEqual(result["missed_adds"], 0)
+        self.assertGreater(result["copy_net_pnl"], 0)
+
     def test_portfolio_replay_keeps_same_coin_wallet_positions_separate(self):
         fills = [
             user_fill("0xa", 1, "BTC", "B", 100, 0, 100.0, 1),

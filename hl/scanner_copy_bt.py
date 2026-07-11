@@ -7,6 +7,8 @@ import math
 
 from . import config, params
 from .copy_backtest import run_backtest
+from .copy_data import market_evidence_key, normalize_copyable_fills
+from .copy_policy import load_copy_policy
 from .sector import SECTORS, compact_sector_results, evaluate_sector_policy, filter_fills
 
 
@@ -40,8 +42,9 @@ def copy_bt_overrides(db):
 
 
 def copy_bt_window_days(p):
-    base = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
-    days = [base] + list(getattr(config, "COPY_BT_RECENT_DAYS", (14, 7)))
+    policy = load_copy_policy()
+    base = int(getattr(p, "copy_bt_days", policy.windows[0]) or policy.windows[0])
+    days = [base] + list(policy.windows[1:])
     out = []
     for day in days:
         try:
@@ -54,21 +57,36 @@ def copy_bt_window_days(p):
 
 
 def copy_bt_min_closed_for_days(p, days):
-    base_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
-    base_min = int(getattr(p, "copy_bt_min_closed", config.COPY_BT_MIN_CLOSED) or 0)
-    if base_days <= 0 or days >= base_days:
-        return base_min
-    scaled = int(math.ceil(base_min * days / base_days))
-    recent_floor = int(getattr(config, f"COPY_BT_MIN_CLOSED_{int(days)}D", 0) or 0)
-    return max(1, scaled, recent_floor)
+    policy = load_copy_policy()
+    explicit = policy.min_closed(int(days))
+    if int(days) >= int(getattr(p, "copy_bt_days", policy.windows[0]) or policy.windows[0]):
+        return int(getattr(p, "copy_bt_min_closed", explicit) or 0)
+    return explicit
 
 
 def copy_bt_result(addr, fills, now_ms, p, days=None):
     days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
     start_ms = now_ms - days * 86400_000
-    replay_fills = [x for x in fills if x.get("time", 0) >= start_ms]
+    replay_fills = [
+        x for x in normalize_copyable_fills(fills, addr=addr)
+        if x.get("time", 0) >= start_ms
+    ]
     if not replay_fills:
-        return {}
+        return {
+            "valid": True,
+            "data_status": "valid",
+            "evidence_status": "no_fills",
+            "has_evidence": False,
+            "closed_n": 0,
+            "open_n": 0,
+            "target_open_events": 0,
+            "opened_n": 0,
+            "_window_days": days,
+            "_window_start_ms": start_ms,
+            "_window_end_ms": now_ms,
+            "_market_evidence_key": market_evidence_key(replay_fills),
+            "_market_generation": getattr(p, "scan_generation", None),
+        }
     try:
         result = run_backtest(
             addr,
@@ -84,9 +102,35 @@ def copy_bt_result(addr, fills, now_ms, p, days=None):
         result["_window_days"] = days
         result["_window_start_ms"] = start_ms
         result["_window_end_ms"] = now_ms
+        result["valid"] = True
+        result["data_status"] = "valid"
+        result["has_evidence"] = bool(
+            int(result.get("target_open_events") or 0)
+            or int(result.get("closed_n") or 0)
+            or int(result.get("open_n") or 0)
+        )
+        result["evidence_status"] = "observed" if result["has_evidence"] else "no_open_events"
+        result["_market_evidence_key"] = market_evidence_key(replay_fills)
+        result["_market_generation"] = getattr(p, "scan_generation", None)
         return result
     except Exception:  # noqa: BLE001 - backtest is a quality aid; never kill discovery on a replay bug
-        return {}
+        # The scanner may keep a prior profile on a data/replay failure, but the
+        # failed replay must never masquerade as positive/missing evidence.
+        return {
+            "valid": False,
+            "data_status": "replay_error",
+            "evidence_status": "invalid",
+            "has_evidence": False,
+            "closed_n": 0,
+            "open_n": 0,
+            "target_open_events": 0,
+            "opened_n": 0,
+            "_window_days": days,
+            "_window_start_ms": start_ms,
+            "_window_end_ms": now_ms,
+            "_market_evidence_key": market_evidence_key(replay_fills),
+            "_market_generation": getattr(p, "scan_generation", None),
+        }
 
 
 def copy_bt_results(addr, fills, now_ms, p):
@@ -112,7 +156,39 @@ def record_primary_copy_bt(metrics, result):
         copy_bt_open_fill_rate=(opened / target_open) if target_open else None,
         copy_bt_liquidations=int(result.get("liquidations") or 0),
         copy_bt_fee_drag=result.get("fee_drag"),
+        copy_bt_data_status=result.get("data_status", "valid"),
+        copy_bt_evidence_status=result.get("evidence_status", "observed"),
     )
+
+
+def _result_has_evidence(result):
+    if not result:
+        return False
+    if "has_evidence" in result:
+        return bool(result.get("has_evidence"))
+    return bool(
+        int(result.get("target_open_events") or 0)
+        or int(result.get("closed_n") or 0)
+        or int(result.get("open_n") or 0)
+    )
+
+
+def _result_is_valid(result):
+    return bool(result) and result.get("valid") is not False and result.get("data_status") != "replay_error"
+
+
+def _window_state(result):
+    if not result:
+        return "legacy_missing"
+    if "copy_net_pnl" in result or "valid" in result:
+        rows = [result]
+    else:
+        rows = [row for row in result.values() if isinstance(row, dict)]
+    if any(not _result_is_valid(row) for row in rows):
+        return "invalid"
+    if not any(_result_has_evidence(row) for row in rows):
+        return "no_evidence"
+    return "observed"
 
 
 def record_recent_copy_bt(metrics, days, result):
@@ -195,7 +271,19 @@ def apply_copy_bt_gate(metrics, result, p):
     if not result:
         return True, "ok"
 
-    if "copy_net_pnl" in result:
+    state = _window_state(result)
+    if "copy_net_pnl" in result or "valid" in result:
+        record_primary_copy_bt(metrics, result)
+    if state == "invalid":
+        metrics["copy_bt_data_status"] = "replay_error"
+        metrics["copy_bt_evidence_status"] = "invalid"
+        return True, "copy_backtest_deferred_data_error"
+    if state == "no_evidence":
+        metrics["copy_bt_data_status"] = "valid"
+        metrics["copy_bt_evidence_status"] = "no_evidence"
+        return True, "copy_backtest_no_evidence"
+
+    if "copy_net_pnl" in result or "valid" in result:
         days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
         record_primary_copy_bt(metrics, result)
         if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
@@ -258,8 +346,30 @@ def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_polic
     metrics["sector_policy_json"] = json.dumps(policy, sort_keys=True)
     if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
         return True, "ok"
+    states = [_window_state(result)] + [
+        _window_state((sector_results or {}).get(sector)) for sector in SECTORS
+    ]
+    if "invalid" in states:
+        metrics["copy_bt_data_status"] = "replay_error"
+        metrics["copy_bt_evidence_status"] = "invalid"
+        return True, "copy_backtest_deferred_data_error"
+    if all(state in {"no_evidence", "legacy_missing"} for state in states):
+        metrics["copy_bt_data_status"] = "valid"
+        metrics["copy_bt_evidence_status"] = "no_evidence"
+        return True, "copy_backtest_no_evidence"
     if policy.get("allowed"):
         return True, "ok"
     if any(compact.get(sector) for sector in SECTORS):
-        return False, "copy_backtest_no_profitable_sector"
+        # Economic weakness or thin evidence belongs to Challenger/continuous scoring.  The sector policy
+        # remains fail-closed for live opens, but it must not erase an otherwise structurally copyable wallet
+        # from the discovery pool before lifecycle/OOS selection can accumulate confirmation.
+        statuses = {
+            str((policy.get(sector) or {}).get("status") or "")
+            for sector in SECTORS
+            if isinstance(policy.get(sector), dict)
+        }
+        metrics["copy_bt_evidence_status"] = (
+            "thin" if statuses and statuses.issubset({"thin_evidence", ""}) else "economically_disqualified"
+        )
+        return True, "copy_backtest_challenger_only"
     return apply_copy_bt_gate(metrics, result, p)

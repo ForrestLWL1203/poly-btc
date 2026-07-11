@@ -6,6 +6,11 @@ import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
+const dropBatchLabel = (source) => ({
+  scan: "每日重采", scan_post_tune: "重采后调参", regate: "重新门控",
+  regate_post_tune: "门控后调参", watchlist: "名单重建",
+}[source] || source || "历史记录");
+
 export function Wallets({ confirm, toast }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);
@@ -15,6 +20,7 @@ export function Wallets({ confirm, toast }) {
   const { auditOpen, resetAudits, toggleAudit, auditBox } = useWalletAudit();
   useEffect(resetAudits, [tab]);
   const dropped = tab === "dropped";
+  const explicit = !!(data && data.selectionMode);
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
@@ -30,11 +36,12 @@ export function Wallets({ confirm, toast }) {
   return (
     <div className="content">
       <div className="section-h" style={{ marginTop: 6 }}>
-        <h2>跟踪名单 {data && <span className="muted">· 跟单线 {fNum(data.followLine, 0)} 分 · {
-          tab === "followed" ? "实跟 " + data.total + " 个(与跟单脚本一致)"
-          : "降级 " + data.total + " 个"}</span>}</h2>
+        <h2>跟踪名单 {data && <span className="muted">· {explicit
+          ? `Selection ${data.selectionGeneration || "—"} · ${tab === "challenger" ? "挑战池" : "Core"} ${data.total} 个`
+          : `跟单线 ${fNum(data.followLine, 0)} 分 · ${tab === "followed" ? "实跟 " + data.total + " 个(与跟单脚本一致)" : "降级 " + data.total + " 个"}`}</span>}</h2>
         <div className="range-tabs">
-          <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中{data && data.followed != null ? " " + data.followed : ""}</button>
+          <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>Core{tab === "followed" && data && data.total != null ? " " + data.total : ""}</button>
+          <button className={tab === "challenger" ? "on" : ""} onClick={() => { setTab("challenger"); setWpage(0); }}>Challenger{tab === "challenger" && data && data.total != null ? " " + data.total : ""}</button>
           <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
         </div>
       </div>
@@ -43,7 +50,7 @@ export function Wallets({ confirm, toast }) {
           <table>
             <thead><tr>
               <th>地址</th><th>市场</th><th className="num">当前分</th><th className="num">曾在线</th><th className="num">ROI</th>
-              <th className="num">胜率</th><th>主力</th><th>降级原因</th><th>降级时间</th>
+              <th className="num">胜率</th><th>主力</th><th>降级原因</th><th>退榜批次</th>
             </tr></thead>
             <tbody>
               {data === null && <tr><td colSpan="9" className="loading">加载中…</td></tr>}
@@ -62,12 +69,55 @@ export function Wallets({ confirm, toast }) {
                       <td className="num">{fNum(w.winRatePct, 0)}%</td>
                       <td><b>{w.mainCoin}</b></td>
                       <td><span className="tint tint-red">{w.dropReason}</span></td>
-                      <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.dropAt || w.lastFollowedAt)}</td>
+                      <td title={w.dropDecidedAt ? "本批次完成判定于 " + fTime(w.dropDecidedAt) : ""}>
+                        <div className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.dropAt || w.lastFollowedAt)}</div>
+                        <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{dropBatchLabel(w.dropSource)}</div>
+                      </td>
                     </tr>
                     {open && <tr className="detail-row"><td colSpan="9">{auditBox(w.address)}</td></tr>}
                   </React.Fragment>
                 );
               })}
+            </tbody>
+          </table>
+        ) : explicit ? (
+          <table>
+            <thead><tr>
+              <th>#</th><th>地址</th><th>角色 / 市场</th><th className="num">评分</th>
+              <th>最近可复制开仓</th><th className="num" title="可执行开仓捕获率 / 资金容量适配率">捕获 / 容量</th>
+              <th className="num">OOS净利</th><th className="num" title="加入当前组合后的样本外边际效用">组合边际</th>
+              <th className="num">Forward盈亏</th><th>数据</th><th>启用</th>
+            </tr></thead>
+            <tbody>
+              {data === null && <tr><td colSpan="11" className="loading">加载中…</td></tr>}
+              {data && pageRows.length === 0 && <tr><td colSpan="11" className="empty">{tab === "challenger" ? "当前没有 Challenger" : "当前没有满足正边际条件的 Core 钱包"}</td></tr>}
+              {data && pageRows.map(w => (
+                <tr key={w.address} className={w.enabled ? "" : "row-off"}
+                  style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
+                  <td><span className="rankbadge">{w.followPos}</span></td>
+                  <td className="addr"><span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span></td>
+                  <td>
+                    <span className={"tint " + (w.role === "core" ? "tint-green" : "tint-amber")}>{w.role}</span>{" "}
+                    <span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span>
+                  </td>
+                  <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
+                  <td>
+                    <div className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{w.lastActionableOpenAt ? fTime(w.lastActionableOpenAt) : "—"}</div>
+                    <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{w.evaluatedAt ? "画像 " + fTime(w.evaluatedAt) : "未记录画像时间"}</div>
+                  </td>
+                  <td className="num mono">{w.actionableOpenRate != null ? fNum(w.actionableOpenRate * 100, 0) + "%" : "—"} / {w.capacityFit != null ? fNum(w.capacityFit * 100, 0) + "%" : "—"}</td>
+                  <td className="num"><b style={{ color: (w.oosNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.oosNetPnl != null ? fSign(w.oosNetPnl, 0) : "—"}</b></td>
+                  <td className="num"><b style={{ color: (w.selectionMarginalUtility || 0) > 0 ? "var(--green-l)" : "var(--t2)" }}>{w.selectionMarginalUtility != null ? fSign(w.selectionMarginalUtility, 2) : "—"}</b></td>
+                  <td className="num">{(w.closedN > 0 || (w.forwardNetPnl || 0) !== 0)
+                    ? <b style={{ color: (w.forwardNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.forwardNetPnl || 0, 0)}</b>
+                    : <span className="muted">—</span>}</td>
+                  <td title={w.profileGeneration ? `Profile generation ${w.profileGeneration}` : ""}>
+                    <span className={"tint " + (w.dataStatus === "valid" ? "tint-green" : ["stale", "deferred_data_error"].includes(w.dataStatus) ? "tint-amber" : "tint-red")}>{w.dataStatus || "unknown"}</span>
+                    <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{w.evidenceStatus || "evidence unknown"}</div>
+                  </td>
+                  <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
+                </tr>
+              ))}
             </tbody>
           </table>
         ) : (

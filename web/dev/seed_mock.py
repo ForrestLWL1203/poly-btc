@@ -13,7 +13,8 @@ DB = sys.argv[1] if len(sys.argv) > 1 else "data/hl_mock.db"
 db = storage.connect(DB, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 params.seed_params(db)
 for t in ("account_stats", "copy_position", "copy_action", "coin_vol", "watchlist",
-          "target_controls", "profile", "leaderboard", "scan_runs"):
+          "target_controls", "profile", "leaderboard", "scan_runs", "follow_selection",
+          "scan_generation", "wallet_registry", "pipeline_audit", "follow_history"):
     db.execute(f"DELETE FROM {t}")
 
 def ago(s):
@@ -45,20 +46,47 @@ W = [
     ("0x7a5555555555555555555555555555555555aa05", "doge_degen",  0.92, 0.33, 0.52, "DOGE", "crypto", -0.18, 3, 23000, 0),
     ("0x7a6666666666666666666666666666666666aa06", "new_lowevd",  0.47, 0.22, 0.50, "BTC",  "crypto", -0.07, 0, 31000, 1),
 ]
+GEN = "mock-2026-07-11"
+db.execute(
+    "INSERT INTO scan_generation "
+    "(generation,source,status,complete,publishable,is_current,started_at,published_at,"
+    "leaderboard_rows,leaderboard_valid,profile_total,profile_valid,profile_complete,workset_mode,fill_mode,"
+    "workset_n,deferred_n,metrics_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    (GEN, "scan", "published", 1, 1, 1, ago(1800), ago(120), 46, 1, 6, 6, 1,
+     "priority", "mixed", 46, 12, '{"requests":128,"estimated_weight":612,"coreRefreshSec":420,"coreDeadlineMet":true,"fullRefetch":7,"deltaRefetch":39}')
+)
 for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enumerate(W, 1):
-    db.execute("INSERT INTO leaderboard (addr,display_name,account_value,mon_roi,is_candidate,fetched_at) "
-               "VALUES (?,?,?,?,1,?)", (addr, name, acct, roi, now_iso()))
+    db.execute("INSERT INTO leaderboard (addr,display_name,account_value,mon_roi,is_candidate,fetched_at,generation) "
+               "VALUES (?,?,?,?,1,?,?)", (addr, name, acct, roi, now_iso(), GEN))
     db.execute("INSERT INTO profile (addr,status,reason,score,n_trades,win_rate,roi_equity,acct_value,"
-               "top_coin,market_type,worst_loss_pct,median_adds_per_ep) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-               (addr, "active", "ok", score, 40, wr, roi, acct, coin, mt, worst, madds))
+               "top_coin,market_type,worst_loss_pct,median_adds_per_ep,profile_generation,evaluated_at,"
+               "data_status,evidence_status,last_copyable_open_ms,actionable_open_rate,capacity_fit,"
+               "oos_net_pnl,oos_max_drawdown,oos_cvar95,selection_marginal_utility) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (addr, "active", "ok", score, 40, wr, roi, acct, coin, mt, worst, madds, GEN, ago(300),
+                "valid", "qualified" if rank <= 4 else "thin", now_ms() - rank * 5 * 3600_000,
+                max(.62, .92 - rank * .04), max(.75, .96 - rank * .025),
+                1450 - rank * 170, .025 + rank * .004, -120 - rank * 18, .18 - rank * .025))
     db.execute("INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,win_rate,top_coin,"
-               "market_type,acct_value,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-               (rank, addr, name, score, roi, wr, coin, mt, acct, now_iso()))
+               "market_type,acct_value,generation,profile_generation,evaluated_at,data_status,evidence_status,updated_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (rank, addr, name, score, roi, wr, coin, mt, acct, GEN, GEN, ago(300), "valid",
+                "qualified" if rank <= 4 else "thin", now_iso()))
     db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES (?,?,?)", (addr, en, now_iso()))
+    role = "core" if rank <= 3 else "challenger"
+    db.execute("INSERT INTO follow_selection "
+               "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,model_version,policy_version,selected_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (GEN, addr, role, en, "core_keep" if role == "core" else "challenger_evidence",
+                .18 - rank * .025, "valid", "qualified" if rank <= 4 else "thin",
+                "selection-vnext-1", "copy-policy-mock", ago(120)))
+    if role == "core":
+        db.execute("INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
+                   "VALUES (?,?,?,?)", (addr, ago(7 * 86400), ago(120), score))
 
 for i in range(40):
-    db.execute("INSERT INTO leaderboard (addr,display_name,account_value,mon_roi,is_candidate,fetched_at) "
-               "VALUES (?,?,?,?,1,?)", (f"0xcand{i:036x}", f"c{i}", 12000, 0.1, now_iso()))
+    db.execute("INSERT INTO leaderboard (addr,display_name,account_value,mon_roi,is_candidate,fetched_at,generation) "
+               "VALUES (?,?,?,?,1,?,?)", (f"0xcand{i:036x}", f"c{i}", 12000, 0.1, now_iso(), GEN))
 reasons = (["inactive"] * 9 + ["spot_dominant"] * 4 + ["bot_frequency"] * 3 + ["irregular"] * 5 +
            ["grid_dca"] * 8 + ["blowup_loss"] * 6 + ["not_profitable"] * 3 + ["hit_page_cap"] * 2)
 for i, reason in enumerate(reasons):
@@ -105,6 +133,24 @@ for i in range(4):
     db.execute("INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,probed_new,added,"
                "retired,kept,rejected,n_active) VALUES (?,?,?,?,?,?,?,?,?,?)",
                (ago((i+1)*86400), ago((i+1)*86400 - 1180), 1180, 1240, 60, 2+i % 2, 1+i % 2, 24, 854+i, 26))
+
+for rank, row in enumerate(W, 1):
+    role = "core" if rank <= 3 else "challenger"
+    db.execute("INSERT INTO pipeline_audit "
+               "(stamp,source,stage,addr,rank,status,reason,follow_score,payload_json,created_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?)",
+               (ago(120), "scan", "selection", row[0], rank, role,
+                "core_keep" if role == "core" else "challenger_evidence", .18-rank*.025,
+                '{}', ago(120)))
+db.execute("INSERT INTO pipeline_audit "
+           "(stamp,source,stage,status,reason,payload_json,created_at) VALUES (?,?,?,?,?,?,?)",
+           (ago(120), "scan", "selection_summary", "ok", "explicit_core_selection",
+            '{"generation":"mock-2026-07-11","action":"keep","core":3,"challenger":3,"exitOnly":0}', ago(120)))
+db.execute("INSERT INTO pipeline_audit "
+           "(stamp,source,stage,status,reason,payload_json,created_at) VALUES (?,?,?,?,?,?,?)",
+           (ago(120), "scan", "auto_tune", "ok", "unchanged",
+            '{"status":"ok","mode":"shadow","shadow":true,"eligibleToApply":false,"followedN":3,'
+            '"validation":{"reasons":["shadow_days_insufficient","forward_closed_insufficient"]}}', ago(60)))
 
 db.commit(); db.close()
 print("seeded mock:", DB)

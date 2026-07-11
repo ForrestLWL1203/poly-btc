@@ -26,7 +26,7 @@ import time
 
 import websockets
 
-from . import config, rest, volatility, ws
+from . import config, rest, selection, volatility, ws
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
 from .copy_engine import OpenSizingParams, plan_open_sizing, reduce_leaves_dust, stop_px as engine_stop_px, tier_for_sigma
 from .fill_transition import classify_fill_transition
@@ -1785,16 +1785,22 @@ class Observer:
 
 # ------------------------------------------------------------------------- loaders
 def load_targets(db, n: int, min_score: float = 0.0):
-    """Followable set = enabled watchlist wallets with score ≥ line, top-n by rank. Evidence (a real
-    track record) is now enforced ONCE at profile time by the scanner's EVIDENCE gate (active_days +
-    n_trades), so a wallet only reaches `active` if it already has history — no separate follow-time
-    re-check (v10: dropped the redundant FOLLOW_MIN_TRADES/FOLLOW_MIN_ACTIVE_DAYS floor). Wallets we
-    still hold a copy on are re-added EXIT-ONLY by the caller's held_off safeguard."""
-    addrs = [r[0] for r in db.execute(
-        "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-        "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? "
-        "ORDER BY w.rank LIMIT ?",
-        (min_score, n)).fetchall()]
+    """Load the explicit published Core, with a one-way legacy fallback.
+
+    ``published_core_addrs`` deliberately distinguishes no publication (``None``)
+    from an explicitly published empty Core (``[]``).  The score-line fallback is
+    therefore disabled permanently as soon as a selection generation is live.
+    Wallets with existing copies are re-added EXIT-ONLY by ``_reload_targets``.
+    """
+    explicit = selection.published_core_addrs(db, n)
+    if explicit is None:
+        addrs = [r[0] for r in db.execute(
+            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
+            "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? "
+            "ORDER BY w.rank LIMIT ?",
+            (min_score, n)).fetchall()]
+    else:
+        addrs = explicit
     seed = {a: {r[0] for r in db.execute("SELECT DISTINCT coin FROM episode WHERE addr=?", (a,)).fetchall()}
             for a in addrs}
     return addrs, seed

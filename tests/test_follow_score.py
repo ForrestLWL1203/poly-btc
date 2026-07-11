@@ -18,6 +18,27 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(result["eligible"])
         self.assertEqual(result["status"], "no_copy_evidence")
 
+    def test_explicit_no_evidence_is_not_real_follow_eligible(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.95,
+            "copy_bt_data_status": "valid",
+            "copy_bt_evidence_status": "no_evidence",
+        })
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["role"], "challenger")
+
+    def test_replay_error_is_quarantined_not_failed_open(self):
+        result = evaluate_follow_eligibility({
+            "score": 0.95,
+            "copy_bt_data_status": "replay_error",
+            "copy_bt_evidence_status": "invalid",
+        })
+
+        self.assertFalse(result["eligible"])
+        self.assertTrue(result["deferred"])
+        self.assertEqual(result["role"], "quarantine")
+
     def test_follow_eligibility_allows_recent_positive_copy(self):
         result = evaluate_follow_eligibility({
             "score": 0.70,

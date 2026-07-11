@@ -12,19 +12,21 @@ import json
 import math
 import sqlite3
 import time
+from datetime import datetime, timezone
 from typing import Iterable
 
-from . import config, params
+from . import config, params, selection
 from .copy_backtest import run_backtest
-from .fills import is_spot
-from .sector import parse_json_obj, policy_allows_coin
+from .copy_data import load_copyable_fills
+from .copy_policy import load_copy_policy
+from .sector import parse_json_obj
 from .util import now_iso
 
 MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
 DEPLOY_KEYS = ("DEPLOY_FULL_PCT",)
 TUNE_KEYS = MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS
-ADD_TUNE_KEYS = ("ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD")
+ADD_TUNE_KEYS = ("ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD")
 CAPACITY_SKIP_KEYS = ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small")
 
 
@@ -131,15 +133,7 @@ def _capacity_skips(result: dict) -> int:
 
 
 def _min_closed_for_days(days: int) -> int:
-    base_days = int(getattr(config, "COPY_BT_DAYS", 30) or 30)
-    base_min = int(getattr(config, "COPY_BT_MIN_CLOSED", 0) or 0)
-    if int(days) <= 7 and hasattr(config, "COPY_BT_MIN_CLOSED_7D"):
-        return int(getattr(config, "COPY_BT_MIN_CLOSED_7D") or base_min)
-    if int(days) <= 14 and hasattr(config, "COPY_BT_MIN_CLOSED_14D"):
-        return int(getattr(config, "COPY_BT_MIN_CLOSED_14D") or base_min)
-    if days >= base_days or base_days <= 0:
-        return base_min
-    return max(1, int(math.ceil(base_min * days / base_days)))
+    return load_copy_policy().min_closed(int(days))
 
 
 def _enough_sample(result: dict, days: int) -> bool:
@@ -270,6 +264,9 @@ def _load_market_ctx(db) -> dict:
 
 
 def _load_followed_wallets(db, follow: dict) -> list[str]:
+    explicit = selection.published_core_addrs(db, int(config.MAX_TARGETS))
+    if explicit is not None:
+        return explicit
     line = float(follow.get("MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     rows = db.execute(
         "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
@@ -288,26 +285,16 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
         (r[0] or "").lower(): parse_json_obj(r[1])
         for r in db.execute(f"SELECT addr,sector_policy_json FROM watchlist WHERE addr IN ({qs})", addrs).fetchall()
     }
-    rows = db.execute(
-        f"SELECT addr,fill_json FROM candidate_fills WHERE addr IN ({qs}) AND time>=? ORDER BY time",
-        (*addrs, int(start_ms or 0)),
-    ).fetchall()
-    out = []
-    for row in rows:
-        addr = row[0] if not isinstance(row, sqlite3.Row) else row["addr"]
-        raw = row[1] if not isinstance(row, sqlite3.Row) else row["fill_json"]
-        try:
-            fill = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-        coin = fill.get("coin") or ""
-        if not coin or is_spot(coin):
-            continue
-        if not policy_allows_coin(policies.get((addr or "").lower()), coin, default=True):
-            continue
-        fill["user"] = (addr or "").lower()
-        out.append(fill)
-    return out
+    return load_copyable_fills(
+        db,
+        addrs,
+        start_ms,
+        policies=policies,
+        # A missing/corrupt policy is not sufficient evidence for a portfolio
+        # tuner to trade every sector.  The scanner can keep the wallet in its
+        # challenger path while the tuner fails closed here.
+        policy_default=False,
+    )
 
 
 def _portfolio_fill_json_bytes(db, addrs: Iterable[str], start_ms: int) -> int:
@@ -442,6 +429,7 @@ def choose_follow_line_by_portfolio(db, ranked: list[dict], follow: dict | None 
         r for r in ranked
         if float(r.get("follow_score", r.get("score")) or 0.0) >= min_score
         and (r.get("follow_eligibility") or {}).get("eligible", True)
+        and bool(r.get("operator_enabled", r.get("enabled", True)))
     ]
     if not rows:
         return {"status": "fallback", "reason": "no_wallet_above_floor"}
@@ -551,14 +539,17 @@ def build_tune_candidate(base: dict, margin_mult: float, lev_caps: tuple[float, 
     }
 
 
-def build_add_candidate(base: dict, gap_k: float, shrink_g: float, max_hard: int) -> dict:
+def build_add_candidate(base: dict, gap_k: float, shrink_g: float, max_hard: int,
+                        pos_gap_k: float | None = None) -> dict:
     params_ = {
         "ADD_GAP_K": float(gap_k),
+        "POS_ADD_GAP_K": float(base.get("POS_ADD_GAP_K", gap_k) if pos_gap_k is None else pos_gap_k),
         "ADD_GAP_SHRINK_G": float(shrink_g),
         "ADD_MAX_HARD": int(max_hard),
     }
     return {
         "gap_k": params_["ADD_GAP_K"],
+        "pos_gap_k": params_["POS_ADD_GAP_K"],
         "shrink_g": params_["ADD_GAP_SHRINK_G"],
         "max_hard": params_["ADD_MAX_HARD"],
         "add_params": params_,
@@ -617,13 +608,17 @@ def tune_candidates_from_axes(base: dict) -> list[dict]:
 def add_candidates_from_axes(base: dict) -> list[dict]:
     gap_ks = _unique_values(getattr(config, "AUTO_TUNE_ADD_GAP_KS", (0.04, 0.06, 0.08, 0.10, 0.12)),
                             float(base["ADD_GAP_K"]))
+    pos_gap_ks = _unique_values(getattr(config, "AUTO_TUNE_POS_ADD_GAP_KS", (0.06, 0.08, 0.10, 0.12)),
+                                float(base["POS_ADD_GAP_K"]))
     shrink_gs = _unique_values(getattr(config, "AUTO_TUNE_ADD_SHRINK_GS", (1.1, 1.2, 1.3, 1.5)),
                                float(base["ADD_GAP_SHRINK_G"]))
     max_hards = _unique_values(getattr(config, "AUTO_TUNE_ADD_MAX_HARDS", (4, 6, 8, 10)),
                                float(base["ADD_MAX_HARD"]))
     return [
-        build_add_candidate(base, gap_k, shrink_g, int(max_hard))
-        for gap_k, shrink_g, max_hard in itertools.product(gap_ks, shrink_gs, max_hards)
+        build_add_candidate(base, gap_k, shrink_g, int(max_hard), pos_gap_k=pos_gap_k)
+        for gap_k, pos_gap_k, shrink_g, max_hard in itertools.product(
+            gap_ks, pos_gap_ks, shrink_gs, max_hards
+        )
     ]
 
 
@@ -729,18 +724,32 @@ def _write_add_params(db, vals: dict) -> None:
 
 def _record_run(db, source: str, stamp: str, selected: dict | None, applied: bool, followed_n: int,
                 baseline: dict, result: dict) -> None:
+    generation_id = selection.latest_published_generation(db)
+    mode = str(result.get("mode") or "shadow")
+    proposal = result.get("proposal") or (_compact_candidate(selected) if selected else {})
+    validation = result.get("validation") or {}
+    created_at = now_iso()
     db.execute(
-        "INSERT INTO auto_tune_runs (source,stamp,selected_mult,applied,followed_n,baseline_json,result_json,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO auto_tune_runs "
+        "(source,stamp,generation,mode,status,selected_mult,applied,eligible_to_apply,followed_n,"
+        "baseline_json,proposal_json,validation_json,result_json,applied_at,created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             source,
             stamp,
+            generation_id,
+            mode,
+            result.get("status"),
             float(selected.get("mult")) if selected else None,
             1 if applied else 0,
+            1 if result.get("eligible_to_apply") else 0,
             followed_n,
             json.dumps(baseline, sort_keys=True),
+            json.dumps(proposal, sort_keys=True, default=float),
+            json.dumps(validation, sort_keys=True, default=float),
             json.dumps(result, sort_keys=True, default=float),
-            now_iso(),
+            created_at if applied else None,
+            created_at,
         ),
     )
 
@@ -760,7 +769,9 @@ def _compact_backtest(result: dict) -> dict:
         "followed_adds", "missed_adds", "missed_add_rate", "add_dependency",
         "target_peak_concurrent", "copy_peak_concurrent", "max_concurrent_fit",
         "capacity_open_fit", "master_leverage_coverage", "master_leverage_known",
-        "master_leverage_missing", "fills",
+        "master_leverage_missing", "price_path_coverage", "model_coverage", "max_drawdown",
+        "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
+        "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}
@@ -771,6 +782,7 @@ def _compact_candidate(candidate: dict) -> dict:
     return {
         "mult": candidate.get("mult"),
         "gap_k": candidate.get("gap_k"),
+        "pos_gap_k": candidate.get("pos_gap_k"),
         "shrink_g": candidate.get("shrink_g"),
         "max_hard": candidate.get("max_hard"),
         "margins": candidate.get("margins"),
@@ -783,13 +795,242 @@ def _compact_candidate(candidate: dict) -> dict:
     }
 
 
-def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_run: bool = False) -> dict:
+def _iso_epoch(value) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _proposal_direction(current: dict, proposed: dict) -> tuple[int, ...]:
+    keys = TUNE_KEYS + ADD_TUNE_KEYS
+    out = []
+    for key in keys:
+        before, after = float(current.get(key, 0.0)), float(proposed.get(key, current.get(key, 0.0)))
+        out.append(1 if after > before + 1e-9 else -1 if after < before - 1e-9 else 0)
+    return tuple(out)
+
+
+def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms) -> dict:
+    """Three non-overlapping ten-day folds plus a conservative cost-stress holdout."""
+    max_days = max(window_fills) if window_fills else 30
+    fills = list((window_fills or {}).get(max_days) or [])
+    market_ctx = {}  # historical liquidity context is supplied separately once versioned snapshots exist
+    base_overrides = dict(follow)
+    proposal_overrides = {**follow, **proposal}
+    folds = []
+    for older, newer in ((30, 20), (20, 10), (10, 0)):
+        lo = now_ms - older * 86400_000
+        hi = now_ms - newer * 86400_000 if newer else now_ms + 1
+        fold_fills = [row for row in fills if lo <= int(row.get("time") or 0) < hi]
+        baseline = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=base_overrides,
+                                market_ctx=market_ctx)
+        challenger = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=proposal_overrides,
+                                  market_ctx=market_ctx)
+        folds.append({"baseline": baseline, "challenger": challenger, "fills": len(fold_fills)})
+    holdout_fills = [row for row in fills if int(row.get("time") or 0) >= now_ms - 10 * 86400_000]
+    stress = run_backtest(
+        "portfolio",
+        holdout_fills,
+        sigmas=sigmas,
+        overrides={**proposal_overrides, "REPLAY_COST_MULT": 1.5},
+        market_ctx=market_ctx,
+    )
+    compact_folds = []
+    wins = 0
+    for index, fold in enumerate(folds):
+        base, challenger = fold["baseline"], fold["challenger"]
+        base_net = float(base.get("copy_net_pnl") or 0.0)
+        challenger_net = float(challenger.get("copy_net_pnl") or 0.0)
+        win = challenger_net > base_net
+        wins += int(win)
+        compact_folds.append({
+            "fold": index + 1,
+            "fills": fold["fills"],
+            "baselineNet": base_net,
+            "challengerNet": challenger_net,
+            "baselineMaxDD": float(base.get("max_drawdown") or 0.0),
+            "challengerMaxDD": float(challenger.get("max_drawdown") or 0.0),
+            "challengerOpenRate": float(challenger.get("open_fill_rate") or 0.0),
+            "challengerCapacityFit": float(challenger.get("capacity_open_fit") or 0.0),
+            "challengerLiquidations": int(challenger.get("liquidations") or 0),
+            "win": win,
+        })
+    return {
+        "folds": compact_folds,
+        "foldWins": wins,
+        "holdout": compact_folds[-1] if compact_folds else {},
+        "stressNet": float(stress.get("copy_net_pnl") or 0.0),
+        "stressLiquidations": int(stress.get("liquidations") or 0),
+        "masterLeverageCoverage": float(stress.get("master_leverage_coverage") or 0.0),
+        "pricePathCoverage": float(stress.get("price_path_coverage") or 0.0),
+    }
+
+
+def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation, stamp) -> dict:
+    policy = load_copy_policy(follow)
+    fingerprint = ",".join(sorted(addrs))
+    direction = _proposal_direction(current, proposal)
+    state = _json_load(_state_get(db, "proposal_validation_state"), {}) or {}
+    same_core = state.get("fingerprint") == fingerprint
+    same_direction = tuple(state.get("direction") or ()) == direction
+    started_at = state.get("startedAt") if same_core else stamp
+    direction_streak = int(state.get("directionStreak") or 0) + 1 if same_core and same_direction else 1
+    _state_set(db, "proposal_validation_state", {
+        "fingerprint": fingerprint,
+        "direction": list(direction),
+        "directionStreak": direction_streak,
+        "startedAt": started_at,
+        "lastAt": stamp,
+    })
+    now_ts = _iso_epoch(stamp) or time.time()
+    shadow_days = max(0.0, (now_ts - (_iso_epoch(started_at) or now_ts)) / 86400.0)
+    if addrs:
+        marks = ",".join("?" for _ in addrs)
+        row = db.execute(
+            f"SELECT COUNT(*) FROM copy_position WHERE status!='open' AND lower(addr) IN ({marks})",
+            tuple(sorted(addrs)),
+        ).fetchone()
+        forward_closed = int((row[0] if row else 0) or 0)
+    else:
+        forward_closed = 0
+    last_apply = db.execute(
+        "SELECT applied_at FROM auto_tune_runs WHERE applied=1 AND applied_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    cooldown_days = float(getattr(config, "AUTO_TUNE_APPLY_COOLDOWN_DAYS", 7))
+    cooldown_ok = not last_apply or now_ts - (_iso_epoch(last_apply[0]) or 0) >= cooldown_days * 86400
+    folds = validation.get("folds") or []
+    holdout = validation.get("holdout") or {}
+    baseline_total = sum(float(fold.get("baselineNet") or 0.0) for fold in folds)
+    challenger_total = sum(float(fold.get("challengerNet") or 0.0) for fold in folds)
+    relative_gain = (
+        (challenger_total - baseline_total) / max(1.0, abs(baseline_total))
+    )
+    reasons = []
+    if validation.get("foldWins", 0) < 2:
+        reasons.append("fewer_than_two_fold_wins")
+    if float(holdout.get("challengerNet") or 0.0) <= max(0.0, float(holdout.get("baselineNet") or 0.0)):
+        reasons.append("holdout_not_better")
+    if validation.get("stressNet", 0.0) <= 0:
+        reasons.append("stress_not_profitable")
+    if validation.get("stressLiquidations", 0) > 0:
+        reasons.append("stress_liquidation")
+    if relative_gain < policy.tune_min_relative_gain:
+        reasons.append("relative_gain_below_floor")
+    if folds and max(float(fold.get("challengerMaxDD") or 0.0) - float(fold.get("baselineMaxDD") or 0.0)
+                     for fold in folds) > policy.tune_max_drawdown_worsening:
+        reasons.append("drawdown_worsened")
+    if folds and min(float(fold.get("challengerOpenRate") or 0.0) for fold in folds) < 0.70:
+        reasons.append("open_rate_below_floor")
+    if folds and min(float(fold.get("challengerCapacityFit") or 0.0) for fold in folds) < 0.85:
+        reasons.append("capacity_fit_below_floor")
+    if shadow_days < policy.tune_min_shadow_days:
+        reasons.append("shadow_days_insufficient")
+    if forward_closed < policy.tune_min_forward_closed:
+        reasons.append("forward_closed_insufficient")
+    min_direction_streak = int(
+        follow.get("AUTO_TUNE_MIN_DIRECTION_STREAK", config.AUTO_TUNE_MIN_DIRECTION_STREAK)
+        if follow.get("AUTO_TUNE_MIN_DIRECTION_STREAK") is not None
+        else config.AUTO_TUNE_MIN_DIRECTION_STREAK
+    )
+    if direction_streak < max(1, min_direction_streak):
+        reasons.append("proposal_direction_unconfirmed")
+    if not cooldown_ok:
+        reasons.append("apply_cooldown")
+    leverage_changed = any(abs(float(current.get(key, 0.0)) - float(proposal.get(key, current.get(key, 0.0)))) > 1e-9
+                           for key in LEV_KEYS)
+    master_coverage_floor = float(
+        follow.get("AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE")
+        if follow.get("AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE") is not None
+        else getattr(config, "AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE", 0.80)
+    )
+    price_path_floor = float(
+        follow.get("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE")
+        if follow.get("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE") is not None
+        else getattr(config, "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", 0.95)
+    )
+    if leverage_changed and validation.get("masterLeverageCoverage", 0.0) < master_coverage_floor:
+        reasons.append("master_leverage_coverage_low")
+    if leverage_changed and validation.get("pricePathCoverage", 0.0) < price_path_floor:
+        reasons.append("price_path_coverage_low")
+    return {
+        "eligible": not reasons,
+        "reasons": reasons,
+        "relativeGain": relative_gain,
+        "shadowDays": shadow_days,
+        "forwardClosed": forward_closed,
+        "directionStreak": direction_streak,
+        "cooldownOk": cooldown_ok,
+        **validation,
+    }
+
+
+def _maybe_rollback_applied(db, follow: dict, now_ms: int) -> dict | None:
+    state = _json_load(_state_get(db, "active_tune_rollback"), {}) or {}
+    if not state or state.get("resolved"):
+        return None
+    applied_ts = _iso_epoch(state.get("appliedAt"))
+    if not applied_ts or now_ms / 1000.0 - applied_ts < 7 * 86400:
+        return {"status": "pending", "reason": "rollback_observation_window"}
+    addrs = list(state.get("addrs") or [])
+    if not addrs:
+        return {"status": "skipped", "reason": "rollback_no_core_snapshot"}
+    fills = _load_portfolio_fills(db, addrs, int(applied_ts * 1000))
+    if not fills:
+        return {"status": "pending", "reason": "rollback_no_forward_fills"}
+    old_params = dict(state.get("oldParams") or {})
+    current_params = {key: follow.get(key) for key in TUNE_KEYS + ADD_TUNE_KEYS if follow.get(key) is not None}
+    sigmas = _load_sigmas(db)
+    champion = run_backtest("portfolio", fills, sigmas=sigmas, overrides={**follow, **old_params})
+    applied = run_backtest("portfolio", fills, sigmas=sigmas, overrides={**follow, **current_params})
+    old_net = float(champion.get("copy_net_pnl") or 0.0)
+    new_net = float(applied.get("copy_net_pnl") or 0.0)
+    utility_drop = old_net - new_net
+    hurdle = max(1.0, abs(old_net) * float(getattr(config, "AUTO_TUNE_ROLLBACK_RELATIVE_DROP", 0.10)))
+    new_liquidation = int(applied.get("liquidations") or 0) > int(champion.get("liquidations") or 0)
+    should_rollback = utility_drop > hurdle or new_liquidation
+    if should_rollback:
+        _write_tune_params(db, old_params)
+        _write_add_params(db, old_params)
+        _enqueue_reload(db, "auto_tune_rollback")
+        reason = "new_liquidation" if new_liquidation else "forward_utility_drop"
+        db.execute(
+            "UPDATE auto_tune_runs SET rollback_at=?,rollback_reason=? "
+            "WHERE id=(SELECT id FROM auto_tune_runs WHERE applied=1 ORDER BY id DESC LIMIT 1)",
+            (now_iso(), reason),
+        )
+        state.update(resolved=True, rolledBack=True, rollbackReason=reason, rollbackAt=now_iso())
+        _state_set(db, "active_tune_rollback", state)
+        return {"status": "rolled_back", "reason": reason, "oldNet": old_net, "newNet": new_net}
+    state.update(resolved=True, rolledBack=False, checkedAt=now_iso())
+    _state_set(db, "active_tune_rollback", state)
+    return {"status": "kept", "oldNet": old_net, "newNet": new_net}
+
+
+def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_run: bool = False,
+                       mode: str | None = None, follow_values: dict | None = None,
+                       data_complete: bool = True) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     stamp = stamp or now_iso()
     params.seed_params(db)
-    follow = params.load_follow(db)
+    follow = dict(follow_values or params.load_follow(db))
+    mode = str(mode or follow.get("AUTO_TUNE_MODE") or getattr(config, "AUTO_TUNE_MODE", "shadow")).lower()
+    if mode not in {"off", "shadow", "apply"}:
+        mode = "shadow"
+    effective_shadow = bool(dry_run or mode != "apply")
+    rollback_result = _maybe_rollback_applied(db, follow, int(time.time() * 1000))
+    if rollback_result and rollback_result.get("status") == "rolled_back":
+        follow = dict(params.load_follow(db))
+    if mode == "off":
+        result = {"status": "disabled", "reason": "auto_tune_mode_off", "mode": mode, "applied": False}
+        _record_run(db, source, stamp, None, False, 0, {}, result)
+        db.commit()
+        return result
     if not follow.get("AUTO_TUNE_MARGIN_ENABLE", getattr(config, "AUTO_TUNE_MARGIN_ENABLE", True)):
-        result = {"status": "disabled", "applied": False}
+        result = {"status": "disabled", "mode": mode, "applied": False}
         _record_run(db, source, stamp, None, False, 0, {}, result)
         db.commit()
         return result
@@ -806,6 +1047,28 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     sigmas = _load_sigmas(db)
     now_ms = int(time.time() * 1000)
     window_fills = _portfolio_window_fills(db, addrs, now_ms)
+    if window_fills is None:
+        result = {
+            "status": "skipped",
+            "reason": "fill_cache_guard",
+            "mode": mode,
+            "applied": False,
+            "followed_n": len(addrs),
+        }
+        _record_run(db, source, stamp, None, False, len(addrs), base, result)
+        db.commit()
+        return result
+    if not data_complete or not any(window_fills.values()):
+        result = {
+            "status": "skipped",
+            "reason": "incomplete_data" if not data_complete else "no_cached_fills",
+            "mode": mode,
+            "applied": False,
+            "followed_n": len(addrs),
+        }
+        _record_run(db, source, stamp, None, False, len(addrs), base, result)
+        db.commit()
+        return result
     candidates = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
                                 window_fills=window_fills)
@@ -835,24 +1098,51 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         if selected_add:
             selected_add_params = selected_add.get("params") or add_base
 
+    current_combined = {**current, **current_add}
+    proposal_combined = {**selected_params, **selected_add_params}
+    walk_forward = _walk_forward_validation(
+        addrs, follow, proposal_combined, sigmas, window_fills, now_ms,
+    )
+    apply_validation = _proposal_apply_eligibility(
+        db, addrs, follow, current_combined, proposal_combined, walk_forward, stamp,
+    )
+    effective_shadow = bool(effective_shadow or not apply_validation.get("eligible"))
+
     applied_sizing = False
     applied_add = False
-    if not dry_run and not _same_tune_values(current, selected_params):
+    will_apply = (
+        not effective_shadow
+        and (
+            not _same_tune_values(current, selected_params)
+            or (follow_for_add.get("SMART_ADD", True) and not _same_add_values(current_add, selected_add_params))
+        )
+    )
+    if will_apply:
+        _state_set(db, "active_tune_rollback", {
+            "appliedAt": stamp,
+            "addrs": sorted(addrs),
+            "oldParams": current_combined,
+            "newParams": proposal_combined,
+            "resolved": False,
+        })
+    if not effective_shadow and not _same_tune_values(current, selected_params):
         _write_tune_params(db, selected_params)
         applied_sizing = True
-    if not dry_run and follow_for_add.get("SMART_ADD", True) and not _same_add_values(current_add, selected_add_params):
+    if not effective_shadow and follow_for_add.get("SMART_ADD", True) and not _same_add_values(current_add, selected_add_params):
         _write_add_params(db, selected_add_params)
         applied_add = True
     applied = applied_sizing or applied_add
-    if not dry_run and applied:
+    if not effective_shadow and applied:
         _enqueue_reload(db, source)
-    if not dry_run:
+    if not effective_shadow:
         store_tune_state(db, base, selected_params)
         if follow_for_add.get("SMART_ADD", True):
             store_add_state(db, add_base, selected_add_params)
 
     result = {
         "status": "ok",
+        "mode": mode,
+        "shadow": effective_shadow,
         "applied": applied,
         "applied_sizing": applied_sizing,
         "applied_add": applied_add,
@@ -865,6 +1155,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "deploy_full_pct": selected.get("deploy_full_pct"),
         "params": selected_params,
         "add_params": selected_add_params,
+        "eligible_to_apply": bool(apply_validation.get("eligible")),
+        "validation": apply_validation,
+        "proposal": proposal_combined,
+        "rollback": rollback_result,
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
     }

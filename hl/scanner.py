@@ -6,13 +6,20 @@ Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
 import json
+import math
 import os
+import statistics
+import subprocess
+import sys
 import threading
 import time
-from types import SimpleNamespace
+from pathlib import Path
 
-from . import auto_tune, config, follow_score, metrics, params, pipeline_audit, rest, storage
+from . import auto_tune, config, follow_score, generation, metrics, params, pipeline_audit, rest, selection, storage
 from .fills import build_episodes, is_spot
+from .copy_data import normalize_copyable_fills
+from .copy_policy import load_copy_policy
+from .fill_transition import classify_fill_transition
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
     apply_sector_copy_bt_gate as _apply_sector_copy_bt_gate,
@@ -23,8 +30,10 @@ from .scanner_copy_bt import (
     sector_copy_bt_results as _sector_copy_bt_results,
 )
 from .scanner_lifecycle import (
-    profile_workset_breakdown as _profile_workset_breakdown,
     prune_discovery_cache as _prune_discovery_cache,
+    ScanTimeBudget,
+    schedule_profile_workset,
+    upsert_wallet_registry,
 )
 from .util import f, now_iso
 
@@ -143,15 +152,7 @@ def _copy_bt_cached_fills(db, addr, now_ms, p):
     """Cached copyable fills for regate's no-network copy replay."""
     days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
     start_ms = now_ms - days * 86400_000
-    out = []
-    for x in _load_cached_fills(db, addr, start_ms):
-        coin = x.get("coin")
-        if not coin or is_spot(coin):
-            continue
-        row = dict(x)
-        row["user"] = addr
-        out.append(row)
-    return out
+    return normalize_copyable_fills(_load_cached_fills(db, addr, start_ms), addr=addr)
 
 
 def _fetch_profile_fills(db, addr, window_start, p, full):
@@ -248,7 +249,36 @@ def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, act
 
 
 # -------------------------------------------------------------------------- harvest
-def harvest(db, p) -> int:
+def _prepare_leaderboard_rows(rows, p, fetched_at):
+    """Attach the cheap harvest decision without mutating the live leaderboard."""
+    min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
+    vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
+    vlm_max = getattr(p, "week_vlm_max", config.HARVEST_WEEK_VLM_MAX)
+    pv_min = getattr(p, "pnl_vol_min", config.HARVEST_PNL_VOL_MIN)
+    pv_max = getattr(p, "pnl_vol_max", config.HARVEST_PNL_VOL_MAX)
+    prepared = []
+    for original in rows or []:
+        r = dict(original or {})
+        w = {name: perf for name, perf in r.get("windowPerformances", [])}
+        wk, mo, al = w.get("week", {}), w.get("month", {}), w.get("allTime", {})
+        acct = f(r.get("accountValue"))
+        wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
+        pnl_vol = (wk_pnl / wk_vlm) if wk_vlm > 0 else 0.0
+        cand = (
+            acct >= min_acct
+            and vlm_min <= wk_vlm <= vlm_max
+            and wk_pnl > 0 and f(mo.get("pnl")) > 0 and f(al.get("pnl")) > 0
+            and pv_min <= pnl_vol <= pv_max
+        )
+        r["is_candidate"] = 1 if cand else 0
+        r["fetched_at"] = fetched_at
+        mon_vlm = f(mo.get("vlm"))
+        r["daily_turnover"] = (mon_vlm / acct / 30.0) if acct > 0 else 0.0
+        prepared.append(r)
+    return prepared
+
+
+def harvest(db, p, *, generation_id=None) -> int:
     """STAGE-1 leaderboard BOX (v5) — leaderboard windows only, ZERO per-wallet API. Gate ONLY on what
     the leaderboard can HONESTLY say; defer ALL profit JUDGMENT to the profile (real fills). Predicate:
       • acct ≥ floor                         → real capital (we copy by %, not $).
@@ -262,26 +292,33 @@ def harvest(db, p) -> int:
     Leaderboard ROI/PnL MAGNITUDE is deliberately NOT a gate — it's contaminated (top-ROI wallets are
     $0-volume HODLers/ghosts) and return magnitude belongs in the SCORE, not eligibility. Bots/grids are
     INVISIBLE to leaderboard aggregates (proven), so the profile's grid/worst_loss gates handle them."""
-    min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
-    vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
-    vlm_max = getattr(p, "week_vlm_max", config.HARVEST_WEEK_VLM_MAX)
-    pv_min = getattr(p, "pnl_vol_min", config.HARVEST_PNL_VOL_MIN)
-    pv_max = getattr(p, "pnl_vol_max", config.HARVEST_PNL_VOL_MAX)
     rows = rest.get_leaderboard()
     now = now_iso()
-    n_cand = 0
+    prepared = _prepare_leaderboard_rows(rows, p, now)
+    n_cand = sum(int(r.get("is_candidate") or 0) for r in prepared)
+
+    if generation_id:
+        previous_count = generation.previous_published_row_count(db)
+        validation = generation.validate_leaderboard_rows(
+            prepared,
+            previous_count=previous_count,
+            min_row_ratio=float(getattr(config, "LEADERBOARD_MIN_ROW_RATIO", 0.85)),
+            min_completeness=float(getattr(config, "LEADERBOARD_MIN_COMPLETE_RATIO", 0.99)),
+        )
+        generation.stage_leaderboard_rows(db, generation_id, prepared, fetched_at=now)
+        generation.record_leaderboard_validation(db, generation_id, validation, fetched_at=now)
+        db.commit()
+        if not validation.valid:
+            raise RuntimeError("leaderboard_invalid:" + ",".join(validation.reasons))
+        return n_cand
+
+    # Standalone ``harvest`` remains a leaderboard-only maintenance command.  Full scans use the staging
+    # path above and promote this table only with their complete selection generation.
     db.execute("UPDATE leaderboard SET is_candidate=0")
-    for r in rows:
+    for r in prepared:
         w = {name: perf for name, perf in r.get("windowPerformances", [])}
         d, wk, mo, al = w.get("day", {}), w.get("week", {}), w.get("month", {}), w.get("allTime", {})
         acct = f(r.get("accountValue"))
-        turnover = (f(mo.get("vlm")) / acct / 30.0) if acct > 0 else 0.0   # stored for display only
-        wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
-        pnl_vol = (wk_pnl / wk_vlm) if wk_vlm > 0 else 0.0
-        cand = (acct >= min_acct
-                and vlm_min <= wk_vlm <= vlm_max                # trading this week, not an MM/bot
-                and wk_pnl > 0 and f(mo.get("pnl")) > 0 and f(al.get("pnl")) > 0  # 3-window consistency
-                and pv_min <= pnl_vol <= pv_max)               # profit plausible for the volume (not ghost)
         db.execute(
             "INSERT OR REPLACE INTO leaderboard (addr,display_name,account_value,"
             "day_pnl,day_roi,day_vlm,week_pnl,week_roi,week_vlm,mon_pnl,mon_roi,mon_vlm,"
@@ -292,10 +329,32 @@ def harvest(db, p) -> int:
              f(wk.get("pnl")), f(wk.get("roi")), f(wk.get("vlm")),
              f(mo.get("pnl")), f(mo.get("roi")), f(mo.get("vlm")),
              f(al.get("pnl")), f(al.get("roi")), f(al.get("vlm")),
-             turnover, 1 if cand else 0, now))
-        n_cand += 1 if cand else 0
+             r.get("daily_turnover"), int(r.get("is_candidate") or 0), now))
     db.commit()
     return n_cand
+
+
+def _stage_existing_leaderboard(db, generation_id):
+    """Use the last published snapshot for a no-harvest scan without changing live membership."""
+    cur = db.execute(
+        "SELECT addr,display_name,account_value,day_pnl,day_roi,day_vlm,week_pnl,week_roi,week_vlm,"
+        "mon_pnl,mon_roi,mon_vlm,all_pnl,all_roi,all_vlm,daily_turnover,is_candidate,fetched_at "
+        "FROM leaderboard ORDER BY addr"
+    )
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    validation = generation.validate_leaderboard_rows(
+        rows,
+        previous_count=generation.previous_published_row_count(db),
+        min_row_ratio=float(getattr(config, "LEADERBOARD_MIN_ROW_RATIO", 0.85)),
+        min_completeness=float(getattr(config, "LEADERBOARD_MIN_COMPLETE_RATIO", 0.99)),
+    )
+    generation.stage_leaderboard_rows(db, generation_id, rows, fetched_at=now_iso())
+    generation.record_leaderboard_validation(db, generation_id, validation)
+    db.commit()
+    if not validation.valid:
+        raise RuntimeError("leaderboard_invalid:" + ",".join(validation.reasons))
+    return sum(int(row.get("is_candidate") or 0) for row in rows)
 
 
 # -------------------------------------------------------------------------- profile
@@ -317,6 +376,158 @@ def _self_liquidations(fills, addr, acct):
 _DAY_MS = 86400_000.0
 
 
+def _open_flow_metrics(fills: list, now_ms: int) -> dict:
+    """Measure copyable *new-position* supply rather than treating every fill as activity."""
+    opens = []
+    seen = set()
+    for x in sorted(fills or [], key=lambda row: (int(row.get("time") or 0), str(row.get("tid") or ""))):
+        try:
+            pos0 = f(x.get("startPosition"))
+            size = f(x.get("sz"))
+            pos1 = pos0 + (size if x.get("side") == "B" else -size)
+        except (TypeError, ValueError):
+            continue
+        if classify_fill_transition(pos0, pos1) not in {"open", "flip"} or abs(pos1) < config.FLAT:
+            continue
+        key = (x.get("coin"), int(x.get("time") or 0), x.get("oid"), x.get("tid"))
+        if key in seen:
+            continue
+        seen.add(key)
+        opens.append(int(x.get("time") or 0))
+
+    def window(days):
+        cutoff = now_ms - int(days) * int(_DAY_MS)
+        vals = [ts for ts in opens if ts >= cutoff]
+        return len(vals), len({ts // int(_DAY_MS) for ts in vals})
+
+    c7, d7 = window(7)
+    c14, d14 = window(14)
+    c30, d30 = window(30)
+    intervals_h = [(b - a) / 3_600_000 for a, b in zip(opens, opens[1:]) if b > a]
+    rate_day = c30 / 30.0
+    return {
+        "last_copyable_open_ms": opens[-1] if opens else 0,
+        "open_events_7d": c7, "open_events_14d": c14, "open_events_30d": c30,
+        # Refined later by the canonical replay once policy/liquidity/capacity skips are known.
+        "actionable_open_events_7d": c7, "actionable_open_events_14d": c14,
+        "actionable_open_events_30d": c30,
+        "open_days_7d": d7, "open_days_14d": d14, "open_days_30d": d30,
+        "avg_open_interval_h": (sum(intervals_h) / len(intervals_h)) if intervals_h else None,
+        "median_open_interval_h": statistics.median(intervals_h) if intervals_h else None,
+        "open_probability_24h": 1.0 - math.exp(-rate_day),
+        "open_probability_48h": 1.0 - math.exp(-2.0 * rate_day),
+    }
+
+
+def _copy_profile_evidence(m, results, p):
+    """Derive normalized, shrinkage-aware profile fields from one canonical replay result set."""
+    if not isinstance(results, dict):
+        results = {}
+    by_days = {}
+    for key, value in results.items():
+        try:
+            by_days[int(key)] = value or {}
+        except (TypeError, ValueError):
+            continue
+    primary_days = int(getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS)
+    primary = by_days.get(primary_days) or (by_days.get(max(by_days)) if by_days else {})
+    oos = by_days.get(7) or by_days.get(14) or primary
+    statuses = {str(result.get("data_status") or "valid") for result in by_days.values()}
+    evidence = {str(result.get("evidence_status") or "") for result in by_days.values()}
+    if any(status not in {"valid", "ok"} for status in statuses):
+        m.update(data_status="deferred_data_error", evidence_status="invalid")
+        return
+
+    positions = list(primary.get("positions") or [])
+    samples = []
+    for pos in positions:
+        margin = f(pos.get("margin"))
+        if margin > 0:
+            samples.append(f(pos.get("net_pnl")) / margin)
+    n = len(samples)
+    # A weak zero-centered prior prevents seven lucky tiny samples from looking certain.  The result is
+    # the estimated probability that the next-episode mean return on occupied margin is positive.
+    prior_n, prior_sigma = 5.0, 0.05
+    denom = n + prior_n
+    mean = (sum(samples) / denom) if denom else 0.0
+    second = (sum(x * x for x in samples) + prior_n * prior_sigma * prior_sigma) / max(1.0, denom)
+    variance = max(1e-12, second - mean * mean)
+    stderr = math.sqrt(variance / max(1.0, denom))
+    positive_probability = statistics.NormalDist().cdf(mean / stderr) if stderr > 0 else (1.0 if mean > 0 else 0.5)
+    dd = max(0.0, f(primary.get("max_drawdown")))
+    worst_return = min(samples, default=0.0)
+    actionable_rate = primary.get("open_fill_rate")
+    capacity_fit = primary.get("capacity_open_fit")
+    master_coverage = primary.get("master_leverage_coverage")
+    price_coverage = primary.get("price_path_coverage")
+    coverage_parts = [x for x in (master_coverage, price_coverage) if x is not None]
+    model_coverage = min(coverage_parts) if coverage_parts else 0.0
+    closed_n = int(primary.get("closed_n") or 0)
+    if not by_days or evidence.issubset({"", "no_fills", "no_open_events"}):
+        evidence_status = "missing"
+    elif closed_n < load_copy_policy().min_closed_7d:
+        evidence_status = "thin"
+    else:
+        evidence_status = "qualified"
+    m.update(
+        data_status="valid",
+        evidence_status=evidence_status,
+        copy_expected_return=mean if n else None,
+        copy_positive_probability=positive_probability if n else None,
+        copy_risk_score=max(0.0, min(1.0, 1.0 - max(dd, abs(min(0.0, worst_return))))),
+        execution_score=(
+            (f(actionable_rate) + f(capacity_fit)) / 2.0
+            if actionable_rate is not None and capacity_fit is not None else None
+        ),
+        model_coverage=model_coverage,
+        oos_net_pnl=oos.get("copy_net_pnl"),
+        oos_max_drawdown=oos.get("max_drawdown"),
+        oos_cvar95=oos.get("cvar95"),
+        actionable_open_rate=actionable_rate,
+        capacity_fit=capacity_fit,
+    )
+    for days in (7, 14, 30):
+        result = by_days.get(days) or {}
+        if result:
+            m[f"actionable_open_events_{days}d"] = int(result.get("opened_n") or 0)
+
+
+def _defer_profile(db, addr, prior, stamp, reason):
+    """Persist a tri-state data error while preserving the last usable market snapshot."""
+    reason = str(reason or "data_error")[:120]
+    if prior:
+        with _db_lock:
+            db.execute(
+                "UPDATE profile SET data_status='deferred_data_error',evidence_status='invalid',"
+                "evaluated_at=?,reason=? WHERE addr=?",
+                (stamp, reason, addr),
+            )
+            db.commit()
+        m = dict(prior)
+        m.update(data_status="deferred_data_error", evidence_status="invalid")
+        return (prior.get("status") or "quarantine"), reason, m, False
+    row = {
+        "addr": addr,
+        "status": "quarantine",
+        "reason": reason,
+        "score": 0.0,
+        "raw_quality_score": 0.0,
+        "data_status": "deferred_data_error",
+        "evidence_status": "invalid",
+        "evaluated_at": stamp,
+        "times_seen": 1,
+        "times_active": 0,
+    }
+    cols = storage.PROFILE_COLS.split(",")
+    with _db_lock:
+        db.execute(
+            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * len(cols))})",
+            [row.get(c) for c in cols],
+        )
+        db.commit()
+    return "quarantine", reason, row, False
+
+
 def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
     """Current OPEN-POSITION character across EVERY dex the wallet traded — the data that un-blinds the
     funnel to live positions (a trend trader's winning holds AND a 扛单's losing holds). clearinghouse-
@@ -332,6 +543,7 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
     types, worst_uw = set(), 0.0
     tot_ntl, acct_val, answered, has_pos = 0.0, 0.0, False, False
     up_loss, up_win, bag_n, max_bag_d, max_win_d = 0.0, 0.0, 0, 0.0, 0.0
+    open_position_count = material_open_count = 0
     perp_short, perp_notl = {}, 0.0                              # for spot-hedge detection
     for dex in dexes:
         cs = rest.clearinghouse_state(addr, dex=dex)             # dex None -> standard perp dex
@@ -347,6 +559,9 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             coin = p_.get("coin")
             types.add((p_.get("leverage") or {}).get("type"))
             szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
+            if abs(szi) < config.FLAT:
+                continue
+            open_position_count += 1
             upnl = f(p_.get("unrealizedPnl"))                    # HL's authoritative current unrealized
             days = (now_ms - open_ms[coin]) / _DAY_MS if coin in open_ms else 0.0
             perp_notl += abs(pv)
@@ -356,6 +571,8 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             material = True
             if risk_acct > 0:
                 material = abs(pv) / risk_acct >= config.OPEN_RISK_MIN_POSITION_EQUITY_FRAC
+            if material:
+                material_open_count += 1
             if entry and szi and material:
                 mark = pv / abs(szi)
                 worst_uw = min(worst_uw, (mark - entry) / entry * (1 if szi > 0 else -1))
@@ -391,10 +608,11 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             "worst_underwater": worst_uw, "open_unrealized": up_loss + up_win,
             "open_loss_frac": up_loss / a, "open_win_frac": up_win / a,
             "bag_count": bag_n, "max_bag_days": max_bag_d, "max_win_days": max_win_d,
+            "open_position_count": open_position_count, "material_open_count": material_open_count,
             "hedge_ratio": hedge_ratio}
 
 
-def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
+def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
     # ONE aggregated fetch per wallet (aggregateByTime -> ~1 page, trade-level). No separate
     # pre-screen call: gates() already rejects dormant ("inactive"), spot/opaque-dominant
     # ("spot_dominant") and no-trades ("no_perp_trades") on this same data — the old two-stage
@@ -404,15 +622,20 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # at 2000 AND returned newest-first unsorted, which broke window_days/trades_per_day/last_fill_ms and
     # over-rejected as hit_page_cap). We slice the 14d window for the existing scoring metrics (behaviour
     # unchanged) and use the full fetch for the multi-window / lifetime nets — still ONE fetch per wallet.
+    if not universe:
+        return _defer_profile(db, addr, prior, stamp, "universe_unavailable")
     window_start = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
-    full = getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN
-    raw_full, hit_cap, new_fills = _fetch_profile_fills(db, addr, window_start, p, full)
+    full = bool(force_full or getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
+    try:
+        raw_full, hit_cap, new_fills = _fetch_profile_fills(db, addr, window_start, p, full)
+    except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
+        return _defer_profile(db, addr, prior, stamp, f"fills_error:{type(exc).__name__}")
     for x in raw_full:
         x["user"] = addr
     # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,
     # e.g. xyz:AAPL — in `universe`). Spot is excluded (is_spot); opaque/private builder dexes are
     # excluded by not being in `universe`. perp_frac = copyable-perp share of fills.
-    perp_full = [x for x in raw_full if not is_spot(x["coin"]) and (not universe or x["coin"] in universe)]
+    perp_full = normalize_copyable_fills(raw_full, addr=addr, universe=universe)
     raw = [x for x in raw_full if x["time"] >= start_ms]          # 14d window slice (scoring metrics)
     perp = [x for x in perp_full if x["time"] >= start_ms]
     perp_frac = (len(perp) / len(raw)) if raw else 0.0
@@ -432,6 +655,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # the 14d window is empty (dormant-but-historically-profitable wallets still get a true net_life).
     eps_full, _ = build_episodes(perp_full)
     m.update(metrics.window_nets(eps_full, now_ms))
+    m.update(_open_flow_metrics(perp_full, now_ms))
 
     acct_value = f((lb or {}).get("account_value"))
     m["perp_frac"] = perp_frac
@@ -447,7 +671,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     # open-position character defaults (filled by the live snapshot in stage B). roi_total starts as the
     # realized-only roi and is upgraded to realized+unrealized once we read the wallet's live positions.
     m.update(open_underwater=0.0, open_unrealized=0.0, open_loss_frac=0.0, open_win_frac=0.0,
-             bag_count=0, max_bag_days=0.0, max_win_days=0.0, hedge_ratio=0.0, roi_total=m["roi_equity"])
+             bag_count=0, open_position_count=0, material_open_count=0,
+             max_bag_days=0.0, max_win_days=0.0, hedge_ratio=0.0, roi_total=m["roi_equity"])
     m["margin_type"] = (prior or {}).get("margin_type")
     m["cur_leverage"] = (prior or {}).get("cur_leverage") or 0.0
 
@@ -467,19 +692,23 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
     if ok:
         dexes = {(c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}}
         snap = _open_snapshot(addr, dexes, open_eps, now_ms, acct_value)
-        if snap is not None:
-            m["margin_type"] = snap["margin_type"]
-            m["cur_leverage"] = snap["cur_leverage"]
-            m["open_underwater"] = snap["worst_underwater"]
-            for k in ("open_unrealized", "open_loss_frac", "open_win_frac",
-                      "bag_count", "max_bag_days", "max_win_days", "hedge_ratio"):
-                m[k] = snap[k]
-            m["roi_total"] = ((m["net_pnl"] + snap["open_unrealized"]) / acct_value) if acct_value else 0.0
+        if snap is None:
+            return _defer_profile(db, addr, prior, stamp, "clearinghouse_unavailable")
+        m["margin_type"] = snap["margin_type"]
+        m["cur_leverage"] = snap["cur_leverage"]
+        m["open_underwater"] = snap["worst_underwater"]
+        for k in ("open_unrealized", "open_loss_frac", "open_win_frac", "bag_count",
+                  "open_position_count", "material_open_count",
+                  "max_bag_days", "max_win_days", "hedge_ratio"):
+            m[k] = snap[k]
+        m["roi_total"] = ((m["net_pnl"] + snap["open_unrealized"]) / acct_value) if acct_value else 0.0
         # v7 PORTFOLIO — authoritative NET-of-fees, deposit-adjusted account perf (one call, all windows).
         # Fed to the ROI pillar (net, replacing leaderboard gross) + the turnover/edge-bps copyability filters.
         _pf = rest.portfolio(addr)
-        _pw = rest.parse_portfolio(_pf, "week") or {}
-        _pm = rest.parse_portfolio(_pf, "month") or {}
+        _pw = rest.parse_portfolio(_pf, "week")
+        _pm = rest.parse_portfolio(_pf, "month")
+        if not _pw or not _pm:
+            return _defer_profile(db, addr, prior, stamp, "portfolio_unavailable")
         m["pf_week_pnl"], m["pf_week_vlm"] = _pw.get("pnl"), _pw.get("vlm")
         m["pf_mon_pnl"], m["pf_mon_vlm"] = _pm.get("pnl"), _pm.get("vlm")
         m["pf_equity"] = _pw.get("equity") or _pm.get("equity")
@@ -493,8 +722,15 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
             m, copy_results, sector_results, p,
             previous_policy=(prior or {}).get("sector_policy_json"),
         )
-    if ok:
-        ok, reason = _apply_follow_eligibility_gate(m)
+        _copy_profile_evidence(m, copy_results, p)
+        try:
+            sector_policy = json.loads(m.get("sector_policy_json") or "{}")
+        except (TypeError, ValueError):
+            sector_policy = {}
+        if not sector_policy.get("allowed") and m.get("evidence_status") not in {"missing", "invalid"}:
+            m["evidence_status"] = "economically_disqualified"
+        if m.get("data_status") == "deferred_data_error":
+            return _defer_profile(db, addr, prior, stamp, "copy_replay_unavailable")
     m["times_active"] += 1 if ok else 0
 
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
@@ -504,11 +740,13 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
 
     prev_status = (prior or {}).get("status")
     m["score"] = metrics.score(m) if ok else 0.0
-    if ok and m["score"] < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
-        ok, reason, m["score"] = False, "low_quality", 0.0     # v10 质量线: 分不够 → 不进 active (watchlist=全好钱包)
+    m["raw_quality_score"] = m["score"]
     status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
     row = dict(m)                                    # keys match column names -> robust positional build
     row.update(addr=addr, status=status, reason=reason, last_refreshed=stamp,
+               profile_generation=getattr(p, "scan_generation", None), evaluated_at=stamp,
+               data_status="valid" if ok else "rejected",
+               evidence_status=m.get("evidence_status") or ("qualified" if ok else "rejected"),
                first_added=(prior or {}).get("first_added") or (stamp if ok else None),
                times_seen=(prior or {}).get("times_seen", 0) + 1)
     cols = storage.PROFILE_COLS.split(",")
@@ -522,10 +760,12 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe):
 
 
 # ------------------------------------------------------------------ curated outputs
-def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
+def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_line=True,
+                      update_follow_history=True, leaderboard_generation=None, commit=True) -> int:
     """Rebuild OUR tiny leaderboard (watchlist) from active profiles. Derived view —
     profile stays the source of truth; operator settings in target_controls survive."""
-    params.seed_params(db)
+    if commit:
+        params.seed_params(db)
     prev_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     prev_followed = {
         (r[0] or "").lower()
@@ -536,6 +776,11 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         ).fetchall()
     }
     db.execute("DELETE FROM watchlist")
+    leaderboard_join = (
+        "LEFT JOIN leaderboard_staging l ON l.addr=p.addr AND l.generation=?"
+        if leaderboard_generation else
+        "LEFT JOIN leaderboard l ON l.addr=p.addr"
+    )
     cur = db.execute(
         "SELECT p.addr, l.display_name, p.score, p.roi_equity, l.mon_roi, p.net_pnl, p.acct_value, "
         "p.n_trades, p.trades_per_day, p.taker_frac_notl, p.median_hold_s, p.win_rate, p.max_drawdown, "
@@ -544,9 +789,12 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         "p.times_active, p.first_added, p.last_fill_ms, "
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
-        "FROM profile p LEFT JOIN leaderboard l ON l.addr=p.addr "
-        "WHERE p.status='active' ORDER BY p.score DESC, p.addr")
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+        "p.profile_generation,p.evaluated_at,p.data_status,p.evidence_status "
+        f"FROM profile p {leaderboard_join} "
+        "WHERE p.status='active' ORDER BY p.score DESC, p.addr",
+        (leaderboard_generation,) if leaderboard_generation else (),
+    )
     row_cols = [d[0] for d in cur.description]
     rows = [dict(zip(row_cols, r)) for r in cur.fetchall()]
     ranked = []
@@ -567,15 +815,9 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
             detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
             stability["status"] = "ineligible" if stability["previouslyFollowed"] else "new_or_unfollowed"
         elif stability["previouslyFollowed"]:
-            keep_min = float(getattr(config, "AUTO_FOLLOW_KEEP_MIN_SCORE", 0.60))
-            if base_score >= keep_min:
-                bonus = float(getattr(config, "AUTO_FOLLOW_KEEP_BONUS", 0.0) or 0.0)
-                if bonus > 0:
-                    score = min(1.0, base_score + bonus)
-                    stability["bonus"] = score - base_score
-                    stability["status"] = "keep_bonus"
-            else:
-                stability["status"] = "too_weak_to_keep"
+            # Membership stability is expressed by lifecycle entry/keep confirmation, never by silently
+            # inflating the displayed score.
+            stability["status"] = "previously_followed"
         detail["stability"] = stability
         r["follow_detail"] = detail
         r["follow_eligibility"] = eligibility
@@ -588,19 +830,22 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
             "n_trades,trades_per_day,taker_frac,median_hold_s,win_rate,max_drawdown,age_days,top_coin,"
             "market_type,tp_move_pct,roi_total,open_loss_frac,open_win_frac,"
             "perp_frac,lev_proxy,margin_type,cur_leverage,liq_worst_pct,sector_copy_json,sector_policy_json,"
+            "generation,profile_generation,evaluated_at,data_status,evidence_status,"
             "times_active,first_added,last_fill_ms,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 rank, r["addr"], r["display_name"], r["follow_score"], r["roi_equity"], r["mon_roi"],
                 r["net_pnl"], r["acct_value"], r["n_trades"], r["trades_per_day"], r["taker_frac_notl"],
                 r["median_hold_s"], r["win_rate"], r["max_drawdown"], r["age_days"], r["top_coin"],
                 r["market_type"], r["tp_move_pct"], r["roi_total"], r["open_loss_frac"], r["open_win_frac"],
                 r["perp_frac"], r["lev_proxy"], r["margin_type"], r["cur_leverage"], r["liq_worst_pct"],
-                r["sector_copy_json"], r["sector_policy_json"], r["times_active"], r["first_added"], r["last_fill_ms"], stamp,
+                r["sector_copy_json"], r["sector_policy_json"], r["profile_generation"],
+                r["profile_generation"], r["evaluated_at"], r["data_status"], r["evidence_status"],
+                r["times_active"], r["first_added"], r["last_fill_ms"], stamp,
             ))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r["addr"], stamp))
-    if getattr(config, "AUTO_FOLLOW_LINE_ENABLE", True) and ranked:
+    if update_follow_line and getattr(config, "AUTO_FOLLOW_LINE_ENABLE", True) and ranked:
         try:
             choice = auto_tune.choose_follow_line_by_portfolio(db, ranked, stamp=stamp)
         except Exception as exc:  # noqa: BLE001 — wallet-count tuning must never abort discovery
@@ -644,6 +889,10 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         for r in ranked
     }
     pipeline_audit.record_watchlist_snapshot(db, stamp, source, line, detail_by_addr)
+    if not update_follow_history:
+        if commit:
+            db.commit()
+        return len(rows)
     followed_rows = []
     current_followed = set()
     for a, s in db.execute(
@@ -671,13 +920,365 @@ def refresh_watchlist(db, stamp, source: str = "watchlist") -> int:
         "last_followed_at=excluded.last_followed_at, "
         "last_followed_score=excluded.last_followed_score",
         followed_rows)
-    db.commit()
+    if commit:
+        db.commit()
     return len(rows)
 
 
-def _maybe_auto_tune_margins(db, source: str, stamp: str) -> dict:
+_HARD_EXIT_REASONS = {
+    "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "too_many_concurrent",
+    "hit_page_cap", "no_copyable_perp_fills", "spot_hedge", "blowup_loss", "copy_liquidation",
+}
+
+
+def _iso_ms(value):
+    if not value:
+        return None
     try:
-        res = auto_tune.maybe_tune_margins(db, source=source, stamp=stamp)
+        from datetime import datetime
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
+    """Conservatively compact shared-account replay windows for marginal selection."""
+    usable = []
+    for days, result in (windows or {}).items():
+        if not result:
+            continue
+        closed = int(result.get("closed_n") or 0)
+        if closed < max(1, load_copy_policy().min_closed_7d):
+            continue
+        positions = list(result.get("positions") or [])
+        pnl_samples = [f(pos.get("net_pnl")) for pos in positions]
+        net = f(result.get("copy_net_pnl"))
+        if len(pnl_samples) > 1:
+            sd = statistics.stdev(pnl_samples)
+            lcb = net - 1.645 * sd * math.sqrt(len(pnl_samples))
+        else:
+            lcb = net
+        usable.append((int(days), result, lcb))
+    if not usable:
+        # Empty baseline is a valid starting portfolio; any candidate still needs real evidence.
+        if selected_n == 0:
+            return selection.PortfolioMetrics(0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+        return selection.PortfolioMetrics(-1e12, -1e12, 0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)
+    primary = next((row for row in usable if row[0] == 14), max(usable, key=lambda row: row[0]))
+    net_lcb = primary[2]
+    stress_lcb = min(row[2] for row in usable)
+    liquidations = max(int(row[1].get("liquidations") or 0) for row in usable)
+    actionable = min(f(row[1].get("open_fill_rate"), 0.0) for row in usable)
+    capacity = min(f(row[1].get("capacity_open_fit"), actionable) for row in usable)
+    max_dd = max(f(row[1].get("max_drawdown"), 0.0) for row in usable)
+    peak_deploy = max(f(row[1].get("peak_deploy_pct"), 0.0) for row in usable)
+    cost_drag = max(
+        f(row[1].get("fee_slippage_drag"), f(row[1].get("fee_drag")))
+        / max(1.0, abs(f(row[1].get("copy_gross_pnl"))))
+        for row in usable
+    )
+    # Until live telemetry supplies a fitted curve, reserve two percentage points of latency budget per
+    # additional polled Core. Replacements do not inflate the poll set.
+    latency_degradation = max(0, selected_n - baseline_n) * 0.02
+    return selection.PortfolioMetrics(
+        net_lcb, stress_lcb, liquidations, actionable, capacity, max_dd, peak_deploy,
+        cost_drag, latency_degradation,
+    )
+
+
+def _build_explicit_selection(db, generation_id, stamp, now_ms):
+    """Build stable Core + Challenger roles and evaluate at most one shared-account marginal action."""
+    copy_policy = load_copy_policy()
+    previous_generation = selection.latest_published_generation(db)
+    previous_roles = {}
+    if previous_generation:
+        previous_roles = {
+            (addr or "").lower(): role
+            for addr, role in db.execute(
+                "SELECT addr,role FROM follow_selection WHERE generation=?", (previous_generation,)
+            ).fetchall()
+        }
+    else:
+        line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
+        previous_roles = {
+            (addr or "").lower(): selection.CORE
+            for (addr,) in db.execute(
+                "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+                "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1 ORDER BY w.rank LIMIT ?",
+                (line, int(config.MAX_TARGETS)),
+            ).fetchall()
+        }
+
+    cold_bootstrap = bool(
+        previous_generation is None
+        and not previous_roles
+        and params.get(
+            db, "FOLLOW_SELECTION_BOOTSTRAP_ENABLE", config.FOLLOW_SELECTION_BOOTSTRAP_ENABLE
+        )
+    )
+
+    held = {
+        (addr or "").lower()
+        for table in ("copy_position", "shadow_position")
+        for (addr,) in db.execute(f"SELECT DISTINCT addr FROM {table} WHERE status='open'").fetchall()
+    }
+    controls = {
+        (addr or "").lower(): bool(enabled)
+        for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
+    }
+    registry = {}
+    for row in db.execute(
+        "SELECT addr,state,current_role,first_qualified_at,consecutive_qualified,consecutive_bad "
+        "FROM wallet_registry"
+    ).fetchall():
+        registry[(row[0] or "").lower()] = {
+            "state": row[1], "role": row[2], "first_qualified_at": row[3],
+            "good": int(row[4] or 0), "bad": int(row[5] or 0),
+        }
+
+    cur = db.execute(
+        "SELECT p.addr,p.status,p.reason,p.score,p.profile_generation,p.data_status,p.evidence_status,p.last_copyable_open_ms,"
+        "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
+        "p.copy_positive_probability,p.copy_expected_return,"
+        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json "
+        "FROM profile p"
+    )
+    names = [desc[0] for desc in cur.description]
+    profiles = [dict(zip(names, row)) for row in cur.fetchall()]
+    for row in profiles:
+        row["follow_score"] = follow_score.compute_follow_score(row)[0]
+    profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
+    for rank, row in enumerate(profiles, 1):
+        row["rank"] = rank
+    evidences = []
+    row_by_addr = {}
+    for row in profiles:
+        addr = (row["addr"] or "").lower()
+        row_by_addr[addr] = row
+        prior_reg = registry.get(addr, {})
+        previous_role = previous_roles.get(addr) or prior_reg.get("role") or selection.CHALLENGER
+        data_status = row.get("data_status") or "valid"
+        refreshed_now = row.get("profile_generation") == generation_id
+        effective_data_status = data_status if refreshed_now or data_status == "deferred_data_error" else "stale"
+        lifecycle_data_status = (
+            "valid" if effective_data_status in {"valid", "rejected"} else effective_data_status
+        )
+        enriched = dict(row)
+        enriched["copy_bt_data_status"] = data_status
+        enriched["copy_bt_evidence_status"] = row.get("evidence_status")
+        eligibility = follow_score.evaluate_follow_eligibility(enriched)
+        soft_bad = (
+            row.get("status") not in {"active", "qualified"}
+            or not eligibility.get("eligible")
+            or row.get("evidence_status") in {"economically_disqualified", "invalid"}
+        )
+        hard_exit = row.get("reason") in _HARD_EXIT_REASONS
+        good_now = lifecycle_data_status == "valid" and row.get("status") in {"active", "qualified"} and not soft_bad
+        bad_now = lifecycle_data_status == "valid" and soft_bad
+        evidences.append(selection.LifecycleEvidence(
+            addr=addr,
+            now_ms=now_ms,
+            current_role=previous_role,
+            data_status=lifecycle_data_status,
+            consecutive_complete_good=int(prior_reg.get("good") or 0) + (1 if good_now else 0),
+            consecutive_soft_bad=int(prior_reg.get("bad") or 0) + (1 if bad_now else 0),
+            last_actionable_open_ms=row.get("last_copyable_open_ms"),
+            oos_closed_n=int(row.get("copy_bt_7d_closed_n") or row.get("copy_bt_closed_n") or 0),
+            positive_probability=f(row.get("copy_positive_probability")),
+            challenger_since_ms=_iso_ms(prior_reg.get("first_qualified_at")),
+            soft_bad=soft_bad,
+            soft_bad_reason=eligibility.get("status") or row.get("reason") or "soft_bad",
+            hard_exit=hard_exit,
+            hard_exit_reason=row.get("reason") or "hard_exit",
+            has_open_copy=addr in held,
+        ))
+
+    decisions = {d.addr: d for d in selection.decide_lifecycles(
+        evidences,
+        selection.LifecyclePolicy(
+            entry_complete_generations=(
+                1 if cold_bootstrap else int(getattr(config, "CORE_ENTRY_CONFIRM_GENERATIONS", 2))
+            ),
+            entry_actionable_age_ms=int(copy_policy.entry_max_open_age_h * 3_600_000),
+            entry_oos_closes=int(copy_policy.min_closed_7d),
+            entry_positive_probability=copy_policy.entry_positive_probability,
+            challenger_observation_ms=(
+                0 if cold_bootstrap
+                else int(getattr(config, "CORE_ENTRY_MIN_CHALLENGER_H", 24) * 3_600_000)
+            ),
+            keep_actionable_grace_ms=int(copy_policy.keep_max_open_age_h * 3_600_000),
+            soft_bad_generations=int(getattr(config, "CORE_SOFT_CONFIRM_GENERATIONS", 2)),
+            max_soft_membership_changes=(
+                int(config.MAX_TARGETS) if cold_bootstrap
+                else int(getattr(config, "CORE_MAX_SOFT_CHANGES_PER_GENERATION", 1))
+            ),
+        ),
+    )}
+    baseline_core = sorted(
+        addr for addr, decision in decisions.items()
+        if decision.previous_role == selection.CORE and decision.role == selection.CORE
+        and controls.get(addr, True)
+    )[:int(config.MAX_TARGETS)]
+    entry_candidates = [
+        addr for addr, decision in decisions.items()
+        if decision.previous_role != selection.CORE and decision.role == selection.CORE
+        and controls.get(addr, True)
+    ]
+    entry_candidates.sort(key=lambda addr: (
+        -(row_by_addr[addr].get("copy_expected_return") or -1e9),
+        row_by_addr[addr].get("rank") or 999999,
+        addr,
+    ))
+    entry_candidates = entry_candidates[:int(config.MAX_TARGETS)]
+
+    selected_core = tuple(baseline_core)
+    marginal = None
+    if entry_candidates:
+        all_addrs = sorted(set(baseline_core) | set(entry_candidates))
+        window_fills = auto_tune._portfolio_window_fills(db, all_addrs, now_ms)
+        if window_fills is not None and any(window_fills.values()):
+            follow = params.load_follow(db)
+            if "SMART_ADD" in follow:
+                follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+            sigmas = auto_tune._load_sigmas(db)
+            baseline_n = len(baseline_core)
+
+            def evaluate(addrs):
+                filtered = auto_tune._filter_window_fills_by_addr(window_fills, addrs)
+                windows = auto_tune._candidate_windows(
+                    db, list(addrs), sigmas, follow, now_ms, window_fills=filtered,
+                )
+                return _portfolio_selection_metrics(
+                    windows, baseline_n=baseline_n, selected_n=len(addrs),
+                )
+
+            try:
+                marginal = selection.select_marginal_core(
+                    baseline_core,
+                    entry_candidates,
+                    evaluate,
+                    selection.SelectionConstraints(
+                        min_relative_lcb_improvement=copy_policy.min_marginal_gain,
+                        min_actionable_open_rate=copy_policy.min_actionable_open_rate,
+                        min_capacity_fit=copy_policy.min_capacity_fit,
+                        max_drawdown_worsening=copy_policy.max_drawdown_worsening,
+                        max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
+                        max_poll_latency_degradation=0.10,
+                        max_targets=int(config.MAX_TARGETS),
+                    ),
+                )
+                selected_core = marginal.selected
+            except Exception as exc:  # noqa: BLE001 - selection failure keeps the stable Core unchanged
+                print(f"selection marginal replay skipped: {exc}", flush=True)
+
+    selected_set = set(selected_core)
+    rows = []
+    for addr, decision in sorted(decisions.items()):
+        profile = row_by_addr[addr]
+        enabled = controls.get(addr, True)
+        if addr in selected_set:
+            role, reason = selection.CORE, decision.reason
+        elif addr in held and decision.role != selection.CORE:
+            role, reason = selection.EXIT_ONLY, decision.reason
+        else:
+            role = selection.CHALLENGER
+            reason = "portfolio_no_positive_marginal" if decision.role == selection.CORE else decision.reason
+        utility = profile.get("selection_marginal_utility")
+        if marginal and addr in marginal.added:
+            utility = marginal.metrics.net_lcb - marginal.baseline.net_lcb
+        include_selection = (
+            role in {selection.CORE, selection.EXIT_ONLY}
+            or profile.get("status") in {"active", "qualified"}
+            or profile.get("data_status") == "deferred_data_error" and decision.previous_role == selection.CORE
+        )
+        if include_selection:
+            selection_data_status = profile.get("data_status") or "valid"
+            if selection_data_status != "deferred_data_error" and profile.get("profile_generation") != generation_id:
+                selection_data_status = "stale"
+            rows.append(selection.SelectionRow(
+                addr=addr,
+                role=role,
+                enabled=enabled,
+                reason=reason,
+                utility=utility,
+                data_status=selection_data_status,
+                evidence_status=profile.get("evidence_status") or "",
+                model_version="selection-vnext-1",
+                policy_version=copy_policy.version,
+            ))
+        lifecycle_state = role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY} else "qualified"
+        if profile.get("data_status") == "deferred_data_error":
+            lifecycle_state = "quarantine" if role != selection.CORE else "core"
+        elif profile.get("status") not in {"active", "qualified"}:
+            lifecycle_state = "rejected"
+        elif profile.get("evidence_status") in {"economically_disqualified", "invalid"}:
+            lifecycle_state = "cooldown"
+        registry_data_status = profile.get("data_status") or "valid"
+        if registry_data_status != "deferred_data_error" and profile.get("profile_generation") != generation_id:
+            registry_data_status = "unobserved"
+        upsert_wallet_registry(
+            db,
+            addr,
+            generation=generation_id,
+            seen_at=stamp,
+            state=lifecycle_state,
+            role=role,
+            data_status=registry_data_status,
+            reason=profile.get("reason"),
+            last_actionable_open_ms=profile.get("last_copyable_open_ms"),
+        )
+        if utility is not None:
+            db.execute("UPDATE profile SET selection_marginal_utility=? WHERE addr=?", (utility, addr))
+    return rows, marginal
+
+
+def _record_explicit_follow_history(db, selection_rows, stamp, previous_core):
+    current_core = {row.addr for row in selection_rows if row.role == selection.CORE and row.enabled}
+    scores = {
+        addr: score for addr, score in db.execute(
+            "SELECT addr,score FROM watchlist WHERE addr IN (%s)" % (
+                ",".join("?" for _ in current_core) or "NULL"
+            ),
+            tuple(current_core),
+        ).fetchall()
+    } if current_core else {}
+    db.executemany(
+        "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
+        "VALUES (?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
+        "first_followed_at=COALESCE(follow_history.first_followed_at,excluded.first_followed_at),"
+        "last_followed_at=excluded.last_followed_at,last_followed_score=excluded.last_followed_score",
+        [(addr, stamp if addr not in previous_core else None, stamp, scores.get(addr)) for addr in sorted(current_core)],
+    )
+    if current_core != set(previous_core):
+        db.execute(
+            "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
+            ("reload_params", json.dumps({
+                "by": "explicit_selection", "previous": len(previous_core), "current": len(current_core),
+            }), "scanner", stamp),
+        )
+    return current_core
+
+
+def _maybe_auto_tune_margins(db, source: str, stamp: str, *, allow_apply: bool = True,
+                             data_complete: bool = True) -> dict:
+    try:
+        mode = str(params.get(db, "AUTO_TUNE_MODE", getattr(config, "AUTO_TUNE_MODE", "shadow")) or "shadow").lower()
+        dry_run = (not allow_apply) or mode != "apply"
+        if mode == "off":
+            res = {"status": "disabled", "reason": "auto_tune_mode_off", "applied": False, "mode": mode}
+        else:
+            try:
+                res = auto_tune.maybe_tune_margins(
+                    db, source=source, stamp=stamp, dry_run=dry_run, mode=mode,
+                    data_complete=data_complete,
+                )
+            except TypeError as exc:
+                # Test doubles and rolling-deploy workers may still expose the legacy signature.
+                if "unexpected keyword" not in str(exc):
+                    raise
+                res = auto_tune.maybe_tune_margins(db, source=source, stamp=stamp)
+            res.setdefault("mode", mode)
     except Exception as exc:  # noqa: BLE001 — auto tuning must never abort discovery
         res = {
             "status": "error",
@@ -715,23 +1316,93 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str) -> dict:
     return res
 
 
-def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before_auto_tune=None) -> int:
-    """Rebuild watchlist, choose the follow line, then tune sizing/add on the final followed set."""
+def tune_published_generation(db, generation_id, stamp=None, source="scan"):
+    """Run one generation-bound tuner proposal with a DB lease.
+
+    This entrypoint is intentionally separate from ``scan`` so tuning cannot delay atomic list publication.
+    """
+    current = selection.latest_published_generation(db)
+    if current != generation_id:
+        return {"status": "skipped", "reason": "generation_not_current", "applied": False}
+    stamp = stamp or now_iso()
+    now_s = time.time()
+    row = db.execute("SELECT value FROM auto_tune_state WHERE key='async_tuner_lease'").fetchone()
+    try:
+        lease = json.loads(row[0]) if row and row[0] else {}
+    except (TypeError, ValueError):
+        lease = {}
+    if f(lease.get("expiresAt")) > now_s and int(lease.get("pid") or 0) != os.getpid():
+        return {"status": "skipped", "reason": "tuner_already_running", "applied": False}
+    db.execute(
+        "INSERT INTO auto_tune_state (key,value,updated_at) VALUES ('async_tuner_lease',?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        (json.dumps({"pid": os.getpid(), "generation": generation_id, "expiresAt": now_s + 7200}), stamp),
+    )
+    db.commit()
+    try:
+        return _maybe_auto_tune_margins(db, source, stamp, allow_apply=True, data_complete=True)
+    finally:
+        db.execute(
+            "UPDATE auto_tune_state SET value=?,updated_at=? WHERE key='async_tuner_lease'",
+            (json.dumps({"pid": os.getpid(), "generation": generation_id, "expiresAt": 0}), now_iso()),
+        )
+        db.commit()
+
+
+def _launch_async_tuner(db, generation_id, stamp):
+    mode = str(params.get(db, "AUTO_TUNE_MODE", getattr(config, "AUTO_TUNE_MODE", "shadow")) or "shadow").lower()
+    if mode == "off":
+        return {"status": "disabled", "reason": "auto_tune_mode_off"}
+    db_row = db.execute("PRAGMA database_list").fetchone()
+    db_path = db_row[2] if db_row and len(db_row) > 2 else None
+    if not db_path or db_path == ":memory:":
+        return {"status": "skipped", "reason": "async_tuner_requires_file_db"}
+    script = str(Path(__file__).resolve().parent.parent / "hl_discover.py")
+    limit_mb = int(getattr(config, "TUNER_MEMORY_LIMIT_MB", 512))
+
+    def _limit_memory():
+        try:
+            import resource
+            limit = max(128, limit_mb) * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        except Exception:  # noqa: BLE001 - platform may not expose RLIMIT_AS
+            pass
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, script, "--db", db_path, "tune", "--generation", generation_id,
+             "--stamp", stamp],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+            preexec_fn=_limit_memory if os.name == "posix" else None,
+        )
+        return {"status": "launched", "pid": proc.pid, "generation": generation_id, "memoryLimitMb": limit_mb}
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "reason": "tuner_launch_failed", "error": str(exc)[:200]}
+
+
+def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before_auto_tune=None,
+                                    *, auto_tune_enabled: bool = True, allow_tune_apply: bool = True) -> int:
+    """Rebuild the derived watchlist, then evaluate an execution-parameter proposal.
+
+    vNext deliberately does *not* regate every stored profile after an applied proposal: most daily
+    profiles were not network-refreshed, so replaying them with fresh execution params could promote or
+    retire wallets from stale portfolio/open-position state.  A later complete generation publishes the
+    new evidence atomically; shadow proposals never mutate live parameters.
+    """
     n_active = refresh_watchlist(db, stamp, source=source)
     if before_auto_tune:
         before_auto_tune()
         db.commit()
-    tune_res = _maybe_auto_tune_margins(db, source, stamp)
-    if tune_res.get("applied"):
-        p = params.apply_scanner_params(db, SimpleNamespace())
-        return regate(
-            db,
-            p,
-            stamp=stamp,
-            source=f"{source}_post_tune",
-            auto_tune_enabled=False,
-            quiet=True,
-        )
+    if auto_tune_enabled:
+        _maybe_auto_tune_margins(db, source, stamp, allow_apply=allow_tune_apply)
+    else:
+        skipped = {"status": "skipped", "reason": "scan_incomplete", "applied": False, "mode": "shadow"}
+        pipeline_audit.record_auto_tune_result(db, stamp, source, skipped)
+        db.commit()
     return n_active
 
 
@@ -750,14 +1421,14 @@ def ensure_watchlist_current(db, stamp=None) -> int:
     current = _watchlist_addrs(db)
     if set(current) == set(active):
         return len(current)
-    p = params.apply_scanner_params(db, SimpleNamespace())
-    return regate(
+    # Repair is a pure derived-view rebuild.  Re-running gates against stale live-position/portfolio
+    # snapshots could reactivate or retire wallets without a fresh network generation.
+    return refresh_watchlist(
         db,
-        p,
-        stamp=stamp or now_iso(),
+        stamp or now_iso(),
         source="repair",
-        auto_tune_enabled=False,
-        quiet=True,
+        update_follow_line=selection.latest_published_generation(db) is None,
+        update_follow_history=selection.latest_published_generation(db) is None,
     )
 
 
@@ -772,7 +1443,7 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
 
 
 def regate(db, p, *, stamp=None, source: str = "regate",
-           auto_tune_enabled: bool = True, quiet: bool = False) -> int:
+           auto_tune_enabled: bool = False, quiet: bool = False) -> int:
     """Re-apply gates() + score() on ALREADY-STORED profile metrics (no network, no re-fetch) and
     rebuild the watchlist. Thresholds (win/roiEq/dd/tpd/hold/...) can be tuned in seconds without a
     full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
@@ -923,7 +1594,8 @@ def scan(db, p) -> None:
     started, t0 = now_iso(), time.time()
     stamp = now_iso()
     start_ms = now_ms - p.days * 86400_000
-    ensure_watchlist_current(db, stamp)
+    if selection.latest_published_generation(db) is None:
+        ensure_watchlist_current(db, stamp)
 
     # dashboard: advertise we're scanning + consume any operator-queued rescan command
     rescan_rows = db.execute(
@@ -948,41 +1620,137 @@ def scan(db, p) -> None:
             db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT {default}"); db.commit()
         except Exception:  # noqa: BLE001 — column already exists
             pass
+    run_full = bool(getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
+    generation_id = generation.begin_generation(
+        db,
+        source="scan",
+        started_at=started,
+        workset_mode="all" if run_full else "priority",
+        fill_mode="full_refetch" if run_full else "mixed",
+    )
+    p.scan_generation = generation_id
+    db.commit()
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
                        candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
     p.copy_bt_sigmas = _copy_bt_sigmas(db)
     p.copy_bt_market_ctx = _copy_bt_market_ctx(db)
     p.copy_bt_overrides = _copy_bt_overrides(db)
+    rest.reset_request_stats()
 
-    universe = rest.copyable_universe()          # crypto perps + transparent builder (stocks/commodities)
-    if not p.no_harvest:
-        print("harvest leaderboard ...", flush=True)
-        n_cand = harvest(db, p)
-        print(f"  {n_cand} candidates (acct>=${getattr(p,'min_acct',config.HARVEST_MIN_ACCT):,.0f}, "
-              f"vol7d ${getattr(p,'week_vlm_min',config.HARVEST_WEEK_VLM_MIN):,.0f}.."
-              f"${getattr(p,'week_vlm_max',config.HARVEST_WEEK_VLM_MAX):,.0f}, "
-              f"pnl/vol {getattr(p,'pnl_vol_min',config.HARVEST_PNL_VOL_MIN):.1%}.."
-              f"{getattr(p,'pnl_vol_max',config.HARVEST_PNL_VOL_MAX):.1%}, "
-              f"7d&30d&all PnL>0)", flush=True)
+    try:
+        universe = rest.copyable_universe()       # crypto perps + transparent builder (stocks/commodities)
+        if not universe:
+            raise RuntimeError("copyable_universe_unavailable")
+        if not p.no_harvest:
+            print("harvest leaderboard -> staging ...", flush=True)
+            n_cand = harvest(db, p, generation_id=generation_id)
+        else:
+            n_cand = _stage_existing_leaderboard(db, generation_id)
+        print(f"  generation {generation_id} · {n_cand} staged candidates", flush=True)
+    except Exception as exc:  # noqa: BLE001 - old published selection remains authoritative
+        db.rollback()
+        generation.fail_generation(db, generation_id, str(exc))
+        old_core = selection.published_core_addrs(db)
+        if old_core is None:
+            line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+            old_core = [r[0] for r in db.execute(
+                "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+                "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1", (line,)
+            ).fetchall()]
+        _record_run(db, started, t0, 0, 0, 0, 0, 0, 0, len(old_core),
+                    full=run_full, failed=1, complete=False)
+        _set_scan_progress(db, state="idle", stage="error", candidates_scanned=0, candidates_total=0)
+        _set_scanner_proc(db, "idle", {"last_error": str(exc)[:300], "active": len(old_core)})
+        _resolve_rescan_commands(
+            db, rescan_ids, run_full=run_full, complete=False, failed=1, active=len(old_core)
+        )
+        db.commit()
+        print(f"scan generation rejected before profiling: {exc}", flush=True)
+        return
 
-    # FULL sweep every cycle (now cheap): re-profile EVERY candidate fresh — so a wallet that was
-    # rejected on a past bad window gets re-discovered when it improves, and degraded actives retire.
-    # No incremental "120 new + NOT IN profile" -> no permanent exclusion, no stale profiles.
-    order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(p.order, "mon_roi")
+    order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(
+        getattr(p, "order", "mon_roi"), "mon_roi"
+    )
     cand = [r[0] for r in db.execute(
-        f"SELECT addr FROM leaderboard WHERE is_candidate=1 ORDER BY {order} DESC").fetchall()]
+        f"SELECT addr FROM leaderboard_staging WHERE generation=? AND is_candidate=1 "
+        f"ORDER BY {order} DESC", (generation_id,)).fetchall()]
     active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
-    # FULL re-fetch when: --full, INCREMENTAL_SCAN off, or the FULL_RESYNC_DAYS self-heal cadence is due.
-    p.full_scan = getattr(p, "full_scan", False) or (not config.INCREMENTAL_SCAN) or _due_for_full_resync(db)
-    run_full = bool(p.full_scan)
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
-    workset_info = _profile_workset_breakdown(cand, active_addrs, profiled, p.full_scan, p.limit)
+    current_selection_generation = selection.latest_published_generation(db)
+    core_addrs = selection.published_core_addrs(db)
+    if core_addrs is None:
+        line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+        core_addrs = [r[0] for r in db.execute(
+            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+            "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1 ORDER BY w.rank", (line,)
+        ).fetchall()]
+    challenger_addrs = []
+    if current_selection_generation:
+        challenger_addrs = [r[0] for r in db.execute(
+            "SELECT addr FROM follow_selection WHERE generation=? AND role='challenger' AND enabled=1",
+            (current_selection_generation,),
+        ).fetchall()]
+    position_addrs = sorted({
+        (addr or "").lower()
+        for table in ("copy_position", "shadow_position")
+        for (addr,) in db.execute(f"SELECT DISTINCT addr FROM {table} WHERE status='open'").fetchall()
+    })
+    cand_set = set(cand)
+    off_list_active = [addr for addr in active_addrs if addr not in cand_set]
+    near_threshold = [r[0] for r in db.execute(
+        "SELECT addr FROM profile WHERE status!='active' ORDER BY score DESC,addr LIMIT 1000"
+    ).fetchall()]
+    priority_n = len(set(position_addrs) | set(core_addrs) | set(active_addrs)
+                     | set(challenger_addrs) | set(off_list_active))
+    recent = db.execute(
+        "SELECT duration_s,COALESCE(profiled,probed_new) FROM scan_runs "
+        "WHERE COALESCE(profiled,probed_new)>0 AND complete=1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    estimated_profile_s = max(1.0, min(120.0, (f(recent[0]) / int(recent[1])))) if recent else 12.0
+    if run_full:
+        scheduler_limit = max(priority_n, int(getattr(p, "limit", 0) or len(cand) + priority_n))
+        time_budget = None
+    else:
+        daily_cap = int(getattr(p, "daily_profile_budget", config.DAILY_PROFILE_BUDGET) or config.DAILY_PROFILE_BUDGET)
+        cli_cap = int(getattr(p, "limit", daily_cap) or daily_cap)
+        scheduler_limit = priority_n + min(daily_cap, cli_cap)
+        total_min = float(getattr(p, "daily_scan_time_budget_min", config.DAILY_SCAN_TIME_BUDGET_MIN))
+        reserve_min = float(getattr(p, "scan_finalize_reserve_min", config.SCAN_FINALIZE_RESERVE_MIN))
+        time_budget = ScanTimeBudget(t0, total_s=total_min * 60.0, finalize_reserve_s=reserve_min * 60.0)
+    workset_info = schedule_profile_workset(
+        cand,
+        active_addrs=active_addrs,
+        core_addrs=core_addrs,
+        challenger_addrs=challenger_addrs,
+        off_list_active_addrs=off_list_active,
+        position_addrs=position_addrs,
+        profiled_addrs=profiled,
+        near_threshold_addrs=near_threshold,
+        exploration_addrs=cand,
+        limit=scheduler_limit,
+        budget=time_budget,
+        estimated_profile_s=estimated_profile_s,
+        shard_count=int(getattr(p, "full_refresh_shards", config.FULL_REFRESH_SHARDS)),
+        exploration_seed=generation_id,
+        full_scan=run_full,
+    )
     pipeline_audit.record_workset_summary(db, stamp, "scan", workset_info)
+    generation.record_workset(
+        db,
+        generation_id,
+        workset_mode=workset_info["workset_mode"],
+        fill_mode=workset_info["fill_mode"],
+        full_refresh_shard=workset_info["refresh"]["shard_index"],
+        workset_n=len(workset_info["workset"]),
+        deferred_n=workset_info["counts"]["deferred"],
+        metrics={"estimatedProfileSec": estimated_profile_s},
+    )
     db.commit()
     workset, mode = workset_info["workset"], workset_info["mode"]
-    cand_set = set(cand)
     off_active_n = len([a for a in active_addrs if a not in cand_set])
+    full_refetch = set(workset_info["refresh"]["full_refetch"])
+    priority_addrs = set(workset[:workset_info["counts"]["priority"]])
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
     _pace = config.MIN_POST_INTERVAL   # live adaptive pace (fast when no copy-trading, slow trickle when observer up)
     print(f"scan: {mode} · {len(workset)} wallets (incl {off_active_n} off-list actives), "
@@ -992,18 +1760,27 @@ def scan(db, p) -> None:
     cols = storage.PROFILE_COLS.split(",")
     priors = {r[0]: dict(zip(cols, r)) for r in
               db.execute(f"SELECT {storage.PROFILE_COLS} FROM profile").fetchall()}
-    lbs = {a: {"account_value": av} for a, av in
-           db.execute("SELECT addr, account_value FROM leaderboard").fetchall()}
+    lbs = {
+        a: {"account_value": av, "week_roi": wr, "mon_roi": mr, "all_roi": ar}
+        for a, av, wr, mr, ar in db.execute(
+            "SELECT addr,account_value,week_roi,mon_roi,all_roi FROM leaderboard_staging WHERE generation=?",
+            (generation_id,),
+        ).fetchall()
+    }
 
-    added = retired = rejected = kept = failed = profiled_ok = 0
+    added = retired = rejected = kept = failed = profiled_ok = deferred_profiles = valid_profiles = 0
     profiled_addrs = []
     workers = max(1, getattr(p, "workers", 8))      # I/O-bound; the REST pacer still caps total rate
 
     def _work(addr):
         prior = priors.get(addr)
-        return addr, prior, _profile_one(db, addr, start_ms, now_ms, p, prior, lbs.get(addr, {}), stamp, universe)
+        return addr, prior, _profile_one(
+            db, addr, start_ms, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
+            force_full=addr in full_refetch,
+        )
 
     done = 0
+    priority_done_at = time.time() if not priority_addrs else None
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         for fut in concurrent.futures.as_completed([ex.submit(_work, a) for a in workset]):
             done += 1
@@ -1015,14 +1792,26 @@ def scan(db, p) -> None:
                 continue
             profiled_ok += 1
             profiled_addrs.append(addr)
-            if status == "active":                # per-wallet detail is in the profile table, not the log
+            priority_addrs.discard(addr)
+            if not priority_addrs and priority_done_at is None:
+                priority_done_at = time.time()
+            data_status = m.get("data_status")
+            if data_status == "deferred_data_error":
+                deferred_profiles += 1
+            elif data_status == "rejected":
+                rejected += 1
+            else:
+                valid_profiles += 1
+            if data_status == "deferred_data_error":
+                pass
+            elif status == "active":              # per-wallet detail is in the profile table, not the log
                 if (prior or {}).get("status") == "active":
                     kept += 1
                 else:
                     added += 1
             elif status == "retired":
                 retired += 1
-            else:
+            elif data_status != "rejected":
                 rejected += 1
             # progress on EVERY completion (single cheap 1-row UPDATE) so the mask's xxx/yyy moves
             # smoothly (~1 wallet/sec) instead of jumping every 10 (~14s frozen gaps → looked stuck).
@@ -1031,23 +1820,142 @@ def scan(db, p) -> None:
                 _set_scanner_proc(db, "scanning", {"stage": "score_filter",   # refresh heartbeat so the
                                   "scanned": done, "total": len(workset)})    # dashboard isn't "心跳超时"
 
-    _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
-    def _scan_before_auto_tune():
-        pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
-        _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
-
-    n_active = refresh_watchlist_and_auto_tune(
-        db,
-        stamp,
-        source="scan",
-        before_auto_tune=_scan_before_auto_tune,
-    )
-    candidates = db.execute("SELECT count(*) FROM leaderboard WHERE is_candidate=1").fetchone()[0]
-    _set_scan_progress(db, stage="persist")
     complete = failed == 0
-    _record_run(db, started, t0, candidates, profiled_ok, added, retired, kept, rejected, n_active,
+    published = False
+    previous_core = selection.published_core_addrs(db)
+    if previous_core is None:
+        line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
+        previous_core = [r[0] for r in db.execute(
+            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
+            "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1", (line,)
+        ).fetchall()]
+    n_active = len(previous_core)
+    pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
+    if complete:
+        _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
+        try:
+            selection_mode = str(
+                params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
+            ).lower()
+            if selection_mode == "manual":
+                selection_rows = selection.current_selection_rows(db)
+                marginal = None
+            else:
+                selection_rows, marginal = _build_explicit_selection(db, generation_id, stamp, now_ms)
+            refresh_watchlist(
+                db,
+                stamp,
+                source="scan",
+                update_follow_line=False,
+                update_follow_history=False,
+                leaderboard_generation=generation_id,
+                commit=False,
+            )
+            generation.mark_generation_ready(
+                db,
+                generation_id,
+                profile_total=profiled_ok,
+                profile_valid=valid_profiles,
+                profile_deferred=deferred_profiles,
+                profile_rejected=rejected,
+                profile_complete=True,
+            )
+            selection.replace_selection_rows(db, generation_id, selection_rows, selected_at=stamp)
+            for row in selection_rows:
+                pipeline_audit._insert_event(
+                    db,
+                    stamp=stamp,
+                    source="scan",
+                    stage="selection",
+                    addr=row.addr,
+                    status=row.role,
+                    reason=row.reason,
+                    follow_score=row.utility,
+                    payload={
+                        "generation": generation_id,
+                        "dataStatus": row.data_status,
+                        "evidenceStatus": row.evidence_status,
+                    },
+                )
+            pipeline_audit._insert_event(
+                db,
+                stamp=stamp,
+                source="scan",
+                stage="selection_summary",
+                status="ok",
+                reason=("manual_selection_preserved" if selection_mode == "manual"
+                        else "explicit_core_selection"),
+                payload={
+                    "generation": generation_id,
+                    "mode": selection_mode,
+                    "action": marginal.action if marginal else "keep",
+                    "core": sum(1 for row in selection_rows if row.role == selection.CORE and row.enabled),
+                    "challenger": sum(1 for row in selection_rows if row.role == selection.CHALLENGER),
+                    "exitOnly": sum(1 for row in selection_rows if row.role == selection.EXIT_ONLY),
+                },
+            )
+            generation.publish_generation(db, generation_id, published_at=stamp)
+            current_core = _record_explicit_follow_history(db, selection_rows, stamp, previous_core)
+            n_active = len(current_core)
+            stage_metrics = {
+                "durationSec": round(time.time() - t0, 3),
+                "coreRefreshSec": round((priority_done_at or time.time()) - t0, 3),
+                "coreDeadlineMet": ((priority_done_at or time.time()) - t0)
+                <= float(getattr(p, "core_refresh_deadline_min", config.CORE_REFRESH_DEADLINE_MIN)) * 60.0,
+                "profileValid": valid_profiles,
+                "profileDeferred": deferred_profiles,
+                "profileFailed": failed,
+                "deltaRefetch": len(workset) - len(full_refetch),
+                "fullRefetch": len(full_refetch),
+                "selectionCore": n_active,
+                "selectionChallenger": sum(1 for row in selection_rows if row.role == selection.CHALLENGER),
+                "selectionAction": marginal.action if marginal else "keep",
+                **rest.request_stats(),
+            }
+            db.execute(
+                "UPDATE scan_generation SET metrics_json=? WHERE generation=?",
+                (json.dumps(stage_metrics, sort_keys=True), generation_id),
+            )
+            db.commit()
+            published = True
+        except Exception as exc:  # noqa: BLE001 - rollback restores old watchlist/selection atomically
+            db.rollback()
+            generation.fail_generation(db, generation_id, f"finalize_error:{exc}")
+            db.commit()
+            complete = False
+            failed += 1
+            print(f"generation finalize failed; old selection retained: {exc}", flush=True)
+    else:
+        generation.mark_generation_ready(
+            db,
+            generation_id,
+            profile_total=profiled_ok,
+            profile_valid=valid_profiles,
+            profile_deferred=deferred_profiles,
+            profile_rejected=rejected,
+            profile_complete=False,
+        )
+        db.commit()
+
+    if published:
+        _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
+        launch = _launch_async_tuner(db, generation_id, stamp)
+        pipeline_audit._insert_event(
+            db,
+            stamp=stamp,
+            source="scan",
+            stage="tuner_launch",
+            status=launch.get("status"),
+            reason=launch.get("reason") or "generation_bound_async",
+            payload=launch,
+        )
+        db.commit()
+    _set_scan_progress(db, stage="persist")
+    _record_run(db, started, t0, n_cand, profiled_ok, added, retired, kept, rejected, n_active,
                 full=run_full, failed=failed, complete=complete)
     try:
+        if not published:
+            raise RuntimeError("generation_not_published")
         pruned = _prune_discovery_cache(db)
         pipeline_audit.record_prune_summary(db, stamp, "scan", pruned)
         db.commit()
@@ -1055,15 +1963,15 @@ def scan(db, p) -> None:
             print(f"pruned discovery cache: {pruned}", flush=True)
     except Exception as exc:  # noqa: BLE001
         db.rollback()
-        print(f"prune discovery cache skipped after scan success: {exc}", flush=True)
+        print(f"prune discovery cache skipped: {exc}", flush=True)
     print(f"\nscan done in {time.time()-t0:.0f}s: +{added} new, -{retired} retired, {kept} kept, "
-          f"{rejected} rejected, {failed} failed. watchlist now: {n_active} active.", flush=True)
+          f"{rejected} rejected, {deferred_profiles} deferred, {failed} failed. Core now: {n_active}.", flush=True)
     # Dashboard: resolve only requests this completed run actually satisfied. A full request arriving
     # during an incremental run is stronger than the current work and must be reported as retryable failure.
     _set_scan_progress(db, state="idle", candidates_scanned=len(workset))
     _set_scanner_proc(db, "idle", {"last_scan_at": now_iso(), "active": n_active})
     _resolve_rescan_commands(
-        db, rescan_ids, run_full=run_full, complete=complete, failed=failed, active=n_active
+        db, rescan_ids, run_full=run_full, complete=published, failed=failed, active=n_active
     )
     db.commit()
 

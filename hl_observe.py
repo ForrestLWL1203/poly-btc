@@ -8,7 +8,7 @@ hl/ (observer, paper, ws, rest, storage). Needs the venv (websockets).
 import argparse
 import asyncio
 
-from hl import config, observer, params, storage
+from hl import config, observer, params, selection, storage
 
 
 def main() -> int:
@@ -42,9 +42,20 @@ def main() -> int:
         addrs = merged[:n]
         seed = {a: seed.get(a, set()) for a in addrs}
         if not addrs:
-            print("no enabled watchlist targets yet — run the scanner first.")
-            return 1
-        print(f"observing {len(addrs)} targets (score>={min_score}, cap {n}): {', '.join(a[:8] for a in addrs)}")
+            published = selection.latest_published_generation(db)
+            if published is None:
+                print("no enabled watchlist targets yet — run the scanner first.")
+                return 1
+            held_n = sum(
+                db.execute(f"SELECT COUNT(DISTINCT addr) FROM {table} WHERE status='open'").fetchone()[0]
+                for table in ("copy_position", "shadow_position")
+            )
+            if not held_n:
+                print(f"selection {published} has zero enabled Core wallets; observer is idle.")
+                return 0
+            print(f"selection {published} has zero enabled Core wallets; managing {held_n} exit-only wallet(s).")
+        else:
+            print(f"observing {len(addrs)} targets (cap {n}): {', '.join(a[:8] for a in addrs)}")
         try:
             asyncio.run(observer.Observer(db, addrs, seed, top_n=n, min_score=min_score,
                                           add_frac=args.add_frac).run())

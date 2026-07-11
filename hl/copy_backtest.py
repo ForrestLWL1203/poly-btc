@@ -8,9 +8,11 @@ the target fill price plus our fee model; the rule decisions mirror the taker bo
 from __future__ import annotations
 
 from collections import Counter
+import math
 
 from . import config
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
+from .copy_data import normalize_copyable_fills
 from .copy_engine import OpenSizingParams, extract_master_leverage, plan_open_sizing, reduce_leaves_dust, stop_px
 from .fill_transition import classify_fill_transition
 from .util import f
@@ -148,9 +150,11 @@ class Backtest:
         self.min_coin_day_ntl_vlm = overrides.get("MIN_COIN_DAY_NTL_VLM", config.MIN_COIN_DAY_NTL_VLM)
         self.min_coin_oi_notional = overrides.get("MIN_COIN_OI_NOTIONAL", config.MIN_COIN_OI_NOTIONAL)
         self.market_ctx = market_ctx or {}
+        self.replay_cost_mult = max(1.0, f(overrides.get("REPLAY_COST_MULT", 1.0)))
         self.price_path_points = 0
         self.master_leverage_known = 0
         self.master_leverage_missing = 0
+        self.deploy_samples = []
 
     def open_sizing_params(self):
         return OpenSizingParams(
@@ -184,6 +188,15 @@ class Backtest:
     def available(self):
         locked = sum(p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0) for p in self.open.values())
         return self.balance - locked
+
+    def locked_margin(self):
+        return sum(
+            p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
+            for p in self.open.values()
+        )
+
+    def _sample_deploy(self, t=None):
+        self.deploy_samples.append((int(t or 0), self.locked_margin() / max(1.0, self.initial_balance)))
 
     def unrealized(self):
         total = 0.0
@@ -220,10 +233,14 @@ class Backtest:
         return None
 
     def run(self, fills, price_path=None):
+        fills = normalize_copyable_fills(
+            fills,
+            addr=None if self.addr == "portfolio" else self.addr,
+        )
         path_events = _price_events(price_path)
         self.price_path_points = len(path_events)
         if not path_events:
-            for x in sorted((fills or []), key=lambda r: r.get("time", 0)):
+            for x in fills:
                 self.process_fill(x)
             return self.result()
 
@@ -285,8 +302,13 @@ class Backtest:
         if transition == "add":
             if oid is not None and oid in ep["seen_oids"]:
                 return
-            ep["seen_oids"].add(oid)
-            self._apply_add(addr, coin, px, signed, pos1, oid)
+            # Do not consume an order id until an add was actually copied.  HL
+            # can match one order in many slices; the first tiny slice may miss
+            # the smart-add gap while a later slice of that same order reaches
+            # it.  Marking the oid before the decision permanently hid those
+            # later actionable slices.
+            if self._apply_add(addr, coin, px, signed, pos1, oid, t=x.get("time")) and oid is not None:
+                ep["seen_oids"].add(oid)
         else:
             self._apply_reduce(addr, coin, px, signed, pos1, closing=abs(pos1) < config.FLAT, t=x.get("time"))
 
@@ -348,7 +370,7 @@ class Backtest:
         notional = plan.notional
         lev = plan.leverage
         size = plan.size
-        fee = abs(size * px) * config.TAKER_FEE
+        fee = abs(size * px) * config.TAKER_FEE * self.replay_cost_mult
         self.balance -= fee
         self.fee_drag += fee
         is_buy = side == "long"
@@ -382,17 +404,25 @@ class Backtest:
             "exit_fees": 0.0,
             "gross_pnl": 0.0,
             "realized_net": -fee,
-            "seen_oids": {oid},
+            "seen_oids": ({oid} if oid is not None else set()),
+            "observed_add_oids": set(),
+            "missed_add_oids": set(),
             "reduce_anchor": None,
         }
         self.opened_n += 1
         self.copy_peak_concurrent = max(self.copy_peak_concurrent, len(self.open))
+        self._sample_deploy(t)
 
-    def _observe_add(self, ep):
-        ep["missed_adds"] += 1
-        self.missed_adds += 1
+    def _observe_add(self, ep, oid=None):
+        # Count one missed target add ORDER, not every exchange fill slice.
+        if oid is None or oid not in ep["missed_add_oids"]:
+            ep["missed_adds"] += 1
+            self.missed_adds += 1
+            if oid is not None:
+                ep["missed_add_oids"].add(oid)
+        return False
 
-    def _apply_add(self, addr, coin, px, signed, pos1, oid):
+    def _apply_add(self, addr, coin, px, signed, pos1, oid, t=None):
         ep = self.open[(addr, coin)]
         m_now = abs(pos1)
         if m_now > 0 and ep["master_open_px"]:
@@ -400,8 +430,11 @@ class Backtest:
             ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * px) / m_now
         add_notl = abs(signed) * px
         ep["target_add_notl"] += add_notl
-        ep["target_adds"] += 1
-        self.target_adds += 1
+        if oid is None or oid not in ep["observed_add_oids"]:
+            ep["target_adds"] += 1
+            self.target_adds += 1
+            if oid is not None:
+                ep["observed_add_oids"].add(oid)
 
         sigma = self.sigma(coin)
         tier = self.tier(sigma, coin)
@@ -424,26 +457,26 @@ class Backtest:
             elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_threshold:
                 pass
             else:
-                return self._observe_add(ep)
+                return self._observe_add(ep, oid)
             if ep["add_count"] >= self.add_max_hard:
-                return self._observe_add(ep)
+                return self._observe_add(ep, oid)
             ratio = add_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
             add_margin = max(0.0, min(ratio * ep["first_margin"],
                                       coin_room,
                                       self.risk_available()))
             if add_margin < self.min_open_margin_pct * risk_equity:
-                return self._observe_add(ep)
+                return self._observe_add(ep, oid)
         else:
             max_adds = self.tier_max_adds[tier]
             if ep["add_count"] >= max_adds:
-                return self._observe_add(ep)
+                return self._observe_add(ep, oid)
             add_margin = max(0.0, min(
                 ep["first_margin"] * self.add_frac,
                 coin_room,
                 self.risk_available(),
             ))
             if add_margin <= 0:
-                return self._observe_add(ep)
+                return self._observe_add(ep, oid)
 
         add_size = (add_margin * ep["leverage"] / px) if px else 0.0
         new_size = ep["rem_size"] + add_size
@@ -458,12 +491,21 @@ class Backtest:
         ep["followed_adds"] += 1
         ep["last_add_px"] = px
         ep["reduce_anchor"] = None
-        fee = abs(add_size * px) * config.TAKER_FEE
+        fee = abs(add_size * px) * config.TAKER_FEE * self.replay_cost_mult
         ep["entry_fees"] += fee
         ep["realized_net"] -= fee
         self.balance -= fee
         self.fee_drag += fee
         self.followed_adds += 1
+        # A later slice of a previously rejected order can make the order
+        # actionable.  In that case it is followed, not both missed and
+        # followed, at order granularity.
+        if oid is not None and oid in ep["missed_add_oids"]:
+            ep["missed_add_oids"].remove(oid)
+            ep["missed_adds"] = max(0, ep["missed_adds"] - 1)
+            self.missed_adds = max(0, self.missed_adds - 1)
+        self._sample_deploy(t)
+        return True
 
     def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed", t=None):
         key = (addr, coin)
@@ -490,7 +532,7 @@ class Backtest:
             status = "closed"
         close_size = ep["rem_size"] * reduce_frac
         gross = close_size * (px - ep["entry_px"]) * ep["sign"]
-        fee = abs(close_size * px) * config.TAKER_FEE
+        fee = abs(close_size * px) * config.TAKER_FEE * self.replay_cost_mult
         pnl = gross - fee
         ep["rem_size"] -= close_size
         ep["gross_pnl"] += gross
@@ -504,6 +546,7 @@ class Backtest:
             ep["status"] = status
             self.closed.append(ep)
             self.open.pop(key, None)
+        self._sample_deploy(t)
 
     def _mark_stops(self, coin, px, t):
         for (addr, c), ep in list(self.open.items()):
@@ -544,6 +587,53 @@ class Backtest:
         add_notl = sum(p["target_add_notl"] for p in self.closed) + sum(p["target_add_notl"] for p in self.open.values())
         capacity_skips = sum(self.skip_reasons[k] for k in ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small"))
         equity_pnl = self.balance - self.initial_balance + unreal
+        curve = []
+        equity = self.initial_balance
+        peak = equity
+        max_drawdown = 0.0
+        daily_pnl = {}
+        ordered_closed = sorted(self.closed, key=lambda p: int(p.get("closed_at") or 0))
+        for position in ordered_closed:
+            equity += f(position.get("realized_net"))
+            peak = max(peak, equity)
+            max_drawdown = max(max_drawdown, (peak - equity) / peak if peak > 0 else 0.0)
+            closed_at = int(position.get("closed_at") or 0)
+            curve.append({"time": closed_at, "equity": equity})
+            day = closed_at // 86400_000 if closed_at else 0
+            daily_pnl[day] = daily_pnl.get(day, 0.0) + f(position.get("realized_net"))
+        if unreal:
+            marked_equity = equity + unreal
+            peak = max(peak, marked_equity)
+            max_drawdown = max(max_drawdown, (peak - marked_equity) / peak if peak > 0 else 0.0)
+            curve.append({"time": max((int(p.get("closed_at") or 0) for p in ordered_closed), default=0),
+                          "equity": marked_equity})
+        daily_values = sorted(daily_pnl.values())
+        tail_n = max(1, int(math.ceil(len(daily_values) * 0.05))) if daily_values else 0
+        cvar95 = (sum(daily_values[:tail_n]) / tail_n) if tail_n else 0.0
+        deploy_values = [value for _, value in self.deploy_samples]
+        peak_deploy_pct = max(deploy_values, default=0.0)
+        avg_deploy_pct = (sum(deploy_values) / len(deploy_values)) if deploy_values else 0.0
+
+        def concentration(key):
+            buckets = {}
+            total_abs = 0.0
+            for position in self.closed:
+                value = f(position.get("realized_net"))
+                bucket = key(position)
+                buckets[bucket] = buckets.get(bucket, 0.0) + value
+                total_abs += abs(value)
+            return (max((abs(value) for value in buckets.values()), default=0.0) / total_abs) if total_abs else 0.0
+
+        leverage_coverage = (
+            self.master_leverage_known / (self.master_leverage_known + self.master_leverage_missing)
+            if (self.master_leverage_known + self.master_leverage_missing) else 1.0
+        )
+        price_path_coverage = 1.0 if self.price_path_points > 0 else 0.0
+        fallback_reasons = []
+        if not self.price_path_points:
+            fallback_reasons.append("missing_price_path")
+        if leverage_coverage < 1.0:
+            fallback_reasons.append("missing_master_leverage")
         return {
             "addr": self.addr,
             "closed_n": len(self.closed),
@@ -569,13 +659,28 @@ class Backtest:
             "copy_peak_concurrent": self.copy_peak_concurrent,
             "max_concurrent_fit": self.copy_peak_concurrent / self.target_peak_concurrent if self.target_peak_concurrent else 1.0,
             "capacity_open_fit": self.opened_n / (self.opened_n + capacity_skips) if (self.opened_n + capacity_skips) else 1.0,
+            "actionable_open_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
+            "execution_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
+            "equity_curve": curve,
+            "max_drawdown": max_drawdown,
+            "worst_day": min(daily_values, default=0.0),
+            "cvar95": cvar95,
+            "peak_deploy_pct": peak_deploy_pct,
+            "avg_deploy_pct": avg_deploy_pct,
+            "fee_slippage_drag": self.fee_drag,
+            "pnl_concentration": {
+                "wallet": concentration(lambda p: p.get("addr")),
+                "coin": concentration(lambda p: p.get("coin")),
+                "side": concentration(lambda p: p.get("side")),
+                "day": concentration(lambda p: int(p.get("closed_at") or 0) // 86400_000),
+            },
             "price_path_points": self.price_path_points,
+            "price_path_coverage": price_path_coverage,
             "master_leverage_known": self.master_leverage_known,
             "master_leverage_missing": self.master_leverage_missing,
-            "master_leverage_coverage": (
-                self.master_leverage_known / (self.master_leverage_known + self.master_leverage_missing)
-                if (self.master_leverage_known + self.master_leverage_missing) else 1.0
-            ),
+            "master_leverage_coverage": leverage_coverage,
+            "model_coverage": min(leverage_coverage, price_path_coverage),
+            "fallback_reasons": fallback_reasons,
             "skip_reasons": dict(self.skip_reasons),
             "positions": [summarize_position(p) for p in self.closed],
             "open_positions": [summarize_position(p) for p in self.open.values()],

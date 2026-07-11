@@ -76,39 +76,199 @@ def _is_new_followed(first_followed_at):
     return bool(ts and time.time() - ts <= NEW_WATCHLIST_WINDOW_SEC)
 
 
+def _published_selection_generation(db):
+    """Return the explicit selection generation, or None before the migration cut-over.
+
+    A published generation is authoritative even when it deliberately contains zero Core wallets.  The
+    existence check therefore lives on ``scan_generation`` rather than ``follow_selection``; otherwise an
+    intentionally empty Core set would incorrectly fall back to the legacy score line.
+    """
+    try:
+        row = q1(
+            db,
+            "SELECT generation FROM scan_generation "
+            "WHERE status='published' AND complete=1 AND is_current=1 "
+            "ORDER BY id DESC LIMIT 1",
+        )
+    except Exception:  # noqa: BLE001 - old read-only DBs may predate the migration
+        return None
+    return _col(row, "generation") if row else None
+
+
+def _ms_epoch(value):
+    try:
+        return float(value) / 1000.0 if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _ep_selected_wallets(db, generation, role, page, size, line_native):
+    """Serve one role from the immutable selection snapshot.
+
+    The page CTE is intentionally selected first so episode/copy-position aggregates only touch the visible
+    rows.  This preserves the endpoint's bounded-query behaviour for large registries.
+    """
+    total_row = q1(
+        db,
+        "SELECT COUNT(*) c FROM follow_selection fs "
+        "WHERE fs.generation=? AND fs.role=?",
+        (generation, role),
+    )
+    total = (_col(total_row, "c") or 0) if total_row else 0
+    cutoff7d = int((time.time() - 7 * 86400) * 1000)
+    rows = qall(
+        db,
+        "WITH page_selected AS ("
+        "  SELECT fs.addr,fs.role,fs.reason AS selection_reason,fs.utility,"
+        "         fs.data_status AS selection_data_status,fs.evidence_status AS selection_evidence_status,"
+        "         fs.generation,COALESCE(w.rank,999999) AS sort_rank "
+        "  FROM follow_selection fs "
+        "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+        "  LEFT JOIN watchlist w ON w.addr=fs.addr "
+        "  WHERE fs.generation=? AND fs.role=? "
+        "  ORDER BY sort_rank,fs.utility DESC,fs.addr LIMIT ? OFFSET ?"
+        "), ep7 AS ("
+        "  SELECT f.addr,COUNT(e.addr) AS closed_7d "
+        "  FROM page_selected f LEFT JOIN episode e ON e.addr=f.addr AND e.close_ms>=? GROUP BY f.addr"
+        "), ep_all AS ("
+        "  SELECT f.addr,COUNT(e.addr) AS episode_total "
+        "  FROM page_selected f LEFT JOIN episode e ON e.addr=f.addr GROUP BY f.addr"
+        "), copy_stats AS ("
+        "  SELECT f.addr,COUNT(cp.pos_id) AS follow_count,"
+        "         SUM(CASE WHEN cp.status!='open' THEN 1 ELSE 0 END) AS closed_n,"
+        "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net "
+        "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
+        ") "
+        "SELECT s.addr,s.role,s.selection_reason,s.utility,s.selection_data_status,"
+        "s.selection_evidence_status,s.generation,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,"
+        "w.worst_single_loss_pct,COALESCE(tc.enabled,1) AS enabled,p.score AS raw_score,p.worst_loss_pct,"
+        "fh.first_followed_at,p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,"
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,"
+        "p.copy_bt_14d_closed_n,p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,"
+        "p.sector_policy_json,p.data_status,p.evidence_status,p.profile_generation,p.evaluated_at,"
+        "p.last_copyable_open_ms,p.actionable_open_rate,p.capacity_fit,p.oos_net_pnl,p.oos_max_drawdown,"
+        "p.oos_cvar95,p.selection_marginal_utility,l.week_roi,l.mon_roi,"
+        "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
+        "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.closed_n,0) AS closed_n,"
+        "COALESCE(cs.fwd_net,0) AS fwd_net "
+        "FROM page_selected s LEFT JOIN watchlist w ON w.addr=s.addr "
+        "LEFT JOIN target_controls tc ON tc.addr=s.addr LEFT JOIN profile p ON p.addr=s.addr "
+        "LEFT JOIN follow_history fh ON fh.addr=s.addr LEFT JOIN leaderboard l ON l.addr=s.addr "
+        "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
+        "LEFT JOIN copy_stats cs ON cs.addr=s.addr ORDER BY s.sort_rank,s.utility DESC,s.addr",
+        (generation, role, size, page * size, cutoff7d),
+    )
+    out = []
+    for i, r in enumerate(rows):
+        worst = _col(r, "worst_single_loss_pct")
+        if worst is None:
+            worst = (_col(r, "worst_loss_pct") or 0.0) * 100
+        closed7d = _col(r, "closed_7d") or 0
+        if closed7d == 0 and (_col(r, "episode_total") or 0) == 0:
+            closed7d = _col(r, "copy_bt_7d_closed_n") or 0
+        out.append({
+            "followPos": page * size + i + 1,
+            "address": _col(r, "addr"),
+            "rank": _col(r, "rank"),
+            "role": _col(r, "role"),
+            "selectionReason": _col(r, "selection_reason"),
+            "selectionMarginalUtility": (
+                _col(r, "utility") if _col(r, "utility") is not None
+                else _col(r, "selection_marginal_utility")
+            ),
+            "selectionGeneration": _col(r, "generation"),
+            "marketType": _col(r, "market_type") or "crypto",
+            "score": score100(_col(r, "score") or 0.0),
+            "rawScore": score100(_col(r, "raw_score") or 0.0),
+            "scoreBreakdown": _score_breakdown(r),
+            "roiEqPct": recent_roi_pct(_col(r, "week_roi"), _col(r, "mon_roi")),
+            "winRatePct": (_col(r, "win_rate") or 0.0) * 100,
+            "worstSingleLossPct": worst,
+            "mainCoin": _col(r, "top_coin"),
+            "followCount": _col(r, "follow_count") or 0,
+            "enabled": bool(_col(r, "enabled", True)),
+            "closed7d": closed7d,
+            "closedN": _col(r, "closed_n") or 0,
+            "forwardNetPnl": _col(r, "fwd_net") or 0,
+            "firstFollowedAt": iso_epoch(_col(r, "first_followed_at")),
+            "isNew": _is_new_followed(_col(r, "first_followed_at")),
+            "dataStatus": _col(r, "selection_data_status") or _col(r, "data_status"),
+            "evidenceStatus": _col(r, "selection_evidence_status") or _col(r, "evidence_status"),
+            "profileGeneration": _col(r, "profile_generation"),
+            "evaluatedAt": iso_epoch(_col(r, "evaluated_at")),
+            "lastActionableOpenAt": _ms_epoch(_col(r, "last_copyable_open_ms")),
+            "actionableOpenRate": _col(r, "actionable_open_rate"),
+            "capacityFit": _col(r, "capacity_fit"),
+            "oosNetPnl": _col(r, "oos_net_pnl"),
+            "oosMaxDrawdown": _col(r, "oos_max_drawdown"),
+            "oosCvar95": _col(r, "oos_cvar95"),
+        })
+    tab = "followed" if role == "core" else role
+    return {
+        "selectionMode": True,
+        "selectionGeneration": generation,
+        "followLine": score100(line_native),
+        "tab": tab,
+        "total": total,
+        "followed": total if role == "core" else None,
+        "page": page,
+        "size": size,
+        "wallets": out,
+    }
+
+
 def ep_wallets(db, qs=None):
     qs = qs or {}
     line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     page = max(0, int((qs.get("page", ["0"]))[0]))
     size = min(100, max(1, int((qs.get("size", ["30"]))[0])))
 
-    if (qs.get("tab", ["followed"]))[0] == "dropped":
+    requested_tab = (qs.get("tab", ["followed"]))[0]
+    selection_generation = _published_selection_generation(db)
+    if selection_generation and requested_tab in {"followed", "core", "challenger", "exit_only"}:
+        role = "core" if requested_tab in {"followed", "core"} else requested_tab
+        return _ep_selected_wallets(db, selection_generation, role, page, size, line_native)
+
+    if requested_tab == "dropped":
         total_row = q1(db,
             "SELECT COUNT(*) c "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
-            "WHERE NOT (w.addr IS NOT NULL AND w.score >= ?)", (line_native,))
+            "WHERE (? IS NOT NULL AND NOT EXISTS ("
+            "  SELECT 1 FROM follow_selection fs WHERE fs.generation=? AND fs.addr=fh.addr "
+            "  AND fs.role='core' AND fs.enabled=1"
+            ")) OR (? IS NULL AND NOT (w.addr IS NOT NULL AND w.score >= ?))",
+            (selection_generation, selection_generation, selection_generation, line_native))
         total = (total_row["c"] if total_row else 0) or 0
         rows = qall(db,
+            "WITH drop_events AS ("
+            "  SELECT fh0.addr,pa.stamp,pa.source,pa.stage,pa.created_at,"
+            "         ROW_NUMBER() OVER (PARTITION BY fh0.addr ORDER BY pa.stamp,pa.id) AS rn "
+            "  FROM follow_history fh0 JOIN pipeline_audit pa ON pa.addr=fh0.addr "
+            "  WHERE pa.stamp>fh0.last_followed_at AND ("
+            "       (pa.stage='profile' AND pa.status IN ('retired','rejected')) "
+            "    OR (pa.stage='watchlist' AND pa.status IN ('below_line','disabled')) "
+            "    OR (pa.stage='selection' AND pa.status IN ('challenger','exit_only')))"
+            ") "
             "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,"
-            "COALESCE(da.drop_at,p.last_refreshed,fh.last_followed_at) AS drop_at,"
+            "COALESCE(de.stamp,p.last_refreshed,fh.last_followed_at) AS drop_at,"
+            "de.source AS drop_source,de.stage AS drop_stage,de.created_at AS drop_decided_at,"
             "COALESCE(w.score,p.score) AS follow_score,p.score AS raw_score,p.status,p.reason,"
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
             "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
             "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
             "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+            "fs.role AS selection_role,fs.reason AS selection_reason,"
             "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
             "LEFT JOIN watchlist w ON w.addr=fh.addr "
             "LEFT JOIN leaderboard l ON l.addr=fh.addr "
-            "LEFT JOIN ("
-            "  SELECT addr,MAX(created_at) AS drop_at FROM pipeline_audit "
-            "  WHERE (stage='profile' AND status IN ('retired','rejected')) "
-            "     OR (stage='watchlist' AND status IN ('below_line','disabled')) "
-            "  GROUP BY addr"
-            ") da ON da.addr=fh.addr "
-            "WHERE NOT (w.addr IS NOT NULL AND w.score >= ?) "
-            "ORDER BY drop_at DESC LIMIT ? OFFSET ?", (line_native, size, page * size))
+            "LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=fh.addr "
+            "LEFT JOIN drop_events de ON de.addr=fh.addr AND de.rn=1 "
+            "WHERE (? IS NOT NULL AND NOT COALESCE(fs.role='core' AND fs.enabled=1,0)) "
+            "OR (? IS NULL AND NOT (w.addr IS NOT NULL AND w.score >= ?)) "
+            "ORDER BY drop_at DESC LIMIT ? OFFSET ?",
+            (selection_generation, selection_generation, selection_generation, line_native, size, page * size))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
             "score": score100(r["follow_score"] or 0.0), "rawScore": score100(r["raw_score"] or 0.0),
@@ -116,7 +276,11 @@ def ep_wallets(db, qs=None):
             "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
             "lastFollowedAt": iso_epoch(r["last_followed_at"]),
             "dropAt": iso_epoch(r["drop_at"]),
-            "dropReason": ("掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
+            "dropSource": r["drop_source"],
+            "dropStage": r["drop_stage"],
+            "dropDecidedAt": iso_epoch(r["drop_decided_at"]),
+            "dropReason": (r["selection_reason"] or "退回挑战池" if r["selection_role"] in {"challenger", "exit_only"}
+                else "掉出评分线" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
                 "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
                 "bot_frequency": "高频", "hft_uncopyable": "高频", "spot_dominant": "现货为主"}.get(r["reason"], r["reason"] or "淘汰")),
             "winRatePct": (r["win_rate"] or 0.0) * 100,
