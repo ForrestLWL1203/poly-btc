@@ -1104,9 +1104,63 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
+    follow_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
+    if getattr(config, "CORE_FROM_ACTIVE_SCORE_LINE", True):
+        # Profile qualification is the sole quality gate.  Selection controls only how many already-good
+        # Active wallets are followed, using the operator's score line; it must not reintroduce observation,
+        # generation-confirmation or portfolio-marginal gates that contradict the Active contract.
+        rows = []
+        for row in profiles:
+            addr = (row["addr"] or "").lower()
+            enabled = controls.get(addr, True)
+            refreshed_now = row.get("profile_generation") == generation_id
+            data_status = row.get("data_status") or "valid"
+            selection_data_status = data_status if refreshed_now or data_status == "deferred_data_error" else "stale"
+            active = row.get("status") in {"active", "qualified"}
+            above_line = f(row.get("follow_score")) >= follow_line
+            previous_role = previous_roles.get(addr) or registry.get(addr, {}).get("role")
+            if data_status == "deferred_data_error" and previous_role == selection.CORE and enabled:
+                role, reason = selection.CORE, "deferred_data_error"
+            elif active and enabled and above_line:
+                role, reason = selection.CORE, "above_follow_line"
+            elif addr in held:
+                role, reason = selection.EXIT_ONLY, "exit_only_open_position"
+            elif active:
+                role, reason = selection.CHALLENGER, "below_follow_line" if enabled else "operator_disabled"
+            else:
+                continue
+            rows.append(selection.SelectionRow(
+                addr=addr,
+                role=role,
+                enabled=enabled,
+                reason=reason,
+                utility=f(row.get("follow_score")),
+                data_status=selection_data_status,
+                evidence_status=row.get("evidence_status") or "",
+                model_version="selection-score-line-v1",
+                policy_version=copy_policy.version,
+            ))
+            lifecycle_state = role if role in {
+                selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY
+            } else "qualified"
+            upsert_wallet_registry(
+                db,
+                addr,
+                generation=generation_id,
+                seen_at=stamp,
+                state=lifecycle_state,
+                role=role,
+                data_status=selection_data_status,
+                reason=reason,
+                last_actionable_open_ms=row.get("last_copyable_open_ms"),
+            )
+            db.execute(
+                "UPDATE profile SET selection_marginal_utility=NULL WHERE addr=?",
+                (addr,),
+            )
+        return rows, None
     evidences = []
     row_by_addr = {}
-    follow_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     for row in profiles:
         addr = (row["addr"] or "").lower()
         row_by_addr[addr] = row

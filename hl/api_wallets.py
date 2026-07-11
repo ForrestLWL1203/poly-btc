@@ -52,6 +52,8 @@ def _selection_reason_text(row, *, now_ms=None):
         "entry_observation_pending": "等待观察期完成",
         "deferred_data_error": "本轮数据异常，暂不跟随",
         "below_follow_line": "评分未达到跟单线",
+        "operator_disabled": "已被手动停用",
+        "exit_only_open_position": "仅管理已有持仓",
         "actionable_open_stale": "近期没有可跟随的新开仓",
         "soft_bad_pending_confirmation": "近期质量下降，等待复核",
         "soft_change_budget": "等待下一轮名单调整",

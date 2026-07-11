@@ -306,6 +306,34 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertIsNone(marginal)
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
 
+    def test_active_wallet_above_line_becomes_core_without_wait_reasons(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.95,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 6,
+                "copy_expected_return": 0.08, "copy_return_lcb": 0.02,
+                "copy_positive_probability": 0.85, "copy_evidence_days": 10,
+                "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
+                "copy_risk_score": 0.9, "execution_score": 0.9,
+                "actionable_open_rate": 0.9, "capacity_fit": 0.9,
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.commit()
+
+            rows, marginal = scanner._build_explicit_selection(db, "g1", "2026-01-03", 1000)
+
+            self.assertIsNone(marginal)
+            self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
+                ("0xaaa", "core", "above_follow_line"),
+            ])
+
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
