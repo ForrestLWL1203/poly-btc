@@ -285,15 +285,16 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 db.execute(
                     "INSERT INTO follow_selection "
                     "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,selected_at) "
-                    "VALUES ('g1',?,?,1,'positive_marginal',?,'valid','qualified','2026-01-01T01:00:00Z')",
-                    (addr, role, utility),
+                    "VALUES ('g1',?,?,1,?,?,'valid','qualified','2026-01-01T01:00:00Z')",
+                    (addr, role, "core_entry" if role == "core" else "challenger_evidence", utility),
                 )
                 db.execute(
                     "INSERT INTO profile "
                     "(addr,status,score,data_status,evidence_status,profile_generation,evaluated_at,"
-                    "last_copyable_open_ms,actionable_open_rate,capacity_fit,oos_net_pnl,oos_max_drawdown,oos_cvar95) "
+                    "last_copyable_open_ms,open_events_7d,actionable_open_events_7d,actionable_open_rate,capacity_fit,"
+                    "copy_bt_net_pnl,copy_bt_closed_n,copy_bt_7d_closed_n,oos_net_pnl,oos_max_drawdown,oos_cvar95) "
                     "VALUES (?,'active',0.8,'valid','qualified','g1','2026-01-01T00:30:00Z',"
-                    "1767225600000,0.8,0.9,42,0.03,-5)",
+                    "1767225600000,6,5,0.8,0.9,42,9,4,42,0.03,-5)",
                     (addr,),
                 )
                 db.execute(
@@ -310,8 +311,12 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(core["wallets"][0]["role"], "core")
         self.assertEqual(core["wallets"][0]["profileGeneration"], "g1")
         self.assertEqual(core["wallets"][0]["actionableOpenRate"], 0.8)
+        self.assertEqual(core["wallets"][0]["openEvents7d"], 5)
+        self.assertEqual(core["wallets"][0]["copyBacktestNetPnl"], 42)
+        self.assertEqual(core["wallets"][0]["copyBacktestClosedN"], 9)
         self.assertEqual(challenger["wallets"][0]["role"], "challenger")
         self.assertEqual(challenger["wallets"][0]["selectionMarginalUtility"], 0.07)
+        self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "近7日平仓样本不足（4/5）")
 
     def test_published_zero_core_selection_does_not_fall_back_to_score_line(self):
         with tempfile.TemporaryDirectory() as td:

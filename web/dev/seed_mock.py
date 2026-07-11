@@ -60,15 +60,17 @@ for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enum
                "VALUES (?,?,?,?,1,?,?)", (addr, name, acct, roi, now_iso(), GEN))
     db.execute("INSERT INTO profile (addr,status,reason,score,n_trades,win_rate,roi_equity,acct_value,"
                "top_coin,market_type,worst_loss_pct,median_adds_per_ep,profile_generation,evaluated_at,"
-               "data_status,evidence_status,last_copyable_open_ms,actionable_open_rate,capacity_fit,"
+               "data_status,evidence_status,last_copyable_open_ms,open_events_7d,actionable_open_events_7d,"
+               "actionable_open_rate,capacity_fit,"
                "oos_net_pnl,oos_max_drawdown,oos_cvar95,selection_marginal_utility,"
                "copy_bt_net_pnl,copy_bt_closed_n,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
                "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,copy_expected_return,copy_return_lcb,"
                "copy_return_volatility,copy_positive_probability,copy_evidence_days,"
                "copy_recent_return_14d,copy_recent_return_7d,copy_risk_score,execution_score,open_probability_48h) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (addr, "active", "ok", score, 40, wr, roi, acct, coin, mt, worst, madds, GEN, ago(300),
                 "valid", "qualified" if rank <= 4 else "thin", now_ms() - rank * 5 * 3600_000,
+                19 - rank * 2, 19 - rank * 2,
                 max(.62, .92 - rank * .04), max(.75, .96 - rank * .025),
                 1450 - rank * 170, .025 + rank * .004, -120 - rank * 18, .18 - rank * .025,
                 1800 - rank * 150, 24 - rank, 900 - rank * 70, 12 - rank, 420 - rank * 35, 7 - min(rank, 2),

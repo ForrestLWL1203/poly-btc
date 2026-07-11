@@ -7,6 +7,7 @@ from . import config
 from . import follow_score
 from . import params as params_mod
 from .api_common import iso_epoch, q1, qall, recent_roi_pct, score100
+from .copy_policy import load_copy_policy
 
 NEW_WATCHLIST_WINDOW_SEC = 12 * 3600
 
@@ -28,6 +29,38 @@ def _json_obj(raw):
     except (TypeError, ValueError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _selection_reason_text(row, *, now_ms=None):
+    """Translate internal selection states into one operator-facing explanation."""
+    reason = str(_col(row, "selection_reason") or "").strip().lower()
+    labels = {
+        "portfolio_no_positive_marginal": "加入后未改善整体收益/风险",
+        "deferred_data_error": "本轮数据异常，暂不跟随",
+        "below_follow_line": "评分未达到跟单线",
+        "actionable_open_stale": "近期没有可跟随的新开仓",
+        "soft_bad_pending_confirmation": "近期质量下降，等待复核",
+        "soft_change_budget": "等待下一轮名单调整",
+    }
+    if reason in labels:
+        return labels[reason]
+    if reason != "challenger_evidence":
+        return "未满足实跟条件" if reason else None
+
+    policy = load_copy_policy()
+    closed_7d = int(_col(row, "copy_bt_7d_closed_n") or 0)
+    if closed_7d < policy.min_closed_7d:
+        return f"近7日平仓样本不足（{closed_7d}/{policy.min_closed_7d}）"
+    last_open_ms = int(_col(row, "last_copyable_open_ms") or 0)
+    if not last_open_ms:
+        return "近期没有可跟随的新开仓"
+    now_ms = int(now_ms or time.time() * 1000)
+    if now_ms - last_open_ms > policy.entry_max_open_age_h * 3_600_000:
+        return f"最近{int(policy.entry_max_open_age_h)}小时没有新开仓"
+    positive_probability = float(_col(row, "copy_positive_probability") or 0.0)
+    if positive_probability < policy.entry_positive_probability:
+        return "历史盈利稳定性不足"
+    return "实跟条件仍待确认"
 
 
 def _sector_policy(row):
@@ -164,7 +197,8 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
         "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,"
         "p.copy_bt_14d_closed_n,p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,"
         "p.sector_policy_json,p.data_status,p.evidence_status,p.profile_generation,p.evaluated_at,"
-        "p.last_copyable_open_ms,p.actionable_open_rate,p.capacity_fit,p.oos_net_pnl,p.oos_max_drawdown,"
+        "p.last_copyable_open_ms,p.open_events_7d,p.actionable_open_events_7d,"
+        "p.actionable_open_rate,p.capacity_fit,p.oos_net_pnl,p.oos_max_drawdown,"
         "p.oos_cvar95,p.selection_marginal_utility,p.copy_expected_return,p.copy_return_lcb,"
         "p.copy_return_volatility,p.copy_positive_probability,p.copy_evidence_days,"
         "p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,"
@@ -180,6 +214,7 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
         (generation, role, size, page * size, cutoff7d),
     )
     out = []
+    request_now_ms = int(time.time() * 1000)
     for i, r in enumerate(rows):
         worst = _col(r, "worst_single_loss_pct")
         if worst is None:
@@ -193,6 +228,7 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
             "rank": _col(r, "rank"),
             "role": _col(r, "role"),
             "selectionReason": _col(r, "selection_reason"),
+            "selectionReasonText": _selection_reason_text(r, now_ms=request_now_ms),
             "selectionMarginalUtility": (
                 _col(r, "utility") if _col(r, "utility") is not None
                 else _col(r, "selection_marginal_utility")
@@ -209,6 +245,14 @@ def _ep_selected_wallets(db, generation, role, page, size, line_native):
             "followCount": _col(r, "follow_count") or 0,
             "enabled": bool(_col(r, "enabled", True)),
             "closed7d": closed7d,
+            "openEvents7d": (
+                _col(r, "actionable_open_events_7d")
+                if _col(r, "actionable_open_events_7d") is not None
+                else (_col(r, "open_events_7d") or 0)
+            ),
+            "copyBacktestNetPnl": _col(r, "copy_bt_net_pnl"),
+            "copyBacktestClosedN": _col(r, "copy_bt_closed_n") or 0,
+            "copyBacktest7dClosedN": _col(r, "copy_bt_7d_closed_n") or 0,
             "closedN": _col(r, "closed_n") or 0,
             "forwardNetPnl": _col(r, "fwd_net") or 0,
             "firstFollowedAt": iso_epoch(_col(r, "first_followed_at")),

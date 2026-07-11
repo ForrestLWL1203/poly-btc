@@ -280,6 +280,20 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function WalletDrawer(", wallets)
         self.assertNotIn("/api/pipeline-audit", wallets)
 
+    def test_explicit_wallet_list_uses_operator_facing_columns(self):
+        wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
+
+        self.assertIn("近7日 开 / 平", wallets)
+        self.assertIn("30日回放", wallets)
+        self.assertIn("未跟原因", wallets)
+        self.assertIn("selectionReasonText", wallets)
+        self.assertNotIn("角色 / 市场", wallets)
+        self.assertNotIn("捕获 / 容量", wallets)
+        self.assertNotIn("OOS净利", wallets)
+        self.assertNotIn("组合边际", wallets)
+        self.assertNotIn("Forward盈亏", wallets)
+        self.assertNotIn("Selection ${data.selectionGeneration", wallets)
+
     def test_wallet_drawer_has_decision_sections(self):
         drawer = (ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx").read_text(encoding="utf-8")
 
