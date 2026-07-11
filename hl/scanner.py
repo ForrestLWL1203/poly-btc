@@ -1028,7 +1028,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (previous_generation,)
             ).fetchall()
         }
-    else:
+    elif not force_cold_bootstrap:
         line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
         previous_roles = {
             (addr or "").lower(): selection.CORE
@@ -1447,7 +1447,7 @@ def _launch_async_tuner(db, generation_id, stamp):
         return {"status": "error", "reason": "tuner_launch_failed", "error": str(exc)[:200]}
 
 
-def repair_published_selection(db, generation_id=None, stamp=None):
+def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False):
     """Repair a provably broken empty selection from the current complete generation.
 
     This is intentionally narrow: it never fetches network data, never rewrites
@@ -1466,7 +1466,7 @@ def repair_published_selection(db, generation_id=None, stamp=None):
     if not meta or not int(meta[0] or 0) or not int(meta[1] or 0):
         raise RuntimeError("selection_repair_requires_complete_generation")
     existing_core = selection.published_core_addrs(db) or []
-    if existing_core:
+    if existing_core and not replace_existing:
         return {"status": "skipped", "reason": "core_already_present", "core": len(existing_core)}
     stale_active = db.execute(
         "SELECT COUNT(*) FROM profile WHERE status='active' AND COALESCE(profile_generation,'')<>?",

@@ -264,6 +264,7 @@ def main() -> int:
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
     rs.add_argument("--generation")
     rs.add_argument("--stamp")
+    rs.add_argument("--replace-existing", action="store_true")
 
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
@@ -301,7 +302,9 @@ def main() -> int:
         result = scanner.tune_published_generation(db, args.generation, stamp=args.stamp)
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "repair-selection":
-        result = scanner.repair_published_selection(db, args.generation, stamp=args.stamp)
+        result = scanner.repair_published_selection(
+            db, args.generation, stamp=args.stamp, replace_existing=args.replace_existing,
+        )
         print(json.dumps(result, sort_keys=True, default=str))
     db.close()
     return 0

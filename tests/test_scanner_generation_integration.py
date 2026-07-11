@@ -243,6 +243,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM commands WHERE type='reload_params' AND status='pending'"
             ).fetchone()[0], 1)
             build.assert_called_once()
+            self.assertTrue(build.call_args.kwargs["force_cold_bootstrap"])
             launch.assert_called_once()
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
