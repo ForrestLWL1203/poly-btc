@@ -246,6 +246,42 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(build.call_args.kwargs["force_cold_bootstrap"])
             launch.assert_called_once()
 
+    def test_forced_cold_bootstrap_ignores_registry_core_role(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at,consecutive_qualified) "
+                "VALUES ('0xaaa','core','core','old','old','old',9)"
+            )
+            db.commit()
+
+            def decide(evidences, _policy):
+                evidence = list(evidences)
+                self.assertEqual(evidence[0].current_role, "challenger")
+                self.assertEqual(evidence[0].consecutive_complete_good, 0)
+                return [scanner.selection.LifecycleDecision(
+                    "0xaaa", "challenger", "challenger", "challenger_evidence",
+                )]
+
+            with patch.object(scanner.selection, "decide_lifecycles", side_effect=decide):
+                rows, marginal = scanner._build_explicit_selection(
+                    db, "g1", "2026-01-03", 1000, force_cold_bootstrap=True,
+                )
+
+            self.assertIsNone(marginal)
+            self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
+
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

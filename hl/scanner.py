@@ -1089,7 +1089,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     for row in profiles:
         addr = (row["addr"] or "").lower()
         row_by_addr[addr] = row
-        prior_reg = registry.get(addr, {})
+        prior_reg = {} if force_cold_bootstrap else registry.get(addr, {})
         previous_role = previous_roles.get(addr) or prior_reg.get("role") or selection.CHALLENGER
         data_status = row.get("data_status") or "valid"
         refreshed_now = row.get("profile_generation") == generation_id
