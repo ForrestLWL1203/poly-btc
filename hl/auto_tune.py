@@ -749,6 +749,28 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
     return windows
 
 
+def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
+                              *, window_fills: dict[int, list[dict]], days: int = 30,
+                              market_ctx: dict | None = None) -> dict:
+    """Replay one portfolio/window and immediately discard heavy position/equity details."""
+    days = int(days)
+    fills = list((window_fills or {}).get(days) or [])
+    warm_result = run_backtest(
+        "portfolio",
+        fills,
+        sigmas=sigmas,
+        overrides=overrides,
+        market_ctx=_load_market_ctx(db) if market_ctx is None else market_ctx,
+    )
+    result = slice_backtest_result(
+        warm_result,
+        now_ms - days * 86_400_000,
+        window_days=days,
+    )
+    result["fills"] = len(fills)
+    return _compact_backtest(result)
+
+
 def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                             sigmas: dict | None = None, now_ms: int | None = None,
                             window_fills: dict[int, list[dict]] | None = None) -> dict:

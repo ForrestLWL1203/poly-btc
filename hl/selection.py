@@ -5,6 +5,7 @@ published generation may intentionally contain zero ``core`` wallets; callers
 must distinguish that from a database which has never published a selection.
 """
 from dataclasses import dataclass, replace
+import time
 from typing import Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 from .util import f, now_iso
@@ -401,6 +402,202 @@ class MarginalSelectionResult:
     added: Tuple[str, ...] = ()
     removed: Tuple[str, ...] = ()
     evaluated: int = 0
+    search_meta: Optional[Mapping[str, object]] = None
+
+
+class SmartCoreSearchTimeout(RuntimeError):
+    """Raised before publication when the bounded Core search exhausts its time budget."""
+
+
+def _portfolio_net(metrics: PortfolioMetrics) -> float:
+    return f(metrics.net_pnl if metrics.net_pnl is not None else metrics.net_lcb)
+
+
+def _smart_rank(item) -> tuple:
+    addrs, metrics = item
+    return (
+        _portfolio_net(metrics),
+        f(metrics.risk_adjusted_utility),
+        -f(metrics.drawdown_dollars),
+        f(metrics.capacity_fit),
+        f(metrics.actionable_open_rate),
+        tuple(addrs),
+    )
+
+
+def search_smart_core(candidates: Sequence[str],
+                      evaluator: Callable[[Tuple[str, ...]], PortfolioMetrics],
+                      constraints: SelectionConstraints = SelectionConstraints(),
+                      *, seed_target: int = 10, beam_width: int = 3,
+                      swap_passes: int = 1, max_replace_out: int = 2,
+                      time_budget_s: Optional[float] = None) -> MarginalSelectionResult:
+    """Find a compact Core by streaming shared-account replay results.
+
+    Score has already done its job before this function: every input wallet is quality-qualified.  Membership
+    is determined by portfolio economics under one neutral parameter surface.  The search keeps only a tiny
+    beam of address tuples plus compact metrics, grows toward ``seed_target``, then continues one wallet at a
+    time until the best next level no longer raises net profit.  Local one-for-one and bounded one-for-two
+    checks reduce greedy path dependence without enumerating every subset.
+    """
+    started = time.monotonic()
+    deadline = (started + max(0.0, float(time_budget_s))) if time_budget_s else None
+    ordered = tuple(dict.fromkeys((addr or "").lower() for addr in candidates if addr))
+    ordered = ordered[:max(0, int(constraints.max_targets))]
+    width = max(1, int(beam_width))
+    target = min(len(ordered), max(0, int(seed_target)))
+    cache = {}
+
+    def check_budget():
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SmartCoreSearchTimeout("smart_core_search_time_budget")
+
+    def evaluate(addrs):
+        check_budget()
+        key = tuple(sorted(addrs))
+        if key not in cache:
+            metrics = evaluator(key)
+            if not isinstance(metrics, PortfolioMetrics):
+                raise TypeError("portfolio evaluator must return PortfolioMetrics")
+            cache[key] = metrics
+        return cache[key]
+
+    def feasible(metrics):
+        return (
+            _portfolio_net(metrics) > 0
+            and f(metrics.actionable_open_rate) >= f(constraints.min_actionable_open_rate)
+            and f(metrics.capacity_fit) >= f(constraints.min_capacity_fit)
+        )
+
+    def top(states):
+        dedup = {}
+        for addrs, metrics in states:
+            prior = dedup.get(addrs)
+            if prior is None or _smart_rank((addrs, metrics)) > _smart_rank((addrs, prior)):
+                dedup[addrs] = metrics
+        return sorted(dedup.items(), key=_smart_rank, reverse=True)[:width]
+
+    baseline = evaluate(())
+    beam = [((), baseline)]
+    levels = []
+    stop_reason = "candidate_pool_exhausted"
+
+    # Build the small starting portfolio.  ``seed_target`` is a search target, never a quota: if no wallet
+    # improves the previous level, the production Core may contain fewer wallets.
+    while beam and len(beam[0][0]) < target:
+        previous_best = max(_portfolio_net(metrics) for _, metrics in beam)
+        expansions = []
+        for addrs, parent in beam:
+            parent_net = _portfolio_net(parent)
+            selected = set(addrs)
+            for addr in ordered:
+                if addr in selected:
+                    continue
+                trial_addrs = tuple(sorted(addrs + (addr,)))
+                trial = evaluate(trial_addrs)
+                if feasible(trial) and _portfolio_net(trial) > parent_net:
+                    expansions.append((trial_addrs, trial))
+        next_beam = top(expansions)
+        if not next_beam or _portfolio_net(next_beam[0][1]) <= previous_best:
+            stop_reason = "no_positive_seed_marginal"
+            break
+        beam = next_beam
+        levels.append({
+            "size": len(beam[0][0]), "bestNet": _portfolio_net(beam[0][1]),
+            "beam": len(beam),
+        })
+
+    def polish_one_for_one(states):
+        current = top(states)
+        for _ in range(max(0, int(swap_passes))):
+            trials = list(current)
+            improved = False
+            for addrs, parent in current:
+                parent_net = _portfolio_net(parent)
+                selected = set(addrs)
+                outside = [addr for addr in ordered if addr not in selected]
+                for outgoing in addrs:
+                    for incoming in outside:
+                        trial_addrs = tuple(sorted((selected - {outgoing}) | {incoming}))
+                        trial = evaluate(trial_addrs)
+                        if feasible(trial) and _portfolio_net(trial) > parent_net:
+                            trials.append((trial_addrs, trial))
+                            improved = True
+            next_states = top(trials)
+            if not improved or _portfolio_net(next_states[0][1]) <= _portfolio_net(current[0][1]):
+                break
+            current = next_states
+        return current
+
+    seed_complete = bool(beam and len(beam[0][0]) >= target)
+    if beam and beam[0][0]:
+        beam = polish_one_for_one(beam)
+
+    # Continue expanding beyond the seed until the best attainable next level stops adding dollars.
+    while seed_complete and beam and len(beam[0][0]) < len(ordered):
+        previous_best = _portfolio_net(beam[0][1])
+        expansions = []
+        for addrs, parent in beam:
+            parent_net = _portfolio_net(parent)
+            selected = set(addrs)
+            for addr in ordered:
+                if addr in selected:
+                    continue
+                trial_addrs = tuple(sorted(addrs + (addr,)))
+                trial = evaluate(trial_addrs)
+                if feasible(trial) and _portfolio_net(trial) > parent_net:
+                    expansions.append((trial_addrs, trial))
+        next_beam = top(expansions)
+        if not next_beam or _portfolio_net(next_beam[0][1]) <= previous_best:
+            stop_reason = "no_positive_expansion_marginal"
+            break
+        beam = next_beam
+        levels.append({
+            "size": len(beam[0][0]), "bestNet": _portfolio_net(beam[0][1]),
+            "beam": len(beam),
+        })
+
+    if beam and beam[0][0]:
+        beam = polish_one_for_one(beam)
+
+    # A bounded one-for-two check may deliberately reduce Core count.  Only the six wallets with the
+    # smallest leave-one-out contribution participate, keeping daily runtime predictable.
+    if beam and max_replace_out >= 2 and len(beam[0][0]) >= 2:
+        finalists = list(beam)
+        for addrs, parent in beam:
+            selected = set(addrs)
+            outside = [addr for addr in ordered if addr not in selected]
+            removal_rank = []
+            for outgoing in addrs:
+                without = tuple(sorted(selected - {outgoing}))
+                removal_rank.append((_portfolio_net(parent) - _portfolio_net(evaluate(without)), outgoing))
+            weak = [addr for _, addr in sorted(removal_rank)[:6]]
+            for i, first in enumerate(weak):
+                for second in weak[i + 1:]:
+                    for incoming in outside:
+                        trial_addrs = tuple(sorted((selected - {first, second}) | {incoming}))
+                        trial = evaluate(trial_addrs)
+                        if feasible(trial) and _portfolio_net(trial) > _portfolio_net(parent):
+                            finalists.append((trial_addrs, trial))
+        beam = top(finalists)
+
+    selected, metrics = beam[0] if beam else ((), baseline)
+    duration = time.monotonic() - started
+    return MarginalSelectionResult(
+        selected=selected,
+        baseline=baseline,
+        metrics=metrics,
+        action="smart_search" if selected else "keep_empty",
+        added=selected,
+        evaluated=len(cache),
+        search_meta={
+            "seedTarget": target,
+            "beamWidth": width,
+            "selectedCount": len(selected),
+            "stopReason": stop_reason,
+            "levels": tuple(levels),
+            "durationSec": round(duration, 3),
+        },
+    )
 
 
 def _portfolio_passes(base: PortfolioMetrics, trial: PortfolioMetrics,

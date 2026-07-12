@@ -1060,16 +1060,48 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 follow = params.load_follow(db)
                 if "SMART_ADD" in follow:
                     follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+                neutral_tune, _ = auto_tune.resolve_tune_baseline(
+                    db, {key: f(follow[key]) for key in auto_tune.TUNE_KEYS},
+                )
+                neutral_add, _ = auto_tune.resolve_add_baseline(
+                    db, {key: f(follow[key]) for key in auto_tune.ADD_TUNE_KEYS},
+                )
+                neutral_follow = {**follow, **neutral_tune, **neutral_add}
+                if "SMART_ADD" in neutral_follow:
+                    neutral_follow["ADD_STRATEGY"] = (
+                        "smart" if neutral_follow["SMART_ADD"] else "hardcap"
+                    )
                 sigmas = auto_tune._load_sigmas(db)
+                market_ctx = auto_tune._load_market_ctx(db)
+                eval_cache = {}
 
                 def evaluate(addrs):
-                    filtered = auto_tune._filter_window_fills_by_addr(window_fills, addrs)
-                    windows = auto_tune._candidate_windows(
-                        db, list(addrs), sigmas, follow, now_ms, window_fills=filtered,
+                    key = tuple(sorted(addrs))
+                    if key in eval_cache:
+                        return eval_cache[key]
+                    allowed = set(key)
+                    # Core search ranks on the primary 30-day window only.  Avoid rebuilding unused 14/7
+                    # lists for every beam candidate; finalists receive the normal multi-window tuner later.
+                    filtered = {
+                        30: [
+                            fill for fill in (window_fills.get(30) or [])
+                            if (fill.get("user") or "").lower() in allowed
+                        ]
+                    }
+                    primary = auto_tune.evaluate_portfolio_window(
+                        db,
+                        list(key),
+                        sigmas,
+                        neutral_follow,
+                        now_ms,
+                        window_fills=filtered,
+                        days=30,
+                        market_ctx=market_ctx,
                     )
-                    return _portfolio_selection_metrics(
-                        windows, baseline_n=0, selected_n=len(addrs),
+                    eval_cache[key] = _portfolio_selection_metrics(
+                        {30: primary}, baseline_n=0, selected_n=len(key),
                     )
+                    return eval_cache[key]
 
                 constraints = selection.SelectionConstraints(
                     min_relative_lcb_improvement=0.0,
@@ -1080,29 +1112,15 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     max_cost_drag_ratio=1.0,
                     max_targets=int(config.MAX_TARGETS),
                 )
-                baseline_core = [
-                    addr for addr in portfolio_candidates
-                    if previous_roles.get(addr) == selection.CORE
-                ]
-                challengers = [addr for addr in portfolio_candidates if addr not in set(baseline_core)]
-                profile_by_addr = {
-                    (row.get("addr") or "").lower(): row for row in profiles
-                }
-                marginal = selection.select_ranked_positive_core(
-                    challengers,
+                marginal = selection.search_smart_core(
+                    portfolio_candidates,
                     evaluate,
                     constraints,
-                    initial_core=baseline_core,
-                    score_by_addr={
-                        addr: f(profile_by_addr.get(addr, {}).get("follow_score"))
-                        for addr in portfolio_candidates
-                    },
-                    individual_net_by_addr={
-                        addr: f(profile_by_addr.get(addr, {}).get("copy_bt_net_pnl"))
-                        for addr in portfolio_candidates
-                        if profile_by_addr.get(addr, {}).get("copy_bt_net_pnl") is not None
-                    },
-                    max_replace_out=2,
+                    seed_target=int(getattr(config, "CORE_SEARCH_SEED_TARGET", 10)),
+                    beam_width=int(getattr(config, "CORE_SEARCH_BEAM_WIDTH", 3)),
+                    swap_passes=int(getattr(config, "CORE_SEARCH_SWAP_PASSES", 1)),
+                    max_replace_out=int(getattr(config, "CORE_SEARCH_MAX_REPLACE_OUT", 2)),
+                    time_budget_s=float(getattr(config, "CORE_SEARCH_TIME_BUDGET_SEC", 600)),
                 )
                 selected_set = set(marginal.selected)
                 final_metrics = evaluate(tuple(sorted(selected_set)))
@@ -1158,7 +1176,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
                 model_version=(
-                    "selection-ranked-rebalance-v2" if marginal is not None
+                    "selection-smart-expansion-v1" if marginal is not None
                     else "selection-replay-unavailable-v1"
                 ),
                 policy_version=copy_policy.version,
@@ -1702,6 +1720,8 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         payload={
             "generation": generation_id,
             "action": marginal.action if marginal else "keep",
+            "search": marginal.search_meta if marginal else None,
+            "evaluated": marginal.evaluated if marginal else 0,
             "core": len(current_core),
             "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
         },
@@ -2275,6 +2295,8 @@ def scan(db, p) -> None:
                     "generation": generation_id,
                     "mode": selection_mode,
                     "action": marginal.action if marginal else "keep",
+                    "search": marginal.search_meta if marginal else None,
+                    "evaluated": marginal.evaluated if marginal else 0,
                     "core": sum(1 for row in selection_rows if row.role == selection.CORE and row.enabled),
                     "challenger": sum(1 for row in selection_rows if row.role == selection.CHALLENGER),
                     "exitOnly": sum(1 for row in selection_rows if row.role == selection.EXIT_ONLY),
@@ -2298,6 +2320,8 @@ def scan(db, p) -> None:
                 "selectionCore": n_active,
                 "selectionChallenger": sum(1 for row in selection_rows if row.role == selection.CHALLENGER),
                 "selectionAction": marginal.action if marginal else "keep",
+                "selectionEvaluated": marginal.evaluated if marginal else 0,
+                "selectionSearch": marginal.search_meta if marginal else None,
                 **rest.request_stats(),
             }
             db.execute(

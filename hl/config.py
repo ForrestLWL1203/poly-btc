@@ -49,6 +49,11 @@ SELECTION_MIN_RELATIVE_GAIN = 0.05
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.85
 SELECTION_MAX_DD_WORSEN = 0.01
+CORE_SEARCH_SEED_TARGET = 10       # Search depth target, never a forced minimum Core count.
+CORE_SEARCH_BEAM_WIDTH = 3         # Compact address+metric states retained at each portfolio size.
+CORE_SEARCH_SWAP_PASSES = 1        # One-for-one local polish passes at seed/final sizes.
+CORE_SEARCH_MAX_REPLACE_OUT = 2    # Enable bounded one-for-two count-reducing checks.
+CORE_SEARCH_TIME_BUDGET_SEC = 600  # Fail closed to the last published Core if exceeded.
 # Post-scan follow-line adaptation. The watchlist is ranked by copy-follow score (raw profile score blended
 # with copy-backtest evidence); after each scan/regate we move MIN_FOLLOW_SCORE to the Nth copyable wallet,
 # with a floor so weak active tails do not get followed just because the pool is small.

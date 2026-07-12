@@ -242,7 +242,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
-                    patch.object(scanner.selection, "select_ranked_positive_core", side_effect=select_after_watchlist), \
+                    patch.object(scanner.selection, "search_smart_core", side_effect=select_after_watchlist), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -471,7 +471,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 action="add", added=("0xaaa",), evaluated=2,
             )
             with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
-                    patch.object(scanner.selection, "select_ranked_positive_core", return_value=marginal), \
+                    patch.object(scanner.selection, "search_smart_core", return_value=marginal), \
                     patch.object(scanner, "_portfolio_selection_metrics", side_effect=[profitable, baseline]):
                 rows, result = scanner._build_explicit_selection(db, "g1", "now", 1000)
 

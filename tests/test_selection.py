@@ -320,6 +320,56 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result.selected, ("0xold",))
         self.assertEqual(result.removed, ())
 
+    def test_smart_core_search_builds_seed_then_stops_on_zero_marginal(self):
+        nets = {
+            (): 0,
+            ("0xa",): 10, ("0xb",): 9, ("0xc",): 8, ("0xd",): 7,
+            ("0xa", "0xb"): 12, ("0xa", "0xc"): 25, ("0xa", "0xd"): 11,
+            ("0xb", "0xc"): 13, ("0xb", "0xd"): 10, ("0xc", "0xd"): 9,
+            ("0xa", "0xb", "0xc"): 26,
+            ("0xa", "0xb", "0xd"): 13,
+            ("0xa", "0xc", "0xd"): 30,
+            ("0xb", "0xc", "0xd"): 14,
+            ("0xa", "0xb", "0xc", "0xd"): 30,
+        }
+
+        def evaluate(addrs):
+            net = nets[addrs]
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .95, .05, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
+                risk_adjusted_utility=net - 500,
+            )
+
+        result = selection.search_smart_core(
+            ["0xa", "0xb", "0xc", "0xd"], evaluate,
+            selection.SelectionConstraints(max_targets=4),
+            seed_target=2, beam_width=2, swap_passes=1, max_replace_out=2,
+        )
+
+        self.assertEqual(result.selected, ("0xa", "0xc", "0xd"))
+        self.assertEqual(result.metrics.net_pnl, 30)
+        self.assertEqual(result.search_meta["selectedCount"], 3)
+        self.assertEqual(result.search_meta["stopReason"], "no_positive_expansion_marginal")
+
+    def test_smart_core_seed_target_is_not_a_minimum_quota(self):
+        def evaluate(addrs):
+            net = 10 if addrs == ("0xa",) else 9 if addrs else 0
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .95, .05, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
+                risk_adjusted_utility=net - 500,
+            )
+
+        result = selection.search_smart_core(
+            ["0xa", "0xb"], evaluate,
+            selection.SelectionConstraints(max_targets=2),
+            seed_target=2, beam_width=1, max_replace_out=1,
+        )
+
+        self.assertEqual(result.selected, ("0xa",))
+        self.assertEqual(result.search_meta["stopReason"], "no_positive_seed_marginal")
+
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000
         result = scanner._portfolio_selection_metrics({
