@@ -14,7 +14,6 @@ export function useSettingsParams() {
   const [params, setParams] = useState(null);
   const [vals, setVals] = useState({});
   const [dirty, setDirty] = useState({});
-  const [scoreDist, setScoreDist] = useState(null);
 
   const loadParams = useCallback(async () => {
     const next = await api.get("/api/params");
@@ -22,13 +21,6 @@ export function useSettingsParams() {
     setVals(valuesFromParams(next));
     return next;
   }, []);
-
-  const loadScoreDist = useCallback(async () => {
-    if (scoreDist) return scoreDist;
-    const next = await api.get("/api/score-dist");
-    setScoreDist(next);
-    return next;
-  }, [scoreDist]);
 
   useEffect(() => {
     loadParams().catch(() => {});
@@ -55,9 +47,7 @@ export function useSettingsParams() {
     params,
     vals,
     dirty,
-    scoreDist,
     loadParams,
-    loadScoreDist,
     setValue,
     clearDirty,
     discard,

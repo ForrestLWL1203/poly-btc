@@ -110,7 +110,7 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(rejected["reason"], "copy_bt_loss")
         self.assertEqual(json.loads(rejected["payload_json"])["copyBt"]["14dNetPnl"], -120)
 
-    def test_refresh_watchlist_records_follow_line_and_watchlist_snapshots(self):
+    def test_refresh_watchlist_does_not_publish_legacy_score_line_membership(self):
         db = self._db()
         params.seed_params(db)
         cols = storage.PROFILE_COLS.split(",")
@@ -124,14 +124,7 @@ class PipelineAuditTests(unittest.TestCase):
         )
         db.commit()
 
-        with patch.object(scanner.auto_tune, "choose_follow_line_by_portfolio", return_value={
-            "status": "ok",
-            "reason": "portfolio_topn",
-            "line": 0.71,
-            "count": 2,
-            "selected": {"n": 2, "score": 1200},
-        }):
-            scanner.refresh_watchlist(db, "2026-07-07T00:00:00Z", source="scan")
+        scanner.refresh_watchlist(db, "2026-07-07T00:00:00Z", source="scan")
 
         stages = self._dict_rows(db.execute(
             "SELECT stage,status,reason,addr,rank,payload_json FROM pipeline_audit "
@@ -139,12 +132,8 @@ class PipelineAuditTests(unittest.TestCase):
         ))
         follow = [r for r in stages if r["stage"] == "follow_line"]
         watched = [r for r in stages if r["stage"] == "watchlist"]
-        self.assertEqual(len(follow), 1)
-        self.assertEqual(follow[0]["status"], "ok")
-        self.assertEqual(follow[0]["reason"], "portfolio_topn")
-        self.assertEqual(json.loads(follow[0]["payload_json"])["count"], 2)
-        self.assertEqual([r["status"] for r in watched], ["followed", "followed", "below_line"])
-        self.assertEqual([r["rank"] for r in watched], [1, 2, 3])
+        self.assertEqual(follow, [])
+        self.assertEqual(watched, [])
 
     def test_pipeline_audit_endpoint_returns_recent_events_with_payload(self):
         db = self._db()
@@ -279,13 +268,11 @@ class PipelineAuditTests(unittest.TestCase):
             "limit": 100,
         })
         pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa", "0xbbb"])
-        pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
-            "status": "ok",
-            "reason": "portfolio_topn",
-            "line": 0.735,
-            "count": 2,
-            "target_n": 16,
-        })
+        pipeline_audit._insert_event(
+            db, stamp="2026-07-07T00:00:00Z", source="scan", stage="selection_summary",
+            status="ok", reason="published_core",
+            payload={"generation": "g1", "action": "add", "core": 2, "challenger": 1},
+        )
         pipeline_audit.record_auto_tune_result(db, "2026-07-07T00:00:00Z", "scan", {
             "status": "ok",
             "applied": True,
@@ -315,9 +302,9 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(res["profile"]["active"], 1)
         self.assertEqual(res["profile"]["rejected"], 1)
         self.assertEqual(res["profile"]["reasonCounts"][0]["reason"], "copy_bt_loss")
-        self.assertEqual(res["followLine"]["reason"], "portfolio_topn")
-        self.assertEqual(res["followLine"]["score"], 73.5)
-        self.assertEqual(res["followLine"]["count"], 2)
+        self.assertNotIn("followLine", res)
+        self.assertEqual(res["selection"]["core"], 2)
+        self.assertEqual(res["selection"]["challenger"], 1)
         self.assertTrue(res["autoTune"]["applied"])
         self.assertTrue(res["autoTune"]["appliedSizing"])
         self.assertFalse(res["autoTune"]["appliedAdd"])
@@ -332,11 +319,11 @@ class PipelineAuditTests(unittest.TestCase):
         db = self._db()
         self._insert_profiles(db)
         pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa"])
-        pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
-            "status": "ok",
-            "reason": "portfolio_topn",
-            "line": 0.735,
-        })
+        pipeline_audit._insert_event(
+            db, stamp="2026-07-07T00:00:00Z", source="scan", stage="selection_summary",
+            status="ok", reason="published_core",
+            payload={"generation": "g1", "action": "keep", "core": 1, "challenger": 0},
+        )
         pipeline_audit.record_profile_snapshot(db, "2026-07-08T00:00:00Z", "manual_backfill", ["0xbbb"])
         db.commit()
 
@@ -344,7 +331,7 @@ class PipelineAuditTests(unittest.TestCase):
 
         self.assertEqual(res["stamp"], "2026-07-07T00:00:00Z")
         self.assertEqual(res["source"], "scan")
-        self.assertEqual(res["followLine"]["reason"], "portfolio_topn")
+        self.assertEqual(res["selection"]["generation"], "g1")
 
     def test_pipeline_summary_does_not_group_all_audit_rows_to_find_latest_decision(self):
         class GuardedDb:

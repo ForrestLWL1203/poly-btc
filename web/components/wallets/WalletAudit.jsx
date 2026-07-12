@@ -3,7 +3,7 @@ import { fNum, fSign } from "../../lib/format.js";
 
 const { useState } = React;
 
-const auditStage = (s) => ({ profile: "画像", watchlist: "名单", follow_line: "跟单线", auto_tune: "调参" }[s] || s || "—");
+const auditStage = (s) => ({ profile: "画像", watchlist: "名单", selection: "Core选择", follow_line: "旧版记录", auto_tune: "调参" }[s] || s || "—");
 
 const auditCopyText = (payload) => {
   const c = payload && payload.copyBt;

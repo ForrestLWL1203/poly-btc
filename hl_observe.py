@@ -16,8 +16,6 @@ def main() -> int:
     ap.add_argument("--db", default=config.DEFAULT_DB)
     sub = ap.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("observe")
-    o.add_argument("--min-score", type=float, default=config.MIN_FOLLOW_SCORE,
-                   help=f"follow watchlist wallets with v3 score >= this (quality threshold, default {config.MIN_FOLLOW_SCORE})")
     o.add_argument("--top", type=int, default=config.MAX_TARGETS,
                    help=f"hard cap on followed wallets (REST-rate ceiling, default {config.MAX_TARGETS})")
     o.add_argument("--add-frac", type=float, default=config.ADD_FRAC,
@@ -32,9 +30,7 @@ def main() -> int:
     params.seed_params(db)                          # ensure UI-tunable params exist (idempotent)
     if args.cmd == "observe":
         n = args.top
-        f = params.load_follow(db)                     # UI-tuned follow line (params win over CLI)
-        min_score = f.get("MIN_FOLLOW_SCORE") if f.get("MIN_FOLLOW_SCORE") is not None else args.min_score
-        addrs, seed = observer.load_targets(db, n, min_score)
+        addrs, seed = observer.load_targets(db, n)
         merged = []                                   # extras first, then watchlist, capped at n
         for a in [x.lower() for x in args.extra] + addrs:
             if a not in merged:
@@ -56,7 +52,7 @@ def main() -> int:
         else:
             print(f"observing {len(addrs)} targets (cap {n}): {', '.join(a[:8] for a in addrs)}")
         try:
-            asyncio.run(observer.Observer(db, addrs, seed, top_n=n, min_score=min_score,
+            asyncio.run(observer.Observer(db, addrs, seed, top_n=n,
                                           add_frac=args.add_frac).run())
         except KeyboardInterrupt:
             print("stopped.")

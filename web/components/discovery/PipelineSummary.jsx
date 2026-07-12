@@ -1,5 +1,3 @@
-import { fSign } from "../../lib/format.js";
-
 const REASON_LABELS = {
   copy_backtest_loss: "copy 回测亏损",
   edge_decayed: "边际衰减",
@@ -12,11 +10,7 @@ const REASON_LABELS = {
 
 export function PipelineSummary({ p }) {
   if (!p || !p.stamp) return null;
-  const prof = p.profile || {}, fl = p.followLine || {}, sel = p.selection || {}, tune = p.autoTune || {};
-  const selected = fl.selected || {};
-  const win = selected.windows || {};
-  const pnl14 = win["14"] && win["14"].copy_net_pnl;
-  const pnl7 = win["7"] && win["7"].copy_net_pnl;
+  const prof = p.profile || {}, sel = p.selection || {}, tune = p.autoTune || {};
   const tuneChanged = tune.appliedSizing || tune.appliedAdd;
   const reasonRows = (prof.reasonCounts || []).slice(0, 5);
   const reasonLabel = (r) => REASON_LABELS[r] || r || "—";
@@ -27,7 +21,7 @@ export function PipelineSummary({ p }) {
           <div className="card-lbl">最近一轮流水线审计</div>
           <div className="pipeline-stamp">{p.stamp.replace("T", " ").replace("Z", "")} · {p.source || "scan"}</div>
         </div>
-        <span className={"tint " + (sel.generation ? "tint-green" : "tint-amber")}>{sel.generation ? `Selection · ${sel.action || "keep"}` : (fl.reason || fl.status || "尚无显式 Selection")}</span>
+        <span className={"tint " + (sel.generation ? "tint-green" : "tint-amber")}>{sel.generation ? `Selection · ${sel.action || "keep"}` : "尚无显式 Selection"}</span>
       </div>
       <div className="pipeline-grid">
         <div className="pipe-metric">
@@ -53,11 +47,10 @@ export function PipelineSummary({ p }) {
       </div>
       <div className="pipeline-detail">
         <div>
-          <div className="muted">Selection / Core候选线</div>
+          <div className="muted">Selection / Core真实跟单集合</div>
           <div className="pipeline-line">
             {sel.generation ? <React.Fragment>{sel.generation} · Core {sel.core || 0} · Challenger {sel.challenger || 0}</React.Fragment>
-              : selected.n ? <React.Fragment>旧 top {selected.n} · 14d {fSign(pnl14 || 0, 0)} · 7d {fSign(pnl7 || 0, 0)}</React.Fragment>
-              : (fl.reason || "等待首个 selection generation")}
+              : "等待首个完整 Selection generation"}
           </div>
         </div>
         <div>

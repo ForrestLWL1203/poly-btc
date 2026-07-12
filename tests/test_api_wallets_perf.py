@@ -58,6 +58,20 @@ class WalletDetailGuardedDb:
 
 
 class ApiWalletsPerfTests(unittest.TestCase):
+    def _publish_selection(self, db, cores=()):
+        db.execute(
+            "INSERT INTO scan_generation "
+            "(generation,status,complete,publishable,is_current,started_at,published_at) "
+            "VALUES ('g-current','published',1,1,1,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
+        )
+        for i, addr in enumerate(cores):
+            db.execute(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,reason,utility,selected_at) "
+                "VALUES ('g-current',?,'core',1,'portfolio_positive_net_contribution',?,'2026-01-01T01:00:00Z')",
+                (addr, 1000 - i),
+            )
+
     def test_wallets_uses_joined_aggregates_for_forward_stats(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -85,6 +99,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO copy_position (addr,coin,side,status,realized_pnl,opened_at,closed_at) "
                 "VALUES ('0xaaa','BTC','long','closed',12,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
             )
+            self._publish_selection(db, ["0xaaa"])
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
@@ -115,6 +130,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "VALUES ('0xaaa','active',0.9,8,123)"
             )
             db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            self._publish_selection(db, ["0xaaa"])
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
@@ -136,6 +152,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
                 "VALUES ('0xaaa','2026-01-03T00:00:00Z','2026-01-03T00:00:00Z',0.9)"
             )
+            self._publish_selection(db, ["0xaaa"])
             db.commit()
 
             with patch.object(api_wallets.time, "time", return_value=1767430800):
@@ -161,6 +178,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "VALUES ('0xaaa','rejected','not_profitable',0.4,'crypto',0.5,'BTC')"
             )
             db.execute("INSERT INTO leaderboard (addr,week_roi,mon_roi) VALUES ('0xaaa',0.1,0.2)")
+            self._publish_selection(db)
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
@@ -192,6 +210,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "VALUES ('2026-01-04T00:00:00Z','scan_post_tune','profile','0xaaa','rejected','not_profitable',"
                 "'2026-01-04T01:23:00Z')"
             )
+            self._publish_selection(db)
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
@@ -207,7 +226,6 @@ class ApiWalletsPerfTests(unittest.TestCase):
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
             params.seed_params(db)
-            db.execute("UPDATE params SET value='0.7' WHERE key='MIN_FOLLOW_SCORE'")
             db.execute(
                 "INSERT INTO follow_history (addr,last_followed_at,last_followed_score) "
                 "VALUES ('0xaaa','2026-01-01T00:00:00Z',0.8)"
@@ -220,12 +238,13 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
                 "VALUES (1,'0xaaa',0.6,'crypto',0.5,'BTC','now')"
             )
+            self._publish_selection(db)
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
 
         self.assertEqual(res["total"], 1)
-        self.assertEqual(res["wallets"][0]["dropReason"], "掉出评分线")
+        self.assertEqual(res["wallets"][0]["dropReason"], "退出Core")
         self.assertEqual(res["wallets"][0]["score"], 60.0)
         self.assertEqual(res["wallets"][0]["rawScore"], 90.0)
 
@@ -244,6 +263,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                     "VALUES (?,'rejected','not_profitable',0.4,'crypto',0.5,'BTC')",
                     (addr,),
                 )
+            self._publish_selection(db)
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"], "page": ["1"], "size": ["2"]})
@@ -262,6 +282,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO watchlist (rank,addr,score,market_type,win_rate,top_coin,updated_at) "
                 "VALUES (1,'0xaaa',0.9,'crypto',0.75,'BTC','now')"
             )
+            self._publish_selection(db, ["0xaaa"])
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["observing"]})

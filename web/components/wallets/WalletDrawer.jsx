@@ -96,8 +96,8 @@ export function WalletDrawer({ address, onClose }) {
             </div>
 
             <div className="wallet-decision-grid">
-              <DecisionCard title="跟单理由" tone={d.score >= 70 ? "good" : ""}>
-                <p>评分 {fNum(d.score, 1)}，{d.rank != null ? "当前名单排名 #" + d.rank : "当前未在排名内"}，市场类型为 {marketLabel(d.marketType)}。</p>
+              <DecisionCard title="跟单理由" tone={d.role === "core" ? "good" : ""}>
+                <p>{d.role === "core" ? "当前已入选 Core，Observer 允许新开仓。" : d.role === "challenger" ? "当前为 Challenger，不会新开仓。" : "当前不在 Core。"} 评分 {fNum(d.score, 1)}仅用于单钱包质量排序。</p>
                 <div className="wallet-mini-row"><span>原始评分</span><b>{scoreBreakdown.rawScore != null ? fNum(scoreBreakdown.rawScore, 1) : "—"}</b></div>
                 <div className="wallet-mini-row"><span>copy 分</span><b>{scoreBreakdown.copyScore != null ? fNum(scoreBreakdown.copyScore, 1) : "—"}</b></div>
                 <div className="wallet-mini-row"><span>置信度</span><b>{scoreBreakdown.confidencePct != null ? fNum(scoreBreakdown.confidencePct, 0) + "%" : "—"}</b></div>

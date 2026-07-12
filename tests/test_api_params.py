@@ -16,7 +16,7 @@ class ApiParamsTests(unittest.TestCase):
         self.assertTrue(callable(api_params.patch_params))
         self.assertTrue(callable(api_params.reset_params))
 
-    def test_patch_min_follow_score_stores_native_score(self):
+    def test_retired_min_follow_score_cannot_be_patched(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
@@ -35,11 +35,11 @@ class ApiParamsTests(unittest.TestCase):
 
             updated = api_params.patch_params(path, "follow", {"MIN_FOLLOW_SCORE": 77})
 
-            self.assertEqual(updated, {"MIN_FOLLOW_SCORE": 77})
+            self.assertEqual(updated, {})
             db = sqlite3.connect(path)
             stored = db.execute("SELECT value FROM params WHERE key='MIN_FOLLOW_SCORE'").fetchone()[0]
             db.close()
-            self.assertEqual(stored, "0.77")
+            self.assertEqual(stored, "0.7")
         finally:
             try:
                 os.remove(path)

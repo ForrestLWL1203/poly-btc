@@ -453,6 +453,15 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "VALUES (1,'0xsector',0.9,10000,?,'now')",
             ('{"crypto":{"allow":true},"stock":{"allow":false},"allowed":["crypto"]}',),
         )
+        db.execute(
+            "INSERT INTO scan_generation "
+            "(generation,status,complete,publishable,is_current,started_at,published_at) "
+            "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02')"
+        )
+        db.execute(
+            "INSERT INTO follow_selection (generation,addr,role,enabled,reason,utility,selected_at) "
+            "VALUES ('g1','0xsector','core',1,'portfolio_positive_net_contribution',1,'now')"
+        )
         db.commit()
         loop = asyncio.new_event_loop()
         try:

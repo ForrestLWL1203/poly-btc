@@ -57,7 +57,6 @@ class ApiScannerStatusTests(unittest.TestCase):
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
             params.seed_params(db)
-            db.execute("UPDATE params SET value='0.5' WHERE key='MIN_FOLLOW_SCORE'")
             db.execute("INSERT INTO leaderboard (addr,is_candidate) VALUES ('0xaaa',1)")
             db.execute("INSERT INTO profile (addr,status,score) VALUES ('0x1','active',0.01)")
             db.execute("INSERT INTO profile (addr,status,score) VALUES ('0x2','active',0.50)")
@@ -73,7 +72,7 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertEqual(bins[0], 1)
         self.assertEqual(bins[8], 1)
         self.assertEqual(bins[15], 1)
-        self.assertEqual(res["scoreHistogram"]["followLineBinIndex"], 8)
+        self.assertNotIn("followLineBinIndex", res["scoreHistogram"])
 
     def test_scan_runs_exposes_profiled_count_not_legacy_probed_new_name(self):
         with tempfile.TemporaryDirectory() as td:

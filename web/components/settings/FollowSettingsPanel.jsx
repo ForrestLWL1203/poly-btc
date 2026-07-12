@@ -15,7 +15,6 @@ export function FollowSettingsPanel({
   list,
   vals,
   dirty,
-  scoreDist,
   openTiers,
   setOpenTiers,
   validationErrors,
@@ -33,25 +32,10 @@ export function FollowSettingsPanel({
 
   return (
     <React.Fragment>
-      {visibleTopRows.map(p => {
-        if (p.key !== "MIN_FOLLOW_SCORE") return row(p);
-        const v = Number(vals.MIN_FOLLOW_SCORE);
-        const n = scoreDist ? scoreDist.scores.filter(s => s >= v).length : null;
-        return (
-          <React.Fragment key={p.key}>
-            {row(p)}
-            <div className="score-hint">
-              {n == null ? "加载钱包分布…" : <React.Fragment>
-                评分 ≥ <b>{isFinite(v) ? v : "—"}</b> 时,当前 watchlist 有 <b style={{ color: "var(--accent)" }}>{n}</b> 个钱包达标会被跟单
-                <span className="muted"> / 共 {scoreDist.total} 个候选</span>
-              </React.Fragment>}
-            </div>
-            {blacklistParam && <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
-              value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
-              onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />}
-          </React.Fragment>
-        );
-      })}
+      {visibleTopRows.map(row)}
+      {blacklistParam && <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
+        value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
+        onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />}
       <div className="psec-h psec-h-row">
         <div className="psec-title-block">保证金与杠杆 · 按波动率 σ 分档
           <span>杠杆 = σ 所在档位的上限(σ 定档),这里设各档的单笔保证金% 与杠杆上限</span></div>

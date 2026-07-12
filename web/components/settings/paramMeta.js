@@ -1,6 +1,5 @@
 export const PARAM_META = {
   // follow
-  MIN_FOLLOW_SCORE: { name: "跟单评分线", desc: "watchlist 里评分≥此线的钱包才实际跟单(0–100 标准化分,见下方实时达标数)", range: "—", up: "更严、跟更少精英", dn: "更宽、纳入更多" },
   STABLE_MARGIN_MIN_PCT: { name: "稳定档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "2–5", up: "低频期每单更重", dn: "低频期每单更轻" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },

@@ -3,7 +3,6 @@
 import time
 
 from . import config
-from . import params as params_mod
 from .api_common import iso_epoch, q1, qall
 from .api_discovery import followed_count, scanner_status
 
@@ -132,8 +131,7 @@ def ep_overview(db):
     obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     ss = scanner_status(db)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    wl = {"c": followed_count(db, line)}
+    wl = {"c": followed_count(db)}
 
     def _stale(row):
         if not row or not row["heartbeat_at"]:

@@ -209,9 +209,11 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         score -= min(0.06, abs(_num(recent7)) * 0.4)
         reasons.append("7天归一化收益为负")
     liqs = int(_num(metrics.get("copy_bt_liquidations")))
+    # Liquidation losses already reduce replay PnL, max drawdown, worst margin return and therefore
+    # ``copy_risk_score``.  Charging another fixed five points per event double-counted the same risk and
+    # made profitable Core contributors look artificially weak.  Keep the count as explanation only.
     if liqs > 0:
-        score -= min(0.15, 0.05 * liqs)
-        reasons.append(f"copy爆仓{liqs}次")
+        reasons.append(f"copy爆仓{liqs}次（已计入收益/回撤）")
     score = _clamp(score)
     return score, {
         "rawScore": raw,

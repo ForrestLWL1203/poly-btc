@@ -46,6 +46,16 @@ class ApiPositionsPerfTests(unittest.TestCase):
         )
         db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES ('0xbbb',0,'now')")
         db.execute(
+            "INSERT INTO scan_generation "
+            "(generation,status,complete,publishable,is_current,started_at,published_at) "
+            "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02')"
+        )
+        db.executemany(
+            "INSERT INTO follow_selection (generation,addr,role,enabled,utility,selected_at) "
+            "VALUES ('g1',?,'core',1,?,'2026-01-02')",
+            [("0xaaa", 2.0), ("0xbbb", 1.0)],
+        )
+        db.execute(
             "INSERT INTO copy_position "
             "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,liq_px,"
             "mark_px,unrealized_pnl,opened_at,add_count) "

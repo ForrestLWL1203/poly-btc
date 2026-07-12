@@ -275,15 +275,7 @@ def _load_market_ctx(db) -> dict:
 
 def _load_followed_wallets(db, follow: dict) -> list[str]:
     explicit = selection.published_core_addrs(db, int(config.MAX_TARGETS))
-    if explicit is not None:
-        return explicit
-    line = float(follow.get("MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
-    rows = db.execute(
-        "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-        "WHERE COALESCE(c.enabled,1)=1 AND w.score>=? ORDER BY w.rank LIMIT ?",
-        (line, int(config.MAX_TARGETS)),
-    ).fetchall()
-    return [(r[0] if not isinstance(r, sqlite3.Row) else r["addr"]).lower() for r in rows]
+    return explicit or []
 
 
 def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]:

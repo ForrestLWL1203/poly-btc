@@ -3,8 +3,6 @@
 import json
 import time
 
-from . import config
-from . import params as params_mod
 from .api_common import iso_epoch, q1, qall, score100
 
 
@@ -29,8 +27,8 @@ def scanner_status(db):
             "heartbeatAt": r["heartbeat_at"], "detail": detail}
 
 
-def followed_count(db, line):
-    """Count of wallets the observer will actually copy."""
+def followed_count(db, line=None):
+    """Count the explicit published Core wallets the observer will actually copy."""
     try:
         selected = q1(
             db,
@@ -40,18 +38,15 @@ def followed_count(db, line):
         )
     except Exception:  # noqa: BLE001 - compatibility with pre-generation read replicas
         selected = None
-    if selected:
-        r = q1(
-            db,
-            "SELECT COUNT(*) cnt FROM follow_selection fs "
-            "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
-            "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1",
-            (selected["generation"],),
-        )
-        return (r["cnt"] if r else 0)
-    r = q1(db, "SELECT COUNT(*) cnt FROM watchlist w "
-               "LEFT JOIN target_controls tc ON tc.addr=w.addr "
-               "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=?", (line,))
+    if not selected:
+        return 0
+    r = q1(
+        db,
+        "SELECT COUNT(*) cnt FROM follow_selection fs "
+        "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+        "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1",
+        (selected["generation"],),
+    )
     return (r["cnt"] if r else 0)
 
 
@@ -77,9 +72,7 @@ def ep_discovery(db):
     leaderboard = (q1(db, "SELECT COUNT(*) c FROM leaderboard") or {"c": 0})["c"]
     candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
     active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
-    # Funnel's final stage = wallets ABOVE the follow line, not the whole watchlist.
-    line_native = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    watchlist = followed_count(db, line_native)
+    watchlist = followed_count(db)
     generation = q1(
         db,
         "SELECT generation,published_at,leaderboard_valid,profile_complete,workset_mode,fill_mode,"
@@ -133,7 +126,6 @@ def ep_discovery(db):
     reject_reasons = [{"label": lbl, "pct": round(n / total_rej * 100) if total_rej else 0}
                       for lbl, n in buckets]
 
-    follow_line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     nbins = 16
     bins = [0] * nbins
     for row in qall(db,
@@ -143,12 +135,11 @@ def ep_discovery(db):
         idx = int(row["idx"])
         if 0 <= idx < nbins:
             bins[idx] = row["n"]
-    follow_idx = min(int(follow_line * nbins), nbins - 1)
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     return {"funnel": {"leaderboard": leaderboard, "candidates": candidates, "qualified": qualified,
                         "challenger": challenger, "core": core, "active": active, "watchlist": watchlist},
             "rejectReasons": reject_reasons,
-            "scoreHistogram": {"bins": bins, "followLineBinIndex": follow_idx},
+            "scoreHistogram": {"bins": bins},
             "scanner": scanner_status(db),
             "generation": generation_out,
             "lastScanAt": (last_scan["m"] if last_scan else None)}
@@ -375,7 +366,7 @@ def ep_pipeline_summary(db, qs):
     stamp, source = _latest_pipeline_key(db, qs)
     if not stamp:
         return {"stamp": None, "source": None, "profile": {}, "watchlist": {},
-                "followLine": None, "autoTune": None, "workset": None, "prune": None}
+                "autoTune": None, "workset": None, "prune": None}
     base = [stamp] + ([source] if source else [])
     src_where = " AND source=?" if source else ""
 
@@ -436,25 +427,6 @@ def ep_pipeline_summary(db, qs):
             "deferredTail": work_counts.get("deferred_tail"),
         }
 
-    follow_row = q1(db,
-        "SELECT status,reason,follow_score,payload_json FROM pipeline_audit "
-        f"WHERE stamp=?{src_where} AND stage='follow_line' ORDER BY id DESC LIMIT 1",
-        tuple(base),
-    )
-    follow_payload = _payload(follow_row)
-    follow_line = None
-    if follow_row:
-        follow_line = {
-            "status": _col(follow_row, "status", 0),
-            "reason": _col(follow_row, "reason", 1),
-            "score": score100(_col(follow_row, "follow_score", 2)),
-            "line": _col(follow_row, "follow_score", 2),
-            "count": follow_payload.get("count"),
-            "targetN": follow_payload.get("target_n"),
-            "selected": follow_payload.get("selected"),
-            "reference": follow_payload.get("reference"),
-        }
-
     tune_row = q1(db,
         "SELECT status,reason,payload_json FROM pipeline_audit "
         f"WHERE stamp=?{src_where} AND stage='auto_tune' ORDER BY id DESC LIMIT 1",
@@ -510,11 +482,10 @@ def ep_pipeline_summary(db, qs):
         "selection": {
             "generation": selection_summary.get("generation"),
             "action": selection_summary.get("action"),
-            "core": selection_counts.get("core", 0),
-            "challenger": selection_counts.get("challenger", 0),
-            "exitOnly": selection_counts.get("exit_only", 0),
+            "core": selection_counts.get("core", selection_summary.get("core", 0)),
+            "challenger": selection_counts.get("challenger", selection_summary.get("challenger", 0)),
+            "exitOnly": selection_counts.get("exit_only", selection_summary.get("exitOnly", 0)),
         },
-        "followLine": follow_line,
         "autoTune": auto_tune,
         "workset": workset,
         "prune": prune,

@@ -7,16 +7,14 @@ import { ADD_KEYS } from "./settings/paramMeta.js";
 import { useSettingsParams } from "./settings/useSettingsParams.js";
 import { validateFollowParams } from "./settings/validation.js";
 
-const { useEffect, useState } = React;
+const { useState } = React;
 
 export function Settings({ confirm }) {
   const {
     params,
     vals,
     dirty,
-    scoreDist,
     loadParams,
-    loadScoreDist,
     setValue,
     clearDirty,
     discard,
@@ -24,10 +22,6 @@ export function Settings({ confirm }) {
   const [tab, setTab] = useState("scanner");
   const [saving, setSaving] = useState(false);
   const [openTiers, setOpenTiers] = useState({});
-
-  useEffect(() => {
-    if (tab === "follow") loadScoreDist().catch(() => {});
-  }, [tab, loadScoreDist]);
 
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
 
@@ -119,7 +113,7 @@ export function Settings({ confirm }) {
       <div className="tbl-wrap">
         {tab === "scanner" && <ScannerSettingsPanel list={list} vals={vals} dirty={dirty} onChange={setValue} />}
         {tab === "follow" && <FollowSettingsPanel list={list} vals={vals} dirty={dirty}
-          scoreDist={scoreDist} openTiers={openTiers} setOpenTiers={setOpenTiers}
+          openTiers={openTiers} setOpenTiers={setOpenTiers}
           validationErrors={validationErrors} badKeys={followValidation.badKeys} onChange={setValue} />}
         {tab === "add" && <AddSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers} onChange={setValue} />}

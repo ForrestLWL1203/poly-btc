@@ -104,7 +104,7 @@ class Observer:
         self.addrs = addrs
         self.seed_coins = seed_coins
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
-        self.min_score = config.MIN_FOLLOW_SCORE if min_score is None else min_score  # quality threshold
+        self.min_score = 0.0  # retired score-line compatibility field; Core selection owns membership
         # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap. Margin uses the adaptive strategy
         # equity base; real risk equity and available cash enforce coin/deployment caps.
         self.add_frac = config.ADD_FRAC if add_frac is None else add_frac  # each ADD = first-open margin × this
@@ -473,7 +473,6 @@ class Observer:
         try:
             from . import params as P
             f = P.load_follow(self.db)
-            if f.get("MIN_FOLLOW_SCORE") is not None: self.min_score = f["MIN_FOLLOW_SCORE"]
             if f.get("COIN_BLACKLIST") is not None: self.coin_blacklist = parse_coin_blacklist(f["COIN_BLACKLIST"])
             if f.get("LOW_LIQUIDITY_FILTER_ENABLE") is not None: self.low_liquidity_filter_enable = bool(f["LOW_LIQUIDITY_FILTER_ENABLE"])
             if f.get("MIN_COIN_DAY_NTL_VLM") is not None: self.min_coin_day_ntl_vlm = f["MIN_COIN_DAY_NTL_VLM"]
@@ -993,10 +992,10 @@ class Observer:
             return await self._cmd_close_all()
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
-        if ctype == "reload_params":               # UI saved follow params → apply NOW (incl. follow line)
-            self._reload_params()                  # re-read sizing/stop/line from params table
-            self._reload_targets()                 # rebuild the follow set with the fresh line
-            return {"reloaded": True, "score_line": self.min_score, "targets": len(self.addrs)}
+        if ctype == "reload_params":               # UI saved follow params or Core membership changed
+            self._reload_params()
+            self._reload_targets()
+            return {"reloaded": True, "source": "published_core", "targets": len(self.addrs)}
         raise ValueError(f"unhandled command type {ctype}")
 
     def _ep_by_pos(self, pos_id):
@@ -1785,22 +1784,14 @@ class Observer:
 
 # ------------------------------------------------------------------------- loaders
 def load_targets(db, n: int, min_score: float = 0.0):
-    """Load the explicit published Core, with a one-way legacy fallback.
+    """Load only the explicit published Core.
 
-    ``published_core_addrs`` deliberately distinguishes no publication (``None``)
-    from an explicitly published empty Core (``[]``).  The score-line fallback is
-    therefore disabled permanently as soon as a selection generation is live.
-    Wallets with existing copies are re-added EXIT-ONLY by ``_reload_targets``.
+    Before the first successful Selection publication there are deliberately no new-entry targets. Wallets
+    with existing copies are still re-added EXIT-ONLY by ``_reload_targets`` for safe position management.
+    ``min_score`` remains in the signature only for CLI compatibility and is intentionally ignored.
     """
     explicit = selection.published_core_addrs(db, n)
-    if explicit is None:
-        addrs = [r[0] for r in db.execute(
-            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-            "WHERE COALESCE(c.enabled,1)=1 AND w.score >= ? "
-            "ORDER BY w.rank LIMIT ?",
-            (min_score, n)).fetchall()]
-    else:
-        addrs = explicit
+    addrs = explicit or []
     seed = {a: {r[0] for r in db.execute("SELECT DISTINCT coin FROM episode WHERE addr=?", (a,)).fetchall()}
             for a in addrs}
     return addrs, seed

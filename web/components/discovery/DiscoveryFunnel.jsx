@@ -1,4 +1,4 @@
-export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons, selectionMode }) {
+export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons }) {
   const h = scoreHistogram;
   const maxBin = Math.max(...h.bins, 1);
   return (
@@ -30,13 +30,11 @@ export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons, selecti
           </div>
         </div>
         <div className="card">
-          <div className="card-lbl">评分分布({selectionMode ? "Active池 / Core候选线" : "标出跟单线"})</div>
+          <div className="card-lbl">Active钱包评分分布 <span className="muted">· 仅用于排序解释</span></div>
           <div className="histo">
             {h.bins.map((b, i) => (
-              <div key={i} className={"hb" + (i < h.followLineBinIndex ? " below" : "")} style={{ height: (b / maxBin * 100) + "%" }} />
+              <div key={i} className="hb" style={{ height: (b / maxBin * 100) + "%" }} />
             ))}
-            <div className="histo-line" style={{ left: (h.followLineBinIndex / h.bins.length * 100) + "%" }}>
-              <span className="lbl">{selectionMode ? "Core候选线" : "跟单线"}</span></div>
           </div>
         </div>
       </div>

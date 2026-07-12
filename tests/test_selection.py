@@ -57,14 +57,14 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(addrs, [])
         self.assertEqual(selection.published_core_addrs(db), [])
 
-    def test_legacy_fallback_only_before_first_publication(self):
+    def test_no_score_fallback_before_first_publication(self):
         db = self._db()
         db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xlegacy',.8,'now')")
         db.commit()
 
         addrs, _ = load_targets(db, 10, 0.7)
 
-        self.assertEqual(addrs, ["0xlegacy"])
+        self.assertEqual(addrs, [])
         self.assertIsNone(selection.latest_published_generation(db))
 
     def test_reload_targets_readds_held_wallet_exit_only_with_empty_core(self):

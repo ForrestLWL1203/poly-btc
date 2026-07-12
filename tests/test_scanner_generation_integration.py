@@ -402,7 +402,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertIsNone(marginal)
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
 
-    def test_active_wallet_above_line_becomes_core_without_wait_reasons(self):
+    def test_active_wallet_without_portfolio_replay_stays_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -430,7 +430,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             self.assertIsNone(marginal)
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "core", "above_follow_line"),
+                ("0xaaa", "challenger", "portfolio_replay_unavailable"),
             ])
             self.assertEqual(rows[0].utility, 0.71)
 

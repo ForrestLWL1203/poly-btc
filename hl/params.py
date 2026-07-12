@@ -87,8 +87,9 @@ PARAM_SPEC = [
         "windfall判定·胜率上限", "配合上条:高集中度+胜率低于此=一波流;真高胜率的集中不算(靠稳定胜率不靠一把)"),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
-    ("MIN_FOLLOW_SCORE",     "follow",  "green",  "float",   "rescan", config.MIN_FOLLOW_SCORE,
-        "跟单评分线", "评分 ≥ 此线的钱包才实际跟单(见下方实时达标数)"),
+    # Hidden migration compatibility only; production membership and UI use published Core exclusively.
+    ("MIN_FOLLOW_SCORE",     "follow",  "hidden", "float",   "rescan", config.MIN_FOLLOW_SCORE,
+        "旧版评分线", "已停用；仅保留迁移兼容"),
     ("FOLLOW_SELECTION_MODE", "follow", "hidden", "text", "immediate", config.FOLLOW_SELECTION_MODE,
         "跟单集合模式", "auto使用已发布Core集合;manual保留人工集合"),
     ("FOLLOW_SELECTION_BOOTSTRAP_ENABLE", "follow", "hidden", "bool", "immediate",

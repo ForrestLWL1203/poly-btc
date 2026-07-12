@@ -814,18 +814,14 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
 def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_line=True,
                       update_follow_history=True, leaderboard_generation=None, commit=True) -> int:
     """Rebuild OUR tiny leaderboard (watchlist) from active profiles. Derived view —
-    profile stays the source of truth; operator settings in target_controls survive."""
+    profile stays the source of truth; operator settings in target_controls survive.
+
+    ``update_follow_line`` and ``update_follow_history`` are retained for call compatibility only.  Explicit
+    published Core owns production membership and its history is written after atomic Selection publication.
+    """
     if commit:
         params.seed_params(db)
-    prev_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
-    prev_followed = {
-        (r[0] or "").lower()
-        for r in db.execute(
-            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-            "WHERE w.score>=? AND COALESCE(c.enabled,1)=1",
-            (prev_line,),
-        ).fetchall()
-    }
+    prev_followed = set(selection.published_core_addrs(db) or [])
     db.execute("DELETE FROM watchlist")
     leaderboard_join = (
         "LEFT JOIN leaderboard_staging l ON l.addr=p.addr AND l.generation=?"
@@ -899,81 +895,6 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
             ))
         db.execute("INSERT OR IGNORE INTO target_controls (addr,enabled,updated_at) VALUES (?,1,?)",
                    (r["addr"], stamp))
-    if update_follow_line and getattr(config, "AUTO_FOLLOW_LINE_ENABLE", True) and ranked:
-        try:
-            choice = auto_tune.choose_follow_line_by_portfolio(db, ranked, stamp=stamp)
-        except Exception as exc:  # noqa: BLE001 — wallet-count tuning must never abort discovery
-            print(f"auto-follow portfolio line: fallback after error: {exc}", flush=True)
-            choice = {"status": "fallback", "reason": "portfolio_error"}
-        if choice.get("status") != "ok":
-            choice = follow_score.choose_follow_line(
-                ranked,
-                min_score=float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60)),
-                min_n=int(getattr(config, "AUTO_FOLLOW_MIN_N", 7)),
-                target_n=min(int(getattr(config, "AUTO_FOLLOW_TARGET_N", 16)), int(config.MAX_TARGETS)),
-                max_n=min(int(getattr(config, "AUTO_FOLLOW_MAX_N", 20)), int(config.MAX_TARGETS)),
-                cliff_gap=float(getattr(config, "AUTO_FOLLOW_CLIFF_GAP", 0.045)),
-            )
-            choice["status"] = "heuristic"
-        desired = choice["line"]
-        pipeline_audit.record_follow_line_choice(db, stamp, source, choice)
-        prev = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-        line_changed = False
-        if abs(float(prev) - desired) > 0.0005:
-            line_changed = True
-            db.execute("UPDATE params SET value=?,updated_at=? WHERE key='MIN_FOLLOW_SCORE'", (f"{desired:.9f}", stamp))
-            db.execute(
-                "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
-                ("reload_params", json.dumps({
-                    "by": "auto_follow_line",
-                    "reason": choice.get("reason"),
-                    "status": choice.get("status"),
-                    "count": choice.get("count"),
-                }), "scanner", stamp))
-    else:
-        line_changed = False
-    # stamp follow-history for everyone CURRENTLY on the follow line (≥ MIN_FOLLOW_SCORE). A wallet that
-    # has since dropped below keeps its old stamp → surfaces in the UI's "dropped" tab until it recovers.
-    line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-    detail_by_addr = {
-        r["addr"]: {
-            "follow_detail": r.get("follow_detail"),
-            "follow_eligibility": r.get("follow_eligibility"),
-        }
-        for r in ranked
-    }
-    pipeline_audit.record_watchlist_snapshot(db, stamp, source, line, detail_by_addr)
-    if not update_follow_history:
-        if commit:
-            db.commit()
-        return len(rows)
-    followed_rows = []
-    current_followed = set()
-    for a, s in db.execute(
-        "SELECT w.addr, w.score FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-        "WHERE w.score >= ? AND COALESCE(c.enabled,1)=1",
-        (line,),
-    ).fetchall():
-        addr_l = (a or "").lower()
-        current_followed.add(addr_l)
-        followed_rows.append((addr_l, None if addr_l in prev_followed else stamp, stamp, s))
-    if current_followed != prev_followed and not line_changed:
-        db.execute(
-            "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
-            ("reload_params", json.dumps({
-                "by": "auto_follow_membership",
-                "source": source,
-                "previous": len(prev_followed),
-                "current": len(current_followed),
-            }), "scanner", stamp))
-    db.executemany(
-        "INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) VALUES (?,?,?,?) "
-        "ON CONFLICT(addr) DO UPDATE SET "
-        "first_followed_at=COALESCE(follow_history.first_followed_at,excluded.first_followed_at,"
-        "follow_history.last_followed_at,excluded.last_followed_at), "
-        "last_followed_at=excluded.last_followed_at, "
-        "last_followed_score=excluded.last_followed_score",
-        followed_rows)
     if commit:
         db.commit()
     return len(rows)
@@ -1060,16 +981,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (previous_generation,)
             ).fetchall()
         }
-    elif not force_cold_bootstrap:
-        line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
-        previous_roles = {
-            (addr or "").lower(): selection.CORE
-            for (addr,) in db.execute(
-                "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-                "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1 ORDER BY w.rank LIMIT ?",
-                (line, int(config.MAX_TARGETS)),
-            ).fetchall()
-        }
 
     cold_bootstrap = bool(
         (force_cold_bootstrap or previous_generation is None)
@@ -1125,7 +1036,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
-    follow_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     if True:  # sole production selection path; there is no observation-period mode
         # Active means the wallet itself is structurally/economically copyable.  Score orders the bounded
         # candidate pool; the shared-account replay then keeps candidates whose added net profit exceeds
@@ -1135,13 +1045,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             if row.get("status") in {"active", "qualified"}
             and controls.get((row.get("addr") or "").lower(), True)
         ][:int(config.MAX_TARGETS)]
-        score_line_core = [
-            (row.get("addr") or "").lower() for row in profiles
-            if row.get("status") in {"active", "qualified"}
-            and controls.get((row.get("addr") or "").lower(), True)
-            and f(row.get("follow_score")) >= follow_line
-        ][:int(config.MAX_TARGETS)]
-        selected_set = set(score_line_core)
+        # If canonical portfolio replay is unavailable, preserve only a still-qualified published Core.
+        # Never fabricate production targets from a retired score threshold.
+        selected_set = {
+            addr for addr in portfolio_candidates if previous_roles.get(addr) == selection.CORE
+        }
         portfolio_rejections = {}
         portfolio_utilities = {}
         marginal = None
@@ -1204,13 +1112,15 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             data_status = row.get("data_status") or "valid"
             selection_data_status = data_status if refreshed_now or data_status == "deferred_data_error" else "stale"
             active = row.get("status") in {"active", "qualified"}
-            above_line = f(row.get("follow_score")) >= follow_line
             previous_role = previous_roles.get(addr) or registry.get(addr, {}).get("role")
             if data_status == "deferred_data_error" and previous_role == selection.CORE and enabled:
                 role, reason = selection.CORE, "deferred_data_error"
             elif active and enabled and addr in selected_set:
                 role = selection.CORE
-                reason = "portfolio_positive_net_contribution" if marginal is not None else "above_follow_line"
+                reason = (
+                    "portfolio_positive_net_contribution" if marginal is not None
+                    else "portfolio_replay_unavailable_keep_core"
+                )
             elif addr in held:
                 role, reason = selection.EXIT_ONLY, "exit_only_open_position"
             elif active:
@@ -1219,10 +1129,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     reason = "operator_disabled"
                 elif marginal is not None and addr in portfolio_candidates:
                     reason = portfolio_rejections.get(addr, "portfolio_no_profit_improvement")
-                elif not above_line:
-                    reason = "below_follow_line"
                 else:
-                    reason = "portfolio_no_profit_improvement"
+                    reason = "portfolio_replay_unavailable"
             else:
                 continue
             rows.append(selection.SelectionRow(
@@ -1234,7 +1142,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
                 model_version=(
-                    "selection-net-drawdown-v1" if marginal is not None else "selection-score-line-v1"
+                    "selection-net-drawdown-v1" if marginal is not None
+                    else "selection-replay-unavailable-v1"
                 ),
                 policy_version=copy_policy.version,
             ))
@@ -1270,11 +1179,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         lifecycle_data_status = (
             "valid" if effective_data_status in {"valid", "rejected"} else effective_data_status
         )
-        above_follow_line = f(row.get("follow_score")) >= follow_line
         soft_bad = (
             row.get("status") not in {"active", "qualified"}
             or row.get("evidence_status") in {"economically_disqualified", "invalid"}
-            or not above_follow_line
         )
         hard_exit = row.get("reason") in _HARD_EXIT_REASONS
         good_now = lifecycle_data_status == "valid" and row.get("status") in {"active", "qualified"} and not soft_bad
@@ -1291,7 +1198,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             positive_probability=f(row.get("copy_positive_probability")),
             challenger_since_ms=_iso_ms(prior_reg.get("first_qualified_at")),
             soft_bad=soft_bad,
-            soft_bad_reason=("below_follow_line" if not above_follow_line else row.get("reason") or "soft_bad"),
+            soft_bad_reason=row.get("reason") or "soft_bad",
             hard_exit=hard_exit,
             hard_exit_reason=row.get("reason") or "hard_exit",
             has_open_copy=addr in held,
@@ -2108,13 +2015,7 @@ def scan(db, p) -> None:
     except Exception as exc:  # noqa: BLE001 - old published selection remains authoritative
         db.rollback()
         generation.fail_generation(db, generation_id, str(exc))
-        old_core = selection.published_core_addrs(db)
-        if old_core is None:
-            line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-            old_core = [r[0] for r in db.execute(
-                "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-                "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1", (line,)
-            ).fetchall()]
+        old_core = selection.published_core_addrs(db) or []
         _record_run(db, started, t0, 0, 0, 0, 0, 0, 0, len(old_core),
                     full=run_full, failed=1, complete=False)
         _set_scan_progress(db, state="idle", stage="error", candidates_scanned=0, candidates_total=0)
@@ -2137,13 +2038,7 @@ def scan(db, p) -> None:
     active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
     current_selection_generation = selection.latest_published_generation(db)
-    core_addrs = selection.published_core_addrs(db)
-    if core_addrs is None:
-        line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-        core_addrs = [r[0] for r in db.execute(
-            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-            "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1 ORDER BY w.rank", (line,)
-        ).fetchall()]
+    core_addrs = selection.published_core_addrs(db) or []
     challenger_addrs = []
     if current_selection_generation:
         challenger_addrs = [r[0] for r in db.execute(
@@ -2300,13 +2195,7 @@ def scan(db, p) -> None:
 
     complete = failed == 0
     published = False
-    previous_core = selection.published_core_addrs(db)
-    if previous_core is None:
-        line = params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
-        previous_core = [r[0] for r in db.execute(
-            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-            "WHERE w.score>=? AND COALESCE(tc.enabled,1)=1", (line,)
-        ).fetchall()]
+    previous_core = selection.published_core_addrs(db) or []
     n_active = len(previous_core)
     pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
     if complete:

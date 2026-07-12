@@ -1,16 +1,18 @@
 """Position list/detail endpoints for the dashboard API."""
 
-from . import config
-from . import params as params_mod
 from .api_common import iso_epoch, q1, qall
 
 
 def _follow_set_cte() -> str:
     return (
-        "WITH follow_set AS ("
-        "SELECT w.addr, ROW_NUMBER() OVER (ORDER BY w.rank) AS follow_pos "
-        "FROM watchlist w LEFT JOIN target_controls tc ON tc.addr=w.addr "
-        "WHERE COALESCE(tc.enabled,1)=1 AND w.score>=?"
+        "WITH current_selection AS ("
+        "SELECT generation FROM scan_generation WHERE status='published' AND complete=1 AND is_current=1 "
+        "ORDER BY id DESC LIMIT 1"
+        "), follow_set AS ("
+        "SELECT fs.addr, ROW_NUMBER() OVER (ORDER BY COALESCE(fs.utility,-1e999) DESC,fs.addr) AS follow_pos "
+        "FROM follow_selection fs JOIN current_selection sg ON sg.generation=fs.generation "
+        "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+        "WHERE fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1"
         ") "
     )
 
@@ -26,7 +28,6 @@ def _close_type(row) -> str:
 
 def ep_positions(db, qs):
     status = (qs.get("status", ["open"])[0])
-    line = params_mod.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE
     if status == "closed":
         where, args = ["cp.status!='open'"], []
         for col, key in (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")):
@@ -49,7 +50,7 @@ def ep_positions(db, qs):
                     "FROM closed_base cb "
                     "LEFT JOIN watchlist w ON w.addr=cb.addr "
                     "LEFT JOIN follow_set fs ON fs.addr=cb.addr "
-                    "ORDER BY cb.closed_at DESC", tuple([line] + args))
+                    "ORDER BY cb.closed_at DESC", tuple(args))
         out = []
         for r in rows:
             o, c = iso_epoch(r["opened_at"]), iso_epoch(r["closed_at"])
@@ -115,7 +116,7 @@ def ep_positions(db, qs):
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
         "LEFT JOIN profile pr ON pr.addr=cp.addr "
         "LEFT JOIN follow_set fs ON fs.addr=cp.addr "
-        "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple([line] + args))
+        "WHERE " + " AND ".join(where) + " ORDER BY cp.opened_at DESC", tuple(args))
     out, float_total = [], 0.0
     for r in rows:
         entry = r["entry_px"] or 0.0
