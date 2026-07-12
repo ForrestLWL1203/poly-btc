@@ -1679,7 +1679,17 @@ def tune_published_generation(db, generation_id, stamp=None, source="scan"):
         lease = json.loads(row[0]) if row and row[0] else {}
     except (TypeError, ValueError):
         lease = {}
-    if f(lease.get("expiresAt")) > now_s and int(lease.get("pid") or 0) != os.getpid():
+    lease_pid = int(lease.get("pid") or 0)
+    lease_alive = False
+    if lease_pid and lease_pid != os.getpid():
+        try:
+            os.kill(lease_pid, 0)
+            lease_alive = True
+        except ProcessLookupError:
+            lease_alive = False
+        except PermissionError:
+            lease_alive = True
+    if f(lease.get("expiresAt")) > now_s and lease_pid != os.getpid() and lease_alive:
         return {"status": "skipped", "reason": "tuner_already_running", "applied": False}
     db.execute(
         "INSERT INTO auto_tune_state (key,value,updated_at) VALUES ('async_tuner_lease',?,?) "
