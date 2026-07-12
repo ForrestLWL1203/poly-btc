@@ -890,7 +890,15 @@ class Observer:
                 for b in self.books:
                     self._refresh_marks(b)
             except Exception as exc:  # noqa: BLE001 — never let dashboard freshness kill the engine
+                self._rollback_db()
                 _log(f"mark refresh failed: {exc}")
+
+    def _rollback_db(self):
+        """Release an interrupted SQLite transaction so another loop can recover after write contention."""
+        try:
+            self.db.rollback()
+        except Exception:  # noqa: BLE001 - recovery must not mask the original loop error
+            pass
 
     async def _announce(self):
         while not self.stop:
@@ -973,6 +981,7 @@ class Observer:
                     self._write_proc_status(self._proc_state)
                     last_hb = time.time()
             except Exception as exc:  # noqa: BLE001
+                self._rollback_db()
                 _log(f"command loop error: {exc}")
             await asyncio.sleep(1.5)
 
@@ -1150,6 +1159,7 @@ class Observer:
                     _log(f"stock mids refreshed: {len(coins)} coins")
                     last_log = time.time()
             except Exception as exc:  # noqa: BLE001
+                self._rollback_db()
                 _log(f"stock mids refresh failed: {exc}")
             await asyncio.sleep(2 if self.stock_coins else 5)
 
@@ -1229,6 +1239,7 @@ class Observer:
                     hb.cancel()
             except Exception as exc:  # noqa: BLE001
                 self.ws = None
+                self._rollback_db()
                 _log(f"bbo ws error: {exc}; reconnecting in 3s")
                 await asyncio.sleep(3)
 
