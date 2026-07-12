@@ -932,6 +932,12 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
     ).hexdigest()[:16]
     primary = windows.get(30) or windows.get(max(windows))
     worst_primary = worst_windows.get(30) or worst_windows.get(max(worst_windows))
+    conservative_net30 = min(
+        f(primary.get("copy_net_pnl")), f(worst_primary.get("copy_net_pnl")),
+    )
+    conservative_liquidations30 = max(
+        int(primary.get("liquidations") or 0), int(worst_primary.get("liquidations") or 0),
+    )
     fills_only_primary = evaluate_portfolio_window(
         db, addrs, sigmas, follow, now_ms,
         window_fills={30: list(window_fills.get(30) or [])}, days=30,
@@ -950,14 +956,16 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         "paramsHash": params_hash,
         "replayedAt": now_iso(),
         "netPnl30": f(primary.get("copy_net_pnl")),
-        "netPnl30Worst": f(worst_primary.get("copy_net_pnl")),
+        "netPnl30Worst": conservative_net30,
+        "netPnl30AmbiguousLiquidate": f(worst_primary.get("copy_net_pnl")),
         "fillsOnlyNetPnl30": f(fills_only_primary.get("copy_net_pnl")),
         "closed30": int(primary.get("closed_n") or 0),
         "maxDrawdown30": f(primary.get("max_drawdown")),
         "openRate30": f(primary.get("open_fill_rate")),
         "capacityFit30": f(primary.get("capacity_open_fit")),
         "liquidations30": int(primary.get("liquidations") or 0),
-        "liquidations30Worst": int(worst_primary.get("liquidations") or 0),
+        "liquidations30Worst": conservative_liquidations30,
+        "liquidations30AmbiguousLiquidate": int(worst_primary.get("liquidations") or 0),
         "fillsOnlyLiquidations30": int(fills_only_primary.get("liquidations") or 0),
         "ambiguousLiquidations30": int(primary.get("ambiguous_liquidations") or 0),
         "pricePathCoverage30": f(primary.get("price_path_coverage")),
