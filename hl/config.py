@@ -423,7 +423,7 @@ AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.0       # Paper exploration;真钱环境�
 # Each volatility tier is searched independently.  The lower 0.60 candidate lets a newly re-ranked Core
 # trade smaller tickets when more good wallets compete for the same account, while the configured tier
 # minimums remain the hard floor.
-AUTO_TUNE_MARGIN_FACTORS = (0.6, 0.8, 1.0, 1.2, 1.4, 1.6)
+AUTO_TUNE_MARGIN_FACTORS = (0.6, 0.8, 1.0, 1.2, 1.6)
 AUTO_TUNE_LEV_CAP_SETS = ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50)
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.06, 0.08, 0.10, 0.12)
