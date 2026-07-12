@@ -716,12 +716,31 @@ def add_candidates_from_axes(base: dict) -> list[dict]:
                                float(base["ADD_GAP_SHRINK_G"]))
     max_hards = _unique_values(getattr(config, "AUTO_TUNE_ADD_MAX_HARDS", (4, 6, 8, 10)),
                                float(base["ADD_MAX_HARD"]))
-    return [
-        build_add_candidate(base, gap_k, shrink_g, int(max_hard), pos_gap_k=pos_gap_k)
-        for gap_k, pos_gap_k, shrink_g, max_hard in itertools.product(
-            gap_ks, pos_gap_ks, shrink_gs, max_hards
-        )
-    ]
+    baseline = build_add_candidate(
+        base, float(base["ADD_GAP_K"]), float(base["ADD_GAP_SHRINK_G"]),
+        int(base["ADD_MAX_HARD"]), pos_gap_k=float(base["POS_ADD_GAP_K"]),
+    )
+    out = [baseline]
+    axes = (
+        ("ADD_GAP_K", gap_ks),
+        ("POS_ADD_GAP_K", pos_gap_ks),
+        ("ADD_GAP_SHRINK_G", shrink_gs),
+        ("ADD_MAX_HARD", max_hards),
+    )
+    seen = {tuple(float(baseline["params"][key]) for key in ADD_TUNE_KEYS)}
+    for key, values in axes:
+        for value in values:
+            params_ = {name: baseline["params"][name] for name in ADD_TUNE_KEYS}
+            params_[key] = int(value) if key == "ADD_MAX_HARD" else float(value)
+            marker = tuple(float(params_[name]) for name in ADD_TUNE_KEYS)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            out.append(build_add_candidate(
+                params_, params_["ADD_GAP_K"], params_["ADD_GAP_SHRINK_G"],
+                int(params_["ADD_MAX_HARD"]), pos_gap_k=params_["POS_ADD_GAP_K"],
+            ))
+    return out
 
 
 def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
@@ -877,7 +896,8 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
 def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                             sigmas: dict | None = None, now_ms: int | None = None,
                             window_fills: dict[int, list[dict]] | None = None,
-                            path_rows: list[dict] | None = None, path_meta: dict | None = None) -> dict:
+                            path_rows: list[dict] | None = None, path_meta: dict | None = None,
+                            primary_only: bool = False) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     overrides = {**follow_overrides_for_tune_candidate(follow, candidate),
                  "AMBIGUOUS_PATH_MODE": "liquidate"}
@@ -891,13 +911,20 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     # Grid search can evaluate hundreds of candidates.  Retaining every position, open-position snapshot,
     # and equity-curve point for every candidate exhausts a 512MB VPS even though ranking only consumes the
     # compact summary below.
-    out["windows"] = {
-        days: _compact_backtest(result)
-        for days, result in _candidate_windows(
-            db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
-            path_rows=path_rows, path_meta=path_meta,
-        ).items()
-    }
+    if primary_only:
+        result = evaluate_portfolio_window(
+            db, addrs, sigmas, overrides, now_ms, window_fills={30: list((window_fills or {}).get(30) or [])},
+            days=30, path_rows=path_rows, path_meta=path_meta,
+        )
+        out["windows"] = {30: _compact_backtest(result)}
+    else:
+        out["windows"] = {
+            days: _compact_backtest(result)
+            for days, result in _candidate_windows(
+                db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
+                path_rows=path_rows, path_meta=path_meta,
+            ).items()
+        }
     return out
 
 
@@ -1324,14 +1351,36 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # One bounded joint sizing search: leverage tuple × shared margin scale × deploy line. This captures
     # the central tradeoff that lower leverage may safely support larger margin tickets. A cheap coordinate
     # polish then adjusts one volatility-tier margin at a time around the best joint surface.
-    joint_candidates = [
+    joint_quick = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
+                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+                                primary_only=True)
         for candidate in tune_candidates_from_axes(base)
+    ]
+    quick_baseline = next(
+        (candidate for candidate in joint_quick if _same_tune_values(candidate.get("params") or {}, base)),
+        joint_quick[0],
+    )
+    quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
+    sizing_limit = max(2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12))
+    quick_finalists = sorted(
+        quick_valid or [quick_baseline],
+        key=lambda candidate: _candidate_rank_key(candidate, quick_baseline), reverse=True,
+    )[:sizing_limit]
+    if not any(_same_tune_values(candidate.get("params") or {}, base) for candidate in quick_finalists):
+        quick_finalists.append(quick_baseline)
+    joint_candidates = [
+        evaluate_tune_candidate(
+            db, addrs, follow,
+            _candidate_from_params(candidate.get("params") or base, axis="joint_finalist"),
+            sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
+            path_rows=path_rows, path_meta=path_meta,
+        )
+        for candidate in quick_finalists
     ]
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
-        joint_candidates[0],
+        joint_candidates[-1],
     )
     selected_joint = choose_margin_candidate(joint_candidates, baseline)
     joint_params = selected_joint.get("params") or base
