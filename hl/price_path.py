@@ -62,10 +62,16 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
     fetched, failed = 0, []
     for coin in coins:
         row = db.execute(
-            "SELECT MAX(close_time) FROM coin_price_candle WHERE coin=? AND interval=?",
+            "SELECT MAX(close_time),MAX(fetched_at) FROM coin_price_candle WHERE coin=? AND interval=?",
             (coin, interval),
         ).fetchone()
-        cursor = max(start_ms, int((row[0] if row else 0) or 0) + 1)
+        latest_close = int((row[0] if row else 0) or 0)
+        latest_fetch = int((row[1] if row else 0) or 0)
+        # A scanner finalization and its generation-bound tuner commonly run back-to-back. Reuse the
+        # just-fetched forming candle instead of issuing one request per market twice.
+        if latest_close >= end_ms - 2 * step and latest_fetch >= now_ms - step // 2:
+            continue
+        cursor = max(start_ms, latest_close + 1)
         # Refresh the forming candle and bridge a possible boundary gap.
         cursor = max(start_ms, cursor - step)
         if cursor >= end_ms:
