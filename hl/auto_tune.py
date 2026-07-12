@@ -738,16 +738,12 @@ def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
 
 def independent_leverage_candidates(base: dict) -> list[dict]:
     """Coordinate-polish one leverage tier at a time around the selected joint surface."""
-    configured = _unique_lev_sets(
-        getattr(config, "AUTO_TUNE_LEV_CAP_SETS", ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))),
-        tuple(float(base[key]) for key in LEV_KEYS),
-    )
-    axes = []
-    for index, key in enumerate(LEV_KEYS):
-        values = {float(values[index]) for values in configured} | {float(base[key])}
-        if key == "MID_LEV_CAP":
-            values |= {float(value) for value in getattr(config, "AUTO_TUNE_COORD_MID_LEV_CAPS", ())}
-        axes.append(sorted(values))
+    configured = {
+        "STABLE_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_STABLE_LEV_CAPS", (35, 32, 30, 28, 25)),
+        "MID_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_MID_LEV_CAPS", (12, 11, 10, 9)),
+        "HIGH_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_HIGH_LEV_CAPS", (4, 5, 6)),
+    }
+    axes = [sorted({float(value) for value in configured[key]} | {float(base[key])}) for key in LEV_KEYS]
     candidates = [_candidate_from_params(dict(base), axis="independent_leverage_baseline")]
     for index, key in enumerate(LEV_KEYS):
         for value in axes[index]:
@@ -757,6 +753,37 @@ def independent_leverage_candidates(base: dict) -> list[dict]:
                 {**base, key: value}, axis=f"independent_leverage_{key.lower()}",
             ))
     return candidates
+
+
+def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
+                             limit: int = 3) -> list[float]:
+    """Keep current, best-profit and fewest-liquidation values for one independently tested tier."""
+    base_params = baseline.get("params") or {}
+    rows = []
+    for candidate in candidates:
+        params_ = candidate.get("params") or {}
+        if all(
+            name == key or abs(float(params_.get(name, 0.0)) - float(base_params.get(name, 0.0))) <= 1e-9
+            for name in LEV_KEYS
+        ):
+            rows.append(candidate)
+    if not rows:
+        return [float(base_params[key])]
+    primary = lambda row: (row.get("windows") or {}).get(30) or {}
+    picks = [baseline]
+    picks.append(max(rows, key=lambda row: _result_pnl(primary(row))))
+    picks.append(min(rows, key=lambda row: (
+        int(primary(row).get("liquidations") or 0), -_result_pnl(primary(row)),
+    )))
+    picks.extend(sorted(rows, key=lambda row: _candidate_rank_key(row, baseline), reverse=True))
+    values = []
+    for candidate in picks:
+        value = float((candidate.get("params") or base_params)[key])
+        if value not in values:
+            values.append(value)
+        if len(values) >= max(1, int(limit)):
+            break
+    return values
 
 
 def deploy_candidates(base: dict) -> list[dict]:
@@ -1474,26 +1501,43 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
         market_ctx=market_ctx,
     )
-    # One bounded joint sizing search: leverage tuple × shared margin scale × deploy line. This captures
-    # the central tradeoff that lower leverage may safely support larger margin tickets. A cheap coordinate
-    # polish then adjusts one volatility-tier margin at a time around the best joint surface.
-    joint_quick = []
-    for candidate in tune_candidates_from_axes(base):
-        check_budget("joint_primary")
-        joint_quick.append(evaluate_tune_candidate(
+    # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
+    # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
+    # for a full leverage Cartesian grid.
+    axis_quick = []
+    for candidate in independent_leverage_candidates(base):
+        check_budget("leverage_axes")
+        axis_quick.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
             primary_only=True,
         ))
     quick_baseline = next(
-        (candidate for candidate in joint_quick if _same_tune_values(candidate.get("params") or {}, base)),
-        joint_quick[0],
+        (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
+        axis_quick[0],
     )
+    tier_values = {
+        key: _tier_leverage_shortlist(axis_quick, quick_baseline, key, limit=3)
+        for key in LEV_KEYS
+    }
+    combo_quick = []
+    for values in itertools.product(*(tier_values[key] for key in LEV_KEYS)):
+        check_budget("leverage_combinations")
+        candidate = _candidate_from_params(
+            {**base, **dict(zip(LEV_KEYS, values))}, axis="leverage_combination",
+        )
+        combo_quick.append(evaluate_tune_candidate(
+            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            primary_only=True,
+        ))
+    joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
     sizing_limit = max(2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12))
-    quick_finalists = _diverse_sizing_candidates(
-        quick_valid or [quick_baseline], quick_baseline, sizing_limit,
-    )
+    quick_finalists = sorted(
+        quick_valid or [quick_baseline],
+        key=lambda candidate: _candidate_rank_key(candidate, quick_baseline), reverse=True,
+    )[:sizing_limit]
     if not any(_same_tune_values(candidate.get("params") or {}, base) for candidate in quick_finalists):
         quick_finalists.append(quick_baseline)
     joint_candidates = []
@@ -1511,15 +1555,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )
     selected_joint = choose_margin_candidate(joint_candidates, baseline)
     joint_params = selected_joint.get("params") or base
-    leverage_candidates = []
-    for candidate in independent_leverage_candidates(joint_params):
-        check_budget("leverage_polish")
-        leverage_candidates.append(evaluate_tune_candidate(
-            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-        ))
-    selected_leverage = choose_margin_candidate(leverage_candidates + [baseline], baseline)
-    joint_params = selected_leverage.get("params") or joint_params
     margin_candidates = []
     for candidate in independent_margin_candidates(joint_params, follow):
         check_budget("margin_polish")
@@ -1532,8 +1567,19 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
          if _same_tune_values(candidate.get("params") or {}, joint_params)),
         margin_candidates[0],
     )
-    selected = choose_margin_candidate(margin_candidates, margin_baseline)
-    candidates = joint_candidates + leverage_candidates + margin_candidates
+    selected_margin = choose_margin_candidate(margin_candidates, margin_baseline)
+    margin_params = selected_margin.get("params") or joint_params
+    deploy_polish = []
+    for candidate in deploy_candidates(margin_params):
+        check_budget("deploy_polish")
+        deploy_polish.append(evaluate_tune_candidate(
+            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        ))
+    selected = choose_margin_candidate(
+        joint_candidates + margin_candidates + deploy_polish + [baseline], baseline,
+    )
+    candidates = joint_candidates + margin_candidates + deploy_polish
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
 
