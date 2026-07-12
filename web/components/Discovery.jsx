@@ -1,7 +1,6 @@
 import { api } from "../lib/api.js";
 import { useApiResource } from "../lib/refresh.js";
 import { DiscoveryFunnel } from "./discovery/DiscoveryFunnel.jsx";
-import { PipelineSummary } from "./discovery/PipelineSummary.jsx";
 import { ScanControls, ScanStatusCard } from "./discovery/ScanStatusCard.jsx";
 import { ScanHistoryTable } from "./discovery/ScanHistoryTable.jsx";
 
@@ -12,12 +11,11 @@ const { useState, useEffect, useCallback, useRef } = React;
 export function Discovery({ scanning, startRescan, confirm }) {
   const [fullScan, setFullScan] = useState(false);
   const load = useCallback(async () => {
-    const [discovery, scanRuns, pipeline] = await Promise.all([
+    const [discovery, scanRuns] = await Promise.all([
       api.get("/api/discovery"),
       api.get("/api/scan-runs?limit=8"),
-      api.get("/api/pipeline-summary"),
     ]);
-    return { discovery, runs: scanRuns.runs, pipeline };
+    return { discovery, runs: scanRuns.runs };
   }, []);
   const { data, reload } = useApiResource(load, { intervalMs: 4000 });
   const wasScanning = useRef(scanning);
@@ -27,7 +25,6 @@ export function Discovery({ scanning, startRescan, confirm }) {
   }, [scanning, reload]);
   const d = data && data.discovery;
   const runs = data && data.runs;
-  const pipeline = data && data.pipeline;
 
   const doRescan = () => confirm({
     title: fullScan ? "触发全量采集" : "触发增量采集",
@@ -46,7 +43,6 @@ export function Discovery({ scanning, startRescan, confirm }) {
       <ScanStatusCard discovery={d} scanning={scanning} />
       <DiscoveryFunnel funnel={d.funnel} scoreHistogram={d.scoreHistogram} rejectReasons={d.rejectReasons} />
 
-      <PipelineSummary p={pipeline} />
       <ScanHistoryTable runs={runs} />
     </div>
   );
