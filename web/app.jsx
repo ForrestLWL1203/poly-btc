@@ -64,7 +64,7 @@ function Dashboard({ onLogout }) {
       ctl("pause", "正在暂停开单…", "paused");
     }
   };
-  useEffect(() => { if (obs !== "running") setStopChecked(false); }, [obs]);  // reset escalation off-running
+  useEffect(() => { if (obs === "stopped") setStopChecked(false); }, [obs]);
   useEffect(() => {
     if (typeof window !== "undefined" && window.matchMedia && !window.matchMedia("(max-width: 860px)").matches) return;
     const raf = requestAnimationFrame(() => {
@@ -116,14 +116,18 @@ function Dashboard({ onLogout }) {
               {streamOk ? "实时" : "轮询"}</span>
             <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
             {/* fixed-width control (minWidth 150, centered) so changing the label never resizes the button.
-                stopped → 启动跟单(restart) · paused → 恢复开单(resume) · running → 暂停开单 + in-button
-                「彻底停止」checkbox that escalates to a full process stop (red). */}
+                stopped → 启动跟单(restart) · paused → 恢复开单或彻底停止 · running → 暂停开单或彻底停止。
+                两种存活状态都保留 in-button checkbox，避免 paused 后失去停止进程入口。 */}
             {!(ov && ov.system) ? null : obs === "stopped"
               ? <button className="btn btn-go" style={{ minWidth: 150, justifyContent: "center" }} onClick={smartStart} disabled={pausing}>
                   <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} /> 启动跟单</button>
               : obs === "paused"
-              ? <button className="btn btn-go" style={{ minWidth: 150, justifyContent: "center" }} onClick={smartStart} disabled={pausing}>
-                  <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} /> 恢复开单</button>
+              ? <button className={"btn " + (stopChecked ? "btn-stop" : "btn-go")} style={{ minWidth: 150, justifyContent: "center" }}
+                  onClick={stopChecked ? pauseOrStop : smartStart} disabled={pausing}>
+                  <span onClick={(e) => { e.stopPropagation(); setStopChecked(v => !v); }} title="勾选后彻底停止整个进程，不恢复开单"
+                    style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 15, height: 15, borderRadius: 4, border: "1.5px solid rgba(255,255,255,.75)", fontSize: 10, lineHeight: 1, cursor: "pointer", flexShrink: 0 }}>
+                    {stopChecked ? "✓" : ""}</span>
+                  {stopChecked ? "彻底停止跟单" : "恢复开单"}</button>
               : <button className={"btn " + (stopChecked ? "btn-stop" : "btn-accent")} style={{ minWidth: 150, justifyContent: "center" }} disabled={pausing} onClick={pauseOrStop}>
                   <span onClick={(e) => { e.stopPropagation(); setStopChecked(v => !v); }} title="勾选后升级为彻底停止整个进程"
                     style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 15, height: 15, borderRadius: 4, border: "1.5px solid rgba(255,255,255,.75)", fontSize: 10, lineHeight: 1, cursor: "pointer", flexShrink: 0 }}>
