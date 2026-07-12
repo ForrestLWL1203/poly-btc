@@ -882,9 +882,16 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout=30000")                          # serialized by a lock)
     for s in schemas:
         db.executescript(s)
-    _apply_migrations(db)
-    _migrate_episode_seq(db)
-    db.commit()
+    # Dashboard, Observer and a maintenance CLI can start at the same moment after deploy.  Serialize
+    # schema inspection + ALTERs so two fresh processes cannot both decide a column is missing and race.
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        _apply_migrations(db)
+        _migrate_episode_seq(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return db
 
 
