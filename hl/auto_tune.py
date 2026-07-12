@@ -761,7 +761,15 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     out["margins"] = {k: params_[k] for k in MARGIN_KEYS}
     out["lev_caps"] = {k: params_[k] for k in LEV_KEYS}
     out["deploy_full_pct"] = params_["DEPLOY_FULL_PCT"]
-    out["windows"] = _candidate_windows(db, addrs, sigmas, overrides, now_ms, window_fills=window_fills)
+    # Grid search can evaluate hundreds of candidates.  Retaining every position, open-position snapshot,
+    # and equity-curve point for every candidate exhausts a 512MB VPS even though ranking only consumes the
+    # compact summary below.
+    out["windows"] = {
+        days: _compact_backtest(result)
+        for days, result in _candidate_windows(
+            db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
+        ).items()
+    }
     return out
 
 
@@ -775,7 +783,12 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     out = dict(candidate)
     out["params"] = params_
     out["add_params"] = params_
-    out["windows"] = _candidate_windows(db, addrs, sigmas, overrides, now_ms, window_fills=window_fills)
+    out["windows"] = {
+        days: _compact_backtest(result)
+        for days, result in _candidate_windows(
+            db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
+        ).items()
+    }
     return out
 
 
