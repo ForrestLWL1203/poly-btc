@@ -261,6 +261,9 @@ def main() -> int:
     t = sub.add_parser("tune", help=argparse.SUPPRESS)
     t.add_argument("--generation", required=True)
     t.add_argument("--stamp")
+    opt = sub.add_parser("optimize", help="path-regate Core and jointly tune all copy parameters")
+    opt.add_argument("--generation")
+    opt.add_argument("--stamp")
     rr = sub.add_parser("refresh-selection-replay", help=argparse.SUPPRESS)
     rr.add_argument("--generation")
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
@@ -302,6 +305,9 @@ def main() -> int:
         print(f"watchlist {n} active")
     elif args.cmd == "tune":
         result = scanner.tune_published_generation(db, args.generation, stamp=args.stamp)
+        print(json.dumps(result, sort_keys=True, default=str))
+    elif args.cmd == "optimize":
+        result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "refresh-selection-replay":
         generation_id = args.generation or scanner.selection.latest_published_generation(db)

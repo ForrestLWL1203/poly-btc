@@ -237,7 +237,12 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     # is not rejected merely because drawdown rises by an arbitrary percentage
     # point; the extra downside must be paid for by extra net profit.
     risk_adjusted_utility = weighted_net - max_drawdown * float(config.INITIAL_BALANCE)
+    liquidations = max(
+        (int(result.get("liquidations") or 0) for result in windows.values()),
+        default=10**9,
+    )
     return (
+        -liquidations,
         risk_adjusted_utility,
         _result_pnl(windows.get(14, {})),
         _result_pnl(windows.get(7, {})),
@@ -654,25 +659,24 @@ def _candidate_from_params(params_: dict, *, axis: str) -> dict:
 
 
 def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
-    """Search each volatility tier independently instead of one shared multiplier."""
+    """Coordinate-polish each tier around a jointly selected sizing surface."""
     factors = _unique_values(
         getattr(
             config, "AUTO_TUNE_MARGIN_FACTORS",
             getattr(config, "AUTO_TUNE_MARGIN_MULTS", (0.8, 1.0, 1.2, 1.4, 1.6)),
         ), 1.0
     )
-    axes = []
+    candidates = [_candidate_from_params(dict(base), axis="independent_margins")]
     for key in MARGIN_KEYS:
         floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
         floor = float(follow.get(floor_key) or 0.0)
-        axes.append(sorted({max(floor, float(base[key]) * factor) for factor in factors}))
-    return [
-        _candidate_from_params(
-            {**base, **dict(zip(MARGIN_KEYS, values))},
-            axis="independent_margins",
-        )
-        for values in itertools.product(*axes)
-    ]
+        for value in sorted({max(floor, float(base[key]) * factor) for factor in factors}):
+            if abs(value - float(base[key])) <= 1e-12:
+                continue
+            candidates.append(_candidate_from_params(
+                {**base, key: value}, axis=f"independent_margin_{key.lower()}",
+            ))
+    return candidates
 
 
 def independent_leverage_candidates(base: dict) -> list[dict]:
@@ -1317,41 +1321,32 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
         market_ctx=_load_market_ctx(db),
     )
+    # One bounded joint sizing search: leverage tuple × shared margin scale × deploy line. This captures
+    # the central tradeoff that lower leverage may safely support larger margin tickets. A cheap coordinate
+    # polish then adjusts one volatility-tier margin at a time around the best joint surface.
+    joint_candidates = [
+        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
+        for candidate in tune_candidates_from_axes(base)
+    ]
+    baseline = next(
+        (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
+        joint_candidates[0],
+    )
+    selected_joint = choose_margin_candidate(joint_candidates, baseline)
+    joint_params = selected_joint.get("params") or base
     margin_candidates = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
                                 window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
-        for candidate in independent_margin_candidates(base, follow)
+        for candidate in independent_margin_candidates(joint_params, follow)
     ]
-    baseline = next(
-        (candidate for candidate in margin_candidates if _same_tune_values(candidate.get("params") or {}, base)),
+    margin_baseline = next(
+        (candidate for candidate in margin_candidates
+         if _same_tune_values(candidate.get("params") or {}, joint_params)),
         margin_candidates[0],
     )
-    selected_margin = choose_margin_candidate(margin_candidates, baseline)
-
-    lev_candidates = [
-        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
-        for candidate in independent_leverage_candidates(selected_margin.get("params") or base)
-    ]
-    lev_baseline = next(
-        (candidate for candidate in lev_candidates
-         if _same_tune_values(candidate.get("params") or {}, selected_margin.get("params") or base)),
-        lev_candidates[0],
-    )
-    selected_lev = choose_margin_candidate(lev_candidates, lev_baseline)
-
-    deploy_grid = [
-        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
-        for candidate in deploy_candidates(selected_lev.get("params") or base)
-    ]
-    deploy_baseline = next(
-        (candidate for candidate in deploy_grid
-         if _same_tune_values(candidate.get("params") or {}, selected_lev.get("params") or base)),
-        deploy_grid[0],
-    )
-    selected = choose_margin_candidate(deploy_grid, deploy_baseline)
-    candidates = margin_candidates + lev_candidates + deploy_grid
+    selected = choose_margin_candidate(margin_candidates, margin_baseline)
+    candidates = joint_candidates + margin_candidates
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
 

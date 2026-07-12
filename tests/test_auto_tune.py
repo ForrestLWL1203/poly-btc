@@ -170,7 +170,7 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(overrides["DEPLOY_FULL_PCT"], 0.50)
         self.assertEqual(overrides["ADD_STRATEGY"], "smart")
 
-    def test_choose_candidate_uses_recent_window_for_capacity_and_liquidation_guard(self):
+    def test_choose_candidate_prioritizes_fewer_full_window_liquidations(self):
         baseline = {
             "mult": 1.0,
             "windows": {
@@ -196,7 +196,7 @@ class AutoTuneTests(unittest.TestCase):
 
         selected = auto_tune.choose_margin_candidate([baseline, recent_winner_with_older_liqs], baseline)
 
-        self.assertEqual(selected["mult"], 1.4)
+        self.assertEqual(selected["mult"], 1.0)
 
     def test_build_add_candidate_changes_smart_add_core_params(self):
         follow = {

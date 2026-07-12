@@ -5,6 +5,7 @@ over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
+import dataclasses
 import hashlib
 import json
 import math
@@ -1164,13 +1165,53 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     ) * 86_400_000
                     path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
                     path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
+                    path_rejected = set()
+                    for candidate_addr in sorted(selected_set):
+                        wallet_fills = [
+                            fill for fill in selected_fills
+                            if (fill.get("user") or "").lower() == candidate_addr
+                        ]
+                        wallet_result = auto_tune.evaluate_portfolio_window(
+                            db, [candidate_addr], sigmas,
+                            {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
+                            window_fills={30: wallet_fills}, days=30, market_ctx=market_ctx,
+                            path_rows=path_rows, path_meta=path_meta,
+                        )
+                        wallet_liqs = int(wallet_result.get("liquidations") or 0)
+                        wallet_closed = int(wallet_result.get("closed_n") or 0)
+                        wallet_liq_rate = wallet_liqs / wallet_closed if wallet_closed else 0.0
+                        if f(wallet_result.get("copy_net_pnl")) <= 0:
+                            path_rejected.add(candidate_addr)
+                            portfolio_rejections[candidate_addr] = "path_copy_net_nonpositive"
+                        elif (
+                            wallet_liqs >= int(getattr(config, "CORE_PATH_WALLET_MAX_LIQUIDATIONS", 3))
+                            and wallet_liq_rate >= float(getattr(
+                                config, "CORE_PATH_WALLET_MAX_LIQUIDATION_RATE", .05,
+                            ))
+                        ):
+                            path_rejected.add(candidate_addr)
+                            portfolio_rejections[candidate_addr] = "path_liquidation_excess"
+                    selected_set -= path_rejected
+                    if path_rejected:
+                        marginal = dataclasses.replace(
+                            marginal,
+                            selected=tuple(sorted(selected_set)),
+                            action="path_regate",
+                            removed=tuple(sorted(set(marginal.removed) | path_rejected)),
+                            search_meta={**dict(marginal.search_meta or {}),
+                                         "pathRejected": len(path_rejected)},
+                        )
+                    selected_fills = [
+                        fill for fill in selected_fills
+                        if (fill.get("user") or "").lower() in selected_set
+                    ]
                     path_primary = auto_tune.evaluate_portfolio_window(
                         db, sorted(selected_set), sigmas,
                         {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
                         window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
                         path_rows=path_rows, path_meta=path_meta,
                     )
-                    path_ok = (
+                    path_ok = not selected_set or (
                         float(path_meta.get("coverage") or 0.0)
                         >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
                         and f(path_primary.get("maintenance_margin_coverage"))
@@ -1192,6 +1233,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     )
                 for addr in portfolio_candidates:
                     if addr in selected_set:
+                        continue
+                    if str(portfolio_rejections.get(addr) or "").startswith("path_"):
                         continue
                     trial = evaluate(tuple(sorted(selected_set | {addr})))
                     final_net = f(final_metrics.net_pnl)
@@ -1728,7 +1771,8 @@ def _launch_async_tuner(db, generation_id, stamp):
         return {"status": "error", "reason": "tuner_launch_failed", "error": str(exc)[:200]}
 
 
-def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False):
+def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
+                               launch_tuner=True):
     """Rebuild selection from the current complete generation without network access.
 
     This is intentionally narrow: it never fetches network data or rewrites profiles.  Replacing a non-empty
@@ -1805,7 +1849,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         },
     )
     db.commit()
-    launch = _launch_async_tuner(db, generation_id, stamp)
+    launch = _launch_async_tuner(db, generation_id, stamp) if launch_tuner else {
+        "status": "skipped", "reason": "synchronous_optimizer",
+    }
     pipeline_audit._insert_event(
         db,
         stamp=stamp,
@@ -1823,6 +1869,22 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
         "selectionAction": marginal.action if marginal else "keep",
         "tuner": launch,
+    }
+
+
+def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
+    """One synchronous operator entrypoint: path-regate Core, jointly tune all execution params, persist."""
+    generation_id = generation_id or selection.latest_published_generation(db)
+    stamp = stamp or now_iso()
+    selection_result = repair_published_selection(
+        db, generation_id, stamp=stamp, replace_existing=True, launch_tuner=False,
+    )
+    tune_result = tune_published_generation(db, generation_id, stamp=stamp)
+    return {
+        "status": "ok" if tune_result.get("status") == "ok" else tune_result.get("status"),
+        "generation": generation_id,
+        "selection": selection_result,
+        "tune": tune_result,
     }
 
 

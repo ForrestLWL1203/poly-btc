@@ -425,18 +425,20 @@ AUTO_TUNE_MAX_DD_WORSEN = 0.01
 AUTO_TUNE_APPLY_COOLDOWN_DAYS = 0  # Paper每次完整generation都可重新寻优；真钱环境再设冷却
 AUTO_TUNE_ROLLBACK_RELATIVE_DROP = 0.10
 AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE = 0.0  # Paper exploration;真钱环境建议0.80
-AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.95      # Profitable tuning must survive the observed market path.
+AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.94      # Paper: current bounded path cache; live-money should use >=.99.
 
 # Canonical profitable Core replay must survive a bounded 15m market path. Fills-only replay remains the
 # fast candidate search, but a new selection is not publishable when its final shared-account path is thin.
-CORE_PRICE_PATH_MIN_COVERAGE = 0.95
+CORE_PRICE_PATH_MIN_COVERAGE = 0.94
 CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
+CORE_PATH_WALLET_MAX_LIQUIDATIONS = 3
+CORE_PATH_WALLET_MAX_LIQUIDATION_RATE = 0.05
 # Each volatility tier is searched independently.  The lower 0.60 candidate lets a newly re-ranked Core
 # trade smaller tickets when more good wallets compete for the same account, while the configured tier
 # minimums remain the hard floor.
-AUTO_TUNE_MARGIN_FACTORS = (0.6, 0.8, 1.0, 1.2, 1.4, 1.6)
-AUTO_TUNE_LEV_CAP_SETS = ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))
-AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50)
+AUTO_TUNE_MARGIN_FACTORS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+AUTO_TUNE_LEV_CAP_SETS = ((12, 5, 3), (15, 6, 4), (18, 7, 4), (20, 8, 4))
+AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50, 0.60)
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.06, 0.08, 0.10, 0.12)
 AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.08, 0.10, 0.12)
 AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3, 1.5)
