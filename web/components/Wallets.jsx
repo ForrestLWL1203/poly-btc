@@ -100,7 +100,8 @@ export function Wallets({ confirm, toast }) {
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
-              <th>最近开仓</th><th className="num" title="按当前已生效的调参结果回放，已扣手续费；同时展示长期与近期结果">当前参数回放</th>
+              <th className="num" title="按当前已生效的调参结果回放，已扣手续费；同时展示长期与近期结果">当前参数回放</th>
+              <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
               <th className="num">胜率</th><th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>
@@ -120,13 +121,18 @@ export function Wallets({ confirm, toast }) {
                     <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{marketLabel(w.marketType)}</span></td>
                     <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
                     <td className="num mono"><b>{w.openEvents7d ?? "—"}</b> <span className="muted">/</span> {w.closed7d ?? "—"}</td>
-                    <td className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{w.lastActionableOpenAt ? fTime(w.lastActionableOpenAt) : "—"}</td>
                     <td className="num">
                       <b style={{ color: (w.copyBacktestNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.copyBacktestNetPnl != null ? fSign(w.copyBacktestNetPnl, 0) : "—"}</b>
                       <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>30日 · {w.copyBacktestClosedN || 0}笔</div>
                       <div style={{ fontSize: 11, marginTop: 2, color: (w.copyBacktest7dNetPnl || 0) < 0 ? "var(--red-l)" : "var(--t2)" }}>
                         7日 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"} · {w.copyBacktest7dClosedN || 0}笔
                       </div>
+                    </td>
+                    <td className="num">
+                      {w.followCount > 0 ? <React.Fragment>
+                        <b style={{ color: (w.forwardNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.forwardNetPnl || 0, 0)}</b>
+                        <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>共 {w.followCount} 笔</div>
+                      </React.Fragment> : <span className="muted">暂无跟单</span>}
                     </td>
                     <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
                     <td><b>{w.mainCoin || "—"}</b></td>
