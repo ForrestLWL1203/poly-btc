@@ -1423,7 +1423,11 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         return result
 
     current = {k: float(follow[k]) for k in TUNE_KEYS}
-    base, baseline_reset = resolve_tune_baseline(db, current)
+    # Every generation optimizes against the parameters that are actually active in Observer and displayed
+    # by the dashboard. A historical manual baseline can be useful for rollback bookkeeping, but using it as
+    # the candidate comparator silently discards the entire neighbourhood above that old leverage surface.
+    base = dict(current)
+    baseline_reset = False
     sigmas = _load_sigmas(db)
     now_ms = int(time.time() * 1000)
     window_fills = _portfolio_window_fills(db, addrs, now_ms)
@@ -1512,7 +1516,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
 
     follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     current_add = {k: float(follow[k]) for k in ADD_TUNE_KEYS}
-    add_base, add_baseline_reset = resolve_add_baseline(db, current_add)
+    add_base = dict(current_add)
+    add_baseline_reset = False
     add_candidates = []
     add_baseline = None
     selected_add = None
