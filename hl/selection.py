@@ -430,7 +430,10 @@ def search_smart_core(candidates: Sequence[str],
                       constraints: SelectionConstraints = SelectionConstraints(),
                       *, seed_target: int = 10, beam_width: int = 3,
                       swap_passes: int = 1, max_replace_out: int = 2,
-                      time_budget_s: Optional[float] = None) -> MarginalSelectionResult:
+                      time_budget_s: Optional[float] = None,
+                      validation_evaluator: Optional[
+                          Callable[[Tuple[str, ...]], PortfolioMetrics]
+                      ] = None) -> MarginalSelectionResult:
     """Find a compact Core by streaming shared-account replay results.
 
     Score has already done its job before this function: every input wallet is quality-qualified.  Membership
@@ -446,6 +449,7 @@ def search_smart_core(candidates: Sequence[str],
     width = max(1, int(beam_width))
     target = min(len(ordered), max(0, int(seed_target)))
     cache = {}
+    validation_cache = {}
 
     def check_budget():
         if deadline is not None and time.monotonic() >= deadline:
@@ -479,6 +483,7 @@ def search_smart_core(candidates: Sequence[str],
     baseline = evaluate(())
     beam = [((), baseline)]
     levels = []
+    portfolio_finalists = []
     stop_reason = "candidate_pool_exhausted"
 
     # Build the small starting portfolio.  ``seed_target`` is a search target, never a quota: if no wallet
@@ -531,6 +536,8 @@ def search_smart_core(candidates: Sequence[str],
     seed_complete = bool(beam and len(beam[0][0]) >= target)
     if beam and beam[0][0]:
         beam = polish_one_for_one(beam)
+        if seed_complete:
+            portfolio_finalists.extend(beam)
 
     # Continue expanding beyond the seed until the best attainable next level stops adding dollars.
     while seed_complete and beam and len(beam[0][0]) < len(ordered):
@@ -551,6 +558,7 @@ def search_smart_core(candidates: Sequence[str],
             stop_reason = "no_positive_expansion_marginal"
             break
         beam = next_beam
+        portfolio_finalists.extend(beam)
         levels.append({
             "size": len(beam[0][0]), "bestNet": _portfolio_net(beam[0][1]),
             "beam": len(beam),
@@ -558,6 +566,7 @@ def search_smart_core(candidates: Sequence[str],
 
     if beam and beam[0][0]:
         beam = polish_one_for_one(beam)
+        portfolio_finalists.extend(beam)
 
     # A bounded one-for-two check may deliberately reduce Core count.  Only the six wallets with the
     # smallest leave-one-out contribution participate, keeping daily runtime predictable.
@@ -579,8 +588,37 @@ def search_smart_core(candidates: Sequence[str],
                         if feasible(trial) and _portfolio_net(trial) > _portfolio_net(parent):
                             finalists.append((trial_addrs, trial))
         beam = top(finalists)
+        portfolio_finalists.extend(beam)
 
     selected, metrics = beam[0] if beam else ((), baseline)
+    if validation_evaluator is not None and portfolio_finalists:
+        dedup_finalists = {}
+        for addrs, neutral_metrics in portfolio_finalists:
+            dedup_finalists[addrs] = neutral_metrics
+        validated = []
+        for addrs, neutral_metrics in dedup_finalists.items():
+            check_budget()
+            if addrs not in validation_cache:
+                value = validation_evaluator(addrs)
+                if not isinstance(value, PortfolioMetrics):
+                    raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
+                validation_cache[addrs] = value
+            value = validation_cache[addrs]
+            stress = f(
+                value.stress_net_pnl
+                if value.stress_net_pnl is not None else value.stress_net_lcb
+            )
+            if feasible(value) and stress > 0:
+                validated.append((addrs, value, neutral_metrics))
+        if validated:
+            validated.sort(key=lambda item: (
+                _portfolio_net(item[1]),
+                f(item[1].risk_adjusted_utility),
+                _portfolio_net(item[2]),
+                -len(item[0]),
+                item[0],
+            ), reverse=True)
+            selected, metrics, _ = validated[0]
     duration = time.monotonic() - started
     return MarginalSelectionResult(
         selected=selected,
@@ -588,11 +626,13 @@ def search_smart_core(candidates: Sequence[str],
         metrics=metrics,
         action="smart_search" if selected else "keep_empty",
         added=selected,
-        evaluated=len(cache),
+        evaluated=len(cache) + len(validation_cache),
         search_meta={
             "seedTarget": target,
             "beamWidth": width,
             "selectedCount": len(selected),
+            "neutralSelectedCount": len(beam[0][0]) if beam else 0,
+            "validatedFinalists": len(validation_cache),
             "stopReason": stop_reason,
             "levels": tuple(levels),
             "durationSec": round(duration, 3),

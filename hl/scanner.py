@@ -1074,6 +1074,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 sigmas = auto_tune._load_sigmas(db)
                 market_ctx = auto_tune._load_market_ctx(db)
                 eval_cache = {}
+                validation_cache = {}
 
                 def evaluate(addrs):
                     key = tuple(sorted(addrs))
@@ -1103,6 +1104,25 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     )
                     return eval_cache[key]
 
+                def validate(addrs):
+                    key = tuple(sorted(addrs))
+                    if key in validation_cache:
+                        return validation_cache[key]
+                    filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
+                    windows = auto_tune._candidate_windows(
+                        db,
+                        list(key),
+                        sigmas,
+                        follow,
+                        now_ms,
+                        window_fills=filtered,
+                        market_ctx=market_ctx,
+                    )
+                    validation_cache[key] = _portfolio_selection_metrics(
+                        windows, baseline_n=0, selected_n=len(key),
+                    )
+                    return validation_cache[key]
+
                 constraints = selection.SelectionConstraints(
                     min_relative_lcb_improvement=0.0,
                     min_actionable_open_rate=copy_policy.min_actionable_open_rate,
@@ -1121,6 +1141,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     swap_passes=int(getattr(config, "CORE_SEARCH_SWAP_PASSES", 1)),
                     max_replace_out=int(getattr(config, "CORE_SEARCH_MAX_REPLACE_OUT", 2)),
                     time_budget_s=float(getattr(config, "CORE_SEARCH_TIME_BUDGET_SEC", 600)),
+                    validation_evaluator=validate,
                 )
                 selected_set = set(marginal.selected)
                 final_metrics = evaluate(tuple(sorted(selected_set)))

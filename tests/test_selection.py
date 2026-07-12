@@ -370,6 +370,34 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result.selected, ("0xa",))
         self.assertEqual(result.search_meta["stopReason"], "no_positive_seed_marginal")
 
+    def test_smart_core_validates_final_sizes_with_effective_params(self):
+        neutral = {
+            (): 0, ("0xa",): 10, ("0xb",): 9,
+            ("0xa", "0xb"): 20,
+        }
+        effective = {("0xa",): 30, ("0xb",): 15, ("0xa", "0xb"): 25}
+
+        def metrics(net):
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .95, .05, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
+                risk_adjusted_utility=net - 500,
+            )
+
+        result = selection.search_smart_core(
+            ["0xa", "0xb"],
+            lambda addrs: metrics(neutral[addrs]),
+            selection.SelectionConstraints(max_targets=2),
+            seed_target=1,
+            beam_width=2,
+            max_replace_out=1,
+            validation_evaluator=lambda addrs: metrics(effective[addrs]),
+        )
+
+        self.assertEqual(result.selected, ("0xa",))
+        self.assertEqual(result.search_meta["neutralSelectedCount"], 2)
+        self.assertEqual(result.search_meta["selectedCount"], 1)
+
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000
         result = scanner._portfolio_selection_metrics({
