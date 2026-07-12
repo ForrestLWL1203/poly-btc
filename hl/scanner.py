@@ -22,7 +22,7 @@ from . import auto_tune, config, follow_score, generation, metrics, params, pipe
 from .fills import build_episodes, is_spot
 from .copy_data import normalize_copyable_fills
 from .copy_policy import load_copy_policy
-from .copy_evidence import summarize_copy_evidence, summarize_portfolio_pnl
+from .copy_evidence import summarize_copy_evidence
 from .sector import classify_coin, compact_sector_results
 from .fill_transition import classify_fill_transition
 from .scanner_copy_bt import (
@@ -981,7 +981,7 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
 
 _HARD_EXIT_REASONS = {
     "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "too_many_concurrent",
-    "hit_page_cap", "no_copyable_perp_fills", "spot_hedge", "blowup_loss", "copy_liquidation",
+    "hit_page_cap", "no_copyable_perp_fills", "spot_hedge", "blowup_loss",
 }
 
 
@@ -996,7 +996,12 @@ def _iso_ms(value):
 
 
 def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
-    """Conservatively compact shared-account replay windows for marginal selection."""
+    """Compact shared-account replay into actual-dollar selection economics.
+
+    Isolated liquidations already lose their full allocated margin in ``copy_net_pnl`` and equity drawdown.
+    Risk-adjusted utility subtracts max drawdown dollars once more, so a wallet passes only when its added
+    net profit more than compensates for any added drawdown; liquidation count itself is not a veto.
+    """
     usable = []
     for days, result in (windows or {}).items():
         if not result:
@@ -1004,21 +1009,23 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
         closed = int(result.get("closed_n") or 0)
         if closed < max(1, load_copy_policy().min_closed_7d):
             continue
-        positions = list(result.get("positions") or [])
-        pnl_evidence = summarize_portfolio_pnl(
-            positions,
-            seed=f"selection:{days}:{baseline_n}:{selected_n}",
-        )
-        lcb = pnl_evidence.pnl_lcb
-        usable.append((int(days), result, lcb))
+        usable.append((int(days), result))
     if not usable:
         # Empty baseline is a valid starting portfolio; any candidate still needs real evidence.
         if selected_n == 0:
-            return selection.PortfolioMetrics(0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0)
-        return selection.PortfolioMetrics(-1e12, -1e12, 0, 0.0, 0.0, 1.0, 1.0, 1.0)
-    primary = next((row for row in usable if row[0] == 14), max(usable, key=lambda row: row[0]))
-    net_lcb = primary[2]
-    stress_lcb = min(row[2] for row in usable)
+            return selection.PortfolioMetrics(
+                0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0,
+                net_pnl=0.0, stress_net_pnl=0.0, drawdown_dollars=0.0,
+                risk_adjusted_utility=0.0,
+            )
+        return selection.PortfolioMetrics(
+            -1e12, -1e12, 0, 0.0, 0.0, 1.0, 1.0, 1.0,
+            net_pnl=-1e12, stress_net_pnl=-1e12,
+            drawdown_dollars=float(config.INITIAL_BALANCE), risk_adjusted_utility=-1e12,
+        )
+    primary = next((row for row in usable if row[0] == 30), max(usable, key=lambda row: row[0]))
+    net_pnl = f(primary[1].get("copy_net_pnl"))
+    stress_net = min(f(row[1].get("copy_net_pnl")) for row in usable)
     liquidations = max(int(row[1].get("liquidations") or 0) for row in usable)
     def num(value, default=0.0):
         return default if value is None else f(value)
@@ -1032,9 +1039,12 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
         / max(1.0, abs(f(row[1].get("copy_gross_pnl"))))
         for row in usable
     )
+    drawdown_dollars = max_dd * float(config.INITIAL_BALANCE)
+    risk_adjusted_utility = net_pnl - drawdown_dollars
     return selection.PortfolioMetrics(
-        net_lcb, stress_lcb, liquidations, actionable, capacity, max_dd, peak_deploy,
-        cost_drag,
+        net_pnl, stress_net, liquidations, actionable, capacity, max_dd, peak_deploy,
+        cost_drag, net_pnl=net_pnl, stress_net_pnl=stress_net,
+        drawdown_dollars=drawdown_dollars, risk_adjusted_utility=risk_adjusted_utility,
     )
 
 
@@ -1117,9 +1127,75 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         row["rank"] = rank
     follow_line = float(params.get(db, "MIN_FOLLOW_SCORE", config.MIN_FOLLOW_SCORE) or config.MIN_FOLLOW_SCORE)
     if True:  # sole production selection path; there is no observation-period mode
-        # Profile qualification is the sole quality gate.  Selection controls only how many already-good
-        # Active wallets are followed, using the operator's score line; it must not reintroduce observation,
-        # generation-confirmation or portfolio-marginal gates that contradict the Active contract.
+        # Active means the wallet itself is structurally/economically copyable.  Score orders the bounded
+        # candidate pool; the shared-account replay then keeps candidates whose added net profit exceeds
+        # their added max-drawdown dollars.  There is no LCB, observation-period or liquidation-count veto.
+        portfolio_candidates = [
+            (row.get("addr") or "").lower() for row in profiles
+            if row.get("status") in {"active", "qualified"}
+            and controls.get((row.get("addr") or "").lower(), True)
+        ][:int(config.MAX_TARGETS)]
+        score_line_core = [
+            (row.get("addr") or "").lower() for row in profiles
+            if row.get("status") in {"active", "qualified"}
+            and controls.get((row.get("addr") or "").lower(), True)
+            and f(row.get("follow_score")) >= follow_line
+        ][:int(config.MAX_TARGETS)]
+        selected_set = set(score_line_core)
+        portfolio_rejections = {}
+        portfolio_utilities = {}
+        marginal = None
+        evaluate = None
+        if portfolio_candidates:
+            window_fills = auto_tune._portfolio_window_fills(db, portfolio_candidates, now_ms)
+            if window_fills is not None and any(window_fills.values()):
+                follow = params.load_follow(db)
+                if "SMART_ADD" in follow:
+                    follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+                sigmas = auto_tune._load_sigmas(db)
+
+                def evaluate(addrs):
+                    filtered = auto_tune._filter_window_fills_by_addr(window_fills, addrs)
+                    windows = auto_tune._candidate_windows(
+                        db, list(addrs), sigmas, follow, now_ms, window_fills=filtered,
+                    )
+                    return _portfolio_selection_metrics(
+                        windows, baseline_n=0, selected_n=len(addrs),
+                    )
+
+                constraints = selection.SelectionConstraints(
+                    min_relative_lcb_improvement=0.0,
+                    min_actionable_open_rate=copy_policy.min_actionable_open_rate,
+                    min_capacity_fit=copy_policy.min_capacity_fit,
+                    max_drawdown_worsening=1.0,
+                    max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
+                    max_cost_drag_ratio=1.0,
+                    max_targets=int(config.MAX_TARGETS),
+                )
+                baseline_core = [
+                    addr for addr in portfolio_candidates
+                    if previous_roles.get(addr) == selection.CORE
+                ]
+                challengers = [addr for addr in portfolio_candidates if addr not in set(baseline_core)]
+                marginal = selection.select_ranked_positive_core(
+                    challengers, evaluate, constraints, initial_core=baseline_core,
+                )
+                selected_set = set(marginal.selected)
+                final_metrics = evaluate(tuple(sorted(selected_set)))
+                final_utility = f(final_metrics.risk_adjusted_utility)
+                for addr in selected_set:
+                    without = tuple(sorted(selected_set - {addr}))
+                    portfolio_utilities[addr] = final_utility - f(
+                        evaluate(without).risk_adjusted_utility
+                    )
+                for addr in portfolio_candidates:
+                    if addr in selected_set:
+                        continue
+                    trial = evaluate(tuple(sorted(selected_set | {addr})))
+                    portfolio_rejections[addr] = selection.portfolio_economic_rejection_reason(
+                        final_metrics, trial, constraints,
+                    )
+
         rows = []
         for row in profiles:
             addr = (row["addr"] or "").lower()
@@ -1132,12 +1208,21 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             previous_role = previous_roles.get(addr) or registry.get(addr, {}).get("role")
             if data_status == "deferred_data_error" and previous_role == selection.CORE and enabled:
                 role, reason = selection.CORE, "deferred_data_error"
-            elif active and enabled and above_line:
-                role, reason = selection.CORE, "above_follow_line"
+            elif active and enabled and addr in selected_set:
+                role = selection.CORE
+                reason = "portfolio_positive_net_contribution" if marginal is not None else "above_follow_line"
             elif addr in held:
                 role, reason = selection.EXIT_ONLY, "exit_only_open_position"
             elif active:
-                role, reason = selection.CHALLENGER, "below_follow_line" if enabled else "operator_disabled"
+                role = selection.CHALLENGER
+                if not enabled:
+                    reason = "operator_disabled"
+                elif marginal is not None and addr in portfolio_candidates:
+                    reason = portfolio_rejections.get(addr, "portfolio_no_profit_improvement")
+                elif not above_line:
+                    reason = "below_follow_line"
+                else:
+                    reason = "portfolio_no_profit_improvement"
             else:
                 continue
             rows.append(selection.SelectionRow(
@@ -1145,10 +1230,12 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 role=role,
                 enabled=enabled,
                 reason=reason,
-                utility=f(row.get("follow_score")),
+                utility=portfolio_utilities.get(addr, f(row.get("follow_score"))),
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
-                model_version="selection-score-line-v1",
+                model_version=(
+                    "selection-net-drawdown-v1" if marginal is not None else "selection-score-line-v1"
+                ),
                 policy_version=copy_policy.version,
             ))
             lifecycle_state = role if role in {
@@ -1166,10 +1253,10 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 last_actionable_open_ms=row.get("last_copyable_open_ms"),
             )
             db.execute(
-                "UPDATE profile SET selection_marginal_utility=NULL WHERE addr=?",
-                (addr,),
+                "UPDATE profile SET selection_marginal_utility=? WHERE addr=?",
+                (portfolio_utilities.get(addr), addr),
             )
-        return rows, None
+        return rows, marginal
     evidences = []
     row_by_addr = {}
     for row in profiles:

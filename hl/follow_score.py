@@ -114,13 +114,6 @@ def evaluate_follow_eligibility(
             "role": "rejected",
             "reasons": [f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%经济底线"],
         }
-    if _num(return_lcb) < policy.min_return_lcb:
-        return {
-            "eligible": False,
-            "status": "copy_return_lcb_low",
-            "role": "rejected",
-            "reasons": ["按日Bootstrap收益下置信界仍为负"],
-        }
     if _num(positive_probability, 0.5) < policy.entry_positive_probability:
         return {
             "eligible": False,
@@ -144,13 +137,6 @@ def evaluate_follow_eligibility(
             "status": "capacity_fit_low",
             "role": "rejected",
             "reasons": [f"资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%"],
-        }
-    if int(_num(metrics.get("copy_bt_liquidations"))) > 0:
-        return {
-            "eligible": False,
-            "status": "copy_liquidation",
-            "role": "rejected",
-            "reasons": ["回放出现爆仓"],
         }
     if recent7 is not None and c7 >= min_closed7 and _num(recent7) <= 0.0:
         return {

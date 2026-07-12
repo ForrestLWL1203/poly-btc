@@ -87,10 +87,13 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(one["eligible"])
         self.assertEqual(both["status"], "recent_copy_loss")
 
-    def test_liquidation_is_not_masked_by_return(self):
+    def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "copy_liquidation")
+        self.assertTrue(result["eligible"])
+
+    def test_negative_bootstrap_lcb_is_scored_but_not_an_automatic_rejection(self):
+        result = evaluate_follow_eligibility(evidence(copy_return_lcb=-0.05))
+        self.assertTrue(result["eligible"])
 
     def test_absolute_dollar_scale_does_not_change_wallet_score(self):
         low, _ = compute_follow_score(evidence(

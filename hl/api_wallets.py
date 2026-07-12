@@ -41,6 +41,7 @@ def _selection_reason_text(row, *, now_ms=None):
         "portfolio_gain_below_floor": "加入后的收益提升不足",
         "portfolio_recent_stress_loss": "加入后近期组合回放亏损",
         "portfolio_new_liquidation": "加入后组合出现爆仓",
+        "portfolio_risk_adjusted_gain_low": "新增收益不足以覆盖新增回撤",
         "portfolio_open_rate_low": "加入后有效开仓率过低",
         "portfolio_capacity_low": "加入后资金容量不足",
         "portfolio_drawdown_worse": "加入后组合回撤过大",

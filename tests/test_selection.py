@@ -217,6 +217,35 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result.added, ("0xa", "0xb"))
         self.assertEqual(result.action, "bootstrap")
 
+    def test_ranked_economic_selector_prices_liquidation_through_pnl_and_drawdown(self):
+        def economic(net, dd, liqs=0):
+            drawdown_dollars = dd * 10_000
+            return selection.PortfolioMetrics(
+                net, net, liqs, .9, .9, dd, .6, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=drawdown_dollars,
+                risk_adjusted_utility=net - drawdown_dollars,
+            )
+
+        values = {
+            (): economic(0, 0),
+            ("0xprofitable",): economic(3_000, .10, liqs=2),
+            ("0xrisky",): economic(2_000, .25, liqs=1),
+            ("0xprofitable", "0xrisky"): economic(3_500, .25, liqs=3),
+        }
+        result = selection.select_ranked_positive_core(
+            ["0xprofitable", "0xrisky"], lambda addrs: values[addrs],
+        )
+
+        self.assertEqual(result.selected, ("0xprofitable",))
+        self.assertEqual(result.metrics.liquidations, 2)
+        self.assertEqual(
+            selection.portfolio_economic_rejection_reason(
+                values[("0xprofitable",)], values[("0xprofitable", "0xrisky")],
+                selection.SelectionConstraints(),
+            ),
+            "portfolio_risk_adjusted_gain_low",
+        )
+
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000
         result = scanner._portfolio_selection_metrics({

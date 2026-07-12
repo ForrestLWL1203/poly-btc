@@ -375,6 +375,10 @@ class PortfolioMetrics:
     max_drawdown: float
     peak_deploy_pct: float
     cost_drag_ratio: float
+    net_pnl: Optional[float] = None
+    stress_net_pnl: Optional[float] = None
+    drawdown_dollars: Optional[float] = None
+    risk_adjusted_utility: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -441,6 +445,80 @@ def portfolio_rejection_reason(base: PortfolioMetrics, trial: PortfolioMetrics,
     if trial.cost_drag_ratio > c.max_cost_drag_ratio:
         return "portfolio_cost_drag_high"
     return "portfolio_not_selected"
+
+
+def portfolio_economic_rejection_reason(base: PortfolioMetrics, trial: PortfolioMetrics,
+                                        c: SelectionConstraints) -> str:
+    """Explain the actual-dollar net/drawdown rule used by production selection."""
+    base_net = base.net_pnl if base.net_pnl is not None else base.net_lcb
+    trial_net = trial.net_pnl if trial.net_pnl is not None else trial.net_lcb
+    base_utility = (
+        base.risk_adjusted_utility if base.risk_adjusted_utility is not None else base.net_lcb
+    )
+    trial_utility = (
+        trial.risk_adjusted_utility if trial.risk_adjusted_utility is not None else trial.net_lcb
+    )
+    if trial_net <= 0 or trial_net <= base_net:
+        return "portfolio_no_profit_improvement"
+    if trial_utility <= base_utility:
+        return "portfolio_risk_adjusted_gain_low"
+    if trial.actionable_open_rate < c.min_actionable_open_rate:
+        return "portfolio_open_rate_low"
+    if trial.capacity_fit < c.min_capacity_fit:
+        return "portfolio_capacity_low"
+    if trial.peak_deploy_pct > c.max_deploy_pct:
+        return "portfolio_deploy_limit"
+    return "portfolio_not_selected"
+
+
+def _portfolio_economic_passes(base: PortfolioMetrics, trial: PortfolioMetrics,
+                               c: SelectionConstraints) -> bool:
+    return portfolio_economic_rejection_reason(base, trial, c) == "portfolio_not_selected"
+
+
+def select_ranked_positive_core(candidates: Sequence[str],
+                                evaluator: Callable[[Tuple[str, ...]], PortfolioMetrics],
+                                constraints: SelectionConstraints = SelectionConstraints(),
+                                *, initial_core: Sequence[str] = ()) -> MarginalSelectionResult:
+    """Add qualified wallets in score order when they improve net and drawdown-adjusted dollars.
+
+    Liquidation losses are already debited from replay PnL and visible in the equity drawdown.  They are
+    therefore measured economically instead of being counted as an automatic veto.  One sequential pass
+    keeps the daily selection replay bounded to O(N) portfolio evaluations.
+    """
+    initial = tuple(sorted(dict.fromkeys(a.lower() for a in initial_core if a)))[:constraints.max_targets]
+    initial_set = set(initial)
+    ordered = tuple(
+        addr for addr in dict.fromkeys(a.lower() for a in candidates if a)
+        if addr not in initial_set
+    )[:max(0, constraints.max_targets - len(initial))]
+    cache = {}
+
+    def evaluate(addrs):
+        key = tuple(sorted(addrs))
+        if key not in cache:
+            value = evaluator(key)
+            if not isinstance(value, PortfolioMetrics):
+                raise TypeError("portfolio evaluator must return PortfolioMetrics")
+            cache[key] = value
+        return cache[key]
+
+    selected = initial
+    baseline = evaluate(selected)
+    current = baseline
+    for addr in ordered:
+        trial_addrs = tuple(sorted(selected + (addr,)))
+        trial = evaluate(trial_addrs)
+        if _portfolio_economic_passes(current, trial, constraints):
+            selected, current = trial_addrs, trial
+    return MarginalSelectionResult(
+        selected=selected,
+        baseline=baseline,
+        metrics=current,
+        action="add" if selected != initial else "keep",
+        added=tuple(sorted(set(selected) - set(initial))),
+        evaluated=len(cache),
+    )
 
 
 def select_marginal_core(current_core: Sequence[str], challengers: Sequence[str],

@@ -222,6 +222,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             metrics = scanner.selection.PortfolioMetrics(
                 100.0, 80.0, 0, 0.95, 0.95, 0.05, 0.20, 0.05,
+                net_pnl=100.0, stress_net_pnl=80.0, drawdown_dollars=50.0,
+                risk_adjusted_utility=50.0,
             )
             marginal = scanner.selection.MarginalSelectionResult(
                 selected=("0xaaa",), baseline=scanner.selection.PortfolioMetrics(
@@ -233,7 +235,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
-                    patch.object(scanner.selection, "select_core_until_stable", return_value=marginal), \
+                    patch.object(scanner.selection, "select_ranked_positive_core", return_value=marginal), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -381,6 +383,52 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 ("0xaaa", "core", "above_follow_line"),
             ])
             self.assertEqual(rows[0].utility, 0.71)
+
+    def test_positive_portfolio_contribution_can_rescue_active_wallet_below_score_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.8,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 6,
+                "copy_expected_return": 0.08, "copy_return_lcb": -0.04,
+                "copy_positive_probability": 0.85, "copy_evidence_days": 10,
+                "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
+                "copy_risk_score": 0.5, "execution_score": 0.9,
+                "actionable_open_rate": 0.9, "capacity_fit": 0.9,
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.execute(
+                "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) "
+                "VALUES(1,'0xaaa',0.65,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
+            )
+            db.commit()
+            baseline = scanner.selection.PortfolioMetrics(
+                0, 0, 0, 1, 1, 0, 0, 0, net_pnl=0, drawdown_dollars=0,
+                risk_adjusted_utility=0,
+            )
+            profitable = scanner.selection.PortfolioMetrics(
+                3000, 3000, 2, .9, .9, .1, .5, .1,
+                net_pnl=3000, drawdown_dollars=1000, risk_adjusted_utility=2000,
+            )
+            marginal = scanner.selection.MarginalSelectionResult(
+                selected=("0xaaa",), baseline=baseline, metrics=profitable,
+                action="add", added=("0xaaa",), evaluated=2,
+            )
+            with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
+                    patch.object(scanner.selection, "select_ranked_positive_core", return_value=marginal), \
+                    patch.object(scanner, "_portfolio_selection_metrics", side_effect=[profitable, baseline]):
+                rows, result = scanner._build_explicit_selection(db, "g1", "now", 1000)
+
+            self.assertEqual(result, marginal)
+            self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
+                ("0xaaa", "core", "portfolio_positive_net_contribution"),
+            ])
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:
