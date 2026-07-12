@@ -64,9 +64,9 @@ class AutoTuneTests(unittest.TestCase):
         good = {
             "mult": 1.25,
             "windows": {
-                30: {"copy_net_pnl": 1800, "closed_n": 10, "open_fill_rate": 0.65,
+                30: {"copy_net_pnl": 1800, "closed_n": 10, "open_fill_rate": 0.88,
                      "capacity_open_fit": 0.88, "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
-                14: {"copy_net_pnl": 350, "closed_n": 5, "open_fill_rate": 0.65,
+                14: {"copy_net_pnl": 350, "closed_n": 5, "open_fill_rate": 0.88,
                      "capacity_open_fit": 0.88, "liquidations": 0, "target_open_events": 5, "skip_reasons": {}},
                 7: {"copy_net_pnl": 90, "closed_n": 3, "open_fill_rate": 1.0,
                     "capacity_open_fit": 1.0, "liquidations": 0, "target_open_events": 3, "skip_reasons": {}},
@@ -77,6 +77,28 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertEqual(selected["mult"], 1.25)
         self.assertEqual(selected["windows"][30]["copy_net_pnl"], 1800)
+
+    def test_diverse_sizing_candidates_reserves_slots_per_leverage_tuple(self):
+        def candidate(levs, pnl):
+            return {
+                "params": dict(zip(auto_tune.LEV_KEYS, levs)),
+                "windows": {30: {
+                    "copy_net_pnl": pnl, "closed_n": 10, "open_fill_rate": 0.90,
+                    "capacity_open_fit": 0.90, "liquidations": 0,
+                    "target_open_events": 10, "skip_reasons": {},
+                }},
+            }
+
+        baseline = candidate((35, 12, 4), 100)
+        crowded = [candidate((12, 5, 3), 1000 - i) for i in range(8)]
+        alternatives = [candidate((18, 7, 4), 700), candidate((20, 8, 4), 600)]
+
+        selected = auto_tune._diverse_sizing_candidates(crowded + alternatives, baseline, 3)
+
+        self.assertEqual(
+            {tuple(row["params"][key] for key in auto_tune.LEV_KEYS) for row in selected},
+            {(12, 5, 3), (18, 7, 4), (20, 8, 4)},
+        )
 
     def test_margin_baseline_tracks_manual_values_not_last_auto_values(self):
         db = self._db()

@@ -203,6 +203,16 @@ def _candidate_valid(candidate: dict, baseline: dict) -> bool:
     )
     if _capacity_fit(result_primary) < min_open_fit:
         return False
+    candidate_open_rate = result_primary.get("open_fill_rate")
+    if candidate_open_rate is not None:
+        base_open_rate = base_primary.get("open_fill_rate")
+        min_open_rate = max(
+            0.70,
+            float(base_open_rate or 0.0)
+            - float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03)),
+        )
+        if float(candidate_open_rate or 0.0) < min_open_rate:
+            return False
     if int(result_primary.get("liquidations") or 0) > int(base_primary.get("liquidations") or 0):
         return False
 
@@ -286,6 +296,34 @@ def choose_margin_candidate(candidates: list[dict], baseline: dict) -> dict:
         return baseline
     best = max(valid, key=lambda c: _candidate_rank_key(c, baseline))
     return best if _candidate_rank_key(best, baseline) >= _candidate_rank_key(baseline, baseline) else baseline
+
+
+def _diverse_sizing_candidates(candidates: list[dict], baseline: dict, limit: int) -> list[dict]:
+    """Keep risk leaders without allowing one leverage tuple to consume every validation slot."""
+    ranked = sorted(candidates, key=lambda item: _candidate_rank_key(item, baseline), reverse=True)
+    groups = {}
+    for candidate in ranked:
+        params_ = candidate.get("params") or {}
+        key = tuple(round(float(params_.get(name, 0.0)), 8) for name in LEV_KEYS)
+        groups.setdefault(key, []).append(candidate)
+    ordered_groups = sorted(
+        groups.values(), key=lambda rows: _candidate_rank_key(rows[0], baseline), reverse=True,
+    )
+    selected = []
+    depth = 0
+    while len(selected) < max(1, int(limit)):
+        added = False
+        for rows in ordered_groups:
+            if depth >= len(rows):
+                continue
+            selected.append(rows[depth])
+            added = True
+            if len(selected) >= max(1, int(limit)):
+                break
+        if not added:
+            break
+        depth += 1
+    return selected
 
 
 def _load_sigmas(db) -> dict:
@@ -1074,11 +1112,13 @@ def _proposal_direction(current: dict, proposed: dict) -> tuple[int, ...]:
 
 
 def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms,
-                             path_rows=None, path_meta=None) -> dict:
+                             path_rows=None, path_meta=None, market_ctx=None) -> dict:
     """Three non-overlapping ten-day folds plus a conservative cost-stress holdout."""
     max_days = max(window_fills) if window_fills else 30
     fills = list((window_fills or {}).get(max_days) or [])
-    market_ctx = {}  # historical liquidity context is supplied separately once versioned snapshots exist
+    # Current market metadata is required for max-leverage maintenance tiers. Historical liquidity snapshots
+    # remain unavailable, but dropping metadata entirely makes maintenance coverage zero for every proposal.
+    market_ctx = market_ctx or {}
     base_overrides = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
     proposal_overrides = {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"}
     folds = []
@@ -1360,9 +1400,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         return result
     path_fills = list(window_fills.get(max(window_fills)) or [])
     path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
+    market_ctx = _load_market_ctx(db)
     path_rows, path_meta = prepare_refined_price_path(
         db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
-        market_ctx=_load_market_ctx(db),
+        market_ctx=market_ctx,
     )
     # One bounded joint sizing search: leverage tuple × shared margin scale × deploy line. This captures
     # the central tradeoff that lower leverage may safely support larger margin tickets. A cheap coordinate
@@ -1381,10 +1422,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
     sizing_limit = max(2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12))
-    quick_finalists = sorted(
-        quick_valid or [quick_baseline],
-        key=lambda candidate: _candidate_rank_key(candidate, quick_baseline), reverse=True,
-    )[:sizing_limit]
+    quick_finalists = _diverse_sizing_candidates(
+        quick_valid or [quick_baseline], quick_baseline, sizing_limit,
+    )
     if not any(_same_tune_values(candidate.get("params") or {}, base) for candidate in quick_finalists):
         quick_finalists.append(quick_baseline)
     joint_candidates = []
@@ -1447,7 +1487,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         key = tuple(round(float((candidate.get("params") or {})[name]), 12) for name in TUNE_KEYS)
         unique_finalists.setdefault(key, candidate)
     finalist_limit = int(getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16)
-    sizing_options = list(unique_finalists.values())[:max(1, finalist_limit)]
+    sizing_options = _diverse_sizing_candidates(
+        list(unique_finalists.values()), baseline, max(1, finalist_limit),
+    )
     if add_candidates and add_baseline:
         ranked_add = sorted(
             add_candidates,
@@ -1484,7 +1526,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combined = {**sizing_params, **finalist_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=path_rows, path_meta=path_meta,
+            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
         )
         model = _model_validation(validation, load_copy_policy(follow))
         finalist_results.append({
@@ -1500,7 +1542,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combined = {**selected_params, **selected_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=path_rows, path_meta=path_meta,
+            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
         )
         chosen = (selected, selected_params, selected_add_params, combined, validation)
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen
