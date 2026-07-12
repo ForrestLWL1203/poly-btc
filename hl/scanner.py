@@ -1165,6 +1165,14 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     ) * 86_400_000
                     path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
                     path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
+                    gate_levs = tuple(getattr(config, "CORE_PATH_GATE_LEV_CAPS", (18, 7, 4)))
+                    gate_follow = {
+                        **neutral_follow,
+                        "STABLE_LEV_CAP": gate_levs[0],
+                        "MID_LEV_CAP": gate_levs[1],
+                        "HIGH_LEV_CAP": gate_levs[2],
+                        "AMBIGUOUS_PATH_MODE": "liquidate",
+                    }
                     path_rejected = set()
                     for candidate_addr in sorted(selected_set):
                         wallet_fills = [
@@ -1173,7 +1181,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         ]
                         wallet_result = auto_tune.evaluate_portfolio_window(
                             db, [candidate_addr], sigmas,
-                            {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
+                            gate_follow, now_ms,
                             window_fills={30: wallet_fills}, days=30, market_ctx=market_ctx,
                             path_rows=path_rows, path_meta=path_meta,
                         )
@@ -1207,7 +1215,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     ]
                     path_primary = auto_tune.evaluate_portfolio_window(
                         db, sorted(selected_set), sigmas,
-                        {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
+                        gate_follow, now_ms,
                         window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
                         path_rows=path_rows, path_meta=path_meta,
                     )

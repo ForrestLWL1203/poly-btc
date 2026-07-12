@@ -433,6 +433,7 @@ CORE_PRICE_PATH_MIN_COVERAGE = 0.94
 CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
 CORE_PATH_WALLET_MAX_LIQUIDATIONS = 3
 CORE_PATH_WALLET_MAX_LIQUIDATION_RATE = 0.05
+CORE_PATH_GATE_LEV_CAPS = (18, 7, 4)
 # Each volatility tier is searched independently.  The lower 0.60 candidate lets a newly re-ranked Core
 # trade smaller tickets when more good wallets compete for the same account, while the configured tier
 # minimums remain the hard floor.
