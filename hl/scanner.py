@@ -5,7 +5,6 @@ over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
-import dataclasses
 import hashlib
 import json
 import math
@@ -1165,57 +1164,14 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     ) * 86_400_000
                     path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
                     path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
-                    gate_levs = tuple(getattr(config, "CORE_PATH_GATE_LEV_CAPS", (18, 7, 4)))
-                    gate_follow = {
-                        **neutral_follow,
-                        "STABLE_LEV_CAP": gate_levs[0],
-                        "MID_LEV_CAP": gate_levs[1],
-                        "HIGH_LEV_CAP": gate_levs[2],
-                        "AMBIGUOUS_PATH_MODE": "liquidate",
-                    }
-                    path_rejected = set()
-                    for candidate_addr in sorted(selected_set):
-                        wallet_fills = [
-                            fill for fill in selected_fills
-                            if (fill.get("user") or "").lower() == candidate_addr
-                        ]
-                        wallet_result = auto_tune.evaluate_portfolio_window(
-                            db, [candidate_addr], sigmas,
-                            gate_follow, now_ms,
-                            window_fills={30: wallet_fills}, days=30, market_ctx=market_ctx,
-                            path_rows=path_rows, path_meta=path_meta,
-                        )
-                        wallet_liqs = int(wallet_result.get("liquidations") or 0)
-                        wallet_closed = int(wallet_result.get("closed_n") or 0)
-                        wallet_liq_rate = wallet_liqs / wallet_closed if wallet_closed else 0.0
-                        if f(wallet_result.get("copy_net_pnl")) <= 0:
-                            path_rejected.add(candidate_addr)
-                            portfolio_rejections[candidate_addr] = "path_copy_net_nonpositive"
-                        elif (
-                            wallet_liqs >= int(getattr(config, "CORE_PATH_WALLET_MAX_LIQUIDATIONS", 3))
-                            and wallet_liq_rate >= float(getattr(
-                                config, "CORE_PATH_WALLET_MAX_LIQUIDATION_RATE", .05,
-                            ))
-                        ):
-                            path_rejected.add(candidate_addr)
-                            portfolio_rejections[candidate_addr] = "path_liquidation_excess"
-                    selected_set -= path_rejected
-                    if path_rejected:
-                        marginal = dataclasses.replace(
-                            marginal,
-                            selected=tuple(sorted(selected_set)),
-                            action="path_regate",
-                            removed=tuple(sorted(set(marginal.removed) | path_rejected)),
-                            search_meta={**dict(marginal.search_meta or {}),
-                                         "pathRejected": len(path_rejected)},
-                        )
-                    selected_fills = [
-                        fill for fill in selected_fills
-                        if (fill.get("user") or "").lower() in selected_set
-                    ]
+                    # Price paths validate that the initial fills-only Core has enough evidence for the
+                    # generation-bound portfolio tuner. They do not reject wallets under an arbitrary fixed
+                    # leverage surface: doing so can sacrifice the whole portfolio to accommodate one wallet
+                    # and can misclassify a profitable wallet before its final parameters are known.
+                    path_follow = {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
                     path_primary = auto_tune.evaluate_portfolio_window(
                         db, sorted(selected_set), sigmas,
-                        gate_follow, now_ms,
+                        path_follow, now_ms,
                         window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
                         path_rows=path_rows, path_meta=path_meta,
                     )
@@ -1224,7 +1180,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
                         and f(path_primary.get("maintenance_margin_coverage"))
                         >= float(getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95))
-                        and f(path_primary.get("copy_net_pnl")) > 0
                     )
                     if not path_ok:
                         selected_set = {

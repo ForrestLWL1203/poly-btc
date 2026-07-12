@@ -30,6 +30,7 @@ export function Wallets({ confirm, toast }) {
   const dropped = tab === "dropped";
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
+  const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
@@ -48,9 +49,11 @@ export function Wallets({ confirm, toast }) {
         <h2>跟踪名单</h2>
         <div className="wallets-head-actions">
           {tab === "followed" && portfolioReplay && (
-            <div className="portfolio-replay-kpi" title="最终 Core 使用当前已生效调参，在一个共享账户中进行30日回放；已扣手续费，不是单钱包收益相加">
-              <span>30d回测预估收益：</span>
-              <b className={(portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30 || 0, 0)}</b>
+            <div className="portfolio-replay-kpi" title="最终 Core 使用已生效参数在共享账户中回放。收益已扣手续费；爆仓为成交OHLC代理的保守压力值，并非真实标记价格强平次数。">
+              <span>最优参数30d保守预估：</span>
+              <b className={(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0, 0)}</b>
+              <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
+              {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}
             </div>
           )}
           <div className="range-tabs">

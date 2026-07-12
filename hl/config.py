@@ -431,23 +431,24 @@ AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.94      # Paper: current bounded path cach
 # fast candidate search, but a new selection is not publishable when its final shared-account path is thin.
 CORE_PRICE_PATH_MIN_COVERAGE = 0.94
 CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
-CORE_PATH_WALLET_MAX_LIQUIDATIONS = 3
-CORE_PATH_WALLET_MAX_LIQUIDATION_RATE = 0.05
-CORE_PATH_GATE_LEV_CAPS = (18, 7, 4)
-# Each volatility tier is searched independently.  The lower 0.60 candidate lets a newly re-ranked Core
-# trade smaller tickets when more good wallets compete for the same account, while the configured tier
-# minimums remain the hard floor.
-AUTO_TUNE_MARGIN_FACTORS = (0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
-AUTO_TUNE_LEV_CAP_SETS = ((12, 5, 3), (15, 6, 4), (18, 7, 4), (20, 8, 4))
-AUTO_TUNE_DEPLOY_FULL_PCTS = (0.30, 0.40, 0.50, 0.60)
-AUTO_TUNE_SIZING_FINALISTS = 12
-AUTO_TUNE_TIME_BUDGET_SEC = 600
-AUTO_TUNE_ADD_GAP_KS = (0.04, 0.06, 0.08, 0.10, 0.12)
+# The path tuner searches a compact neighbourhood around the profitable fills-only Core. It must not drive
+# the entire portfolio to ultra-low leverage merely to reach zero proxy liquidations. Candidate selection
+# requires preserved conservative profit and targets a 20% reduction from the effective path baseline.
+AUTO_TUNE_MARGIN_FACTORS = (0.85, 1.0, 1.15)
+AUTO_TUNE_LEV_CAP_SETS = (
+    (35, 12, 4), (32, 12, 4), (30, 11, 4), (30, 10, 4),
+    (28, 10, 4), (25, 10, 4), (25, 8, 4),
+)
+AUTO_TUNE_DEPLOY_FULL_PCTS = (0.40, 0.50, 0.60)
+AUTO_TUNE_TARGET_LIQUIDATION_REDUCTION = 0.20
+AUTO_TUNE_SIZING_FINALISTS = 8
+AUTO_TUNE_TIME_BUDGET_SEC = 360
+AUTO_TUNE_ADD_GAP_KS = (0.04, 0.08, 0.12)
 AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.08, 0.10, 0.12)
-AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3, 1.5)
-AUTO_TUNE_ADD_MAX_HARDS = (4, 6, 8, 10)
+AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3)
+AUTO_TUNE_ADD_MAX_HARDS = (6, 8, 10)
 AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
-AUTO_TUNE_FINALIST_LIMIT = 16  # 利润最高者验证失败后继续验证后续候选
+AUTO_TUNE_FINALIST_LIMIT = 10  # 小范围Pareto候选进入非重叠折叠验证
 AUTO_TUNE_FILL_CACHE_MAX_BYTES = 64 * 1024 * 1024  # raw fill_json cache guard for 1GB VPS; fallback if exceeded
 AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08

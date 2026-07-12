@@ -213,8 +213,10 @@ def _candidate_valid(candidate: dict, baseline: dict) -> bool:
         )
         if float(candidate_open_rate or 0.0) < min_open_rate:
             return False
-    if int(result_primary.get("liquidations") or 0) > int(base_primary.get("liquidations") or 0):
-        return False
+    for days, result in windows.items():
+        base_result = base_windows.get(days) or {}
+        if int(result.get("liquidations") or 0) > int(base_result.get("liquidations") or 0):
+            return False
 
     base_skips = _capacity_skips(base_primary)
     skip_allow = max(2, int((base_primary.get("target_open_events") or 0) * float(getattr(config, "AUTO_TUNE_MARGIN_CAP_SKIP_FRAC", 0.05))))
@@ -238,6 +240,7 @@ def _candidate_distance(candidate: dict, baseline: dict) -> float:
 
 def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     windows = candidate.get("windows") or {}
+    base_windows = baseline.get("windows") or {}
     weighted_net = _candidate_score(candidate)
     max_drawdown = max(
         (float(result.get("max_drawdown") or 0.0) for result in windows.values()),
@@ -251,12 +254,28 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
         (int(result.get("liquidations") or 0) for result in windows.values()),
         default=10**9,
     )
+    primary = windows.get(30) or (windows.get(max(windows)) if windows else {})
+    base_primary = base_windows.get(30) or (base_windows.get(max(base_windows)) if base_windows else {})
+    primary_net = _result_pnl(primary)
+    base_net = _result_pnl(base_primary)
+    base_liquidations = int(base_primary.get("liquidations") or 0)
+    target_reduction = max(0.0, min(1.0, float(getattr(
+        config, "AUTO_TUNE_TARGET_LIQUIDATION_REDUCTION", 0.20,
+    ))))
+    target_liquidations = math.floor(base_liquidations * (1.0 - target_reduction))
+    profit_preserved = primary_net >= base_net
+    liquidation_reduced = liquidations < base_liquidations
+    reduction_target_met = liquidations <= target_liquidations
     return (
+        int(profit_preserved and reduction_target_met),
+        int(profit_preserved and liquidation_reduced),
+        int(profit_preserved),
+        weighted_net,
+        primary_net,
         -liquidations,
         risk_adjusted_utility,
         _result_pnl(windows.get(14, {})),
         _result_pnl(windows.get(7, {})),
-        _result_pnl(windows.get(30, {})),
         -_candidate_distance(candidate, baseline),
     )
 
@@ -913,6 +932,17 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
     ).hexdigest()[:16]
     primary = windows.get(30) or windows.get(max(windows))
     worst_primary = worst_windows.get(30) or worst_windows.get(max(worst_windows))
+    fills_only_primary = evaluate_portfolio_window(
+        db, addrs, sigmas, follow, now_ms,
+        window_fills={30: list(window_fills.get(30) or [])}, days=30,
+        market_ctx=market_ctx,
+    )
+    effective_params = {
+        "leverageCaps": {key: f(follow.get(key)) for key in LEV_KEYS},
+        "marginPct": {key: f(follow.get(key)) for key in MARGIN_KEYS},
+        "deployFullPct": f(follow.get("DEPLOY_FULL_PCT")),
+        "add": {key: f(follow.get(key)) for key in ADD_TUNE_KEYS},
+    }
     summary = {
         "generation": generation_id,
         "status": "ok",
@@ -921,16 +951,23 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         "replayedAt": now_iso(),
         "netPnl30": f(primary.get("copy_net_pnl")),
         "netPnl30Worst": f(worst_primary.get("copy_net_pnl")),
+        "fillsOnlyNetPnl30": f(fills_only_primary.get("copy_net_pnl")),
         "closed30": int(primary.get("closed_n") or 0),
         "maxDrawdown30": f(primary.get("max_drawdown")),
         "openRate30": f(primary.get("open_fill_rate")),
         "capacityFit30": f(primary.get("capacity_open_fit")),
         "liquidations30": int(primary.get("liquidations") or 0),
         "liquidations30Worst": int(worst_primary.get("liquidations") or 0),
+        "fillsOnlyLiquidations30": int(fills_only_primary.get("liquidations") or 0),
         "ambiguousLiquidations30": int(primary.get("ambiguous_liquidations") or 0),
         "pricePathCoverage30": f(primary.get("price_path_coverage")),
         "pricePathBoundarySkips30": int(primary.get("price_path_boundary_skips") or 0),
-        "pricePathStatus": "verified" if f(primary.get("price_path_coverage")) >= .95 else "unverified",
+        "pricePathStatus": (
+            "covered" if f(primary.get("price_path_coverage"))
+            >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95)) else "unverified"
+        ),
+        "estimateKind": "trade_ohlc_conservative_proxy",
+        "effectiveParams": effective_params,
         "maintenanceMarginCoverage30": f(primary.get("maintenance_margin_coverage")),
         "netPnl14": f((windows.get(14) or {}).get("copy_net_pnl")),
         "netPnl7": f((windows.get(7) or {}).get("copy_net_pnl")),
