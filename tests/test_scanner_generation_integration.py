@@ -36,6 +36,50 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 
+    def test_selection_replay_uses_current_params_without_mutating_profile(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
+                "VALUES('g1','published',1,1,1,'now')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES('g1','0xaaa','core',1,'now')"
+            )
+            db.execute(
+                "INSERT INTO profile(addr,status,copy_bt_net_pnl,copy_bt_closed_n) "
+                "VALUES('0xaaa','active',100,7)"
+            )
+            db.commit()
+            windows = {
+                30: {"copy_net_pnl": 250, "copy_win_rate": 0.75, "closed_n": 8,
+                     "opened_n": 9, "target_open_events": 10, "liquidations": 0, "fee_drag": 12},
+                14: {"copy_net_pnl": 180, "closed_n": 6},
+                7: {"copy_net_pnl": 90, "closed_n": 3},
+            }
+            sectors = {"crypto": windows, "stock": {}}
+            with patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"time": 1}]), \
+                    patch.object(scanner, "_copy_bt_results", return_value=windows), \
+                    patch.object(scanner, "_sector_copy_bt_results", return_value=sectors), \
+                    patch.object(scanner, "_copy_bt_overrides", return_value={"MID_MARGIN_PCT": 0.05}), \
+                    patch.object(scanner, "_copy_bt_sigmas", return_value={}), \
+                    patch.object(scanner, "_copy_bt_market_ctx", return_value={}):
+                result = scanner.refresh_selection_copy_replay(db, "g1", replayed_at="later")
+
+            replay = db.execute(
+                "SELECT replay_copy_bt_net_pnl,replay_copy_bt_closed_n,replay_copy_bt_7d_net_pnl,"
+                "replay_params_hash,replayed_at FROM follow_selection WHERE generation='g1' AND addr='0xaaa'"
+            ).fetchone()
+            profile = db.execute(
+                "SELECT copy_bt_net_pnl,copy_bt_closed_n FROM profile WHERE addr='0xaaa'"
+            ).fetchone()
+            self.assertEqual(result["refreshed"], 1)
+            self.assertEqual(replay[:3], (250, 8, 90))
+            self.assertTrue(replay[3])
+            self.assertEqual(replay[4], "later")
+            self.assertEqual(profile, (100, 7))
+
     def test_warmup_backfill_targets_only_wallets_with_copy_evidence(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

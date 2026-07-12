@@ -126,7 +126,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("title={scoreTitle(w)}", wallets)
         self.assertNotIn("score-info-btn", css)
         self.assertNotIn(".score-detail-modal", css)
-        self.assertIn("历史 copy 回测", drawer)
+        self.assertIn("当前参数 Copy 回放", drawer)
         self.assertIn("copyWindowRows", drawer)
         self.assertIn("scoreBreakdown", drawer)
         self.assertIn(".score-window-grid", css)
@@ -284,7 +284,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
 
         self.assertIn("近7日钱包 开 / 平", wallets)
-        self.assertIn("Copy回放", wallets)
+        self.assertIn("当前参数回放", wallets)
         self.assertIn("30日 ·", wallets)
         self.assertIn("7日 ", wallets)
         self.assertIn("未跟原因", wallets)

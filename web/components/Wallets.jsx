@@ -91,7 +91,7 @@ export function Wallets({ confirm, toast }) {
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
-              <th>最近开仓</th><th className="num" title="按当前跟单策略回放，已扣手续费；同时展示长期与近期结果">Copy回放</th>
+              <th>最近开仓</th><th className="num" title="按当前已生效的调参结果回放，已扣手续费；同时展示长期与近期结果">当前参数回放</th>
               <th className="num">胜率</th><th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>

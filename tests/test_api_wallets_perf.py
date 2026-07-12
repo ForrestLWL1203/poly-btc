@@ -328,10 +328,6 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
                 "VALUES('g1','published',1,1,1,'now')"
             )
-            db.execute(
-                "INSERT INTO follow_selection(generation,addr,role,enabled,reason,selected_at) "
-                "VALUES('g1','0xaaa','core',1,'above_follow_line','now')"
-            )
             policy = json.dumps({"allowed": ["stock"], "stock": {"allow": True}, "crypto": {"allow": False}})
             sectors = json.dumps({
                 "stock": {"30": {"copy_net_pnl": 307, "closed_n": 11, "wins": 6},
@@ -339,6 +335,15 @@ class ApiWalletsPerfTests(unittest.TestCase):
                           "7": {"copy_net_pnl": 171, "closed_n": 6, "wins": 3}},
                 "crypto": {"30": {"copy_net_pnl": -525, "closed_n": 2, "wins": 0}},
             })
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,reason,"
+                "replay_copy_bt_net_pnl,replay_copy_bt_closed_n,replay_copy_bt_14d_net_pnl,"
+                "replay_copy_bt_14d_closed_n,replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_closed_n,"
+                "replay_sector_copy_json,replay_params_hash,replayed_at,selected_at) "
+                "VALUES('g1','0xaaa','core',1,'above_follow_line',999,99,888,88,777,77,"
+                "?,'current123','2026-01-02T00:00:00Z','now')",
+                (sectors,),
+            )
             db.execute(
                 "INSERT INTO profile(addr,status,score,copy_bt_net_pnl,copy_bt_closed_n,"
                 "copy_bt_14d_net_pnl,copy_bt_14d_closed_n,copy_bt_7d_net_pnl,copy_bt_7d_closed_n,"
@@ -355,6 +360,8 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["copyBacktestClosedN"], 11)
         self.assertEqual(wallet["copyBacktest14dNetPnl"], 293)
         self.assertEqual(wallet["copyBacktest7dNetPnl"], 171)
+        self.assertEqual(wallet["copyReplayParamsHash"], "current123")
+        self.assertIsNotNone(wallet["copyReplayedAt"])
         self.assertEqual(wallet["selectionReasonText"], "达到跟单线")
 
     def test_published_zero_core_selection_does_not_fall_back_to_score_line(self):

@@ -316,6 +316,19 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     evidence_status TEXT,
     model_version   TEXT,
     policy_version  TEXT,
+    replay_copy_bt_net_pnl        REAL,
+    replay_copy_bt_win_rate       REAL,
+    replay_copy_bt_closed_n       INTEGER,
+    replay_copy_bt_open_fill_rate REAL,
+    replay_copy_bt_liquidations   INTEGER,
+    replay_copy_bt_fee_drag       REAL,
+    replay_copy_bt_14d_net_pnl    REAL,
+    replay_copy_bt_14d_closed_n   INTEGER,
+    replay_copy_bt_7d_net_pnl     REAL,
+    replay_copy_bt_7d_closed_n    INTEGER,
+    replay_sector_copy_json       TEXT,
+    replay_params_hash            TEXT,
+    replayed_at                   TEXT,
     selected_at     TEXT NOT NULL,
     PRIMARY KEY (generation, addr)
 );
@@ -844,6 +857,21 @@ _MIGRATIONS = (
     "ALTER TABLE auto_tune_runs ADD COLUMN applied_at TEXT",
     "ALTER TABLE auto_tune_runs ADD COLUMN rollback_at TEXT",
     "ALTER TABLE auto_tune_runs ADD COLUMN rollback_reason TEXT",
+    # Display-only replay under the currently effective strategy parameters.  The scan-time profile
+    # evidence remains immutable, so this refresh cannot feed back into Core membership.
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_win_rate REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_closed_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_open_fill_rate REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_liquidations INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_fee_drag REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_closed_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_closed_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_sector_copy_json TEXT",
+    "ALTER TABLE follow_selection ADD COLUMN replay_params_hash TEXT",
+    "ALTER TABLE follow_selection ADD COLUMN replayed_at TEXT",
 )
 
 

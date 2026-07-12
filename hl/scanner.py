@@ -16,13 +16,14 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import auto_tune, config, follow_score, generation, metrics, params, pipeline_audit, rest, selection, storage
 from .fills import build_episodes, is_spot
 from .copy_data import normalize_copyable_fills
 from .copy_policy import load_copy_policy
 from .copy_evidence import summarize_copy_evidence, summarize_portfolio_pnl
-from .sector import classify_coin
+from .sector import classify_coin, compact_sector_results
 from .fill_transition import classify_fill_transition
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
@@ -1446,6 +1447,72 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str, *, allow_apply: bool =
     return res
 
 
+def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -> dict:
+    """Refresh dashboard Copy PnL with the currently effective follow parameters.
+
+    Scan-time profile evidence remains the immutable qualification snapshot.  Auto-tune runs after list
+    publication, so its per-wallet replay belongs on the generation selection: the UI can match the live
+    sizing/add/leverage rules without a post-tune regate changing Core membership.
+    """
+    current = selection.latest_published_generation(db)
+    if not generation_id or current != generation_id:
+        return {"status": "skipped", "reason": "generation_not_current", "generation": generation_id}
+    rows = db.execute(
+        "SELECT addr FROM follow_selection WHERE generation=? "
+        "AND role IN ('core','challenger') ORDER BY addr",
+        (generation_id,),
+    ).fetchall()
+    if not rows:
+        return {"status": "ok", "generation": generation_id, "refreshed": 0}
+
+    now_ms = int(time.time() * 1000)
+    stamp = replayed_at or now_iso()
+    overrides = _copy_bt_overrides(db)
+    replay_hash = hashlib.sha256(
+        json.dumps(overrides, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    replay_ctx = SimpleNamespace(
+        copy_bt_days=int(config.COPY_BT_DAYS),
+        copy_bt_sigmas=_copy_bt_sigmas(db),
+        copy_bt_market_ctx=_copy_bt_market_ctx(db),
+        copy_bt_overrides=overrides,
+        scan_generation=generation_id,
+    )
+    updates = []
+    for (addr,) in rows:
+        fills = _copy_bt_cached_fills(db, addr, now_ms, replay_ctx)
+        windows = _copy_bt_results(addr, fills, now_ms, replay_ctx)
+        sectors = _sector_copy_bt_results(addr, fills, now_ms, replay_ctx)
+        primary = (windows.get(30) or windows.get(max(windows))) if windows else {}
+        recent14 = windows.get(14) or {}
+        recent7 = windows.get(7) or {}
+        opened = int(primary.get("opened_n") or 0)
+        target_open = int(primary.get("target_open_events") or 0)
+        updates.append((
+            primary.get("copy_net_pnl"), primary.get("copy_win_rate"),
+            int(primary.get("closed_n") or 0),
+            (opened / target_open) if target_open else None,
+            int(primary.get("liquidations") or 0), primary.get("fee_drag"),
+            recent14.get("copy_net_pnl"), int(recent14.get("closed_n") or 0),
+            recent7.get("copy_net_pnl"), int(recent7.get("closed_n") or 0),
+            json.dumps(compact_sector_results(sectors), sort_keys=True),
+            replay_hash, stamp, generation_id, addr,
+        ))
+    db.executemany(
+        "UPDATE follow_selection SET replay_copy_bt_net_pnl=?,replay_copy_bt_win_rate=?,"
+        "replay_copy_bt_closed_n=?,replay_copy_bt_open_fill_rate=?,replay_copy_bt_liquidations=?,"
+        "replay_copy_bt_fee_drag=?,replay_copy_bt_14d_net_pnl=?,replay_copy_bt_14d_closed_n=?,"
+        "replay_copy_bt_7d_net_pnl=?,replay_copy_bt_7d_closed_n=?,replay_sector_copy_json=?,"
+        "replay_params_hash=?,replayed_at=? WHERE generation=? AND addr=?",
+        updates,
+    )
+    db.commit()
+    return {
+        "status": "ok", "generation": generation_id, "refreshed": len(updates),
+        "paramsHash": replay_hash, "replayedAt": stamp,
+    }
+
+
 def tune_published_generation(db, generation_id, stamp=None, source="scan"):
     """Run one generation-bound tuner proposal with a DB lease.
 
@@ -1470,7 +1537,14 @@ def tune_published_generation(db, generation_id, stamp=None, source="scan"):
     )
     db.commit()
     try:
-        return _maybe_auto_tune_margins(db, source, stamp, allow_apply=True, data_complete=True)
+        result = _maybe_auto_tune_margins(db, source, stamp, allow_apply=True, data_complete=True)
+        try:
+            result["selectionReplay"] = refresh_selection_copy_replay(
+                db, generation_id, replayed_at=now_iso()
+            )
+        except Exception as exc:  # noqa: BLE001 - display replay must never invalidate a tune run
+            result["selectionReplay"] = {"status": "error", "error": str(exc)[:300]}
+        return result
     finally:
         db.execute(
             "UPDATE auto_tune_state SET value=?,updated_at=? WHERE key='async_tuner_lease'",

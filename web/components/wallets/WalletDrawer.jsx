@@ -114,7 +114,7 @@ export function WalletDrawer({ address, onClose }) {
                 )}
               </DecisionCard>
 
-              <DecisionCard title="历史 copy 回测" tone={copyRows.length ? "good" : "muted"}>
+              <DecisionCard title="当前参数 Copy 回放" tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
                   <div className="score-window-grid">
                     {copyRows.map(([label, pnl, n]) => (
