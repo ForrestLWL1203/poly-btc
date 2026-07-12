@@ -230,12 +230,19 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0,
                 ), metrics=metrics, action="add", added=("0xaaa",), evaluated=1,
             )
+
+            def select_after_watchlist(*args, **kwargs):
+                self.assertIsNotNone(db.execute(
+                    "SELECT 1 FROM watchlist WHERE addr='0xaaa'"
+                ).fetchone())
+                return marginal
+
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
-                    patch.object(scanner.selection, "select_ranked_positive_core", return_value=marginal), \
+                    patch.object(scanner.selection, "select_ranked_positive_core", side_effect=select_after_watchlist), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -315,6 +322,49 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             build.assert_called_once()
             self.assertTrue(build.call_args.kwargs["force_cold_bootstrap"])
             launch.assert_called_once()
+
+    def test_repair_existing_selection_refreshes_watchlist_before_rebuild(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at,"
+                "leaderboard_valid,profile_complete) "
+                "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02',1,1)"
+            )
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES('g1','0xaaa','core',1,'2026-01-02')"
+            )
+            db.commit()
+            core_row = scanner.selection.SelectionRow("0xaaa", "core", reason="core_keep")
+
+            def build(db_arg, generation, stamp, now_ms, **kwargs):
+                self.assertIsNotNone(db_arg.execute(
+                    "SELECT 1 FROM watchlist WHERE addr='0xaaa'"
+                ).fetchone())
+                self.assertFalse(kwargs["force_cold_bootstrap"])
+                return [core_row], None
+
+            with patch.object(scanner, "_build_explicit_selection", side_effect=build), \
+                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}):
+                result = scanner.repair_published_selection(
+                    db, "g1", "2026-01-03", replace_existing=True,
+                )
+
+            self.assertEqual(result["status"], "repaired")
+            self.assertEqual(result["core"], 1)
 
     def test_forced_cold_bootstrap_ignores_registry_core_role(self):
         with tempfile.TemporaryDirectory() as td:

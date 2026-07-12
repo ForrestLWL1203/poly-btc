@@ -1710,12 +1710,11 @@ def _launch_async_tuner(db, generation_id, stamp):
 
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False):
-    """Repair a provably broken empty selection from the current complete generation.
+    """Rebuild selection from the current complete generation without network access.
 
-    This is intentionally narrow: it never fetches network data, never rewrites
-    profiles, and refuses to replace a non-empty Core.  It exists so an initial
-    Paper scan does not need to repeat an expensive full refetch after a
-    selection-code failure.
+    This is intentionally narrow: it never fetches network data or rewrites profiles.  Replacing a non-empty
+    Core requires the explicit ``replace_existing`` flag.  It repairs both an empty bootstrap and a published
+    selection produced from a stale derived watchlist without repeating an expensive full scan.
     """
     current = selection.latest_published_generation(db)
     generation_id = generation_id or current
@@ -1738,8 +1737,18 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         raise RuntimeError("selection_repair_has_stale_active_profiles")
 
     stamp = stamp or now_iso()
+    refresh_watchlist(
+        db,
+        stamp,
+        source="selection_repair",
+        update_follow_line=False,
+        update_follow_history=False,
+        leaderboard_generation=generation_id,
+        commit=False,
+    )
     rows, marginal = _build_explicit_selection(
-        db, generation_id, stamp, int(time.time() * 1000), force_cold_bootstrap=True,
+        db, generation_id, stamp, int(time.time() * 1000),
+        force_cold_bootstrap=not bool(existing_core),
     )
     previous_core = set(existing_core)
     selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
@@ -1766,7 +1775,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         source="selection_repair",
         stage="selection_summary",
         status="ok",
-        reason="repaired_cold_bootstrap",
+        reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
         payload={
             "generation": generation_id,
             "action": marginal.action if marginal else "keep",
@@ -2306,11 +2315,9 @@ def scan(db, p) -> None:
             selection_mode = str(
                 params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
             ).lower()
-            if selection_mode == "manual":
-                selection_rows = selection.current_selection_rows(db)
-                marginal = None
-            else:
-                selection_rows, marginal = _build_explicit_selection(db, generation_id, stamp, now_ms)
+            # Selection reads final scores and per-wallet sector policies from watchlist.  Rebuild that
+            # derived view first; otherwise newly-qualified wallets have no policy row and the canonical
+            # portfolio loader correctly filters all of their fills, fabricating zero marginal profit.
             refresh_watchlist(
                 db,
                 stamp,
@@ -2320,6 +2327,11 @@ def scan(db, p) -> None:
                 leaderboard_generation=generation_id,
                 commit=False,
             )
+            if selection_mode == "manual":
+                selection_rows = selection.current_selection_rows(db)
+                marginal = None
+            else:
+                selection_rows, marginal = _build_explicit_selection(db, generation_id, stamp, now_ms)
             generation.mark_generation_ready(
                 db,
                 generation_id,
