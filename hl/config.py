@@ -425,7 +425,11 @@ AUTO_TUNE_MAX_DD_WORSEN = 0.01
 AUTO_TUNE_APPLY_COOLDOWN_DAYS = 0  # Paper每次完整generation都可重新寻优；真钱环境再设冷却
 AUTO_TUNE_ROLLBACK_RELATIVE_DROP = 0.10
 AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE = 0.0  # Paper exploration;真钱环境建议0.80
-AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.0       # Paper exploration;真钱环境建议0.95
+AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.95      # Profitable tuning must survive the observed market path.
+
+# Canonical profitable Core replay must survive a bounded 15m market path. Fills-only replay remains the
+# fast candidate search, but a new selection is not publishable when its final shared-account path is thin.
+CORE_PRICE_PATH_MIN_COVERAGE = 0.95
 # Each volatility tier is searched independently.  The lower 0.60 candidate lets a newly re-ranked Core
 # trade smaller tickets when more good wallets compete for the same account, while the configured tier
 # minimums remain the hard floor.

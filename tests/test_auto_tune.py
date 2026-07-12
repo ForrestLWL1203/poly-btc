@@ -404,7 +404,7 @@ class AutoTuneTests(unittest.TestCase):
         self.assertFalse(result["applied"])
         self.assertEqual(after, before)
 
-    def test_paper_apply_policy_can_activate_without_calendar_or_coverage_waits(self):
+    def test_paper_apply_policy_still_requires_price_path_for_leverage_change(self):
         db = self._db()
         params.seed_params(db)
         current = {key: 1.0 for key in auto_tune.TUNE_KEYS + auto_tune.ADD_TUNE_KEYS}
@@ -437,7 +437,8 @@ class AutoTuneTests(unittest.TestCase):
             "2026-07-11T00:00:00Z",
         )
 
-        self.assertTrue(result["eligible"], result["reasons"])
+        self.assertFalse(result["eligible"])
+        self.assertIn("price_path_coverage_low", result["reasons"])
 
     def test_choose_follow_line_by_portfolio_prefers_profitable_prefix(self):
         db = self._db()

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 from . import auto_tune, config, follow_score, generation, metrics, params, pipeline_audit, rest, selection, storage
 from .fills import build_episodes, is_spot
-from .copy_data import normalize_copyable_fills
+from .copy_data import load_copyable_fills, normalize_copyable_fills
 from .copy_policy import load_copy_policy
 from .copy_evidence import summarize_copy_evidence
 from .sector import classify_coin, compact_sector_results
@@ -969,7 +969,8 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     )
 
 
-def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False):
+def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False,
+                              validate_price_path=True):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     copy_policy = load_copy_policy()
     previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
@@ -1147,6 +1148,38 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     validation_evaluator=validate,
                 )
                 selected_set = set(marginal.selected)
+                # The beam search deliberately stays fills-only for bounded runtime. Its finalist must then
+                # survive the shared 15m market path before it can change production membership. Missing
+                # path data retains the still-qualified published Core; it never turns an optimistic replay
+                # into a newly published target set.
+                if selected_set and validate_price_path:
+                    selected_fills = [
+                        fill for fill in (window_fills.get(30) or [])
+                        if (fill.get("user") or "").lower() in selected_set
+                    ]
+                    from . import price_path
+                if selected_set and validate_price_path and price_path.coins_for_fills(selected_fills):
+                    path_start = now_ms - (
+                        30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+                    ) * 86_400_000
+                    path_rows = price_path.load(db, selected_fills, path_start, now_ms)
+                    path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
+                    path_primary = auto_tune.evaluate_portfolio_window(
+                        db, sorted(selected_set), sigmas, neutral_follow, now_ms,
+                        window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
+                        path_rows=path_rows, path_meta=path_meta,
+                    )
+                    path_ok = (
+                        float(path_meta.get("coverage") or 0.0)
+                        >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
+                        and f(path_primary.get("copy_net_pnl")) > 0
+                    )
+                    if not path_ok:
+                        selected_set = {
+                            addr for addr in portfolio_candidates
+                            if previous_roles.get(addr) == selection.CORE
+                        }
+                        marginal = None
                 final_metrics = evaluate(tuple(sorted(selected_set)))
                 final_utility = f(final_metrics.risk_adjusted_utility)
                 for addr in selected_set:
@@ -2278,10 +2311,37 @@ def scan(db, p) -> None:
     pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
     if complete:
         _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
+        selection_mode = str(
+            params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
+        ).lower()
+        # Discover the fills-only finalist in a rolled-back staging pass, then fetch its shared market path
+        # before the atomic publication transaction. Network I/O must never hold the Dashboard/Observer
+        # SQLite writer lock, and a partial watchlist must never become visible.
+        if selection_mode == "auto":
+            try:
+                db.commit()
+                refresh_watchlist(
+                    db, stamp, source="scan", update_follow_line=False, update_follow_history=False,
+                    leaderboard_generation=generation_id, commit=False,
+                )
+                preview_rows, _ = _build_explicit_selection(
+                    db, generation_id, stamp, now_ms, validate_price_path=False,
+                )
+                preview_core = sorted({
+                    row.addr for row in preview_rows if row.role == selection.CORE and row.enabled
+                })
+                db.rollback()
+                if preview_core:
+                    from . import price_path
+                    path_start = now_ms - (
+                        30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+                    ) * 86_400_000
+                    preview_fills = load_copyable_fills(db, preview_core, path_start)
+                    price_path.ensure(db, preview_fills, path_start, now_ms)
+            except Exception as exc:  # noqa: BLE001 - final pass safely retains prior Core without coverage
+                db.rollback()
+                print(f"selection price-path prefetch unavailable: {exc}", flush=True)
         try:
-            selection_mode = str(
-                params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
-            ).lower()
             # Selection reads final scores and per-wallet sector policies from watchlist.  Rebuild that
             # derived view first; otherwise newly-qualified wallets have no policy row and the canonical
             # portfolio loader correctly filters all of their fills, fabricating zero marginal profit.

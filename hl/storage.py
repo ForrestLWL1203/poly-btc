@@ -669,6 +669,26 @@ CREATE TABLE IF NOT EXISTS candidate_fills (
 );
 CREATE INDEX IF NOT EXISTS idx_candidate_fills_addr_time ON candidate_fills(addr, time);
 
+-- Shared, bounded market path cache for copy-replay liquidation validation. Candles are keyed by market,
+-- not wallet, so every candidate and portfolio replay reuses the same observations. Retention is enforced
+-- by hl.price_path after refresh: 15m keeps 39 days (37d replay + boundary buffer), 1m keeps 4 days.
+CREATE TABLE IF NOT EXISTS coin_price_candle (
+    coin       TEXT NOT NULL,
+    interval   TEXT NOT NULL,
+    open_time  INTEGER NOT NULL,
+    close_time INTEGER NOT NULL,
+    open_px    REAL NOT NULL,
+    high_px    REAL NOT NULL,
+    low_px     REAL NOT NULL,
+    close_px   REAL NOT NULL,
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (coin, interval, open_time)
+);
+CREATE INDEX IF NOT EXISTS idx_coin_price_candle_expiry
+    ON coin_price_candle(interval, close_time);
+CREATE INDEX IF NOT EXISTS idx_coin_price_candle_coin_range
+    ON coin_price_candle(coin, interval, open_time);
+
 -- Per-wallet cache coverage.  This deliberately separates a full PROFILE workset from a full
 -- historical FILL refetch: migrations can refresh every wallet while only backfilling wallets whose
 -- copy replay actually needs the additional warm-up context.

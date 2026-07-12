@@ -68,6 +68,8 @@ def _price_events(price_path) -> list[dict]:
             lo, hi = hi, lo
         out.append({
             "time": _row_time(row),
+            "open_time": int(row.get("open_time") or row.get("t") or _row_time(row)),
+            "close_time": int(row.get("close_time") or row.get("T") or _row_time(row)),
             "coin": coin,
             "low": lo,
             "high": hi,
@@ -78,7 +80,8 @@ def _price_events(price_path) -> list[dict]:
 
 
 class Backtest:
-    def __init__(self, addr, sigmas=None, initial_balance=None, overrides=None, market_ctx=None):
+    def __init__(self, addr, sigmas=None, initial_balance=None, overrides=None, market_ctx=None,
+                 price_path_meta=None):
         overrides = overrides or {}
         self.addr = (addr or "").lower()
         self.sigmas = sigmas or {}
@@ -152,6 +155,8 @@ class Backtest:
         self.market_ctx = market_ctx or {}
         self.replay_cost_mult = max(1.0, f(overrides.get("REPLAY_COST_MULT", 1.0)))
         self.price_path_points = 0
+        self.price_path_meta = price_path_meta or {}
+        self.path_boundary_skips = 0
         self.master_leverage_known = 0
         self.master_leverage_missing = 0
         self.deploy_samples = []
@@ -330,7 +335,9 @@ class Backtest:
             lo, hi = hi, lo
         close = f(x.get("close")) or (lo + hi) / 2
         self.last_px[coin] = close
-        self._mark_stops_range(coin, lo, hi, x.get("time"))
+        self._mark_stops_range(
+            coin, lo, hi, x.get("time"), candle_open_time=x.get("open_time"),
+        )
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
         if coin_is_blacklisted(coin, self.coin_blacklist):
@@ -565,9 +572,15 @@ class Backtest:
             elif stop_hit:
                 self._apply_reduce(addr, coin, px, 0.0, 0.0, closing=True, status="stopped", t=t)
 
-    def _mark_stops_range(self, coin, low, high, t):
+    def _mark_stops_range(self, coin, low, high, t, candle_open_time=None):
         for (addr, c), ep in list(self.open.items()):
             if c != coin:
+                continue
+            # A candle's low/high may have occurred before a position opened inside that candle. Applying
+            # the entire range would create false liquidations. Boundary candles remain explicitly
+            # unresolved until a finer path is available.
+            if candle_open_time is not None and int(ep.get("opened_at") or 0) > int(candle_open_time):
+                self.path_boundary_skips += 1
                 continue
             if ep["side"] == "long":
                 liq_hit = low <= ep["liq_px"]
@@ -634,7 +647,9 @@ class Backtest:
             self.master_leverage_known / (self.master_leverage_known + self.master_leverage_missing)
             if (self.master_leverage_known + self.master_leverage_missing) else 1.0
         )
-        price_path_coverage = 1.0 if self.price_path_points > 0 else 0.0
+        price_path_coverage = float(self.price_path_meta.get(
+            "coverage", 1.0 if self.price_path_points > 0 else 0.0,
+        ))
         fallback_reasons = []
         if not self.price_path_points:
             fallback_reasons.append("missing_price_path")
@@ -682,6 +697,8 @@ class Backtest:
             },
             "price_path_points": self.price_path_points,
             "price_path_coverage": price_path_coverage,
+            "price_path_boundary_skips": self.path_boundary_skips,
+            "price_path_missing_coins": list(self.price_path_meta.get("missingCoins") or []),
             "master_leverage_known": self.master_leverage_known,
             "master_leverage_missing": self.master_leverage_missing,
             "master_leverage_coverage": leverage_coverage,
@@ -720,9 +737,11 @@ def summarize_position(p):
     }
 
 
-def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None, market_ctx=None):
+def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None,
+                 market_ctx=None, price_path_meta=None):
     return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance,
-                    overrides=overrides, market_ctx=market_ctx).run(fills, price_path=price_path)
+                    overrides=overrides, market_ctx=market_ctx,
+                    price_path_meta=price_path_meta).run(fills, price_path=price_path)
 
 
 def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> dict:

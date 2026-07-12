@@ -137,7 +137,6 @@ class WebStaticAssetsTests(unittest.TestCase):
             "discovery/ScanMask.jsx": "export function ScanMask(",
             "discovery/ScanStatusCard.jsx": "export function ScanStatusCard(",
             "discovery/DiscoveryFunnel.jsx": "export function DiscoveryFunnel(",
-            "discovery/PipelineSummary.jsx": "export function PipelineSummary(",
             "discovery/ScanHistoryTable.jsx": "export function ScanHistoryTable(",
         }
 
@@ -150,6 +149,7 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertIn('export { ScanMask } from "./discovery/ScanMask.jsx"', discovery)
         self.assertNotIn("function PipelineSummary(", discovery)
+        self.assertNotIn("PipelineSummary", discovery)
         self.assertNotIn("const STAGES_FE", discovery)
 
     def test_positions_and_history_internals_are_split(self):

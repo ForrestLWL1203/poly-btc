@@ -200,7 +200,15 @@ def candle_snapshot(coin: str, interval: str = "1d", days: int = 30):
     now = int(time.time() * 1000)
     return post_soft({"type": "candleSnapshot",
                       "req": {"coin": coin, "interval": interval,
-                              "startTime": now - days * 86400_000, "endTime": now}})
+                      "startTime": now - days * 86400_000, "endTime": now}})
+
+
+def candle_snapshot_range(coin: str, interval: str, start_ms: int, end_ms: int):
+    """Fetch one explicit candle range. Hyperliquid exposes at most the latest 5000 candles."""
+    return post_soft({"type": "candleSnapshot", "req": {
+        "coin": coin, "interval": interval,
+        "startTime": int(start_ms), "endTime": int(end_ms),
+    }})
 
 
 def asset_contexts(dex: str = None) -> dict:

@@ -18,6 +18,7 @@ from typing import Iterable
 
 from . import config, params, selection
 from .copy_backtest import run_backtest, slice_backtest_result
+from . import price_path
 from .copy_data import load_copyable_fills
 from .copy_policy import load_copy_policy
 from .sector import parse_json_obj
@@ -729,7 +730,8 @@ def follow_overrides_for_margin_candidate(follow: dict, margins: dict) -> dict:
 
 def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
                        window_fills: dict[int, list[dict]] | None = None,
-                       market_ctx: dict | None = None) -> dict:
+                       market_ctx: dict | None = None, path_rows: list[dict] | None = None,
+                       path_meta: dict | None = None) -> dict:
     market_ctx = _load_market_ctx(db) if market_ctx is None else market_ctx
     windows = {}
     for days in _tune_days():
@@ -738,7 +740,8 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
             start_ms = now_ms - int(days) * 86400_000
             fills = _load_portfolio_fills(db, addrs, start_ms)
         warm_result = run_backtest(
-            "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {}
+            "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {},
+            price_path=path_rows, price_path_meta=path_meta,
         )
         result = slice_backtest_result(
             warm_result,
@@ -752,7 +755,8 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
 
 def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
                               *, window_fills: dict[int, list[dict]], days: int = 30,
-                              market_ctx: dict | None = None) -> dict:
+                              market_ctx: dict | None = None, path_rows: list[dict] | None = None,
+                              path_meta: dict | None = None) -> dict:
     """Replay one portfolio/window and immediately discard heavy position/equity details."""
     days = int(days)
     fills = list((window_fills or {}).get(days) or [])
@@ -762,6 +766,8 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
         sigmas=sigmas,
         overrides=overrides,
         market_ctx=_load_market_ctx(db) if market_ctx is None else market_ctx,
+        price_path=path_rows,
+        price_path_meta=path_meta,
     )
     result = slice_backtest_result(
         warm_result,
@@ -790,8 +796,15 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
     follow = params.load_follow(db)
     if "SMART_ADD" in follow:
         follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+    all_fills = list(window_fills.get(max(window_fills)) or [])
+    path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
+    refresh = price_path.ensure(db, all_fills, path_start, now_ms)
+    path_rows = price_path.load(db, all_fills, path_start, now_ms)
+    path_meta = price_path.coverage(db, all_fills, path_start, now_ms)
+    path_meta["refreshFailed"] = len(refresh.get("failed") or [])
     windows = _candidate_windows(
         db, addrs, _load_sigmas(db), follow, now_ms, window_fills=window_fills,
+        path_rows=path_rows, path_meta=path_meta,
     )
     params_hash = hashlib.sha256(
         json.dumps(follow, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -809,6 +822,9 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         "openRate30": f(primary.get("open_fill_rate")),
         "capacityFit30": f(primary.get("capacity_open_fit")),
         "liquidations30": int(primary.get("liquidations") or 0),
+        "pricePathCoverage30": f(primary.get("price_path_coverage")),
+        "pricePathBoundarySkips30": int(primary.get("price_path_boundary_skips") or 0),
+        "pricePathStatus": "verified" if f(primary.get("price_path_coverage")) >= .95 else "unverified",
         "netPnl14": f((windows.get(14) or {}).get("copy_net_pnl")),
         "netPnl7": f((windows.get(7) or {}).get("copy_net_pnl")),
     }
@@ -1094,6 +1110,9 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
         follow.get("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE")
         if follow.get("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE") is not None
         else getattr(config, "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", 0.95)
+    )
+    price_path_floor = max(
+        price_path_floor, float(getattr(config, "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", .95)),
     )
     if leverage_changed and validation.get("masterLeverageCoverage", 0.0) < master_coverage_floor:
         reasons.append("master_leverage_coverage_low")
