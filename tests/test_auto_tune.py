@@ -100,6 +100,22 @@ class AutoTuneTests(unittest.TestCase):
             {(12, 5, 3), (18, 7, 4), (20, 8, 4)},
         )
 
+    def test_leverage_polish_changes_one_tier_at_a_time(self):
+        base = {
+            "STABLE_MARGIN_PCT": 0.0644, "MID_MARGIN_PCT": 0.0552,
+            "HIGH_MARGIN_PCT": 0.0368, "STABLE_LEV_CAP": 32.0,
+            "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0, "DEPLOY_FULL_PCT": 0.60,
+        }
+
+        candidates = auto_tune.independent_leverage_candidates(base)
+        values = [candidate["params"] for candidate in candidates]
+
+        self.assertTrue(any(row["STABLE_LEV_CAP"] == 32 and row["MID_LEV_CAP"] == 11 for row in values))
+        self.assertTrue(any(row["STABLE_LEV_CAP"] == 32 and row["MID_LEV_CAP"] == 9 for row in values))
+        self.assertFalse(any(
+            row["STABLE_LEV_CAP"] != 32 and row["MID_LEV_CAP"] != 12 for row in values
+        ))
+
     def test_margin_baseline_tracks_manual_values_not_last_auto_values(self):
         db = self._db()
         base = {"STABLE_MARGIN_PCT": 0.015, "MID_MARGIN_PCT": 0.015, "HIGH_MARGIN_PCT": 0.010}
