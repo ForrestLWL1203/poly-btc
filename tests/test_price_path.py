@@ -63,6 +63,19 @@ class PricePathTest(unittest.TestCase):
         self.assertEqual(1, second["deferred"])
         self.assertEqual(1, fetch.call_count)
 
+    def test_finer_path_only_replaces_fully_covered_candle(self):
+        coarse = [{"coin": "BTC", "time": 900, "open_time": 1, "close_time": 900,
+                   "low": 90, "high": 110, "close": 100, "interval": "15m"}]
+        complete = [
+            {"coin": "BTC", "time": end, "open_time": start, "close_time": end,
+             "low": 95, "high": 105, "close": 100, "interval": "5m"}
+            for start, end in ((1, 300), (301, 600), (601, 900))
+        ]
+        merged = price_path.merge_finer_path(coarse, complete)
+        self.assertEqual(3, len(merged))
+        gapped = price_path.merge_finer_path(coarse, complete[:2])
+        self.assertEqual(coarse, gapped)
+
 
 if __name__ == "__main__":
     unittest.main()

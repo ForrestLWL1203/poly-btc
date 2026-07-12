@@ -32,6 +32,29 @@ ADD_TUNE_KEYS = ("ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD
 CAPACITY_SKIP_KEYS = ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small")
 
 
+def prepare_refined_price_path(db, fills: list[dict], start_ms: int, end_ms: int,
+                               *, sigmas: dict, overrides: dict, market_ctx: dict) -> tuple[list[dict], dict]:
+    """Fetch the 15m baseline, then refine only liquidation-ambiguous markets and recent ranges."""
+    price_path.ensure(db, fills, start_ms, end_ms)
+    meta = price_path.coverage(db, fills, start_ms, end_ms)
+    rows = price_path.load_refined(db, fills, start_ms, end_ms)
+    for interval in price_path.REFINEMENT_INTERVALS:
+        probe = run_backtest(
+            "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx,
+            price_path=rows, price_path_meta=meta,
+        )
+        refinement = price_path.refinement_fills(
+            probe.get("ambiguous_path_ranges") or [], end_ms, interval,
+        )
+        if not refinement:
+            continue
+        refine_start = min(int(row["time"]) for row in refinement)
+        price_path.ensure(db, refinement, refine_start, end_ms, interval=interval)
+        fine = price_path.load(db, refinement, refine_start, end_ms, interval=interval)
+        rows = price_path.merge_finer_path(rows, fine)
+    return rows, meta
+
+
 def _json_load(raw, fallback):
     if not raw:
         return fallback
@@ -798,18 +821,25 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
     all_fills = list(window_fills.get(max(window_fills)) or [])
     path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
-    refresh = price_path.ensure(db, all_fills, path_start, now_ms)
-    path_rows = price_path.load(db, all_fills, path_start, now_ms)
-    path_meta = price_path.coverage(db, all_fills, path_start, now_ms)
-    path_meta["refreshFailed"] = len(refresh.get("failed") or [])
+    sigmas = _load_sigmas(db)
+    market_ctx = _load_market_ctx(db)
+    path_rows, path_meta = prepare_refined_price_path(
+        db, all_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
+        market_ctx=market_ctx,
+    )
     windows = _candidate_windows(
-        db, addrs, _load_sigmas(db), follow, now_ms, window_fills=window_fills,
+        db, addrs, sigmas, follow, now_ms, window_fills=window_fills,
         path_rows=path_rows, path_meta=path_meta,
+    )
+    worst_windows = _candidate_windows(
+        db, addrs, sigmas, {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
+        window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
     )
     params_hash = hashlib.sha256(
         json.dumps(follow, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()[:16]
     primary = windows.get(30) or windows.get(max(windows))
+    worst_primary = worst_windows.get(30) or worst_windows.get(max(worst_windows))
     summary = {
         "generation": generation_id,
         "status": "ok",
@@ -817,11 +847,14 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         "paramsHash": params_hash,
         "replayedAt": now_iso(),
         "netPnl30": f(primary.get("copy_net_pnl")),
+        "netPnl30Worst": f(worst_primary.get("copy_net_pnl")),
         "closed30": int(primary.get("closed_n") or 0),
         "maxDrawdown30": f(primary.get("max_drawdown")),
         "openRate30": f(primary.get("open_fill_rate")),
         "capacityFit30": f(primary.get("capacity_open_fit")),
         "liquidations30": int(primary.get("liquidations") or 0),
+        "liquidations30Worst": int(worst_primary.get("liquidations") or 0),
+        "ambiguousLiquidations30": int(primary.get("ambiguous_liquidations") or 0),
         "pricePathCoverage30": f(primary.get("price_path_coverage")),
         "pricePathBoundarySkips30": int(primary.get("price_path_boundary_skips") or 0),
         "pricePathStatus": "verified" if f(primary.get("price_path_coverage")) >= .95 else "unverified",
@@ -835,9 +868,11 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
 
 def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                             sigmas: dict | None = None, now_ms: int | None = None,
-                            window_fills: dict[int, list[dict]] | None = None) -> dict:
+                            window_fills: dict[int, list[dict]] | None = None,
+                            path_rows: list[dict] | None = None, path_meta: dict | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
-    overrides = follow_overrides_for_tune_candidate(follow, candidate)
+    overrides = {**follow_overrides_for_tune_candidate(follow, candidate),
+                 "AMBIGUOUS_PATH_MODE": "liquidate"}
     params_ = {k: overrides[k] for k in TUNE_KEYS}
     sigmas = sigmas if sigmas is not None else _load_sigmas(db)
     out = dict(candidate)
@@ -852,6 +887,7 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
         days: _compact_backtest(result)
         for days, result in _candidate_windows(
             db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
+            path_rows=path_rows, path_meta=path_meta,
         ).items()
     }
     return out
@@ -859,9 +895,11 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
 
 def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                            sigmas: dict | None = None, now_ms: int | None = None,
-                           window_fills: dict[int, list[dict]] | None = None) -> dict:
+                           window_fills: dict[int, list[dict]] | None = None,
+                           path_rows: list[dict] | None = None, path_meta: dict | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
-    overrides = follow_overrides_for_add_candidate(follow, candidate)
+    overrides = {**follow_overrides_for_add_candidate(follow, candidate),
+                 "AMBIGUOUS_PATH_MODE": "liquidate"}
     params_ = {k: overrides[k] for k in ADD_TUNE_KEYS}
     sigmas = sigmas if sigmas is not None else _load_sigmas(db)
     out = dict(candidate)
@@ -871,6 +909,7 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
         days: _compact_backtest(result)
         for days, result in _candidate_windows(
             db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
+            path_rows=path_rows, path_meta=path_meta,
         ).items()
     }
     return out
@@ -947,6 +986,7 @@ def _compact_backtest(result: dict) -> dict:
         "master_leverage_missing", "price_path_coverage", "model_coverage", "max_drawdown",
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
+        "ambiguous_liquidations", "price_path_boundary_skips",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}
@@ -988,13 +1028,14 @@ def _proposal_direction(current: dict, proposed: dict) -> tuple[int, ...]:
     return tuple(out)
 
 
-def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms) -> dict:
+def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms,
+                             path_rows=None, path_meta=None) -> dict:
     """Three non-overlapping ten-day folds plus a conservative cost-stress holdout."""
     max_days = max(window_fills) if window_fills else 30
     fills = list((window_fills or {}).get(max_days) or [])
     market_ctx = {}  # historical liquidity context is supplied separately once versioned snapshots exist
-    base_overrides = dict(follow)
-    proposal_overrides = {**follow, **proposal}
+    base_overrides = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
+    proposal_overrides = {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"}
     folds = []
     warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86400_000
     for older, newer in ((30, 20), (20, 10), (10, 0)):
@@ -1002,9 +1043,11 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         hi = now_ms - newer * 86400_000 if newer else now_ms + 1
         fold_fills = [row for row in fills if lo - warmup_ms <= int(row.get("time") or 0) < hi]
         baseline_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=base_overrides,
-                                     market_ctx=market_ctx)
+                                     market_ctx=market_ctx, price_path=path_rows,
+                                     price_path_meta=path_meta)
         challenger_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=proposal_overrides,
-                                       market_ctx=market_ctx)
+                                       market_ctx=market_ctx, price_path=path_rows,
+                                       price_path_meta=path_meta)
         baseline = slice_backtest_result(baseline_warm, lo, window_days=10)
         challenger = slice_backtest_result(challenger_warm, lo, window_days=10)
         in_window_n = sum(lo <= int(row.get("time") or 0) < hi for row in fold_fills)
@@ -1017,6 +1060,8 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         sigmas=sigmas,
         overrides={**proposal_overrides, "REPLAY_COST_MULT": 1.5},
         market_ctx=market_ctx,
+        price_path=path_rows,
+        price_path_meta=path_meta,
     )
     stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
     compact_folds = []
@@ -1256,9 +1301,15 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         _record_run(db, source, stamp, None, False, len(addrs), base, result)
         db.commit()
         return result
+    path_fills = list(window_fills.get(max(window_fills)) or [])
+    path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
+    path_rows, path_meta = prepare_refined_price_path(
+        db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
+        market_ctx=_load_market_ctx(db),
+    )
     margin_candidates = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills)
+                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
         for candidate in independent_margin_candidates(base, follow)
     ]
     baseline = next(
@@ -1269,7 +1320,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
 
     lev_candidates = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills)
+                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
         for candidate in independent_leverage_candidates(selected_margin.get("params") or base)
     ]
     lev_baseline = next(
@@ -1281,7 +1332,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
 
     deploy_grid = [
         evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills)
+                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
         for candidate in deploy_candidates(selected_lev.get("params") or base)
     ]
     deploy_baseline = next(
@@ -1304,7 +1355,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     if follow_for_add.get("SMART_ADD", True):
         add_candidates = [
             evaluate_add_candidate(db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms,
-                                   window_fills=window_fills)
+                                   window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
             for candidate in add_candidates_from_axes(add_base)
         ]
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
@@ -1357,6 +1408,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combined = {**sizing_params, **finalist_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
+            path_rows=path_rows, path_meta=path_meta,
         )
         model = _model_validation(validation, load_copy_policy(follow))
         finalist_results.append({
@@ -1372,6 +1424,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combined = {**selected_params, **selected_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
+            path_rows=path_rows, path_meta=path_meta,
         )
         chosen = (selected, selected_params, selected_add_params, combined, validation)
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen

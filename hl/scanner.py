@@ -1162,10 +1162,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     path_start = now_ms - (
                         30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
                     ) * 86_400_000
-                    path_rows = price_path.load(db, selected_fills, path_start, now_ms)
+                    path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
                     path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
                     path_primary = auto_tune.evaluate_portfolio_window(
-                        db, sorted(selected_set), sigmas, neutral_follow, now_ms,
+                        db, sorted(selected_set), sigmas,
+                        {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
                         window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
                         path_rows=path_rows, path_meta=path_meta,
                     )
@@ -2337,7 +2338,16 @@ def scan(db, p) -> None:
                         30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
                     ) * 86_400_000
                     preview_fills = load_copyable_fills(db, preview_core, path_start)
-                    price_path.ensure(db, preview_fills, path_start, now_ms)
+                    preview_follow = params.load_follow(db)
+                    if "SMART_ADD" in preview_follow:
+                        preview_follow["ADD_STRATEGY"] = (
+                            "smart" if preview_follow["SMART_ADD"] else "hardcap"
+                        )
+                    auto_tune.prepare_refined_price_path(
+                        db, preview_fills, path_start, now_ms,
+                        sigmas=auto_tune._load_sigmas(db), overrides=preview_follow,
+                        market_ctx=auto_tune._load_market_ctx(db),
+                    )
             except Exception as exc:  # noqa: BLE001 - final pass safely retains prior Core without coverage
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)

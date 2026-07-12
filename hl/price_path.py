@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import time
+import bisect
 
 from . import rest
 from .copy_data import normalize_copyable_fills
 
-INTERVAL_MS = {"1m": 60_000, "15m": 15 * 60_000}
-RETENTION_DAYS = {"1m": 4, "15m": 39}
+INTERVAL_MS = {"1m": 60_000, "3m": 3 * 60_000, "5m": 5 * 60_000, "15m": 15 * 60_000}
+RETENTION_DAYS = {"1m": 4, "3m": 12, "5m": 19, "15m": 39}
+REFINEMENT_INTERVALS = ("5m", "3m", "1m")
 BASE_INTERVAL = "15m"
 
 
@@ -124,6 +126,79 @@ def load(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERVAL
     ).fetchall()
     return [{"coin": r[0], "time": r[2], "open_time": r[1], "close_time": r[2],
              "low": r[3], "high": r[4], "close": r[5], "interval": interval} for r in rows]
+
+
+def refinement_fills(ranges: list[dict], now_ms: int, interval: str) -> list[dict]:
+    cutoff = int(now_ms) - RETENTION_DAYS[interval] * 86_400_000
+    relevant = [row for row in ranges or [] if int(row.get("close_time") or 0) >= cutoff]
+    by_coin = {}
+    for row in relevant:
+        coin = row.get("coin")
+        if not coin:
+            continue
+        span = by_coin.setdefault(coin, [int(row["open_time"]), int(row["close_time"])])
+        span[0] = min(span[0], int(row["open_time"]))
+        span[1] = max(span[1], int(row["close_time"]))
+    return [
+        {"coin": coin, "time": timestamp}
+        for coin, span in sorted(by_coin.items()) for timestamp in span
+    ]
+
+
+def merge_finer_path(path_rows: list[dict], fine_rows: list[dict]) -> list[dict]:
+    """Replace overlapping coarse candles with a complete finer series."""
+    if not fine_rows:
+        return list(path_rows or [])
+    by_coin = {}
+    for row in fine_rows:
+        coin = row.get("coin")
+        by_coin.setdefault(coin, []).append(row)
+    starts = {}
+    for coin, rows in by_coin.items():
+        rows.sort(key=lambda row: int(row["open_time"]))
+        starts[coin] = [int(row["open_time"]) for row in rows]
+    def fine_coverage(row):
+        coin = row.get("coin")
+        fine = by_coin.get(coin) or []
+        lo = int(row.get("open_time") or row.get("time") or 0)
+        hi = int(row.get("close_time") or row.get("time") or 0)
+        index = max(0, bisect.bisect_left(starts.get(coin) or [], lo) - 1)
+        covered = 0
+        cursor = lo
+        for item in fine[index:]:
+            item_lo, item_hi = int(item["open_time"]), int(item["close_time"])
+            if item_lo > hi:
+                break
+            if item_hi < cursor:
+                continue
+            start = max(cursor, item_lo)
+            end = min(hi, item_hi)
+            if end >= start:
+                covered += end - start + 1
+                cursor = max(cursor, end + 1)
+        return covered, covered >= .95 * max(1, hi - lo + 1)
+
+    invalid_coins = set()
+    for row in path_rows or []:
+        covered, complete = fine_coverage(row)
+        if covered and not complete:
+            invalid_coins.add(row.get("coin"))
+    kept = []
+    for row in path_rows or []:
+        _covered, complete = fine_coverage(row)
+        if row.get("coin") in invalid_coins or not complete:
+            kept.append(row)
+    usable_fine = [row for row in fine_rows if row.get("coin") not in invalid_coins]
+    return sorted(kept + usable_fine, key=lambda row: (
+        int(row.get("time") or 0), row.get("coin") or "",
+    ))
+
+
+def load_refined(db, fills, start_ms: int, end_ms: int) -> list[dict]:
+    rows = load(db, fills, start_ms, end_ms, interval=BASE_INTERVAL)
+    for interval in REFINEMENT_INTERVALS:
+        rows = merge_finer_path(rows, load(db, fills, start_ms, end_ms, interval=interval))
+    return rows
 
 
 def coverage(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERVAL) -> dict:

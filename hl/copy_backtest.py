@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 import math
+import bisect
 
 from . import config
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
@@ -74,6 +75,7 @@ def _price_events(price_path) -> list[dict]:
             "low": lo,
             "high": hi,
             "close": _row_price(row, "close", "c", "px", "price") or (lo + hi) / 2,
+            "interval": row.get("interval"),
         })
     out.sort(key=lambda x: x["time"])
     return out
@@ -157,6 +159,8 @@ class Backtest:
         self.price_path_points = 0
         self.price_path_meta = price_path_meta or {}
         self.path_boundary_skips = 0
+        self.ambiguous_path_events = set()
+        self.ambiguous_path_mode = str(overrides.get("AMBIGUOUS_PATH_MODE", "ignore") or "ignore")
         self.master_leverage_known = 0
         self.master_leverage_missing = 0
         self.deploy_samples = []
@@ -255,8 +259,17 @@ class Backtest:
                 self.process_fill(x)
             return self.result()
 
+        fill_times = {}
+        for row in fills:
+            fill_times.setdefault(row.get("coin"), []).append(int(row.get("time") or 0))
+        for times in fill_times.values():
+            times.sort()
         events = []
         for row in path_events:
+            times = fill_times.get(row.get("coin")) or []
+            lo = bisect.bisect_left(times, int(row.get("open_time") or row["time"]))
+            hi = bisect.bisect_right(times, int(row.get("close_time") or row["time"]))
+            row["has_fill_events"] = hi > lo
             events.append((row["time"], 0, row))
         for row in fills or []:
             events.append((int(row.get("time", 0) or 0), 1, row))
@@ -337,6 +350,7 @@ class Backtest:
         self.last_px[coin] = close
         self._mark_stops_range(
             coin, lo, hi, x.get("time"), candle_open_time=x.get("open_time"),
+            ambiguous=bool(x.get("has_fill_events")), candle_close_time=x.get("close_time"),
         )
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
@@ -572,22 +586,27 @@ class Backtest:
             elif stop_hit:
                 self._apply_reduce(addr, coin, px, 0.0, 0.0, closing=True, status="stopped", t=t)
 
-    def _mark_stops_range(self, coin, low, high, t, candle_open_time=None):
+    def _mark_stops_range(self, coin, low, high, t, candle_open_time=None,
+                          ambiguous=False, candle_close_time=None):
         for (addr, c), ep in list(self.open.items()):
             if c != coin:
                 continue
             # A candle's low/high may have occurred before a position opened inside that candle. Applying
             # the entire range would create false liquidations. Boundary candles remain explicitly
             # unresolved until a finer path is available.
-            if candle_open_time is not None and int(ep.get("opened_at") or 0) > int(candle_open_time):
-                self.path_boundary_skips += 1
-                continue
+            boundary = candle_open_time is not None and int(ep.get("opened_at") or 0) > int(candle_open_time)
             if ep["side"] == "long":
                 liq_hit = low <= ep["liq_px"]
                 stop_hit = self.copy_stop_enable and ep["stop_px"] and low <= ep["stop_px"]
             else:
                 liq_hit = high >= ep["liq_px"]
                 stop_hit = self.copy_stop_enable and ep["stop_px"] and high >= ep["stop_px"]
+            if (ambiguous or boundary) and (liq_hit or stop_hit):
+                self.path_boundary_skips += 1
+                self.ambiguous_path_events.add((coin, int(candle_open_time or t or 0),
+                                                int(candle_close_time or t or 0)))
+                if self.ambiguous_path_mode != "liquidate":
+                    continue
             if liq_hit:
                 self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated", t=t)
             elif stop_hit:
@@ -698,6 +717,11 @@ class Backtest:
             "price_path_points": self.price_path_points,
             "price_path_coverage": price_path_coverage,
             "price_path_boundary_skips": self.path_boundary_skips,
+            "ambiguous_liquidations": len(self.ambiguous_path_events),
+            "ambiguous_path_ranges": [
+                {"coin": coin, "open_time": lo, "close_time": hi}
+                for coin, lo, hi in sorted(self.ambiguous_path_events)
+            ],
             "price_path_missing_coins": list(self.price_path_meta.get("missingCoins") or []),
             "master_leverage_known": self.master_leverage_known,
             "master_leverage_missing": self.master_leverage_missing,
@@ -790,11 +814,17 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
             total_abs += abs(pnl)
         return max((abs(value) for value in buckets.values()), default=0.0) / total_abs if total_abs else 0.0
 
+    ambiguous_ranges = [
+        row for row in (out.get("ambiguous_path_ranges") or [])
+        if int(row.get("close_time") or 0) >= int(start_ms)
+    ]
     out.update({
         "closed_n": len(positions),
         "wins": wins,
         "stops": sum(1 for position in positions if position.get("status") == "stopped"),
         "liquidations": sum(1 for position in positions if position.get("status") == "liquidated"),
+        "ambiguous_liquidations": len(ambiguous_ranges),
+        "ambiguous_path_ranges": ambiguous_ranges,
         "copy_win_rate": wins / len(positions) if positions else 0.0,
         "copy_net_pnl": closed_net,
         "closed_net_pnl": closed_net,

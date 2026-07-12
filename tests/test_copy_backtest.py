@@ -240,6 +240,23 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["stops"], 1)
         self.assertEqual(result["liquidations"], 0)
 
+    def test_fill_candle_crossing_is_ambiguous_not_confirmed(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 60),
+            fill(3_000, "BTC", "A", 100, 100, 101.0, 61),
+        ]
+        path = [{"coin": "BTC", "time": 2_000, "open_time": 1, "close_time": 2_000,
+                 "low": 95.0, "high": 101.0, "close": 100.0}]
+        best = run_backtest("0xabc", fills, sigmas={"BTC": 0.04},
+                            overrides={"COPY_STOP_ENABLE": False}, price_path=path)
+        worst = run_backtest("0xabc", fills, sigmas={"BTC": 0.04},
+                             overrides={"COPY_STOP_ENABLE": False, "AMBIGUOUS_PATH_MODE": "liquidate"},
+                             price_path=path)
+        self.assertEqual(0, best["liquidations"])
+        self.assertEqual(1, best["ambiguous_liquidations"])
+        self.assertEqual(1, worst["liquidations"])
+        self.assertLess(worst["copy_net_pnl"], best["copy_net_pnl"])
+
     def test_long_to_short_flip_closes_old_position_and_opens_new_one(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 70),
