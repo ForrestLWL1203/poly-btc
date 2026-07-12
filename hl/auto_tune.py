@@ -1149,6 +1149,16 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         price_path_meta=path_meta,
     )
     stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
+    baseline_stress_warm = run_backtest(
+        "portfolio",
+        holdout_fills,
+        sigmas=sigmas,
+        overrides={**base_overrides, "REPLAY_COST_MULT": 1.5},
+        market_ctx=market_ctx,
+        price_path=path_rows,
+        price_path_meta=path_meta,
+    )
+    baseline_stress = slice_backtest_result(baseline_stress_warm, holdout_start, window_days=10)
     compact_folds = []
     wins = 0
     for index, fold in enumerate(folds):
@@ -1173,6 +1183,8 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         "folds": compact_folds,
         "foldWins": wins,
         "holdout": compact_folds[-1] if compact_folds else {},
+        "baselineStressNet": float(baseline_stress.get("copy_net_pnl") or 0.0),
+        "baselineStressLiquidations": int(baseline_stress.get("liquidations") or 0),
         "stressNet": float(stress.get("copy_net_pnl") or 0.0),
         "stressLiquidations": int(stress.get("liquidations") or 0),
         "masterLeverageCoverage": float(stress.get("master_leverage_coverage") or 0.0),
@@ -1279,7 +1291,9 @@ def _model_validation(validation: dict, policy) -> dict:
         reasons.append("holdout_not_better")
     if validation.get("stressNet", 0.0) <= 0:
         reasons.append("stress_not_profitable")
-    if validation.get("stressLiquidations", 0) > 0:
+    stress_liquidations = int(validation.get("stressLiquidations") or 0)
+    baseline_stress_liquidations = int(validation.get("baselineStressLiquidations") or 0)
+    if stress_liquidations > 0 and stress_liquidations >= baseline_stress_liquidations:
         reasons.append("stress_liquidation")
     if relative_gain < policy.tune_min_relative_gain:
         reasons.append("relative_gain_below_floor")

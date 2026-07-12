@@ -462,6 +462,29 @@ class AutoTuneTests(unittest.TestCase):
         self.assertFalse(result["eligible"])
         self.assertIn("price_path_coverage_low", result["reasons"])
 
+    def test_model_validation_allows_fewer_stress_liquidations_than_baseline(self):
+        folds = [
+            {
+                "baselineNet": 100.0, "challengerNet": 120.0,
+                "challengerOpenRate": 0.90, "challengerCapacityFit": 0.90,
+            }
+            for _ in range(3)
+        ]
+        validation = {
+            "folds": folds,
+            "foldWins": 3,
+            "holdout": folds[-1],
+            "baselineStressLiquidations": 8,
+            "stressNet": 100.0,
+            "stressLiquidations": 1,
+        }
+        policy = auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": 0.05})
+
+        result = auto_tune._model_validation(validation, policy)
+
+        self.assertTrue(result["eligible"])
+        self.assertNotIn("stress_liquidation", result["reasons"])
+
     def test_choose_follow_line_by_portfolio_prefers_profitable_prefix(self):
         db = self._db()
         params.seed_params(db)
