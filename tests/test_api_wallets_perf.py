@@ -100,6 +100,14 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "VALUES ('0xaaa','BTC','long','closed',12,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')"
             )
             self._publish_selection(db, ["0xaaa"])
+            db.execute(
+                "INSERT INTO auto_tune_state(key,value,updated_at) VALUES "
+                "('effective_portfolio_replay',?,'now')",
+                (json.dumps({
+                    "generation": "g-current", "status": "ok", "coreCount": 1,
+                    "netPnl30": 4321.0, "replayedAt": "now",
+                }),),
+            )
             db.commit()
 
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
@@ -115,6 +123,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["scoreBreakdown"]["sectorPolicy"]["allowed"], ["crypto"])
         self.assertFalse(wallet["scoreBreakdown"]["sectorPolicy"]["stock"]["allow"])
         self.assertNotIn("evidenceHeld", wallet)
+        self.assertEqual(res["portfolioReplay"]["netPnl30"], 4321.0)
 
     def test_wallets_falls_back_to_copy_7d_closed_when_episode_rows_are_missing(self):
         with tempfile.TemporaryDirectory() as td:

@@ -169,6 +169,17 @@ def _ms_epoch(value):
         return None
 
 
+def _portfolio_replay_summary(db, generation):
+    try:
+        row = q1(db, "SELECT value FROM auto_tune_state WHERE key='effective_portfolio_replay'")
+        payload = _json_obj(_col(row, "value") if row else None)
+    except Exception:  # noqa: BLE001 - rolling deploys may predate tuner state
+        return None
+    if not payload or payload.get("generation") != generation or payload.get("status") != "ok":
+        return None
+    return payload
+
+
 def _ep_selected_wallets(db, generation, role, page, size):
     """Serve one role from the immutable selection snapshot.
 
@@ -309,6 +320,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
     return {
         "selectionMode": True,
         "selectionGeneration": generation,
+        "portfolioReplay": _portfolio_replay_summary(db, generation),
         "tab": tab,
         "total": total,
         "followed": total if role == "core" else None,

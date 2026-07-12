@@ -29,6 +29,7 @@ export function Wallets({ confirm, toast }) {
   useEffect(resetAudits, [tab]);
   const dropped = tab === "dropped";
   const explicit = !!(data && data.selectionMode);
+  const portfolioReplay = data && data.portfolioReplay;
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
@@ -43,12 +44,21 @@ export function Wallets({ confirm, toast }) {
 
   return (
     <div className="content">
-      <div className="section-h" style={{ marginTop: 6 }}>
+      <div className="section-h wallets-section-h" style={{ marginTop: 6 }}>
         <h2>跟踪名单</h2>
-        <div className="range-tabs">
-          <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>Core{tab === "followed" && data && data.total != null ? " " + data.total : ""}</button>
-          <button className={tab === "challenger" ? "on" : ""} onClick={() => { setTab("challenger"); setWpage(0); }}>Challenger{tab === "challenger" && data && data.total != null ? " " + data.total : ""}</button>
-          <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
+        <div className="wallets-head-actions">
+          {tab === "followed" && portfolioReplay && (
+            <div className="portfolio-replay-kpi" title="最终 Core 使用当前已生效调参，在一个共享账户中进行30日回放；已扣手续费，不是单钱包收益相加">
+              <span>组合30日预估</span>
+              <b className={(portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30 || 0, 0)}</b>
+              <em>当前参数 · {portfolioReplay.coreCount}钱包</em>
+            </div>
+          )}
+          <div className="range-tabs">
+            <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>Core{tab === "followed" && data && data.total != null ? " " + data.total : ""}</button>
+            <button className={tab === "challenger" ? "on" : ""} onClick={() => { setTab("challenger"); setWpage(0); }}>Challenger{tab === "challenger" && data && data.total != null ? " " + data.total : ""}</button>
+            <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
+          </div>
         </div>
       </div>
       <div className="tbl-wrap">

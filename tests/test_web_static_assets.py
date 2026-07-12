@@ -289,6 +289,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("7日 ", wallets)
         self.assertIn("未跟原因", wallets)
         self.assertIn("selectionReasonText", wallets)
+        self.assertIn("组合30日预估", wallets)
+        self.assertIn("portfolioReplay.netPnl30", wallets)
         self.assertNotIn("角色 / 市场", wallets)
         self.assertNotIn("捕获 / 容量", wallets)
         self.assertNotIn("OOS净利", wallets)

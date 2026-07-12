@@ -1603,6 +1603,12 @@ def tune_published_generation(db, generation_id, stamp=None, source="scan"):
     try:
         result = _maybe_auto_tune_margins(db, source, stamp, allow_apply=True, data_complete=True)
         try:
+            result["portfolioReplay"] = auto_tune.store_effective_portfolio_replay(
+                db, generation_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - dashboard summary must not invalidate tuning
+            result["portfolioReplay"] = {"status": "error", "error": str(exc)[:300]}
+        try:
             result["selectionReplay"] = refresh_selection_copy_replay(
                 db, generation_id, replayed_at=now_iso()
             )

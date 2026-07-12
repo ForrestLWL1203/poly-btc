@@ -7,6 +7,7 @@ deployment cap, and stop rules remain operator-owned risk limits.
 """
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import math
@@ -20,7 +21,7 @@ from .copy_backtest import run_backtest, slice_backtest_result
 from .copy_data import load_copyable_fills
 from .copy_policy import load_copy_policy
 from .sector import parse_json_obj
-from .util import now_iso
+from .util import f, now_iso
 
 MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
@@ -769,6 +770,51 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
     )
     result["fills"] = len(fills)
     return _compact_backtest(result)
+
+
+def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | None = None) -> dict:
+    """Persist the final Core's shared-account replay under currently effective parameters."""
+    addrs = _load_followed_wallets(db, {})
+    now_ms = int(now_ms or time.time() * 1000)
+    if not addrs:
+        summary = {
+            "generation": generation_id, "coreCount": 0, "replayedAt": now_iso(),
+            "status": "empty",
+        }
+        _state_set(db, "effective_portfolio_replay", summary)
+        db.commit()
+        return summary
+    window_fills = _portfolio_window_fills(db, addrs, now_ms)
+    if window_fills is None or not any(window_fills.values()):
+        return {"generation": generation_id, "status": "unavailable", "coreCount": len(addrs)}
+    follow = params.load_follow(db)
+    if "SMART_ADD" in follow:
+        follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+    windows = _candidate_windows(
+        db, addrs, _load_sigmas(db), follow, now_ms, window_fills=window_fills,
+    )
+    params_hash = hashlib.sha256(
+        json.dumps(follow, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()[:16]
+    primary = windows.get(30) or windows.get(max(windows))
+    summary = {
+        "generation": generation_id,
+        "status": "ok",
+        "coreCount": len(addrs),
+        "paramsHash": params_hash,
+        "replayedAt": now_iso(),
+        "netPnl30": f(primary.get("copy_net_pnl")),
+        "closed30": int(primary.get("closed_n") or 0),
+        "maxDrawdown30": f(primary.get("max_drawdown")),
+        "openRate30": f(primary.get("open_fill_rate")),
+        "capacityFit30": f(primary.get("capacity_open_fit")),
+        "liquidations30": int(primary.get("liquidations") or 0),
+        "netPnl14": f((windows.get(14) or {}).get("copy_net_pnl")),
+        "netPnl7": f((windows.get(7) or {}).get("copy_net_pnl")),
+    }
+    _state_set(db, "effective_portfolio_replay", summary)
+    db.commit()
+    return summary
 
 
 def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
