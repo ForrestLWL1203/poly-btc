@@ -296,7 +296,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result.selected, ("0xold",))
         self.assertEqual(result.evaluated, 1)
 
-    def test_ranked_quality_upgrade_precedes_joint_retuning(self):
+    def test_ranked_quality_upgrade_still_requires_portfolio_gain(self):
         def economic(net):
             return selection.PortfolioMetrics(
                 net, net, 0, .9, .9, 0, .7, .1,
@@ -306,7 +306,7 @@ class SelectionTests(unittest.TestCase):
 
         values = {
             ("0xold",): economic(100),
-            ("0xnew",): economic(80),  # old parameters were optimized around the incumbent
+            ("0xnew",): economic(80),
         }
         result = selection.select_ranked_positive_core(
             ["0xnew"],
@@ -317,8 +317,8 @@ class SelectionTests(unittest.TestCase):
             individual_net_by_addr={"0xnew": 30, "0xold": 20},
         )
 
-        self.assertEqual(result.selected, ("0xnew",))
-        self.assertEqual(result.removed, ("0xold",))
+        self.assertEqual(result.selected, ("0xold",))
+        self.assertEqual(result.removed, ())
 
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000

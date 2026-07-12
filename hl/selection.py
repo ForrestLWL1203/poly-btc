@@ -487,15 +487,13 @@ def select_ranked_positive_core(candidates: Sequence[str],
 
     Liquidation losses are already debited from replay PnL and visible in the equity drawdown.  They are
     therefore measured economically instead of being counted as an automatic veto.  Candidate order is the
-    published wallet-score order.  New additions and count-reducing actions must improve shared-account
-    economics; strict score+standalone-profit upgrades may replace a weaker incumbent before the new Core
-    is jointly tuned.  This prevents incumbents from becoming permanent merely because old parameters were
-    optimized around them in an earlier generation.
+    published wallet-score order, but every addition or replacement must improve shared-account economics.
+    This prevents incumbents from becoming permanent merely because they were selected earlier without
+    turning an individually strong wallet into a forced portfolio member.
 
     A replacement is considered only when the incoming wallet has both a higher published score and a
-    higher standalone replay net profit than every outgoing wallet.  Such a wallet is a strict quality
-    upgrade, so it replaces the lowest-scored dominated incumbent even when the *old* sizing parameters
-    temporarily make the shared replay worse; the portfolio tuner runs on the new quality-ranked Core next.
+    higher standalone replay net profit than every outgoing wallet.  This only bounds the expensive search;
+    it never bypasses the shared-account improvement requirement.
     A 1-for-2 action may intentionally reduce the Core count when removing the two lowest dominated wallets
     already improves current portfolio economics.  There is no minimum target count.
     """
@@ -560,21 +558,18 @@ def select_ranked_positive_core(candidates: Sequence[str],
                 trial = evaluate(trial_addrs)
                 if _portfolio_economic_passes(current, trial, constraints):
                     trials.append((trial, trial_addrs, "replace_2", outgoing))
-        if not trials and mandatory_replacement is None:
+        if not trials:
             continue
         # The candidate already earned priority by score order.  For that candidate choose the economically
         # strongest feasible action; deterministic address/action keys break exact replay ties.
-        if trials:
-            trials.sort(key=lambda item: (
-                -f(item[0].risk_adjusted_utility),
-                -f(item[0].net_pnl),
-                f(item[0].max_drawdown),
-                item[2],
-                item[3],
-            ))
-            chosen = trials[0]
-        else:
-            chosen = mandatory_replacement
+        trials.sort(key=lambda item: (
+            -f(item[0].risk_adjusted_utility),
+            -f(item[0].net_pnl),
+            f(item[0].max_drawdown),
+            item[2],
+            item[3],
+        ))
+        chosen = trials[0]
         current, selected = chosen[0], chosen[1]
     added = tuple(sorted(set(selected) - set(initial)))
     removed = tuple(sorted(set(initial) - set(selected)))
