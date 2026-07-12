@@ -49,14 +49,13 @@ export function Wallets({ confirm, toast }) {
         <div className="wallets-head-actions">
           {tab === "followed" && portfolioReplay && (
             <div className="portfolio-replay-kpi" title="最终 Core 使用当前已生效调参，在一个共享账户中进行30日回放；已扣手续费，不是单钱包收益相加">
-              <span>组合30日预估</span>
+              <span>30d回测预估收益：</span>
               <b className={(portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30 || 0, 0)}</b>
-              <em>当前参数 · {portfolioReplay.coreCount}钱包</em>
             </div>
           )}
           <div className="range-tabs">
-            <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>Core{tab === "followed" && data && data.total != null ? " " + data.total : ""}</button>
-            <button className={tab === "challenger" ? "on" : ""} onClick={() => { setTab("challenger"); setWpage(0); }}>Challenger{tab === "challenger" && data && data.total != null ? " " + data.total : ""}</button>
+            <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中{tab === "followed" && data && data.total != null ? " " + data.total : ""}</button>
+            <button className={tab === "challenger" ? "on" : ""} onClick={() => { setTab("challenger"); setWpage(0); }}>候选{tab === "challenger" && data && data.total != null ? " " + data.total : ""}</button>
             <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
           </div>
         </div>
