@@ -288,6 +288,8 @@ class AutoTuneTests(unittest.TestCase):
         with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
                 patch.object(auto_tune, "_load_sigmas", return_value={}), \
                 patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                patch.object(auto_tune, "resolve_tune_baseline", side_effect=AssertionError("stale baseline used")), \
+                patch.object(auto_tune, "resolve_add_baseline", side_effect=AssertionError("stale add baseline used")), \
                 patch.object(auto_tune, "tune_candidates_from_axes", side_effect=tune_axes), \
                 patch.object(auto_tune, "evaluate_tune_candidate", side_effect=eval_tune), \
                 patch.object(auto_tune, "add_candidates_from_axes", side_effect=add_axes), \

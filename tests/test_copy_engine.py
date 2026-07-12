@@ -121,8 +121,17 @@ class CopyEngineTests(unittest.TestCase):
         )
 
         self.assertTrue(plan.ok)
-        self.assertEqual(plan.tier, "stable")
-        self.assertEqual(plan.leverage, 25.0)
+        self.assertEqual(plan.tier, "mid")
+        self.assertEqual(plan.leverage, 12.0)
+
+    def test_only_btc_is_eligible_for_stable_tier(self):
+        from hl.copy_engine import tier_for_sigma
+
+        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "BTC"), "stable")
+        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "ETH"), "mid")
+        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "XRP"), "mid")
+        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "xyz:GOLD"), "mid")
+        self.assertEqual(tier_for_sigma(0.12, 0.05, 0.10, "BTC"), "high")
 
 
 if __name__ == "__main__":

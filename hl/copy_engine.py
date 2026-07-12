@@ -52,8 +52,11 @@ class OpenSizingPlan:
     sizing_equity: float
 
 
-def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float) -> str:
-    if sigma <= stable_sigma_max:
+def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
+                   coin: str | None = None) -> str:
+    # BTC is the only market eligible for the stable tier. Calm ETH, altcoins and stock/builder perps must
+    # still start at mid risk; otherwise a low recent range silently grants them BTC-sized leverage.
+    if str(coin or "").upper() == "BTC" and sigma <= stable_sigma_max:
         return "stable"
     return "high" if sigma >= high_sigma_min else "mid"
 
@@ -115,7 +118,7 @@ def plan_open_sizing(
     params: OpenSizingParams,
     maintenance_leverage: float | None = None,
 ) -> OpenSizingPlan:
-    tier = tier_for_sigma(sigma, params.stable_sigma_max, params.high_sigma_min)
+    tier = tier_for_sigma(sigma, params.stable_sigma_max, params.high_sigma_min, coin)
     lev = max(params.min_lev, float(int(params.tier_lev_cap[tier])))
     if coin.startswith("xyz:"):
         lev = max(params.min_lev, min(lev, params.stock_max_lev))

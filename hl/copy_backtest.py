@@ -15,7 +15,7 @@ from . import config
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
-                          plan_open_sizing, reduce_leaves_dust, stop_px)
+                          plan_open_sizing, reduce_leaves_dust, stop_px, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .util import f
 
@@ -193,9 +193,7 @@ class Backtest:
         return self.sigmas.get(coin) or config.VOL_FALLBACK_SIGMA
 
     def tier(self, sigma: float, coin: str | None = None) -> str:
-        if sigma <= self.stable_sigma_max:
-            return "stable"
-        return "high" if sigma >= self.high_sigma_min else "mid"
+        return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin)
 
     def available(self):
         locked = sum(p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0) for p in self.open.values())

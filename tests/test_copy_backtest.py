@@ -179,11 +179,11 @@ class CopyBacktestTests(unittest.TestCase):
         sigmas = {f"C{i}": 0.04 for i in range(8)}
 
         result = run_backtest("0xabc", fills, sigmas=sigmas, overrides={
-            "STABLE_MARGIN_MIN_PCT": 0.02,
-            "STABLE_MARGIN_PCT": 0.04,
-            "STABLE_LEV_CAP": 10.0,
-            "STABLE_MIN_NOTIONAL": 0.0,
-            "STABLE_COIN_CAP_PCT": 1.0,
+            "MID_MARGIN_MIN_PCT": 0.02,
+            "MID_MARGIN_PCT": 0.04,
+            "MID_LEV_CAP": 10.0,
+            "MID_MIN_NOTIONAL": 0.0,
+            "MID_COIN_CAP_PCT": 1.0,
             "DEPLOY_FULL_PCT": 0.08,
             "MAX_DEPLOY_PCT": 0.50,
             "COPY_STOP_ENABLE": False,

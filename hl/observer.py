@@ -672,10 +672,8 @@ class Observer:
         return self.vol.get(coin) or self.vol_fallback_sigma
 
     def _tier(self, sigma: float, coin: str = None) -> str:
-        """σ-tier: stable (σ ≤ stable_sigma_max) / high (σ ≥ high_sigma_min) / mid (between). Stocks/builder
-        perps (xyz:*) are tiered by their own σ like everything else — their over-leverage risk is handled
-        by the master-leverage cap in the open path, NOT by force-bucketing them (rolled back 2026-07-01)."""
-        return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min)
+        """BTC alone may enter stable; every other market starts at mid and can rise to high by σ."""
+        return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin)
 
     def _stop_px_for(self, entry_px: float, is_buy: bool, leverage: float = 0.0) -> float:
         """Stop PRICE from entry (v10, MARGIN-based): cut when the position's unrealized loss reaches
@@ -1881,7 +1879,7 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(sizing: σ-tiers margin/lev-cap [stable σ≤{config.STABLE_SIGMA_MAX*100:g}%: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
+    print(f"\n(sizing: σ-tiers margin/lev-cap [stable BTC-only σ≤{config.STABLE_SIGMA_MAX*100:g}%: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
           f"mid: {config.MID_MARGIN_PCT*100:g}%/{config.MID_LEV_CAP:g}x · high σ≥{config.HIGH_SIGMA_MIN*100:g}%: {config.HIGH_MARGIN_PCT*100:g}%/{config.HIGH_LEV_CAP:g}x], "
-          f"lev=cap×{config.STABLE_SIGMA_MAX*100:g}%/σ, add={config.ADD_FRAC:g}×first "
+          f"lev=tier cap clipped by market/master max, add={config.ADD_FRAC:g}×first "
           f"(max {config.STABLE_MAX_ADDS}/{config.MID_MAX_ADDS}/{config.HIGH_MAX_ADDS} by tier), isolated)")
