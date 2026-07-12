@@ -788,9 +788,18 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
         if window_fills is None:
             start_ms = now_ms - int(days) * 86400_000
             fills = _load_portfolio_fills(db, addrs, start_ms)
+        replay_path = path_rows
+        if path_rows and fills:
+            first_fill = min(int(row.get("time") or 0) for row in fills)
+            last_fill = max(int(row.get("time") or 0) for row in fills)
+            replay_path = [
+                row for row in path_rows
+                if int(row.get("close_time") or row.get("time") or 0) >= first_fill
+                and int(row.get("open_time") or row.get("time") or 0) <= last_fill
+            ]
         warm_result = run_backtest(
             "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {},
-            price_path=path_rows, price_path_meta=path_meta,
+            price_path=replay_path, price_path_meta=path_meta,
         )
         result = slice_backtest_result(
             warm_result,
@@ -1287,6 +1296,13 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                        mode: str | None = None, follow_values: dict | None = None,
                        data_complete: bool = True) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
+    tune_started = time.monotonic()
+    deadline = tune_started + float(getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 600) or 600)
+
+    def check_budget(stage):
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"auto_tune_time_budget:{stage}")
+
     stamp = stamp or now_iso()
     params.seed_params(db)
     follow = dict(follow_values or params.load_follow(db))
@@ -1351,12 +1367,14 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # One bounded joint sizing search: leverage tuple × shared margin scale × deploy line. This captures
     # the central tradeoff that lower leverage may safely support larger margin tickets. A cheap coordinate
     # polish then adjusts one volatility-tier margin at a time around the best joint surface.
-    joint_quick = [
-        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-                                primary_only=True)
-        for candidate in tune_candidates_from_axes(base)
-    ]
+    joint_quick = []
+    for candidate in tune_candidates_from_axes(base):
+        check_budget("joint_primary")
+        joint_quick.append(evaluate_tune_candidate(
+            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            primary_only=True,
+        ))
     quick_baseline = next(
         (candidate for candidate in joint_quick if _same_tune_values(candidate.get("params") or {}, base)),
         joint_quick[0],
@@ -1369,26 +1387,28 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )[:sizing_limit]
     if not any(_same_tune_values(candidate.get("params") or {}, base) for candidate in quick_finalists):
         quick_finalists.append(quick_baseline)
-    joint_candidates = [
-        evaluate_tune_candidate(
+    joint_candidates = []
+    for candidate in quick_finalists:
+        check_budget("joint_finalists")
+        joint_candidates.append(evaluate_tune_candidate(
             db, addrs, follow,
             _candidate_from_params(candidate.get("params") or base, axis="joint_finalist"),
             sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
             path_rows=path_rows, path_meta=path_meta,
-        )
-        for candidate in quick_finalists
-    ]
+        ))
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
         joint_candidates[-1],
     )
     selected_joint = choose_margin_candidate(joint_candidates, baseline)
     joint_params = selected_joint.get("params") or base
-    margin_candidates = [
-        evaluate_tune_candidate(db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
-        for candidate in independent_margin_candidates(joint_params, follow)
-    ]
+    margin_candidates = []
+    for candidate in independent_margin_candidates(joint_params, follow):
+        check_budget("margin_polish")
+        margin_candidates.append(evaluate_tune_candidate(
+            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        ))
     margin_baseline = next(
         (candidate for candidate in margin_candidates
          if _same_tune_values(candidate.get("params") or {}, joint_params)),
@@ -1407,11 +1427,12 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected_add = None
     selected_add_params = add_base
     if follow_for_add.get("SMART_ADD", True):
-        add_candidates = [
-            evaluate_add_candidate(db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms,
-                                   window_fills=window_fills, path_rows=path_rows, path_meta=path_meta)
-            for candidate in add_candidates_from_axes(add_base)
-        ]
+        for candidate in add_candidates_from_axes(add_base):
+            check_budget("add_polish")
+            add_candidates.append(evaluate_add_candidate(
+                db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms,
+                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            ))
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
                             add_candidates[0] if add_candidates else None)
         selected_add = choose_margin_candidate(add_candidates, add_baseline) if add_baseline else None
@@ -1458,6 +1479,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     finalist_results = []
     chosen = None
     for _rank, _sizing_rank, _add_rank, sizing_candidate, finalist_add_params in combined_options:
+        check_budget("walk_forward")
         sizing_params = sizing_candidate.get("params") or base
         combined = {**sizing_params, **finalist_add_params}
         validation = _walk_forward_validation(

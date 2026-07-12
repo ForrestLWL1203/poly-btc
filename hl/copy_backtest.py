@@ -267,20 +267,23 @@ class Backtest:
             fill_times.setdefault(row.get("coin"), []).append(int(row.get("time") or 0))
         for times in fill_times.values():
             times.sort()
-        events = []
         for row in path_events:
             times = fill_times.get(row.get("coin")) or []
             lo = bisect.bisect_left(times, int(row.get("open_time") or row["time"]))
             hi = bisect.bisect_right(times, int(row.get("close_time") or row["time"]))
             row["has_fill_events"] = hi > lo
-            events.append((row["time"], 0, row))
-        for row in fills or []:
-            events.append((int(row.get("time", 0) or 0), 1, row))
-        for _, kind, row in sorted(events, key=lambda x: (x[0], x[1])):
-            if kind == 0:
-                self.process_price(row)
+        # Both streams are already sorted. A linear merge avoids allocating and sorting hundreds of
+        # thousands of candle/fill tuples for every tuner candidate.
+        path_i = fill_i = 0
+        while path_i < len(path_events) or fill_i < len(fills):
+            path_time = path_events[path_i]["time"] if path_i < len(path_events) else None
+            fill_time = int(fills[fill_i].get("time") or 0) if fill_i < len(fills) else None
+            if path_time is not None and (fill_time is None or path_time <= fill_time):
+                self.process_price(path_events[path_i])
+                path_i += 1
             else:
-                self.process_fill(row)
+                self.process_fill(fills[fill_i])
+                fill_i += 1
         return self.result()
 
     def process_fill(self, x):
