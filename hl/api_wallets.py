@@ -197,15 +197,12 @@ def _ep_selected_wallets(db, generation, role, page, size):
     rows = qall(
         db,
         "WITH page_selected AS ("
-        "  SELECT fs.addr,fs.role,fs.reason AS selection_reason,fs.utility,"
-        "         fs.data_status AS selection_data_status,fs.evidence_status AS selection_evidence_status,"
-        "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,"
-        "         fs.replay_copy_bt_open_fill_rate,fs.replay_copy_bt_liquidations,"
-        "         fs.replay_copy_bt_fee_drag,fs.replay_copy_bt_14d_net_pnl,"
-        "         fs.replay_copy_bt_14d_closed_n,fs.replay_copy_bt_7d_net_pnl,"
+        "  SELECT fs.addr,fs.reason AS selection_reason,fs.utility,"
+        "         fs.data_status AS selection_data_status,"
+        "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_closed_n,"
+        "         fs.replay_copy_bt_7d_net_pnl,"
         "         fs.replay_copy_bt_7d_closed_n,fs.replay_sector_copy_json,"
-        "         fs.replay_params_hash,fs.replayed_at,"
-        "         fs.generation,COALESCE(w.rank,999999) AS sort_rank "
+        "         fs.replayed_at,COALESCE(w.rank,999999) AS sort_rank "
         "  FROM follow_selection fs "
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
         "  LEFT JOIN watchlist w ON w.addr=fs.addr "
@@ -219,38 +216,24 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  FROM page_selected f LEFT JOIN episode e ON e.addr=f.addr GROUP BY f.addr"
         "), copy_stats AS ("
         "  SELECT f.addr,COUNT(cp.pos_id) AS follow_count,"
-        "         SUM(CASE WHEN cp.status!='open' THEN 1 ELSE 0 END) AS closed_n,"
         "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net "
         "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
         ") "
-        "SELECT s.addr,s.role,s.selection_reason,s.utility,s.selection_data_status,"
-        "s.selection_evidence_status,s.generation,w.rank,w.market_type,w.score,w.win_rate,w.top_coin,"
-        "w.worst_single_loss_pct,COALESCE(tc.enabled,1) AS enabled,p.score AS raw_score,p.worst_loss_pct,"
+        "SELECT s.addr,s.selection_reason,s.selection_data_status,"
+        "w.market_type,w.score,w.win_rate,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
-        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_win_rate ELSE p.copy_bt_win_rate END AS copy_bt_win_rate,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
-        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_open_fill_rate ELSE p.copy_bt_open_fill_rate END AS copy_bt_open_fill_rate,"
-        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
-        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
-        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_14d_net_pnl ELSE p.copy_bt_14d_net_pnl END AS copy_bt_14d_net_pnl,"
-        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_14d_closed_n ELSE p.copy_bt_14d_closed_n END AS copy_bt_14d_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
-        "s.replay_params_hash,s.replayed_at,"
-        "p.sector_policy_json,p.data_status,p.evidence_status,p.profile_generation,p.evaluated_at,"
+        "p.sector_policy_json,p.data_status,"
         "p.last_copyable_open_ms,p.open_events_7d,p.actionable_open_events_7d,"
-        "p.actionable_open_rate,p.capacity_fit,p.oos_net_pnl,p.oos_max_drawdown,"
-        "p.oos_cvar95,p.selection_marginal_utility,p.copy_expected_return,p.copy_return_lcb,"
-        "p.copy_return_volatility,p.copy_positive_probability,p.copy_evidence_days,"
-        "p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,"
-        "p.open_probability_48h,l.week_roi,l.mon_roi,"
+        "p.copy_positive_probability,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
-        "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.closed_n,0) AS closed_n,"
-        "COALESCE(cs.fwd_net,0) AS fwd_net "
+        "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.fwd_net,0) AS fwd_net "
         "FROM page_selected s LEFT JOIN watchlist w ON w.addr=s.addr "
         "LEFT JOIN target_controls tc ON tc.addr=s.addr LEFT JOIN profile p ON p.addr=s.addr "
-        "LEFT JOIN follow_history fh ON fh.addr=s.addr LEFT JOIN leaderboard l ON l.addr=s.addr "
+        "LEFT JOIN follow_history fh ON fh.addr=s.addr "
         "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=s.addr ORDER BY s.sort_rank,s.utility DESC,s.addr",
         (generation, role, size, page * size, cutoff7d),
@@ -259,31 +242,16 @@ def _ep_selected_wallets(db, generation, role, page, size):
     request_now_ms = int(time.time() * 1000)
     for i, r in enumerate(rows):
         display_metrics = apply_allowed_sector_copy_metrics(dict(r))
-        worst = _col(r, "worst_single_loss_pct")
-        if worst is None:
-            worst = (_col(r, "worst_loss_pct") or 0.0) * 100
         closed7d = _col(r, "closed_7d") or 0
         if closed7d == 0 and (_col(r, "episode_total") or 0) == 0:
             closed7d = _col(r, "copy_bt_7d_closed_n") or 0
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
-            "rank": _col(r, "rank"),
-            "role": _col(r, "role"),
-            "selectionReason": _col(r, "selection_reason"),
             "selectionReasonText": _selection_reason_text(r, now_ms=request_now_ms),
-            "selectionMarginalUtility": (
-                _col(r, "utility") if _col(r, "utility") is not None
-                else _col(r, "selection_marginal_utility")
-            ),
-            "selectionGeneration": _col(r, "generation"),
             "marketType": _col(r, "market_type") or "crypto",
             "score": score100(_col(r, "score") or 0.0),
-            "rawScore": score100(_col(r, "raw_score") or 0.0),
-            "scoreBreakdown": _score_breakdown(r),
-            "roiEqPct": recent_roi_pct(_col(r, "week_roi"), _col(r, "mon_roi")),
             "winRatePct": (_col(r, "win_rate") or 0.0) * 100,
-            "worstSingleLossPct": worst,
             "mainCoin": _col(r, "top_coin"),
             "followCount": _col(r, "follow_count") or 0,
             "enabled": bool(_col(r, "enabled", True)),
@@ -295,26 +263,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
             ),
             "copyBacktestNetPnl": _col(display_metrics, "copy_bt_net_pnl"),
             "copyBacktestClosedN": _col(display_metrics, "copy_bt_closed_n") or 0,
-            "copyBacktest14dNetPnl": _col(display_metrics, "copy_bt_14d_net_pnl"),
-            "copyBacktest14dClosedN": _col(display_metrics, "copy_bt_14d_closed_n") or 0,
             "copyBacktest7dNetPnl": _col(display_metrics, "copy_bt_7d_net_pnl"),
             "copyBacktest7dClosedN": _col(display_metrics, "copy_bt_7d_closed_n") or 0,
-            "copyReplayParamsHash": _col(r, "replay_params_hash"),
-            "copyReplayedAt": iso_epoch(_col(r, "replayed_at")),
-            "closedN": _col(r, "closed_n") or 0,
             "forwardNetPnl": _col(r, "fwd_net") or 0,
-            "firstFollowedAt": iso_epoch(_col(r, "first_followed_at")),
             "isNew": _is_new_followed(_col(r, "first_followed_at")),
             "dataStatus": _col(r, "selection_data_status") or _col(r, "data_status"),
-            "evidenceStatus": _col(r, "selection_evidence_status") or _col(r, "evidence_status"),
-            "profileGeneration": _col(r, "profile_generation"),
-            "evaluatedAt": iso_epoch(_col(r, "evaluated_at")),
-            "lastActionableOpenAt": _ms_epoch(_col(r, "last_copyable_open_ms")),
-            "actionableOpenRate": _col(r, "actionable_open_rate"),
-            "capacityFit": _col(r, "capacity_fit"),
-            "oosNetPnl": _col(r, "oos_net_pnl"),
-            "oosMaxDrawdown": _col(r, "oos_max_drawdown"),
-            "oosCvar95": _col(r, "oos_cvar95"),
         })
     tab = "followed" if role == "core" else role
     return {
@@ -375,15 +328,8 @@ def ep_wallets(db, qs=None):
             "SELECT fh.addr,fh.last_followed_at,fh.last_followed_score,"
             "COALESCE(de.stamp,p.last_refreshed,fh.last_followed_at) AS drop_at,"
             "de.source AS drop_source,de.stage AS drop_stage,de.created_at AS drop_decided_at,"
-            "COALESCE(w.score,p.score) AS follow_score,p.score AS raw_score,p.status,p.reason,"
+            "COALESCE(w.score,p.score) AS follow_score,p.status,p.reason,"
             "p.market_type,p.win_rate,p.top_coin,w.rank AS rank,"
-            "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
-            "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-            "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.copy_expected_return,p.copy_return_lcb,"
-            "p.copy_return_volatility,p.copy_positive_probability,p.copy_evidence_days,"
-            "p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,"
-            "p.actionable_open_rate,p.capacity_fit,p.open_probability_48h,"
-            "p.sector_copy_json,p.sector_policy_json,"
             "fs.role AS selection_role,fs.reason AS selection_reason,"
             "l.week_roi,l.mon_roi "
             "FROM follow_history fh JOIN profile p ON p.addr=fh.addr "
@@ -397,8 +343,7 @@ def ep_wallets(db, qs=None):
             (selection_generation, selection_generation, size, page * size))
         out = [{
             "address": r["addr"], "rank": r["rank"], "marketType": r["market_type"] or "crypto",
-            "score": score100(r["follow_score"] or 0.0), "rawScore": score100(r["raw_score"] or 0.0),
-            "scoreBreakdown": _score_breakdown(r),
+            "score": score100(r["follow_score"] or 0.0),
             "lastFollowedScore": score100(r["last_followed_score"] or 0.0),
             "lastFollowedAt": iso_epoch(r["last_followed_at"]),
             "dropAt": iso_epoch(r["drop_at"]),
@@ -438,7 +383,7 @@ def ep_wallet_detail(db, addr, qs=None):
             "p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
             "p.copy_positive_probability,p.copy_evidence_days,p.copy_recent_return_14d,"
             "p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,p.actionable_open_rate,"
-            "p.capacity_fit,p.open_probability_48h,"
+            "p.capacity_fit,p.open_probability_48h,p.last_copyable_open_ms,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
             "fs.replay_params_hash,fs.replayed_at "
@@ -469,6 +414,7 @@ def ep_wallet_detail(db, addr, qs=None):
         "address": addr, "rank": (w["rank"] if w else None),
         "role": (_col(pr, "selection_role") if pr else None),
         "selectionReason": (_col(pr, "selection_reason") if pr else None),
+        "selectionReasonText": (_selection_reason_text(pr) if pr else None),
         "marketType": (pr["market_type"] if pr else None),
         "score": score100(final_score) if final_score is not None else None,
         "scoreBreakdown": _score_breakdown(pr) if pr else {},

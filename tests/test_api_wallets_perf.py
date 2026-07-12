@@ -110,18 +110,16 @@ class ApiWalletsPerfTests(unittest.TestCase):
             )
             db.commit()
 
-            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
+            with patch.object(api_wallets, "_score_breakdown", side_effect=AssertionError("detail-only")):
+                res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
 
         wallet = res["wallets"][0]
         self.assertEqual(wallet["followCount"], 1)
-        self.assertEqual(wallet["closedN"], 1)
         self.assertEqual(wallet["closed7d"], 1)
         self.assertEqual(wallet["forwardNetPnl"], 12)
-        self.assertEqual(wallet["rawScore"], 90.0)
-        self.assertIn("scoreBreakdown", wallet)
-        self.assertNotIn("sectorPolicy", wallet)
-        self.assertEqual(wallet["scoreBreakdown"]["sectorPolicy"]["allowed"], ["crypto"])
-        self.assertFalse(wallet["scoreBreakdown"]["sectorPolicy"]["stock"]["allow"])
+        self.assertNotIn("scoreBreakdown", wallet)
+        self.assertNotIn("rawScore", wallet)
+        self.assertNotIn("profileGeneration", wallet)
         self.assertNotIn("evidenceHeld", wallet)
         self.assertEqual(res["portfolioReplay"]["netPnl30"], 4321.0)
 
@@ -170,7 +168,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 stale = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})["wallets"][0]
 
         self.assertTrue(recent["isNew"])
-        self.assertEqual(recent["firstFollowedAt"], 1767398400)
+        self.assertNotIn("firstFollowedAt", recent)
         self.assertFalse(stale["isNew"])
 
     def test_dropped_wallets_omit_unused_profile_columns(self):
@@ -193,7 +191,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
             res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["dropped"]})
 
         self.assertEqual(res["wallets"][0]["dropReason"], "转亏")
-        self.assertIn("scoreBreakdown", res["wallets"][0])
+        self.assertNotIn("scoreBreakdown", res["wallets"][0])
 
     def test_dropped_wallet_uses_first_batch_after_last_followed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -255,7 +253,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(res["total"], 1)
         self.assertEqual(res["wallets"][0]["dropReason"], "退出Core")
         self.assertEqual(res["wallets"][0]["score"], 60.0)
-        self.assertEqual(res["wallets"][0]["rawScore"], 90.0)
+        self.assertNotIn("rawScore", res["wallets"][0])
 
     def test_dropped_wallets_are_paginated_in_sql(self):
         with tempfile.TemporaryDirectory() as td:
@@ -335,19 +333,18 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
             core = api_wallets.ep_wallets(db, {"tab": ["followed"]})
             challenger = api_wallets.ep_wallets(db, {"tab": ["challenger"]})
+            challenger_detail = api_wallets.ep_wallet_detail(db, "0xbbb")
 
         self.assertTrue(core["selectionMode"])
         self.assertEqual(core["selectionGeneration"], "g1")
-        self.assertEqual(core["wallets"][0]["role"], "core")
-        self.assertEqual(core["wallets"][0]["profileGeneration"], "g1")
-        self.assertEqual(core["wallets"][0]["actionableOpenRate"], 0.8)
         # Activity is the target wallet's actual opens; copied/actionable opens remain a separate field.
         self.assertEqual(core["wallets"][0]["openEvents7d"], 6)
         self.assertEqual(core["wallets"][0]["copyBacktestNetPnl"], 42)
         self.assertEqual(core["wallets"][0]["copyBacktestClosedN"], 9)
-        self.assertEqual(challenger["wallets"][0]["role"], "challenger")
-        self.assertEqual(challenger["wallets"][0]["selectionMarginalUtility"], 0.07)
+        self.assertNotIn("role", core["wallets"][0])
+        self.assertNotIn("selectionMarginalUtility", challenger["wallets"][0])
         self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
+        self.assertEqual(challenger_detail["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
 
     def test_selected_list_displays_only_observer_allowed_sector_replay(self):
         with tempfile.TemporaryDirectory() as td:
@@ -388,10 +385,9 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
         self.assertEqual(wallet["copyBacktestNetPnl"], 307)
         self.assertEqual(wallet["copyBacktestClosedN"], 11)
-        self.assertEqual(wallet["copyBacktest14dNetPnl"], 293)
         self.assertEqual(wallet["copyBacktest7dNetPnl"], 171)
-        self.assertEqual(wallet["copyReplayParamsHash"], "current123")
-        self.assertIsNotNone(wallet["copyReplayedAt"])
+        self.assertNotIn("copyBacktest14dNetPnl", wallet)
+        self.assertNotIn("copyReplayParamsHash", wallet)
         self.assertEqual(wallet["selectionReasonText"], "达到跟单线")
 
     def test_published_zero_core_selection_does_not_fall_back_to_score_line(self):

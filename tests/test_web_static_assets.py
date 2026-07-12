@@ -126,7 +126,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("title={scoreTitle(w)}", wallets)
         self.assertNotIn("score-info-btn", css)
         self.assertNotIn(".score-detail-modal", css)
-        self.assertIn("当前参数 Copy 回放", drawer)
+        self.assertIn("当前参数回放", drawer)
         self.assertIn("copyWindowRows", drawer)
         self.assertIn("scoreBreakdown", drawer)
         self.assertIn(".score-window-grid", css)
@@ -307,9 +307,14 @@ class WebStaticAssetsTests(unittest.TestCase):
     def test_wallet_drawer_has_decision_sections(self):
         drawer = (ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx").read_text(encoding="utf-8")
 
-        self.assertIn("跟单理由", drawer)
-        self.assertIn("证据质量", drawer)
-        self.assertIn("风险信号", drawer)
+        self.assertIn("名单状态", drawer)
+        self.assertIn("实际盈亏", drawer)
+        self.assertIn("实际跟单", drawer)
+        self.assertIn("需要留意", drawer)
+        self.assertNotIn("跟单理由", drawer)
+        self.assertNotIn("证据质量", drawer)
+        self.assertNotIn("预期保证金收益", drawer)
+        self.assertNotIn("收益下置信界", drawer)
         self.assertIn("wallet-decision-grid", drawer)
 
 

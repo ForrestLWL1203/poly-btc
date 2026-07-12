@@ -51,16 +51,21 @@ export function WalletDrawer({ address, onClose }) {
     : null;
   const scoreBreakdown = (d && d.scoreBreakdown) || {};
   const copyRows = copyWindowRows(scoreBreakdown);
-  const scoreReasons = (scoreBreakdown.reasons || []).slice(0, 6);
-  const evidenceTone = !d || d.closedN >= 5 ? "good" : d.closedN > 0 ? "warn" : "muted";
+  const copy30 = copyRows.find(([label]) => label === "30 天");
+  const roleView = !d ? null : d.role === "core"
+    ? { label: "跟单中", detail: "已通过钱包质量筛选与组合回放，当前允许新开仓。", tone: "good" }
+    : d.role === "challenger"
+      ? { label: "候选", detail: d.selectionReasonText || "当前未进入跟单列表。", tone: "neutral" }
+      : d.role === "exit_only"
+        ? { label: "只平不开", detail: "不再复制新开仓，已有仓位继续管理至退出。", tone: "warn" }
+        : { label: "未跟单", detail: d.selectionReasonText || "当前不在跟单列表。", tone: "neutral" };
   const riskItems = !d ? [] : [
     losing && ["实盘亏损", fSign(d.netPnl, 1), "danger"],
     d.openUnrealized < -5 && ["在持浮亏", fSign(d.openUnrealized, 1), "danger"],
-    d.closedN === 0 && ["无平仓样本", "先观察", "warn"],
+    d.closedN === 0 && ["暂无实跟平仓", "0 笔", "warn"],
     liveWinDelta != null && liveWinDelta < -20 && ["实盘胜率低于历史", fNum(liveWinDelta, 0) + "pt", "warn"],
     d.lossN > d.winN && ["亏损笔数偏多", d.lossN + " 负", "warn"],
   ].filter(Boolean);
-  const quietRisk = d && riskItems.length === 0;
   return (
     <React.Fragment>
       <div className="scrim" onClick={onClose} />
@@ -76,45 +81,23 @@ export function WalletDrawer({ address, onClose }) {
         </div>
         {!d ? <div className="loading">加载中…</div> : (
           <React.Fragment>
-            <div className={"wallet-decision-hero " + (losing ? "danger" : net > 0 ? "good" : "neutral")}>
+            <div className={"wallet-decision-hero " + roleView.tone}>
               <div>
-                <div className="card-lbl">钱包决策</div>
-                <div className="wallet-decision-status">{losing ? "需要复核" : net > 0 ? "贡献为正" : "继续观察"}</div>
-                <div className="muted">以现有实盘跟单记录评估，不改变跟单逻辑</div>
-              </div>
-              <div className="wallet-decision-net">
-                <span>净盈亏</span>
-                <b className={cls(d.netPnl)}>{fSign(d.netPnl, 1)}</b>
+                <div className="card-lbl">名单状态</div>
+                <div className="wallet-decision-status">{roleView.label}</div>
+                <div className="muted">{roleView.detail}</div>
               </div>
             </div>
 
             <div className="wallet-stat-grid">
-              <div><span>最终评分</span><b>{fNum(d.score, 1)}</b></div>
-              <div><span>历史胜率</span><b>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}</b><em>{d.scoredTrades || 0} 笔</em></div>
+              <div><span>实际盈亏</span><b className={cls(d.netPnl)}>{fSign(d.netPnl, 1)}</b><em>含在持浮动</em></div>
+              <div><span>实际跟单</span><b>{d.recordsTotal}</b><em>{d.closedN} 已平 · {d.openN} 在持</em></div>
               <div><span>实盘胜率</span><b>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}</b><em>{d.closedN} 平仓</em></div>
-              <div><span>实盘记录</span><b>{d.recordsTotal}</b><em>{d.openN} 在持</em></div>
+              <div><span>30日回放</span><b className={copy30 ? cls(copy30[1]) : ""}>{copy30 ? fSign(copy30[1] || 0, 0) : "—"}</b><em>{copy30 ? (copy30[2] || 0) + " 笔" : "暂无数据"}</em></div>
             </div>
 
             <div className="wallet-decision-grid">
-              <DecisionCard title="跟单理由" tone={d.role === "core" ? "good" : ""}>
-                <p>{d.role === "core" ? "当前已入选 Core，Observer 允许新开仓。" : d.role === "challenger" ? "当前为 Challenger，不会新开仓。" : "当前不在 Core。"} 评分 {fNum(d.score, 1)}仅用于单钱包质量排序。</p>
-                <div className="wallet-mini-row"><span>原始评分</span><b>{scoreBreakdown.rawScore != null ? fNum(scoreBreakdown.rawScore, 1) : "—"}</b></div>
-                <div className="wallet-mini-row"><span>copy 分</span><b>{scoreBreakdown.copyScore != null ? fNum(scoreBreakdown.copyScore, 1) : "—"}</b></div>
-                <div className="wallet-mini-row"><span>置信度</span><b>{scoreBreakdown.confidencePct != null ? fNum(scoreBreakdown.confidencePct, 0) + "%" : "—"}</b></div>
-                <div className="wallet-mini-row"><span>预期保证金收益</span><b className={cls(scoreBreakdown.expectedReturnPct)}>{scoreBreakdown.expectedReturnPct != null ? fSign(scoreBreakdown.expectedReturnPct, 2) + "%" : "—"}</b></div>
-                <div className="wallet-mini-row"><span>收益下置信界</span><b className={cls(scoreBreakdown.returnLcbPct)}>{scoreBreakdown.returnLcbPct != null ? fSign(scoreBreakdown.returnLcbPct, 2) + "%" : "—"}</b></div>
-                <div className="wallet-mini-row"><span>未来盈利概率</span><b>{scoreBreakdown.positiveProbabilityPct != null ? fNum(scoreBreakdown.positiveProbabilityPct, 1) + "%" : "—"}</b></div>
-                <div className="wallet-mini-row"><span>独立证据</span><b>{scoreBreakdown.evidenceDays != null ? scoreBreakdown.evidenceDays + " 天" : "—"}</b></div>
-                <div className="wallet-mini-row"><span>历史样本</span><b>{d.scoredTrades || 0} 笔</b></div>
-                <div className="wallet-mini-row"><span>历史胜率</span><b>{d.scoredWinRatePct != null ? fNum(d.scoredWinRatePct, 0) + "%" : "—"}</b></div>
-                {scoreReasons.length > 0 && (
-                  <div className="score-reasons" style={{ marginTop: 9 }}>
-                    {scoreReasons.map((r, i) => <span key={i}>{r}</span>)}
-                  </div>
-                )}
-              </DecisionCard>
-
-              <DecisionCard title="当前参数 Copy 回放" tone={copyRows.length ? "good" : "muted"}>
+              <DecisionCard title="当前参数回放" tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
                   <div className="score-window-grid">
                     {copyRows.map(([label, pnl, n]) => (
@@ -128,14 +111,8 @@ export function WalletDrawer({ address, onClose }) {
                 ) : <p>暂无可用 copy 回测窗口，先按历史评分和实盘记录观察。</p>}
               </DecisionCard>
 
-              <DecisionCard title="证据质量" tone={evidenceTone}>
-                <p>{d.closedN >= 5 ? "已有多笔实盘平仓记录，可用于对照历史评分。" : d.closedN > 0 ? "已有少量实盘记录，但样本仍偏薄，适合继续观察。" : "暂无实盘平仓样本，主要依赖历史评分。"}</p>
-                <div className="wallet-mini-row"><span>实盘战绩</span><b><span className="up">{d.winN}胜</span> / <span className="down">{d.lossN}负</span></b></div>
-                <div className="wallet-mini-row"><span>已实现</span><b className={cls(d.realizedPnl)}>{fSign(d.realizedPnl, 1)}</b></div>
-              </DecisionCard>
-
-              <DecisionCard title="风险信号" tone={losing ? "danger" : riskItems.length ? "warn" : "good"}>
-                {quietRisk ? <p>暂无明显红旗，继续看实盘记录是否稳定。</p> : (
+              {riskItems.length > 0 && (
+                <DecisionCard title="需要留意" tone={losing ? "danger" : "warn"}>
                   <div className="wallet-risk-list">
                     {riskItems.map(([label, value, tone]) => (
                       <div className={"wallet-risk " + tone} key={label}>
@@ -143,24 +120,8 @@ export function WalletDrawer({ address, onClose }) {
                       </div>
                     ))}
                   </div>
-                )}
-                <div className="wallet-mini-row"><span>在持浮动</span><b className={cls(d.openUnrealized)}>{fSign(d.openUnrealized, 1)}</b></div>
-              </DecisionCard>
-            </div>
-
-            <div className="wallet-ledger">
-              <div>
-                <div className="muted">已实现</div>
-                <div className={"mono " + cls(d.realizedPnl)}>{fSign(d.realizedPnl, 1)}</div>
-              </div>
-              <div>
-                <div className="muted">在持({d.openN})浮动</div>
-                <div className={"mono " + cls(d.openUnrealized)}>{fSign(d.openUnrealized, 1)}</div>
-              </div>
-              <div>
-                <div className="muted">记录总数</div>
-                <div className="mono">{d.recordsTotal}</div>
-              </div>
+                </DecisionCard>
+              )}
             </div>
 
             <div className="card-lbl" style={{ marginBottom: 8 }}>跟单记录 <span className="muted">· 共 {d.recordsTotal} 笔(点击展开)</span></div>
