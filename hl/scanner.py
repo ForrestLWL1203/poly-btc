@@ -1061,12 +1061,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 follow = params.load_follow(db)
                 if "SMART_ADD" in follow:
                     follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
-                neutral_tune, _ = auto_tune.resolve_tune_baseline(
-                    db, {key: f(follow[key]) for key in auto_tune.TUNE_KEYS},
-                )
-                neutral_add, _ = auto_tune.resolve_add_baseline(
-                    db, {key: f(follow[key]) for key in auto_tune.ADD_TUNE_KEYS},
-                )
+                # Selection must evaluate candidates under the parameters Observer is actually running.
+                # Historical tune/add baselines are rollback metadata only; using them here can change Core
+                # membership for a strategy surface that is no longer active.
+                neutral_tune = {key: f(follow[key]) for key in auto_tune.TUNE_KEYS}
+                neutral_add = {key: f(follow[key]) for key in auto_tune.ADD_TUNE_KEYS}
                 neutral_follow = {**follow, **neutral_tune, **neutral_add}
                 if "SMART_ADD" in neutral_follow:
                     neutral_follow["ADD_STRATEGY"] = (

@@ -1,4 +1,5 @@
 import tempfile
+import inspect
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +34,12 @@ def scan_args():
 
 
 class ScannerGenerationIntegrationTests(unittest.TestCase):
+    def test_selection_uses_effective_params_not_historical_tune_baseline(self):
+        source = inspect.getsource(scanner._build_explicit_selection)
+
+        self.assertNotIn("resolve_tune_baseline", source)
+        self.assertNotIn("resolve_add_baseline", source)
+
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 
