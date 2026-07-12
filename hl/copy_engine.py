@@ -119,6 +119,11 @@ def plan_open_sizing(
     lev = max(params.min_lev, float(int(params.tier_lev_cap[tier])))
     if coin.startswith("xyz:"):
         lev = max(params.min_lev, min(lev, params.stock_max_lev))
+    # `maintenance_leverage` comes from the venue's per-market maxLeverage metadata. It determines both
+    # the first maintenance tier and the maximum leverage that can actually be opened. Simulating above
+    # it creates impossible notionals and false liquidations (for example ETH/XRP under a 35x stable cap).
+    if maintenance_leverage and maintenance_leverage > 0:
+        lev = max(params.min_lev, min(lev, float(maintenance_leverage)))
     if master_leverage and master_leverage > 0:
         lev = max(params.min_lev, float(int(min(lev, master_leverage))))
 
