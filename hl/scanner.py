@@ -1085,8 +1085,24 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     if previous_roles.get(addr) == selection.CORE
                 ]
                 challengers = [addr for addr in portfolio_candidates if addr not in set(baseline_core)]
+                profile_by_addr = {
+                    (row.get("addr") or "").lower(): row for row in profiles
+                }
                 marginal = selection.select_ranked_positive_core(
-                    challengers, evaluate, constraints, initial_core=baseline_core,
+                    challengers,
+                    evaluate,
+                    constraints,
+                    initial_core=baseline_core,
+                    score_by_addr={
+                        addr: f(profile_by_addr.get(addr, {}).get("follow_score"))
+                        for addr in portfolio_candidates
+                    },
+                    individual_net_by_addr={
+                        addr: f(profile_by_addr.get(addr, {}).get("copy_bt_net_pnl"))
+                        for addr in portfolio_candidates
+                        if profile_by_addr.get(addr, {}).get("copy_bt_net_pnl") is not None
+                    },
+                    max_replace_out=2,
                 )
                 selected_set = set(marginal.selected)
                 final_metrics = evaluate(tuple(sorted(selected_set)))
@@ -1142,7 +1158,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
                 model_version=(
-                    "selection-net-drawdown-v1" if marginal is not None
+                    "selection-ranked-rebalance-v2" if marginal is not None
                     else "selection-replay-unavailable-v1"
                 ),
                 policy_version=copy_policy.version,

@@ -246,6 +246,80 @@ class SelectionTests(unittest.TestCase):
             "portfolio_risk_adjusted_gain_low",
         )
 
+    def test_ranked_selector_can_replace_two_lower_quality_wallets(self):
+        def economic(net, dd=.05):
+            drawdown_dollars = dd * 10_000
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .9, dd, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=drawdown_dollars,
+                risk_adjusted_utility=net - drawdown_dollars,
+            )
+
+        values = {
+            ("0xlow1", "0xlow2"): economic(100),
+            ("0xhigh", "0xlow1"): economic(104),
+            ("0xhigh", "0xlow2"): economic(103),
+            ("0xhigh",): economic(130),
+        }
+        result = selection.select_ranked_positive_core(
+            ["0xhigh"],
+            lambda addrs: values[addrs],
+            selection.SelectionConstraints(max_targets=2),
+            initial_core=["0xlow1", "0xlow2"],
+            score_by_addr={"0xhigh": .90, "0xlow1": .60, "0xlow2": .50},
+            individual_net_by_addr={"0xhigh": 30, "0xlow1": 10, "0xlow2": 20},
+            max_replace_out=2,
+        )
+
+        self.assertEqual(result.selected, ("0xhigh",))
+        self.assertEqual(result.removed, ("0xlow1", "0xlow2"))
+        self.assertEqual(result.action, "rebalance")
+
+    def test_ranked_selector_does_not_replace_higher_profit_incumbent(self):
+        def economic(net):
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .9, 0, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
+            )
+
+        values = {("0xold",): economic(100)}
+        result = selection.select_ranked_positive_core(
+            ["0xnew"],
+            lambda addrs: values[addrs],
+            selection.SelectionConstraints(max_targets=1),
+            initial_core=["0xold"],
+            score_by_addr={"0xnew": .90, "0xold": .50},
+            individual_net_by_addr={"0xnew": 10, "0xold": 20},
+        )
+
+        self.assertEqual(result.selected, ("0xold",))
+        self.assertEqual(result.evaluated, 1)
+
+    def test_ranked_quality_upgrade_precedes_joint_retuning(self):
+        def economic(net):
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .9, 0, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
+            )
+
+        values = {
+            ("0xold",): economic(100),
+            ("0xnew",): economic(80),  # old parameters were optimized around the incumbent
+        }
+        result = selection.select_ranked_positive_core(
+            ["0xnew"],
+            lambda addrs: values[addrs],
+            selection.SelectionConstraints(max_targets=1),
+            initial_core=["0xold"],
+            score_by_addr={"0xnew": .90, "0xold": .50},
+            individual_net_by_addr={"0xnew": 30, "0xold": 20},
+        )
+
+        self.assertEqual(result.selected, ("0xnew",))
+        self.assertEqual(result.removed, ("0xold",))
+
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000
         result = scanner._portfolio_selection_metrics({

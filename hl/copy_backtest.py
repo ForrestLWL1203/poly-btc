@@ -196,7 +196,13 @@ class Backtest:
         )
 
     def _sample_deploy(self, t=None):
-        self.deploy_samples.append((int(t or 0), self.locked_margin() / max(1.0, self.initial_balance)))
+        # Deployment limits are defined against contemporaneous risk equity.  Dividing by the initial
+        # balance made a profitable compounding replay report impossible values such as 468% deployed even
+        # though the engine was respecting an 80% cap, which in turn falsely blocked every later selection.
+        self.deploy_samples.append((
+            int(t or 0),
+            self.locked_margin() / max(1.0, self.risk_equity()),
+        ))
 
     def unrealized(self):
         total = 0.0

@@ -7,7 +7,7 @@ must distinguish that from a database which has never published a selection.
 from dataclasses import dataclass, replace
 from typing import Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
-from .util import now_iso
+from .util import f, now_iso
 
 
 CORE = "core"
@@ -479,19 +479,32 @@ def _portfolio_economic_passes(base: PortfolioMetrics, trial: PortfolioMetrics,
 def select_ranked_positive_core(candidates: Sequence[str],
                                 evaluator: Callable[[Tuple[str, ...]], PortfolioMetrics],
                                 constraints: SelectionConstraints = SelectionConstraints(),
-                                *, initial_core: Sequence[str] = ()) -> MarginalSelectionResult:
-    """Add qualified wallets in score order when they improve net and drawdown-adjusted dollars.
+                                *, initial_core: Sequence[str] = (),
+                                score_by_addr: Optional[Mapping[str, float]] = None,
+                                individual_net_by_addr: Optional[Mapping[str, float]] = None,
+                                max_replace_out: int = 2) -> MarginalSelectionResult:
+    """Challenge Core in score order with additions plus bounded 1-for-1/1-for-2 replacements.
 
     Liquidation losses are already debited from replay PnL and visible in the equity drawdown.  They are
-    therefore measured economically instead of being counted as an automatic veto.  One sequential pass
-    keeps the daily selection replay bounded to O(N) portfolio evaluations.
+    therefore measured economically instead of being counted as an automatic veto.  Candidate order is the
+    published wallet-score order.  New additions and count-reducing actions must improve shared-account
+    economics; strict score+standalone-profit upgrades may replace a weaker incumbent before the new Core
+    is jointly tuned.  This prevents incumbents from becoming permanent merely because old parameters were
+    optimized around them in an earlier generation.
+
+    A replacement is considered only when the incoming wallet has both a higher published score and a
+    higher standalone replay net profit than every outgoing wallet.  Such a wallet is a strict quality
+    upgrade, so it replaces the lowest-scored dominated incumbent even when the *old* sizing parameters
+    temporarily make the shared replay worse; the portfolio tuner runs on the new quality-ranked Core next.
+    A 1-for-2 action may intentionally reduce the Core count when removing the two lowest dominated wallets
+    already improves current portfolio economics.  There is no minimum target count.
     """
     initial = tuple(sorted(dict.fromkeys(a.lower() for a in initial_core if a)))[:constraints.max_targets]
     initial_set = set(initial)
     ordered = tuple(
         addr for addr in dict.fromkeys(a.lower() for a in candidates if a)
         if addr not in initial_set
-    )[:max(0, constraints.max_targets - len(initial))]
+    )[:constraints.max_targets]
     cache = {}
 
     def evaluate(addrs):
@@ -506,17 +519,78 @@ def select_ranked_positive_core(candidates: Sequence[str],
     selected = initial
     baseline = evaluate(selected)
     current = baseline
+    scores = {(addr or "").lower(): f(value) for addr, value in (score_by_addr or {}).items()}
+    individual_nets = {
+        (addr or "").lower(): f(value) for addr, value in (individual_net_by_addr or {}).items()
+    }
     for addr in ordered:
-        trial_addrs = tuple(sorted(selected + (addr,)))
-        trial = evaluate(trial_addrs)
-        if _portfolio_economic_passes(current, trial, constraints):
-            selected, current = trial_addrs, trial
+        trials = []
+        if len(selected) < constraints.max_targets:
+            trial_addrs = tuple(sorted(selected + (addr,)))
+            trial = evaluate(trial_addrs)
+            if _portfolio_economic_passes(current, trial, constraints):
+                trials.append((trial, trial_addrs, "add", ""))
+        mandatory_replacement = None
+        # Production supplies both maps from the same published profile/replay snapshot.  Without them we
+        # still support cold-bootstrap additions, but do not guess which incumbents are lower quality.
+        if addr in scores and addr in individual_nets:
+            eligible_out = [
+                outgoing for outgoing in selected
+                if outgoing in scores and outgoing in individual_nets
+                and scores[outgoing] < scores[addr]
+                and individual_nets[outgoing] < individual_nets[addr]
+            ]
+            eligible_out.sort(key=lambda outgoing: (
+                scores[outgoing], individual_nets[outgoing], outgoing,
+            ))
+            if eligible_out:
+                outgoing = (eligible_out[0],)
+                trial_addrs = tuple(sorted((set(selected) - set(outgoing)) | {addr}))
+                mandatory_replacement = (
+                    evaluate(trial_addrs), trial_addrs, "replace_1_ranked", outgoing,
+                )
+                if _portfolio_economic_passes(current, mandatory_replacement[0], constraints):
+                    trials.append(mandatory_replacement)
+            # Only the two lowest-scored dominated wallets are eligible for count reduction.  Searching
+            # arbitrary pairs could evict stronger wallets merely because old parameters happened to favor
+            # a historical event ordering.
+            if min(max(0, int(max_replace_out)), len(eligible_out)) >= 2:
+                outgoing = tuple(eligible_out[:2])
+                trial_addrs = tuple(sorted((set(selected) - set(outgoing)) | {addr}))
+                trial = evaluate(trial_addrs)
+                if _portfolio_economic_passes(current, trial, constraints):
+                    trials.append((trial, trial_addrs, "replace_2", outgoing))
+        if not trials and mandatory_replacement is None:
+            continue
+        # The candidate already earned priority by score order.  For that candidate choose the economically
+        # strongest feasible action; deterministic address/action keys break exact replay ties.
+        if trials:
+            trials.sort(key=lambda item: (
+                -f(item[0].risk_adjusted_utility),
+                -f(item[0].net_pnl),
+                f(item[0].max_drawdown),
+                item[2],
+                item[3],
+            ))
+            chosen = trials[0]
+        else:
+            chosen = mandatory_replacement
+        current, selected = chosen[0], chosen[1]
+    added = tuple(sorted(set(selected) - set(initial)))
+    removed = tuple(sorted(set(initial) - set(selected)))
+    if removed:
+        action = "replace" if len(selected) == len(initial) else "rebalance"
+    elif added:
+        action = "add"
+    else:
+        action = "keep"
     return MarginalSelectionResult(
         selected=selected,
         baseline=baseline,
         metrics=current,
-        action="add" if selected != initial else "keep",
-        added=tuple(sorted(set(selected) - set(initial))),
+        action=action,
+        added=added,
+        removed=removed,
         evaluated=len(cache),
     )
 
