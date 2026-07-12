@@ -688,6 +688,15 @@ CREATE INDEX IF NOT EXISTS idx_coin_price_candle_expiry
     ON coin_price_candle(interval, close_time);
 CREATE INDEX IF NOT EXISTS idx_coin_price_candle_coin_range
     ON coin_price_candle(coin, interval, open_time);
+CREATE TABLE IF NOT EXISTS coin_price_path_state (
+    coin          TEXT NOT NULL,
+    interval      TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    error_count   INTEGER NOT NULL DEFAULT 0,
+    last_attempt  INTEGER NOT NULL,
+    retry_after   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (coin, interval)
+);
 
 -- Per-wallet cache coverage.  This deliberately separates a full PROFILE workset from a full
 -- historical FILL refetch: migrations can refresh every wallet while only backfilling wallets whose

@@ -59,8 +59,15 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
     end_ms = min(int(end_ms), now_ms)
     start_ms = max(int(start_ms), now_ms - RETENTION_DAYS[interval] * 86_400_000)
     coins = coins_for_fills(fills)
-    fetched, failed = 0, []
+    fetched, failed, deferred = 0, [], 0
     for coin in coins:
+        state = db.execute(
+            "SELECT status,error_count,retry_after FROM coin_price_path_state "
+            "WHERE coin=? AND interval=?", (coin, interval),
+        ).fetchone()
+        if state and state[0] == "failed" and int(state[2] or 0) > now_ms:
+            deferred += 1
+            continue
         row = db.execute(
             "SELECT MAX(close_time),MAX(fetched_at) FROM coin_price_candle WHERE coin=? AND interval=?",
             (coin, interval),
@@ -79,11 +86,29 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
         candles = rest.candle_snapshot_range(coin, interval, cursor, end_ms)
         if not isinstance(candles, list):
             failed.append(coin)
+            error_count = int((state[1] if state else 0) or 0) + 1
+            retry_ms = min(24 * 3_600_000, 3_600_000 * (2 ** min(4, error_count - 1)))
+            db.execute(
+                "INSERT INTO coin_price_path_state "
+                "(coin,interval,status,error_count,last_attempt,retry_after) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(coin,interval) DO UPDATE SET status=excluded.status,"
+                "error_count=excluded.error_count,last_attempt=excluded.last_attempt,"
+                "retry_after=excluded.retry_after",
+                (coin, interval, "failed", error_count, now_ms, now_ms + retry_ms),
+            )
             continue
         fetched += _upsert(db, coin, interval, candles, now_ms)
+        db.execute(
+            "INSERT INTO coin_price_path_state "
+            "(coin,interval,status,error_count,last_attempt,retry_after) VALUES (?,?,?,?,?,0) "
+            "ON CONFLICT(coin,interval) DO UPDATE SET status='ok',error_count=0,"
+            "last_attempt=excluded.last_attempt,retry_after=0",
+            (coin, interval, "ok", 0, now_ms),
+        )
     deleted = prune(db, now_ms)
     db.commit()
-    return {"coins": len(coins), "fetched": fetched, "failed": failed, "deleted": deleted}
+    return {"coins": len(coins), "fetched": fetched, "failed": failed,
+            "deferred": deferred, "deleted": deleted}
 
 
 def load(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERVAL) -> list[dict]:

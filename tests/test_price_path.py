@@ -50,6 +50,19 @@ class PricePathTest(unittest.TestCase):
         self.assertEqual(0, result["liquidations"])
         self.assertGreater(result["price_path_boundary_skips"], 0)
 
+    def test_failed_market_uses_retry_backoff(self):
+        now = 4_000_000_000_000
+        fills = [{"coin": "OLD", "time": now - 60_000, "side": "B", "sz": "10",
+                  "startPosition": "0", "px": "10"}]
+        with mock.patch("hl.price_path.time.time", return_value=now / 1000), mock.patch(
+            "hl.price_path.rest.candle_snapshot_range", return_value=None,
+        ) as fetch:
+            first = price_path.ensure(self.db, fills, now - 86_400_000, now)
+            second = price_path.ensure(self.db, fills, now - 86_400_000, now)
+        self.assertEqual(1, len(first["failed"]))
+        self.assertEqual(1, second["deferred"])
+        self.assertEqual(1, fetch.call_count)
+
 
 if __name__ == "__main__":
     unittest.main()
