@@ -398,6 +398,32 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result.search_meta["neutralSelectedCount"], 2)
         self.assertEqual(result.search_meta["selectedCount"], 1)
 
+    def test_smart_core_stops_when_post_seed_gain_is_below_ratio(self):
+        nets = {
+            (): 0, ("0xa",): 10, ("0xb",): 9, ("0xc",): 8,
+            ("0xa", "0xb"): 15, ("0xa", "0xc"): 25, ("0xb", "0xc"): 14,
+            ("0xa", "0xb", "0xc"): 30,
+        }
+
+        def evaluate(addrs):
+            net = nets[addrs]
+            return selection.PortfolioMetrics(
+                net, net, 0, .9, .95, .05, .7, .1,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
+                risk_adjusted_utility=net - 500,
+            )
+
+        result = selection.search_smart_core(
+            ["0xa", "0xb", "0xc"], evaluate,
+            selection.SelectionConstraints(max_targets=3),
+            seed_target=2, beam_width=2, max_replace_out=1,
+            min_marginal_gain_ratio=.25,
+        )
+
+        self.assertEqual(result.selected, ("0xa", "0xc"))
+        self.assertEqual(result.search_meta["stopReason"], "expansion_marginal_gain_below_floor")
+        self.assertAlmostEqual(result.search_meta["stoppedMarginal"]["ratio"], .20)
+
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000
         result = scanner._portfolio_selection_metrics({

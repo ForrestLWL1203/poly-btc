@@ -1140,6 +1140,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     beam_width=int(getattr(config, "CORE_SEARCH_BEAM_WIDTH", 3)),
                     swap_passes=int(getattr(config, "CORE_SEARCH_SWAP_PASSES", 1)),
                     max_replace_out=int(getattr(config, "CORE_SEARCH_MAX_REPLACE_OUT", 2)),
+                    min_marginal_gain_ratio=float(getattr(
+                        config, "CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO", 0.01,
+                    )),
                     time_budget_s=float(getattr(config, "CORE_SEARCH_TIME_BUDGET_SEC", 600)),
                     validation_evaluator=validate,
                 )
@@ -1155,9 +1158,21 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     if addr in selected_set:
                         continue
                     trial = evaluate(tuple(sorted(selected_set | {addr})))
-                    portfolio_rejections[addr] = selection.portfolio_economic_rejection_reason(
-                        final_metrics, trial, constraints,
-                    )
+                    final_net = f(final_metrics.net_pnl)
+                    marginal_net = f(trial.net_pnl) - final_net
+                    min_gain_ratio = float(getattr(
+                        config, "CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO", 0.01,
+                    ))
+                    if (
+                        marginal_net > 0
+                        and final_net > 0
+                        and marginal_net / final_net < min_gain_ratio
+                    ):
+                        portfolio_rejections[addr] = "portfolio_marginal_gain_below_floor"
+                    else:
+                        portfolio_rejections[addr] = selection.portfolio_economic_rejection_reason(
+                            final_metrics, trial, constraints,
+                        )
 
         rows = []
         for row in profiles:

@@ -430,6 +430,7 @@ def search_smart_core(candidates: Sequence[str],
                       constraints: SelectionConstraints = SelectionConstraints(),
                       *, seed_target: int = 10, beam_width: int = 3,
                       swap_passes: int = 1, max_replace_out: int = 2,
+                      min_marginal_gain_ratio: float = 0.0,
                       time_budget_s: Optional[float] = None,
                       validation_evaluator: Optional[
                           Callable[[Tuple[str, ...]], PortfolioMetrics]
@@ -485,6 +486,7 @@ def search_smart_core(candidates: Sequence[str],
     levels = []
     portfolio_finalists = []
     stop_reason = "candidate_pool_exhausted"
+    stopped_marginal = None
 
     # Build the small starting portfolio.  ``seed_target`` is a search target, never a quota: if no wallet
     # improves the previous level, the production Core may contain fewer wallets.
@@ -554,8 +556,20 @@ def search_smart_core(candidates: Sequence[str],
                 if feasible(trial) and _portfolio_net(trial) > parent_net:
                     expansions.append((trial_addrs, trial))
         next_beam = top(expansions)
-        if not next_beam or _portfolio_net(next_beam[0][1]) <= previous_best:
+        best_next = _portfolio_net(next_beam[0][1]) if next_beam else previous_best
+        gain = best_next - previous_best
+        required_gain = abs(previous_best) * max(0.0, f(min_marginal_gain_ratio))
+        if not next_beam or gain <= 0:
             stop_reason = "no_positive_expansion_marginal"
+            stopped_marginal = {"gain": gain, "required": required_gain}
+            break
+        if gain + 1e-12 < required_gain:
+            stop_reason = "expansion_marginal_gain_below_floor"
+            stopped_marginal = {
+                "gain": gain,
+                "required": required_gain,
+                "ratio": gain / abs(previous_best) if previous_best else 0.0,
+            }
             break
         beam = next_beam
         portfolio_finalists.extend(beam)
@@ -633,6 +647,8 @@ def search_smart_core(candidates: Sequence[str],
             "selectedCount": len(selected),
             "neutralSelectedCount": len(beam[0][0]) if beam else 0,
             "validatedFinalists": len(validation_cache),
+            "minMarginalGainRatio": max(0.0, f(min_marginal_gain_ratio)),
+            "stoppedMarginal": stopped_marginal,
             "stopReason": stop_reason,
             "levels": tuple(levels),
             "durationSec": round(duration, 3),

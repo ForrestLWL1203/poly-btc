@@ -37,6 +37,7 @@ def _selection_reason_text(row, *, now_ms=None):
         "portfolio_no_positive_marginal": "组合评估未通过（旧记录）",
         "portfolio_no_profit_improvement": "加入后组合净收益没有提高",
         "portfolio_gain_below_floor": "加入后的收益提升不足",
+        "portfolio_marginal_gain_below_floor": "加入后组合收益增幅低于1%",
         "portfolio_recent_stress_loss": "加入后近期组合回放亏损",
         "portfolio_new_liquidation": "加入后组合出现爆仓",
         "portfolio_risk_adjusted_gain_low": "新增收益不足以覆盖新增回撤",
