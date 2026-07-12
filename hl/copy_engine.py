@@ -65,6 +65,19 @@ def stop_px(entry_px: float, is_buy: bool, leverage: float, copy_stop_enable: bo
     return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
 
 
+def isolated_liq_px(entry_px: float, side: str, size: float, margin: float,
+                    maintenance_leverage: float | None, leverage: float) -> float:
+    """Estimate Hyperliquid isolated liquidation including first-tier maintenance margin."""
+    if entry_px <= 0 or size <= 0 or margin <= 0:
+        return 0.0
+    maint_lev = float(maintenance_leverage or 0.0)
+    mmr = .5 / max(1.0, maint_lev) if maint_lev > 0 else 0.0
+    margin_per_unit = margin / size
+    if side == "long":
+        return max(0.0, (entry_px - margin_per_unit) / max(1e-9, 1.0 - mmr))
+    return max(0.0, (entry_px + margin_per_unit) / (1.0 + mmr))
+
+
 def reduce_leaves_dust(rem_size: float, reduce_frac: float, px: float,
                        dust_notional: float = config.DUST_CLOSE_NOTIONAL) -> bool:
     if not dust_notional or dust_notional <= 0 or reduce_frac >= 1.0:
@@ -100,6 +113,7 @@ def plan_open_sizing(
     master_notional: float,
     master_leverage: float | None,
     params: OpenSizingParams,
+    maintenance_leverage: float | None = None,
 ) -> OpenSizingPlan:
     tier = tier_for_sigma(sigma, params.stable_sigma_max, params.high_sigma_min)
     lev = max(params.min_lev, float(int(params.tier_lev_cap[tier])))
@@ -151,7 +165,7 @@ def plan_open_sizing(
 
     size = notional / entry_px if entry_px else 0.0
     is_buy = side == "long"
-    liq = entry_px * (1 - 1.0 / lev) if is_buy else entry_px * (1 + 1.0 / lev)
+    liq = isolated_liq_px(entry_px, side, size, margin, maintenance_leverage, lev)
     stop = stop_px(entry_px, is_buy, lev, params.copy_stop_enable, params.stop_margin_pct)
     return OpenSizingPlan(True, "", tier, side, margin_pct, margin, notional, lev, size, liq, stop,
                           room, deploy_room, risk_available, wanted_margin, master_notional,

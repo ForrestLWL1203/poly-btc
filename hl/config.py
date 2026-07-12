@@ -430,6 +430,7 @@ AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.95      # Profitable tuning must survive t
 # Canonical profitable Core replay must survive a bounded 15m market path. Fills-only replay remains the
 # fast candidate search, but a new selection is not publishable when its final shared-account path is thin.
 CORE_PRICE_PATH_MIN_COVERAGE = 0.95
+CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
 # Each volatility tier is searched independently.  The lower 0.60 candidate lets a newly re-ranked Core
 # trade smaller tickets when more good wallets compete for the same account, while the configured tier
 # minimums remain the hard floor.

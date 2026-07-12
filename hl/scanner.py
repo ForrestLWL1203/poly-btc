@@ -1173,6 +1173,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     path_ok = (
                         float(path_meta.get("coverage") or 0.0)
                         >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
+                        and f(path_primary.get("maintenance_margin_coverage"))
+                        >= float(getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95))
                         and f(path_primary.get("copy_net_pnl")) > 0
                     )
                     if not path_ok:

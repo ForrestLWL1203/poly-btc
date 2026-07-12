@@ -457,6 +457,8 @@ CREATE TABLE IF NOT EXISTS coin_vol (
     open_interest REAL,           -- base open interest from metaAndAssetCtxs
     mark_px    REAL,              -- mark used to value OI
     oi_notional REAL,             -- open_interest * mark_px; low-liquidity gate
+    max_leverage REAL,            -- first-tier market max leverage; maintenance rate = 0.5/max_leverage
+    margin_meta_updated_at TEXT,
     market_ctx_updated_at TEXT,
     updated_at TEXT
 );
@@ -832,6 +834,8 @@ _MIGRATIONS = (
     "ALTER TABLE coin_vol ADD COLUMN mark_px REAL",
     "ALTER TABLE coin_vol ADD COLUMN oi_notional REAL",
     "ALTER TABLE coin_vol ADD COLUMN market_ctx_updated_at TEXT",
+    "ALTER TABLE coin_vol ADD COLUMN max_leverage REAL",
+    "ALTER TABLE coin_vol ADD COLUMN margin_meta_updated_at TEXT",
     # vNext generation/freshness/evidence and actionable-open flow.
     "ALTER TABLE leaderboard ADD COLUMN generation TEXT",
     "ALTER TABLE profile ADD COLUMN profile_generation TEXT",

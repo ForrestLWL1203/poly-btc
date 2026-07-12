@@ -14,7 +14,8 @@ import bisect
 from . import config
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
-from .copy_engine import OpenSizingParams, extract_master_leverage, plan_open_sizing, reduce_leaves_dust, stop_px
+from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
+                          plan_open_sizing, reduce_leaves_dust, stop_px)
 from .fill_transition import classify_fill_transition
 from .util import f
 
@@ -163,6 +164,8 @@ class Backtest:
         self.ambiguous_path_mode = str(overrides.get("AMBIGUOUS_PATH_MODE", "ignore") or "ignore")
         self.master_leverage_known = 0
         self.master_leverage_missing = 0
+        self.maintenance_margin_known = 0
+        self.maintenance_margin_missing = 0
         self.deploy_samples = []
 
     def open_sizing_params(self):
@@ -376,6 +379,11 @@ class Backtest:
             self.master_leverage_known += 1
         else:
             self.master_leverage_missing += 1
+        maintenance_leverage = (self.market_ctx.get(coin) or {}).get("max_leverage")
+        if maintenance_leverage:
+            self.maintenance_margin_known += 1
+        else:
+            self.maintenance_margin_missing += 1
         plan = plan_open_sizing(
             coin=coin,
             side=side,
@@ -387,6 +395,7 @@ class Backtest:
             master_notional=target_notl,
             master_leverage=master_lev,
             params=self.open_sizing_params(),
+            maintenance_leverage=maintenance_leverage,
         )
         tier = plan.tier
         if not plan.ok:
@@ -420,6 +429,7 @@ class Backtest:
             "first_margin": margin,
             "notional": notional,
             "leverage": lev,
+            "maintenance_leverage": maintenance_leverage,
             "master_leverage": master_lev,
             "liq_px": plan.liq_px,
             "stop_px": plan.stop_px,
@@ -512,7 +522,10 @@ class Backtest:
         ep["size"] += add_size
         ep["margin"] += add_margin
         ep["notional"] += add_margin * ep["leverage"]
-        ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / ep["leverage"]) if is_buy else ep["entry_px"] * (1 + 1.0 / ep["leverage"])
+        ep["liq_px"] = isolated_liq_px(
+            ep["entry_px"], ep["side"], ep["size"], ep["margin"],
+            ep.get("maintenance_leverage"), ep["leverage"],
+        )
         ep["stop_px"] = _stop_px(ep["entry_px"], is_buy, ep["leverage"], self.copy_stop_enable, self.stop_margin_pct)
         ep["add_count"] += 1
         ep["followed_adds"] += 1
@@ -666,6 +679,10 @@ class Backtest:
             self.master_leverage_known / (self.master_leverage_known + self.master_leverage_missing)
             if (self.master_leverage_known + self.master_leverage_missing) else 1.0
         )
+        maintenance_coverage = (
+            self.maintenance_margin_known / (self.maintenance_margin_known + self.maintenance_margin_missing)
+            if (self.maintenance_margin_known + self.maintenance_margin_missing) else 1.0
+        )
         price_path_coverage = float(self.price_path_meta.get(
             "coverage", 1.0 if self.price_path_points > 0 else 0.0,
         ))
@@ -726,7 +743,10 @@ class Backtest:
             "master_leverage_known": self.master_leverage_known,
             "master_leverage_missing": self.master_leverage_missing,
             "master_leverage_coverage": leverage_coverage,
-            "model_coverage": min(leverage_coverage, price_path_coverage),
+            "maintenance_margin_coverage": maintenance_coverage,
+            "maintenance_margin_known": self.maintenance_margin_known,
+            "maintenance_margin_missing": self.maintenance_margin_missing,
+            "model_coverage": min(leverage_coverage, maintenance_coverage, price_path_coverage),
             "fallback_reasons": fallback_reasons,
             "skip_reasons": dict(self.skip_reasons),
             "positions": [summarize_position(p) for p in self.closed],

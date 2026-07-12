@@ -28,7 +28,8 @@ import websockets
 
 from . import config, rest, selection, volatility, ws
 from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
-from .copy_engine import OpenSizingParams, plan_open_sizing, reduce_leaves_dust, stop_px as engine_stop_px, tier_for_sigma
+from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing, reduce_leaves_dust,
+                          stop_px as engine_stop_px, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .sector import parse_json_obj, policy_allows_coin
 from .util import f, now_iso, now_ms
@@ -1478,6 +1479,10 @@ class Observer:
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
             target_notl = abs(ep["master_peak"]) * master_px if master_px else 0.0
             master_notl = (m_mgn or 0.0) * (m_lev or 0.0) or target_notl
+            margin_row = self.db.execute(
+                "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
+            ).fetchone()
+            maintenance_leverage = margin_row[0] if margin_row and margin_row[0] else None
             plan = plan_open_sizing(
                 coin=coin,
                 side=ep["side"],
@@ -1489,6 +1494,7 @@ class Observer:
                 master_notional=master_notl,
                 master_leverage=m_lev,
                 params=self._open_sizing_params(book),
+                maintenance_leverage=maintenance_leverage,
             )
             if not plan.ok:
                 self._tally(f"skip_{plan.reason}", book)
@@ -1618,7 +1624,13 @@ class Observer:
             ep["size"] += add_size
             ep["margin"] += add_margin
             ep["notional"] += add_margin * lev
-            ep["liq_px"] = ep["entry_px"] * (1 - 1.0 / lev) if is_buy else ep["entry_px"] * (1 + 1.0 / lev)
+            margin_row = self.db.execute(
+                "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
+            ).fetchone()
+            ep["liq_px"] = isolated_liq_px(
+                ep["entry_px"], ep["side"], ep["size"], ep["margin"],
+                margin_row[0] if margin_row and margin_row[0] else None, lev,
+            )
             ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, lev)  # re-anchor margin-stop to new avg entry
             ep["add_count"] += 1
             ep["last_add_px"] = px                    # advance the smart 波动闸 reference to this fill

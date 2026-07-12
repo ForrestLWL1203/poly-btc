@@ -6,6 +6,7 @@ import bisect
 
 from . import rest
 from .copy_data import normalize_copyable_fills
+from .util import f, now_iso
 
 INTERVAL_MS = {"1m": 60_000, "3m": 3 * 60_000, "5m": 5 * 60_000, "15m": 15 * 60_000}
 RETENTION_DAYS = {"1m": 4, "3m": 12, "5m": 19, "15m": 39}
@@ -15,6 +16,39 @@ BASE_INTERVAL = "15m"
 
 def coins_for_fills(fills) -> list[str]:
     return sorted({row["coin"] for row in normalize_copyable_fills(fills) if row.get("coin")})
+
+
+def refresh_margin_metadata(db, fills) -> dict:
+    """Cache first-tier max leverage used to derive Hyperliquid maintenance margin."""
+    coins = coins_for_fills(fills)
+    if not coins:
+        return {}
+    marks = ",".join("?" for _ in coins)
+    known = {row[0]: row[1] for row in db.execute(
+        f"SELECT coin,max_leverage FROM coin_vol WHERE coin IN ({marks}) AND max_leverage IS NOT NULL",
+        tuple(coins),
+    ).fetchall()}
+    missing = set(coins) - set(known)
+    contexts = {}
+    if any(":" not in coin for coin in missing):
+        contexts.update(rest.asset_contexts())
+    if any(coin.startswith("xyz:") for coin in missing):
+        for name, row in rest.asset_contexts("xyz").items():
+            contexts[name if name.startswith("xyz:") else f"xyz:{name}"] = row
+    stamp = now_iso()
+    for coin in sorted(missing):
+        max_leverage = f((contexts.get(coin) or {}).get("universe_maxLeverage")) or None
+        if max_leverage is None:
+            continue
+        db.execute(
+            "INSERT INTO coin_vol (coin,max_leverage,margin_meta_updated_at,updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(coin) DO UPDATE SET max_leverage=excluded.max_leverage,"
+            "margin_meta_updated_at=excluded.margin_meta_updated_at",
+            (coin, max_leverage, stamp, stamp),
+        )
+        known[coin] = max_leverage
+    db.commit()
+    return known
 
 
 def prune(db, now_ms: int | None = None) -> int:

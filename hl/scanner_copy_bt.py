@@ -22,12 +22,12 @@ def copy_bt_sigmas(db):
 def copy_bt_market_ctx(db):
     try:
         rows = db.execute(
-            "SELECT coin,day_ntl_vlm,oi_notional FROM coin_vol "
-            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL"
+            "SELECT coin,day_ntl_vlm,oi_notional,max_leverage FROM coin_vol "
+            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL OR max_leverage IS NOT NULL"
         ).fetchall()
     except Exception:  # noqa: BLE001
         return {}
-    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2]} for r in rows}
+    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2], "max_leverage": r[3]} for r in rows}
 
 
 def copy_bt_overrides(db):

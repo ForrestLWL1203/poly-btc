@@ -35,6 +35,9 @@ CAPACITY_SKIP_KEYS = ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip
 def prepare_refined_price_path(db, fills: list[dict], start_ms: int, end_ms: int,
                                *, sigmas: dict, overrides: dict, market_ctx: dict) -> tuple[list[dict], dict]:
     """Fetch the 15m baseline, then refine only liquidation-ambiguous markets and recent ranges."""
+    margin_meta = price_path.refresh_margin_metadata(db, fills)
+    for coin, max_leverage in margin_meta.items():
+        market_ctx.setdefault(coin, {})["max_leverage"] = max_leverage
     price_path.ensure(db, fills, start_ms, end_ms)
     meta = price_path.coverage(db, fills, start_ms, end_ms)
     rows = price_path.load_refined(db, fills, start_ms, end_ms)
@@ -290,12 +293,12 @@ def _load_sigmas(db) -> dict:
 def _load_market_ctx(db) -> dict:
     try:
         rows = db.execute(
-            "SELECT coin,day_ntl_vlm,oi_notional FROM coin_vol "
-            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL"
+            "SELECT coin,day_ntl_vlm,oi_notional,max_leverage FROM coin_vol "
+            "WHERE day_ntl_vlm IS NOT NULL OR oi_notional IS NOT NULL OR max_leverage IS NOT NULL"
         ).fetchall()
     except sqlite3.Error:
         return {}
-    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2]} for r in rows}
+    return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2], "max_leverage": r[3]} for r in rows}
 
 
 def _load_followed_wallets(db, follow: dict) -> list[str]:
@@ -858,6 +861,7 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         "pricePathCoverage30": f(primary.get("price_path_coverage")),
         "pricePathBoundarySkips30": int(primary.get("price_path_boundary_skips") or 0),
         "pricePathStatus": "verified" if f(primary.get("price_path_coverage")) >= .95 else "unverified",
+        "maintenanceMarginCoverage30": f(primary.get("maintenance_margin_coverage")),
         "netPnl14": f((windows.get(14) or {}).get("copy_net_pnl")),
         "netPnl7": f((windows.get(7) or {}).get("copy_net_pnl")),
     }
@@ -984,6 +988,7 @@ def _compact_backtest(result: dict) -> dict:
         "target_peak_concurrent", "copy_peak_concurrent", "max_concurrent_fit",
         "capacity_open_fit", "master_leverage_coverage", "master_leverage_known",
         "master_leverage_missing", "price_path_coverage", "model_coverage", "max_drawdown",
+        "maintenance_margin_coverage", "maintenance_margin_known", "maintenance_margin_missing",
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
         "ambiguous_liquidations", "price_path_boundary_skips",
@@ -1091,6 +1096,7 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         "stressNet": float(stress.get("copy_net_pnl") or 0.0),
         "stressLiquidations": int(stress.get("liquidations") or 0),
         "masterLeverageCoverage": float(stress.get("master_leverage_coverage") or 0.0),
+        "maintenanceMarginCoverage": float(stress.get("maintenance_margin_coverage") or 0.0),
         "pricePathCoverage": float(stress.get("price_path_coverage") or 0.0),
     }
 
@@ -1163,6 +1169,10 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
         reasons.append("master_leverage_coverage_low")
     if leverage_changed and validation.get("pricePathCoverage", 0.0) < price_path_floor:
         reasons.append("price_path_coverage_low")
+    if validation.get("maintenanceMarginCoverage", 0.0) < float(
+        getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)
+    ):
+        reasons.append("maintenance_margin_coverage_low")
     return {
         "eligible": not reasons,
         "reasons": reasons,
