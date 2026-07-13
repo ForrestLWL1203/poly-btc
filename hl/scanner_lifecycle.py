@@ -253,10 +253,11 @@ def _weighted_take(groups: Sequence[Sequence[str]], capacity: int, ratios: Seque
 def schedule_profile_workset(
     candidates: Iterable[str],
     *,
-    active_addrs: Iterable[str] = (),
+    qualified_addrs: Iterable[str] = (),
     core_addrs: Iterable[str] = (),
     challenger_addrs: Iterable[str] = (),
-    off_list_active_addrs: Iterable[str] = (),
+    warmup_backfill_addrs: Iterable[str] = (),
+    off_list_qualified_addrs: Iterable[str] = (),
     position_addrs: Iterable[str] = (),
     profiled_addrs: Iterable[str] = (),
     near_threshold_addrs: Iterable[str] = (),
@@ -273,18 +274,22 @@ def schedule_profile_workset(
 ) -> dict:
     """Build an auditable vNext workset.
 
-    Position/core/active/challenger/off-list wallets are mandatory and never dropped for a discovery budget.
-    The selected daily refresh shard comes next; remaining capacity is divided new/recovery/exploration 40/40/20.
-    Time awareness converts the remaining discovery window into a conservative wallet capacity estimate.
+    Position/Core/qualified/Challenger/off-list-qualified wallets are mandatory and never dropped for a
+    discovery budget.  One-time warm-up backfills are the first ordinary lane and therefore consume the
+    configured daily candidate budget instead of masquerading as Challenger priority.  The selected daily
+    refresh shard comes next; remaining capacity is divided new/recovery/exploration 40/40/20.  Time awareness
+    converts the remaining discovery window into a conservative wallet capacity estimate.
     """
     candidates = dedupe_preserve(str(addr).strip().lower() for addr in candidates if str(addr).strip())
     candidate_set = set(candidates)
     priority_lanes = [
         dedupe_preserve(str(addr).strip().lower() for addr in position_addrs if str(addr).strip()),
         dedupe_preserve(str(addr).strip().lower() for addr in core_addrs if str(addr).strip()),
-        dedupe_preserve(str(addr).strip().lower() for addr in active_addrs if str(addr).strip()),
+        dedupe_preserve(str(addr).strip().lower() for addr in qualified_addrs if str(addr).strip()),
         dedupe_preserve(str(addr).strip().lower() for addr in challenger_addrs if str(addr).strip()),
-        dedupe_preserve(str(addr).strip().lower() for addr in off_list_active_addrs if str(addr).strip()),
+        dedupe_preserve(
+            str(addr).strip().lower() for addr in off_list_qualified_addrs if str(addr).strip()
+        ),
     ]
     priority = dedupe_preserve(item for lane in priority_lanes for item in lane)
     priority_set = set(priority)
@@ -305,15 +310,29 @@ def schedule_profile_workset(
     if full_scan:
         discovery = eligible_tail[:discovery_capacity]
         rotation = discovery
+        warmup_backfill = [
+            addr for addr in dedupe_preserve(
+                str(item).strip().lower() for item in warmup_backfill_addrs if str(item).strip()
+            ) if addr in set(discovery)
+        ]
         weighted = []
         weighted_counts = [0, 0, 0]
     else:
-        due_rotation = [
-            addr for addr in eligible_tail if stable_refresh_shard(addr, shard_count) == refresh_shard
+        warmup_due = [
+            addr for addr in dedupe_preserve(
+                str(item).strip().lower() for item in warmup_backfill_addrs if str(item).strip()
+            ) if addr in candidate_set and addr not in priority_set
         ]
-        rotation = due_rotation[:discovery_capacity]
-        capacity_after_rotation = max(0, discovery_capacity - len(rotation))
-        used = priority_set | set(rotation)
+        warmup_backfill = warmup_due[:discovery_capacity]
+        capacity_after_warmup = max(0, discovery_capacity - len(warmup_backfill))
+        due_rotation = [
+            addr for addr in eligible_tail
+            if addr not in set(warmup_backfill)
+            and stable_refresh_shard(addr, shard_count) == refresh_shard
+        ]
+        rotation = due_rotation[:capacity_after_warmup]
+        capacity_after_rotation = max(0, capacity_after_warmup - len(rotation))
+        used = priority_set | set(warmup_backfill) | set(rotation)
         new = [addr for addr in candidates if addr not in used and addr not in profiled_set]
         recovery_source = dedupe_preserve(
             str(addr).strip().lower()
@@ -333,12 +352,16 @@ def schedule_profile_workset(
         weighted, weighted_counts = _weighted_take(
             (new, recovery, exploration), capacity_after_rotation, (0.40, 0.40, 0.20)
         )
-        discovery = dedupe_preserve(rotation + weighted)
+        discovery = dedupe_preserve(warmup_backfill + rotation + weighted)
 
     workset = dedupe_preserve(priority + discovery)
     workset_set = set(workset)
+    # The profile/reporting window is 30 days, but replay needs seven earlier warm-up days so positions opened
+    # before the reporting boundary and closed inside it are reconstructed correctly.  The daily shard does a
+    # rolling 37-day self-heal; other wallets remain cursor-based delta fetches.
     full_refetch = workset if full_scan else [
-        addr for addr in workset if addr in candidate_set and stable_refresh_shard(addr, shard_count) == refresh_shard
+        addr for addr in workset
+        if addr in candidate_set and stable_refresh_shard(addr, shard_count) == refresh_shard
     ]
     delta = [addr for addr in workset if addr not in set(full_refetch)]
     all_eligible = set(candidates) | priority_set
@@ -352,9 +375,10 @@ def schedule_profile_workset(
             "priority": len(priority),
             "position": sum(1 for addr in priority_lanes[0] if addr in workset_set),
             "core": sum(1 for addr in priority_lanes[1] if addr in workset_set),
-            "active": sum(1 for addr in priority_lanes[2] if addr in workset_set),
+            "qualified": sum(1 for addr in priority_lanes[2] if addr in workset_set),
             "challenger": sum(1 for addr in priority_lanes[3] if addr in workset_set),
-            "off_list_active": sum(1 for addr in priority_lanes[4] if addr in workset_set),
+            "off_list_qualified": sum(1 for addr in priority_lanes[4] if addr in workset_set),
+            "warmup_backfill": len(warmup_backfill),
             "rotation": len(rotation),
             "new": weighted_counts[0],
             "recovery": weighted_counts[1],

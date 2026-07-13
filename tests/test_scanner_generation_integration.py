@@ -40,6 +40,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("resolve_tune_baseline", source)
         self.assertNotIn("resolve_add_baseline", source)
 
+    def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
+        source = inspect.getsource(scanner._build_explicit_selection)
+
+        self.assertIn('f(path_primary.get("copy_net_pnl")) > 0', source)
+        self.assertNotIn("path_rejected", source)
+
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 

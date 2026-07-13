@@ -420,9 +420,17 @@ def ep_pipeline_summary(db, qs):
             "profiledBefore": work_counts.get("profiled_before"),
             "activeTotal": work_counts.get("active_total"),
             "active": work_counts.get("active_candidate"),
+            "qualified": work_counts.get("qualified", work_counts.get("active_candidate")),
+            "core": work_counts.get("core"),
+            "challenger": work_counts.get("challenger"),
+            "positions": work_counts.get("position"),
+            "warmupBackfill": work_counts.get("warmup_backfill"),
             "new": work_counts.get("new_candidate"),
             "topRecheck": work_counts.get("top_recheck"),
             "offListActive": work_counts.get("off_list_active"),
+            "offListQualified": work_counts.get(
+                "off_list_qualified", work_counts.get("off_list_active")
+            ),
             "profiled": work_counts.get("workset"),
             "deferredTail": work_counts.get("deferred_tail"),
         }
@@ -468,6 +476,7 @@ def ep_pipeline_summary(db, qs):
         "profile": {
             "total": sum(status_counts.values()),
             "active": status_counts.get("active", 0),
+            "qualified": status_counts.get("active", 0),
             "rejected": status_counts.get("rejected", 0),
             "retired": status_counts.get("retired", 0),
             "reasonCounts": [{"status": _col(r, "status", 0), "reason": _col(r, "reason", 1), "count": _col(r, "n", 2)}

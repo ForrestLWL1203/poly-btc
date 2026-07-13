@@ -30,7 +30,7 @@ export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons }) {
           </div>
         </div>
         <div className="card">
-          <div className="card-lbl">Active钱包评分分布 <span className="muted">· 仅用于排序解释</span></div>
+          <div className="card-lbl">Qualified候选评分分布 <span className="muted">· 仅用于排序解释</span></div>
           <div className="histo">
             {h.bins.map((b, i) => (
               <div key={i} className="hb" style={{ height: (b / maxBin * 100) + "%" }} />

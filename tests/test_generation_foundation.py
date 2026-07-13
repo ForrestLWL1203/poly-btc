@@ -172,9 +172,9 @@ class GenerationFoundationTests(unittest.TestCase):
             candidates,
             position_addrs=["0xposition"],
             core_addrs=["0xcore"],
-            active_addrs=["0xcore", "0xactive"],
+            qualified_addrs=["0xcore", "0xqualified"],
             challenger_addrs=["0xchallenger"],
-            off_list_active_addrs=["0xoff"],
+            off_list_qualified_addrs=["0xoff"],
             profiled_addrs=candidates,
             limit=300,
             budget=budget,
@@ -184,11 +184,30 @@ class GenerationFoundationTests(unittest.TestCase):
         )
 
         self.assertEqual(result["workset"][:5], [
-            "0xposition", "0xcore", "0xactive", "0xchallenger", "0xoff",
+            "0xposition", "0xcore", "0xqualified", "0xchallenger", "0xoff",
         ])
         self.assertEqual(result["counts"]["priority"], 5)
         self.assertEqual(result["time_capacity"], 5)
         self.assertEqual(len(result["workset"]), 10)
+
+    def test_scheduler_counts_warmup_as_ordinary_budget_not_challenger_priority(self):
+        candidates = ["0xwarm1", "0xwarm2", "0xother1", "0xother2"]
+        result = scanner_lifecycle.schedule_profile_workset(
+            candidates,
+            core_addrs=["0xcore"],
+            qualified_addrs=["0xcore", "0xchallenger"],
+            challenger_addrs=["0xchallenger"],
+            warmup_backfill_addrs=["0xwarm1", "0xwarm2"],
+            profiled_addrs=candidates,
+            limit=4,
+            refresh_shard=0,
+        )
+
+        self.assertEqual(result["counts"]["priority"], 2)
+        self.assertEqual(result["counts"]["qualified"], 2)
+        self.assertEqual(result["counts"]["challenger"], 1)
+        self.assertEqual(result["counts"]["warmup_backfill"], 2)
+        self.assertEqual(result["workset"], ["0xcore", "0xchallenger", "0xwarm1", "0xwarm2"])
 
     def test_scheduler_uses_40_40_20_after_stable_refresh_lane(self):
         new = [f"0xnew{i}" for i in range(30)]

@@ -36,7 +36,6 @@ from .scanner_copy_bt import (
 )
 from .scanner_lifecycle import (
     prune_discovery_cache as _prune_discovery_cache,
-    ScanTimeBudget,
     schedule_profile_workset,
     upsert_wallet_registry,
 )
@@ -1163,10 +1162,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     ) * 86_400_000
                     path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
                     path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
-                    # Price paths validate that the initial fills-only Core has enough evidence for the
-                    # generation-bound portfolio tuner. They do not reject wallets under an arbitrary fixed
-                    # leverage surface: doing so can sacrifice the whole portfolio to accommodate one wallet
-                    # and can misclassify a profitable wallet before its final parameters are known.
+                    # Price paths validate the fills-only Core as one shared account.  They do not eject an
+                    # individual wallet under an arbitrary pre-tune leverage surface, but a path-adjusted
+                    # portfolio that is no longer profitable must not replace the last published Core.
                     path_follow = {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
                     path_primary = auto_tune.evaluate_portfolio_window(
                         db, sorted(selected_set), sigmas,
@@ -1179,6 +1177,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
                         and f(path_primary.get("maintenance_margin_coverage"))
                         >= float(getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95))
+                        and f(path_primary.get("copy_net_pnl")) > 0
                     )
                     if not path_ok:
                         selected_set = {
@@ -2183,7 +2182,11 @@ def scan(db, p) -> None:
         f"ORDER BY {order} DESC",
         (generation_id,),
     ).fetchall()]
-    active_addrs = [r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()]
+    # ``profile.status='active'`` is the storage-compatible spelling for a wallet that passed the
+    # per-wallet quality/Copy gates.  It is a qualified pre-selection candidate, not a production role.
+    qualified_addrs = [
+        r[0] for r in db.execute("SELECT addr FROM profile WHERE status='active'").fetchall()
+    ]
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
     current_selection_generation = selection.latest_published_generation(db)
     core_addrs = selection.published_core_addrs(db) or []
@@ -2198,24 +2201,29 @@ def scan(db, p) -> None:
     warmup_backfill_addrs = _copy_warmup_backfill_addrs(
         db, now_ms - config.PROFILE_FETCH_DAYS * 86400_000,
     )
-    challenger_addrs = list(dict.fromkeys(challenger_addrs + warmup_backfill_addrs))
     position_addrs = sorted({
         (addr or "").lower()
         for table in ("copy_position", "shadow_position")
         for (addr,) in db.execute(f"SELECT DISTINCT addr FROM {table} WHERE status='open'").fetchall()
     })
     cand_set = set(cand)
-    off_list_active = [addr for addr in active_addrs if addr not in cand_set]
+    off_list_qualified = [addr for addr in qualified_addrs if addr not in cand_set]
     near_threshold = [r[0] for r in db.execute(
         "SELECT addr FROM profile WHERE status!='active' ORDER BY score DESC,addr LIMIT 1000"
     ).fetchall()]
-    priority_n = len(set(position_addrs) | set(core_addrs) | set(active_addrs)
-                     | set(challenger_addrs) | set(off_list_active))
+    priority_n = len(set(position_addrs) | set(core_addrs) | set(qualified_addrs)
+                     | set(challenger_addrs) | set(off_list_qualified))
     recent = db.execute(
         "SELECT duration_s,COALESCE(profiled,probed_new) FROM scan_runs "
         "WHERE COALESCE(profiled,probed_new)>0 AND complete=1 ORDER BY id DESC LIMIT 1"
     ).fetchone()
     estimated_profile_s = max(1.0, min(120.0, (f(recent[0]) / int(recent[1])))) if recent else 12.0
+    daily_slo_min = float(
+        getattr(p, "daily_scan_time_budget_min", config.DAILY_SCAN_TIME_BUDGET_MIN)
+    )
+    finalize_reserve_min = float(
+        getattr(p, "scan_finalize_reserve_min", config.SCAN_FINALIZE_RESERVE_MIN)
+    )
     if run_full:
         scheduler_limit = max(priority_n, int(getattr(p, "limit", 0) or len(cand) + priority_n))
         time_budget = None
@@ -2223,15 +2231,17 @@ def scan(db, p) -> None:
         daily_cap = int(getattr(p, "daily_profile_budget", config.DAILY_PROFILE_BUDGET) or config.DAILY_PROFILE_BUDGET)
         cli_cap = int(getattr(p, "limit", daily_cap) or daily_cap)
         scheduler_limit = priority_n + min(daily_cap, cli_cap)
-        total_min = float(getattr(p, "daily_scan_time_budget_min", config.DAILY_SCAN_TIME_BUDGET_MIN))
-        reserve_min = float(getattr(p, "scan_finalize_reserve_min", config.SCAN_FINALIZE_RESERVE_MIN))
-        time_budget = ScanTimeBudget(t0, total_s=total_min * 60.0, finalize_reserve_s=reserve_min * 60.0)
+        # Daily coverage is count-bounded, not wall-clock truncated.  The 60-minute setting is an SLO used
+        # for audit/alerting; dropping the tail at that boundary would permanently starve rotating seeds
+        # whenever Observer-safe REST pacing makes a wallet require several spaced requests.
+        time_budget = None
     workset_info = schedule_profile_workset(
         cand,
-        active_addrs=active_addrs,
+        qualified_addrs=qualified_addrs,
         core_addrs=core_addrs,
         challenger_addrs=challenger_addrs,
-        off_list_active_addrs=off_list_active,
+        warmup_backfill_addrs=warmup_backfill_addrs,
+        off_list_qualified_addrs=off_list_qualified,
         position_addrs=position_addrs,
         profiled_addrs=profiled,
         near_threshold_addrs=near_threshold,
@@ -2268,12 +2278,12 @@ def scan(db, p) -> None:
     )
     db.commit()
     workset, mode = workset_info["workset"], workset_info["mode"]
-    off_active_n = len([a for a in active_addrs if a not in cand_set])
+    off_qualified_n = len([a for a in qualified_addrs if a not in cand_set])
     full_refetch = set(workset_info["refresh"]["full_refetch"])
     priority_addrs = set(workset[:workset_info["counts"]["priority"]])
     _set_scan_progress(db, stage="fetch_history", candidates_total=len(workset))
     _pace = config.MIN_POST_INTERVAL   # live adaptive pace (fast when no copy-trading, slow trickle when observer up)
-    print(f"scan: {mode} · {len(workset)} wallets (incl {off_active_n} off-list actives), "
+    print(f"scan: {mode} · {len(workset)} wallets (incl {off_qualified_n} off-list qualified), "
           f"{p.days}d window, pace {_pace:g}s/req ({'FULL-SPEED 无跟单' if _pace <= config.SCAN_IDLE_INTERVAL else '慢采·跟单进行中'})\n")
 
     # bulk pre-fetch prior profiles + lb account values once, so the worker threads never read the DB
@@ -2303,44 +2313,61 @@ def scan(db, p) -> None:
     done = 0
     priority_done_at = time.time() if not priority_addrs else None
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        for fut in concurrent.futures.as_completed([ex.submit(_work, a) for a in workset]):
-            done += 1
-            try:
-                addr, prior, (status, reason, m, hit_cap) = fut.result()
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                print(f"  [{done}/{len(workset)}] FAIL: {exc}")
-                continue
-            profiled_ok += 1
-            profiled_addrs.append(addr)
-            priority_addrs.discard(addr)
-            if not priority_addrs and priority_done_at is None:
-                priority_done_at = time.time()
-            data_status = m.get("data_status")
-            if data_status == "deferred_data_error":
-                deferred_profiles += 1
-            elif data_status == "rejected":
-                rejected += 1
-            else:
-                valid_profiles += 1
-            if data_status == "deferred_data_error":
-                pass
-            elif status == "active":              # per-wallet detail is in the profile table, not the log
-                if (prior or {}).get("status") == "active":
-                    kept += 1
-                else:
-                    added += 1
-            elif status == "retired":
-                retired += 1
-            elif data_status != "rejected":
-                rejected += 1
-            # progress on EVERY completion (single cheap 1-row UPDATE) so the mask's xxx/yyy moves
-            # smoothly (~1 wallet/sec) instead of jumping every 10 (~14s frozen gaps → looked stuck).
-            _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
-            if done % 10 == 0:
-                _set_scanner_proc(db, "scanning", {"stage": "score_filter",   # refresh heartbeat so the
-                                  "scanned": done, "total": len(workset)})    # dashboard isn't "心跳超时"
+        pending = {}
+        next_index = 0
 
+        def submit_available():
+            nonlocal next_index
+            while next_index < len(workset) and len(pending) < workers:
+                addr = workset[next_index]
+                next_index += 1
+                pending[ex.submit(_work, addr)] = addr
+
+        submit_available()
+        while pending:
+            completed, _ = concurrent.futures.wait(
+                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for fut in completed:
+                expected_addr = pending.pop(fut)
+                done += 1
+                priority_addrs.discard(expected_addr)
+                if not priority_addrs and priority_done_at is None:
+                    priority_done_at = time.time()
+                try:
+                    addr, prior, (status, reason, m, hit_cap) = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    print(f"  [{done}/{len(workset)}] FAIL: {exc}")
+                    continue
+                profiled_ok += 1
+                profiled_addrs.append(addr)
+                data_status = m.get("data_status")
+                if data_status == "deferred_data_error":
+                    deferred_profiles += 1
+                elif data_status == "rejected":
+                    rejected += 1
+                else:
+                    valid_profiles += 1
+                if data_status == "deferred_data_error":
+                    pass
+                elif status == "active":          # storage spelling; semantically a qualified candidate
+                    if (prior or {}).get("status") == "active":
+                        kept += 1
+                    else:
+                        added += 1
+                elif status == "retired":
+                    retired += 1
+                elif data_status != "rejected":
+                    rejected += 1
+                _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
+                if done % 10 == 0:
+                    _set_scanner_proc(
+                        db, "scanning", {"stage": "score_filter", "scanned": done, "total": len(workset)},
+                    )
+            submit_available()
+
+    profile_done_at = time.time()
     complete = failed == 0
     published = False
     previous_core = selection.published_core_addrs(db) or []
@@ -2455,8 +2482,15 @@ def scan(db, p) -> None:
                 db, selection_rows, stamp, previous_core, generation_id,
             )
             n_active = len(current_core)
+            duration_s = time.time() - t0
+            profile_slo_s = max(0.0, daily_slo_min - finalize_reserve_min) * 60.0
             stage_metrics = {
-                "durationSec": round(time.time() - t0, 3),
+                "durationSec": round(duration_s, 3),
+                "dailySloSec": None if run_full else round(daily_slo_min * 60.0, 3),
+                "dailySloMet": None if run_full else duration_s <= daily_slo_min * 60.0,
+                "profileDurationSec": round(profile_done_at - t0, 3),
+                "profileSloSec": None if run_full else round(profile_slo_s, 3),
+                "profileSloMet": None if run_full else (profile_done_at - t0) <= profile_slo_s,
                 "coreRefreshSec": round((priority_done_at or time.time()) - t0, 3),
                 "coreDeadlineMet": ((priority_done_at or time.time()) - t0)
                 <= float(getattr(p, "core_refresh_deadline_min", config.CORE_REFRESH_DEADLINE_MIN)) * 60.0,
