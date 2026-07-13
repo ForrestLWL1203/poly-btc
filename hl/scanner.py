@@ -1078,6 +1078,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         path_fallback = False
         if portfolio_candidates:
             window_fills = auto_tune._portfolio_window_fills(db, portfolio_candidates, now_ms)
+            if (window_fills is None or not any(window_fills.values())) and previous_generation:
+                # Selection did not run. Publishing the still-qualified intersection of the old Core and
+                # the new profile set silently shrinks membership without portfolio evidence. Fail the
+                # generation so the complete previous published selection remains authoritative.
+                raise RuntimeError("selection_portfolio_replay_unavailable")
             if window_fills is not None and any(window_fills.values()):
                 follow = params.load_follow(db)
                 if "SMART_ADD" in follow:
@@ -1251,13 +1256,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                             for detail in nonempty_path_checks.values())
                 )
                 if path_data_unavailable:
-                    selected_set = {
-                        addr for addr in portfolio_candidates
-                        if previous_roles.get(addr) == selection.CORE
-                    }
-                    core_rank = {}
-                    marginal = None
-                    path_fallback = True
+                    raise RuntimeError("selection_price_path_unavailable")
                 if selected_set and validate_price_path and marginal is not None:
                     candidate_core = sorted(selected_set)
                     detail = path_validation_details.get(tuple(candidate_core))
@@ -1265,13 +1264,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     if detail is None:
                         path_reasons = ["path_validation_missing"]
                     if path_reasons:
-                        selected_set = {
-                            addr for addr in portfolio_candidates
-                            if previous_roles.get(addr) == selection.CORE
-                        }
-                        core_rank = {}
-                        marginal = None
-                        path_fallback = True
+                        raise RuntimeError(
+                            "selection_price_path_invalid:" + ",".join(path_reasons)
+                        )
                     coverage_floor = float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
                     maintenance_floor = float(
                         getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)

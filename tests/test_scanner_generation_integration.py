@@ -481,10 +481,19 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertIsNone(marginal)
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
 
-    def test_active_wallet_without_portfolio_replay_stays_challenger(self):
+    def test_active_wallet_without_portfolio_replay_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g0','published',1,1,1,'old','old')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES('g0','0xold','core',1,'old')"
+            )
             cols = storage.PROFILE_COLS.split(",")
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.95,
@@ -505,15 +514,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.commit()
 
-            rows, marginal = scanner._build_explicit_selection(db, "g1", "2026-01-03", 1000)
+            with self.assertRaisesRegex(
+                    RuntimeError, "selection_portfolio_replay_unavailable"):
+                scanner._build_explicit_selection(db, "g1", "2026-01-03", 1000)
 
-            self.assertIsNone(marginal)
-            self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "challenger", "portfolio_replay_unavailable"),
-            ])
-            self.assertEqual(rows[0].utility, 0.71)
-
-    def test_path_validation_failure_records_metrics_and_explicit_fallback_reason(self):
+    def test_path_validation_failure_fails_closed(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -594,24 +599,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                         "coverage": .90, "expected": 100, "observed": 90,
                         "missingCoins": ["BTC"],
                     }):
-                rows, result = scanner._build_explicit_selection(
-                    db, "g1", "published-at", 10_000, audit_stamp="scan-start",
-                )
+                with self.assertRaisesRegex(
+                        RuntimeError, "selection_price_path_invalid"):
+                    scanner._build_explicit_selection(
+                        db, "g1", "published-at", 10_000, audit_stamp="scan-start",
+                    )
 
-            self.assertIsNone(result)
-            roles = {row.addr: (row.role, row.reason) for row in rows}
-            self.assertEqual(roles["0xold"], ("core", "path_validation_failed_keep_core"))
-            self.assertEqual(roles["0xnew"], ("challenger", "path_validation_failed"))
-            audit = db.execute(
-                "SELECT stamp,status,reason,payload_json FROM pipeline_audit "
-                "WHERE stage='selection_path_validation'"
-            ).fetchone()
-            self.assertEqual(audit[:3], (
-                "scan-start", "fallback", "price_path_coverage_low,maintenance_margin_coverage_low,path_net_nonpositive",
-            ))
-            self.assertIn('"candidateCore": ["0xnew"]', audit[3])
-            self.assertIn('"effectiveCore": ["0xold"]', audit[3])
-            self.assertIn('"pathNetPnl": -25.0', audit[3])
+            self.assertEqual(scanner.selection.published_core_addrs(db), ["0xold"])
 
     def test_positive_portfolio_contribution_can_rescue_active_wallet_below_score_line(self):
         with tempfile.TemporaryDirectory() as td:
