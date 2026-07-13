@@ -43,7 +43,9 @@ Wallet quality and funded-account membership are separate decisions.
   1.5x transaction-cost stress without adding a stress liquidation. This can admit several complementary
   wallets in one run, or replace a weak incumbent. There is no fixed minimum Core count or wall-clock cutoff.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
-  same complete generation. The sealed strategy revision activates new parameters and new Core together.
+  same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
+  search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
+  the work without publishing a timed-out partial result.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
 

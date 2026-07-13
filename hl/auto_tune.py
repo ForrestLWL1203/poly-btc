@@ -1489,7 +1489,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                        data_complete: bool = True, expected_generation: str | None = None) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     tune_started = time.monotonic()
-    deadline = tune_started + float(getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 600) or 600)
+    time_budget_s = float(getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 600))
+    deadline = (
+        float("inf") if time_budget_s <= 0 else tune_started + time_budget_s
+    )
 
     def check_budget(stage):
         if time.monotonic() >= deadline:

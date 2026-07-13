@@ -155,6 +155,7 @@ Current Paper defaults deliberately allow the full closed loop:
 - `AUTO_TUNE_MODE=apply`;
 - minimum shadow days, forward closed episodes, leverage coverage, and price-path coverage are zero for Paper;
 - candidate still must pass the OOS/holdout/stress/risk gates;
+- portfolio tuning has no wall-clock cutoff; finite axes and finalist limits bound completion;
 - live-money deployments should use conservative shadow/coverage/forward thresholds instead.
 
 Tuning must never mutate Core membership by re-running stale profiles. When a generation-bound proposal changes
