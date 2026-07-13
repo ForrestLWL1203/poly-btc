@@ -337,6 +337,34 @@ CREATE INDEX IF NOT EXISTS idx_follow_selection_generation_role
 CREATE INDEX IF NOT EXISTS idx_follow_selection_addr_generation
     ON follow_selection(addr, generation);
 
+-- Immutable execution bundles.  A revision binds one published Core generation to the exact
+-- engine-unit follow parameters and target execution context used by Observer.  Activation is a
+-- singleton pointer update in the same writer transaction that publishes/scales the strategy.
+CREATE TABLE IF NOT EXISTS strategy_revision (
+    revision             TEXT PRIMARY KEY,
+    selection_generation TEXT NOT NULL,
+    parent_revision      TEXT,
+    source               TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'staged',
+    params_json          TEXT NOT NULL,
+    params_hash          TEXT NOT NULL,
+    targets_json         TEXT NOT NULL,
+    validation_json      TEXT,
+    reason               TEXT,
+    created_at           TEXT NOT NULL,
+    activated_at         TEXT,
+    superseded_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_revision_generation
+    ON strategy_revision(selection_generation, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_revision_status
+    ON strategy_revision(status, activated_at DESC);
+CREATE TABLE IF NOT EXISTS active_strategy_revision (
+    id         INTEGER PRIMARY KEY CHECK (id=1),
+    revision   TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 -- Follow-status history: last time each wallet was AT/ABOVE the follow line. Updated each scan/regate
 -- for the currently-followed set; a wallet that drops below the line keeps its old timestamp, so the UI
 -- can show "was followed, recently dropped". A recovered wallet climbing back re-stamps and leaves the list.
@@ -512,7 +540,8 @@ CREATE TABLE IF NOT EXISTS copy_position (
     realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
     add_count INTEGER DEFAULT 0,                   -- follow-on adds taken (capped at MAX_ADDS)
     mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, was_stopped INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
-    opened_at TEXT, closed_at TEXT
+    opened_at TEXT, closed_at TEXT,
+    strategy_revision_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_cp_status ON copy_position(status);
 CREATE INDEX IF NOT EXISTS idx_cp_addr ON copy_position(addr);
@@ -544,7 +573,8 @@ CREATE TABLE IF NOT EXISTS copy_action (
     maker          INTEGER,              -- 1 = master's fill was a resting-limit (maker) fill
     master_oid     INTEGER,              -- master's order id -> JOIN target_orders for placed px/sz
     master_px REAL, master_sz_delta REAL, master_pos_after REAL,
-    our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL
+    our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL,
+    strategy_revision_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ca_oid ON copy_action(master_oid);
 CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
@@ -572,7 +602,8 @@ CREATE TABLE IF NOT EXISTS shadow_position (
     realized_pnl REAL DEFAULT 0, add_count INTEGER DEFAULT 0,
     mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, was_stopped INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
     mark_px REAL, unrealized_pnl REAL, open_lag_sec REAL,
-    opened_at TEXT, closed_at TEXT
+    opened_at TEXT, closed_at TEXT,
+    strategy_revision_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sp_status ON shadow_position(status);
 CREATE INDEX IF NOT EXISTS idx_sp_addr ON shadow_position(addr);
@@ -581,7 +612,8 @@ CREATE TABLE IF NOT EXISTS shadow_action (
     pos_id INTEGER, addr TEXT, coin TEXT, ts INTEGER, recv_ms INTEGER,
     action TEXT, maker INTEGER, master_oid INTEGER,
     master_px REAL, master_sz_delta REAL, master_pos_after REAL,
-    our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL
+    our_qty_delta REAL, our_px REAL, realized_pnl REAL, slippage_bps REAL,
+    strategy_revision_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sa_pos ON shadow_action(pos_id, action, act_id);
 -- pending mirrored maker orders (the 挂单中 tab): one per target resting order we're shadowing.
@@ -905,6 +937,10 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_sector_copy_json TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_params_hash TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replayed_at TEXT",
+    "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
+    "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
+    "ALTER TABLE shadow_position ADD COLUMN strategy_revision_id TEXT",
+    "ALTER TABLE shadow_action ADD COLUMN strategy_revision_id TEXT",
 )
 
 

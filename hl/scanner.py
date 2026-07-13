@@ -18,7 +18,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import auto_tune, config, follow_score, generation, metrics, params, pipeline_audit, rest, selection, storage
+from . import (auto_tune, config, follow_score, generation, metrics, params, pipeline_audit, rest,
+               selection, storage, strategy_revision)
 from .fills import build_episodes, is_spot
 from .copy_data import load_copyable_fills, normalize_copyable_fills
 from .copy_policy import load_copy_policy
@@ -1533,13 +1534,6 @@ def _record_explicit_follow_history(db, selection_rows, stamp, previous_core, ge
             generation_id if addr not in previous_core else None, generation_id,
         ) for addr in sorted(current_core)],
     )
-    if current_core != set(previous_core):
-        db.execute(
-            "INSERT INTO commands (type,payload_json,owner,created_at) VALUES (?,?,?,?)",
-            ("reload_params", json.dumps({
-                "by": "explicit_selection", "previous": len(previous_core), "current": len(current_core),
-            }), "scanner", stamp),
-        )
     return current_core
 
 
@@ -1849,6 +1843,13 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     previous_core = set(existing_core)
     selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
     current_core = _record_explicit_follow_history(db, rows, stamp, previous_core, generation_id)
+    active_strategy = strategy_revision.create_revision(
+        db,
+        generation_id,
+        source="selection_repair",
+        reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
+        stamp=stamp,
+    )
     for row in rows:
         pipeline_audit._insert_event(
             db,
@@ -1879,6 +1880,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
             "evaluated": marginal.evaluated if marginal else 0,
             "core": len(current_core),
             "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
+            "strategyRevision": active_strategy["revision"],
         },
     )
     db.commit()
@@ -2553,6 +2555,23 @@ def scan(db, p) -> None:
             generation.publish_generation(db, generation_id, published_at=publication_stamp)
             current_core = _record_explicit_follow_history(
                 db, selection_rows, publication_stamp, previous_core, generation_id,
+            )
+            active_strategy = strategy_revision.create_revision(
+                db,
+                generation_id,
+                source="scanner",
+                reason=("manual_selection_preserved" if selection_mode == "manual"
+                        else "published_selection"),
+                stamp=publication_stamp,
+            )
+            pipeline_audit._insert_event(
+                db,
+                stamp=publication_stamp,
+                source="scan",
+                stage="strategy_revision",
+                status="active",
+                reason=active_strategy["source"],
+                payload=active_strategy,
             )
             n_active = len(current_core)
             duration_s = time.time() - t0

@@ -26,7 +26,7 @@ import time
 
 import websockets
 
-from . import config, rest, selection, volatility, ws
+from . import config, rest, selection, strategy_revision, volatility, ws
 from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing, reduce_leaves_dust,
                           stop_px as engine_stop_px, tier_for_sigma)
@@ -104,6 +104,7 @@ class Observer:
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
+        self.strategy_revision_id = None
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
         self.min_score = 0.0  # retired score-line compatibility field; Core selection owns membership
         # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap. Margin uses the adaptive strategy
@@ -468,13 +469,13 @@ class Observer:
         self.hb[key] = self.hb.get(key, 0) + 1
 
     # -- restart recovery: reload open copies from db ------------------------
-    def _reload_params(self):
+    def _reload_params(self, follow_values=None):
         """Refresh UI-tunable strategy params from the params table (engine units; config = fallback).
         Called at startup + each watchlist reload so dashboard edits take effect on the NEXT new copy.
         Fully defensive: any failure keeps the current values (never disrupts the live engine)."""
         try:
             from . import params as P
-            f = P.load_follow(self.db)
+            f = dict(follow_values) if follow_values is not None else P.load_follow(self.db)
             if f.get("COIN_BLACKLIST") is not None: self.coin_blacklist = parse_coin_blacklist(f["COIN_BLACKLIST"])
             if f.get("BLOCK_KOREAN_STOCKS") is not None: self.block_korean_stocks = bool(f["BLOCK_KOREAN_STOCKS"])
             if f.get("LOW_LIQUIDITY_FILTER_ENABLE") is not None: self.low_liquidity_filter_enable = bool(f["LOW_LIQUIDITY_FILTER_ENABLE"])
@@ -562,10 +563,10 @@ class Observer:
         self.db.execute(
             f"INSERT INTO {book.act_table} "
             "(pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,master_sz_delta,"
-            "master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps,strategy_revision_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (pos_id, addr, coin, t, t, "close", 0, None, px, 0.0, 0.0,
-             -rem_size * sign, px, 0.0, 0.0),
+             -rem_size * sign, px, 0.0, 0.0, self.strategy_revision_id),
         )
         self.db.execute(
             f"UPDATE {book.pos_table} SET rem_size=0,status='closed',closed_at=?,"
@@ -630,15 +631,26 @@ class Observer:
                 _log(f"reconcile loop error: {exc}")
 
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
-    def _reload_targets(self, init=False):
-        addrs, seed = load_targets(self.db, self.top_n, self.min_score)
+    def _reload_targets(self, init=False, target_snapshot=None):
+        if target_snapshot is None:
+            addrs, seed = load_targets(self.db, self.top_n, self.min_score)
+            target_acct = {a: v for a, v in                 # conviction denominator (target's account)
+                           self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
+            target_sector_policy = {
+                (r[0] or "").lower(): parse_json_obj(r[1])
+                for r in self.db.execute("SELECT addr, sector_policy_json FROM watchlist").fetchall()
+            }
+        else:
+            rows = list(target_snapshot)[:max(0, int(self.top_n))]
+            addrs = [(row.get("addr") or "").lower() for row in rows if row.get("addr")]
+            seed = {row["addr"].lower(): set(row.get("seedCoins") or []) for row in rows}
+            target_acct = {row["addr"].lower(): row.get("acctValue") for row in rows}
+            target_sector_policy = {
+                row["addr"].lower(): dict(row.get("sectorPolicy") or {}) for row in rows
+            }
         self.seed_coins = seed
-        self.target_acct = {a: v for a, v in                 # conviction denominator (target's account)
-                            self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
-        self.target_sector_policy = {
-            (r[0] or "").lower(): parse_json_obj(r[1])
-            for r in self.db.execute("SELECT addr, sector_policy_json FROM watchlist").fetchall()
-        }
+        self.target_acct = target_acct
+        self.target_sector_policy = target_sector_policy
         # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
         held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
@@ -652,6 +664,37 @@ class Observer:
         if init or new or dropped or held_off:
             extra = f", {len(held_off)} held-off-list" if held_off else ""
             _log(f"watchlist: tracking {len(addrs)} wallets (+{len(new)} new, -{len(dropped)} dropped{extra})")
+
+    def _reload_strategy(self, init=False):
+        """Load one immutable Core+params bundle from a single SQLite read snapshot."""
+        try:
+            if self.db.in_transaction:
+                self.db.commit()
+            self.db.execute("BEGIN")
+            bundle = strategy_revision.load_active(self.db)
+            published_generation = selection.latest_published_generation(self.db)
+            if bundle and bundle.get("selectionGeneration") == published_generation:
+                follow = dict(bundle.get("params") or {})
+                targets = strategy_revision.resolved_targets(self.db, bundle, self.top_n)
+                revision = bundle["revision"]
+            else:
+                # Rolling-deploy compatibility only.  Once the first revision exists, mutable global params
+                # can no longer race independently against a published Core generation.
+                from . import params as P
+                follow = P.load_follow(self.db)
+                targets = None
+                revision = None
+            self.db.commit()
+        except Exception:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+        self._reload_params(follow)
+        self._reload_targets(init=init, target_snapshot=targets)
+        changed = revision != self.strategy_revision_id
+        self.strategy_revision_id = revision
+        if changed:
+            _log(f"strategy revision: {revision or 'legacy-fallback'}")
 
     # -- WS bbo (pricing only; no user subscriptions) ------------------------
     async def _sub(self, subscription: dict):
@@ -949,7 +992,7 @@ class Observer:
             "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
             (state, os.getpid(), now_iso(),
              json.dumps({"paused": self.paused, "targets": len(self.addrs),
-                         "open": len(self.open_ep)})))
+                         "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id})))
         self.db.commit()
 
     async def consume_commands(self):
@@ -1003,9 +1046,25 @@ class Observer:
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
         if ctype == "reload_params":               # UI saved follow params or Core membership changed
-            self._reload_params()
-            self._reload_targets()
-            return {"reloaded": True, "source": "published_core", "targets": len(self.addrs)}
+            created = None
+            if payload.get("createStrategyRevision"):
+                if self.db.in_transaction:
+                    self.db.commit()
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    created = strategy_revision.materialize_current(
+                        self.db,
+                        source=str(payload.get("by") or "manual_params"),
+                        reason=payload.get("reason") or "operator_follow_params_changed",
+                        enqueue_reload=False,
+                    )
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
+            self._reload_strategy()
+            return {"reloaded": True, "source": "strategy_revision", "targets": len(self.addrs),
+                    "revision": self.strategy_revision_id, "created": created}
         raise ValueError(f"unhandled command type {ctype}")
 
     def _ep_by_pos(self, pos_id):
@@ -1065,7 +1124,7 @@ class Observer:
         if cur.rowcount == 0:
             self.db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES (?,?,?)", (addr, e, ts))
         self.db.commit()
-        self._reload_targets()
+        self._reload_strategy()
         return {"address": addr, "enabled": bool(enabled)}
 
     # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
@@ -1090,8 +1149,7 @@ class Observer:
 
         while not self.stop:
             if now_ms() - last_reload > config.WATCHLIST_RELOAD_S * 1000:
-                self._reload_params()              # params FIRST (pick up UI edits) ...
-                self._reload_targets()             # ... then load targets with the fresh follow line
+                self._reload_strategy()
                 last_reload = now_ms()
             await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
             await asyncio.sleep(1)                 # small breath between rounds
@@ -1212,8 +1270,7 @@ class Observer:
             if coin not in self.crypto_coins and self._copyable(coin):
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
-        self._reload_params()                      # load UI-tunable strategy params FIRST (config = fallback)
-        self._reload_targets(init=True)            # then load watchlist with the live follow line (forward-only)
+        self._reload_strategy(init=True)           # atomic Core + exact follow-param revision (forward-only)
         try:
             self._write_proc_status("running")     # advertise liveness + state to the dashboard
         except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
@@ -1420,8 +1477,9 @@ class Observer:
         lag_sec = max(0.0, (now_ms() - t) / 1000.0)   # copy latency: master fill -> our detection (dashboard)
         cur = self.db.execute(
             f"INSERT INTO {book.pos_table} (addr,coin,side,status,master_open_ms,master_open_px,"
-            "master_peak_sz,opened_at,num_actions,open_lag_sec) VALUES (?,?,?,'open',?,?,?,?,0,?)",
-            (addr, coin, side, t, px, abs(pos1), now_iso(), lag_sec))
+            "master_peak_sz,opened_at,num_actions,open_lag_sec,strategy_revision_id) "
+            "VALUES (?,?,?,'open',?,?,?,?,0,?,?)",
+            (addr, coin, side, t, px, abs(pos1), now_iso(), lag_sec, self.strategy_revision_id))
         ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
               "open_maker": maker, "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
@@ -1782,10 +1840,10 @@ class Observer:
         ep["num_actions"] += 1
         self.db.execute(
             f"INSERT INTO {book.act_table} (pos_id,addr,coin,ts,recv_ms,action,maker,master_oid,master_px,"
-            "master_sz_delta,master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "master_sz_delta,master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps,"
+            "strategy_revision_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ep["pos_id"], addr, coin, t, now_ms(), action, 1 if maker else 0, oid, master_px, sz_delta,
-             pos_after, our_qty_delta, our_px, realized, slip))
+             pos_after, our_qty_delta, our_px, realized, slip, self.strategy_revision_id))
         if book.stats_loaded:
             traded = abs((our_qty_delta or 0.0) * (our_px or 0.0))
             book.gross_traded += traded

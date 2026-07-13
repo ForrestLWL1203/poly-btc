@@ -40,9 +40,6 @@ export function Settings({ confirm }) {
       const category = tab === "add" ? "follow" : tab;
       try { await api.patchParams(category, body); } catch (_e) {}
       clearDirty();
-      if (tab === "follow" || tab === "add") {
-        try { await api.cmd("reload_params", {}); } catch (_e) {}
-      }
       await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
       setSaving(false);
     };
@@ -88,9 +85,6 @@ export function Settings({ confirm }) {
           await loadParams();
           clearDirty();
         } catch (_e) {}
-        if (category === "follow") {
-          try { await api.cmd("reload_params", {}); } catch (_e) {}
-        }
         await new Promise(r => setTimeout(r, Math.max(0, 450 - (Date.now() - t0))));
         setSaving(false);
       },

@@ -93,7 +93,6 @@ export function Positions({ confirm, toast, streamOpen }) {
       if (!current.includes(normalized)) {
         const next = formatCoinList([...current, normalized]);
         await api.patchParams("follow", { COIN_BLACKLIST: next });
-        await api.cmd("reload_params", {});
         setBlacklist(parseCoinList(next));
       } else {
         setBlacklist(current);

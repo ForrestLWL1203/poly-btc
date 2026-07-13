@@ -38,7 +38,7 @@ def ep_positions(db, qs):
                     ", closed_base AS ("
                     "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                     "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
-                    "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr "
+                    "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id "
                     "FROM copy_position cp WHERE " + " AND ".join(where) +
                     " ORDER BY cp.closed_at DESC LIMIT 100"
                     ") "
@@ -71,7 +71,8 @@ def ep_positions(db, qs):
                         "entry": r["entry_px"], "closePx": close_px, "addCount": r["add_count"] or 0,
                         "leverage": r["leverage"], "notional": r["notional"] or 0.0,
                         "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
-                        "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0)})
+                        "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
+                        "strategyRevision": r["strategy_revision_id"]})
         sw = "cp.status!='open'" + ("".join(f" AND {c}=?" for c, k in
              (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")) if qs.get(k)))
         s = q1(db,
@@ -110,7 +111,7 @@ def ep_positions(db, qs):
         _follow_set_cte() +
         "SELECT cp.pos_id,cp.coin,cp.side,cp.entry_px,cp.leverage,cp.margin,cp.notional,cp.size,"
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
-        "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
+        "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,cp.strategy_revision_id,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos "
         "FROM copy_position cp "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
@@ -138,13 +139,15 @@ def ep_positions(db, qs):
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
             "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),
             "addCount": r["add_count"] or 0,
+            "strategyRevision": r["strategy_revision_id"],
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
 
 
 def ep_position_detail(db, pos_id):
     p = q1(db, "SELECT pos_id,coin,side,status,entry_px,leverage,margin,size,rem_size,master_open_px,"
-               "realized_pnl,unrealized_pnl,was_liq,was_stopped,opened_at,closed_at FROM copy_position WHERE pos_id=?", (pos_id,))
+               "realized_pnl,unrealized_pnl,was_liq,was_stopped,opened_at,closed_at,strategy_revision_id "
+               "FROM copy_position WHERE pos_id=?", (pos_id,))
     if not p:
         return {"error": "not_found"}
     lev = p["leverage"] or 1.0
@@ -187,6 +190,7 @@ def ep_position_detail(db, pos_id):
         "closeType": _close_type(p),
         "masterAdds": (c["m_adds"] if c else 0) or 0, "ourAdds": (c["our_adds"] if c else 0) or 0,
         "masterEntry": p["master_open_px"], "ourEntry": p["entry_px"], "ourLeverage": lev,
+        "strategyRevision": p["strategy_revision_id"],
         "ourMargin": p["margin"] or 0.0,
         "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
         "fills": fills,

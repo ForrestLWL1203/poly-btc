@@ -248,7 +248,7 @@ def seed_params(db):
     db.commit()
 
 
-def reset_defaults(db, category=None):
+def reset_defaults(db, category=None, *, commit=True):
     """恢复默认配置: FORCE-overwrite params back to PARAM_SPEC (= config.py) defaults.
 
     Unlike seed_params (INSERT OR IGNORE, which protects operator edits), this OVERWRITES the live
@@ -265,7 +265,8 @@ def reset_defaults(db, category=None):
         cur = db.execute("UPDATE params SET value=?,default_value=?,updated_at=? WHERE key=?",
                          (dv, dv, stamp, key))
         n += cur.rowcount
-    db.commit()
+    if commit:
+        db.commit()
     return n
 
 

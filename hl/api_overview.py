@@ -1,8 +1,9 @@
 """Overview, equity, insight, and shadow dashboard endpoints."""
 
+import json
 import time
 
-from . import config
+from . import config, strategy_revision
 from .api_common import iso_epoch, q1, qall
 from .api_discovery import followed_count, scanner_status
 
@@ -141,6 +142,7 @@ def ep_overview(db):
 
     obs_state = ("stopped" if (not obs or obs["state"] == "stopped" or _stale(obs))
                  else (obs["state"] or "running"))
+    active_strategy = strategy_revision.load_active(db)
     base["system"] = {
         "observer": obs_state,
         "observerStale": _stale(obs),
@@ -152,8 +154,41 @@ def ep_overview(db):
         "lastScanAt": (last_scan["m"] if last_scan else None),
         "watchlistCount": (wl["c"] if wl else 0),
         "mode": "paper",
+        "strategyRevision": (active_strategy or {}).get("revision"),
+        "strategyGeneration": (active_strategy or {}).get("selectionGeneration"),
+        "strategySource": (active_strategy or {}).get("source"),
+        "strategyActivatedAt": (active_strategy or {}).get("activatedAt"),
+        "strategyParamsHash": (active_strategy or {}).get("paramsHash"),
     }
     return base
+
+
+def ep_strategy_revisions(db, limit=50):
+    limit = min(200, max(1, int(limit)))
+    active = strategy_revision.active_revision_id(db)
+    rows = qall(
+        db,
+        "SELECT revision,selection_generation,parent_revision,source,status,params_hash,reason,"
+        "created_at,activated_at,superseded_at,targets_json "
+        "FROM strategy_revision ORDER BY created_at DESC,revision DESC LIMIT ?",
+        (limit,),
+    )
+    return {
+        "activeRevision": active,
+        "revisions": [{
+            "revision": row["revision"],
+            "selectionGeneration": row["selection_generation"],
+            "parentRevision": row["parent_revision"],
+            "source": row["source"],
+            "status": row["status"],
+            "paramsHash": row["params_hash"],
+            "reason": row["reason"],
+            "targetCount": len(json.loads(row["targets_json"] or "[]")),
+            "createdAt": row["created_at"],
+            "activatedAt": row["activated_at"],
+            "supersededAt": row["superseded_at"],
+        } for row in rows],
+    }
 
 
 def ep_equity(db, rng):

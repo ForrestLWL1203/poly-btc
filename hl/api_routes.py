@@ -11,7 +11,7 @@ from .api_discovery import (
     ep_scan_status,
     ep_score_dist,
 )
-from .api_overview import ep_equity, ep_insights, ep_overview, ep_shadow
+from .api_overview import ep_equity, ep_insights, ep_overview, ep_shadow, ep_strategy_revisions
 from .api_params import ep_params, patch_params, reset_params
 from .api_positions import ep_position_detail, ep_positions
 from .api_wallets import ep_wallet_detail, ep_wallets
@@ -58,6 +58,9 @@ GET_ROUTES = {
     "/api/pipeline-audit": lambda db, qs: ep_pipeline_audit(db, qs),
     "/api/pipeline-summary": lambda db, qs: ep_pipeline_summary(db, qs),
     "/api/shadow": lambda db, qs: ep_shadow(db),
+    "/api/strategy-revisions": lambda db, qs: ep_strategy_revisions(
+        db, int(qs.get("limit", [50])[0])
+    ),
 }
 
 

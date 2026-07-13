@@ -16,7 +16,7 @@ import time
 from datetime import datetime, timezone
 from typing import Iterable
 
-from . import config, params, selection
+from . import config, params, selection, strategy_revision
 from .copy_backtest import run_backtest, slice_backtest_result
 from . import price_path
 from .copy_data import load_copyable_fills
@@ -1383,7 +1383,8 @@ def _model_validation(validation: dict, policy) -> dict:
 
 
 def _maybe_rollback_applied(db, follow: dict, now_ms: int,
-                            expected_generation: str | None = None) -> dict | None:
+                            expected_generation: str | None = None,
+                            expected_strategy_revision: str | None = None) -> dict | None:
     state = _json_load(_state_get(db, "active_tune_rollback"), {}) or {}
     if not state or state.get("resolved"):
         return None
@@ -1412,18 +1413,39 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
             db.commit()
             db.execute("BEGIN IMMEDIATE")
             current_generation = selection.latest_published_generation(db)
-            if current_generation != expected_generation:
+            current_revision = strategy_revision.active_revision_id(db)
+            if (current_generation != expected_generation
+                    or (expected_strategy_revision is not None
+                        and current_revision != expected_strategy_revision)):
                 db.rollback()
                 return {
                     "status": "skipped",
-                    "reason": "generation_changed_before_rollback",
+                    "reason": ("generation_changed_before_rollback"
+                               if current_generation != expected_generation
+                               else "strategy_revision_changed_before_rollback"),
                     "expectedGeneration": expected_generation,
                     "currentGeneration": current_generation,
+                    "expectedStrategyRevision": expected_strategy_revision,
+                    "currentStrategyRevision": current_revision,
                 }
         _write_tune_params(db, old_params)
         _write_add_params(db, old_params)
-        _enqueue_reload(db, "auto_tune_rollback")
         reason = "new_liquidation" if new_liquidation else "forward_utility_drop"
+        rollback_revision = None
+        if expected_generation:
+            parent = strategy_revision.load_active(db)
+            rollback_revision = strategy_revision.create_revision(
+                db,
+                expected_generation,
+                source="auto_tune_rollback",
+                parent_revision=expected_strategy_revision,
+                targets=(parent or {}).get("targets"),
+                validation={"rollbackReason": reason, "oldNet": old_net, "newNet": new_net},
+                reason=reason,
+                expected_active_revision=expected_strategy_revision,
+            )
+        else:
+            _enqueue_reload(db, "auto_tune_rollback")
         db.execute(
             "UPDATE auto_tune_runs SET rollback_at=?,rollback_reason=? "
             "WHERE id=(SELECT id FROM auto_tune_runs WHERE applied=1 ORDER BY id DESC LIMIT 1)",
@@ -1433,7 +1455,8 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
         _state_set(db, "active_tune_rollback", state)
         if expected_generation:
             db.commit()
-        return {"status": "rolled_back", "reason": reason, "oldNet": old_net, "newNet": new_net}
+        return {"status": "rolled_back", "reason": reason, "oldNet": old_net, "newNet": new_net,
+                "strategyRevision": (rollback_revision or {}).get("revision")}
     state.update(resolved=True, rolledBack=False, checkedAt=now_iso())
     _state_set(db, "active_tune_rollback", state)
     return {"status": "kept", "oldNet": old_net, "newNet": new_net}
@@ -1452,15 +1475,46 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
 
     stamp = stamp or now_iso()
     params.seed_params(db)
-    follow = dict(follow_values or params.load_follow(db))
+    expected_strategy_revision = None
+    if expected_generation:
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        current_generation = selection.latest_published_generation(db)
+        if current_generation != expected_generation:
+            db.rollback()
+            return {
+                "status": "skipped",
+                "reason": "generation_changed_before_tune",
+                "expectedGeneration": expected_generation,
+                "currentGeneration": current_generation,
+                "applied": False,
+            }
+        active_bundle = strategy_revision.load_active(db)
+        if not active_bundle or active_bundle.get("selectionGeneration") != expected_generation:
+            strategy_revision.materialize_current(
+                db,
+                source="tuner_generation_bridge",
+                reason="rolling_deploy_generation_bridge",
+                enqueue_reload=False,
+            )
+            active_bundle = strategy_revision.load_active(db)
+        expected_strategy_revision = (active_bundle or {}).get("revision")
+        active_follow = dict((active_bundle or {}).get("params") or {})
+        db.commit()
+    else:
+        active_follow = {}
+    follow = dict(follow_values or active_follow or params.load_follow(db))
     mode = str(mode or follow.get("AUTO_TUNE_MODE") or getattr(config, "AUTO_TUNE_MODE", "shadow")).lower()
     if mode not in {"off", "shadow", "apply"}:
         mode = "shadow"
     effective_shadow = bool(dry_run or mode != "apply")
     rollback_result = _maybe_rollback_applied(
         db, follow, int(time.time() * 1000), expected_generation=expected_generation,
+        expected_strategy_revision=expected_strategy_revision,
     )
-    if rollback_result and rollback_result.get("reason") == "generation_changed_before_rollback":
+    if rollback_result and rollback_result.get("reason") in {
+        "generation_changed_before_rollback", "strategy_revision_changed_before_rollback",
+    }:
         result = {
             **rollback_result,
             "mode": mode,
@@ -1475,6 +1529,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         return result
     if rollback_result and rollback_result.get("status") == "rolled_back":
         follow = dict(params.load_follow(db))
+        expected_strategy_revision = (
+            rollback_result.get("strategyRevision") or strategy_revision.active_revision_id(db)
+        )
     if mode == "off":
         result = {"status": "disabled", "reason": "auto_tune_mode_off", "mode": mode, "applied": False}
         _record_run(db, source, stamp, None, False, 0, {}, result,
@@ -1722,15 +1779,21 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         db.commit()
         db.execute("BEGIN IMMEDIATE")
         current_generation = selection.latest_published_generation(db)
-        if current_generation != expected_generation:
+        current_revision = strategy_revision.active_revision_id(db)
+        if (current_generation != expected_generation
+                or current_revision != expected_strategy_revision):
             result = {
                 "status": "skipped",
-                "reason": "generation_changed_before_apply",
+                "reason": ("generation_changed_before_apply"
+                           if current_generation != expected_generation
+                           else "strategy_revision_changed_before_apply"),
                 "mode": mode,
                 "shadow": True,
                 "applied": False,
                 "expectedGeneration": expected_generation,
                 "currentGeneration": current_generation,
+                "expectedStrategyRevision": expected_strategy_revision,
+                "currentStrategyRevision": current_revision,
                 "followed_n": len(addrs),
                 "proposal": proposal_combined,
                 "validation": apply_validation,
@@ -1766,8 +1829,22 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         _write_add_params(db, selected_add_params)
         applied_add = True
     applied = applied_sizing or applied_add
+    applied_revision = None
     if not effective_shadow and applied:
-        _enqueue_reload(db, source)
+        if expected_generation:
+            parent_bundle = strategy_revision.load_active(db)
+            applied_revision = strategy_revision.create_revision(
+                db,
+                expected_generation,
+                source="auto_tune",
+                parent_revision=expected_strategy_revision,
+                targets=(parent_bundle or {}).get("targets"),
+                validation=apply_validation,
+                reason="validated_portfolio_tune",
+                expected_active_revision=expected_strategy_revision,
+            )
+        else:
+            _enqueue_reload(db, source)
     if not effective_shadow:
         store_tune_state(db, base, selected_params)
         if follow_for_add.get("SMART_ADD", True):
@@ -1792,6 +1869,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "eligible_to_apply": bool(apply_validation.get("eligible")),
         "validation": apply_validation,
         "proposal": proposal_combined,
+        "strategyRevision": (applied_revision or {}).get("revision"),
+        "parentStrategyRevision": expected_strategy_revision,
         "finalists": finalist_results,
         "rollback": rollback_result,
         "candidates": [_compact_candidate(c) for c in candidates],

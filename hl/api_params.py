@@ -1,5 +1,6 @@
 """Dashboard strategy parameter endpoints and writes."""
 
+import json
 import sqlite3
 
 from . import params as params_mod
@@ -17,6 +18,24 @@ def rw_connect(path):
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=10000")
     return db
+
+
+def _enqueue_follow_revision(db, source):
+    """Ask Observer (a business-state writer) to materialise the edited params as a revision."""
+    if not db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='commands'"
+    ).fetchone():
+        return
+    stamp = now_iso()
+    db.execute(
+        "INSERT INTO commands (type,payload_json,owner,status,created_at) "
+        "VALUES ('reload_params',?,'dashboard','pending',?)",
+        (json.dumps({
+            "by": source,
+            "createStrategyRevision": True,
+            "reason": "operator_follow_params_changed",
+        }, sort_keys=True), stamp),
+    )
 
 
 def patch_params(db_path, category, updates):
@@ -42,6 +61,8 @@ def patch_params(db_path, category, updates):
                     else "false" if stored is False else str(stored))
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (sval, now_iso(), key))
             out[key] = val
+        if category == "follow" and out:
+            _enqueue_follow_revision(db, "dashboard_params")
         db.commit()
         return out
     finally:
@@ -53,7 +74,11 @@ def reset_params(db_path, category):
     db = rw_connect(db_path)
     try:
         cat = None if category == "all" else category
-        return params_mod.reset_defaults(db, cat)
+        count = params_mod.reset_defaults(db, cat, commit=False)
+        if cat in (None, "follow"):
+            _enqueue_follow_revision(db, "dashboard_params_reset")
+        db.commit()
+        return count
     finally:
         db.close()
 
