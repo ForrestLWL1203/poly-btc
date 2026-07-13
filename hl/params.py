@@ -47,6 +47,8 @@ PARAM_SPEC = [
         "完整重拉分片数", ""),
     ("RANDOM_EXPLORATION_RATIO", "scanner", "hidden", "pct", "rescan", config.RANDOM_EXPLORATION_RATIO * 100,
         "随机探索比例", ""),
+    ("AUTO_TUNE_RISK_PROFILE", "scanner", "green", "text", "rescan", config.AUTO_TUNE_RISK_PROFILE,
+        "自动调参目标", "只运行所选目标;平衡档允许用有限收益换取更少爆仓和更完整的持仓路径复刻"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
@@ -92,9 +94,6 @@ PARAM_SPEC = [
         "旧版评分线", "已停用；仅保留迁移兼容"),
     ("FOLLOW_SELECTION_MODE", "follow", "hidden", "text", "immediate", config.FOLLOW_SELECTION_MODE,
         "跟单集合模式", "auto使用已发布Core集合;manual保留人工集合"),
-    ("FOLLOW_SELECTION_BOOTSTRAP_ENABLE", "follow", "hidden", "bool", "immediate",
-        config.FOLLOW_SELECTION_BOOTSTRAP_ENABLE,
-        "首次Core快速形成", "全新Paper数据库首个完整generation可直接从合格历史证据形成Core"),
     ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
         "币种黑名单", "命中的币种不再新开仓;已有仓位仍继续跟随减仓/平仓。建议从持仓行一键加入,避免符号别名写错"),
     ("BLOCK_KOREAN_STOCKS",  "follow",  "green",  "bool",    "immediate", config.BLOCK_KOREAN_STOCKS,

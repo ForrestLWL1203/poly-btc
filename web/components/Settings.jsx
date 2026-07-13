@@ -118,7 +118,7 @@ export function Settings({ confirm }) {
           <div className="ab-l">{tabDirty.length} 项未应用改动{tab === "scanner" ? "(需重采生效)" : "(即时生效)"}</div>
           <div style={{ display: "flex", gap: 10 }}>
             <button className="btn" onClick={() => discard(tabDirty.map(p => p.key))}>放弃</button>
-            <button className="btn btn-accent" disabled={validationErrors.length > 0} onClick={apply}>{tab === "scanner" ? "应用并重采" : "保存(即时生效)"}</button>
+            <button className="btn btn-accent" disabled={validationErrors.length > 0} onClick={apply}>{tab === "scanner" ? "保存(下次采集生效)" : "保存(即时生效)"}</button>
           </div>
         </div>
       )}

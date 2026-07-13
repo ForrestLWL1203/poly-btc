@@ -235,6 +235,8 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertGreater(fills_only["copy_net_pnl"], 0)
         self.assertEqual(with_path["positions"][0]["status"], "liquidated")
         self.assertEqual(with_path["liquidations"], 1)
+        self.assertEqual(with_path["path_completion_rate"], 0.0)
+        self.assertEqual(with_path["behavior_replication_rate"], 0.0)
         self.assertLess(with_path["copy_net_pnl"], 0)
 
     def test_price_path_can_stop_between_target_fills_before_liquidation(self):

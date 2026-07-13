@@ -36,6 +36,7 @@ export const PARAM_META = {
 
 export const UNIT = { usd: "$", pct: "%", x: "×" };
 export const AUTO_TUNE_KEY = "AUTO_TUNE_MARGIN_ENABLE";
+export const AUTO_TUNE_RISK_PROFILE_KEY = "AUTO_TUNE_RISK_PROFILE";
 export const BLACKLIST_KEY = "COIN_BLACKLIST";
 
 export const ADD_KEYS = new Set([

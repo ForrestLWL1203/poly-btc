@@ -290,6 +290,11 @@ CREATE TABLE IF NOT EXISTS wallet_registry (
     data_error_count           INTEGER NOT NULL DEFAULT 0,
     consecutive_qualified      INTEGER NOT NULL DEFAULT 0,
     consecutive_bad            INTEGER NOT NULL DEFAULT 0,
+    core_nomination_streak     INTEGER NOT NULL DEFAULT 0,
+    core_omission_streak       INTEGER NOT NULL DEFAULT 0,
+    core_nomination_started_at TEXT,
+    core_omission_started_at   TEXT,
+    last_core_signal_generation TEXT,
     core_entries               INTEGER NOT NULL DEFAULT 0,
     core_exits                 INTEGER NOT NULL DEFAULT 0,
     recovery_count             INTEGER NOT NULL DEFAULT 0,
@@ -875,6 +880,13 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replayed_at TEXT",
     "ALTER TABLE follow_selection ADD COLUMN follow_score REAL",
     "ALTER TABLE follow_selection ADD COLUMN selection_rank INTEGER",
+    # Desired portfolio membership is evidence, not immediate authority.  These streaks let the scanner
+    # publish a stable Core while still recomputing the ideal strict-replay portfolio every generation.
+    "ALTER TABLE wallet_registry ADD COLUMN core_nomination_streak INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_registry ADD COLUMN core_omission_streak INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_registry ADD COLUMN core_nomination_started_at TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN core_omission_started_at TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN last_core_signal_generation TEXT",
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
 )

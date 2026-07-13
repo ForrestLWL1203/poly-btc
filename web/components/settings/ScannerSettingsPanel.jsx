@@ -1,5 +1,7 @@
 import { EditableValue } from "./EditableValue.jsx";
 import { editableParam, ParamRiskBadge, ParamRow, resolveLevel } from "./ParamRow.jsx";
+import { TuneRiskProfileSelector } from "./TuneRiskProfileSelector.jsx";
+import { AUTO_TUNE_RISK_PROFILE_KEY } from "./paramMeta.js";
 
 const WEEK_VLM_MIN = "HARVEST_WEEK_VLM_MIN";
 const WEEK_VLM_MAX = "HARVEST_WEEK_VLM_MAX";
@@ -32,8 +34,9 @@ function HarvestVolumeRangeRow({ paramsByKey, vals, dirty, onChange }) {
 
 export function ScannerSettingsPanel({ list, vals, dirty, onChange }) {
   const paramsByKey = new Map(list.map(p => [p.key, p]));
+  const profileParam = paramsByKey.get(AUTO_TUNE_RISK_PROFILE_KEY);
   const baseRows = list.filter(p => BASIC_SCANNER_KEYS.has(p.key));
-  const advancedRows = list.filter(p => !BASIC_SCANNER_KEYS.has(p.key));
+  const advancedRows = list.filter(p => !BASIC_SCANNER_KEYS.has(p.key) && p.key !== AUTO_TUNE_RISK_PROFILE_KEY);
   const advancedDirty = advancedRows.some(p => dirty[p.key]);
   const renderScannerRow = p => {
     if (p.key === WEEK_VLM_MIN) {
@@ -44,6 +47,8 @@ export function ScannerSettingsPanel({ list, vals, dirty, onChange }) {
   };
   return (
     <React.Fragment>
+      <TuneRiskProfileSelector param={profileParam} value={vals[AUTO_TUNE_RISK_PROFILE_KEY]}
+        dirty={!!dirty[AUTO_TUNE_RISK_PROFILE_KEY]} onChange={onChange} />
       {baseRows.map(renderScannerRow)}
       {advancedRows.length > 0 && (
         <details className={"scanner-advanced" + (advancedDirty ? " dirty" : "")}>

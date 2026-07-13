@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from hl import scanner, selection, storage
 from hl.observer import Observer, load_targets
@@ -159,6 +160,147 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(decisions["0xsoft1"].role, selection.CHALLENGER)
         self.assertEqual(decisions["0xsoft2"].role, selection.CORE)
         self.assertEqual(decisions["0xsoft2"].reason, "soft_change_budget")
+
+    @staticmethod
+    def _transition_policy():
+        return SimpleNamespace(
+            entry_max_open_age_h=24.0,
+            keep_max_open_age_h=72.0,
+            min_closed_7d=7,
+            entry_positive_probability=.70,
+        )
+
+    @staticmethod
+    def _transition_metrics(net):
+        return selection.PortfolioMetrics(
+            net, net, 0, .95, .95, .01, .50, .05,
+            net_pnl=net, stress_net_pnl=net, drawdown_dollars=10,
+            risk_adjusted_utility=net,
+        )
+
+    def test_stable_core_requires_three_nominations_and_48_hours(self):
+        day = 86_400_000
+        now = 3 * day
+        profile = {
+            "addr": "0xnew", "status": "active", "profile_generation": "g3",
+            "data_status": "valid", "last_copyable_open_ms": now,
+            "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
+            "follow_score": .9,
+        }
+        registry = {"0xnew": {
+            "core_nomination_streak": 2,
+            "core_nomination_started_at": "1970-01-02T00:00:00Z",
+            "last_core_signal_generation": "g2",
+        }}
+
+        def evaluate(addrs):
+            return self._transition_metrics(100 if addrs else 0)
+
+        result = scanner._stable_core_transition(
+            [profile], generation_id="g3", stamp="1970-01-04T00:00:00Z", now_ms=now,
+            previous_roles={}, registry=registry, controls={}, held=set(),
+            desired_order=("0xnew",), strict_evaluate=evaluate,
+            validate_fold=lambda addrs, *_args: evaluate(addrs),
+            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
+        )
+
+        self.assertEqual(result["selected"], ("0xnew",))
+        self.assertEqual(result["reasons"]["0xnew"], "core_promoted_after_confirmation")
+        self.assertEqual(result["signals"]["0xnew"]["state"].nomination_streak, 3)
+
+    def test_stable_core_keeps_temporary_weakness_and_resets_on_recovery(self):
+        day = 86_400_000
+        now = 3 * day
+        base = {
+            "addr": "0xcore", "status": "active", "profile_generation": "g3",
+            "data_status": "valid", "last_copyable_open_ms": now,
+            "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
+            "follow_score": .8,
+        }
+        evaluate = lambda addrs: self._transition_metrics(100 if addrs else 0)
+        common = dict(
+            generation_id="g3", stamp="1970-01-04T00:00:00Z", now_ms=now,
+            previous_roles={"0xcore": "core"}, controls={}, held=set(),
+            strict_evaluate=evaluate, validate_fold=lambda addrs, *_args: evaluate(addrs),
+            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
+        )
+
+        pending = scanner._stable_core_transition(
+            [base], registry={}, desired_order=(), **common,
+        )
+        recovered = scanner._stable_core_transition(
+            [base], registry={"0xcore": {
+                "core_omission_streak": 2,
+                "core_omission_started_at": "1970-01-02T00:00:00Z",
+                "last_core_signal_generation": "g2",
+            }}, desired_order=("0xcore",), **common,
+        )
+
+        self.assertEqual(pending["selected"], ("0xcore",))
+        self.assertEqual(pending["reasons"]["0xcore"], "core_weak_pending_1_of_3")
+        self.assertEqual(recovered["selected"], ("0xcore",))
+        self.assertEqual(recovered["reasons"]["0xcore"], "core_desired_keep")
+        self.assertEqual(recovered["signals"]["0xcore"]["state"].omission_streak, 0)
+
+    def test_stable_core_inactivity_exits_without_performance_grace(self):
+        hour = 3_600_000
+        now = 100 * hour
+        profile = {
+            "addr": "0xidle", "status": "active", "profile_generation": "g2",
+            "data_status": "valid", "last_copyable_open_ms": now - 73 * hour,
+            "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
+            "follow_score": .8,
+        }
+        evaluate = lambda addrs: self._transition_metrics(100 if addrs else 0)
+
+        result = scanner._stable_core_transition(
+            [profile], generation_id="g2", stamp="1970-01-05T04:00:00Z", now_ms=now,
+            previous_roles={"0xidle": "core"}, registry={}, controls={}, held=set(),
+            desired_order=("0xidle",), strict_evaluate=evaluate,
+            validate_fold=lambda addrs, *_args: evaluate(addrs),
+            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
+        )
+
+        self.assertEqual(result["selected"], ())
+        self.assertEqual(result["reasons"]["0xidle"], "core_inactive_72h")
+
+    def test_stable_core_replaces_only_confirmed_weak_wallet(self):
+        day = 86_400_000
+        now = 3 * day
+        profiles = [
+            {"addr": addr, "status": "active", "profile_generation": "g3",
+             "data_status": "valid", "last_copyable_open_ms": now,
+             "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
+             "follow_score": score}
+            for addr, score in (("0xa", .7), ("0xb", .8), ("0xc", .9))
+        ]
+        nets = {
+            (): 0, ("0xa",): 10, ("0xb",): 90, ("0xc",): 50,
+            ("0xa", "0xb"): 100, ("0xa", "0xc"): 60,
+            ("0xb", "0xc"): 130, ("0xa", "0xb", "0xc"): 102,
+        }
+        evaluate = lambda addrs: self._transition_metrics(nets[tuple(sorted(addrs))])
+        registry = {
+            "0xa": {"core_omission_streak": 2,
+                     "core_omission_started_at": "1970-01-02T00:00:00Z",
+                     "last_core_signal_generation": "g2"},
+            "0xc": {"core_nomination_streak": 2,
+                     "core_nomination_started_at": "1970-01-02T00:00:00Z",
+                     "last_core_signal_generation": "g2"},
+        }
+
+        result = scanner._stable_core_transition(
+            profiles, generation_id="g3", stamp="1970-01-04T00:00:00Z", now_ms=now,
+            previous_roles={"0xa": "core", "0xb": "core"}, registry=registry,
+            controls={}, held=set(), desired_order=("0xb", "0xc"),
+            strict_evaluate=evaluate, validate_fold=lambda addrs, *_args: evaluate(addrs),
+            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
+        )
+
+        self.assertEqual(set(result["selected"]), {"0xb", "0xc"})
+        self.assertEqual(result["softAction"]["action"], "replace")
+        self.assertEqual(result["reasons"]["0xa"], "core_replaced_after_confirmation")
+        self.assertEqual(result["reasons"]["0xc"], "core_promoted_after_confirmation")
 
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,

@@ -64,9 +64,23 @@ def _selection_reason_text(row, *, now_ms=None):
         "actionable_open_stale": "近期没有可跟随的新开仓",
         "soft_bad_pending_confirmation": "近期质量下降，等待复核",
         "soft_change_budget": "等待下一轮名单调整",
+        "promotion_portfolio_check": "连续观察已通过，正在复核组合贡献",
+        "promotion_waiting_portfolio_gain": "连续观察已通过，加入后组合提升不足",
+        "core_promoted_after_confirmation": "连续观察及组合复核均已通过",
+        "challenger_not_nominated": "本轮未进入严格组合候选",
+        "core_inactive_72h": "连续72小时没有可跟开仓，已退出跟单",
+        "core_replaced_after_confirmation": "连续弱势后被更强候选替换",
+        "core_removed_after_confirmation": "连续弱势且移除后组合更优",
+        "core_retained_portfolio_value": "近期偏弱，但保留后组合仍更优",
     }
     if reason in labels:
         return labels[reason]
+    if reason.startswith("promotion_pending_"):
+        progress = reason.removeprefix("promotion_pending_").replace("_of_", "/")
+        return f"候选观察中（{progress}轮）"
+    if reason.startswith("core_weak_pending_"):
+        progress = reason.removeprefix("core_weak_pending_").replace("_of_", "/")
+        return f"近期偏弱，等待连续确认（{progress}轮）"
     if reason != "challenger_evidence":
         return "未满足实跟条件" if reason else None
 
@@ -187,6 +201,29 @@ def _portfolio_replay_summary(db, generation):
     return payload
 
 
+def _tune_comparison_summary(db, generation):
+    """Return the latest same-Core strict A/B for this published generation."""
+    try:
+        row = q1(
+            db,
+            "SELECT result_json,applied,eligible_to_apply,created_at FROM auto_tune_runs "
+            "WHERE generation=? AND status='ok' ORDER BY id DESC LIMIT 1",
+            (generation,),
+        )
+        payload = _json_obj(_col(row, "result_json") if row else None)
+    except Exception:  # noqa: BLE001 - rolling deploys may predate the comparison payload
+        return None
+    comparison = payload.get("comparison") if payload else None
+    if not isinstance(comparison, dict) or comparison.get("status") != "ok":
+        return None
+    return {
+        **comparison,
+        "applied": bool(_col(row, "applied")),
+        "eligibleToApply": bool(_col(row, "eligible_to_apply")),
+        "createdAt": _col(row, "created_at"),
+    }
+
+
 def _ep_selected_wallets(db, generation, role, page, size):
     """Serve one role from the immutable selection snapshot.
 
@@ -299,6 +336,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "selectionMode": True,
         "selectionGeneration": generation,
         "portfolioReplay": _portfolio_replay_summary(db, generation),
+        "tuneComparison": _tune_comparison_summary(db, generation),
         "tab": tab,
         "total": total,
         "followed": total if role == "core" else None,

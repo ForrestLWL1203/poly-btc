@@ -160,6 +160,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             portfolio_replay.assert_called_once()
             selection_replay.assert_called_once()
 
+    def test_profile_ab_is_analysis_only_and_releases_tuner_lease(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
+                "VALUES('g1','published',1,1,1,'now')"
+            )
+            db.commit()
+            with patch.object(scanner.auto_tune, "maybe_tune_margins", return_value={
+                "status": "ok", "comparison": {"status": "ok"}, "applied": False,
+            }) as tune:
+                result = scanner.compare_current_to_tune_profile(db, "g1", profile="balanced")
+
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue(tune.call_args.kwargs["analysis_only"])
+            self.assertTrue(tune.call_args.kwargs["dry_run"])
+            self.assertEqual(tune.call_args.kwargs["mode"], "shadow")
+            self.assertEqual(tune.call_args.kwargs["risk_profile_override"], "balanced")
+            lease = db.execute(
+                "SELECT value FROM auto_tune_state WHERE key='async_tuner_lease'"
+            ).fetchone()[0]
+            self.assertIn('"expiresAt": 0', lease)
+
     def test_generation_tune_rolls_back_when_membership_seal_fails(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -312,7 +335,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
             launch.assert_called_once()
 
-    def test_cold_paper_bootstrap_can_publish_first_qualified_core(self):
+    def test_cold_paper_bootstrap_stages_first_qualified_wallet_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
 
@@ -405,7 +428,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             row = db.execute(
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (current,)
             ).fetchone()
-            self.assertEqual(row, ("0xaaa", "core"))
+            self.assertEqual(row, ("0xaaa", "challenger"))
+            registry = db.execute(
+                "SELECT core_nomination_streak FROM wallet_registry WHERE addr='0xaaa'"
+            ).fetchone()
+            self.assertEqual(registry, (1,))
 
     def test_systemd_scan_launches_tuner_in_independent_transient_unit(self):
         with tempfile.TemporaryDirectory() as td:
@@ -732,11 +759,75 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db, "g1", "now", 1000, validate_price_path=False,
                 )
 
-            self.assertEqual(result.selected, ("0xaaa",))
-            self.assertEqual(result.action, "robust_multi_start")
+            self.assertEqual(result.selected, ())
+            self.assertEqual(result.action, "keep")
+            self.assertEqual(result.search_meta["desiredSelectedCount"], 1)
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "core", "portfolio_positive_net_contribution"),
+                ("0xaaa", "challenger", "promotion_pending_1_of_3"),
             ])
+
+    def test_daily_desired_portfolio_does_not_replace_existing_core_in_one_generation(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g0','published',1,1,1,'old','old')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES('g0','0xold','core',1,'old')"
+            )
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
+                "VALUES('0xold','core','core','old','old','old')"
+            )
+            cols = storage.PROFILE_COLS.split(",")
+            for rank, (addr, score) in enumerate((("0xnew", .9), ("0xold", .8)), 1):
+                profile = {
+                    "addr": addr, "status": "active", "reason": "ok", "score": score,
+                    "profile_generation": "g1", "data_status": "valid",
+                    "evidence_status": "qualified", "last_copyable_open_ms": 1000,
+                    "copy_bt_closed_n": 20, "copy_bt_7d_closed_n": 9,
+                    "copy_positive_probability": .8,
+                }
+                db.execute(
+                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
+                    f"VALUES ({','.join('?' for _ in cols)})",
+                    [profile.get(col) for col in cols],
+                )
+                db.execute(
+                    "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(?,?,?,'now')",
+                    (rank, addr, score),
+                )
+            db.commit()
+            baseline = scanner.selection.PortfolioMetrics(
+                100, 100, 0, .95, .95, .01, .5, .05,
+                net_pnl=100, stress_net_pnl=100, drawdown_dollars=10,
+                risk_adjusted_utility=100,
+            )
+            staged = scanner.offline_core_optimizer.OfflineSearchResult(
+                selected=("0xnew",), metrics=baseline, initial=("0xold",),
+                initial_metrics=baseline, fast_evaluated=2, strict_evaluated=2,
+                finalists=(("0xnew",),),
+            )
+            robust = scanner.offline_core_optimizer.RobustSelectionResult(
+                selected=("0xnew",), metrics=baseline, comparison=None, evaluated=1,
+            )
+            with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
+                    patch.object(scanner.offline_core_optimizer, "optimize_membership", return_value=staged), \
+                    patch.object(scanner.offline_core_optimizer, "choose_robust_candidate", return_value=robust), \
+                    patch.object(scanner, "_portfolio_selection_metrics", return_value=baseline):
+                rows, result = scanner._build_explicit_selection(
+                    db, "g1", "1970-01-01T00:00:01Z", 1000, validate_price_path=False,
+                )
+
+            by_addr = {row.addr: (row.role, row.reason) for row in rows}
+            self.assertEqual(result.selected, ("0xold",))
+            self.assertEqual(by_addr["0xold"], ("core", "core_weak_pending_1_of_3"))
+            self.assertEqual(by_addr["0xnew"], ("challenger", "promotion_pending_1_of_3"))
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:

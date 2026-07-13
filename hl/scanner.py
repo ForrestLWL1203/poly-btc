@@ -37,6 +37,7 @@ from .scanner_copy_bt import (
     sector_copy_bt_results as _sector_copy_bt_results,
 )
 from .scanner_lifecycle import (
+    next_core_signal_state,
     prune_discovery_cache as _prune_discovery_cache,
     schedule_profile_workset,
     upsert_wallet_registry,
@@ -917,6 +918,279 @@ def _iso_ms(value):
         return None
 
 
+def _stable_core_transition(
+    profiles,
+    *,
+    generation_id,
+    stamp,
+    now_ms,
+    previous_roles,
+    registry,
+    controls,
+    held,
+    desired_order,
+    strict_evaluate,
+    validate_fold,
+    constraints,
+    copy_policy,
+):
+    """Turn the strict optimizer's desired subset into a deliberately slow-moving published Core.
+
+    Daily replay remains free to discover a very different ideal subset.  Promotion/demotion evidence is
+    persistent, while a single bounded add/remove/replacement is portfolio-validated before publication.
+    Structural exits and 72-hour inactivity are safety/activity decisions and therefore bypass the soft-change
+    budget.
+    """
+    rows = {(row.get("addr") or "").lower(): row for row in profiles}
+    desired_order = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
+    desired = set(desired_order)
+    previous_core = {
+        (addr or "").lower() for addr, role in previous_roles.items()
+        if role == selection.CORE
+    }
+    published = set(previous_core)
+    reasons = {}
+    signals = {}
+    hard_removed = set()
+    inactive_removed = set()
+    confirmed_weak = []
+    promotable = []
+    entry_confirmations = max(1, int(getattr(config, "CORE_ENTRY_CONFIRM_GENERATIONS", 3)))
+    soft_confirmations = max(1, int(getattr(config, "CORE_SOFT_CONFIRM_GENERATIONS", 3)))
+    entry_observation_ms = int(
+        float(getattr(config, "CORE_ENTRY_MIN_CHALLENGER_H", 48.0)) * 3_600_000
+    )
+    soft_observation_ms = int(
+        float(getattr(config, "CORE_SOFT_MIN_WEAK_H", 48.0)) * 3_600_000
+    )
+    entry_fresh_ms = int(float(copy_policy.entry_max_open_age_h) * 3_600_000)
+    keep_fresh_ms = int(float(copy_policy.keep_max_open_age_h) * 3_600_000)
+
+    for addr, row in rows.items():
+        prior = registry.get(addr, {})
+        was_core = addr in previous_core
+        enabled = controls.get(addr, True)
+        refreshed = row.get("profile_generation") == generation_id
+        data_status = row.get("data_status") or "valid"
+        signal_valid = refreshed and data_status in {"valid", "rejected"}
+        active = row.get("status") in {"active", "qualified"} and enabled
+        nominated = active and addr in desired
+        signal = next_core_signal_state(
+            prior,
+            generation=generation_id,
+            stamp=stamp,
+            nominated=nominated,
+            previous_core=was_core,
+            valid=signal_valid,
+        )
+        signals[addr] = {"state": signal, "nominated": nominated, "valid": signal_valid}
+        last_open_ms = row.get("last_copyable_open_ms")
+        last_open_age = None if last_open_ms is None else max(0, now_ms - int(last_open_ms))
+        hard_exit = (not enabled) or (
+            signal_valid and row.get("reason") in _HARD_EXIT_REASONS
+        )
+        inactive = (
+            was_core and signal_valid and not hard_exit
+            and (last_open_age is None or last_open_age > keep_fresh_ms)
+        )
+
+        if was_core:
+            if hard_exit:
+                published.discard(addr)
+                hard_removed.add(addr)
+                reasons[addr] = row.get("reason") or "core_hard_exit"
+            elif inactive:
+                published.discard(addr)
+                inactive_removed.add(addr)
+                reasons[addr] = "core_inactive_72h"
+            elif not signal_valid:
+                reasons[addr] = "core_data_deferred_keep"
+            elif nominated:
+                reasons[addr] = "core_desired_keep"
+            else:
+                weak_age = (
+                    0 if signal.omission_started_at is None
+                    else max(0, now_ms - int(_iso_ms(signal.omission_started_at) or now_ms))
+                )
+                if signal.omission_streak >= soft_confirmations and weak_age >= soft_observation_ms:
+                    confirmed_weak.append(addr)
+                    reasons[addr] = "core_weak_confirmed"
+                else:
+                    reasons[addr] = (
+                        f"core_weak_pending_{signal.omission_streak}_of_{soft_confirmations}"
+                    )
+            continue
+
+        if not signal_valid or not nominated:
+            reasons.setdefault(addr, "challenger_not_nominated")
+            continue
+        nomination_age = (
+            0 if signal.nomination_started_at is None
+            else max(0, now_ms - int(_iso_ms(signal.nomination_started_at) or now_ms))
+        )
+        samples = int(row.get("copy_bt_7d_closed_n") or row.get("copy_bt_closed_n") or 0)
+        probability = f(row.get("copy_positive_probability"))
+        entry_ready = (
+            signal.nomination_streak >= entry_confirmations
+            and nomination_age >= entry_observation_ms
+            and last_open_age is not None and last_open_age <= entry_fresh_ms
+            and samples >= max(
+                int(copy_policy.min_closed_7d),
+                int(getattr(config, "CORE_ENTRY_MIN_OOS_CLOSED", 7)),
+            )
+            and probability >= f(copy_policy.entry_positive_probability)
+        )
+        if entry_ready:
+            promotable.append(addr)
+            reasons[addr] = "promotion_portfolio_check"
+        else:
+            reasons[addr] = (
+                f"promotion_pending_{signal.nomination_streak}_of_{entry_confirmations}"
+            )
+
+    # A previously published Core missing from this generation's profile set is retained fail-closed.
+    for addr in previous_core - set(rows):
+        reasons[addr] = "core_profile_missing_keep"
+
+    gain_floor = max(0.0, float(getattr(config, "SELECTION_MIN_RELATIVE_GAIN", .05)))
+
+    def metrics_utility(metrics):
+        return f(
+            metrics.risk_adjusted_utility
+            if metrics.risk_adjusted_utility is not None else metrics.net_lcb
+        )
+
+    comparison_cache = {}
+
+    def robust_change(before, after):
+        before, after = tuple(sorted(before)), tuple(sorted(after))
+        key = (before, after)
+        if key in comparison_cache:
+            return comparison_cache[key]
+        base = strict_evaluate(before)
+        trial = strict_evaluate(after)
+        base_folds = [validate_fold(before, older, newer, 1.0)
+                      for older, newer in ((30, 20), (20, 10), (10, 0))]
+        trial_folds = [validate_fold(after, older, newer, 1.0)
+                       for older, newer in ((30, 20), (20, 10), (10, 0))]
+        comparison = offline_core_optimizer.robust_improvement(
+            base, trial, base_folds, trial_folds,
+            validate_fold(before, 10, 0, 1.5),
+            validate_fold(after, 10, 0, 1.5),
+            constraints,
+            min_total_gain_ratio=gain_floor,
+        )
+        base_utility = metrics_utility(base)
+        trial_utility = metrics_utility(trial)
+        utility_floor = abs(base_utility) * gain_floor
+        eligible = (
+            comparison.eligible
+            and trial_utility > base_utility
+            and trial_utility - base_utility + 1e-12 >= utility_floor
+        )
+        result = (eligible, trial_utility - base_utility, comparison)
+        comparison_cache[key] = result
+        return result
+
+    # Strict leave-one-out contribution defines "weakest" inside the actual current account.
+    def weak_order(addresses):
+        addresses = tuple(sorted(addresses))
+        if not addresses:
+            return []
+        base_utility = metrics_utility(strict_evaluate(addresses))
+        return sorted(
+            addresses,
+            key=lambda addr: (
+                base_utility - metrics_utility(strict_evaluate(
+                    tuple(item for item in addresses if item != addr)
+                )),
+                f(rows.get(addr, {}).get("follow_score")),
+                addr,
+            ),
+        )
+
+    desired_rank = {addr: rank for rank, addr in enumerate(desired_order)}
+    promotable.sort(key=lambda addr: (
+        desired_rank.get(addr, 999999),
+        -f(rows.get(addr, {}).get("follow_score")),
+        addr,
+    ))
+    confirmed_weak = [addr for addr in weak_order(published) if addr in set(confirmed_weak)]
+    max_soft_changes = max(0, int(getattr(config, "CORE_MAX_SOFT_MEMBERSHIP_CHANGES", 1)))
+    soft_action = None
+
+    if max_soft_changes > 0:
+        add_trials = []
+        replacement_trials = []
+        removal_trials = []
+        for incoming in promotable:
+            if len(published) < int(constraints.max_targets):
+                after = set(published) | {incoming}
+                eligible, gain, comparison = robust_change(published, after)
+                if eligible:
+                    add_trials.append((gain, "add", incoming, None, after, comparison))
+            for outgoing in confirmed_weak[:1]:
+                after = (set(published) - {outgoing}) | {incoming}
+                eligible, gain, comparison = robust_change(published, after)
+                if eligible:
+                    replacement_trials.append((gain, "replace", incoming, outgoing, after, comparison))
+        for outgoing in confirmed_weak[:1]:
+            after = set(published) - {outgoing}
+            if not after:
+                continue
+            eligible, gain, comparison = robust_change(published, after)
+            if eligible:
+                removal_trials.append((gain, "remove", None, outgoing, after, comparison))
+        # Prefer profitable expansion.  Replacement exists for the exact case where funding contention
+        # makes direct addition unattractive; removal is the last resort after persistent weakness.
+        trials = add_trials or replacement_trials or removal_trials
+        if trials:
+            gain, action, incoming, outgoing, after, comparison = max(
+                trials,
+                key=lambda item: (item[0], 1 if item[1] == "add" else 0, item[1], item[2] or ""),
+            )
+            published = set(after)
+            soft_action = {
+                "action": action, "incoming": incoming, "outgoing": outgoing,
+                "utilityGain": gain, "foldWins": comparison.fold_wins,
+            }
+            if incoming:
+                reasons[incoming] = "core_promoted_after_confirmation"
+            if outgoing:
+                reasons[outgoing] = "core_replaced_after_confirmation" if incoming else "core_removed_after_confirmation"
+
+    for addr in promotable:
+        if addr not in published and reasons.get(addr) == "promotion_portfolio_check":
+            reasons[addr] = "promotion_waiting_portfolio_gain"
+    for addr in confirmed_weak:
+        if addr in published and reasons.get(addr) == "core_weak_confirmed":
+            reasons[addr] = "core_retained_portfolio_value"
+
+    final_metrics = strict_evaluate(tuple(sorted(published)))
+    final_utility = metrics_utility(final_metrics)
+    contribution_rows = []
+    for addr in published:
+        without = tuple(sorted(published - {addr}))
+        contribution_rows.append((
+            final_utility - metrics_utility(strict_evaluate(without)),
+            -desired_rank.get(addr, 999999), addr,
+        ))
+    contribution_rows.sort(reverse=True)
+    final_order = tuple(item[-1] for item in contribution_rows)
+    utilities = {item[-1]: item[0] for item in contribution_rows}
+    return {
+        "selected": final_order,
+        "reasons": reasons,
+        "signals": signals,
+        "utilities": utilities,
+        "softAction": soft_action,
+        "hardRemoved": tuple(sorted(hard_removed)),
+        "inactiveRemoved": tuple(sorted(inactive_removed)),
+        "desired": desired_order,
+        "metrics": final_metrics,
+    }
+
+
 def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     """Compact shared-account replay into actual-dollar selection economics.
 
@@ -1062,21 +1336,12 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     copy_policy = load_copy_policy()
     previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
     previous_roles = {}
+    previous_selection = {}
     if previous_generation:
-        previous_roles = {
-            (addr or "").lower(): role
-            for addr, role in db.execute(
-                "SELECT addr,role FROM follow_selection WHERE generation=?", (previous_generation,)
-            ).fetchall()
+        previous_selection = {
+            row.addr: row for row in selection.current_selection_rows(db)
         }
-
-    cold_bootstrap = bool(
-        (force_cold_bootstrap or previous_generation is None)
-        and not previous_roles
-        and params.get(
-            db, "FOLLOW_SELECTION_BOOTSTRAP_ENABLE", config.FOLLOW_SELECTION_BOOTSTRAP_ENABLE
-        )
-    )
+        previous_roles = {addr: row.role for addr, row in previous_selection.items()}
 
     held = {(addr or "").lower() for (addr,) in db.execute(
         "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
@@ -1087,12 +1352,19 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     }
     registry = {}
     for row in db.execute(
-        "SELECT addr,state,current_role,first_qualified_at,consecutive_qualified,consecutive_bad "
+        "SELECT addr,state,current_role,first_qualified_at,consecutive_qualified,consecutive_bad,"
+        "core_nomination_streak,core_omission_streak,core_nomination_started_at,"
+        "core_omission_started_at,last_core_signal_generation "
         "FROM wallet_registry"
     ).fetchall():
         registry[(row[0] or "").lower()] = {
             "state": row[1], "role": row[2], "first_qualified_at": row[3],
             "good": int(row[4] or 0), "bad": int(row[5] or 0),
+            "core_nomination_streak": int(row[6] or 0),
+            "core_omission_streak": int(row[7] or 0),
+            "core_nomination_started_at": row[8],
+            "core_omission_started_at": row[9],
+            "last_core_signal_generation": row[10],
         }
 
     cur = db.execute(
@@ -1122,15 +1394,26 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
-    if True:  # sole production selection path; there is no observation-period mode
+    selection_mode = str(
+        params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
+    ).lower()
+    if selection_mode == "auto":
         # Active means the wallet itself is structurally/economically copyable.  Score orders the bounded
         # candidate pool; the shared-account replay then keeps candidates whose added net profit exceeds
         # their added max-drawdown dollars.  There is no LCB, observation-period or liquidation-count veto.
-        portfolio_candidates = [
+        ranked_candidates = [
             (row.get("addr") or "").lower() for row in profiles
             if row.get("status") in {"active", "qualified"}
             and controls.get((row.get("addr") or "").lower(), True)
-        ][:int(config.MAX_TARGETS)]
+        ]
+        # Active incumbents remain inside the bounded optimizer even when a one-day score move pushes them
+        # below the Challenger cutoff.  Otherwise rank truncation itself becomes an immediate silent exit.
+        incumbent_candidates = [
+            addr for addr in ranked_candidates if previous_roles.get(addr) == selection.CORE
+        ]
+        portfolio_candidates = list(dict.fromkeys(
+            incumbent_candidates + ranked_candidates
+        ))[:int(config.MAX_TARGETS)]
         # If canonical portfolio replay is unavailable, preserve only a still-qualified published Core.
         # Never fabricate production targets from a retired score threshold.
         selected_set = {
@@ -1143,7 +1426,13 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         evaluate = None
         path_fallback = False
         if portfolio_candidates:
-            window_fills = auto_tune._portfolio_window_fills(db, portfolio_candidates, now_ms)
+            replay_addrs = list(dict.fromkeys(
+                portfolio_candidates + [
+                    addr for addr, role in previous_roles.items()
+                    if role == selection.CORE and controls.get(addr, True)
+                ]
+            ))
+            window_fills = auto_tune._portfolio_window_fills(db, replay_addrs, now_ms)
             if (window_fills is None or not any(window_fills.values())) and previous_generation:
                 # Selection did not run. Publishing the still-qualified intersection of the old Core and
                 # the new profile set silently shrinks membership without portfolio evidence. Fail the
@@ -1625,29 +1914,116 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         )
                     portfolio_rejections[addr] = reason
 
+        transition = None
+        if marginal is not None and evaluate is not None:
+            desired_marginal = marginal
+            effective_evaluate = validate if validate_price_path else evaluate
+            transition = _stable_core_transition(
+                profiles,
+                generation_id=generation_id,
+                stamp=stamp,
+                now_ms=now_ms,
+                previous_roles=previous_roles,
+                registry=registry,
+                controls=controls,
+                held=held,
+                desired_order=desired_marginal.selected,
+                strict_evaluate=effective_evaluate,
+                validate_fold=validate_fold,
+                constraints=constraints,
+                copy_policy=copy_policy,
+            )
+            selected_set = set(transition["selected"])
+            core_rank = {
+                addr: rank for rank, addr in enumerate(transition["selected"], 1)
+            }
+            portfolio_utilities.update(transition["utilities"])
+            previous_core_set = {
+                addr for addr, role in previous_roles.items() if role == selection.CORE
+            }
+            search_meta = dict(desired_marginal.search_meta or {})
+            search_meta.update({
+                "desiredSelectedCount": len(transition["desired"]),
+                "publishedSelectedCount": len(transition["selected"]),
+                "desiredOrder": transition["desired"],
+                "softAction": transition["softAction"],
+                "hardExitCount": len(transition["hardRemoved"]),
+                "inactiveExitCount": len(transition["inactiveRemoved"]),
+                "membershipPolicy": "stable-core-v1",
+            })
+            marginal = selection.MarginalSelectionResult(
+                selected=transition["selected"],
+                baseline=effective_evaluate(tuple(sorted(previous_core_set))),
+                metrics=transition["metrics"],
+                action=(
+                    (transition["softAction"] or {}).get("action")
+                    or ("hard_or_inactive_exit" if previous_core_set - selected_set else "keep")
+                ),
+                added=tuple(sorted(selected_set - previous_core_set)),
+                removed=tuple(sorted(previous_core_set - selected_set)),
+                evaluated=desired_marginal.evaluated,
+                search_meta=search_meta,
+            )
+            pipeline_audit._insert_event(
+                db,
+                stamp=audit_stamp or stamp,
+                source="scan",
+                stage="selection_membership_transition",
+                status="ok",
+                reason=(transition["softAction"] or {}).get("action") or (
+                    "activity_or_hard_exit"
+                    if transition["hardRemoved"] or transition["inactiveRemoved"]
+                    else "stable_keep"
+                ),
+                payload={
+                    "generation": generation_id,
+                    "policy": "stable-core-v1",
+                    "previousCount": len(previous_core_set),
+                    "desiredCount": len(transition["desired"]),
+                    "publishedCount": len(transition["selected"]),
+                    "addedCount": len(selected_set - previous_core_set),
+                    "removedCount": len(previous_core_set - selected_set),
+                    "hardExitCount": len(transition["hardRemoved"]),
+                    "inactiveExitCount": len(transition["inactiveRemoved"]),
+                    "softAction": transition["softAction"],
+                    "entryConfirmations": int(getattr(
+                        config, "CORE_ENTRY_CONFIRM_GENERATIONS", 3,
+                    )),
+                    "softConfirmations": int(getattr(
+                        config, "CORE_SOFT_CONFIRM_GENERATIONS", 3,
+                    )),
+                    "keepMaxOpenAgeH": float(copy_policy.keep_max_open_age_h),
+                },
+            )
+
+        transition_reasons = (transition or {}).get("reasons", {})
+        transition_signals = (transition or {}).get("signals", {})
         rows = []
         for row in profiles:
             addr = (row["addr"] or "").lower()
             enabled = controls.get(addr, True)
+            include_selection = True
             refreshed_now = row.get("profile_generation") == generation_id
             data_status = row.get("data_status") or "valid"
             selection_data_status = data_status if refreshed_now or data_status == "deferred_data_error" else "stale"
             active = row.get("status") in {"active", "qualified"}
             previous_role = previous_roles.get(addr) or registry.get(addr, {}).get("role")
-            if data_status == "deferred_data_error" and previous_role == selection.CORE and enabled:
-                role, reason = selection.CORE, "deferred_data_error"
-            elif active and enabled and addr in selected_set:
+            if addr in selected_set and enabled:
                 role = selection.CORE
-                reason = (
+                reason = transition_reasons.get(addr) or (
                     "portfolio_positive_net_contribution" if marginal is not None
-                    else "path_validation_failed_keep_core" if path_fallback
                     else "portfolio_replay_unavailable_keep_core"
                 )
+            elif data_status == "deferred_data_error" and previous_role == selection.CORE and enabled:
+                role, reason = selection.CORE, "deferred_data_error"
             elif addr in held:
-                role, reason = selection.EXIT_ONLY, "exit_only_open_position"
+                role = selection.EXIT_ONLY
+                reason = transition_reasons.get(addr, "exit_only_open_position")
             elif active:
                 role = selection.CHALLENGER
-                if not enabled:
+                if transition_reasons.get(addr):
+                    reason = transition_reasons[addr]
+                elif not enabled:
                     reason = "operator_disabled"
                 elif marginal is not None and addr in portfolio_candidates:
                     reason = portfolio_rejections.get(addr, "portfolio_no_profit_improvement")
@@ -1656,27 +2032,36 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 else:
                     reason = "portfolio_replay_unavailable"
             else:
-                continue
-            rows.append(selection.SelectionRow(
-                addr=addr,
-                role=role,
-                enabled=enabled,
-                reason=reason,
-                utility=portfolio_utilities.get(addr, f(row.get("follow_score"))),
-                follow_score=f(row.get("follow_score")),
-                selection_rank=core_rank.get(addr) if role == selection.CORE else row.get("rank"),
-                data_status=selection_data_status,
-                evidence_status=row.get("evidence_status") or "",
-                model_version=(
-                    "selection-smart-expansion-v1" if marginal is not None
-                    else "selection-path-fallback-v1" if path_fallback
-                    else "selection-replay-unavailable-v1"
-                ),
-                policy_version=copy_policy.version,
-            ))
+                role = selection.CHALLENGER
+                reason = transition_reasons.get(addr, row.get("reason") or "not_qualified")
+                include_selection = False
+            if include_selection:
+                rows.append(selection.SelectionRow(
+                    addr=addr,
+                    role=role,
+                    enabled=enabled,
+                    reason=reason,
+                    utility=portfolio_utilities.get(addr, f(row.get("follow_score"))),
+                    follow_score=f(row.get("follow_score")),
+                    selection_rank=core_rank.get(addr) if role == selection.CORE else row.get("rank"),
+                    data_status=selection_data_status,
+                    evidence_status=row.get("evidence_status") or "",
+                    model_version=(
+                        "selection-stable-core-v1" if transition is not None
+                        else "selection-smart-expansion-v1" if marginal is not None
+                        else "selection-path-fallback-v1" if path_fallback
+                        else "selection-replay-unavailable-v1"
+                    ),
+                    policy_version=copy_policy.version,
+                ))
             lifecycle_state = role if role in {
                 selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY
             } else "qualified"
+            if role not in {selection.CORE, selection.EXIT_ONLY} and not active:
+                lifecycle_state = (
+                    "cooldown" if row.get("evidence_status") == "economically_disqualified"
+                    else "rejected"
+                )
             upsert_wallet_registry(
                 db,
                 addr,
@@ -1687,197 +2072,44 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 data_status=selection_data_status,
                 reason=reason,
                 last_actionable_open_ms=row.get("last_copyable_open_ms"),
+                core_nominated=(transition_signals.get(addr) or {}).get("nominated"),
+                core_signal_valid=(transition_signals.get(addr) or {}).get("valid", False),
+                core_signal_previous_core=(previous_roles.get(addr) == selection.CORE),
             )
             db.execute(
                 "UPDATE profile SET selection_marginal_utility=? WHERE addr=?",
                 (portfolio_utilities.get(addr), addr),
             )
-        return rows, marginal
-    evidences = []
-    row_by_addr = {}
-    for row in profiles:
-        addr = (row["addr"] or "").lower()
-        row_by_addr[addr] = row
-        prior_reg = {} if force_cold_bootstrap else registry.get(addr, {})
-        previous_role = previous_roles.get(addr) or prior_reg.get("role") or selection.CHALLENGER
-        data_status = row.get("data_status") or "valid"
-        refreshed_now = row.get("profile_generation") == generation_id
-        effective_data_status = data_status if refreshed_now or data_status == "deferred_data_error" else "stale"
-        lifecycle_data_status = (
-            "valid" if effective_data_status in {"valid", "rejected"} else effective_data_status
-        )
-        soft_bad = (
-            row.get("status") not in {"active", "qualified"}
-            or row.get("evidence_status") in {"economically_disqualified", "invalid"}
-        )
-        hard_exit = row.get("reason") in _HARD_EXIT_REASONS
-        good_now = lifecycle_data_status == "valid" and row.get("status") in {"active", "qualified"} and not soft_bad
-        bad_now = lifecycle_data_status == "valid" and soft_bad
-        evidences.append(selection.LifecycleEvidence(
-            addr=addr,
-            now_ms=now_ms,
-            current_role=previous_role,
-            data_status=lifecycle_data_status,
-            consecutive_complete_good=int(prior_reg.get("good") or 0) + (1 if good_now else 0),
-            consecutive_soft_bad=int(prior_reg.get("bad") or 0) + (1 if bad_now else 0),
-            last_actionable_open_ms=row.get("last_copyable_open_ms"),
-            oos_closed_n=int(row.get("copy_bt_7d_closed_n") or row.get("copy_bt_closed_n") or 0),
-            positive_probability=f(row.get("copy_positive_probability")),
-            challenger_since_ms=_iso_ms(prior_reg.get("first_qualified_at")),
-            soft_bad=soft_bad,
-            soft_bad_reason=row.get("reason") or "soft_bad",
-            hard_exit=hard_exit,
-            hard_exit_reason=row.get("reason") or "hard_exit",
-            has_open_copy=addr in held,
-        ))
-
-    decisions = {d.addr: d for d in selection.decide_lifecycles(
-        evidences,
-        selection.LifecyclePolicy(
-            entry_complete_generations=(
-                1 if cold_bootstrap else int(getattr(config, "CORE_ENTRY_CONFIRM_GENERATIONS", 2))
-            ),
-            entry_actionable_age_ms=int(copy_policy.entry_max_open_age_h * 3_600_000),
-            entry_oos_closes=int(copy_policy.min_closed_7d),
-            entry_positive_probability=copy_policy.entry_positive_probability,
-            challenger_observation_ms=(
-                0 if cold_bootstrap
-                else int(getattr(config, "CORE_ENTRY_MIN_CHALLENGER_H", 24) * 3_600_000)
-            ),
-            keep_actionable_grace_ms=int(copy_policy.keep_max_open_age_h * 3_600_000),
-            soft_bad_generations=int(getattr(config, "CORE_SOFT_CONFIRM_GENERATIONS", 2)),
-            max_soft_membership_changes=len(evidences),
-        ),
-    )}
-    baseline_core = sorted(
-        addr for addr, decision in decisions.items()
-        if decision.previous_role == selection.CORE and decision.role == selection.CORE
-        and controls.get(addr, True)
-    )[:int(config.MAX_TARGETS)]
-    entry_candidates = [
-        addr for addr, decision in decisions.items()
-        if decision.previous_role != selection.CORE and decision.role == selection.CORE
-        and controls.get(addr, True)
-    ]
-    entry_candidates.sort(key=lambda addr: (
-        -(row_by_addr[addr].get("copy_expected_return") or -1e9),
-        row_by_addr[addr].get("rank") or 999999,
-        addr,
-    ))
-    entry_candidates = entry_candidates[:int(config.MAX_TARGETS)]
-
-    selected_core = tuple(baseline_core)
-    marginal = None
-    if entry_candidates:
-        all_addrs = sorted(set(baseline_core) | set(entry_candidates))
-        window_fills = auto_tune._portfolio_window_fills(db, all_addrs, now_ms)
-        if window_fills is not None and any(window_fills.values()):
-            follow = params.load_follow(db)
-            if "SMART_ADD" in follow:
-                follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
-            sigmas = auto_tune._load_sigmas(db)
-            baseline_n = len(baseline_core)
-
-            def evaluate(addrs):
-                filtered = auto_tune._filter_window_fills_by_addr(window_fills, addrs)
-                windows = auto_tune._candidate_windows(
-                    db, list(addrs), sigmas, follow, now_ms, window_fills=filtered,
-                )
-                return _portfolio_selection_metrics(
-                    windows, baseline_n=baseline_n, selected_n=len(addrs),
-                )
-
-            try:
-                constraints = selection.SelectionConstraints(
-                    min_relative_lcb_improvement=copy_policy.min_marginal_gain,
-                    min_actionable_open_rate=copy_policy.min_actionable_open_rate,
-                    min_capacity_fit=copy_policy.min_capacity_fit,
-                    max_drawdown_worsening=copy_policy.max_drawdown_worsening,
-                    max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
-                    max_targets=int(config.MAX_TARGETS),
-                )
-                marginal = selection.select_core_until_stable(
-                    baseline_core,
-                    entry_candidates,
-                    evaluate,
-                    constraints,
-                    action="bootstrap" if cold_bootstrap else "rebalance",
-                )
-                selected_core = marginal.selected
-            except Exception as exc:  # noqa: BLE001 - never publish a generation with fabricated empty Core
-                raise RuntimeError(f"selection_marginal_replay_failed:{exc}") from exc
-
-    selected_set = set(selected_core)
-    portfolio_rejections = {}
-    portfolio_utilities = {}
-    if marginal is not None:
-        final_metrics = evaluate(selected_core)
-        for addr in selected_core:
-            without = tuple(item for item in selected_core if item != addr)
-            portfolio_utilities[addr] = final_metrics.net_lcb - evaluate(without).net_lcb
-        for addr in entry_candidates:
-            if addr in selected_set:
+        row_addrs = {row.addr for row in rows}
+        for addr in sorted(selected_set - row_addrs):
+            prior = previous_selection.get(addr)
+            if prior is None:
                 continue
-            trial = evaluate(tuple(sorted(selected_set | {addr})))
-            portfolio_rejections[addr] = selection.portfolio_rejection_reason(
-                final_metrics, trial, constraints,
-            )
-    rows = []
-    for addr, decision in sorted(decisions.items()):
-        profile = row_by_addr[addr]
-        enabled = controls.get(addr, True)
-        if addr in selected_set:
-            role, reason = selection.CORE, decision.reason
-        elif addr in held and decision.role != selection.CORE:
-            role, reason = selection.EXIT_ONLY, decision.reason
-        else:
-            role = selection.CHALLENGER
-            reason = portfolio_rejections.get(addr, decision.reason)
-        utility = portfolio_utilities.get(addr)
-        include_selection = (
-            role in {selection.CORE, selection.EXIT_ONLY}
-            or profile.get("status") in {"active", "qualified"}
-            or profile.get("data_status") == "deferred_data_error" and decision.previous_role == selection.CORE
-        )
-        if include_selection:
-            selection_data_status = profile.get("data_status") or "valid"
-            if selection_data_status != "deferred_data_error" and profile.get("profile_generation") != generation_id:
-                selection_data_status = "stale"
             rows.append(selection.SelectionRow(
                 addr=addr,
-                role=role,
-                enabled=enabled,
-                reason=reason,
-                utility=utility,
-                follow_score=f(profile.get("follow_score") or profile.get("score")),
-                data_status=selection_data_status,
-                evidence_status=profile.get("evidence_status") or "",
-                model_version="selection-vnext-1",
+                role=selection.CORE,
+                enabled=prior.enabled,
+                reason=transition_reasons.get(addr, "core_profile_missing_keep"),
+                utility=portfolio_utilities.get(addr, prior.utility),
+                follow_score=prior.follow_score,
+                selection_rank=core_rank.get(addr),
+                data_status="stale",
+                evidence_status=prior.evidence_status,
+                model_version="selection-stable-core-v1",
                 policy_version=copy_policy.version,
             ))
-        lifecycle_state = role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY} else "qualified"
-        if profile.get("data_status") == "deferred_data_error":
-            lifecycle_state = "quarantine" if role != selection.CORE else "core"
-        elif profile.get("status") not in {"active", "qualified"}:
-            lifecycle_state = "rejected"
-        elif profile.get("evidence_status") in {"economically_disqualified", "invalid"}:
-            lifecycle_state = "cooldown"
-        registry_data_status = profile.get("data_status") or "valid"
-        if registry_data_status != "deferred_data_error" and profile.get("profile_generation") != generation_id:
-            registry_data_status = "unobserved"
-        upsert_wallet_registry(
-            db,
-            addr,
-            generation=generation_id,
-            seen_at=stamp,
-            state=lifecycle_state,
-            role=role,
-            data_status=registry_data_status,
-            reason=profile.get("reason"),
-            last_actionable_open_ms=profile.get("last_copyable_open_ms"),
-        )
-        db.execute("UPDATE profile SET selection_marginal_utility=? WHERE addr=?", (utility, addr))
-    return rows, marginal
+            upsert_wallet_registry(
+                db,
+                addr,
+                generation=generation_id,
+                seen_at=stamp,
+                state="core",
+                role=selection.CORE,
+                data_status="unobserved",
+                reason="core_profile_missing_keep",
+            )
+        return rows, marginal
+    raise RuntimeError("explicit selection builder requires FOLLOW_SELECTION_MODE=auto")
 
 
 def _record_explicit_follow_history(db, selection_rows, stamp, previous_core, generation_id):
@@ -2026,6 +2258,68 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
         "status": "ok", "generation": generation_id, "refreshed": len(updates),
         "paramsHash": replay_hash, "replayedAt": stamp,
     }
+
+
+def compare_current_to_tune_profile(db, generation_id=None, *, profile="balanced", stamp=None):
+    """Strict offline A/B: current effective params versus one newly optimized risk profile."""
+    generation_id = generation_id or selection.latest_published_generation(db)
+    current = selection.latest_published_generation(db)
+    if not generation_id or current != generation_id:
+        return {"status": "skipped", "reason": "generation_not_current", "generation": generation_id}
+    progress = db.execute("SELECT state FROM scan_progress WHERE id=1").fetchone()
+    if progress and progress[0] == "scanning":
+        return {"status": "skipped", "reason": "scan_running", "generation": generation_id}
+
+    stamp = stamp or now_iso()
+    now_s = time.time()
+    row = db.execute("SELECT value FROM auto_tune_state WHERE key='async_tuner_lease'").fetchone()
+    try:
+        lease = json.loads(row[0]) if row and row[0] else {}
+    except (TypeError, ValueError):
+        lease = {}
+    lease_pid = int(lease.get("pid") or 0)
+    lease_alive = False
+    if lease_pid and lease_pid != os.getpid():
+        try:
+            os.kill(lease_pid, 0)
+            lease_alive = True
+        except ProcessLookupError:
+            lease_alive = False
+        except PermissionError:
+            lease_alive = True
+    if f(lease.get("expiresAt")) > now_s and lease_pid != os.getpid() and lease_alive:
+        return {"status": "skipped", "reason": "tuner_already_running", "generation": generation_id}
+
+    db.execute(
+        "INSERT INTO auto_tune_state (key,value,updated_at) VALUES ('async_tuner_lease',?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        (json.dumps({
+            "pid": os.getpid(), "generation": generation_id,
+            "purpose": "profile_ab", "expiresAt": now_s + 14400,
+        }), stamp),
+    )
+    db.commit()
+    try:
+        return auto_tune.maybe_tune_margins(
+            db,
+            source="profile_ab",
+            stamp=stamp,
+            dry_run=True,
+            mode="shadow",
+            data_complete=True,
+            expected_generation=generation_id,
+            risk_profile_override=profile,
+            analysis_only=True,
+        )
+    finally:
+        db.execute(
+            "UPDATE auto_tune_state SET value=?,updated_at=? WHERE key='async_tuner_lease'",
+            (json.dumps({
+                "pid": os.getpid(), "generation": generation_id,
+                "purpose": "profile_ab", "expiresAt": 0,
+            }), now_iso()),
+        )
+        db.commit()
 
 
 def tune_published_generation(db, generation_id, stamp=None, source="scan"):

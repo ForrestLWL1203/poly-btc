@@ -44,6 +44,16 @@ class GenerationFoundationTests(unittest.TestCase):
                     id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,stamp TEXT,selected_mult REAL,
                     applied INTEGER,followed_n INTEGER,baseline_json TEXT,result_json TEXT,created_at TEXT
                 );
+                CREATE TABLE wallet_registry (
+                    addr TEXT PRIMARY KEY,state TEXT NOT NULL DEFAULT 'qualified',current_role TEXT,
+                    first_seen_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,first_qualified_at TEXT,
+                    last_qualified_at TEXT,first_core_at TEXT,last_core_at TEXT,last_rejected_at TEXT,
+                    last_reject_reason TEXT,cooldown_until TEXT,data_error_count INTEGER NOT NULL DEFAULT 0,
+                    consecutive_qualified INTEGER NOT NULL DEFAULT 0,consecutive_bad INTEGER NOT NULL DEFAULT 0,
+                    core_entries INTEGER NOT NULL DEFAULT 0,core_exits INTEGER NOT NULL DEFAULT 0,
+                    recovery_count INTEGER NOT NULL DEFAULT 0,last_valid_generation TEXT,
+                    last_evaluated_generation TEXT,last_actionable_open_ms INTEGER,updated_at TEXT NOT NULL
+                );
                 """
             )
             old.commit()
@@ -53,6 +63,7 @@ class GenerationFoundationTests(unittest.TestCase):
             profile_cols = {row[1] for row in db.execute("PRAGMA table_info(profile)")}
             watchlist_cols = {row[1] for row in db.execute("PRAGMA table_info(watchlist)")}
             tune_cols = {row[1] for row in db.execute("PRAGMA table_info(auto_tune_runs)")}
+            registry_cols = {row[1] for row in db.execute("PRAGMA table_info(wallet_registry)")}
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
             self.assertTrue({
@@ -68,6 +79,10 @@ class GenerationFoundationTests(unittest.TestCase):
             self.assertTrue({
                 "generation", "mode", "status", "proposal_json", "validation_json", "rollback_reason",
             }.issubset(tune_cols))
+            self.assertTrue({
+                "core_nomination_streak", "core_omission_streak", "core_nomination_started_at",
+                "core_omission_started_at", "last_core_signal_generation",
+            }.issubset(registry_cols))
             self.assertTrue({
                 "scan_generation", "leaderboard_staging", "wallet_registry", "follow_selection",
             }.issubset(tables))
@@ -142,13 +157,15 @@ class GenerationFoundationTests(unittest.TestCase):
             with db:
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xABC", generation="g1", seen_at="2026-07-11T00:00:00Z",
-                    state="core", last_actionable_open_ms=100,
+                    state="core", last_actionable_open_ms=100, core_nominated=True,
                 )
                 scanner_lifecycle.upsert_wallet_registry(
-                    db, "0xabc", generation="g1", seen_at="2026-07-11T00:01:00Z", state="core"
+                    db, "0xabc", generation="g1", seen_at="2026-07-11T00:01:00Z", state="core",
+                    core_nominated=False,
                 )
                 scanner_lifecycle.upsert_wallet_registry(
-                    db, "0xabc", generation="g2", seen_at="2026-07-12T00:00:00Z", state="challenger"
+                    db, "0xabc", generation="g2", seen_at="2026-07-12T00:00:00Z", state="challenger",
+                    core_nominated=False,
                 )
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xabc", generation="g3", seen_at="2026-07-13T00:00:00Z",
@@ -156,14 +173,16 @@ class GenerationFoundationTests(unittest.TestCase):
                 )
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xabc", generation="g4", seen_at="2026-07-14T00:00:00Z",
-                    state="core", last_actionable_open_ms=90,
+                    state="core", last_actionable_open_ms=90, core_nominated=True,
                 )
 
             row = db.execute(
                 "SELECT state,current_role,consecutive_qualified,data_error_count,core_entries,core_exits,"
-                "recovery_count,last_valid_generation,last_actionable_open_ms FROM wallet_registry WHERE addr='0xabc'"
+                "recovery_count,last_valid_generation,last_actionable_open_ms,core_nomination_streak,"
+                "core_omission_streak,last_core_signal_generation "
+                "FROM wallet_registry WHERE addr='0xabc'"
             ).fetchone()
-            self.assertEqual(row, ("core", "core", 3, 1, 2, 1, 1, "g4", 100))
+            self.assertEqual(row, ("core", "core", 3, 1, 2, 1, 1, "g4", 100, 1, 0, "g4"))
 
     def test_scheduler_preserves_priority_and_applies_time_capacity(self):
         candidates = [f"0xc{i}" for i in range(30)]

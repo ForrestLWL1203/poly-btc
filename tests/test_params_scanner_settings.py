@@ -23,6 +23,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MAX"], 30_000_000.0)
             self.assertFalse(follow["COPY_STOP_ENABLE"])
+            self.assertEqual(scanner["AUTO_TUNE_RISK_PROFILE"], "balanced")
 
     def test_scanner_settings_expose_basic_and_folded_advanced_knobs(self):
         with tempfile.TemporaryDirectory() as td:
@@ -47,6 +48,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertIn("MIN_ACTIVE_SCORE", scanner_keys)
             self.assertIn("EVIDENCE_MIN_DAYS", scanner_keys)
             self.assertIn("EVIDENCE_MIN_TRADES", scanner_keys)
+            self.assertIn("AUTO_TUNE_RISK_PROFILE", scanner_keys)
+            self.assertEqual(levels["AUTO_TUNE_RISK_PROFILE"], "green")
             self.assertEqual(levels["PORTFOLIO_MAX_TURNOVER"], "blue")
             self.assertEqual(levels["EVIDENCE_MIN_TRADES"], "blue")
             self.assertFalse(any(k.startswith("SCORE_") for k in scanner_keys))

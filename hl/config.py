@@ -39,12 +39,15 @@ MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load eve
 # vNext publishes an explicit Core/Challenger selection.  The legacy score-line path remains as a
 # migration fallback until the first successful selection generation is published.
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
-FOLLOW_SELECTION_BOOTSTRAP_ENABLE = True  # cold-start paper DB may form its first Core in one complete generation
+CORE_ENTRY_CONFIRM_GENERATIONS = 3
+CORE_ENTRY_MIN_CHALLENGER_H = 48.0
 CORE_ENTRY_MAX_OPEN_AGE_H = 24.0
 CORE_KEEP_MAX_OPEN_AGE_H = 72.0
 CORE_ENTRY_MIN_OOS_CLOSED = 7
 CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
-CORE_SOFT_CONFIRM_GENERATIONS = 2
+CORE_SOFT_CONFIRM_GENERATIONS = 3
+CORE_SOFT_MIN_WEAK_H = 48.0
+CORE_MAX_SOFT_MEMBERSHIP_CHANGES = 1
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.85
@@ -418,6 +421,7 @@ AUTO_TUNE_MARGIN_ENABLE = True
 # `AUTO_TUNE_MARGIN_ENABLE` is retained for compatibility.  Mode is authoritative for vNext:
 # shadow computes and audits proposals but never writes live execution parameters.
 AUTO_TUNE_MODE = "apply"              # Paper product default: off | shadow | apply
+AUTO_TUNE_RISK_PROFILE = "balanced"   # aggressive | balanced | conservative; one objective runs per scan
 AUTO_TUNE_APPLY_MIN_SHADOW_DAYS = 0    # Paper validates by OOS/holdout/stress;真钱环境改回14
 AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED = 0 # Paper cold-start may apply;真钱环境改回100
 AUTO_TUNE_MIN_DIRECTION_STREAK = 1     # one complete Paper generation;真钱环境建议2
@@ -433,18 +437,17 @@ AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.94      # Paper: current bounded path cach
 CORE_PRICE_PATH_MIN_COVERAGE = 0.94
 CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
 # The path tuner searches a compact neighbourhood around the profitable fills-only Core. It must not drive
-# the entire portfolio to ultra-low leverage merely to reach zero proxy liquidations. Candidate selection
-# requires preserved conservative profit and targets a 20% reduction from the effective path baseline.
+# the entire portfolio to ultra-low leverage merely to reach zero proxy liquidations. The selected risk
+# profile defines how much profit may be traded for path completion and a material liquidation reduction.
 AUTO_TUNE_MARGIN_FACTORS = (0.85, 1.0, 1.15)
 AUTO_TUNE_LEV_CAP_SETS = (
     (35, 12, 4), (32, 12, 4), (30, 11, 4), (30, 10, 4),
     (28, 10, 4), (25, 10, 4), (25, 8, 4),
 )
-AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 11, 10, 9)
-AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 32, 30, 28, 25)
-AUTO_TUNE_COORD_HIGH_LEV_CAPS = (4, 5, 6)
+AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 11, 10, 9, 8, 7)
+AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 32, 30, 28, 25, 22, 20)
+AUTO_TUNE_COORD_HIGH_LEV_CAPS = (2, 3, 4, 5, 6)
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.40, 0.50, 0.60)
-AUTO_TUNE_TARGET_LIQUIDATION_REDUCTION = 0.20
 AUTO_TUNE_SIZING_FINALISTS = 8
 AUTO_TUNE_TIME_BUDGET_SEC = 0  # 0 = no wall-clock cutoff; finite axes/finalist limits bound the tuner.
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.08, 0.12)

@@ -636,6 +636,8 @@ class Backtest:
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
         stops = sum(1 for p in self.closed if p.get("status") == "stopped")
         liquidations = sum(1 for p in self.closed if p.get("status") == "liquidated")
+        natural_closes = max(0, len(self.closed) - stops - liquidations)
+        path_completion_rate = natural_closes / len(self.closed) if self.closed else 1.0
         initial_notl = sum(p["target_initial_notl"] for p in self.closed) + sum(p["target_initial_notl"] for p in self.open.values())
         add_notl = sum(p["target_add_notl"] for p in self.closed) + sum(p["target_add_notl"] for p in self.open.values())
         capacity_skips = sum(self.skip_reasons[k] for k in ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small"))
@@ -700,6 +702,9 @@ class Backtest:
             "wins": wins,
             "stops": stops,
             "liquidations": liquidations,
+            "natural_closes": natural_closes,
+            "path_completion_rate": path_completion_rate,
+            "liquidation_rate": liquidations / len(self.closed) if self.closed else 0.0,
             "copy_win_rate": wins / len(self.closed) if self.closed else 0.0,
             "copy_net_pnl": equity_pnl,
             "closed_net_pnl": closed_net,
@@ -720,6 +725,11 @@ class Backtest:
             "capacity_open_fit": self.opened_n / (self.opened_n + capacity_skips) if (self.opened_n + capacity_skips) else 1.0,
             "actionable_open_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
             "execution_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
+            "behavior_replication_rate": (
+                (self.opened_n / self.target_open_events if self.target_open_events else 1.0)
+                * (1.0 - (self.missed_adds / self.target_adds if self.target_adds else 0.0))
+                * path_completion_rate
+            ),
             "equity_curve": curve,
             "max_drawdown": max_drawdown,
             "worst_day": min(daily_values, default=0.0),
@@ -808,6 +818,12 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     gross = sum(f(position.get("gross_pnl")) for position in positions)
     fees = sum(f(position.get("fee_drag")) for position in positions)
     wins = sum(1 for position in positions if f(position.get("net_pnl")) > 0)
+    stops = sum(1 for position in positions if position.get("status") == "stopped")
+    liquidations = sum(1 for position in positions if position.get("status") == "liquidated")
+    natural_closes = max(0, len(positions) - stops - liquidations)
+    path_completion_rate = natural_closes / len(positions) if positions else 1.0
+    open_rate = f(out.get("actionable_open_rate")) if out.get("actionable_open_rate") is not None else 1.0
+    add_capture = 1.0 - (f(out.get("missed_add_rate")) if out.get("missed_add_rate") is not None else 0.0)
 
     equity = float(config.INITIAL_BALANCE)
     peak = equity
@@ -843,8 +859,12 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     out.update({
         "closed_n": len(positions),
         "wins": wins,
-        "stops": sum(1 for position in positions if position.get("status") == "stopped"),
-        "liquidations": sum(1 for position in positions if position.get("status") == "liquidated"),
+        "stops": stops,
+        "liquidations": liquidations,
+        "natural_closes": natural_closes,
+        "path_completion_rate": path_completion_rate,
+        "liquidation_rate": liquidations / len(positions) if positions else 0.0,
+        "behavior_replication_rate": max(0.0, min(1.0, open_rate * add_capture * path_completion_rate)),
         "ambiguous_liquidations": len(ambiguous_ranges),
         "ambiguous_path_ranges": ambiguous_ranges,
         "copy_win_rate": wins / len(positions) if positions else 0.0,

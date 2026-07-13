@@ -36,6 +36,57 @@ def dedupe_preserve(items):
     return out
 
 
+@dataclass(frozen=True)
+class CoreSignalState:
+    nomination_streak: int = 0
+    omission_streak: int = 0
+    nomination_started_at: str | None = None
+    omission_started_at: str | None = None
+    last_generation: str | None = None
+
+
+def next_core_signal_state(
+    prior: Mapping | None,
+    *,
+    generation: str | None,
+    stamp: str,
+    nominated: bool,
+    previous_core: bool,
+    valid: bool = True,
+) -> CoreSignalState:
+    """Advance desired-Core evidence once per complete profile generation.
+
+    Qualification and desired portfolio membership are deliberately separate signals: every desired wallet
+    is qualified, but a qualified Challenger must not accumulate promotion credit unless the strict shared
+    account optimizer keeps nominating it.
+    """
+    prior = prior or {}
+    state = CoreSignalState(
+        nomination_streak=int(prior.get("core_nomination_streak") or 0),
+        omission_streak=int(prior.get("core_omission_streak") or 0),
+        nomination_started_at=prior.get("core_nomination_started_at"),
+        omission_started_at=prior.get("core_omission_started_at"),
+        last_generation=prior.get("last_core_signal_generation"),
+    )
+    if not valid or not generation or state.last_generation == generation:
+        return state
+    if nominated:
+        return CoreSignalState(
+            nomination_streak=state.nomination_streak + 1,
+            omission_streak=0,
+            nomination_started_at=state.nomination_started_at or stamp,
+            omission_started_at=None,
+            last_generation=generation,
+        )
+    return CoreSignalState(
+        nomination_streak=0,
+        omission_streak=state.omission_streak + 1 if previous_core else 0,
+        nomination_started_at=None,
+        omission_started_at=(state.omission_started_at or stamp) if previous_core else None,
+        last_generation=generation,
+    )
+
+
 def upsert_wallet_registry(
     db: sqlite3.Connection,
     addr: str,
@@ -48,6 +99,9 @@ def upsert_wallet_registry(
     reason: str | None = None,
     cooldown_until: str | None = None,
     last_actionable_open_ms: int | None = None,
+    core_nominated: bool | None = None,
+    core_signal_valid: bool = True,
+    core_signal_previous_core: bool | None = None,
 ) -> dict:
     """Durably record one wallet lifecycle evaluation without committing.
 
@@ -65,7 +119,9 @@ def upsert_wallet_registry(
     cur = db.execute(
         "SELECT state,current_role,first_seen_at,last_seen_at,first_qualified_at,last_qualified_at,"
         "first_core_at,last_core_at,last_rejected_at,last_reject_reason,cooldown_until,data_error_count,"
-        "consecutive_qualified,consecutive_bad,core_entries,core_exits,recovery_count,last_valid_generation,"
+        "consecutive_qualified,consecutive_bad,core_nomination_streak,core_omission_streak,"
+        "core_nomination_started_at,core_omission_started_at,last_core_signal_generation,"
+        "core_entries,core_exits,recovery_count,last_valid_generation,"
         "last_evaluated_generation,last_actionable_open_ms,updated_at FROM wallet_registry WHERE addr=?",
         (addr,),
     )
@@ -99,6 +155,16 @@ def upsert_wallet_registry(
     core_entries = int(old["core_entries"] if old else 0)
     core_exits = int(old["core_exits"] if old else 0)
     recovery_count = int(old["recovery_count"] if old else 0)
+    signal = next_core_signal_state(
+        old,
+        generation=generation,
+        stamp=seen_at,
+        nominated=bool(core_nominated),
+        previous_core=(
+            old_core if core_signal_previous_core is None else bool(core_signal_previous_core)
+        ),
+        valid=bool(core_signal_valid and core_nominated is not None),
+    )
 
     if data_status == "deferred_data_error" and not same_generation:
         data_error_count += 1
@@ -143,6 +209,11 @@ def upsert_wallet_registry(
         "data_error_count": data_error_count,
         "consecutive_qualified": consecutive_qualified,
         "consecutive_bad": consecutive_bad,
+        "core_nomination_streak": signal.nomination_streak,
+        "core_omission_streak": signal.omission_streak,
+        "core_nomination_started_at": signal.nomination_started_at,
+        "core_omission_started_at": signal.omission_started_at,
+        "last_core_signal_generation": signal.last_generation,
         "core_entries": core_entries,
         "core_exits": core_exits,
         "recovery_count": recovery_count,

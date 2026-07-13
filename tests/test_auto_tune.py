@@ -8,6 +8,35 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_strict_tune_comparison_reports_profit_and_liquidation_tradeoff(self):
+        baseline = {
+            "copy_net_pnl": 10_000.0, "closed_n": 20, "liquidations": 5,
+            "max_drawdown": .30, "path_completion_rate": .75,
+            "behavior_replication_rate": .60, "actionable_open_rate": .90,
+            "capacity_open_fit": .90,
+        }
+        candidate = {
+            "copy_net_pnl": 8_500.0, "closed_n": 20, "liquidations": 2,
+            "max_drawdown": .18, "path_completion_rate": .90,
+            "behavior_replication_rate": .82, "actionable_open_rate": .94,
+            "capacity_open_fit": .92,
+        }
+
+        with patch.object(auto_tune, "evaluate_portfolio_window", side_effect=[baseline, candidate]) as replay:
+            comparison = auto_tune.strict_tune_comparison(
+                None, ["0xaaa"], {"MID_LEV_CAP": 10}, {"MID_LEV_CAP": 7},
+                sigmas={}, now_ms=1, window_fills={30: [{}]}, risk_profile="balanced",
+            )
+
+        self.assertEqual(replay.call_count, 2)
+        self.assertEqual(comparison["baseline"]["netPnl"], 10_000.0)
+        self.assertEqual(comparison["candidate"]["netPnl"], 8_500.0)
+        self.assertEqual(comparison["delta"]["netPnl"], -1_500.0)
+        self.assertAlmostEqual(comparison["delta"]["netPnlPct"], -.15)
+        self.assertEqual(comparison["delta"]["liquidationsAvoided"], 3)
+        self.assertAlmostEqual(comparison["delta"]["liquidationReductionPct"], .60)
+        self.assertAlmostEqual(comparison["delta"]["behaviorReplicationPctPoints"], .22)
+
     def test_generation_bound_tune_skips_if_generation_changes_before_apply(self):
         db = self._db()
         params.seed_params(db)
@@ -48,7 +77,7 @@ class AutoTuneTests(unittest.TestCase):
                 patch.object(auto_tune, "independent_margin_candidates", side_effect=candidate_axis), \
                 patch.object(auto_tune, "deploy_candidates", side_effect=candidate_axis), \
                 patch.object(auto_tune, "evaluate_tune_candidate", side_effect=evaluate), \
-                patch.object(auto_tune, "choose_margin_candidate", side_effect=lambda rows, _base: rows[0]), \
+                patch.object(auto_tune, "choose_margin_candidate", side_effect=lambda rows, _base, *_args: rows[0]), \
                 patch.object(auto_tune, "add_candidates_from_axes", return_value=[]), \
                 patch.object(auto_tune, "_walk_forward_validation", return_value={}), \
                 patch.object(auto_tune, "_proposal_apply_eligibility", side_effect=generation_changes):
@@ -138,6 +167,33 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertEqual(selected["mult"], 1.25)
         self.assertEqual(selected["windows"][30]["copy_net_pnl"], 1800)
+
+    def test_risk_profiles_run_one_objective_and_trade_profit_for_path_survival(self):
+        def candidate(pnl, liqs, path):
+            windows = {}
+            for days, scale in ((30, 1.0), (14, .5), (7, .25)):
+                windows[days] = {
+                    "copy_net_pnl": pnl * scale,
+                    "closed_n": 20,
+                    "open_fill_rate": .92,
+                    "capacity_open_fit": .92,
+                    "liquidations": liqs,
+                    "path_completion_rate": path,
+                    "behavior_replication_rate": path * .92,
+                    "target_open_events": 20,
+                    "skip_reasons": {},
+                }
+            return {"mult": pnl, "windows": windows}
+
+        baseline = candidate(1000, 5, .75)
+        profit = candidate(2000, 5, .75)
+        balanced = candidate(1700, 2, .90)
+        conservative = candidate(1200, 0, 1.0)
+        rows = [baseline, profit, balanced, conservative]
+
+        self.assertIs(auto_tune.choose_margin_candidate(rows, baseline, "aggressive"), profit)
+        self.assertIs(auto_tune.choose_margin_candidate(rows, baseline, "balanced"), balanced)
+        self.assertIs(auto_tune.choose_margin_candidate(rows, baseline, "conservative"), conservative)
 
     def test_diverse_sizing_candidates_reserves_slots_per_leverage_tuple(self):
         def candidate(levs, pnl):
@@ -321,6 +377,8 @@ class AutoTuneTests(unittest.TestCase):
     def test_maybe_tune_margins_writes_add_params_after_sizing_grid(self):
         db = self._db()
         params.seed_params(db)
+        db.execute("UPDATE params SET value='aggressive' WHERE key='AUTO_TUNE_RISK_PROFILE'")
+        db.commit()
         base_windows = {
             30: {"copy_net_pnl": 1000, "closed_n": 10, "capacity_open_fit": 0.9,
                  "liquidations": 0, "target_open_events": 10, "skip_reasons": {}},
@@ -565,6 +623,95 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertTrue(result["eligible"])
         self.assertNotIn("stress_liquidation", result["reasons"])
+
+    def test_balanced_validation_accepts_profit_retention_with_material_safety_gain(self):
+        folds = [
+            {
+                "baselineNet": 100.0, "challengerNet": 80.0,
+                "baselineClosedN": 10, "challengerClosedN": 10,
+                "baselineLiquidations": 2, "challengerLiquidations": 1,
+                "baselinePathCompletionRate": .70, "challengerPathCompletionRate": .90,
+                "baselineReplicationRate": .65, "challengerReplicationRate": .84,
+                "challengerOpenRate": .90, "challengerCapacityFit": .90,
+            }
+            for _ in range(3)
+        ]
+        validation = {
+            "folds": folds,
+            "holdout": folds[-1],
+            "baselineStressNet": 100.0,
+            "stressNet": 80.0,
+            "baselineStressLiquidations": 2,
+            "stressLiquidations": 1,
+        }
+        policy = auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": 0.05})
+
+        result = auto_tune._model_validation(validation, policy, risk_profile="balanced")
+
+        self.assertTrue(result["eligible"], result["reasons"])
+        self.assertEqual(result["riskProfile"], "balanced")
+
+    def test_balanced_validation_rejects_low_open_capture_even_when_liquidations_fall(self):
+        folds = [
+            {
+                "baselineNet": 100.0, "challengerNet": 80.0,
+                "baselineClosedN": 10, "challengerClosedN": 10,
+                "baselineLiquidations": 2, "challengerLiquidations": 0,
+                "baselinePathCompletionRate": .70, "challengerPathCompletionRate": 1.0,
+                "baselineReplicationRate": .65, "challengerReplicationRate": .50,
+                "challengerOpenRate": .50, "challengerCapacityFit": .90,
+            }
+            for _ in range(3)
+        ]
+        validation = {
+            "folds": folds, "holdout": folds[-1],
+            "baselineStressNet": 100.0, "stressNet": 80.0,
+            "baselineStressLiquidations": 2, "stressLiquidations": 0,
+        }
+        policy = auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": 0.05})
+
+        result = auto_tune._model_validation(validation, policy, risk_profile="balanced")
+
+        self.assertFalse(result["eligible"])
+        self.assertIn("open_rate_below_floor", result["reasons"])
+
+    def test_balanced_forward_check_keeps_intentional_profit_tradeoff_when_safety_improves(self):
+        db = self._db()
+        params.seed_params(db)
+        current = {key: 1.0 for key in auto_tune.TUNE_KEYS + auto_tune.ADD_TUNE_KEYS}
+        auto_tune._state_set(db, "active_tune_rollback", {
+            "appliedAt": "2026-01-01T00:00:00Z",
+            "addrs": ["0xaaa"],
+            "oldParams": current,
+            "newParams": current,
+            "resolved": False,
+        })
+        db.commit()
+        champion = {
+            "copy_net_pnl": 1000.0,
+            "closed_n": 10,
+            "liquidations": 4,
+            "path_completion_rate": .60,
+            "behavior_replication_rate": .55,
+        }
+        applied = {
+            "copy_net_pnl": 850.0,
+            "closed_n": 10,
+            "liquidations": 2,
+            "path_completion_rate": .80,
+            "behavior_replication_rate": .78,
+        }
+
+        with patch.object(auto_tune, "_load_portfolio_fills", return_value=[{}]), \
+                patch.object(auto_tune, "run_backtest", side_effect=[champion, applied]):
+            result = auto_tune._maybe_rollback_applied(
+                db, params.load_follow(db), 2_000_000_000_000,
+                risk_profile="balanced",
+            )
+
+        self.assertEqual(result["status"], "kept")
+        self.assertTrue(result["safetyImproved"])
+        self.assertEqual(result["riskProfile"], "balanced")
 
     def test_choose_follow_line_by_portfolio_prefers_profitable_prefix(self):
         db = self._db()
