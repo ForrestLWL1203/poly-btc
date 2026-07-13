@@ -870,9 +870,27 @@ def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
         ), 1.0
     )
     candidates = [_candidate_from_params(dict(base), axis="independent_margins")]
+    floors = {
+        key: float(follow.get(key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")) or 0.0)
+        for key in MARGIN_KEYS
+    }
+    # Safety tuning needs at least one coherent all-tier contraction. Coordinate-only changes can leave
+    # another tier consuming the same shared cash and make a genuinely safer surface look ineffective.
+    for factor in factors:
+        if abs(float(factor) - 1.0) <= 1e-12:
+            continue
+        candidates.append(_candidate_from_params(
+            {
+                **base,
+                **{
+                    key: max(floors[key], float(base[key]) * float(factor))
+                    for key in MARGIN_KEYS
+                },
+            },
+            axis="all_tier_margins",
+        ))
     for key in MARGIN_KEYS:
-        floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
-        floor = float(follow.get(floor_key) or 0.0)
+        floor = floors[key]
         for value in sorted({max(floor, float(base[key]) * factor) for factor in factors}):
             if abs(value - float(base[key])) <= 1e-12:
                 continue
@@ -917,6 +935,10 @@ def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
         return [float(base_params[key])]
     primary = lambda row: (row.get("windows") or {}).get(30) or {}
     picks = [baseline]
+    if normalize_risk_profile(risk_profile) != "aggressive":
+        # Always preserve the deepest safe endpoint. Without this sentinel the profit-led shortlist
+        # repeatedly trims 20x/7x/2x before the shared-account replay can measure their capital benefit.
+        picks.append(min(rows, key=lambda row: float((row.get("params") or base_params)[key])))
     picks.append(max(rows, key=lambda row: _result_pnl(primary(row))))
     picks.append(min(rows, key=lambda row: (
         int(primary(row).get("liquidations") or 0), -_result_pnl(primary(row)),
@@ -2071,7 +2093,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )
     tier_values = {
         key: _tier_leverage_shortlist(
-            axis_quick, quick_baseline, key, limit=3, risk_profile=risk_profile,
+            axis_quick, quick_baseline, key,
+            limit=4 if risk_profile != "aggressive" else 3,
+            risk_profile=risk_profile,
         )
         for key in LEV_KEYS
     }
@@ -2092,6 +2116,33 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     quick_finalists = _sorted_tune_candidates(
         quick_valid or [quick_baseline], quick_baseline, risk_profile,
     )[:sizing_limit]
+    if risk_profile != "aggressive":
+        directed_quick = [
+            candidate for candidate in (quick_valid or [quick_baseline])
+            if _profile_direction_ok(candidate, quick_baseline, risk_profile)
+        ]
+        primary = lambda row: (row.get("windows") or {}).get(30) or {}
+        sentinels = [
+            min(directed_quick, key=lambda row: (
+                int(primary(row).get("liquidations") or 0),
+                float(primary(row).get("max_drawdown") or 0.0),
+                -_result_pnl(primary(row)),
+            )),
+            min(directed_quick, key=lambda row: float(primary(row).get("max_drawdown") or 0.0)),
+            min(directed_quick, key=lambda row: sum(
+                float((row.get("params") or base)[key]) for key in LEV_KEYS
+            )),
+            max(directed_quick, key=lambda row: _result_replication_rate(primary(row))),
+        ] if directed_quick else []
+        seen = {
+            tuple(round(float((candidate.get("params") or base)[key]), 12) for key in TUNE_KEYS)
+            for candidate in quick_finalists
+        }
+        for candidate in sentinels:
+            marker = tuple(round(float((candidate.get("params") or base)[key]), 12) for key in TUNE_KEYS)
+            if marker not in seen:
+                seen.add(marker)
+                quick_finalists.append(candidate)
     if not any(_same_tune_values(candidate.get("params") or {}, base) for candidate in quick_finalists):
         quick_finalists.append(quick_baseline)
     joint_candidates = []

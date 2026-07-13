@@ -296,6 +296,51 @@ class AutoTuneTests(unittest.TestCase):
             row["STABLE_LEV_CAP"] != 32 and row["MID_LEV_CAP"] != 12 for row in values
         ))
 
+    def test_balanced_leverage_shortlist_keeps_deepest_safe_endpoint(self):
+        base = {
+            "STABLE_MARGIN_PCT": .08, "MID_MARGIN_PCT": .05, "HIGH_MARGIN_PCT": .03,
+            "STABLE_LEV_CAP": 30.0, "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0,
+            "DEPLOY_FULL_PCT": .60,
+        }
+        rows = []
+        for lev, pnl in ((30, 1000), (28, 990), (25, 800), (20, 500)):
+            candidate = auto_tune._candidate_from_params(
+                {**base, "STABLE_LEV_CAP": lev}, axis="test",
+            )
+            candidate["windows"] = {30: {
+                "copy_net_pnl": pnl, "closed_n": 20, "liquidations": 4,
+                "max_drawdown": .1, "open_fill_rate": .9, "capacity_open_fit": .9,
+                "target_open_events": 20, "skip_reasons": {},
+            }}
+            rows.append(candidate)
+
+        values = auto_tune._tier_leverage_shortlist(
+            rows, rows[0], "STABLE_LEV_CAP", limit=2, risk_profile="balanced",
+        )
+
+        self.assertEqual(values, [30.0, 20.0])
+
+    def test_margin_polish_includes_coherent_all_tier_contraction(self):
+        base = {
+            "STABLE_MARGIN_PCT": .08, "MID_MARGIN_PCT": .05, "HIGH_MARGIN_PCT": .03,
+            "STABLE_LEV_CAP": 30.0, "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0,
+            "DEPLOY_FULL_PCT": .60,
+        }
+        follow = {
+            "STABLE_MARGIN_MIN_PCT": .01, "MID_MARGIN_MIN_PCT": .01,
+            "HIGH_MARGIN_MIN_PCT": .01,
+        }
+
+        candidates = auto_tune.independent_margin_candidates(base, follow)
+        all_tier = [row for row in candidates if row.get("axis") == "all_tier_margins"]
+
+        self.assertTrue(any(
+            row["params"]["STABLE_MARGIN_PCT"] < base["STABLE_MARGIN_PCT"]
+            and row["params"]["MID_MARGIN_PCT"] < base["MID_MARGIN_PCT"]
+            and row["params"]["HIGH_MARGIN_PCT"] < base["HIGH_MARGIN_PCT"]
+            for row in all_tier
+        ))
+
     def test_margin_baseline_tracks_manual_values_not_last_auto_values(self):
         db = self._db()
         base = {"STABLE_MARGIN_PCT": 0.015, "MID_MARGIN_PCT": 0.015, "HIGH_MARGIN_PCT": 0.010}
