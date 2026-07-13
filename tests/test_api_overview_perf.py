@@ -75,7 +75,6 @@ class ApiOverviewPerfTests(unittest.TestCase):
         self.assertIsNotNone(util.find_spec("hl.api_overview"))
         api_overview = import_module("hl.api_overview")
 
-        self.assertTrue(callable(api_overview.ep_shadow))
         self.assertTrue(callable(api_overview.ep_overview))
         self.assertTrue(callable(api_overview.ep_equity))
         self.assertTrue(callable(api_overview.ep_insights))

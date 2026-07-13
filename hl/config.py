@@ -100,9 +100,6 @@ POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet's in-memory cu
 POLL_CONCURRENCY = 10      # signal-poll fan-out: fetch this many wallets' fills concurrently. The global
 #                            pacer still spaces the SPAWN of each POST, but the network round-trips overlap
 #                            instead of running serially → a round's wall-time ≈ (N × pace), not (N × (pace+RTT)).
-ORDER_POLL_S = 60          # frontendOpenOrders (target limit-order INTENTIONS — display/analysis, NOT the copy
-#                            hot path) polled at most this often. Was ~continuous (5s) and cost 1 weight-20 call
-#                            PER wallet, stealing ~half the REST budget from the fill signal → doubled copy LAG.
 LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup only needs the overlap
 ACCOUNT_STATS_RETENTION_DAYS = 365  # keep the dashboard equity curve bounded (5-minute snapshots)
 #                                window; the rest is audit) — keeps the only unbounded table bounded
@@ -242,20 +239,12 @@ RECONCILE_INTERVAL_S = 300  # 5 min
 # Copy-strategy knobs (UI-tunable; no hardcoded magic). None = disabled.
 # Chase guard: on a fast spike the master eats the book with size and our taker fill lands worse.
 # If our entry price is more than this % worse than the master's, SKIP that open (don't chase).
-# Applies to taker opens only (maker rests passively; exits are never blocked — always follow out).
+# Applies to new opens only; exits are never blocked and always follow out.
 MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.5% worse than master
 
-# Execution model (paper fidelity). We ALWAYS price off the CURRENT book at detection (never the
-# master's fill price — that's only a fallback when the book isn't ready). The only question is which
-# SIDE: a copy reacts seconds LATE (forward-only REST poll), so we can't retroactively have rested at
-# the master's maker price — to actually hold the position the master is in, we cross the spread (taker
-# catch-up). Pricing a late maker fill at the passive side silently assumes an instant, never-missed
-# rest = optimistic paper PnL. Default OFF = honest taker catch-up for ALL fills. Flip ON only once we
-# proactively mirror a target's resting order we saw AHEAD of its fill (target_orders) — then a maker
-# fill is legitimately reproducible. Until that exists, leave OFF so paper PnL doesn't flatter live.
-EXEC_MAKER_MIRROR = True      # maker book rests at the passive book side on the target's maker fills (saves the
-#                              spread vs crossing) — only fires when our_maker=True, so the taker book (always
-#                              our_maker=False) is unaffected; assumes our rest fills (optimistic; 戳破 = v2).
+# Execution model (paper fidelity). We price off the current book at detection and always cross the spread.
+# A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
+# Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
 # Stage-1 leaderboard prefilter (UI-tunable). The leaderboard carries each wallet's 24h/7d/30d/allTime
 # perf in ONE bulk fetch, so we pre-bias on what it CAN reliably say — multi-window profitability +
@@ -536,10 +525,6 @@ STOP_MARGIN_PCT  = 0.70     # cut when unrealized loss ≥ this fraction of the 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
 TAKER_FEE = 0.00045          # detection latency, so all three resolve to the same live-book price
-MAKER_FEE = 0.00015          # 1.5bp — maker-shadow account fills passively (resting limit), pays the maker rate
-MAKER_THROUGH_WINDOW_MS = 20000  # v2 戳破: rolling window over which we track a coin's price extreme to decide
-#                                 whether the price traded THROUGH our resting maker price (else we didn't fill)
-SHADOW_MAKER_ENABLED = True  # gate the parallel maker-shadow book (turn on once the taker refactor is verified)
 NOTIONAL = 1000.0            # fixed paper notional per copied trade ($)
 BOOK_HIST_S = max(LATENCIES) + 3  # (legacy) bbo history depth — REST mode prices off current bbo only
 

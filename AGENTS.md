@@ -175,8 +175,9 @@ only when its generation matches the current published generation.
   `l2Book`.
 - Observer loads enabled Core addresses from the current published selection. Existing positions for removed,
   disabled, or no-longer-Core wallets stay exit-only.
-- Copy state is persisted in `copy_position` and `copy_action`; taker and optional maker-shadow books are
-  separate. Live `copy_position` PnL includes realized closed PnL plus unrealized PnL for open rows.
+- Copy state is persisted in `copy_position` and `copy_action`. Paper execution is taker-only; maker execution
+  will be designed separately before a real-money deployment. Live `copy_position` PnL includes realized closed
+  PnL plus unrealized PnL for open rows.
 - Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
   through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
   remain hard execution boundaries.
@@ -188,7 +189,7 @@ only when its generation matches the current published generation.
 
 The dashboard reads the API and controls workers through the command/params plane. Important endpoints include:
 
-- `/api/overview`, `/api/positions`, `/api/history`, `/api/shadow`;
+- `/api/overview`, `/api/positions`, `/api/history`;
 - `/api/wallets?tab=followed|challenger|dropped`;
 - `/api/wallets/{address}` for lazy wallet details;
 - `/api/positions/{id}` for lazy position detail;

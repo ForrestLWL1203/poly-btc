@@ -15,7 +15,7 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("/api/params", api_routes.GET_ROUTES)
         self.assertIn("/api/scan-status", api_routes.GET_ROUTES)
         self.assertIn("/api/score-dist", api_routes.GET_ROUTES)
-        self.assertIn("/api/shadow", api_routes.GET_ROUTES)
+        self.assertNotIn("/api/shadow", api_routes.GET_ROUTES)
 
         prefixes = [prefix for prefix, _handler in api_routes.GET_PREFIX_ROUTES]
         self.assertIn("/api/positions/", prefixes)

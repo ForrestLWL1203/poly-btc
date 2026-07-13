@@ -35,9 +35,9 @@ def _start_adaptive_pace(db_path, slow_interval):
                 "SELECT generation FROM scan_generation WHERE status='published' AND complete=1 "
                 "AND is_current=1 ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            open_n = sum(con.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE status='open'"
-            ).fetchone()[0] for table in ("copy_position", "shadow_position"))
+            open_n = con.execute(
+                "SELECT COUNT(*) FROM copy_position WHERE status='open'"
+            ).fetchone()[0]
             if generation:
                 target_n = con.execute(
                     "SELECT COUNT(*) FROM follow_selection fs LEFT JOIN target_controls tc ON tc.addr=fs.addr "

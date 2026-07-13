@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +7,37 @@ from hl import storage
 
 
 class StorageIndexTests(unittest.TestCase):
+    def test_existing_maker_shadow_tables_and_param_are_retired(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "hl.db")
+            legacy = sqlite3.connect(path)
+            for table in ("shadow_account", "shadow_position", "shadow_action", "shadow_order", "target_orders"):
+                legacy.execute(f"CREATE TABLE {table} (id INTEGER)")
+            legacy.execute("CREATE TABLE params (key TEXT PRIMARY KEY, value TEXT)")
+            legacy.execute("INSERT INTO params (key,value) VALUES ('EXEC_MAKER_MIRROR','true')")
+            legacy.commit()
+            legacy.close()
+
+            db = storage.connect(path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            tables = {row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            self.assertTrue({
+                "shadow_account", "shadow_position", "shadow_action", "shadow_order", "target_orders"
+            }.isdisjoint(tables))
+            self.assertIsNone(db.execute(
+                "SELECT value FROM params WHERE key='EXEC_MAKER_MIRROR'"
+            ).fetchone())
+            db.execute("ALTER TABLE copy_action ADD COLUMN maker INTEGER")
+            db.commit()
+            db.close()
+
+            db = storage.connect(path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            self.assertNotIn("maker", {
+                row[1] for row in db.execute("PRAGMA table_info(copy_action)").fetchall()
+            })
+            db.close()
+
     def test_hot_query_indexes_are_created(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

@@ -39,10 +39,9 @@ def main() -> int:
         seed = {a: seed.get(a, set()) for a in addrs}
         if not addrs:
             published = selection.latest_published_generation(db)
-            held_n = sum(
-                db.execute(f"SELECT COUNT(DISTINCT addr) FROM {table} WHERE status='open'").fetchone()[0]
-                for table in ("copy_position", "shadow_position")
-            )
+            held_n = db.execute(
+                "SELECT COUNT(DISTINCT addr) FROM copy_position WHERE status='open'"
+            ).fetchone()[0]
             if published is None:
                 print("no published Core yet; observer is running idle and waiting for the first scan.")
             elif not held_n:

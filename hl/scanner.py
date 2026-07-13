@@ -1078,11 +1078,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         )
     )
 
-    held = {
-        (addr or "").lower()
-        for table in ("copy_position", "shadow_position")
-        for (addr,) in db.execute(f"SELECT DISTINCT addr FROM {table} WHERE status='open'").fetchall()
-    }
+    held = {(addr or "").lower() for (addr,) in db.execute(
+        "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+    ).fetchall()}
     controls = {
         (addr or "").lower(): bool(enabled)
         for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
@@ -2729,11 +2727,9 @@ def scan(db, p) -> None:
     warmup_backfill_addrs = _copy_warmup_backfill_addrs(
         db, now_ms - config.PROFILE_FETCH_DAYS * 86400_000,
     )
-    position_addrs = sorted({
-        (addr or "").lower()
-        for table in ("copy_position", "shadow_position")
-        for (addr,) in db.execute(f"SELECT DISTINCT addr FROM {table} WHERE status='open'").fetchall()
-    })
+    position_addrs = sorted({(addr or "").lower() for (addr,) in db.execute(
+        "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+    ).fetchall()})
     cand_set = set(cand)
     off_list_qualified = [addr for addr in qualified_addrs if addr not in cand_set]
     near_threshold = [r[0] for r in db.execute(

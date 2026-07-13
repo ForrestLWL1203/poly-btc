@@ -103,6 +103,14 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("--bundle", build)
         self.assertIn("--format=iife", build)
 
+    def test_maker_shadow_ui_is_retired(self):
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+
+        self.assertFalse((ROOT / "web" / "components" / "ShadowCompare.jsx").exists())
+        self.assertNotIn("ShadowCompare", jsx)
+        self.assertNotIn("影子对比", jsx)
+        self.assertNotIn('"shadow"', jsx)
+
     def test_positions_page_is_split_from_dashboard_shell(self):
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
         positions = ROOT / "web" / "components" / "Positions.jsx"
