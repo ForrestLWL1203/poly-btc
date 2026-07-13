@@ -43,7 +43,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
         source = inspect.getsource(scanner._build_explicit_selection)
 
-        self.assertIn('f(path_primary.get("copy_net_pnl")) > 0', source)
+        self.assertIn("if path_net <= 0", source)
         self.assertNotIn("path_rejected", source)
 
     def open_db(self, td):
@@ -156,6 +156,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_complete_scan_publishes_generation_and_explicit_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
+            now_calls = 0
+
+            def scan_time():
+                nonlocal now_calls
+                now_calls += 1
+                return "2026-01-01T00:00:00Z" if now_calls <= 2 else "2026-01-01T00:01:00Z"
 
             def fake_profile(db_, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
@@ -186,18 +192,22 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
+                    patch.object(scanner, "now_iso", side_effect=scan_time), \
+                    patch.object(scanner.generation, "now_iso", return_value="2026-01-01T00:01:00Z"), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}) as launch, \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
 
             current = db.execute(
-                "SELECT generation,profile_complete FROM scan_generation "
+                "SELECT generation,profile_complete,ready_at,published_at,started_at FROM scan_generation "
                 "WHERE is_current=1 AND status='published'"
             ).fetchone()
             selection_row = db.execute(
                 "SELECT generation,addr,role,data_status,evidence_status FROM follow_selection"
             ).fetchone()
             self.assertEqual(current[1], 1)
+            self.assertEqual(current[3], current[2])
+            self.assertGreater(current[3], current[4])
             self.assertEqual(selection_row, (current[0], "0xaaa", "challenger", "valid", "missing"))
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
             launch.assert_called_once()
@@ -446,6 +456,91 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 ("0xaaa", "challenger", "portfolio_replay_unavailable"),
             ])
             self.assertEqual(rows[0].utility, 0.71)
+
+    def test_path_validation_failure_records_metrics_and_explicit_fallback_reason(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g0','published',1,1,1,'old','old')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES('g0','0xold','core',1,'old')"
+            )
+            cols = storage.PROFILE_COLS.split(",")
+            for addr, score in (("0xold", .8), ("0xnew", .9)):
+                profile = {
+                    "addr": addr, "status": "active", "score": score,
+                    "profile_generation": "g1", "data_status": "valid",
+                    "evidence_status": "qualified",
+                }
+                db.execute(
+                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
+                    f"VALUES ({','.join('?' for _ in cols)})",
+                    [profile.get(col) for col in cols],
+                )
+                db.execute(
+                    "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(?,?,?,'now')",
+                    (1 if addr == "0xnew" else 2, addr, score),
+                )
+            db.commit()
+            marginal = scanner.selection.MarginalSelectionResult(
+                selected=("0xnew",),
+                baseline=scanner.selection.PortfolioMetrics(0, 0, 0, 1, 1, 0, 0, 0),
+                metrics=scanner.selection.PortfolioMetrics(
+                    100, 100, 0, 1, 1, .01, .1, .01,
+                    net_pnl=100, drawdown_dollars=10, risk_adjusted_utility=90,
+                ),
+                action="replace", added=("0xnew",), removed=("0xold",),
+            )
+            fills = [
+                {"user": addr, "coin": "BTC", "time": 1000, "tid": index,
+                 "side": "B", "sz": "1", "startPosition": "0", "px": "100"}
+                for index, addr in enumerate(("0xold", "0xnew"), 1)
+            ]
+
+            def evaluate(_db, _addrs, _sigmas, _follow, _now_ms, **kwargs):
+                if kwargs.get("path_rows") is not None:
+                    return {
+                        "copy_net_pnl": -25, "maintenance_margin_coverage": .91,
+                        "liquidations": 2, "ambiguous_liquidations": 1,
+                        "price_path_boundary_skips": 3,
+                    }
+                return {
+                    "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
+                    "capacity_open_fit": .95, "max_drawdown": .01,
+                }
+
+            with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: fills}), \
+                    patch.object(scanner.auto_tune, "evaluate_portfolio_window", side_effect=evaluate), \
+                    patch.object(scanner.selection, "search_smart_core", return_value=marginal), \
+                    patch("hl.price_path.coins_for_fills", return_value=["BTC"]), \
+                    patch("hl.price_path.load_refined", return_value=[{"coin": "BTC", "time": 1000}]), \
+                    patch("hl.price_path.coverage", return_value={
+                        "coverage": .90, "expected": 100, "observed": 90,
+                        "missingCoins": ["BTC"],
+                    }):
+                rows, result = scanner._build_explicit_selection(
+                    db, "g1", "published-at", 10_000, audit_stamp="scan-start",
+                )
+
+            self.assertIsNone(result)
+            roles = {row.addr: (row.role, row.reason) for row in rows}
+            self.assertEqual(roles["0xold"], ("core", "path_validation_failed_keep_core"))
+            self.assertEqual(roles["0xnew"], ("challenger", "path_validation_failed"))
+            audit = db.execute(
+                "SELECT stamp,status,reason,payload_json FROM pipeline_audit "
+                "WHERE stage='selection_path_validation'"
+            ).fetchone()
+            self.assertEqual(audit[:3], (
+                "scan-start", "fallback", "price_path_coverage_low,maintenance_margin_coverage_low,path_net_nonpositive",
+            ))
+            self.assertIn('"candidateCore": ["0xnew"]', audit[3])
+            self.assertIn('"effectiveCore": ["0xold"]', audit[3])
+            self.assertIn('"pathNetPnl": -25.0', audit[3])
 
     def test_positive_portfolio_contribution_can_rescue_active_wallet_below_score_line(self):
         with tempfile.TemporaryDirectory() as td:

@@ -969,7 +969,7 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
 
 
 def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False,
-                              validate_price_path=True):
+                              validate_price_path=True, audit_stamp=None):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     copy_policy = load_copy_policy()
     previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
@@ -1054,6 +1054,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         portfolio_utilities = {}
         marginal = None
         evaluate = None
+        path_fallback = False
         if portfolio_candidates:
             window_fills = auto_tune._portfolio_window_fills(db, portfolio_candidates, now_ms)
             if window_fills is not None and any(window_fills.values()):
@@ -1156,35 +1157,78 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         if (fill.get("user") or "").lower() in selected_set
                     ]
                     from . import price_path
-                if selected_set and validate_price_path and price_path.coins_for_fills(selected_fills):
-                    path_start = now_ms - (
-                        30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
-                    ) * 86_400_000
-                    path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
-                    path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
-                    # Price paths validate the fills-only Core as one shared account.  They do not eject an
-                    # individual wallet under an arbitrary pre-tune leverage surface, but a path-adjusted
-                    # portfolio that is no longer profitable must not replace the last published Core.
-                    path_follow = {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
-                    path_primary = auto_tune.evaluate_portfolio_window(
-                        db, sorted(selected_set), sigmas,
-                        path_follow, now_ms,
-                        window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
-                        path_rows=path_rows, path_meta=path_meta,
-                    )
-                    path_ok = not selected_set or (
-                        float(path_meta.get("coverage") or 0.0)
-                        >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
-                        and f(path_primary.get("maintenance_margin_coverage"))
-                        >= float(getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95))
-                        and f(path_primary.get("copy_net_pnl")) > 0
-                    )
-                    if not path_ok:
-                        selected_set = {
-                            addr for addr in portfolio_candidates
-                            if previous_roles.get(addr) == selection.CORE
-                        }
-                        marginal = None
+                    path_coins = price_path.coins_for_fills(selected_fills)
+                    if path_coins:
+                        candidate_core = sorted(selected_set)
+                        path_start = now_ms - (
+                            30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+                        ) * 86_400_000
+                        path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
+                        path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
+                        # Price paths validate the fills-only Core as one shared account.  They do not eject an
+                        # individual wallet under an arbitrary pre-tune leverage surface, but a path-adjusted
+                        # portfolio that is no longer profitable must not replace the last published Core.
+                        path_follow = {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
+                        path_primary = auto_tune.evaluate_portfolio_window(
+                            db, candidate_core, sigmas,
+                            path_follow, now_ms,
+                            window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
+                            path_rows=path_rows, path_meta=path_meta,
+                        )
+                        coverage_floor = float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
+                        maintenance_floor = float(
+                            getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)
+                        )
+                        coverage = float(path_meta.get("coverage") or 0.0)
+                        maintenance = f(path_primary.get("maintenance_margin_coverage"))
+                        path_net = f(path_primary.get("copy_net_pnl"))
+                        path_reasons = []
+                        if coverage < coverage_floor:
+                            path_reasons.append("price_path_coverage_low")
+                        if maintenance < maintenance_floor:
+                            path_reasons.append("maintenance_margin_coverage_low")
+                        if path_net <= 0:
+                            path_reasons.append("path_net_nonpositive")
+                        if path_reasons:
+                            selected_set = {
+                                addr for addr in portfolio_candidates
+                                if previous_roles.get(addr) == selection.CORE
+                            }
+                            marginal = None
+                            path_fallback = True
+                        pipeline_audit._insert_event(
+                            db,
+                            stamp=audit_stamp or stamp,
+                            source="scan",
+                            stage="selection_path_validation",
+                            status="fallback" if path_reasons else "ok",
+                            reason=",".join(path_reasons) if path_reasons else "path_validated",
+                            payload={
+                                "generation": generation_id,
+                                "candidateCore": candidate_core,
+                                "effectiveCore": sorted(selected_set),
+                                "coins": path_coins,
+                                "fills": len(selected_fills),
+                                "fillsOnlyNetPnl": f(evaluate(tuple(candidate_core)).net_pnl),
+                                "pathNetPnl": path_net,
+                                "pathLiquidations": int(path_primary.get("liquidations") or 0),
+                                "ambiguousLiquidations": int(
+                                    path_primary.get("ambiguous_liquidations") or 0
+                                ),
+                                "pathBoundarySkips": int(
+                                    path_primary.get("price_path_boundary_skips") or 0
+                                ),
+                                "coverage": coverage,
+                                "coverageFloor": coverage_floor,
+                                "maintenanceCoverage": maintenance,
+                                "maintenanceFloor": maintenance_floor,
+                                "expectedCandles": int(path_meta.get("expected") or 0),
+                                "observedCandles": int(path_meta.get("observed") or 0),
+                                "missingCoins": list(path_meta.get("missingCoins") or []),
+                                "fallback": bool(path_reasons),
+                                "reasons": path_reasons,
+                            },
+                        )
                 final_metrics = evaluate(tuple(sorted(selected_set)))
                 final_utility = f(final_metrics.risk_adjusted_utility)
                 for addr in selected_set:
@@ -1229,6 +1273,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 role = selection.CORE
                 reason = (
                     "portfolio_positive_net_contribution" if marginal is not None
+                    else "path_validation_failed_keep_core" if path_fallback
                     else "portfolio_replay_unavailable_keep_core"
                 )
             elif addr in held:
@@ -1239,6 +1284,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     reason = "operator_disabled"
                 elif marginal is not None and addr in portfolio_candidates:
                     reason = portfolio_rejections.get(addr, "portfolio_no_profit_improvement")
+                elif path_fallback:
+                    reason = "path_validation_failed"
                 else:
                     reason = "portfolio_replay_unavailable"
             else:
@@ -1253,6 +1300,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 evidence_status=row.get("evidence_status") or "",
                 model_version=(
                     "selection-smart-expansion-v1" if marginal is not None
+                    else "selection-path-fallback-v1" if path_fallback
                     else "selection-replay-unavailable-v1"
                 ),
                 policy_version=copy_policy.version,
@@ -1496,7 +1544,7 @@ def _record_explicit_follow_history(db, selection_rows, stamp, previous_core, ge
 
 
 def _maybe_auto_tune_margins(db, source: str, stamp: str, *, allow_apply: bool = True,
-                             data_complete: bool = True) -> dict:
+                             data_complete: bool = True, expected_generation=None) -> dict:
     try:
         mode = str(params.get(db, "AUTO_TUNE_MODE", getattr(config, "AUTO_TUNE_MODE", "shadow")) or "shadow").lower()
         dry_run = (not allow_apply) or mode != "apply"
@@ -1506,7 +1554,7 @@ def _maybe_auto_tune_margins(db, source: str, stamp: str, *, allow_apply: bool =
             try:
                 res = auto_tune.maybe_tune_margins(
                     db, source=source, stamp=stamp, dry_run=dry_run, mode=mode,
-                    data_complete=data_complete,
+                    data_complete=data_complete, expected_generation=expected_generation,
                 )
             except TypeError as exc:
                 # Test doubles and rolling-deploy workers may still expose the legacy signature.
@@ -1651,7 +1699,21 @@ def tune_published_generation(db, generation_id, stamp=None, source="scan"):
     )
     db.commit()
     try:
-        result = _maybe_auto_tune_margins(db, source, stamp, allow_apply=True, data_complete=True)
+        result = _maybe_auto_tune_margins(
+            db, source, stamp, allow_apply=True, data_complete=True,
+            expected_generation=generation_id,
+        )
+        current_after_tune = selection.latest_published_generation(db)
+        if current_after_tune != generation_id:
+            skipped_replay = {
+                "status": "skipped",
+                "reason": "generation_not_current_after_tune",
+                "expectedGeneration": generation_id,
+                "currentGeneration": current_after_tune,
+            }
+            result["portfolioReplay"] = dict(skipped_replay)
+            result["selectionReplay"] = dict(skipped_replay)
+            return result
         try:
             result["portfolioReplay"] = auto_tune.store_effective_portfolio_replay(
                 db, generation_id,
@@ -2370,6 +2432,7 @@ def scan(db, p) -> None:
     profile_done_at = time.time()
     complete = failed == 0
     published = False
+    publication_stamp = None
     previous_core = selection.published_core_addrs(db) or []
     n_active = len(previous_core)
     pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
@@ -2415,12 +2478,13 @@ def scan(db, p) -> None:
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
         try:
+            selection_stamp = now_iso()
             # Selection reads final scores and per-wallet sector policies from watchlist.  Rebuild that
             # derived view first; otherwise newly-qualified wallets have no policy row and the canonical
             # portfolio loader correctly filters all of their fills, fabricating zero marginal profit.
             refresh_watchlist(
                 db,
-                stamp,
+                selection_stamp,
                 source="scan",
                 update_follow_line=False,
                 update_follow_history=False,
@@ -2431,7 +2495,13 @@ def scan(db, p) -> None:
                 selection_rows = selection.current_selection_rows(db)
                 marginal = None
             else:
-                selection_rows, marginal = _build_explicit_selection(db, generation_id, stamp, now_ms)
+                selection_rows, marginal = _build_explicit_selection(
+                    db, generation_id, selection_stamp, now_ms, audit_stamp=stamp,
+                )
+            # Publication timestamps describe when the complete decision became visible, not when the
+            # hours-long scan started.  Use one actual completion stamp for ready/selection/publish/history
+            # so operational ordering remains monotonic and Observer reload commands have honest times.
+            publication_stamp = now_iso()
             generation.mark_generation_ready(
                 db,
                 generation_id,
@@ -2440,8 +2510,11 @@ def scan(db, p) -> None:
                 profile_deferred=deferred_profiles,
                 profile_rejected=rejected,
                 profile_complete=True,
+                ready_at=publication_stamp,
             )
-            selection.replace_selection_rows(db, generation_id, selection_rows, selected_at=stamp)
+            selection.replace_selection_rows(
+                db, generation_id, selection_rows, selected_at=publication_stamp,
+            )
             for row in selection_rows:
                 pipeline_audit._insert_event(
                     db,
@@ -2477,9 +2550,9 @@ def scan(db, p) -> None:
                     "exitOnly": sum(1 for row in selection_rows if row.role == selection.EXIT_ONLY),
                 },
             )
-            generation.publish_generation(db, generation_id, published_at=stamp)
+            generation.publish_generation(db, generation_id, published_at=publication_stamp)
             current_core = _record_explicit_follow_history(
-                db, selection_rows, stamp, previous_core, generation_id,
+                db, selection_rows, publication_stamp, previous_core, generation_id,
             )
             n_active = len(current_core)
             duration_s = time.time() - t0
@@ -2533,7 +2606,7 @@ def scan(db, p) -> None:
 
     if published:
         _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
-        launch = _launch_async_tuner(db, generation_id, stamp)
+        launch = _launch_async_tuner(db, generation_id, publication_stamp or now_iso())
         pipeline_audit._insert_event(
             db,
             stamp=stamp,

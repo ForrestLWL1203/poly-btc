@@ -1097,8 +1097,8 @@ def _write_add_params(db, vals: dict) -> None:
 
 
 def _record_run(db, source: str, stamp: str, selected: dict | None, applied: bool, followed_n: int,
-                baseline: dict, result: dict) -> None:
-    generation_id = selection.latest_published_generation(db)
+                baseline: dict, result: dict, *, generation_id: str | None = None) -> None:
+    generation_id = generation_id or selection.latest_published_generation(db)
     mode = str(result.get("mode") or "shadow")
     proposal = result.get("proposal") or (_compact_candidate(selected) if selected else {})
     validation = result.get("validation") or {}
@@ -1382,7 +1382,8 @@ def _model_validation(validation: dict, policy) -> dict:
     return {"eligible": not reasons, "reasons": reasons, "relativeGain": relative_gain}
 
 
-def _maybe_rollback_applied(db, follow: dict, now_ms: int) -> dict | None:
+def _maybe_rollback_applied(db, follow: dict, now_ms: int,
+                            expected_generation: str | None = None) -> dict | None:
     state = _json_load(_state_get(db, "active_tune_rollback"), {}) or {}
     if not state or state.get("resolved"):
         return None
@@ -1407,6 +1408,18 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int) -> dict | None:
     new_liquidation = int(applied.get("liquidations") or 0) > int(champion.get("liquidations") or 0)
     should_rollback = utility_drop > hurdle or new_liquidation
     if should_rollback:
+        if expected_generation:
+            db.commit()
+            db.execute("BEGIN IMMEDIATE")
+            current_generation = selection.latest_published_generation(db)
+            if current_generation != expected_generation:
+                db.rollback()
+                return {
+                    "status": "skipped",
+                    "reason": "generation_changed_before_rollback",
+                    "expectedGeneration": expected_generation,
+                    "currentGeneration": current_generation,
+                }
         _write_tune_params(db, old_params)
         _write_add_params(db, old_params)
         _enqueue_reload(db, "auto_tune_rollback")
@@ -1418,6 +1431,8 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int) -> dict | None:
         )
         state.update(resolved=True, rolledBack=True, rollbackReason=reason, rollbackAt=now_iso())
         _state_set(db, "active_tune_rollback", state)
+        if expected_generation:
+            db.commit()
         return {"status": "rolled_back", "reason": reason, "oldNet": old_net, "newNet": new_net}
     state.update(resolved=True, rolledBack=False, checkedAt=now_iso())
     _state_set(db, "active_tune_rollback", state)
@@ -1426,7 +1441,7 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int) -> dict | None:
 
 def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_run: bool = False,
                        mode: str | None = None, follow_values: dict | None = None,
-                       data_complete: bool = True) -> dict:
+                       data_complete: bool = True, expected_generation: str | None = None) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     tune_started = time.monotonic()
     deadline = tune_started + float(getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 600) or 600)
@@ -1442,24 +1457,42 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     if mode not in {"off", "shadow", "apply"}:
         mode = "shadow"
     effective_shadow = bool(dry_run or mode != "apply")
-    rollback_result = _maybe_rollback_applied(db, follow, int(time.time() * 1000))
+    rollback_result = _maybe_rollback_applied(
+        db, follow, int(time.time() * 1000), expected_generation=expected_generation,
+    )
+    if rollback_result and rollback_result.get("reason") == "generation_changed_before_rollback":
+        result = {
+            **rollback_result,
+            "mode": mode,
+            "shadow": True,
+            "applied": False,
+        }
+        _record_run(
+            db, source, stamp, None, False, 0, {}, result,
+            generation_id=expected_generation,
+        )
+        db.commit()
+        return result
     if rollback_result and rollback_result.get("status") == "rolled_back":
         follow = dict(params.load_follow(db))
     if mode == "off":
         result = {"status": "disabled", "reason": "auto_tune_mode_off", "mode": mode, "applied": False}
-        _record_run(db, source, stamp, None, False, 0, {}, result)
+        _record_run(db, source, stamp, None, False, 0, {}, result,
+                    generation_id=expected_generation)
         db.commit()
         return result
     if not follow.get("AUTO_TUNE_MARGIN_ENABLE", getattr(config, "AUTO_TUNE_MARGIN_ENABLE", True)):
         result = {"status": "disabled", "mode": mode, "applied": False}
-        _record_run(db, source, stamp, None, False, 0, {}, result)
+        _record_run(db, source, stamp, None, False, 0, {}, result,
+                    generation_id=expected_generation)
         db.commit()
         return result
 
     addrs = _load_followed_wallets(db, follow)
     if len(addrs) < int(getattr(config, "AUTO_TUNE_MARGIN_MIN_FOLLOWED", 1)):
         result = {"status": "no_followed_wallets", "applied": False, "followed_n": len(addrs)}
-        _record_run(db, source, stamp, None, False, len(addrs), {}, result)
+        _record_run(db, source, stamp, None, False, len(addrs), {}, result,
+                    generation_id=expected_generation)
         db.commit()
         return result
 
@@ -1480,7 +1513,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "applied": False,
             "followed_n": len(addrs),
         }
-        _record_run(db, source, stamp, None, False, len(addrs), base, result)
+        _record_run(db, source, stamp, None, False, len(addrs), base, result,
+                    generation_id=expected_generation)
         db.commit()
         return result
     if not data_complete or not any(window_fills.values()):
@@ -1491,7 +1525,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "applied": False,
             "followed_n": len(addrs),
         }
-        _record_run(db, source, stamp, None, False, len(addrs), base, result)
+        _record_run(db, source, stamp, None, False, len(addrs), base, result,
+                    generation_id=expected_generation)
         db.commit()
         return result
     path_fills = list(window_fills.get(max(window_fills)) or [])
@@ -1678,6 +1713,35 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )
     effective_shadow = bool(effective_shadow or not apply_validation.get("eligible"))
 
+    # Tuning is expensive and runs outside the scanner process.  The generation can change while the
+    # proposal is being evaluated, so the startup check is insufficient.  Commit harmless validation
+    # bookkeeping, then take SQLite's writer lock and re-check immediately before touching live params.
+    # A scanner publication now either happens before this check (and makes us stale) or after our complete
+    # params/reload transaction; an old Core can never leak its tuning surface into a newer generation.
+    if expected_generation:
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        current_generation = selection.latest_published_generation(db)
+        if current_generation != expected_generation:
+            result = {
+                "status": "skipped",
+                "reason": "generation_changed_before_apply",
+                "mode": mode,
+                "shadow": True,
+                "applied": False,
+                "expectedGeneration": expected_generation,
+                "currentGeneration": current_generation,
+                "followed_n": len(addrs),
+                "proposal": proposal_combined,
+                "validation": apply_validation,
+            }
+            _record_run(
+                db, source, stamp, selected, False, len(addrs), base, result,
+                generation_id=expected_generation,
+            )
+            db.commit()
+            return result
+
     applied_sizing = False
     applied_add = False
     will_apply = (
@@ -1733,6 +1797,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
     }
-    _record_run(db, source, stamp, selected, applied, len(addrs), base, result)
+    _record_run(db, source, stamp, selected, applied, len(addrs), base, result,
+                generation_id=expected_generation)
     db.commit()
     return result

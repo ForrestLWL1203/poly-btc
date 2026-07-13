@@ -8,6 +8,67 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_generation_bound_tune_skips_if_generation_changes_before_apply(self):
+        db = self._db()
+        params.seed_params(db)
+        db.execute(
+            "INSERT INTO scan_generation "
+            "(generation,status,complete,publishable,is_current,started_at,published_at) "
+            "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-01')"
+        )
+        db.commit()
+        before = dict(db.execute("SELECT key,value FROM params").fetchall())
+
+        def candidate_axis(base, *_args):
+            changed = dict(base)
+            changed["MID_MARGIN_PCT"] = float(base["MID_MARGIN_PCT"]) * 1.15
+            return [auto_tune._candidate_from_params(changed, axis="test")]
+
+        def evaluate(_db, _addrs, _follow, candidate, **_kwargs):
+            out = dict(candidate)
+            out["windows"] = {
+                30: {"copy_net_pnl": 1000, "closed_n": 10, "open_fill_rate": .95,
+                     "capacity_open_fit": .95, "liquidations": 0},
+            }
+            return out
+
+        def generation_changes(*_args, **_kwargs):
+            db.execute("UPDATE scan_generation SET is_current=0 WHERE generation='g1'")
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g2','published',1,1,1,'2026-01-02','2026-01-02')"
+            )
+            db.commit()
+            return {"eligible": True, "reasons": [], "relativeGain": .2}
+
+        with patch.object(auto_tune, "_load_followed_wallets", return_value=["0xaaa"]), \
+                patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
+                patch.object(auto_tune, "independent_leverage_candidates", side_effect=candidate_axis), \
+                patch.object(auto_tune, "independent_margin_candidates", side_effect=candidate_axis), \
+                patch.object(auto_tune, "deploy_candidates", side_effect=candidate_axis), \
+                patch.object(auto_tune, "evaluate_tune_candidate", side_effect=evaluate), \
+                patch.object(auto_tune, "choose_margin_candidate", side_effect=lambda rows, _base: rows[0]), \
+                patch.object(auto_tune, "add_candidates_from_axes", return_value=[]), \
+                patch.object(auto_tune, "_walk_forward_validation", return_value={}), \
+                patch.object(auto_tune, "_proposal_apply_eligibility", side_effect=generation_changes):
+            result = auto_tune.maybe_tune_margins(
+                db, source="test", mode="apply", expected_generation="g1",
+            )
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "generation_changed_before_apply")
+        self.assertEqual(result["expectedGeneration"], "g1")
+        self.assertEqual(result["currentGeneration"], "g2")
+        self.assertFalse(result["applied"])
+        self.assertEqual(dict(db.execute("SELECT key,value FROM params").fetchall()), before)
+        self.assertEqual(db.execute(
+            "SELECT COUNT(*) FROM commands WHERE type='reload_params'"
+        ).fetchone()[0], 0)
+        self.assertEqual(db.execute(
+            "SELECT generation FROM auto_tune_runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0], "g1")
+
     def test_add_candidate_applies_positive_add_gap_independently(self):
         follow = {
             "ADD_GAP_K": 0.12, "POS_ADD_GAP_K": 0.08,
