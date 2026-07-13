@@ -68,6 +68,10 @@ export function Wallets({ confirm, toast }) {
                 </b>
                 <i>复刻 {fNum(tuneBase.behaviorReplicationRate * 100, 0)}%→{fNum(tuneCandidate.behaviorReplicationRate * 100, 0)}%</i>
               </div>}
+              {tuneComparison && tuneComparison.status === "no_eligible_candidate" &&
+                <div className="tune-comparison-kpi" title="本轮所有平衡候选都未同时满足收益保留、爆仓下降、回撤不恶化和复刻不下降的硬条件。">
+                  <span>{tuneProfileLabel}档：</span><b className="up">无合格候选，继续当前参数</b>
+                </div>}
             </div>
           )}
           <div className="range-tabs">

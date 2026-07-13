@@ -214,7 +214,9 @@ def _tune_comparison_summary(db, generation):
     except Exception:  # noqa: BLE001 - rolling deploys may predate the comparison payload
         return None
     comparison = payload.get("comparison") if payload else None
-    if not isinstance(comparison, dict) or comparison.get("status") != "ok":
+    if not isinstance(comparison, dict) or comparison.get("status") not in {
+        "ok", "no_eligible_candidate",
+    }:
         return None
     return {
         **comparison,

@@ -293,6 +293,28 @@ def _candidate_distance(candidate: dict, baseline: dict) -> float:
     return sum(abs(float(params_.get(k, 0.0)) - float(base_params.get(k, 0.0))) for k in keys)
 
 
+def _profile_direction_ok(candidate: dict, baseline: dict, risk_profile: str) -> bool:
+    """Safety profiles may only move knobs in a direction that cannot increase planned exposure."""
+    if normalize_risk_profile(risk_profile) == "aggressive":
+        return True
+    current = baseline.get("params") or {}
+    proposed = candidate.get("params") or {}
+    if not current or not proposed:
+        return True
+    # Lower first-open margin, leverage and deployment line all contract capital use.
+    for key in MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS:
+        if key in current and key in proposed and float(proposed[key]) > float(current[key]) + 1e-12:
+            return False
+    # Larger price gaps / later-add widening and a lower hard cap reduce add pressure.
+    for key in ("ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G"):
+        if key in current and key in proposed and float(proposed[key]) < float(current[key]) - 1e-12:
+            return False
+    if "ADD_MAX_HARD" in current and "ADD_MAX_HARD" in proposed:
+        if int(proposed["ADD_MAX_HARD"]) > int(current["ADD_MAX_HARD"]):
+            return False
+    return True
+
+
 def _candidate_rank_key(candidate: dict, baseline: dict, risk_profile: str = "aggressive",
                         profit_reference: dict | None = None) -> tuple:
     windows = candidate.get("windows") or {}
@@ -314,7 +336,9 @@ def _candidate_rank_key(candidate: dict, baseline: dict, risk_profile: str = "ag
     profile = normalize_risk_profile(risk_profile)
     if profile != "aggressive":
         policy = risk_profile_policy(profile)
-        reference = profit_reference or baseline
+        # The active parameters are the profit-maximized incumbent.  A safety profile must beat that
+        # incumbent on safety, not a moving best-profit row from an intermediate coordinate axis.
+        reference = baseline
         reference_windows = reference.get("windows") or {}
         reference_primary = reference_windows.get(30) or (
             reference_windows.get(max(reference_windows)) if reference_windows else {}
@@ -335,10 +359,36 @@ def _candidate_rank_key(candidate: dict, baseline: dict, risk_profile: str = "ag
         target_liquidations = math.floor(
             reference_liquidations * (1.0 - float(policy["liquidation_reduction"]))
         )
-        return (
+        reference_max_drawdown = max(
+            (float(result.get("max_drawdown") or 0.0) for result in reference_windows.values()),
+            default=0.0,
+        )
+        drawdown_not_worse = max_drawdown <= reference_max_drawdown + 1e-12
+        liquidation_target_met = (
+            liquidations == 0 if reference_liquidations == 0
+            else liquidations <= target_liquidations
+        )
+        common = (
             int(profit_floor_met),
-            int(min_path_completion >= float(policy["path_completion_target"])),
-            int(liquidations <= target_liquidations),
+            int(drawdown_not_worse),
+            int(liquidation_target_met),
+        )
+        if profile == "balanced":
+            return common + (
+                weighted_net,
+                primary_net,
+                min_replication,
+                min_path_completion,
+                reference_liquidations - liquidations,
+                reference_max_drawdown - max_drawdown,
+                -max_liquidation_rate,
+                -liquidations,
+                worst_cvar,
+                -_candidate_distance(candidate, baseline),
+            )
+        return common + (
+            reference_liquidations - liquidations,
+            reference_max_drawdown - max_drawdown,
             min_replication,
             min_path_completion,
             -max_liquidation_rate,
@@ -391,13 +441,13 @@ def _compact_follow_line_candidate(candidate: dict) -> dict:
 def _sorted_tune_candidates(candidates: list[dict], baseline: dict,
                             risk_profile: str = "aggressive") -> list[dict]:
     profile = normalize_risk_profile(risk_profile)
-    reference = max(
-        list(candidates) + [baseline],
-        key=lambda candidate: (_candidate_score(candidate), _result_pnl((candidate.get("windows") or {}).get(30, {}))),
-    )
+    directed = [
+        candidate for candidate in candidates
+        if _profile_direction_ok(candidate, baseline, profile)
+    ]
     return sorted(
-        candidates,
-        key=lambda candidate: _candidate_rank_key(candidate, baseline, profile, reference),
+        directed,
+        key=lambda candidate: _candidate_rank_key(candidate, baseline, profile, baseline),
         reverse=True,
     )
 
@@ -406,6 +456,7 @@ def choose_margin_candidate(candidates: list[dict], baseline: dict,
                             risk_profile: str = "aggressive") -> dict:
     """Pick one profile-aware candidate while preserving copyability and recent profitability."""
     valid = [c for c in candidates if _candidate_valid(c, baseline)]
+    valid = [c for c in valid if _profile_direction_ok(c, baseline, risk_profile)]
     if not valid:
         return baseline
     ranked = _sorted_tune_candidates(valid + [baseline], baseline, risk_profile)
@@ -851,7 +902,7 @@ def independent_leverage_candidates(base: dict) -> list[dict]:
 
 
 def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
-                             limit: int = 3) -> list[float]:
+                             limit: int = 3, risk_profile: str = "aggressive") -> list[float]:
     """Keep current, best-profit and fewest-liquidation values for one independently tested tier."""
     base_params = baseline.get("params") or {}
     rows = []
@@ -860,7 +911,7 @@ def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
         if all(
             name == key or abs(float(params_.get(name, 0.0)) - float(base_params.get(name, 0.0))) <= 1e-9
             for name in LEV_KEYS
-        ):
+        ) and _profile_direction_ok(candidate, baseline, risk_profile):
             rows.append(candidate)
     if not rows:
         return [float(base_params[key])]
@@ -870,7 +921,11 @@ def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
     picks.append(min(rows, key=lambda row: (
         int(primary(row).get("liquidations") or 0), -_result_pnl(primary(row)),
     )))
-    picks.extend(sorted(rows, key=lambda row: _candidate_rank_key(row, baseline), reverse=True))
+    picks.extend(sorted(
+        rows,
+        key=lambda row: _candidate_rank_key(row, baseline, risk_profile),
+        reverse=True,
+    ))
     values = []
     for candidate in picks:
         value = float((candidate.get("params") or base_params)[key])
@@ -1091,6 +1146,46 @@ def strict_tune_comparison(db, addrs: list[str], follow: dict, proposal: dict, *
             ),
         },
     }
+
+
+def strict_profile_comparison_reasons(comparison: dict, risk_profile: str) -> list[str]:
+    """Hard full-window safety constraints after fold/stress finalist validation."""
+    profile = normalize_risk_profile(risk_profile)
+    if profile == "aggressive" or comparison.get("status") != "ok":
+        return []
+    policy = risk_profile_policy(profile)
+    baseline = comparison.get("baseline") or {}
+    candidate = comparison.get("candidate") or {}
+    reasons = []
+    baseline_net = float(baseline.get("netPnl") or 0.0)
+    candidate_net = float(candidate.get("netPnl") or 0.0)
+    if candidate_net <= 0 or candidate_net < max(0.0, baseline_net) * float(policy["profit_retention"]):
+        reasons.append("strict_profit_below_profile_floor")
+    if float(candidate.get("maxDrawdown") or 0.0) > float(baseline.get("maxDrawdown") or 0.0) + 1e-12:
+        reasons.append("strict_drawdown_increased")
+    baseline_liquidations = int(baseline.get("liquidations") or 0)
+    candidate_liquidations = int(candidate.get("liquidations") or 0)
+    target_liquidations = math.floor(
+        baseline_liquidations * (1.0 - float(policy["liquidation_reduction"]))
+    )
+    if (
+        candidate_liquidations != 0 if baseline_liquidations == 0
+        else candidate_liquidations > target_liquidations
+    ):
+        reasons.append("strict_liquidation_reduction_below_profile_target")
+    if float(candidate.get("pathCompletionRate") or 0.0) + 1e-12 < float(
+        baseline.get("pathCompletionRate") or 0.0
+    ):
+        reasons.append("strict_path_completion_reduced")
+    if float(candidate.get("behaviorReplicationRate") or 0.0) + 1e-12 < float(
+        baseline.get("behaviorReplicationRate") or 0.0
+    ):
+        reasons.append("strict_replication_reduced")
+    if float(candidate.get("openRate") or 0.0) + 1e-12 < float(baseline.get("openRate") or 0.0):
+        reasons.append("strict_open_rate_reduced")
+    if float(candidate.get("capacityFit") or 0.0) + 1e-12 < float(baseline.get("capacityFit") or 0.0):
+        reasons.append("strict_capacity_fit_reduced")
+    return reasons
 
 
 def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | None = None) -> dict:
@@ -1435,7 +1530,9 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
             "challengerClosedN": int(challenger.get("closed_n") or 0),
             "baselineMaxDD": float(base.get("max_drawdown") or 0.0),
             "challengerMaxDD": float(challenger.get("max_drawdown") or 0.0),
+            "baselineOpenRate": float(base.get("open_fill_rate") or 0.0),
             "challengerOpenRate": float(challenger.get("open_fill_rate") or 0.0),
+            "baselineCapacityFit": float(base.get("capacity_open_fit") or 0.0),
             "challengerCapacityFit": float(challenger.get("capacity_open_fit") or 0.0),
             "baselineLiquidations": int(base.get("liquidations") or 0),
             "challengerLiquidations": int(challenger.get("liquidations") or 0),
@@ -1451,10 +1548,12 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         "holdout": compact_folds[-1] if compact_folds else {},
         "baselineStressNet": float(baseline_stress.get("copy_net_pnl") or 0.0),
         "baselineStressLiquidations": int(baseline_stress.get("liquidations") or 0),
+        "baselineStressMaxDD": float(baseline_stress.get("max_drawdown") or 0.0),
         "baselineStressPathCompletionRate": _result_path_completion(baseline_stress),
         "baselineStressReplicationRate": _result_replication_rate(baseline_stress),
         "stressNet": float(stress.get("copy_net_pnl") or 0.0),
         "stressLiquidations": int(stress.get("liquidations") or 0),
+        "stressMaxDD": float(stress.get("max_drawdown") or 0.0),
         "stressPathCompletionRate": _result_path_completion(stress),
         "stressReplicationRate": _result_replication_rate(stress),
         "masterLeverageCoverage": float(stress.get("master_leverage_coverage") or 0.0),
@@ -1593,10 +1692,20 @@ def _model_validation(validation: dict, policy, risk_profile: str = "aggressive"
             for fold in folds
         ):
             reasons.append("fold_liquidation_increased")
+        if any(
+            float(fold.get("challengerMaxDD") or 0.0)
+            > float(fold.get("baselineMaxDD") or 0.0) + 1e-12
+            for fold in folds
+        ):
+            reasons.append("fold_drawdown_increased")
         stress_liquidations = int(validation.get("stressLiquidations") or 0)
         baseline_stress_liquidations = int(validation.get("baselineStressLiquidations") or 0)
         if stress_liquidations > baseline_stress_liquidations:
             reasons.append("stress_liquidation_increased")
+        if float(validation.get("stressMaxDD") or 0.0) > float(
+            validation.get("baselineStressMaxDD") or 0.0
+        ) + 1e-12:
+            reasons.append("stress_drawdown_increased")
 
         baseline_liquidations = sum(int(fold.get("baselineLiquidations") or 0) for fold in folds)
         challenger_liquidations = sum(int(fold.get("challengerLiquidations") or 0) for fold in folds)
@@ -1620,12 +1729,32 @@ def _model_validation(validation: dict, policy, risk_profile: str = "aggressive"
         path_gain = challenger_path - baseline_path
         replication_gain = challenger_replication - baseline_replication
         liquidation_target_met = (
-            baseline_liquidations > 0
-            and challenger_liquidations < baseline_liquidations
-            and challenger_liquidations <= target_liquidations
+            challenger_liquidations == 0 if baseline_liquidations == 0
+            else (
+                challenger_liquidations < baseline_liquidations
+                and challenger_liquidations <= target_liquidations
+            )
         )
+        if not liquidation_target_met:
+            reasons.append("liquidation_reduction_below_profile_target")
+        if challenger_path + 1e-12 < baseline_path:
+            reasons.append("path_completion_reduced")
+        if challenger_replication + 1e-12 < baseline_replication:
+            reasons.append("replication_reduced")
+        if any(
+            float(fold.get("challengerOpenRate") or 0.0) + 1e-12
+            < float(fold.get("baselineOpenRate") or 0.0)
+            for fold in folds
+        ):
+            reasons.append("open_rate_reduced")
+        if any(
+            float(fold.get("challengerCapacityFit") or 0.0) + 1e-12
+            < float(fold.get("baselineCapacityFit") or 0.0)
+            for fold in folds
+        ):
+            reasons.append("capacity_fit_reduced")
         material_safety_gain = (
-            liquidation_target_met
+            (baseline_liquidations > 0 and liquidation_target_met)
             or path_gain >= float(objective["material_path_gain"])
             or replication_gain >= float(objective["material_path_gain"])
         )
@@ -1941,7 +2070,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         axis_quick[0],
     )
     tier_values = {
-        key: _tier_leverage_shortlist(axis_quick, quick_baseline, key, limit=3)
+        key: _tier_leverage_shortlist(
+            axis_quick, quick_baseline, key, limit=3, risk_profile=risk_profile,
+        )
         for key in LEV_KEYS
     }
     combo_quick = []
@@ -2006,7 +2137,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
 
-    follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     current_add = {k: float(follow[k]) for k in ADD_TUNE_KEYS}
     add_base = dict(current_add)
     add_baseline_reset = False
@@ -2014,6 +2144,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     add_baseline = None
     selected_add = None
     selected_add_params = add_base
+    follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     if follow_for_add.get("SMART_ADD", True):
         for candidate in add_candidates_from_axes(add_base):
             check_budget("add_polish")
@@ -2086,29 +2217,58 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         if model["eligible"]:
             chosen = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
             break
+    no_eligible_profile_candidate = False
     if chosen is None:
-        combined = {**selected_params, **selected_add_params}
-        validation = _walk_forward_validation(
-            addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
-        )
-        chosen = (selected, selected_params, selected_add_params, combined, validation)
+        if risk_profile != "aggressive":
+            # A rejected safety proposal is not a proposal. Retain the incumbent and report that this
+            # generation contained no admissible profile candidate.
+            no_eligible_profile_candidate = True
+            selected = baseline
+            selected_params = dict(current)
+            selected_add_params = dict(current_add)
+            combined = dict(current_combined)
+            validation = _walk_forward_validation(
+                addrs, follow, combined, sigmas, window_fills, now_ms,
+                path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+            )
+            chosen = (selected, selected_params, selected_add_params, combined, validation)
+        else:
+            combined = {**selected_params, **selected_add_params}
+            validation = _walk_forward_validation(
+                addrs, follow, combined, sigmas, window_fills, now_ms,
+                path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+            )
+            chosen = (selected, selected_params, selected_add_params, combined, validation)
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen
     selected_margins = {key: selected_params[key] for key in MARGIN_KEYS}
-    follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
-    try:
-        comparison = strict_tune_comparison(
-            db, addrs, follow, proposal_combined, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            market_ctx=market_ctx, risk_profile=risk_profile,
-        )
-    except Exception as exc:  # noqa: BLE001 - comparison is diagnostic and must not invalidate tuning
+    if no_eligible_profile_candidate:
         comparison = {
-            "status": "unavailable",
+            "status": "no_eligible_candidate",
             "riskProfile": risk_profile,
-            "reason": type(exc).__name__,
+            "reason": "profile_constraints_not_met",
         }
-    if analysis_only:
+    else:
+        try:
+            comparison = strict_tune_comparison(
+                db, addrs, follow, proposal_combined, sigmas=sigmas, now_ms=now_ms,
+                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+                market_ctx=market_ctx, risk_profile=risk_profile,
+            )
+        except Exception as exc:  # noqa: BLE001 - comparison is diagnostic and must not invalidate tuning
+            comparison = {
+                "status": "unavailable",
+                "riskProfile": risk_profile,
+                "reason": type(exc).__name__,
+            }
+    if no_eligible_profile_candidate:
+        apply_validation = {
+            "eligible": False,
+            "reasons": ["no_eligible_profile_candidate"],
+            "relativeGain": 0.0,
+            "riskProfile": risk_profile,
+            "analysisOnly": bool(analysis_only),
+        }
+    elif analysis_only:
         apply_validation = {
             **_model_validation(
                 walk_forward, load_copy_policy(follow), risk_profile=risk_profile,
@@ -2120,6 +2280,13 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             db, addrs, follow, current_combined, proposal_combined, walk_forward, stamp,
             risk_profile=risk_profile,
         )
+    strict_reasons = strict_profile_comparison_reasons(comparison, risk_profile)
+    if strict_reasons:
+        apply_validation["reasons"] = list(dict.fromkeys(
+            list(apply_validation.get("reasons") or []) + strict_reasons
+        ))
+        apply_validation["eligible"] = False
+        apply_validation["strictComparisonReasons"] = strict_reasons
     effective_shadow = bool(effective_shadow or not apply_validation.get("eligible"))
 
     # Tuning is expensive and runs outside the scanner process.  The generation can change while the
@@ -2178,7 +2345,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     if not effective_shadow and not _same_tune_values(current, selected_params):
         _write_tune_params(db, selected_params)
         applied_sizing = True
-    if not effective_shadow and follow_for_add.get("SMART_ADD", True) and not _same_add_values(current_add, selected_add_params):
+    if (not effective_shadow and follow_for_add.get("SMART_ADD", True)
+            and not _same_add_values(current_add, selected_add_params)):
         _write_add_params(db, selected_add_params)
         applied_add = True
     applied = applied_sizing or applied_add
@@ -2214,6 +2382,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "mode": mode,
         "riskProfile": risk_profile,
         "analysisOnly": bool(analysis_only),
+        "noEligibleProfileCandidate": bool(no_eligible_profile_candidate),
         "shadow": effective_shadow,
         "applied": applied,
         "applied_sizing": applied_sizing,

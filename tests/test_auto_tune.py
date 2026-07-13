@@ -40,6 +40,7 @@ class AutoTuneTests(unittest.TestCase):
     def test_generation_bound_tune_skips_if_generation_changes_before_apply(self):
         db = self._db()
         params.seed_params(db)
+        db.execute("UPDATE params SET value='aggressive' WHERE key='AUTO_TUNE_RISK_PROFILE'")
         db.execute(
             "INSERT INTO scan_generation "
             "(generation,status,complete,publishable,is_current,started_at,published_at) "
@@ -194,6 +195,66 @@ class AutoTuneTests(unittest.TestCase):
         self.assertIs(auto_tune.choose_margin_candidate(rows, baseline, "aggressive"), profit)
         self.assertIs(auto_tune.choose_margin_candidate(rows, baseline, "balanced"), balanced)
         self.assertIs(auto_tune.choose_margin_candidate(rows, baseline, "conservative"), conservative)
+
+    def test_balanced_profile_rejects_exposure_increasing_parameter_directions(self):
+        def row(params_, pnl=1000, liqs=2):
+            return {
+                "params": params_,
+                "windows": {
+                    days: {
+                        "copy_net_pnl": pnl * scale, "closed_n": 20,
+                        "open_fill_rate": .9, "capacity_open_fit": .9,
+                        "liquidations": liqs, "max_drawdown": .10,
+                        "path_completion_rate": .9, "behavior_replication_rate": .8,
+                        "target_open_events": 20, "skip_reasons": {},
+                    }
+                    for days, scale in ((30, 1.0), (14, .5), (7, .25))
+                },
+            }
+
+        baseline = row({
+            "ADD_GAP_K": .08, "POS_ADD_GAP_K": .08,
+            "ADD_GAP_SHRINK_G": 1.3, "ADD_MAX_HARD": 10,
+        }, pnl=1000, liqs=4)
+        earlier_adverse_add = row({
+            "ADD_GAP_K": .04, "POS_ADD_GAP_K": .08,
+            "ADD_GAP_SHRINK_G": 1.3, "ADD_MAX_HARD": 10,
+        }, pnl=2000, liqs=2)
+        safer_adds = row({
+            "ADD_GAP_K": .12, "POS_ADD_GAP_K": .10,
+            "ADD_GAP_SHRINK_G": 1.3, "ADD_MAX_HARD": 8,
+        }, pnl=900, liqs=2)
+
+        selected = auto_tune.choose_margin_candidate(
+            [baseline, earlier_adverse_add, safer_adds], baseline, "balanced",
+        )
+
+        self.assertIs(selected, safer_adds)
+
+    def test_balanced_validation_requires_full_liquidation_reduction_target(self):
+        folds = [{
+            "baselineNet": 100.0, "challengerNet": 90.0,
+            "baselineClosedN": 10, "challengerClosedN": 10,
+            "baselineLiquidations": 4, "challengerLiquidations": 3,
+            "baselineMaxDD": .20, "challengerMaxDD": .18,
+            "baselinePathCompletionRate": .8, "challengerPathCompletionRate": .85,
+            "baselineReplicationRate": .7, "challengerReplicationRate": .75,
+            "baselineOpenRate": .9, "challengerOpenRate": .9,
+            "baselineCapacityFit": .9, "challengerCapacityFit": .9,
+        } for _ in range(3)]
+        validation = {
+            "folds": folds, "holdout": folds[-1],
+            "baselineStressNet": 100.0, "stressNet": 90.0,
+            "baselineStressLiquidations": 4, "stressLiquidations": 3,
+            "baselineStressMaxDD": .20, "stressMaxDD": .18,
+        }
+
+        result = auto_tune._model_validation(
+            validation, auto_tune.load_copy_policy({}), risk_profile="balanced",
+        )
+
+        self.assertFalse(result["eligible"])
+        self.assertIn("liquidation_reduction_below_profile_target", result["reasons"])
 
     def test_diverse_sizing_candidates_reserves_slots_per_leverage_tuple(self):
         def candidate(levs, pnl):
