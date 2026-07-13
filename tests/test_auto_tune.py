@@ -278,6 +278,59 @@ class AutoTuneTests(unittest.TestCase):
             {(12, 5, 3), (18, 7, 4), (20, 8, 4)},
         )
 
+    def test_balanced_finalists_reserve_distinct_safety_endpoints(self):
+        base = {
+            "STABLE_MARGIN_PCT": .08, "MID_MARGIN_PCT": .05, "HIGH_MARGIN_PCT": .03,
+            "STABLE_LEV_CAP": 30.0, "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0,
+            "DEPLOY_FULL_PCT": .60,
+        }
+
+        def candidate(name, changes, pnl, liqs, drawdown):
+            row = auto_tune._candidate_from_params({**base, **changes}, axis=name)
+            row["windows"] = {30: {
+                "copy_net_pnl": pnl, "closed_n": 20, "liquidations": liqs,
+                "max_drawdown": drawdown, "open_fill_rate": .9, "capacity_open_fit": .9,
+                "target_open_events": 20, "skip_reasons": {},
+            }}
+            return row
+
+        baseline = candidate("baseline", {}, 1000, 5, .20)
+        deep_leverage = candidate("deep_leverage", {
+            "STABLE_LEV_CAP": 20, "MID_LEV_CAP": 7, "HIGH_LEV_CAP": 2,
+        }, 500, 4, .18)
+        low_margins = candidate("low_margins", {
+            "STABLE_MARGIN_PCT": .04, "MID_MARGIN_PCT": .025, "HIGH_MARGIN_PCT": .015,
+        }, 600, 4, .17)
+        low_deploy = candidate("low_deploy", {"DEPLOY_FULL_PCT": .30}, 700, 4, .16)
+        fewest_liqs = candidate("fewest_liqs", {"STABLE_LEV_CAP": 25}, 800, 1, .15)
+        lowest_drawdown = candidate("lowest_drawdown", {"MID_LEV_CAP": 9}, 900, 3, .05)
+
+        selected = auto_tune._safety_sizing_candidates(
+            [baseline, deep_leverage, low_margins, low_deploy, fewest_liqs, lowest_drawdown],
+            baseline, 5, "balanced",
+        )
+
+        self.assertEqual(
+            [row["axis"] for row in selected],
+            ["deep_leverage", "low_margins", "low_deploy", "fewest_liqs", "lowest_drawdown"],
+        )
+
+    def test_add_axes_include_coherent_least_aggressive_combination(self):
+        base = {
+            "ADD_GAP_K": .08, "POS_ADD_GAP_K": .08,
+            "ADD_GAP_SHRINK_G": 1.3, "ADD_MAX_HARD": 10,
+        }
+
+        rows = [row["params"] for row in auto_tune.add_candidates_from_axes(base)]
+
+        self.assertTrue(any(
+            row["ADD_GAP_K"] == max(auto_tune.config.AUTO_TUNE_ADD_GAP_KS)
+            and row["POS_ADD_GAP_K"] == max(auto_tune.config.AUTO_TUNE_POS_ADD_GAP_KS)
+            and row["ADD_GAP_SHRINK_G"] == max(auto_tune.config.AUTO_TUNE_ADD_SHRINK_GS)
+            and row["ADD_MAX_HARD"] == min(auto_tune.config.AUTO_TUNE_ADD_MAX_HARDS)
+            for row in rows
+        ))
+
     def test_leverage_polish_changes_one_tier_at_a_time(self):
         base = {
             "STABLE_MARGIN_PCT": 0.0644, "MID_MARGIN_PCT": 0.0552,

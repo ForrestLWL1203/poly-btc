@@ -491,6 +491,57 @@ def _diverse_sizing_candidates(candidates: list[dict], baseline: dict, limit: in
     return selected
 
 
+def _safety_sizing_candidates(candidates: list[dict], baseline: dict, limit: int,
+                              risk_profile: str = "aggressive") -> list[dict]:
+    """Reserve final validation slots for materially different safety surfaces.
+
+    Profit-led coordinate polishing can otherwise keep many near-identical rows and discard the
+    lowest-leverage or lowest-margin endpoint before the expensive strict replay measures whether
+    it actually improves funded-account survival and copy coverage.
+    """
+    profile = normalize_risk_profile(risk_profile)
+    diverse = _diverse_sizing_candidates(candidates, baseline, limit, profile)
+    if profile == "aggressive":
+        return diverse
+    directed = [candidate for candidate in candidates if _profile_direction_ok(candidate, baseline, profile)]
+    if not directed:
+        return diverse
+    base_params = baseline.get("params") or {}
+    primary = lambda row: (row.get("windows") or {}).get(30) or {}
+    param_sum = lambda row, keys: sum(
+        float((row.get("params") or {}).get(key, base_params.get(key, 0.0))) for key in keys
+    )
+    sentinels = [
+        min(directed, key=lambda row: param_sum(row, LEV_KEYS)),
+        min(directed, key=lambda row: param_sum(row, MARGIN_KEYS)),
+        min(directed, key=lambda row: float(
+            (row.get("params") or {}).get("DEPLOY_FULL_PCT", base_params.get("DEPLOY_FULL_PCT", 0.0))
+        )),
+        min(directed, key=lambda row: (
+            int(primary(row).get("liquidations") or 0),
+            float(primary(row).get("max_drawdown") or 0.0),
+            -_result_pnl(primary(row)),
+        )),
+        min(directed, key=lambda row: (
+            float(primary(row).get("max_drawdown") or 0.0),
+            int(primary(row).get("liquidations") or 0),
+            -_result_pnl(primary(row)),
+        )),
+    ]
+    selected = []
+    seen = set()
+    for candidate in sentinels + diverse:
+        params_ = candidate.get("params") or {}
+        marker = tuple(round(float(params_.get(key, base_params.get(key, 0.0))), 12) for key in TUNE_KEYS)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        selected.append(candidate)
+        if len(selected) >= max(1, int(limit)):
+            break
+    return selected
+
+
 def _load_sigmas(db) -> dict:
     try:
         return {coin: sigma for coin, sigma in db.execute("SELECT coin,sigma FROM coin_vol WHERE sigma IS NOT NULL")}
@@ -1002,6 +1053,18 @@ def add_candidates_from_axes(base: dict) -> list[dict]:
                 params_, params_["ADD_GAP_K"], params_["ADD_GAP_SHRINK_G"],
                 int(params_["ADD_MAX_HARD"]), pos_gap_k=params_["POS_ADD_GAP_K"],
             ))
+    safest = {
+        "ADD_GAP_K": max(gap_ks),
+        "POS_ADD_GAP_K": max(pos_gap_ks),
+        "ADD_GAP_SHRINK_G": max(shrink_gs),
+        "ADD_MAX_HARD": int(min(max_hards)),
+    }
+    marker = tuple(float(safest[name]) for name in ADD_TUNE_KEYS)
+    if marker not in seen:
+        out.append(build_add_candidate(
+            safest, safest["ADD_GAP_K"], safest["ADD_GAP_SHRINK_G"],
+            safest["ADD_MAX_HARD"], pos_gap_k=safest["POS_ADD_GAP_K"],
+        ))
     return out
 
 
@@ -2219,14 +2282,25 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         key = tuple(round(float((candidate.get("params") or {})[name]), 12) for name in TUNE_KEYS)
         unique_finalists.setdefault(key, candidate)
     finalist_limit = int(getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16)
-    sizing_options = _diverse_sizing_candidates(
+    sizing_options = _safety_sizing_candidates(
         list(unique_finalists.values()), baseline, max(1, finalist_limit), risk_profile,
     )
     if add_candidates and add_baseline:
         ranked_add = _sorted_tune_candidates(add_candidates, add_baseline, risk_profile)
         add_options = []
         seen_add = set()
-        for candidate in ([selected_add, add_baseline] + ranked_add):
+        add_priority = [selected_add, add_baseline] + ranked_add
+        if risk_profile != "aggressive" and ranked_add:
+            # Safety profiles may tune adds, but the first strict replay must cover the combination
+            # that least worsens an existing position: widest gaps/widening and the lowest add cap.
+            safest_add = min(ranked_add, key=lambda row: (
+                -float((row.get("params") or add_base)["ADD_GAP_K"]),
+                -float((row.get("params") or add_base)["POS_ADD_GAP_K"]),
+                -float((row.get("params") or add_base)["ADD_GAP_SHRINK_G"]),
+                int((row.get("params") or add_base)["ADD_MAX_HARD"]),
+            ))
+            add_priority.insert(0, safest_add)
+        for candidate in add_priority:
             if not candidate:
                 continue
             params_ = candidate.get("params") or add_base
