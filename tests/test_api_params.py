@@ -104,37 +104,6 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
-    def test_auto_tune_risk_profile_rejects_unknown_value(self):
-        fd, path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        try:
-            db = sqlite3.connect(path)
-            db.execute(
-                "CREATE TABLE params ("
-                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
-                "effect TEXT,default_value TEXT,updated_at TEXT)"
-            )
-            db.execute(
-                "INSERT INTO params VALUES "
-                "('AUTO_TUNE_RISK_PROFILE','balanced','scanner','green','text','rescan','balanced',NULL)"
-            )
-            db.commit()
-            db.close()
-
-            with self.assertRaises(ValueError):
-                api_params.patch_params(path, "scanner", {"AUTO_TUNE_RISK_PROFILE": "fastest"})
-
-            db = sqlite3.connect(path)
-            self.assertEqual(db.execute(
-                "SELECT value FROM params WHERE key='AUTO_TUNE_RISK_PROFILE'"
-            ).fetchone()[0], "balanced")
-            db.close()
-        finally:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
 
 if __name__ == "__main__":
     unittest.main()

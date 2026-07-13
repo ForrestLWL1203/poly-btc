@@ -108,19 +108,6 @@ class ApiWalletsPerfTests(unittest.TestCase):
                     "netPnl30": 4321.0, "replayedAt": "now",
                 }),),
             )
-            db.execute(
-                "INSERT INTO auto_tune_runs "
-                "(generation,status,applied,eligible_to_apply,result_json,created_at) "
-                "VALUES ('g-current','ok',1,1,?,'now')",
-                (json.dumps({
-                    "comparison": {
-                        "status": "ok", "riskProfile": "balanced", "windowDays": 30,
-                        "baseline": {"netPnl": 5000, "liquidations": 4},
-                        "candidate": {"netPnl": 4500, "liquidations": 1},
-                        "delta": {"netPnl": -500, "liquidationsAvoided": 3},
-                    },
-                }),),
-            )
             db.commit()
 
             with patch.object(api_wallets, "_score_breakdown", side_effect=AssertionError("detail-only")):
@@ -135,8 +122,6 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertNotIn("profileGeneration", wallet)
         self.assertNotIn("evidenceHeld", wallet)
         self.assertEqual(res["portfolioReplay"]["netPnl30"], 4321.0)
-        self.assertEqual(res["tuneComparison"]["delta"]["liquidationsAvoided"], 3)
-        self.assertTrue(res["tuneComparison"]["applied"])
 
     def test_wallets_falls_back_to_copy_7d_closed_when_episode_rows_are_missing(self):
         with tempfile.TemporaryDirectory() as td:

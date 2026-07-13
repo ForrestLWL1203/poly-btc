@@ -2260,68 +2260,6 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
     }
 
 
-def compare_current_to_tune_profile(db, generation_id=None, *, profile="balanced", stamp=None):
-    """Strict offline A/B: current effective params versus one newly optimized risk profile."""
-    generation_id = generation_id or selection.latest_published_generation(db)
-    current = selection.latest_published_generation(db)
-    if not generation_id or current != generation_id:
-        return {"status": "skipped", "reason": "generation_not_current", "generation": generation_id}
-    progress = db.execute("SELECT state FROM scan_progress WHERE id=1").fetchone()
-    if progress and progress[0] == "scanning":
-        return {"status": "skipped", "reason": "scan_running", "generation": generation_id}
-
-    stamp = stamp or now_iso()
-    now_s = time.time()
-    row = db.execute("SELECT value FROM auto_tune_state WHERE key='async_tuner_lease'").fetchone()
-    try:
-        lease = json.loads(row[0]) if row and row[0] else {}
-    except (TypeError, ValueError):
-        lease = {}
-    lease_pid = int(lease.get("pid") or 0)
-    lease_alive = False
-    if lease_pid and lease_pid != os.getpid():
-        try:
-            os.kill(lease_pid, 0)
-            lease_alive = True
-        except ProcessLookupError:
-            lease_alive = False
-        except PermissionError:
-            lease_alive = True
-    if f(lease.get("expiresAt")) > now_s and lease_pid != os.getpid() and lease_alive:
-        return {"status": "skipped", "reason": "tuner_already_running", "generation": generation_id}
-
-    db.execute(
-        "INSERT INTO auto_tune_state (key,value,updated_at) VALUES ('async_tuner_lease',?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-        (json.dumps({
-            "pid": os.getpid(), "generation": generation_id,
-            "purpose": "profile_ab", "expiresAt": now_s + 14400,
-        }), stamp),
-    )
-    db.commit()
-    try:
-        return auto_tune.maybe_tune_margins(
-            db,
-            source="profile_ab",
-            stamp=stamp,
-            dry_run=True,
-            mode="shadow",
-            data_complete=True,
-            expected_generation=generation_id,
-            risk_profile_override=profile,
-            analysis_only=True,
-        )
-    finally:
-        db.execute(
-            "UPDATE auto_tune_state SET value=?,updated_at=? WHERE key='async_tuner_lease'",
-            (json.dumps({
-                "pid": os.getpid(), "generation": generation_id,
-                "purpose": "profile_ab", "expiresAt": 0,
-            }), now_iso()),
-        )
-        db.commit()
-
-
 def tune_published_generation(db, generation_id, stamp=None, source="scan"):
     """Run one generation-bound tuner proposal with a DB lease.
 

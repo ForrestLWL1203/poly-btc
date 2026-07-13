@@ -160,29 +160,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             portfolio_replay.assert_called_once()
             selection_replay.assert_called_once()
 
-    def test_profile_ab_is_analysis_only_and_releases_tuner_lease(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            db.execute(
-                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
-                "VALUES('g1','published',1,1,1,'now')"
-            )
-            db.commit()
-            with patch.object(scanner.auto_tune, "maybe_tune_margins", return_value={
-                "status": "ok", "comparison": {"status": "ok"}, "applied": False,
-            }) as tune:
-                result = scanner.compare_current_to_tune_profile(db, "g1", profile="balanced")
-
-            self.assertEqual(result["status"], "ok")
-            self.assertTrue(tune.call_args.kwargs["analysis_only"])
-            self.assertTrue(tune.call_args.kwargs["dry_run"])
-            self.assertEqual(tune.call_args.kwargs["mode"], "shadow")
-            self.assertEqual(tune.call_args.kwargs["risk_profile_override"], "balanced")
-            lease = db.execute(
-                "SELECT value FROM auto_tune_state WHERE key='async_tuner_lease'"
-            ).fetchone()[0]
-            self.assertIn('"expiresAt": 0', lease)
-
     def test_generation_tune_rolls_back_when_membership_seal_fails(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

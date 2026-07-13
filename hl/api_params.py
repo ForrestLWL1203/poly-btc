@@ -11,9 +11,6 @@ from .util import now_iso
 
 WRITABLE_LEVELS = {"green", "yellow", "blue"}
 REMOVED_PARAMS = {"MIN_FOLLOW_SCORE"}
-ENUM_VALUES = {
-    "AUTO_TUNE_RISK_PROFILE": {"aggressive", "balanced", "conservative"},
-}
 
 
 def rw_connect(path):
@@ -56,12 +53,8 @@ def patch_params(db_path, category, updates):
                 continue
             if row["level"] not in WRITABLE_LEVELS or row["type"] == "display":
                 raise ValueError(f"{key} is read-only")
-            if key in ENUM_VALUES and str(val or "").strip().lower() not in ENUM_VALUES[key]:
-                raise ValueError(f"{key} has invalid value")
             if key == "COIN_BLACKLIST":
                 stored = format_coin_blacklist(val)
-            elif key in ENUM_VALUES:
-                stored = str(val).strip().lower()
             else:
                 stored = val
             sval = (None if stored is None else "true" if stored is True

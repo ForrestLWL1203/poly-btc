@@ -47,8 +47,6 @@ PARAM_SPEC = [
         "完整重拉分片数", ""),
     ("RANDOM_EXPLORATION_RATIO", "scanner", "hidden", "pct", "rescan", config.RANDOM_EXPLORATION_RATIO * 100,
         "随机探索比例", ""),
-    ("AUTO_TUNE_RISK_PROFILE", "scanner", "green", "text", "rescan", config.AUTO_TUNE_RISK_PROFILE,
-        "自动调参目标", "只运行所选目标;平衡档允许用有限收益换取更少爆仓和更完整的持仓路径复刻"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),

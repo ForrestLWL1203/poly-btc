@@ -1,5 +1,5 @@
 import { api } from "../lib/api.js";
-import { fNum, fPct, fSign, short } from "../lib/format.js";
+import { fNum, fSign, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
@@ -21,14 +21,7 @@ export function Wallets({ confirm, toast }) {
   const { data, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
-  const tuneComparison = data && data.tuneComparison;
   const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
-  const tuneBase = tuneComparison && tuneComparison.baseline;
-  const tuneCandidate = tuneComparison && tuneComparison.candidate;
-  const tuneDelta = tuneComparison && tuneComparison.delta;
-  const tuneProfileLabel = ({ aggressive: "激进", balanced: "平衡", conservative: "保守" }[
-    tuneComparison && tuneComparison.riskProfile
-  ] || "候选");
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
@@ -46,32 +39,13 @@ export function Wallets({ confirm, toast }) {
       <div className="section-h wallets-section-h" style={{ marginTop: 6 }}>
         <h2>跟踪名单</h2>
         <div className="wallets-head-actions">
-          {tab === "followed" && (portfolioReplay || tuneComparison) && (
-            <div className="portfolio-kpi-stack">
-              {portfolioReplay && <div className="portfolio-replay-kpi" title="当前 Core 使用 Observer 已生效参数在共享账户中做严格30日回放。复刻率同时考虑开仓捕获、加仓捕获以及是否存活到目标自然退出；爆仓为成交OHLC代理的保守压力值。">
-                <span>当前Core · 生效参数 · 严格30d：</span>
-                <b className={(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0, 0)}</b>
-                <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
-                {portfolioReplay.behaviorReplication30Worst != null && <i>复刻≈{fNum(portfolioReplay.behaviorReplication30Worst * 100, 0)}%</i>}
-                {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}
-              </div>}
-              {tuneBase && tuneCandidate && tuneDelta && <div className="tune-comparison-kpi"
-                title="本轮调参开始时的生效参数与最终候选，使用同一 Core、同一30日成交、同一K线路径和成本做严格A/B。正数的‘少爆’表示候选减少了爆仓。">
-                <span>{tuneProfileLabel}{tuneComparison.applied ? "已应用" : "候选"} vs 调参前：</span>
-                <i>收益 {fSign(tuneBase.netPnl, 0)}→{fSign(tuneCandidate.netPnl, 0)}</i>
-                <b className={(tuneDelta.netPnl || 0) < 0 ? "down" : "up"}>
-                  {fSign(tuneDelta.netPnl, 0)}{tuneDelta.netPnlPct == null ? "" : ` (${fPct(tuneDelta.netPnlPct * 100, 0)})`}
-                </b>
-                <i>爆仓 {tuneBase.liquidations}→{tuneCandidate.liquidations}</i>
-                <b className={(tuneDelta.liquidationsAvoided || 0) >= 0 ? "up" : "down"}>
-                  {(tuneDelta.liquidationsAvoided || 0) >= 0 ? "少爆 " : "多爆 "}{Math.abs(tuneDelta.liquidationsAvoided || 0)}
-                </b>
-                <i>复刻 {fNum(tuneBase.behaviorReplicationRate * 100, 0)}%→{fNum(tuneCandidate.behaviorReplicationRate * 100, 0)}%</i>
-              </div>}
-              {tuneComparison && tuneComparison.status === "no_eligible_candidate" &&
-                <div className="tune-comparison-kpi" title="本轮所有平衡候选都未同时满足收益保留、爆仓下降、回撤不恶化和复刻不下降的硬条件。">
-                  <span>{tuneProfileLabel}档：</span><b className="up">无合格候选，继续当前参数</b>
-                </div>}
+          {tab === "followed" && portfolioReplay && (
+            <div className="portfolio-replay-kpi" title="当前 Core 使用 Observer 已生效参数在共享账户中做严格30日回放。复刻率同时考虑开仓捕获、加仓捕获以及是否存活到目标自然退出；爆仓为成交OHLC代理的保守压力值。">
+              <span>当前Core · 生效参数 · 严格30d：</span>
+              <b className={(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0, 0)}</b>
+              <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
+              {portfolioReplay.behaviorReplication30Worst != null && <i>复刻≈{fNum(portfolioReplay.behaviorReplication30Worst * 100, 0)}%</i>}
+              {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}
             </div>
           )}
           <div className="range-tabs">

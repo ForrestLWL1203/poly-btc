@@ -201,31 +201,6 @@ def _portfolio_replay_summary(db, generation):
     return payload
 
 
-def _tune_comparison_summary(db, generation):
-    """Return the latest same-Core strict A/B for this published generation."""
-    try:
-        row = q1(
-            db,
-            "SELECT result_json,applied,eligible_to_apply,created_at FROM auto_tune_runs "
-            "WHERE generation=? AND status='ok' ORDER BY id DESC LIMIT 1",
-            (generation,),
-        )
-        payload = _json_obj(_col(row, "result_json") if row else None)
-    except Exception:  # noqa: BLE001 - rolling deploys may predate the comparison payload
-        return None
-    comparison = payload.get("comparison") if payload else None
-    if not isinstance(comparison, dict) or comparison.get("status") not in {
-        "ok", "no_eligible_candidate",
-    }:
-        return None
-    return {
-        **comparison,
-        "applied": bool(_col(row, "applied")),
-        "eligibleToApply": bool(_col(row, "eligible_to_apply")),
-        "createdAt": _col(row, "created_at"),
-    }
-
-
 def _ep_selected_wallets(db, generation, role, page, size):
     """Serve one role from the immutable selection snapshot.
 
@@ -338,7 +313,6 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "selectionMode": True,
         "selectionGeneration": generation,
         "portfolioReplay": _portfolio_replay_summary(db, generation),
-        "tuneComparison": _tune_comparison_summary(db, generation),
         "tab": tab,
         "total": total,
         "followed": total if role == "core" else None,

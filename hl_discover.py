@@ -264,9 +264,6 @@ def main() -> int:
     opt = sub.add_parser("optimize", help="path-regate Core and jointly tune all copy parameters")
     opt.add_argument("--generation")
     opt.add_argument("--stamp")
-    ab = sub.add_parser("compare-tune", help="strict offline A/B: current params vs a tune profile")
-    ab.add_argument("--generation")
-    ab.add_argument("--profile", choices=("aggressive", "balanced", "conservative"), default="balanced")
     rr = sub.add_parser("refresh-selection-replay", help=argparse.SUPPRESS)
     rr.add_argument("--generation")
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
@@ -312,22 +309,6 @@ def main() -> int:
     elif args.cmd == "optimize":
         result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
         print(json.dumps(result, sort_keys=True, default=str))
-    elif args.cmd == "compare-tune":
-        result = scanner.compare_current_to_tune_profile(
-            db, args.generation, profile=args.profile,
-        )
-        compact = {
-            "status": result.get("status"),
-            "reason": result.get("reason"),
-            "riskProfile": result.get("riskProfile"),
-            "analysisOnly": result.get("analysisOnly"),
-            "followedN": result.get("followed_n"),
-            "eligibleToApply": result.get("eligible_to_apply"),
-            "comparison": result.get("comparison"),
-            "proposal": result.get("proposal"),
-            "validation": result.get("validation"),
-        }
-        print(json.dumps(compact, sort_keys=True, default=str))
     elif args.cmd == "refresh-selection-replay":
         generation_id = args.generation or scanner.selection.latest_published_generation(db)
         result = scanner.refresh_selection_copy_replay(db, generation_id)

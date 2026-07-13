@@ -238,10 +238,6 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertIn('from "./EditableValue.jsx"', (ROOT / "web" / "components" / "settings/ParamRow.jsx").read_text(encoding="utf-8"))
         self.assertIn('from "./CoinBlacklistEditor.jsx"', (ROOT / "web" / "components" / "settings/FollowSettingsPanel.jsx").read_text(encoding="utf-8"))
-        risk_profile = (ROOT / "web" / "components" / "settings" / "TuneRiskProfileSelector.jsx").read_text(encoding="utf-8")
-        scanner_panel = (ROOT / "web" / "components" / "settings" / "ScannerSettingsPanel.jsx").read_text(encoding="utf-8")
-        self.assertIn("export function TuneRiskProfileSelector(", risk_profile)
-        self.assertIn('from "./TuneRiskProfileSelector.jsx"', scanner_panel)
 
         self.assertNotIn("const PARAM_META = {", settings)
 
@@ -303,9 +299,6 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("liquidations30Worst", wallets)
         self.assertIn("effectiveParams", wallets)
         self.assertIn("portfolioReplay.netPnl30", wallets)
-        self.assertIn("tuneComparison", wallets)
-        self.assertIn("vs 调参前", wallets)
-        self.assertIn("liquidationsAvoided", wallets)
         self.assertIn(">跟单中{", wallets)
         self.assertIn(">候选{", wallets)
         self.assertNotIn(">降级<", wallets)
