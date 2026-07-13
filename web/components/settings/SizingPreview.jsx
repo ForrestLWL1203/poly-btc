@@ -4,7 +4,7 @@ export function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
   const [deploy, setDeploy] = React.useState(20);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
-  const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 10);
+  const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 9);
   const MINL = Math.max(1, n("MIN_LEV", 1));
   const SM = n("STOP_MARGIN_PCT", 70);
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;

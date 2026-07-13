@@ -128,7 +128,7 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #              further caps to the master's own leverage and the stock cap. σ still selects the tier.
 #   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
 STABLE_SIGMA_MAX = 0.05     # BTC-specific stable ceiling. Non-BTC never enters stable even below this σ.
-HIGH_SIGMA_MIN   = 0.10     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
+HIGH_SIGMA_MIN   = 0.09     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
 STABLE_MARGIN_MIN_PCT = 0.020  # first-open margin lower bound once portfolio deployment gets crowded
 MID_MARGIN_MIN_PCT    = 0.020
 HIGH_MARGIN_MIN_PCT   = 0.012
