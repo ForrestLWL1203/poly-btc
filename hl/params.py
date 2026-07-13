@@ -97,6 +97,8 @@ PARAM_SPEC = [
         "首次Core快速形成", "全新Paper数据库首个完整generation可直接从合格历史证据形成Core"),
     ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
         "币种黑名单", "命中的币种不再新开仓;已有仓位仍继续跟随减仓/平仓。建议从持仓行一键加入,避免符号别名写错"),
+    ("BLOCK_KOREAN_STOCKS",  "follow",  "green",  "bool",    "immediate", config.BLOCK_KOREAN_STOCKS,
+        "屏蔽韩股相关标的", "预置屏蔽 EWY、KR200、Samsung(SMSN)、SK hynix(SKHX/SKHY)、Hyundai；已有仓位只减仓/平仓，不新增仓位"),
     ("LOW_LIQUIDITY_FILTER_ENABLE", "follow", "hidden", "bool", "immediate", config.LOW_LIQUIDITY_FILTER_ENABLE,
         "低流动性币过滤", "标准 crypto perp 低于24h成交量/OI名义额阈值时不新开仓"),
     ("MIN_COIN_DAY_NTL_VLM", "follow", "hidden", "usd", "immediate", config.MIN_COIN_DAY_NTL_VLM,

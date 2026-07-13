@@ -27,7 +27,7 @@ import time
 import websockets
 
 from . import config, rest, selection, volatility, ws
-from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
+from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing, reduce_leaves_dust,
                           stop_px as engine_stop_px, tier_for_sigma)
 from .fill_transition import classify_fill_transition
@@ -120,6 +120,7 @@ class Observer:
         self.min_lev = config.MIN_LEV
         self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
         self.coin_blacklist = parse_coin_blacklist(config.COIN_BLACKLIST)
+        self.block_korean_stocks = bool(config.BLOCK_KOREAN_STOCKS)
         self.low_liquidity_filter_enable = config.LOW_LIQUIDITY_FILTER_ENABLE
         self.min_coin_day_ntl_vlm = config.MIN_COIN_DAY_NTL_VLM
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
@@ -475,6 +476,7 @@ class Observer:
             from . import params as P
             f = P.load_follow(self.db)
             if f.get("COIN_BLACKLIST") is not None: self.coin_blacklist = parse_coin_blacklist(f["COIN_BLACKLIST"])
+            if f.get("BLOCK_KOREAN_STOCKS") is not None: self.block_korean_stocks = bool(f["BLOCK_KOREAN_STOCKS"])
             if f.get("LOW_LIQUIDITY_FILTER_ENABLE") is not None: self.low_liquidity_filter_enable = bool(f["LOW_LIQUIDITY_FILTER_ENABLE"])
             if f.get("MIN_COIN_DAY_NTL_VLM") is not None: self.min_coin_day_ntl_vlm = f["MIN_COIN_DAY_NTL_VLM"]
             if f.get("MIN_COIN_OI_NOTIONAL") is not None: self.min_coin_oi_notional = f["MIN_COIN_OI_NOTIONAL"]
@@ -1408,7 +1410,7 @@ class Observer:
 
     def _open_position(self, addr, coin, t, px, pos1, maker, oid, book=None, forced_entry_px=None):
         book = book or self.taker
-        if coin_is_blacklisted(coin, self.coin_blacklist):
+        if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
             self._tally("skip_coin_blacklist", book)
             return
         if not self._copyable(coin):
@@ -1575,6 +1577,10 @@ class Observer:
                 self.db.execute(f"UPDATE {book.pos_table} SET master_open_px=? WHERE pos_id=?",
                                 (ep["master_open_px"], ep["pos_id"]))
                 self.db.commit()
+
+            if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
+                self._tally("skip_coin_blacklist_add", book)
+                return _observe_only()
 
             if self._coin_liquidity_block_reason(coin):
                 self._tally("skip_low_liquidity_add", book)

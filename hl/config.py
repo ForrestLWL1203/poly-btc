@@ -160,6 +160,7 @@ STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz
 #                           20x, and one 10% day ate our profit. No σ statistic reliably catches stock gaps →
 #                           cap by instrument class. (2026-07-02, after the TSLA 20x blow-up.)
 COIN_BLACKLIST = ""         # comma/newline separated exact coin ids to never open anew (e.g. XYZ:SHKX).
+BLOCK_KOREAN_STOCKS = False # preset: block EWY/KR200/Samsung/SK hynix/Hyundai new opens and adds.
 #                           Existing copy positions still reduce/close normally; flips close old side, then skip
 #                           the new blacklisted side. Prefer adding from the position row to avoid symbol aliases.
 LOW_LIQUIDITY_FILTER_ENABLE = True

@@ -12,7 +12,7 @@ import math
 import bisect
 
 from . import config
-from .coin_filter import coin_is_blacklisted, parse_coin_blacklist
+from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, reduce_leaves_dust, stop_px, tier_for_sigma)
@@ -151,6 +151,7 @@ class Backtest:
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
         self.coin_blacklist = parse_coin_blacklist(overrides.get("COIN_BLACKLIST", config.COIN_BLACKLIST))
+        self.block_korean_stocks = bool(overrides.get("BLOCK_KOREAN_STOCKS", config.BLOCK_KOREAN_STOCKS))
         self.low_liquidity_filter_enable = bool(overrides.get(
             "LOW_LIQUIDITY_FILTER_ENABLE", config.LOW_LIQUIDITY_FILTER_ENABLE))
         self.min_coin_day_ntl_vlm = overrides.get("MIN_COIN_DAY_NTL_VLM", config.MIN_COIN_DAY_NTL_VLM)
@@ -358,7 +359,7 @@ class Backtest:
         )
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
-        if coin_is_blacklisted(coin, self.coin_blacklist):
+        if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
             self.skip_reasons["skip_coin_blacklist"] += 1
             return
         if self.liquidity_block_reason(coin):
