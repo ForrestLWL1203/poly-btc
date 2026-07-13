@@ -1,15 +1,9 @@
 import { api } from "../lib/api.js";
-import { fNum, fSign, fTime, short } from "../lib/format.js";
+import { fNum, fSign, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
-import { useWalletAudit } from "./wallets/WalletAudit.jsx";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
-const { useState, useEffect, useCallback } = React;
-
-const dropBatchLabel = (source) => ({
-  scan: "每日重采", scan_post_tune: "重采后调参", regate: "重新门控",
-  regate_post_tune: "门控后调参", watchlist: "名单重建",
-}[source] || source || "历史记录");
+const { useState, useCallback } = React;
 
 const marketLabel = (market) => ({ crypto: "加密", stock: "美股/指数", mixed: "混合" }[market] || market || "—");
 
@@ -25,9 +19,6 @@ export function Wallets({ confirm, toast }) {
   const [tab, setTab] = useState("followed");
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
   const { data, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
-  const { auditOpen, resetAudits, toggleAudit, auditBox } = useWalletAudit();
-  useEffect(resetAudits, [tab]);
-  const dropped = tab === "dropped";
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
   const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
@@ -59,46 +50,11 @@ export function Wallets({ confirm, toast }) {
           <div className="range-tabs">
             <button className={tab === "followed" ? "on" : ""} onClick={() => { setTab("followed"); setWpage(0); }}>跟单中{tab === "followed" && data && data.total != null ? " " + data.total : ""}</button>
             <button className={tab === "challenger" ? "on" : ""} onClick={() => { setTab("challenger"); setWpage(0); }}>候选{tab === "challenger" && data && data.total != null ? " " + data.total : ""}</button>
-            <button className={tab === "dropped" ? "on" : ""} onClick={() => { setTab("dropped"); setWpage(0); }}>降级</button>
           </div>
         </div>
       </div>
       <div className="tbl-wrap">
-        {dropped ? (
-          <table>
-            <thead><tr>
-              <th>地址</th><th>市场</th><th className="num">当前分</th><th className="num">曾在线</th><th className="num">ROI</th>
-              <th className="num">胜率</th><th>主力</th><th>降级原因</th><th>退榜批次</th>
-            </tr></thead>
-            <tbody>
-              {data === null && <tr><td colSpan="9" className="loading">加载中…</td></tr>}
-              {data && data.wallets.length === 0 && <tr><td colSpan="9" className="empty">暂无降级钱包 —— 都在跟单中 👍</td></tr>}
-              {data && pageRows.map(w => {
-                const key = (w.address || "").toLowerCase();
-                const open = !!auditOpen[key];
-                return (
-                  <React.Fragment key={w.address}>
-                    <tr className={open ? "row-open" : ""} style={{ cursor: "pointer" }} onClick={() => toggleAudit(w.address)}>
-                      <td className="addr"><span className="row-caret">{open ? "▴" : "▾"}</span>{short(w.address)}</td>
-                      <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
-                      <td className="num"><b style={{ color: "var(--t2)" }}>{fNum(w.score, 1)}</b></td>
-                      <td className="num muted">{fNum(w.lastFollowedScore, 1)}</td>
-                      <td className="num up">{fNum(w.roiEqPct, 0)}%</td>
-                      <td className="num">{fNum(w.winRatePct, 0)}%</td>
-                      <td><b>{w.mainCoin}</b></td>
-                      <td><span className="tint tint-red">{w.dropReason}</span></td>
-                      <td title={w.dropDecidedAt ? "本批次完成判定于 " + fTime(w.dropDecidedAt) : ""}>
-                        <div className="mono" style={{ color: "var(--t2)", fontSize: 12 }}>{fTime(w.dropAt || w.lastFollowedAt)}</div>
-                        <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{dropBatchLabel(w.dropSource)}</div>
-                      </td>
-                    </tr>
-                    {open && <tr className="detail-row"><td colSpan="9">{auditBox(w.address)}</td></tr>}
-                  </React.Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        ) : explicit ? (
+        {explicit ? (
           <table>
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>

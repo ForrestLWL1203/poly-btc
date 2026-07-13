@@ -266,17 +266,11 @@ class WebStaticAssetsTests(unittest.TestCase):
     def test_wallets_internals_are_split(self):
         wallets = (ROOT / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
         drawer = ROOT / "web" / "components" / "wallets" / "WalletDrawer.jsx"
-        audit = ROOT / "web" / "components" / "wallets" / "WalletAudit.jsx"
 
         self.assertTrue(drawer.exists(), "Wallet drawer should live in web/components/wallets/WalletDrawer.jsx")
-        self.assertTrue(audit.exists(), "Wallet audit UI should live in web/components/wallets/WalletAudit.jsx")
         drawer_body = drawer.read_text(encoding="utf-8")
-        audit_body = audit.read_text(encoding="utf-8")
         self.assertIn("export function WalletDrawer(", drawer_body)
-        self.assertIn("export function useWalletAudit(", audit_body)
-        self.assertIn("/api/pipeline-audit", audit_body)
         self.assertIn('from "./wallets/WalletDrawer.jsx"', wallets)
-        self.assertIn('from "./wallets/WalletAudit.jsx"', wallets)
         self.assertNotIn("function WalletDrawer(", wallets)
         self.assertNotIn("/api/pipeline-audit", wallets)
 
@@ -299,6 +293,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("portfolioReplay.netPnl30", wallets)
         self.assertIn(">跟单中{", wallets)
         self.assertIn(">候选{", wallets)
+        self.assertNotIn(">降级<", wallets)
+        self.assertNotIn('tab === "dropped"', wallets)
         self.assertNotIn("角色 / 市场", wallets)
         self.assertNotIn("捕获 / 容量", wallets)
         self.assertNotIn("OOS净利", wallets)
