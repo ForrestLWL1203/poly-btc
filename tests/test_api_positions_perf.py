@@ -42,7 +42,8 @@ class ApiPositionsPerfTests(unittest.TestCase):
         params.seed_params(db)
         db.execute(
             "INSERT INTO watchlist (rank,addr,score,market_type,updated_at) VALUES "
-            "(1,'0xaaa',0.9,'crypto','now'),(2,'0xbbb',0.8,'crypto','now')"
+            "(1,'0xaaa',0.9,'crypto','now'),(2,'0xbbb',0.8,'crypto','now'),"
+            "(3,'0xccc',0.7,'crypto','now')"
         )
         db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES ('0xbbb',0,'now')")
         db.execute(
@@ -51,9 +52,10 @@ class ApiPositionsPerfTests(unittest.TestCase):
             "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02')"
         )
         db.executemany(
-            "INSERT INTO follow_selection (generation,addr,role,enabled,utility,selected_at) "
-            "VALUES ('g1',?,'core',1,?,'2026-01-02')",
-            [("0xaaa", 2.0), ("0xbbb", 1.0)],
+            "INSERT INTO follow_selection "
+            "(generation,addr,role,enabled,utility,selection_rank,selected_at) "
+            "VALUES ('g1',?,'core',1,?,?,'2026-01-02')",
+            [("0xaaa", 1.0, 1), ("0xbbb", .5, 3), ("0xccc", 2.0, 2)],
         )
         db.execute(
             "INSERT INTO copy_position "
