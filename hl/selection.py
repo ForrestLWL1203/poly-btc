@@ -453,6 +453,9 @@ def search_smart_core(candidates: Sequence[str],
                       min_marginal_gain_ratio: float = 0.0,
                       time_budget_s: Optional[float] = None,
                       validation_limit: Optional[int] = None,
+                      strict_order_width: int = 2,
+                      strict_challenger_limit: int = 4,
+                      strict_expansion_passes: int = 1,
                       validation_evaluator: Optional[
                           Callable[[Tuple[str, ...]], PortfolioMetrics]
                       ] = None) -> MarginalSelectionResult:
@@ -475,6 +478,7 @@ def search_smart_core(candidates: Sequence[str],
     target = min(len(ordered), max(0, int(seed_target)))
     cache = {}
     validation_cache = {}
+    strict_eval_seconds = 0.0
 
     def check_budget():
         if deadline is not None and time.monotonic() >= deadline:
@@ -489,6 +493,21 @@ def search_smart_core(candidates: Sequence[str],
                 raise TypeError("portfolio evaluator must return PortfolioMetrics")
             cache[key] = metrics
         return cache[key]
+
+    def validate_strict(addrs):
+        nonlocal strict_eval_seconds
+        if validation_evaluator is None:
+            raise RuntimeError("strict evaluator is unavailable")
+        check_budget()
+        key = tuple(sorted(addrs))
+        if key not in validation_cache:
+            tick = time.monotonic()
+            value = validation_evaluator(key)
+            strict_eval_seconds += time.monotonic() - tick
+            if not isinstance(value, PortfolioMetrics):
+                raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
+            validation_cache[key] = value
+        return validation_cache[key]
 
     def feasible(metrics):
         return (
@@ -686,17 +705,20 @@ def search_smart_core(candidates: Sequence[str],
         finalist_items = list(dedup_finalists.items())
         limit = max(1, int(validation_limit)) if validation_limit else None
         if limit and len(finalist_items) > limit:
-            # Reserve the best two paths at every cardinality before filling remaining slots globally.
-            # This makes 1..anchor all genuine strict-replay finalists without letting K-line replay explode.
+            # Reserve the anchor sizes plus the largest expansion before filling remaining slots globally.
+            # Covering every cardinality can consume the entire budget before validating the best large set.
             by_size = {}
             for item in finalist_items:
                 by_size.setdefault(len(item[0]), []).append(item)
             shortlisted, shortlisted_keys = [], set()
-            for size in sorted(by_size):
-                for item in sorted(by_size[size], key=_smart_rank, reverse=True)[:2]:
-                    if item[0] not in shortlisted_keys and len(shortlisted) < limit:
-                        shortlisted.append(item)
-                        shortlisted_keys.add(item[0])
+            required_sizes = [size for size in sorted(by_size) if size <= target]
+            if by_size:
+                required_sizes.append(max(by_size))
+            for size in dict.fromkeys(required_sizes):
+                item = max(by_size[size], key=_smart_rank)
+                if item[0] not in shortlisted_keys and len(shortlisted) < limit:
+                    shortlisted.append(item)
+                    shortlisted_keys.add(item[0])
             for item in sorted(finalist_items, key=_smart_rank, reverse=True):
                 if item[0] not in shortlisted_keys and len(shortlisted) < limit:
                     shortlisted.append(item)
@@ -704,13 +726,7 @@ def search_smart_core(candidates: Sequence[str],
             finalist_items = shortlisted
         validated = []
         for addrs, neutral_metrics in finalist_items:
-            check_budget()
-            if addrs not in validation_cache:
-                value = validation_evaluator(addrs)
-                if not isinstance(value, PortfolioMetrics):
-                    raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
-                validation_cache[addrs] = value
-            value = validation_cache[addrs]
+            value = validate_strict(addrs)
             stress = f(
                 value.stress_net_pnl
                 if value.stress_net_pnl is not None else value.stress_net_lcb
@@ -727,27 +743,49 @@ def search_smart_core(candidates: Sequence[str],
                 item[0],
             ), reverse=True)
             selected, metrics, _ = validated[0]
-            # Give the published list an economically meaningful 1..N order.  At each position compare all
-            # remaining wallets from the winning set under the same strict replay.  After the anchor, apply
-            # the same marginal-profit floor used by expansion and stop rather than force a quota.
+            # Give the published list an economically meaningful 1..N order. At each position use the fast
+            # shared-account replay to shortlist the strongest marginal paths, then let strict K-line replay
+            # choose between them. After the anchor, apply the same profit floor and stop rather than force
+            # a quota. This is deliberately good-enough local search, not exhaustive subset optimization.
             remaining = set(selected)
             contribution_order = []
-            strict_current = validation_cache.get(())
-            if strict_current is None:
-                strict_current = validation_evaluator(())
-                if not isinstance(strict_current, PortfolioMetrics):
-                    raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
-                validation_cache[()] = strict_current
+            strict_current = validate_strict(())
+
+            def strict_shortlist(pool, prefix, limit):
+                pool = set(pool)
+                limit = max(1, int(limit))
+                if len(pool) <= limit:
+                    return sorted(pool, key=lambda addr: (
+                        score_order.get(addr, len(ordered)), addr,
+                    ))
+                fast_current = evaluate(tuple(sorted(prefix)))
+                ranked = []
+                for addr in pool:
+                    fast_trial = evaluate(tuple(sorted((*prefix, addr))))
+                    ranked.append((
+                        _portfolio_utility(fast_trial) - _portfolio_utility(fast_current),
+                        _portfolio_net(fast_trial) - _portfolio_net(fast_current),
+                        -score_order.get(addr, len(ordered)),
+                        addr,
+                    ))
+                ranked.sort(reverse=True)
+                # Preserve the highest published-score wallet as a tie-break path, then fill by fast shared
+                # account marginal value. Strict K-line replay still makes the actual admission decision.
+                score_pick = min(pool, key=lambda addr: score_order.get(addr, len(ordered)))
+                out = [score_pick]
+                for _utility, _net, _score, addr in ranked:
+                    if addr not in out:
+                        out.append(addr)
+                    if len(out) >= limit:
+                        break
+                return out
+
             while remaining:
                 ranked_additions = []
-                for addr in remaining:
+                for addr in strict_shortlist(
+                        remaining, contribution_order, strict_order_width):
                     trial_addrs = tuple(sorted((*contribution_order, addr)))
-                    if trial_addrs not in validation_cache:
-                        value = validation_evaluator(trial_addrs)
-                        if not isinstance(value, PortfolioMetrics):
-                            raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
-                        validation_cache[trial_addrs] = value
-                    value = validation_cache[trial_addrs]
+                    value = validate_strict(trial_addrs)
                     if not feasible(value) or not _portfolio_economic_passes(
                             strict_current, value, constraints):
                         continue
@@ -780,17 +818,14 @@ def search_smart_core(candidates: Sequence[str],
             # admission.  This prevents a high-quality Challenger from being stranded solely because its
             # earlier fills-only beam path was pruned.
             outside = {addr for addr in ordered if addr not in contribution_order}
-            while outside and len(contribution_order) < constraints.max_targets:
+            for _ in range(max(0, int(strict_expansion_passes))):
+                if not outside or len(contribution_order) >= constraints.max_targets:
+                    break
                 ranked_additions = []
-                for addr in outside:
+                for addr in strict_shortlist(
+                        outside, contribution_order, strict_challenger_limit):
                     trial_addrs = tuple(sorted((*contribution_order, addr)))
-                    if trial_addrs not in validation_cache:
-                        check_budget()
-                        value = validation_evaluator(trial_addrs)
-                        if not isinstance(value, PortfolioMetrics):
-                            raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
-                        validation_cache[trial_addrs] = value
-                    value = validation_cache[trial_addrs]
+                    value = validate_strict(trial_addrs)
                     if not feasible(value) or not _portfolio_economic_passes(
                             strict_current, value, constraints):
                         continue
@@ -836,6 +871,12 @@ def search_smart_core(candidates: Sequence[str],
             "selectedCount": len(selected),
             "neutralSelectedCount": len(beam[0][0]) if beam else 0,
             "validatedFinalists": len(validation_cache),
+            "neutralEvaluations": len(cache),
+            "strictEvaluations": len(validation_cache),
+            "strictEvalSec": round(strict_eval_seconds, 3),
+            "strictOrderWidth": max(1, int(strict_order_width)),
+            "strictChallengerLimit": max(1, int(strict_challenger_limit)),
+            "strictExpansionPasses": max(0, int(strict_expansion_passes)),
             "strictValidationPassed": bool(selected) if validation_evaluator is not None else None,
             "contributionOrder": tuple(selected),
             "minMarginalGainRatio": max(0.0, f(min_marginal_gain_ratio)),

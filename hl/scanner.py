@@ -988,6 +988,73 @@ def _selection_prefetch_candidates(db, limit=None) -> list[str]:
     ]
 
 
+def _portfolio_replay_input_diagnostics(db, addrs, now_ms, window_fills=None) -> dict:
+    """Compact, address-free evidence for explaining why portfolio inputs were unavailable."""
+    owners = sorted({(addr or "").lower() for addr in addrs if addr})
+    warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+    tune_days = auto_tune._tune_days()
+    start_ms = int(now_ms) - (max(tune_days) + warmup_days) * 86_400_000
+    if not owners:
+        return {"candidates": 0, "rawRows": 0, "rawBytes": 0, "policies": 0, "usable": {}}
+    marks = ",".join("?" for _ in owners)
+    raw = db.execute(
+        f"SELECT COUNT(*),COALESCE(SUM(LENGTH(fill_json)),0) FROM candidate_fills "
+        f"WHERE lower(addr) IN ({marks}) AND time>=?",
+        (*owners, start_ms),
+    ).fetchone()
+    policy_rows = db.execute(
+        f"SELECT sector_policy_json FROM watchlist WHERE lower(addr) IN ({marks})",
+        tuple(owners),
+    ).fetchall()
+    valid_policies = 0
+    for (raw_policy,) in policy_rows:
+        try:
+            policy = json.loads(raw_policy or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(policy, dict) and policy.get("allowed"):
+            valid_policies += 1
+    return {
+        "candidates": len(owners),
+        "rawRows": int((raw[0] if raw else 0) or 0),
+        "rawBytes": int((raw[1] if raw else 0) or 0),
+        "maxBytes": int(getattr(
+            config, "AUTO_TUNE_FILL_CACHE_MAX_BYTES", 64 * 1024 * 1024,
+        ) or 0),
+        "policies": len(policy_rows),
+        "validPolicies": valid_policies,
+        "usable": {
+            int(days): len(rows) for days, rows in (window_fills or {}).items()
+        },
+    }
+
+
+def _prefetch_selection_paths(db, candidates, now_ms) -> dict:
+    """Incrementally prepare the bounded candidate path cache without profile/fill refetch."""
+    candidates = list(dict.fromkeys((addr or "").lower() for addr in candidates if addr))
+    if not candidates:
+        return {"candidates": 0, "fills": 0, "pathRows": 0, "coverage": 1.0}
+    path_start = int(now_ms) - (
+        30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+    ) * 86_400_000
+    fills = load_copyable_fills(db, candidates, path_start)
+    follow = params.load_follow(db)
+    if "SMART_ADD" in follow:
+        follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+    rows, meta = auto_tune.prepare_refined_price_path(
+        db, fills, path_start, int(now_ms),
+        sigmas=auto_tune._load_sigmas(db), overrides=follow,
+        market_ctx=auto_tune._load_market_ctx(db),
+    )
+    return {
+        "candidates": len(candidates),
+        "fills": len(fills),
+        "pathRows": len(rows),
+        "coverage": float(meta.get("coverage") or 0.0),
+        "missingCoins": len(meta.get("missingCoins") or ()),
+    }
+
+
 def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False,
                               validate_price_path=True, audit_stamp=None):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
@@ -1082,7 +1149,13 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 # Selection did not run. Publishing the still-qualified intersection of the old Core and
                 # the new profile set silently shrinks membership without portfolio evidence. Fail the
                 # generation so the complete previous published selection remains authoritative.
-                raise RuntimeError("selection_portfolio_replay_unavailable")
+                diagnostic = _portfolio_replay_input_diagnostics(
+                    db, portfolio_candidates, now_ms, window_fills,
+                )
+                raise RuntimeError(
+                    "selection_portfolio_replay_unavailable:"
+                    + json.dumps(diagnostic, sort_keys=True, separators=(",", ":"))
+                )
             if window_fills is not None and any(window_fills.values()):
                 follow = params.load_follow(db)
                 if "SMART_ADD" in follow:
@@ -1235,7 +1308,14 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         config, "CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO", 0.01,
                     )),
                     time_budget_s=float(getattr(config, "CORE_SEARCH_TIME_BUDGET_SEC", 600)),
-                    validation_limit=int(getattr(config, "CORE_SEARCH_VALIDATION_FINALISTS", 24)),
+                    validation_limit=int(getattr(config, "CORE_SEARCH_VALIDATION_FINALISTS", 12)),
+                    strict_order_width=int(getattr(config, "CORE_SEARCH_STRICT_ORDER_WIDTH", 2)),
+                    strict_challenger_limit=int(getattr(
+                        config, "CORE_SEARCH_STRICT_CHALLENGER_LIMIT", 4,
+                    )),
+                    strict_expansion_passes=int(getattr(
+                        config, "CORE_SEARCH_STRICT_EXPANSION_PASSES", 1,
+                    )),
                     validation_evaluator=validate,
                 )
                 selected_set = set(marginal.selected)
@@ -1896,11 +1976,12 @@ def _launch_async_tuner(db, generation_id, stamp):
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
                                launch_tuner=True):
-    """Rebuild selection from the current complete generation without network access.
+    """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
-    This is intentionally narrow: it never fetches network data or rewrites profiles.  Replacing a non-empty
-    Core requires the explicit ``replace_existing`` flag.  It repairs both an empty bootstrap and a published
-    selection produced from a stale derived watchlist without repeating an expensive full scan.
+    This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
+    rewrites wallet profiles or fetches wallet fills. Replacing a non-empty Core requires the explicit
+    ``replace_existing`` flag. It repairs both an empty bootstrap and a published selection produced from a
+    stale derived watchlist without repeating an expensive full scan.
     """
     current = selection.latest_published_generation(db)
     generation_id = generation_id or current
@@ -1923,6 +2004,20 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         raise RuntimeError("selection_repair_has_stale_active_profiles")
 
     stamp = stamp or now_iso()
+    repair_now_ms = int(time.time() * 1000)
+    db.commit()
+    refresh_watchlist(
+        db,
+        stamp,
+        source="selection_repair_prefetch",
+        update_follow_line=False,
+        update_follow_history=False,
+        leaderboard_generation=generation_id,
+        commit=False,
+    )
+    prefetch_candidates = _selection_prefetch_candidates(db)
+    db.rollback()
+    _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms)
     refresh_watchlist(
         db,
         stamp,
@@ -1933,7 +2028,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         commit=False,
     )
     rows, marginal = _build_explicit_selection(
-        db, generation_id, stamp, int(time.time() * 1000),
+        db, generation_id, stamp, repair_now_ms,
         force_cold_bootstrap=not bool(existing_core),
     )
     previous_core = set(existing_core)
@@ -2563,21 +2658,7 @@ def scan(db, p) -> None:
                         db, stage="prefetch_selection_paths",
                         candidates_scanned=len(workset), candidates_total=len(workset),
                     )
-                    from . import price_path
-                    path_start = now_ms - (
-                        30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
-                    ) * 86_400_000
-                    preview_fills = load_copyable_fills(db, preview_candidates, path_start)
-                    preview_follow = params.load_follow(db)
-                    if "SMART_ADD" in preview_follow:
-                        preview_follow["ADD_STRATEGY"] = (
-                            "smart" if preview_follow["SMART_ADD"] else "hardcap"
-                        )
-                    auto_tune.prepare_refined_price_path(
-                        db, preview_fills, path_start, now_ms,
-                        sigmas=auto_tune._load_sigmas(db), overrides=preview_follow,
-                        market_ctx=auto_tune._load_market_ctx(db),
-                    )
+                    _prefetch_selection_paths(db, preview_candidates, now_ms)
             except Exception as exc:  # noqa: BLE001 - final pass safely retains prior Core without coverage
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
@@ -2715,6 +2796,19 @@ def scan(db, p) -> None:
         except Exception as exc:  # noqa: BLE001 - rollback restores old watchlist/selection atomically
             db.rollback()
             generation.fail_generation(db, generation_id, f"finalize_error:{exc}")
+            pipeline_audit._insert_event(
+                db,
+                stamp=stamp,
+                source="scan",
+                stage="selection_summary",
+                status="failed",
+                reason=str(exc)[:300],
+                payload={
+                    "generation": generation_id,
+                    "mode": selection_mode,
+                    "retainedGeneration": selection.latest_published_generation(db),
+                },
+            )
             db.commit()
             complete = False
             failed += 1
