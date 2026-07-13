@@ -145,13 +145,6 @@ function Dashboard({ onLogout }) {
             <div className="strip-item"><span>可用</span><b>{fUsd(ov.availableBalance)}</b></div>
             <div className="strip-item"><span>被跟</span><b>{ov.system.watchlistCount}</b></div>
             <div className="strip-item"><span>浮动</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</b></div>
-            <div className="strip-item" title={ov.system.strategyRevision
-              ? `Revision ${ov.system.strategyRevision}\nGeneration ${ov.system.strategyGeneration}\nSource ${ov.system.strategySource}\nParams ${ov.system.strategyParamsHash}`
-              : "尚未生成策略 revision，Observer 使用兼容读取"}>
-              <span>观测 / 策略</span><b style={{ color: obs === "stopped" ? "var(--t3)" : obs === "paused" ? "var(--amber)" : "var(--green-l)" }}>
-                {obs === "stopped" ? "停" : obs === "paused" ? "暂停" : "运行"} · {ov.system.strategyRevision ? ov.system.strategyRevision.slice(-4) : "兼容"}
-              </b>
-            </div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
               return <div className="strip-item"><span>采集</span><b style={{ color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</b></div>; })()}
           </div>
