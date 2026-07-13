@@ -1462,6 +1462,28 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
     return {"status": "kept", "oldNet": old_net, "newNet": new_net}
 
 
+def bind_active_tune_rollback_core(db, addrs) -> bool:
+    """Move the forward champion/challenger check onto the sealed Core set."""
+    state = _json_load(_state_get(db, "active_tune_rollback"), {}) or {}
+    if not state or state.get("resolved"):
+        return False
+    state["addrs"] = sorted({(addr or "").lower() for addr in addrs if addr})
+    _state_set(db, "active_tune_rollback", state)
+    return True
+
+
+def resolve_active_tune_rollback(db, reason: str) -> bool:
+    """Close a pending forward check when its parameter apply was rolled back."""
+    state = _json_load(_state_get(db, "active_tune_rollback"), {}) or {}
+    if not state or state.get("resolved"):
+        return False
+    state.update(
+        resolved=True, rolledBack=True, rollbackReason=reason, rollbackAt=now_iso(),
+    )
+    _state_set(db, "active_tune_rollback", state)
+    return True
+
+
 def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_run: bool = False,
                        mode: str | None = None, follow_values: dict | None = None,
                        data_complete: bool = True, expected_generation: str | None = None) -> dict:
@@ -1842,6 +1864,12 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                 validation=apply_validation,
                 reason="validated_portfolio_tune",
                 expected_active_revision=expected_strategy_revision,
+                # The generation-bound caller seals the new parameters together
+                # with a membership consistency pass.  Keep this audit bundle
+                # staged: Observer must never see params/new + targets/old, even
+                # if it restarts while the strict membership pass is running.
+                activate=False,
+                enqueue_reload=False,
             )
         else:
             _enqueue_reload(db, source)
@@ -1871,6 +1899,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "proposal": proposal_combined,
         "strategyRevision": (applied_revision or {}).get("revision"),
         "parentStrategyRevision": expected_strategy_revision,
+        "reloadDeferredForSelection": bool(applied_revision),
         "finalists": finalist_results,
         "rollback": rollback_result,
         "candidates": [_compact_candidate(c) for c in candidates],

@@ -129,6 +129,70 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(replay[4], "later")
             self.assertEqual(profile, (100, 7))
 
+    def test_generation_tune_seals_applied_params_with_membership_before_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
+                "VALUES('g1','published',1,1,1,'now')"
+            )
+            db.commit()
+            tuned = {
+                "status": "ok", "applied": True,
+                "strategyRevision": "temporary", "parentStrategyRevision": "previous",
+            }
+            with patch.object(scanner, "_maybe_auto_tune_margins", return_value=tuned), \
+                    patch.object(scanner, "repair_published_selection", return_value={
+                        "status": "repaired", "generation": "g1", "core": 10,
+                    }) as repair, \
+                    patch.object(scanner.strategy_revision, "active_revision_id",
+                                 return_value="sealed"), \
+                    patch.object(scanner.auto_tune, "store_effective_portfolio_replay",
+                                 return_value={"status": "ok"}) as portfolio_replay, \
+                    patch.object(scanner, "refresh_selection_copy_replay",
+                                 return_value={"status": "ok"}) as selection_replay:
+                result = scanner.tune_published_generation(db, "g1")
+
+            self.assertEqual(result["selectionConsistency"]["status"], "repaired")
+            self.assertEqual(result["sealedStrategyRevision"], "sealed")
+            self.assertTrue(repair.call_args.kwargs["replace_existing"])
+            self.assertFalse(repair.call_args.kwargs["launch_tuner"])
+            portfolio_replay.assert_called_once()
+            selection_replay.assert_called_once()
+
+    def test_generation_tune_rolls_back_when_membership_seal_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
+                "VALUES('g1','published',1,1,1,'now')"
+            )
+            db.commit()
+            tuned = {
+                "status": "ok", "applied": True,
+                "strategyRevision": "temporary", "parentStrategyRevision": "previous",
+            }
+            with patch.object(scanner, "_maybe_auto_tune_margins", return_value=tuned), \
+                    patch.object(scanner, "repair_published_selection",
+                                 side_effect=RuntimeError("strict replay failed")), \
+                    patch.object(scanner.strategy_revision, "reactivate_revision",
+                                 return_value={"revision": "previous"}) as rollback, \
+                    patch.object(scanner.auto_tune, "store_effective_portfolio_replay") as replay:
+                result = scanner.tune_published_generation(db, "g1")
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["reason"], "selection_consistency_failed")
+            self.assertFalse(result["effectiveApplied"])
+            rollback.assert_called_once_with(
+                db, "previous", source="tune_selection_consistency",
+                expected_active_revision="previous", enqueue_reload=True,
+                restore_param_keys=(
+                    *scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS,
+                ),
+                expected_mutable_params={},
+            )
+            replay.assert_not_called()
+
     def test_warmup_backfill_targets_only_wallets_with_copy_evidence(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -284,18 +348,24 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 net_pnl=100.0, stress_net_pnl=80.0, drawdown_dollars=50.0,
                 risk_adjusted_utility=50.0,
             )
-            marginal = scanner.selection.MarginalSelectionResult(
-                selected=("0xaaa",), baseline=scanner.selection.PortfolioMetrics(
+            staged = scanner.offline_core_optimizer.OfflineSearchResult(
+                selected=("0xaaa",), metrics=metrics, initial=(),
+                initial_metrics=scanner.selection.PortfolioMetrics(
                     0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0,
-                ), metrics=metrics, action="add", added=("0xaaa",), evaluated=1,
+                ), fast_evaluated=1, strict_evaluated=1,
+                finalists=(("0xaaa",),),
+            )
+            robust = scanner.offline_core_optimizer.RobustSelectionResult(
+                selected=("0xaaa",), metrics=metrics, comparison=None,
+                evaluated=1,
             )
 
-            def select_after_watchlist(*args, **kwargs):
+            def select_after_watchlist(*args):
                 self.assertIsNotNone(db.execute(
                     "SELECT 1 FROM watchlist WHERE addr='0xaaa'"
                 ).fetchone())
-                kwargs["validation_evaluator"](("0xaaa",))
-                return marginal
+                args[3](("0xaaa",))
+                return staged
 
             strict_windows = {
                 30: {
@@ -321,7 +391,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_windows), \
-                    patch.object(scanner.selection, "search_smart_core", side_effect=select_after_watchlist), \
+                    patch.object(scanner.offline_core_optimizer, "optimize_membership",
+                                 side_effect=select_after_watchlist), \
+                    patch.object(scanner.offline_core_optimizer, "choose_robust_candidate",
+                                 return_value=robust), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -592,7 +665,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: fills}), \
                     patch.object(scanner.auto_tune, "evaluate_portfolio_window", side_effect=evaluate), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_window), \
-                    patch.object(scanner.selection, "search_smart_core", side_effect=search), \
                     patch("hl.price_path.coins_for_fills", return_value=["BTC"]), \
                     patch("hl.price_path.load_refined", return_value=[{"coin": "BTC", "time": 1000}]), \
                     patch("hl.price_path.coverage", return_value={
@@ -639,18 +711,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 3000, 3000, 2, .9, .9, .1, .5, .1,
                 net_pnl=3000, drawdown_dollars=1000, risk_adjusted_utility=2000,
             )
-            marginal = scanner.selection.MarginalSelectionResult(
-                selected=("0xaaa",), baseline=baseline, metrics=profitable,
-                action="add", added=("0xaaa",), evaluated=2,
+            staged = scanner.offline_core_optimizer.OfflineSearchResult(
+                selected=("0xaaa",), metrics=profitable, initial=(),
+                initial_metrics=baseline, fast_evaluated=1, strict_evaluated=1,
+                finalists=(("0xaaa",),),
+            )
+            robust = scanner.offline_core_optimizer.RobustSelectionResult(
+                selected=("0xaaa",), metrics=profitable, comparison=None,
+                evaluated=1,
             )
             with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
-                    patch.object(scanner.selection, "search_smart_core", return_value=marginal), \
-                    patch.object(scanner, "_portfolio_selection_metrics", side_effect=[profitable, baseline]):
+                    patch.object(scanner.offline_core_optimizer, "optimize_membership",
+                                 return_value=staged), \
+                    patch.object(scanner.offline_core_optimizer, "choose_robust_candidate",
+                                 return_value=robust), \
+                    patch.object(scanner, "_portfolio_selection_metrics",
+                                 side_effect=lambda _windows, baseline_n=0, selected_n=0:
+                                 profitable if selected_n else baseline):
                 rows, result = scanner._build_explicit_selection(
                     db, "g1", "now", 1000, validate_price_path=False,
                 )
 
-            self.assertEqual(result, marginal)
+            self.assertEqual(result.selected, ("0xaaa",))
+            self.assertEqual(result.action, "robust_multi_start")
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
                 ("0xaaa", "core", "portfolio_positive_net_contribution"),
             ])

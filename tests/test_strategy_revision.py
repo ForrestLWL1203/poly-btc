@@ -105,6 +105,36 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(len(active["targets"]), 1)
         self.assertEqual(strategy_revision.resolved_targets(db, active), [])
 
+    def test_reactivate_revision_restores_complete_bundle_and_mutable_params(self):
+        db = self._db()
+        first = strategy_revision.create_revision(
+            db, "g1", source="scan", enqueue_reload=False,
+        )
+        first_bundle = strategy_revision.load_revision(db, first["revision"])
+        db.execute("UPDATE params SET value='7' WHERE key='STABLE_MARGIN_PCT'")
+        second = strategy_revision.create_revision(
+            db, "g1", source="auto_tune", parent_revision=first["revision"],
+            expected_active_revision=first["revision"], enqueue_reload=False,
+        )
+        db.commit()
+
+        restored = strategy_revision.reactivate_revision(
+            db, first["revision"], source="selection_consistency",
+            expected_active_revision=second["revision"],
+        )
+        db.commit()
+
+        self.assertEqual(strategy_revision.active_revision_id(db), first["revision"])
+        self.assertEqual(
+            params.load_follow(db)["STABLE_MARGIN_PCT"],
+            first_bundle["params"]["STABLE_MARGIN_PCT"],
+        )
+        self.assertGreater(restored["restoredParams"], 0)
+        payload = db.execute(
+            "SELECT payload_json FROM commands WHERE type='reload_params' ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        self.assertIn(first["revision"], payload)
+
 
 if __name__ == "__main__":
     unittest.main()

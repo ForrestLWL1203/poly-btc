@@ -36,12 +36,14 @@ Wallet quality and funded-account membership are separate decisions.
   data, insufficient evidence, stale activity, thin copy edge, and copy replays that lose after costs.
 - The final copy-follow score ranks wallets that passed those gates. It combines raw profile quality and copy
   evidence; it is displayed on a 0–100 scale while stored natively in `[0, 1]`.
-- The Core selector starts with score-ordered qualified candidates, evaluates one shared simulated account,
-  and uses a bounded beam search plus replacement checks. Seed target 10 is a search depth, not a minimum count.
-  Core may contain fewer wallets when extra wallets do not add enough net portfolio value.
-- After the seed, each expansion must improve shared portfolio net PnL by at least 1% of the current result.
-  The selector also checks open capture, capacity, drawdown, deployment, cost drag, and concentration. There is
-  no fixed “at least seven wallets” rule.
+- The Core selector evaluates one shared simulated account using empty-forward, all-backward, and current-Core
+  starts, then repeatedly checks add/remove/swap/pair-add moves under strict K-line replay. Score orders the
+  candidate pool; it does not force a score prefix or fixed base count.
+- Final moves must improve portfolio economics and pass non-overlapping ten-day folds, a recent holdout, and
+  1.5x transaction-cost stress without adding a stress liquidation. This can admit several complementary
+  wallets in one run, or replace a weak incumbent. There is no fixed minimum Core count or wall-clock cutoff.
+- When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
+  same complete generation. The sealed strategy revision activates new parameters and new Core together.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
 

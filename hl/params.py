@@ -324,6 +324,40 @@ def load_follow(db):
     return load_category(db, "follow")
 
 
+def restore_follow_snapshot(db, values, *, keys=None, expected_current=None, stamp=None):
+    """Restore an engine-unit follow snapshot without committing.
+
+    Used only by the immutable strategy fail-closed path.  Percent/nullable
+    values are converted back to the UI-facing units stored in ``params``.
+    """
+    stamp = stamp or now_iso()
+    allowed = set(keys) if keys is not None else None
+    current = load_follow(db) if expected_current else {}
+    restored = 0
+    for spec in PARAM_SPEC:
+        key, category, _level, ptype = spec[:4]
+        if (category != "follow" or ptype == "display" or key not in values
+                or (allowed is not None and key not in allowed)):
+            continue
+        if key in (expected_current or {}):
+            actual = current.get(key)
+            expected = expected_current[key]
+            if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
+                if abs(float(actual) - float(expected)) > 1e-12:
+                    continue
+            elif actual != expected:
+                continue
+        value = values[key]
+        if value is not None and ptype in ("pct", "nullable"):
+            value = float(value) * 100.0
+        cur = db.execute(
+            "UPDATE params SET value=?,updated_at=? WHERE key=?",
+            (_to_text(value), stamp, key),
+        )
+        restored += int(cur.rowcount or 0)
+    return restored
+
+
 # DB scanner-param key -> the scan args-namespace attribute the scanner/metrics actually read.
 SCANNER_ARG_MAP = {
     "HARVEST_MIN_ACCT": "min_acct",

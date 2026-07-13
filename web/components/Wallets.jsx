@@ -49,8 +49,8 @@ export function Wallets({ confirm, toast }) {
         <h2>跟踪名单</h2>
         <div className="wallets-head-actions">
           {tab === "followed" && portfolioReplay && (
-            <div className="portfolio-replay-kpi" title="最终 Core 使用已生效参数在共享账户中回放。收益已扣手续费；爆仓为成交OHLC代理的保守压力值，并非真实标记价格强平次数。">
-              <span>最优参数30d保守预估：</span>
+            <div className="portfolio-replay-kpi" title="当前 Core 使用 Observer 已生效参数在共享账户中做严格30日回放。收益已扣手续费；爆仓为成交OHLC代理的保守压力值，并非真实标记价格强平次数。">
+              <span>当前Core · 生效参数 · 严格30d：</span>
               <b className={(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0, 0)}</b>
               <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
               {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}

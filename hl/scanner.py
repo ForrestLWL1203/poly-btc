@@ -18,8 +18,9 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import (auto_tune, config, follow_score, generation, metrics, params, pipeline_audit, rest,
-               selection, storage, strategy_revision)
+from . import (auto_tune, config, follow_score, generation, metrics, offline_core_optimizer,
+               params, pipeline_audit, rest, selection, storage, strategy_revision)
+from .copy_backtest import run_backtest, slice_backtest_result
 from .fills import build_episodes, is_spot
 from .copy_data import load_copyable_fills, normalize_copyable_fills
 from .copy_policy import load_copy_policy
@@ -1174,15 +1175,26 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 market_ctx = auto_tune._load_market_ctx(db)
                 eval_cache = {}
                 validation_cache = {}
+                fold_validation_cache = {}
                 path_validation_details = {}
+                from . import price_path
+                path_start = now_ms - (
+                    30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+                ) * 86_400_000
+                all_selection_fills = list(window_fills.get(30) or [])
+                shared_path_rows = (
+                    price_path.load_refined(
+                        db, all_selection_fills, path_start, now_ms,
+                    ) if validate_price_path else []
+                )
 
                 def evaluate(addrs):
                     key = tuple(sorted(addrs))
                     if key in eval_cache:
                         return eval_cache[key]
                     allowed = set(key)
-                    # Core search ranks on the primary 30-day window only.  Avoid rebuilding unused 14/7
-                    # lists for every beam candidate; finalists receive the normal multi-window tuner later.
+                    # Fast discovery ranks on the primary 30-day window only. Avoid rebuilding unused 14/7
+                    # lists for every candidate; strict finalists receive full multi-window replay below.
                     filtered = {
                         30: [
                             fill for fill in (window_fills.get(30) or [])
@@ -1217,28 +1229,34 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     path_reasons = []
                     path_meta = {}
                     path_primary = None
+                    normal_primary = None
+                    selected_fills = []
                     if validate_price_path:
-                        from . import price_path
                         selected_fills = list(filtered.get(30) or [])
-                        path_start = now_ms - (
-                            30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
-                        ) * 86_400_000
                         path_meta = price_path.coverage(
                             db, selected_fills, path_start, now_ms,
                         )
-                        path_rows = price_path.load_refined(
-                            db, selected_fills, path_start, now_ms,
-                        )
                         strict_follow = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
-                        windows = auto_tune._candidate_windows(
+                        normal_windows = auto_tune._candidate_windows(
+                            db, list(key), sigmas, follow, now_ms,
+                            window_fills=filtered, market_ctx=market_ctx,
+                            path_rows=shared_path_rows, path_meta=path_meta,
+                        )
+                        strict_windows = auto_tune._candidate_windows(
                             db, list(key), sigmas, strict_follow, now_ms,
                             window_fills=filtered, market_ctx=market_ctx,
-                            path_rows=path_rows, path_meta=path_meta,
+                            path_rows=shared_path_rows, path_meta=path_meta,
                         )
-                        path_primary = windows.get(30) or windows.get(max(windows, default=30))
+                        normal_primary = normal_windows.get(30) or normal_windows.get(
+                            max(normal_windows, default=30)
+                        )
+                        path_primary = strict_windows.get(30) or strict_windows.get(
+                            max(strict_windows, default=30)
+                        )
                         coverage = float(path_meta.get("coverage") or 0.0)
-                        maintenance = f(
-                            (path_primary or {}).get("maintenance_margin_coverage")
+                        maintenance = min(
+                            f((normal_primary or {}).get("maintenance_margin_coverage")),
+                            f((path_primary or {}).get("maintenance_margin_coverage")),
                         )
                         if coverage < float(getattr(
                                 config, "CORE_PRICE_PATH_MIN_COVERAGE", .95)):
@@ -1246,12 +1264,27 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         if maintenance < float(getattr(
                                 config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)):
                             path_reasons.append("maintenance_margin_coverage_low")
-                        if f((path_primary or {}).get("copy_net_pnl")) <= 0:
+                        if min(
+                            f((normal_primary or {}).get("copy_net_pnl")),
+                            f((path_primary or {}).get("copy_net_pnl")),
+                        ) <= 0:
                             path_reasons.append("path_net_nonpositive")
+                        normal_metrics = _portfolio_selection_metrics(
+                            normal_windows, baseline_n=0, selected_n=len(key),
+                        )
+                        strict_metrics = _portfolio_selection_metrics(
+                            strict_windows, baseline_n=0, selected_n=len(key),
+                        )
+                        value = offline_core_optimizer.conservative_metrics(
+                            normal_metrics, strict_metrics,
+                        )
                     else:
                         windows = auto_tune._candidate_windows(
                             db, list(key), sigmas, follow, now_ms,
                             window_fills=filtered, market_ctx=market_ctx,
+                        )
+                        value = _portfolio_selection_metrics(
+                            windows, baseline_n=0, selected_n=len(key),
                         )
                     path_validation_details[key] = {
                         "reasons": tuple(path_reasons),
@@ -1262,10 +1295,17 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         "expectedCandles": int(path_meta.get("expected") or 0),
                         "observedCandles": int(path_meta.get("observed") or 0),
                         "missingCoins": tuple(path_meta.get("missingCoins") or ()),
-                        "pathNetPnl": f((path_primary or {}).get("copy_net_pnl")),
-                        "pathLiquidations": int((path_primary or {}).get("liquidations") or 0),
-                        "ambiguousLiquidations": int(
-                            (path_primary or {}).get("ambiguous_liquidations") or 0
+                        "pathNetPnl": min(
+                            f((normal_primary or {}).get("copy_net_pnl")),
+                            f((path_primary or {}).get("copy_net_pnl")),
+                        ),
+                        "pathLiquidations": max(
+                            int((normal_primary or {}).get("liquidations") or 0),
+                            int((path_primary or {}).get("liquidations") or 0),
+                        ),
+                        "ambiguousLiquidations": max(
+                            int((normal_primary or {}).get("ambiguous_liquidations") or 0),
+                            int((path_primary or {}).get("ambiguous_liquidations") or 0),
                         ),
                         "pathBoundarySkips": int(
                             (path_primary or {}).get("price_path_boundary_skips") or 0
@@ -1275,11 +1315,52 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         ),
                     }
                     if path_reasons:
-                        windows = {}
-                    validation_cache[key] = _portfolio_selection_metrics(
-                        windows, baseline_n=0, selected_n=len(key),
-                    )
+                        value = _portfolio_selection_metrics(
+                            {}, baseline_n=0, selected_n=len(key),
+                        )
+                    validation_cache[key] = value
                     return validation_cache[key]
+
+                def validate_fold(addrs, older, newer, cost_mult=1.0):
+                    key = (tuple(sorted(addrs)), int(older), int(newer), float(cost_mult))
+                    if key in fold_validation_cache:
+                        return fold_validation_cache[key]
+                    selected = key[0]
+                    if not selected:
+                        value = _portfolio_selection_metrics({}, selected_n=0)
+                        fold_validation_cache[key] = value
+                        return value
+                    lo = now_ms - int(older) * 86_400_000
+                    hi = now_ms - int(newer) * 86_400_000 if newer else now_ms + 1
+                    warmup = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7)) * 86_400_000
+                    allowed = set(selected)
+                    source_fills = list(window_fills.get(max(window_fills)) or [])
+                    fold_fills = [
+                        row for row in source_fills
+                        if (row.get("user") or "").lower() in allowed
+                        and lo - warmup <= int(row.get("time") or 0) < hi
+                    ]
+                    result = run_backtest(
+                        "portfolio", fold_fills, sigmas=sigmas,
+                        overrides={
+                            **follow, "AMBIGUOUS_PATH_MODE": "liquidate",
+                            "REPLAY_COST_MULT": float(cost_mult),
+                        },
+                        market_ctx=market_ctx, price_path=shared_path_rows,
+                        price_path_meta=price_path.coverage(
+                            db, fold_fills, path_start, now_ms,
+                        ) if validate_price_path else {},
+                    )
+                    sliced = slice_backtest_result(
+                        result, lo,
+                        window_days=max(1, int(older) - int(newer)),
+                    )
+                    value = _portfolio_selection_metrics(
+                        {max(1, int(older) - int(newer)): sliced},
+                        baseline_n=0, selected_n=len(selected),
+                    )
+                    fold_validation_cache[key] = value
+                    return value
 
                 constraints = selection.SelectionConstraints(
                     min_relative_lcb_improvement=0.0,
@@ -1296,27 +1377,114 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         config, "CORE_SEARCH_MAX_CAPACITY_FIT_DROP", .05,
                     )),
                 )
-                marginal = selection.search_smart_core(
-                    portfolio_candidates,
-                    evaluate,
-                    constraints,
-                    seed_target=int(getattr(config, "CORE_SEARCH_SEED_TARGET", 6)),
-                    beam_width=int(getattr(config, "CORE_SEARCH_BEAM_WIDTH", 6)),
-                    swap_passes=int(getattr(config, "CORE_SEARCH_SWAP_PASSES", 1)),
-                    max_replace_out=int(getattr(config, "CORE_SEARCH_MAX_REPLACE_OUT", 2)),
-                    min_marginal_gain_ratio=float(getattr(
-                        config, "CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO", 0.01,
+                search_budget_s = float(getattr(
+                    config, "CORE_SEARCH_TIME_BUDGET_SEC", 600,
+                ))
+                search_started = time.monotonic()
+                search_config = offline_core_optimizer.OfflineSearchConfig(
+                    finalist_limit=int(getattr(
+                        config, "CORE_SEARCH_VALIDATION_FINALISTS", 12,
                     )),
-                    time_budget_s=float(getattr(config, "CORE_SEARCH_TIME_BUDGET_SEC", 600)),
-                    validation_limit=int(getattr(config, "CORE_SEARCH_VALIDATION_FINALISTS", 12)),
-                    strict_order_width=int(getattr(config, "CORE_SEARCH_STRICT_ORDER_WIDTH", 2)),
-                    strict_challenger_limit=int(getattr(
-                        config, "CORE_SEARCH_STRICT_CHALLENGER_LIMIT", 4,
+                    strict_move_shortlist=int(getattr(
+                        config, "CORE_SEARCH_STRICT_MOVE_SHORTLIST", 8,
                     )),
-                    strict_expansion_passes=int(getattr(
-                        config, "CORE_SEARCH_STRICT_EXPANSION_PASSES", 1,
+                    max_strict_moves=int(getattr(
+                        config, "CORE_SEARCH_MAX_STRICT_MOVES", config.MAX_TARGETS,
                     )),
-                    validation_evaluator=validate,
+                    pair_add_limit=int(getattr(
+                        config, "CORE_SEARCH_PAIR_ADD_LIMIT", 4,
+                    )),
+                    time_budget_s=search_budget_s,
+                )
+                initial_core = tuple(sorted(selected_set))
+                staged_search = offline_core_optimizer.optimize_membership(
+                    portfolio_candidates, initial_core, evaluate, validate,
+                    constraints, search_config,
+                )
+                if staged_search.timed_out:
+                    raise selection.SmartCoreSearchTimeout(
+                        "robust_core_search_time_budget"
+                    )
+                robust_selected = initial_core
+                robust_rounds = []
+                robust_seen = {robust_selected}
+                robust_eval_total = 0
+                # A positive override is shared by all phases.  Production uses
+                # zero (unbounded wall clock); the finite candidate/move graph,
+                # visited-state guard and MAX_TARGETS still guarantee closure.
+                robust_deadline = (
+                    float("inf") if search_budget_s <= 0
+                    else search_started + search_budget_s
+                )
+                for _ in range(max(1, len(portfolio_candidates))):
+                    if time.monotonic() >= robust_deadline:
+                        raise selection.SmartCoreSearchTimeout(
+                            "robust_core_closure_time_budget"
+                        )
+                    robust = offline_core_optimizer.choose_robust_candidate(
+                        robust_selected, portfolio_candidates,
+                        (*staged_search.finalists, staged_search.selected),
+                        validate, validate_fold, constraints,
+                        finalist_limit=int(getattr(
+                            config, "CORE_SEARCH_ROBUST_FINALISTS", 12,
+                        )),
+                    )
+                    robust_eval_total += robust.evaluated
+                    robust_rounds.append(robust)
+                    next_selected = tuple(sorted(robust.selected))
+                    if next_selected == robust_selected:
+                        break
+                    if next_selected in robust_seen:
+                        raise RuntimeError("robust_core_search_cycle")
+                    robust_seen.add(next_selected)
+                    robust_selected = next_selected
+                robust = robust_rounds[-1]
+                robust_metrics = validate(robust_selected)
+                # Published 1..N order is leave-one-out strict contribution, not
+                # raw score order or the arbitrary tuple order of a subset.
+                contributions = []
+                for addr in robust_selected:
+                    without = tuple(a for a in robust_selected if a != addr)
+                    without_metrics = validate(without)
+                    contributions.append((
+                        f(robust_metrics.risk_adjusted_utility)
+                        - f(without_metrics.risk_adjusted_utility),
+                        f(robust_metrics.net_pnl) - f(without_metrics.net_pnl),
+                        -portfolio_candidates.index(addr), addr,
+                    ))
+                contributions.sort(reverse=True)
+                contribution_order = tuple(row[-1] for row in contributions)
+                marginal = selection.MarginalSelectionResult(
+                    selected=contribution_order,
+                    baseline=validate(initial_core),
+                    metrics=robust_metrics,
+                    action="robust_multi_start",
+                    added=tuple(sorted(set(robust_selected) - set(initial_core))),
+                    removed=tuple(sorted(set(initial_core) - set(robust_selected))),
+                    evaluated=(
+                        staged_search.fast_evaluated + staged_search.strict_evaluated
+                        + robust_eval_total + len(fold_validation_cache)
+                    ),
+                    search_meta={
+                        "algorithm": "multi_start_robust_v1",
+                        "selectedCount": len(robust_selected),
+                        "inSampleSelectedCount": len(staged_search.selected),
+                        "fastEvaluations": staged_search.fast_evaluated,
+                        "strictEvaluations": staged_search.strict_evaluated,
+                        "robustEvaluations": robust_eval_total,
+                        "foldEvaluations": len(fold_validation_cache),
+                        "finalists": len(staged_search.finalists),
+                        "robustRounds": len(robust_rounds),
+                        "robustFinalists": sum(
+                            len(round_.audit) for round_ in robust_rounds
+                        ),
+                        "robustPassed": sum(
+                            1 for round_ in robust_rounds for row in round_.audit
+                            if row.get("eligible")
+                        ),
+                        "contributionOrder": contribution_order,
+                        "timedOut": staged_search.timed_out,
+                    },
                 )
                 selected_set = set(marginal.selected)
                 core_rank = {
@@ -1399,6 +1567,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     validate if marginal is not None and validate_price_path else evaluate
                 )
                 final_metrics = effective_evaluate(tuple(sorted(selected_set)))
+                final_fold_metrics = None
+                final_cost_stress = None
                 prefix = []
                 prefix_metrics = effective_evaluate(())
                 for addr in marginal.selected if marginal is not None else sorted(selected_set):
@@ -1415,22 +1585,47 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     if str(portfolio_rejections.get(addr) or "").startswith("path_"):
                         continue
                     trial = effective_evaluate(tuple(sorted(selected_set | {addr})))
-                    final_net = f(final_metrics.net_pnl)
-                    marginal_net = f(trial.net_pnl) - final_net
-                    min_gain_ratio = float(getattr(
-                        config, "CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO", 0.01,
-                    ))
-                    if (
-                        marginal_net > 0
-                        and final_net > 0
-                        and len(selected_set) >= int(getattr(config, "CORE_SEARCH_SEED_TARGET", 6))
-                        and marginal_net / final_net < min_gain_ratio
-                    ):
-                        portfolio_rejections[addr] = "portfolio_marginal_gain_below_floor"
-                    else:
-                        portfolio_rejections[addr] = selection.portfolio_economic_rejection_reason(
-                            final_metrics, trial, constraints,
+                    reason = selection.portfolio_economic_rejection_reason(
+                        final_metrics, trial, constraints,
+                    )
+                    if reason == "portfolio_not_selected":
+                        if final_fold_metrics is None:
+                            final_fold_metrics = [
+                                validate_fold(
+                                    tuple(sorted(selected_set)), older, newer, 1.0,
+                                )
+                                for older, newer in ((30, 20), (20, 10), (10, 0))
+                            ]
+                            final_cost_stress = validate_fold(
+                                tuple(sorted(selected_set)), 10, 0, 1.5,
+                            )
+                        trial_addrs = tuple(sorted(selected_set | {addr}))
+                        comparison = offline_core_optimizer.robust_improvement(
+                            final_metrics, trial, final_fold_metrics,
+                            [
+                                validate_fold(trial_addrs, older, newer, 1.0)
+                                for older, newer in ((30, 20), (20, 10), (10, 0))
+                            ],
+                            final_cost_stress,
+                            validate_fold(trial_addrs, 10, 0, 1.5),
+                            constraints,
                         )
+                        reason_map = {
+                            "fewer_than_required_fold_wins": "portfolio_fold_stability_low",
+                            "fold_total_gain_below_floor": "portfolio_fold_gain_below_floor",
+                            "holdout_not_better": "portfolio_holdout_not_better",
+                            "cost_stress_not_better": "portfolio_cost_stress_no_gain",
+                            "cost_stress_new_liquidation": "portfolio_cost_stress_liquidation",
+                            "fold_infeasible": "portfolio_fold_constraints_failed",
+                        }
+                        reason = (
+                            "portfolio_not_selected" if comparison.eligible
+                            else reason_map.get(
+                                next(iter(comparison.reasons), ""),
+                                "portfolio_robustness_not_improved",
+                            )
+                        )
+                    portfolio_rejections[addr] = reason
 
         rows = []
         for row in profiles:
@@ -1884,6 +2079,79 @@ def tune_published_generation(db, generation_id, stamp=None, source="scan"):
             result["portfolioReplay"] = dict(skipped_replay)
             result["selectionReplay"] = dict(skipped_replay)
             return result
+        if result.get("applied"):
+            temporary_revision = result.get("strategyRevision")
+            parent_revision = result.get("parentStrategyRevision")
+            try:
+                consistency = repair_published_selection(
+                    db, generation_id, stamp=now_iso(),
+                    replace_existing=True, launch_tuner=False,
+                )
+                if consistency.get("status") != "repaired":
+                    raise RuntimeError(
+                        "selection_consistency_not_repaired:"
+                        + str(consistency.get("reason") or consistency.get("status"))
+                    )
+                result["selectionConsistency"] = consistency
+                result["sealedStrategyRevision"] = strategy_revision.active_revision_id(db)
+                auto_tune.bind_active_tune_rollback_core(
+                    db, selection.published_core_addrs(db) or [],
+                )
+                if temporary_revision:
+                    db.execute(
+                        "UPDATE strategy_revision SET status='superseded',superseded_at=? "
+                        "WHERE revision=? AND status='staged'",
+                        (now_iso(), temporary_revision),
+                    )
+                    db.commit()
+            except Exception as exc:  # noqa: BLE001 - restore the last complete bundle before returning
+                db.rollback()
+                rollback = None
+                rollback_error = None
+                if parent_revision:
+                    try:
+                        rollback = strategy_revision.reactivate_revision(
+                            db, parent_revision,
+                            source="tune_selection_consistency",
+                            expected_active_revision=parent_revision,
+                            enqueue_reload=True,
+                            restore_param_keys=(
+                                *auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS,
+                            ),
+                            expected_mutable_params=result.get("proposal") or {},
+                        )
+                        auto_tune.resolve_active_tune_rollback(
+                            db, "selection_consistency_failed",
+                        )
+                        db.commit()
+                    except Exception as rollback_exc:  # noqa: BLE001
+                        db.rollback()
+                        rollback_error = str(rollback_exc)[:300]
+                result.update({
+                    "status": "error",
+                    "reason": "selection_consistency_failed",
+                    "effectiveApplied": False,
+                    "selectionConsistency": {
+                        "status": "error", "error": str(exc)[:300],
+                        "rollback": rollback, "rollbackError": rollback_error,
+                    },
+                })
+                pipeline_audit._insert_event(
+                    db,
+                    stamp=now_iso(), source="tune_selection_consistency",
+                    stage="selection_consistency", status="error",
+                    reason="selection_consistency_failed",
+                    payload={
+                        "generation": generation_id,
+                        "temporaryRevision": temporary_revision,
+                        "parentRevision": parent_revision,
+                        "error": str(exc)[:300],
+                        "rollback": rollback,
+                        "rollbackError": rollback_error,
+                    },
+                )
+                db.commit()
+                return result
         try:
             result["portfolioReplay"] = auto_tune.store_effective_portfolio_replay(
                 db, generation_id,
@@ -1994,6 +2262,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     if not meta or not int(meta[0] or 0) or not int(meta[1] or 0):
         raise RuntimeError("selection_repair_requires_complete_generation")
     existing_core = selection.published_core_addrs(db) or []
+    expected_strategy_revision = strategy_revision.active_revision_id(db)
     if existing_core and not replace_existing:
         return {"status": "skipped", "reason": "core_already_present", "core": len(existing_core)}
     stale_active = db.execute(
@@ -2039,6 +2308,8 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         generation_id,
         source="selection_repair",
         reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
+        parent_revision=expected_strategy_revision,
+        expected_active_revision=expected_strategy_revision,
         stamp=stamp,
     )
     for row in rows:

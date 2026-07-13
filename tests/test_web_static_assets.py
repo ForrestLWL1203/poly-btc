@@ -293,7 +293,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("<th>最近开仓</th>", wallets)
         self.assertIn("未跟原因", wallets)
         self.assertIn("selectionReasonText", wallets)
-        self.assertIn("最优参数30d保守预估：", wallets)
+        self.assertIn("当前Core · 生效参数 · 严格30d：", wallets)
         self.assertIn("liquidations30Worst", wallets)
         self.assertIn("effectiveParams", wallets)
         self.assertIn("portfolioReplay.netPnl30", wallets)

@@ -116,12 +116,15 @@ The user-facing roles are:
 - **Cooldown/rejected/quarantine**: internal lifecycle/data states, not new-entry targets.
 
 Core selection first ranks quality-qualified candidates by final copy-follow score, then evaluates them in one
-shared simulated account. The selector uses a compact beam search (default seed target 10, beam width 3),
-one-for-one polishing, and bounded one-for-two replacement checks. The seed target is a search depth, never a
-minimum Core count. After the seed, each additional wallet must improve portfolio net PnL by at least 1% of
-the current portfolio; otherwise expansion stops. The search is bounded by `MAX_TARGETS=40` and a 600-second
-search budget. If replay cannot be completed safely, retain the previous published Core instead of fabricating
-membership.
+shared simulated account. Score supplies candidate order, never a fixed prefix. The production selector uses
+three fast starts (empty-forward, all-backward, and current-Core warm start), strict finalist replay, then
+repeated add/remove/swap/pair-add closure. It can cross an individually weak addition when a complementary pair
+improves the whole portfolio, and it is not limited to one new wallet per run. Final moves must also improve at
+least two of three non-overlapping ten-day folds, the recent holdout, and a 1.5x transaction-cost stress replay
+without adding a stress liquidation. Published Core order is strict leave-one-out portfolio contribution, not
+raw score order. The finite graph is bounded by `MAX_TARGETS=40`, finalist/move limits and visited-state cycle
+guards; production has no wall-clock cutoff. If replay cannot be completed safely, retain the previous
+published Core instead of fabricating membership.
 
 Selection evaluates shared balance, funding contention, open capture, capacity fit, deployment, drawdown, fee/
 slippage drag, and concentration. A wallet can have a high personal score and still remain Challenger when
@@ -154,10 +157,14 @@ Current Paper defaults deliberately allow the full closed loop:
 - candidate still must pass the OOS/holdout/stress/risk gates;
 - live-money deployments should use conservative shadow/coverage/forward thresholds instead.
 
-Tuning must never mutate Core membership by re-running stale profiles. A tuner failure, timeout, memory cap, or
-missing fill cache must leave the published selection intact. A later complete generation is the source of new
-profile evidence. `auto_tune_state.effective_portfolio_replay` is valid only when its generation matches the
-current published generation.
+Tuning must never mutate Core membership by re-running stale profiles. When a generation-bound proposal changes
+parameters, Observer reload is deferred until the selector rechecks the same complete generation under the new
+parameters and seals parameters plus membership into one strategy revision. This is one bounded coordinate pass,
+not an open-ended tune/select loop; the membership closure itself may add or replace multiple wallets. If the
+consistency pass fails, the previous immutable strategy revision and mutable follow parameters are restored. A
+tuner failure, timeout, memory cap, or missing fill cache must leave the published selection intact. A later
+complete generation is the source of new profile evidence. `auto_tune_state.effective_portfolio_replay` is valid
+only when its generation matches the current published generation.
 
 ## Observer and execution model
 
