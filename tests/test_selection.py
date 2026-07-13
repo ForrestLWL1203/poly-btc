@@ -337,8 +337,8 @@ class SelectionTests(unittest.TestCase):
             net = nets[addrs]
             return selection.PortfolioMetrics(
                 net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
-                risk_adjusted_utility=net - 500,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
             )
 
         result = selection.search_smart_core(
@@ -357,8 +357,8 @@ class SelectionTests(unittest.TestCase):
             net = 10 if addrs == ("0xa",) else 9 if addrs else 0
             return selection.PortfolioMetrics(
                 net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
-                risk_adjusted_utility=net - 500,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
             )
 
         result = selection.search_smart_core(
@@ -375,13 +375,13 @@ class SelectionTests(unittest.TestCase):
             (): 0, ("0xa",): 10, ("0xb",): 9,
             ("0xa", "0xb"): 20,
         }
-        effective = {("0xa",): 30, ("0xb",): 15, ("0xa", "0xb"): 25}
+        effective = {(): 0, ("0xa",): 30, ("0xb",): 15, ("0xa", "0xb"): 25}
 
         def metrics(net):
             return selection.PortfolioMetrics(
                 net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
-                risk_adjusted_utility=net - 500,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
             )
 
         result = selection.search_smart_core(
@@ -409,8 +409,8 @@ class SelectionTests(unittest.TestCase):
             net = nets[addrs]
             return selection.PortfolioMetrics(
                 net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=500,
-                risk_adjusted_utility=net - 500,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
             )
 
         result = selection.search_smart_core(
@@ -423,6 +423,92 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result.selected, ("0xa", "0xc"))
         self.assertEqual(result.search_meta["stopReason"], "expansion_marginal_gain_below_floor")
         self.assertAlmostEqual(result.search_meta["stoppedMarginal"]["ratio"], .20)
+
+    def test_strict_replay_orders_wallets_by_incremental_value_and_stops_after_anchor(self):
+        candidates = ("0xa", "0xb", "0xc")
+
+        def neutral(addrs):
+            net = sum({"0xa": 10, "0xb": 9, "0xc": 8}[addr] for addr in addrs)
+            return selection.PortfolioMetrics(
+                net, net, 0, .92, .94, .03, .70, .05,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
+            )
+
+        strict_nets = {
+            (): 0, ("0xa",): 10, ("0xb",): 30, ("0xc",): 20,
+            ("0xa", "0xb"): 35, ("0xa", "0xc"): 40,
+            ("0xb", "0xc"): 55, ("0xa", "0xb", "0xc"): 60,
+        }
+
+        def strict(addrs):
+            net = strict_nets[tuple(sorted(addrs))]
+            return selection.PortfolioMetrics(
+                net, net, 0, .92, .94, .03, .70, .05,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
+            )
+
+        result = selection.search_smart_core(
+            candidates, neutral, selection.SelectionConstraints(max_targets=3),
+            seed_target=2, beam_width=3, max_replace_out=1,
+            min_marginal_gain_ratio=.20, validation_evaluator=strict,
+        )
+
+        self.assertEqual(result.selected, ("0xb", "0xc"))
+        self.assertEqual(result.metrics.net_pnl, 55)
+        self.assertEqual(result.search_meta["contributionOrder"], ("0xb", "0xc"))
+        self.assertEqual(result.search_meta["stopReason"], "strict_expansion_stopped")
+
+    def test_portfolio_economics_rejects_material_coverage_drop(self):
+        base = selection.PortfolioMetrics(
+            100, 100, 0, .92, .95, .03, .70, .05,
+            net_pnl=100, stress_net_pnl=100, risk_adjusted_utility=90,
+        )
+        trial = selection.PortfolioMetrics(
+            120, 120, 0, .84, .94, .03, .70, .05,
+            net_pnl=120, stress_net_pnl=120, risk_adjusted_utility=110,
+        )
+
+        reason = selection.portfolio_economic_rejection_reason(
+            base, trial,
+            selection.SelectionConstraints(
+                min_actionable_open_rate=.70, max_actionable_open_rate_drop=.05,
+            ),
+        )
+
+        self.assertEqual(reason, "portfolio_open_rate_drop")
+
+    def test_strict_expansion_reconsiders_wallet_pruned_from_fast_finalists(self):
+        neutral_nets = {
+            (): 0, ("0xa",): 20, ("0xb",): 10, ("0xc",): 1,
+            ("0xa", "0xb"): 30, ("0xa", "0xc"): 21,
+            ("0xb", "0xc"): 11, ("0xa", "0xb", "0xc"): 31,
+        }
+        strict_nets = {
+            (): 0, ("0xa",): 20, ("0xb",): 10, ("0xc",): 25,
+            ("0xa", "0xb"): 25, ("0xa", "0xc"): 50,
+            ("0xb", "0xc"): 30, ("0xa", "0xb", "0xc"): 55,
+        }
+
+        def metrics(net):
+            return selection.PortfolioMetrics(
+                net, net, 0, .92, .94, .03, .70, .05,
+                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
+                risk_adjusted_utility=net,
+            )
+
+        result = selection.search_smart_core(
+            ["0xa", "0xb", "0xc"],
+            lambda addrs: metrics(neutral_nets[addrs]),
+            selection.SelectionConstraints(max_targets=3),
+            seed_target=1, beam_width=1, max_replace_out=1,
+            min_marginal_gain_ratio=.50,
+            validation_evaluator=lambda addrs: metrics(strict_nets[addrs]),
+        )
+
+        self.assertEqual(result.selected, ("0xa", "0xc"))
+        self.assertNotIn("0xb", result.selected)
 
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000

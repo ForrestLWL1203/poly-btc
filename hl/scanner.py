@@ -1053,6 +1053,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         }
         portfolio_rejections = {}
         portfolio_utilities = {}
+        core_rank = {}
         marginal = None
         evaluate = None
         path_fallback = False
@@ -1076,6 +1077,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 market_ctx = auto_tune._load_market_ctx(db)
                 eval_cache = {}
                 validation_cache = {}
+                path_validation_details = {}
 
                 def evaluate(addrs):
                     key = tuple(sorted(addrs))
@@ -1109,16 +1111,65 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     key = tuple(sorted(addrs))
                     if key in validation_cache:
                         return validation_cache[key]
+                    if not key:
+                        validation_cache[key] = _portfolio_selection_metrics(
+                            {}, baseline_n=0, selected_n=0,
+                        )
+                        return validation_cache[key]
                     filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
-                    windows = auto_tune._candidate_windows(
-                        db,
-                        list(key),
-                        sigmas,
-                        follow,
-                        now_ms,
-                        window_fills=filtered,
-                        market_ctx=market_ctx,
-                    )
+                    path_reasons = []
+                    path_meta = {}
+                    path_primary = None
+                    if validate_price_path:
+                        from . import price_path
+                        selected_fills = list(filtered.get(30) or [])
+                        path_start = now_ms - (
+                            30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+                        ) * 86_400_000
+                        path_meta = price_path.coverage(
+                            db, selected_fills, path_start, now_ms,
+                        )
+                        path_rows = price_path.load_refined(
+                            db, selected_fills, path_start, now_ms,
+                        )
+                        strict_follow = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
+                        windows = auto_tune._candidate_windows(
+                            db, list(key), sigmas, strict_follow, now_ms,
+                            window_fills=filtered, market_ctx=market_ctx,
+                            path_rows=path_rows, path_meta=path_meta,
+                        )
+                        path_primary = windows.get(30) or windows.get(max(windows, default=30))
+                        coverage = float(path_meta.get("coverage") or 0.0)
+                        maintenance = f(
+                            (path_primary or {}).get("maintenance_margin_coverage")
+                        )
+                        if coverage < float(getattr(
+                                config, "CORE_PRICE_PATH_MIN_COVERAGE", .95)):
+                            path_reasons.append("price_path_coverage_low")
+                        if maintenance < float(getattr(
+                                config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)):
+                            path_reasons.append("maintenance_margin_coverage_low")
+                        if f((path_primary or {}).get("copy_net_pnl")) <= 0:
+                            path_reasons.append("path_net_nonpositive")
+                    else:
+                        windows = auto_tune._candidate_windows(
+                            db, list(key), sigmas, follow, now_ms,
+                            window_fills=filtered, market_ctx=market_ctx,
+                        )
+                    path_validation_details[key] = {
+                        "reasons": tuple(path_reasons),
+                        "coverage": float(path_meta.get("coverage") or 0.0),
+                        "expectedCandles": int(path_meta.get("expected") or 0),
+                        "observedCandles": int(path_meta.get("observed") or 0),
+                        "missingCoins": tuple(path_meta.get("missingCoins") or ()),
+                        "pathNetPnl": f((path_primary or {}).get("copy_net_pnl")),
+                        "pathLiquidations": int((path_primary or {}).get("liquidations") or 0),
+                        "maintenanceCoverage": f(
+                            (path_primary or {}).get("maintenance_margin_coverage")
+                        ),
+                    }
+                    if path_reasons:
+                        windows = {}
                     validation_cache[key] = _portfolio_selection_metrics(
                         windows, baseline_n=0, selected_n=len(key),
                     )
@@ -1132,26 +1183,54 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
                     max_cost_drag_ratio=1.0,
                     max_targets=int(config.MAX_TARGETS),
+                    max_actionable_open_rate_drop=float(getattr(
+                        config, "CORE_SEARCH_MAX_OPEN_RATE_DROP", .05,
+                    )),
+                    max_capacity_fit_drop=float(getattr(
+                        config, "CORE_SEARCH_MAX_CAPACITY_FIT_DROP", .05,
+                    )),
                 )
                 marginal = selection.search_smart_core(
                     portfolio_candidates,
                     evaluate,
                     constraints,
-                    seed_target=int(getattr(config, "CORE_SEARCH_SEED_TARGET", 10)),
-                    beam_width=int(getattr(config, "CORE_SEARCH_BEAM_WIDTH", 3)),
+                    seed_target=int(getattr(config, "CORE_SEARCH_SEED_TARGET", 6)),
+                    beam_width=int(getattr(config, "CORE_SEARCH_BEAM_WIDTH", 6)),
                     swap_passes=int(getattr(config, "CORE_SEARCH_SWAP_PASSES", 1)),
                     max_replace_out=int(getattr(config, "CORE_SEARCH_MAX_REPLACE_OUT", 2)),
                     min_marginal_gain_ratio=float(getattr(
                         config, "CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO", 0.01,
                     )),
                     time_budget_s=float(getattr(config, "CORE_SEARCH_TIME_BUDGET_SEC", 600)),
+                    validation_limit=int(getattr(config, "CORE_SEARCH_VALIDATION_FINALISTS", 24)),
                     validation_evaluator=validate,
                 )
                 selected_set = set(marginal.selected)
-                # The beam search deliberately stays fills-only for bounded runtime. Its finalist must then
-                # survive the shared 15m market path before it can change production membership. Missing
-                # path data retains the still-qualified published Core; it never turns an optimistic replay
-                # into a newly published target set.
+                core_rank = {
+                    addr: rank for rank, addr in enumerate(marginal.selected, 1)
+                }
+                # Every retained finalist has already competed under the strict shared K-line path.  Repeat
+                # the winning replay only to persist a compact operator audit.  A coverage/maintenance-data
+                # failure is operational and retains the previous Core; a complete strict replay that finds
+                # no profitable combination may intentionally publish an empty Core.
+                nonempty_path_checks = {
+                    key: detail for key, detail in path_validation_details.items() if key
+                }
+                path_data_unavailable = bool(
+                    validate_price_path and not selected_set and nonempty_path_checks
+                    and all(any(reason in {
+                        "price_path_coverage_low", "maintenance_margin_coverage_low",
+                    } for reason in detail.get("reasons") or ())
+                            for detail in nonempty_path_checks.values())
+                )
+                if path_data_unavailable:
+                    selected_set = {
+                        addr for addr in portfolio_candidates
+                        if previous_roles.get(addr) == selection.CORE
+                    }
+                    core_rank = {}
+                    marginal = None
+                    path_fallback = True
                 if selected_set and validate_price_path:
                     selected_fills = [
                         fill for fill in (window_fills.get(30) or [])
@@ -1195,6 +1274,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                                 addr for addr in portfolio_candidates
                                 if previous_roles.get(addr) == selection.CORE
                             }
+                            core_rank = {}
                             marginal = None
                             path_fallback = True
                         pipeline_audit._insert_event(
@@ -1230,19 +1310,26 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                                 "reasons": path_reasons,
                             },
                         )
-                final_metrics = evaluate(tuple(sorted(selected_set)))
-                final_utility = f(final_metrics.risk_adjusted_utility)
-                for addr in selected_set:
-                    without = tuple(sorted(selected_set - {addr}))
-                    portfolio_utilities[addr] = final_utility - f(
-                        evaluate(without).risk_adjusted_utility
+                effective_evaluate = (
+                    validate if marginal is not None and validate_price_path else evaluate
+                )
+                final_metrics = effective_evaluate(tuple(sorted(selected_set)))
+                prefix = []
+                prefix_metrics = effective_evaluate(())
+                for addr in marginal.selected if marginal is not None else sorted(selected_set):
+                    prefix.append(addr)
+                    current_metrics = effective_evaluate(tuple(sorted(prefix)))
+                    portfolio_utilities[addr] = (
+                        f(current_metrics.risk_adjusted_utility)
+                        - f(prefix_metrics.risk_adjusted_utility)
                     )
+                    prefix_metrics = current_metrics
                 for addr in portfolio_candidates:
                     if addr in selected_set:
                         continue
                     if str(portfolio_rejections.get(addr) or "").startswith("path_"):
                         continue
-                    trial = evaluate(tuple(sorted(selected_set | {addr})))
+                    trial = effective_evaluate(tuple(sorted(selected_set | {addr})))
                     final_net = f(final_metrics.net_pnl)
                     marginal_net = f(trial.net_pnl) - final_net
                     min_gain_ratio = float(getattr(
@@ -1251,6 +1338,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     if (
                         marginal_net > 0
                         and final_net > 0
+                        and len(selected_set) >= int(getattr(config, "CORE_SEARCH_SEED_TARGET", 6))
                         and marginal_net / final_net < min_gain_ratio
                     ):
                         portfolio_rejections[addr] = "portfolio_marginal_gain_below_floor"
@@ -1297,6 +1385,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 enabled=enabled,
                 reason=reason,
                 utility=portfolio_utilities.get(addr, f(row.get("follow_score"))),
+                follow_score=f(row.get("follow_score")),
+                selection_rank=core_rank.get(addr) if role == selection.CORE else row.get("rank"),
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
                 model_version=(
@@ -1481,6 +1571,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 enabled=enabled,
                 reason=reason,
                 utility=utility,
+                follow_score=f(profile.get("follow_score") or profile.get("score")),
                 data_status=selection_data_status,
                 evidence_status=profile.get("evidence_status") or "",
                 model_version="selection-vnext-1",
@@ -1859,9 +1950,11 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
             addr=row.addr,
             status=row.role,
             reason=row.reason,
-            follow_score=row.utility,
+            follow_score=row.follow_score,
             payload={
                 "generation": generation_id,
+                "selectionRank": row.selection_rank,
+                "marginalUtility": row.utility,
                 "dataStatus": row.data_status,
                 "evidenceStatus": row.evidence_status,
             },
@@ -2456,16 +2549,17 @@ def scan(db, p) -> None:
                 preview_rows, _ = _build_explicit_selection(
                     db, generation_id, stamp, now_ms, validate_price_path=False,
                 )
-                preview_core = sorted({
-                    row.addr for row in preview_rows if row.role == selection.CORE and row.enabled
-                })
+                preview_candidates = [
+                    row.addr for row in preview_rows
+                    if row.role in {selection.CORE, selection.CHALLENGER} and row.enabled
+                ][:int(config.MAX_TARGETS)]
                 db.rollback()
-                if preview_core:
+                if preview_candidates:
                     from . import price_path
                     path_start = now_ms - (
                         30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
                     ) * 86_400_000
-                    preview_fills = load_copyable_fills(db, preview_core, path_start)
+                    preview_fills = load_copyable_fills(db, preview_candidates, path_start)
                     preview_follow = params.load_follow(db)
                     if "SMART_ADD" in preview_follow:
                         preview_follow["ADD_STRATEGY"] = (
@@ -2526,9 +2620,11 @@ def scan(db, p) -> None:
                     addr=row.addr,
                     status=row.role,
                     reason=row.reason,
-                    follow_score=row.utility,
+                    follow_score=row.follow_score,
                     payload={
                         "generation": generation_id,
+                        "selectionRank": row.selection_rank,
+                        "marginalUtility": row.utility,
                         "dataStatus": row.data_status,
                         "evidenceStatus": row.evidence_status,
                     },

@@ -142,6 +142,8 @@ def current_selection_rows(db) -> list:
         + expr("enabled", "1") + ","
         + expr("reason", "''") + ","
         + expr("utility", "NULL") + ","
+        + expr("follow_score", "NULL") + ","
+        + expr("selection_rank", "NULL") + ","
         + expr("data_status", "'valid'") + ","
         + expr("evidence_status", "''") + ","
         + expr("model_version", "''") + ","
@@ -152,8 +154,8 @@ def current_selection_rows(db) -> list:
     return [
         SelectionRow(
             addr=row[0], role=row[1], enabled=bool(row[2]), reason=row[3] or "",
-            utility=row[4], data_status=row[5] or "valid", evidence_status=row[6] or "",
-            model_version=row[7] or "", policy_version=row[8] or "",
+            utility=row[4], follow_score=row[5], selection_rank=row[6], data_status=row[7] or "valid",
+            evidence_status=row[8] or "", model_version=row[9] or "", policy_version=row[10] or "",
         )
         for row in rows
     ]
@@ -166,6 +168,8 @@ class SelectionRow:
     enabled: bool = True
     reason: str = ""
     utility: Optional[float] = None
+    follow_score: Optional[float] = None
+    selection_rank: Optional[int] = None
     data_status: str = "valid"
     evidence_status: str = ""
     model_version: str = ""
@@ -204,7 +208,12 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
     normalized = [_coerce_selection_row(r) for r in rows]
     if len({r.addr for r in normalized}) != len(normalized):
         raise ValueError("duplicate wallet in selection generation")
-    normalized.sort(key=lambda r: (0 if r.role == CORE else 1, -(r.utility or 0.0), r.addr))
+    normalized.sort(key=lambda r: (
+        0 if r.role == CORE else 1,
+        r.selection_rank if r.selection_rank is not None else 999999,
+        -(r.follow_score or 0.0),
+        r.addr,
+    ))
     selected_at = selected_at or now_iso()
 
     field_values = (
@@ -214,6 +223,8 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("enabled", lambda r: 1 if r.enabled else 0),
         ("reason", lambda r: r.reason),
         ("utility", lambda r: r.utility),
+        ("follow_score", lambda r: r.follow_score),
+        ("selection_rank", lambda r: r.selection_rank),
         ("data_status", lambda r: r.data_status),
         ("evidence_status", lambda r: r.evidence_status),
         ("model_version", lambda r: r.model_version),
@@ -391,6 +402,8 @@ class SelectionConstraints:
     max_deploy_pct: float = 0.80
     max_cost_drag_ratio: float = 0.25
     max_targets: int = 40
+    max_actionable_open_rate_drop: float = 0.05
+    max_capacity_fit_drop: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -413,11 +426,18 @@ def _portfolio_net(metrics: PortfolioMetrics) -> float:
     return f(metrics.net_pnl if metrics.net_pnl is not None else metrics.net_lcb)
 
 
+def _portfolio_utility(metrics: PortfolioMetrics) -> float:
+    return f(
+        metrics.risk_adjusted_utility
+        if metrics.risk_adjusted_utility is not None else _portfolio_net(metrics)
+    )
+
+
 def _smart_rank(item) -> tuple:
     addrs, metrics = item
     return (
+        _portfolio_utility(metrics),
         _portfolio_net(metrics),
-        f(metrics.risk_adjusted_utility),
         -f(metrics.drawdown_dollars),
         f(metrics.capacity_fit),
         f(metrics.actionable_open_rate),
@@ -428,10 +448,11 @@ def _smart_rank(item) -> tuple:
 def search_smart_core(candidates: Sequence[str],
                       evaluator: Callable[[Tuple[str, ...]], PortfolioMetrics],
                       constraints: SelectionConstraints = SelectionConstraints(),
-                      *, seed_target: int = 10, beam_width: int = 3,
+                      *, seed_target: int = 6, beam_width: int = 6,
                       swap_passes: int = 1, max_replace_out: int = 2,
                       min_marginal_gain_ratio: float = 0.0,
                       time_budget_s: Optional[float] = None,
+                      validation_limit: Optional[int] = None,
                       validation_evaluator: Optional[
                           Callable[[Tuple[str, ...]], PortfolioMetrics]
                       ] = None) -> MarginalSelectionResult:
@@ -440,13 +461,16 @@ def search_smart_core(candidates: Sequence[str],
     Score has already done its job before this function: every input wallet is quality-qualified.  Membership
     is determined by portfolio economics under one neutral parameter surface.  The search keeps only a tiny
     beam of address tuples plus compact metrics, grows toward ``seed_target``, then continues one wallet at a
-    time until the best next level no longer raises net profit.  Local one-for-one and bounded one-for-two
-    checks reduce greedy path dependence without enumerating every subset.
+    time until the best next level no longer raises shared-account economics.  Local one-for-one and bounded
+    one-for-two checks reduce greedy path dependence without enumerating every subset.  When an effective
+    (strict price-path) evaluator is supplied, it chooses the winner and orders its wallets by strict
+    incremental contribution; the anchor is a search depth, not a score-filled quota.
     """
     started = time.monotonic()
     deadline = (started + max(0.0, float(time_budget_s))) if time_budget_s else None
     ordered = tuple(dict.fromkeys((addr or "").lower() for addr in candidates if addr))
     ordered = ordered[:max(0, int(constraints.max_targets))]
+    score_order = {addr: index for index, addr in enumerate(ordered)}
     width = max(1, int(beam_width))
     target = min(len(ordered), max(0, int(seed_target)))
     cache = {}
@@ -469,8 +493,10 @@ def search_smart_core(candidates: Sequence[str],
     def feasible(metrics):
         return (
             _portfolio_net(metrics) > 0
+            and _portfolio_utility(metrics) > 0
             and f(metrics.actionable_open_rate) >= f(constraints.min_actionable_open_rate)
             and f(metrics.capacity_fit) >= f(constraints.min_capacity_fit)
+            and f(metrics.peak_deploy_pct) <= f(constraints.max_deploy_pct)
         )
 
     def top(states):
@@ -479,7 +505,41 @@ def search_smart_core(candidates: Sequence[str],
             prior = dedup.get(addrs)
             if prior is None or _smart_rank((addrs, metrics)) > _smart_rank((addrs, prior)):
                 dedup[addrs] = metrics
-        return sorted(dedup.items(), key=_smart_rank, reverse=True)[:width]
+        states = list(dedup.items())
+        if len(states) <= width:
+            return sorted(states, key=_smart_rank, reverse=True)
+        # Preserve different paths instead of pruning only by current net profit. A high-quality or
+        # low-drawdown pair can be temporarily behind yet form the best shared portfolio at anchor size.
+        rankings = (
+            sorted(states, key=_smart_rank, reverse=True),
+            sorted(states, key=lambda item: (
+                _portfolio_net(item[1]), _portfolio_utility(item[1]), item[0]
+            ), reverse=True),
+            sorted(states, key=lambda item: (
+                -sum(score_order.get(addr, len(ordered)) for addr in item[0]),
+                -max((score_order.get(addr, len(ordered)) for addr in item[0]), default=0),
+                _portfolio_utility(item[1]), item[0],
+            ), reverse=True),
+        )
+        kept, seen = [], set()
+        cursor = [0] * len(rankings)
+        while len(kept) < width:
+            added = False
+            for index, ranked in enumerate(rankings):
+                while cursor[index] < len(ranked):
+                    item = ranked[cursor[index]]
+                    cursor[index] += 1
+                    if item[0] in seen:
+                        continue
+                    seen.add(item[0])
+                    kept.append(item)
+                    added = True
+                    break
+                if len(kept) >= width:
+                    break
+            if not added:
+                break
+        return sorted(kept, key=_smart_rank, reverse=True)
 
     baseline = evaluate(())
     beam = [((), baseline)]
@@ -491,23 +551,23 @@ def search_smart_core(candidates: Sequence[str],
     # Build the small starting portfolio.  ``seed_target`` is a search target, never a quota: if no wallet
     # improves the previous level, the production Core may contain fewer wallets.
     while beam and len(beam[0][0]) < target:
-        previous_best = max(_portfolio_net(metrics) for _, metrics in beam)
+        previous_best = max(_portfolio_utility(metrics) for _, metrics in beam)
         expansions = []
         for addrs, parent in beam:
-            parent_net = _portfolio_net(parent)
             selected = set(addrs)
             for addr in ordered:
                 if addr in selected:
                     continue
                 trial_addrs = tuple(sorted(addrs + (addr,)))
                 trial = evaluate(trial_addrs)
-                if feasible(trial) and _portfolio_net(trial) > parent_net:
+                if feasible(trial) and _portfolio_economic_passes(parent, trial, constraints):
                     expansions.append((trial_addrs, trial))
         next_beam = top(expansions)
-        if not next_beam or _portfolio_net(next_beam[0][1]) <= previous_best:
+        if not next_beam or _portfolio_utility(next_beam[0][1]) <= previous_best:
             stop_reason = "no_positive_seed_marginal"
             break
         beam = next_beam
+        portfolio_finalists.extend(beam)
         levels.append({
             "size": len(beam[0][0]), "bestNet": _portfolio_net(beam[0][1]),
             "beam": len(beam),
@@ -519,18 +579,18 @@ def search_smart_core(candidates: Sequence[str],
             trials = list(current)
             improved = False
             for addrs, parent in current:
-                parent_net = _portfolio_net(parent)
                 selected = set(addrs)
                 outside = [addr for addr in ordered if addr not in selected]
                 for outgoing in addrs:
                     for incoming in outside:
                         trial_addrs = tuple(sorted((selected - {outgoing}) | {incoming}))
                         trial = evaluate(trial_addrs)
-                        if feasible(trial) and _portfolio_net(trial) > parent_net:
+                        if feasible(trial) and _portfolio_economic_passes(parent, trial, constraints):
                             trials.append((trial_addrs, trial))
                             improved = True
             next_states = top(trials)
-            if not improved or _portfolio_net(next_states[0][1]) <= _portfolio_net(current[0][1]):
+            if (not improved
+                    or _portfolio_utility(next_states[0][1]) <= _portfolio_utility(current[0][1])):
                 break
             current = next_states
         return current
@@ -538,39 +598,53 @@ def search_smart_core(candidates: Sequence[str],
     seed_complete = bool(beam and len(beam[0][0]) >= target)
     if beam and beam[0][0]:
         beam = polish_one_for_one(beam)
-        if seed_complete:
-            portfolio_finalists.extend(beam)
+        portfolio_finalists.extend(beam)
 
     # Continue expanding beyond the seed until the best attainable next level stops adding dollars.
     while seed_complete and beam and len(beam[0][0]) < len(ordered):
-        previous_best = _portfolio_net(beam[0][1])
+        best_current = max(beam, key=_smart_rank)
+        current_net = _portfolio_net(best_current[1])
+        current_utility = _portfolio_utility(best_current[1])
         expansions = []
+        rejected_marginals = []
         for addrs, parent in beam:
-            parent_net = _portfolio_net(parent)
             selected = set(addrs)
             for addr in ordered:
                 if addr in selected:
                     continue
                 trial_addrs = tuple(sorted(addrs + (addr,)))
                 trial = evaluate(trial_addrs)
-                if feasible(trial) and _portfolio_net(trial) > parent_net:
-                    expansions.append((trial_addrs, trial))
+                if feasible(trial) and _portfolio_economic_passes(parent, trial, constraints):
+                    # A deeper path must beat the best portfolio at the current size, not merely a weak
+                    # parent retained for diversity.  Otherwise cardinality can grow while economics stay
+                    # flat or regress.
+                    gain = _portfolio_net(trial) - current_net
+                    required = abs(current_net) * max(0.0, f(min_marginal_gain_ratio))
+                    if (_portfolio_utility(trial) > current_utility
+                            and gain + 1e-12 >= required):
+                        expansions.append((trial_addrs, trial))
+                    else:
+                        rejected_marginals.append((gain, required, current_net))
         next_beam = top(expansions)
-        best_next = _portfolio_net(next_beam[0][1]) if next_beam else previous_best
-        gain = best_next - previous_best
-        required_gain = abs(previous_best) * max(0.0, f(min_marginal_gain_ratio))
-        if not next_beam or gain <= 0:
-            stop_reason = "no_positive_expansion_marginal"
-            stopped_marginal = {"gain": gain, "required": required_gain}
+        if not next_beam:
+            if rejected_marginals:
+                gain, required_gain, parent_net = max(
+                    rejected_marginals, key=lambda item: (item[0] - item[1], item[0])
+                )
+                stop_reason = (
+                    "no_positive_expansion_marginal"
+                    if gain <= 0 else "expansion_marginal_gain_below_floor"
+                )
+                stopped_marginal = {
+                    "gain": gain,
+                    "required": required_gain,
+                    "ratio": gain / abs(parent_net) if parent_net else 0.0,
+                }
+            else:
+                stop_reason = "no_positive_expansion_marginal"
+                stopped_marginal = {"gain": 0.0, "required": 0.0}
             break
-        if gain + 1e-12 < required_gain:
-            stop_reason = "expansion_marginal_gain_below_floor"
-            stopped_marginal = {
-                "gain": gain,
-                "required": required_gain,
-                "ratio": gain / abs(previous_best) if previous_best else 0.0,
-            }
-            break
+        # Every retained expansion already beats the best current-size portfolio and its marginal floor.
         beam = next_beam
         portfolio_finalists.extend(beam)
         levels.append({
@@ -599,7 +673,7 @@ def search_smart_core(candidates: Sequence[str],
                     for incoming in outside:
                         trial_addrs = tuple(sorted((selected - {first, second}) | {incoming}))
                         trial = evaluate(trial_addrs)
-                        if feasible(trial) and _portfolio_net(trial) > _portfolio_net(parent):
+                        if feasible(trial) and _portfolio_economic_passes(parent, trial, constraints):
                             finalists.append((trial_addrs, trial))
         beam = top(finalists)
         portfolio_finalists.extend(beam)
@@ -609,8 +683,27 @@ def search_smart_core(candidates: Sequence[str],
         dedup_finalists = {}
         for addrs, neutral_metrics in portfolio_finalists:
             dedup_finalists[addrs] = neutral_metrics
+        finalist_items = list(dedup_finalists.items())
+        limit = max(1, int(validation_limit)) if validation_limit else None
+        if limit and len(finalist_items) > limit:
+            # Reserve the best two paths at every cardinality before filling remaining slots globally.
+            # This makes 1..anchor all genuine strict-replay finalists without letting K-line replay explode.
+            by_size = {}
+            for item in finalist_items:
+                by_size.setdefault(len(item[0]), []).append(item)
+            shortlisted, shortlisted_keys = [], set()
+            for size in sorted(by_size):
+                for item in sorted(by_size[size], key=_smart_rank, reverse=True)[:2]:
+                    if item[0] not in shortlisted_keys and len(shortlisted) < limit:
+                        shortlisted.append(item)
+                        shortlisted_keys.add(item[0])
+            for item in sorted(finalist_items, key=_smart_rank, reverse=True):
+                if item[0] not in shortlisted_keys and len(shortlisted) < limit:
+                    shortlisted.append(item)
+                    shortlisted_keys.add(item[0])
+            finalist_items = shortlisted
         validated = []
-        for addrs, neutral_metrics in dedup_finalists.items():
+        for addrs, neutral_metrics in finalist_items:
             check_budget()
             if addrs not in validation_cache:
                 value = validation_evaluator(addrs)
@@ -622,17 +715,113 @@ def search_smart_core(candidates: Sequence[str],
                 value.stress_net_pnl
                 if value.stress_net_pnl is not None else value.stress_net_lcb
             )
-            if feasible(value) and stress > 0:
+            if (feasible(value) and stress > 0
+                    and _portfolio_economic_passes(baseline, value, constraints)):
                 validated.append((addrs, value, neutral_metrics))
         if validated:
             validated.sort(key=lambda item: (
+                _portfolio_utility(item[1]),
                 _portfolio_net(item[1]),
-                f(item[1].risk_adjusted_utility),
                 _portfolio_net(item[2]),
                 -len(item[0]),
                 item[0],
             ), reverse=True)
             selected, metrics, _ = validated[0]
+            # Give the published list an economically meaningful 1..N order.  At each position compare all
+            # remaining wallets from the winning set under the same strict replay.  After the anchor, apply
+            # the same marginal-profit floor used by expansion and stop rather than force a quota.
+            remaining = set(selected)
+            contribution_order = []
+            strict_current = validation_cache.get(())
+            if strict_current is None:
+                strict_current = validation_evaluator(())
+                if not isinstance(strict_current, PortfolioMetrics):
+                    raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
+                validation_cache[()] = strict_current
+            while remaining:
+                ranked_additions = []
+                for addr in remaining:
+                    trial_addrs = tuple(sorted((*contribution_order, addr)))
+                    if trial_addrs not in validation_cache:
+                        value = validation_evaluator(trial_addrs)
+                        if not isinstance(value, PortfolioMetrics):
+                            raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
+                        validation_cache[trial_addrs] = value
+                    value = validation_cache[trial_addrs]
+                    if not feasible(value) or not _portfolio_economic_passes(
+                            strict_current, value, constraints):
+                        continue
+                    gain = _portfolio_net(value) - _portfolio_net(strict_current)
+                    required = (
+                        abs(_portfolio_net(strict_current))
+                        * max(0.0, f(min_marginal_gain_ratio))
+                        if len(contribution_order) >= target else 0.0
+                    )
+                    if gain + 1e-12 < required:
+                        continue
+                    ranked_additions.append((
+                        _portfolio_utility(value) - _portfolio_utility(strict_current),
+                        gain,
+                        -score_order.get(addr, len(ordered)),
+                        addr,
+                        value,
+                    ))
+                if not ranked_additions:
+                    stop_reason = (
+                        "strict_expansion_stopped" if contribution_order else "no_valid_strict_anchor"
+                    )
+                    break
+                _utility_gain, _net_gain, _score_tie, addr, value = max(ranked_additions)
+                contribution_order.append(addr)
+                remaining.remove(addr)
+                strict_current = value
+            # The beam only bounds combinatorial discovery.  Give every qualified wallet outside the
+            # winning finalist a direct strict chance to join the resulting portfolio, then repeat after an
+            # admission.  This prevents a high-quality Challenger from being stranded solely because its
+            # earlier fills-only beam path was pruned.
+            outside = {addr for addr in ordered if addr not in contribution_order}
+            while outside and len(contribution_order) < constraints.max_targets:
+                ranked_additions = []
+                for addr in outside:
+                    trial_addrs = tuple(sorted((*contribution_order, addr)))
+                    if trial_addrs not in validation_cache:
+                        check_budget()
+                        value = validation_evaluator(trial_addrs)
+                        if not isinstance(value, PortfolioMetrics):
+                            raise TypeError("portfolio validation evaluator must return PortfolioMetrics")
+                        validation_cache[trial_addrs] = value
+                    value = validation_cache[trial_addrs]
+                    if not feasible(value) or not _portfolio_economic_passes(
+                            strict_current, value, constraints):
+                        continue
+                    gain = _portfolio_net(value) - _portfolio_net(strict_current)
+                    required = (
+                        abs(_portfolio_net(strict_current))
+                        * max(0.0, f(min_marginal_gain_ratio))
+                        if len(contribution_order) >= target else 0.0
+                    )
+                    if gain + 1e-12 < required:
+                        continue
+                    ranked_additions.append((
+                        _portfolio_utility(value) - _portfolio_utility(strict_current),
+                        gain,
+                        -score_order.get(addr, len(ordered)),
+                        addr,
+                        value,
+                    ))
+                if not ranked_additions:
+                    stop_reason = "strict_expansion_stopped"
+                    break
+                _utility_gain, _net_gain, _score_tie, addr, value = max(ranked_additions)
+                contribution_order.append(addr)
+                outside.remove(addr)
+                strict_current = value
+            selected = tuple(contribution_order)
+            metrics = strict_current
+        else:
+            # A strict evaluator is fail-closed.  The caller can distinguish this from an intentionally
+            # empty qualified pool and retain the last published Core.
+            selected, metrics = (), baseline
     duration = time.monotonic() - started
     return MarginalSelectionResult(
         selected=selected,
@@ -647,6 +836,8 @@ def search_smart_core(candidates: Sequence[str],
             "selectedCount": len(selected),
             "neutralSelectedCount": len(beam[0][0]) if beam else 0,
             "validatedFinalists": len(validation_cache),
+            "strictValidationPassed": bool(selected) if validation_evaluator is not None else None,
+            "contributionOrder": tuple(selected),
             "minMarginalGainRatio": max(0.0, f(min_marginal_gain_ratio)),
             "stoppedMarginal": stopped_marginal,
             "stopReason": stop_reason,
@@ -717,8 +908,13 @@ def portfolio_economic_rejection_reason(base: PortfolioMetrics, trial: Portfolio
         return "portfolio_risk_adjusted_gain_low"
     if trial.actionable_open_rate < c.min_actionable_open_rate:
         return "portfolio_open_rate_low"
+    if (base_net > 0 and trial.actionable_open_rate + c.max_actionable_open_rate_drop
+            < base.actionable_open_rate):
+        return "portfolio_open_rate_drop"
     if trial.capacity_fit < c.min_capacity_fit:
         return "portfolio_capacity_low"
+    if (base_net > 0 and trial.capacity_fit + c.max_capacity_fit_drop < base.capacity_fit):
+        return "portfolio_capacity_drop"
     if trial.peak_deploy_pct > c.max_deploy_pct:
         return "portfolio_deploy_limit"
     return "portfolio_not_selected"

@@ -346,6 +346,40 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
         self.assertEqual(challenger_detail["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
 
+    def test_published_selection_scores_do_not_follow_in_progress_profile_mutations(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02')"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,utility,follow_score,selection_rank,selected_at) "
+                "VALUES ('g1',?,?,?,?,?,?,'2026-01-02')",
+                [
+                    ("0xcore2", "core", 1, 20, .72, 2),
+                    ("0xcore1", "core", 1, 30, .68, 1),
+                    ("0xchallenger", "challenger", 1, .81, .81, 3),
+                ],
+            )
+            for addr in ("0xcore1", "0xcore2", "0xchallenger"):
+                db.execute(
+                    "INSERT INTO profile(addr,status,score,profile_generation) "
+                    "VALUES (?,'rejected',0,'g-in-progress')", (addr,),
+                )
+            db.commit()
+
+            core = api_wallets.ep_wallets(db, {"tab": ["followed"]})
+            challenger = api_wallets.ep_wallets(db, {"tab": ["challenger"]})
+
+        self.assertEqual([row["address"] for row in core["wallets"]], ["0xcore1", "0xcore2"])
+        self.assertEqual([row["score"] for row in core["wallets"]], [68.0, 72.0])
+        self.assertEqual(challenger["wallets"][0]["score"], 81.0)
+
     def test_selected_list_displays_only_observer_allowed_sector_replay(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

@@ -49,12 +49,15 @@ SELECTION_MIN_RELATIVE_GAIN = 0.05
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.85
 SELECTION_MAX_DD_WORSEN = 0.01
-CORE_SEARCH_SEED_TARGET = 10       # Search depth target, never a forced minimum Core count.
-CORE_SEARCH_BEAM_WIDTH = 3         # Compact address+metric states retained at each portfolio size.
+CORE_SEARCH_SEED_TARGET = 6        # Anchor depth; sizes 1..6 are all validated, never a minimum quota.
+CORE_SEARCH_BEAM_WIDTH = 6         # Diverse risk/net/quality paths retained at each portfolio size.
 CORE_SEARCH_SWAP_PASSES = 1        # One-for-one local polish passes at seed/final sizes.
 CORE_SEARCH_MAX_REPLACE_OUT = 2    # Enable bounded one-for-two count-reducing checks.
 CORE_SEARCH_TIME_BUDGET_SEC = 600  # Fail closed to the last published Core if exceeded.
 CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO = 0.01  # After the seed, each added wallet must raise net profit >=1%.
+CORE_SEARCH_VALIDATION_FINALISTS = 24  # Strict K-line finalists, with at least two retained per size.
+CORE_SEARCH_MAX_OPEN_RATE_DROP = 0.05  # Reject an addition that materially reduces executable opens.
+CORE_SEARCH_MAX_CAPACITY_FIT_DROP = 0.05  # Reject material shared-balance contention before the floor.
 # Post-scan follow-line adaptation. The watchlist is ranked by copy-follow score (raw profile score blended
 # with copy-backtest evidence); after each scan/regate we move MIN_FOLLOW_SCORE to the Nth copyable wallet,
 # with a floor so weak active tails do not get followed just because the pool is small.

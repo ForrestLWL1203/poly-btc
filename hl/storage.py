@@ -312,6 +312,8 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     enabled         INTEGER NOT NULL DEFAULT 1,
     reason          TEXT,
     utility         REAL,
+    follow_score    REAL,             -- immutable final copy-follow score at selection publication
+    selection_rank  INTEGER,          -- Core contribution order; Challenger score order
     data_status     TEXT,
     evidence_status TEXT,
     model_version   TEXT,
@@ -937,6 +939,8 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_sector_copy_json TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_params_hash TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replayed_at TEXT",
+    "ALTER TABLE follow_selection ADD COLUMN follow_score REAL",
+    "ALTER TABLE follow_selection ADD COLUMN selection_rank INTEGER",
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE shadow_position ADD COLUMN strategy_revision_id TEXT",

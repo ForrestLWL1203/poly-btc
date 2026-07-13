@@ -197,17 +197,28 @@ def _ep_selected_wallets(db, generation, role, page, size):
     rows = qall(
         db,
         "WITH page_selected AS ("
-        "  SELECT fs.addr,fs.reason AS selection_reason,fs.utility,"
+        "  SELECT fs.addr,fs.role AS selection_role,fs.reason AS selection_reason,fs.utility,"
+        "         fs.selection_rank,"
+        "         fs.follow_score AS selection_follow_score,"
+        "         CASE WHEN fs.follow_score IS NOT NULL THEN fs.follow_score "
+        "              WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility "
+        "              WHEN sfh.last_followed_generation=fs.generation THEN sfh.last_followed_score "
+        "              ELSE NULL END AS legacy_follow_score,"
         "         fs.data_status AS selection_data_status,"
         "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_closed_n,"
         "         fs.replay_copy_bt_7d_net_pnl,"
         "         fs.replay_copy_bt_7d_closed_n,fs.replay_sector_copy_json,"
-        "         fs.replayed_at,COALESCE(w.rank,999999) AS sort_rank "
+        "         fs.replayed_at "
         "  FROM follow_selection fs "
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
-        "  LEFT JOIN watchlist w ON w.addr=fs.addr "
+        "  LEFT JOIN follow_history sfh ON sfh.addr=fs.addr "
         "  WHERE fs.generation=? AND fs.role=? "
-        "  ORDER BY sort_rank,fs.utility DESC,fs.addr LIMIT ? OFFSET ?"
+        "  ORDER BY CASE WHEN fs.role='core' THEN COALESCE(fs.selection_rank,999999) ELSE 0 END,"
+        "      CASE WHEN fs.role='core' THEN fs.utility END DESC,"
+        "      COALESCE(fs.follow_score,"
+        "      CASE WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility END,"
+        "      CASE WHEN sfh.last_followed_generation=fs.generation THEN sfh.last_followed_score END,-1) DESC,"
+        "      fs.addr LIMIT ? OFFSET ?"
         "), ep7 AS ("
         "  SELECT f.addr,COUNT(e.addr) AS closed_7d "
         "  FROM page_selected f LEFT JOIN episode e ON e.addr=f.addr AND e.close_ms>=? GROUP BY f.addr"
@@ -219,7 +230,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net "
         "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
         ") "
-        "SELECT s.addr,s.selection_reason,s.selection_data_status,"
+        "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
+        "s.selection_follow_score,s.legacy_follow_score,"
         "w.market_type,w.score,w.win_rate,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
@@ -235,13 +247,19 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "LEFT JOIN target_controls tc ON tc.addr=s.addr LEFT JOIN profile p ON p.addr=s.addr "
         "LEFT JOIN follow_history fh ON fh.addr=s.addr "
         "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
-        "LEFT JOIN copy_stats cs ON cs.addr=s.addr ORDER BY s.sort_rank,s.utility DESC,s.addr",
+        "LEFT JOIN copy_stats cs ON cs.addr=s.addr "
+        "ORDER BY CASE WHEN s.selection_role='core' THEN COALESCE(s.selection_rank,999999) ELSE 0 END,"
+        "CASE WHEN s.selection_role='core' THEN s.utility END DESC,"
+        "COALESCE(s.selection_follow_score,s.legacy_follow_score,-1) DESC,s.addr",
         (generation, role, size, page * size, cutoff7d),
     )
     out = []
     request_now_ms = int(time.time() * 1000)
     for i, r in enumerate(rows):
         display_metrics = apply_allowed_sector_copy_metrics(dict(r))
+        published_score = _col(r, "selection_follow_score")
+        if published_score is None:
+            published_score = _col(r, "legacy_follow_score")
         closed7d = _col(r, "closed_7d") or 0
         if closed7d == 0 and (_col(r, "episode_total") or 0) == 0:
             closed7d = _col(r, "copy_bt_7d_closed_n") or 0
@@ -250,7 +268,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "address": _col(r, "addr"),
             "selectionReasonText": _selection_reason_text(r, now_ms=request_now_ms),
             "marketType": _col(r, "market_type") or "crypto",
-            "score": score100(_col(r, "score") or 0.0),
+            "score": score100(published_score) if published_score is not None else None,
             "winRatePct": (_col(r, "win_rate") or 0.0) * 100,
             "mainCoin": _col(r, "top_coin"),
             "followCount": _col(r, "follow_count") or 0,
@@ -386,8 +404,11 @@ def ep_wallet_detail(db, addr, qs=None):
             "p.capacity_fit,p.open_probability_48h,p.last_copyable_open_ms,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
+            "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"
+            "fh.last_followed_score,fh.last_followed_generation,"
             "fs.replay_params_hash,fs.replayed_at "
             "FROM profile p LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=p.addr "
+            "LEFT JOIN follow_history fh ON fh.addr=p.addr "
             "WHERE p.addr=?", (selection_generation, addr))
     agg = q1(db,
              "SELECT COUNT(*) total_n,"
@@ -409,7 +430,16 @@ def ep_wallet_detail(db, addr, qs=None):
         "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at "
         "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
         (addr, rs, rp * rs))
-    final_score = w["score"] if (w and w["score"] is not None) else (pr["score"] if pr else None)
+    final_score = _col(pr, "selection_follow_score") if pr else None
+    if final_score is None and pr and _col(pr, "selection_role") != "core":
+        utility = _col(pr, "selection_utility")
+        if utility is not None and 0 <= utility <= 1:
+            final_score = utility
+    if (final_score is None and pr
+            and _col(pr, "last_followed_generation") == selection_generation):
+        final_score = _col(pr, "last_followed_score")
+    if final_score is None and not _col(pr, "selection_role"):
+        final_score = w["score"] if (w and w["score"] is not None) else (pr["score"] if pr else None)
     return {
         "address": addr, "rank": (w["rank"] if w else None),
         "role": (_col(pr, "selection_role") if pr else None),
