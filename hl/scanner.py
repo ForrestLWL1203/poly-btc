@@ -969,6 +969,25 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     )
 
 
+def _selection_prefetch_candidates(db, limit=None) -> list[str]:
+    """Return the bounded qualified universe needed for path prefetch without running selection."""
+    limit = max(0, int(config.MAX_TARGETS if limit is None else limit))
+    if not limit:
+        return []
+    return [
+        (row[0] or "").lower() for row in db.execute(
+            "SELECT p.addr FROM profile p "
+            "LEFT JOIN watchlist w ON w.addr=p.addr "
+            "LEFT JOIN target_controls tc ON tc.addr=p.addr "
+            "WHERE p.status IN ('active','qualified') "
+            "AND COALESCE(tc.enabled,1)=1 "
+            "ORDER BY COALESCE(w.score,-1) DESC,p.addr LIMIT ?",
+            (limit,),
+        ).fetchall()
+        if row[0]
+    ]
+
+
 def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False,
                               validate_price_path=True, audit_stamp=None):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
@@ -1158,12 +1177,21 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                         )
                     path_validation_details[key] = {
                         "reasons": tuple(path_reasons),
+                        "coins": tuple(price_path.coins_for_fills(selected_fills))
+                        if validate_price_path else (),
+                        "fills": len(selected_fills) if validate_price_path else 0,
                         "coverage": float(path_meta.get("coverage") or 0.0),
                         "expectedCandles": int(path_meta.get("expected") or 0),
                         "observedCandles": int(path_meta.get("observed") or 0),
                         "missingCoins": tuple(path_meta.get("missingCoins") or ()),
                         "pathNetPnl": f((path_primary or {}).get("copy_net_pnl")),
                         "pathLiquidations": int((path_primary or {}).get("liquidations") or 0),
+                        "ambiguousLiquidations": int(
+                            (path_primary or {}).get("ambiguous_liquidations") or 0
+                        ),
+                        "pathBoundarySkips": int(
+                            (path_primary or {}).get("price_path_boundary_skips") or 0
+                        ),
                         "maintenanceCoverage": f(
                             (path_primary or {}).get("maintenance_margin_coverage")
                         ),
@@ -1209,10 +1237,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 core_rank = {
                     addr: rank for rank, addr in enumerate(marginal.selected, 1)
                 }
-                # Every retained finalist has already competed under the strict shared K-line path.  Repeat
-                # the winning replay only to persist a compact operator audit.  A coverage/maintenance-data
-                # failure is operational and retains the previous Core; a complete strict replay that finds
-                # no profitable combination may intentionally publish an empty Core.
+                # Every retained finalist has already competed under the strict shared K-line path. A
+                # coverage/maintenance-data failure is operational and retains the previous Core; a complete
+                # strict replay that finds no profitable combination may intentionally publish an empty Core.
                 nonempty_path_checks = {
                     key: detail for key, detail in path_validation_details.items() if key
                 }
@@ -1231,85 +1258,68 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     core_rank = {}
                     marginal = None
                     path_fallback = True
-                if selected_set and validate_price_path:
-                    selected_fills = [
-                        fill for fill in (window_fills.get(30) or [])
-                        if (fill.get("user") or "").lower() in selected_set
-                    ]
-                    from . import price_path
-                    path_coins = price_path.coins_for_fills(selected_fills)
-                    if path_coins:
-                        candidate_core = sorted(selected_set)
-                        path_start = now_ms - (
-                            30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
-                        ) * 86_400_000
-                        path_rows = price_path.load_refined(db, selected_fills, path_start, now_ms)
-                        path_meta = price_path.coverage(db, selected_fills, path_start, now_ms)
-                        # Price paths validate the fills-only Core as one shared account.  They do not eject an
-                        # individual wallet under an arbitrary pre-tune leverage surface, but a path-adjusted
-                        # portfolio that is no longer profitable must not replace the last published Core.
-                        path_follow = {**neutral_follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
-                        path_primary = auto_tune.evaluate_portfolio_window(
-                            db, candidate_core, sigmas,
-                            path_follow, now_ms,
-                            window_fills={30: selected_fills}, days=30, market_ctx=market_ctx,
-                            path_rows=path_rows, path_meta=path_meta,
-                        )
-                        coverage_floor = float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
-                        maintenance_floor = float(
-                            getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)
-                        )
-                        coverage = float(path_meta.get("coverage") or 0.0)
-                        maintenance = f(path_primary.get("maintenance_margin_coverage"))
-                        path_net = f(path_primary.get("copy_net_pnl"))
-                        path_reasons = []
-                        if coverage < coverage_floor:
-                            path_reasons.append("price_path_coverage_low")
-                        if maintenance < maintenance_floor:
-                            path_reasons.append("maintenance_margin_coverage_low")
-                        if path_net <= 0:
-                            path_reasons.append("path_net_nonpositive")
-                        if path_reasons:
-                            selected_set = {
-                                addr for addr in portfolio_candidates
-                                if previous_roles.get(addr) == selection.CORE
-                            }
-                            core_rank = {}
-                            marginal = None
-                            path_fallback = True
-                        pipeline_audit._insert_event(
-                            db,
-                            stamp=audit_stamp or stamp,
-                            source="scan",
-                            stage="selection_path_validation",
-                            status="fallback" if path_reasons else "ok",
-                            reason=",".join(path_reasons) if path_reasons else "path_validated",
-                            payload={
-                                "generation": generation_id,
-                                "candidateCore": candidate_core,
-                                "effectiveCore": sorted(selected_set),
-                                "coins": path_coins,
-                                "fills": len(selected_fills),
-                                "fillsOnlyNetPnl": f(evaluate(tuple(candidate_core)).net_pnl),
-                                "pathNetPnl": path_net,
-                                "pathLiquidations": int(path_primary.get("liquidations") or 0),
-                                "ambiguousLiquidations": int(
-                                    path_primary.get("ambiguous_liquidations") or 0
-                                ),
-                                "pathBoundarySkips": int(
-                                    path_primary.get("price_path_boundary_skips") or 0
-                                ),
-                                "coverage": coverage,
-                                "coverageFloor": coverage_floor,
-                                "maintenanceCoverage": maintenance,
-                                "maintenanceFloor": maintenance_floor,
-                                "expectedCandles": int(path_meta.get("expected") or 0),
-                                "observedCandles": int(path_meta.get("observed") or 0),
-                                "missingCoins": list(path_meta.get("missingCoins") or []),
-                                "fallback": bool(path_reasons),
-                                "reasons": path_reasons,
-                            },
-                        )
+                if selected_set and validate_price_path and marginal is not None:
+                    candidate_core = sorted(selected_set)
+                    detail = path_validation_details.get(tuple(candidate_core))
+                    path_reasons = list((detail or {}).get("reasons") or ())
+                    if detail is None:
+                        path_reasons = ["path_validation_missing"]
+                    if path_reasons:
+                        selected_set = {
+                            addr for addr in portfolio_candidates
+                            if previous_roles.get(addr) == selection.CORE
+                        }
+                        core_rank = {}
+                        marginal = None
+                        path_fallback = True
+                    coverage_floor = float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95))
+                    maintenance_floor = float(
+                        getattr(config, "CORE_MAINTENANCE_META_MIN_COVERAGE", .95)
+                    )
+                    pipeline_audit._insert_event(
+                        db,
+                        stamp=audit_stamp or stamp,
+                        source="scan",
+                        stage="selection_path_validation",
+                        status="fallback" if path_reasons else "ok",
+                        reason=",".join(path_reasons) if path_reasons else "path_validated",
+                        payload={
+                            "generation": generation_id,
+                            "candidateCore": candidate_core,
+                            "effectiveCore": sorted(selected_set),
+                            "coins": list((detail or {}).get("coins") or ()),
+                            "fills": int((detail or {}).get("fills") or 0),
+                            "fillsOnlyNetPnl": f(evaluate(tuple(candidate_core)).net_pnl),
+                            "pathNetPnl": f((detail or {}).get("pathNetPnl")),
+                            "pathLiquidations": int(
+                                (detail or {}).get("pathLiquidations") or 0
+                            ),
+                            "ambiguousLiquidations": int(
+                                (detail or {}).get("ambiguousLiquidations") or 0
+                            ),
+                            "pathBoundarySkips": int(
+                                (detail or {}).get("pathBoundarySkips") or 0
+                            ),
+                            "coverage": float((detail or {}).get("coverage") or 0.0),
+                            "coverageFloor": coverage_floor,
+                            "maintenanceCoverage": f(
+                                (detail or {}).get("maintenanceCoverage")
+                            ),
+                            "maintenanceFloor": maintenance_floor,
+                            "expectedCandles": int(
+                                (detail or {}).get("expectedCandles") or 0
+                            ),
+                            "observedCandles": int(
+                                (detail or {}).get("observedCandles") or 0
+                            ),
+                            "missingCoins": list(
+                                (detail or {}).get("missingCoins") or ()
+                            ),
+                            "fallback": bool(path_reasons),
+                            "reasons": path_reasons,
+                            "reusedStrictReplay": True,
+                        },
+                    )
                 effective_evaluate = (
                     validate if marginal is not None and validate_price_path else evaluate
                 )
@@ -2536,25 +2546,28 @@ def scan(db, p) -> None:
         selection_mode = str(
             params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
         ).lower()
-        # Discover the fills-only finalist in a rolled-back staging pass, then fetch its shared market path
-        # before the atomic publication transaction. Network I/O must never hold the Dashboard/Observer
-        # SQLite writer lock, and a partial watchlist must never become visible.
+        # Build only the bounded candidate universe in a rolled-back staging pass, then fetch its shared
+        # market path before the atomic publication transaction.  The old flow ran a complete fills-only
+        # selection here and repeated it during final publication merely to discover which paths to fetch.
+        # Querying the same quality-qualified top-40 universe removes that duplicate search while keeping
+        # network I/O outside the Dashboard/Observer SQLite writer lock.
         if selection_mode == "auto":
             try:
+                _set_scan_progress(
+                    db, stage="prepare_selection_candidates", candidates_scanned=len(workset),
+                )
                 db.commit()
                 refresh_watchlist(
                     db, stamp, source="scan", update_follow_line=False, update_follow_history=False,
                     leaderboard_generation=generation_id, commit=False,
                 )
-                preview_rows, _ = _build_explicit_selection(
-                    db, generation_id, stamp, now_ms, validate_price_path=False,
-                )
-                preview_candidates = [
-                    row.addr for row in preview_rows
-                    if row.role in {selection.CORE, selection.CHALLENGER} and row.enabled
-                ][:int(config.MAX_TARGETS)]
+                preview_candidates = _selection_prefetch_candidates(db)
                 db.rollback()
                 if preview_candidates:
+                    _set_scan_progress(
+                        db, stage="prefetch_selection_paths",
+                        candidates_scanned=len(workset), candidates_total=len(workset),
+                    )
                     from . import price_path
                     path_start = now_ms - (
                         30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
@@ -2574,6 +2587,10 @@ def scan(db, p) -> None:
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
         try:
+            _set_scan_progress(
+                db, stage="selection_search", candidates_scanned=len(workset),
+                candidates_total=len(workset),
+            )
             selection_stamp = now_iso()
             # Selection reads final scores and per-wallet sector policies from watchlist.  Rebuild that
             # derived view first; otherwise newly-qualified wallets have no policy row and the canonical

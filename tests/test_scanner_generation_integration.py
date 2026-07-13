@@ -43,8 +43,44 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
         source = inspect.getsource(scanner._build_explicit_selection)
 
-        self.assertIn("if path_net <= 0", source)
+        self.assertIn('path_reasons.append("path_net_nonpositive")', source)
+        self.assertIn('"reusedStrictReplay": True', source)
         self.assertNotIn("path_rejected", source)
+
+    def test_scan_runs_explicit_selection_only_once(self):
+        source = inspect.getsource(scanner.scan)
+
+        self.assertEqual(source.count("_build_explicit_selection("), 1)
+        self.assertIn("_selection_prefetch_candidates(db)", source)
+        self.assertNotIn("preview_rows", source)
+
+    def test_selection_prefetch_candidates_is_bounded_ranked_and_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile(addr,status,score) VALUES (?,?,?)",
+                [
+                    ("0xlow", "active", .7),
+                    ("0xhigh", "qualified", .9),
+                    ("0xdisabled", "active", .95),
+                    ("0xrejected", "rejected", .99),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES (?,?,?,'now')",
+                [
+                    (1, "0xdisabled", .95), (2, "0xhigh", .9),
+                    (3, "0xlow", .7), (4, "0xrejected", .99),
+                ],
+            )
+            db.execute(
+                "INSERT INTO target_controls(addr,enabled) VALUES('0xdisabled',0)"
+            )
+            db.commit()
+
+            candidates = scanner._selection_prefetch_candidates(db, limit=2)
+
+        self.assertEqual(candidates, ["0xhigh", "0xlow"])
 
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -258,13 +294,33 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(db.execute(
                     "SELECT 1 FROM watchlist WHERE addr='0xaaa'"
                 ).fetchone())
+                kwargs["validation_evaluator"](("0xaaa",))
                 return marginal
+
+            strict_windows = {
+                30: {
+                    "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
+                    "capacity_open_fit": .95, "max_drawdown": .01,
+                    "maintenance_margin_coverage": 1.0,
+                },
+                14: {
+                    "copy_net_pnl": 80, "closed_n": 8, "open_fill_rate": .95,
+                    "capacity_open_fit": .95, "max_drawdown": .01,
+                    "maintenance_margin_coverage": 1.0,
+                },
+                7: {
+                    "copy_net_pnl": 60, "closed_n": 7, "open_fill_rate": .95,
+                    "capacity_open_fit": .95, "max_drawdown": .01,
+                    "maintenance_margin_coverage": 1.0,
+                },
+            }
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                    patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_windows), \
                     patch.object(scanner.selection, "search_smart_core", side_effect=select_after_watchlist), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
@@ -514,9 +570,24 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "capacity_open_fit": .95, "max_drawdown": .01,
                 }
 
+            strict_window = {
+                30: {
+                    "copy_net_pnl": -25, "maintenance_margin_coverage": .91,
+                    "liquidations": 2, "ambiguous_liquidations": 1,
+                    "price_path_boundary_skips": 3, "closed_n": 10,
+                    "open_fill_rate": .95, "capacity_open_fit": .95,
+                    "max_drawdown": .01,
+                },
+            }
+
+            def search(*_args, **kwargs):
+                kwargs["validation_evaluator"](("0xnew",))
+                return marginal
+
             with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: fills}), \
                     patch.object(scanner.auto_tune, "evaluate_portfolio_window", side_effect=evaluate), \
-                    patch.object(scanner.selection, "search_smart_core", return_value=marginal), \
+                    patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_window), \
+                    patch.object(scanner.selection, "search_smart_core", side_effect=search), \
                     patch("hl.price_path.coins_for_fills", return_value=["BTC"]), \
                     patch("hl.price_path.load_refined", return_value=[{"coin": "BTC", "time": 1000}]), \
                     patch("hl.price_path.coverage", return_value={
@@ -581,7 +652,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
                     patch.object(scanner.selection, "search_smart_core", return_value=marginal), \
                     patch.object(scanner, "_portfolio_selection_metrics", side_effect=[profitable, baseline]):
-                rows, result = scanner._build_explicit_selection(db, "g1", "now", 1000)
+                rows, result = scanner._build_explicit_selection(
+                    db, "g1", "now", 1000, validate_price_path=False,
+                )
 
             self.assertEqual(result, marginal)
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
