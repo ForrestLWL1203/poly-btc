@@ -1,8 +1,10 @@
 import sqlite3
 import tempfile
+import time
 import unittest
 from importlib import import_module, util
 from pathlib import Path
+from unittest.mock import patch
 
 from hl import api_discovery, params, storage
 
@@ -38,6 +40,40 @@ class ApiScannerStatusTests(unittest.TestCase):
 
     def test_scanning_scanner_is_stale_when_heartbeat_is_old(self):
         st = api_discovery.scanner_status(self._db_with_status("scanning"))
+
+        self.assertTrue(st["stale"])
+
+    def test_scanning_scanner_allows_expected_multi_minute_batch_heartbeat(self):
+        now = 2_000_000_000.0
+        db = self._db_with_status("scanning")
+        heartbeat = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(now - 6 * 60),
+        )
+        db.execute(
+            "UPDATE process_status SET heartbeat_at=? WHERE name='scanner'",
+            (heartbeat,),
+        )
+
+        with patch.object(api_discovery.time, "time", return_value=now):
+            st = api_discovery.scanner_status(db)
+
+        self.assertFalse(st["stale"])
+
+    def test_scanning_scanner_is_stale_after_scanner_specific_timeout(self):
+        now = 2_000_000_000.0
+        db = self._db_with_status("scanning")
+        heartbeat = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(now - api_discovery.SCANNER_STALE_SEC - 1),
+        )
+        db.execute(
+            "UPDATE process_status SET heartbeat_at=? WHERE name='scanner'",
+            (heartbeat,),
+        )
+
+        with patch.object(api_discovery.time, "time", return_value=now):
+            st = api_discovery.scanner_status(db)
 
         self.assertTrue(st["stale"])
 

@@ -6,7 +6,10 @@ import time
 from .api_common import iso_epoch, q1, qall, score100
 
 
-PROC_STALE_SEC = 90
+# The scanner refreshes process_status after each batch of 10 completed profiles.
+# Observer-safe REST pacing can make a healthy batch take roughly five minutes, so
+# the Observer's 90-second liveness window is not appropriate for scanner health.
+SCANNER_STALE_SEC = 15 * 60
 
 
 def scanner_status(db):
@@ -21,7 +24,11 @@ def scanner_status(db):
     except (ValueError, TypeError):
         detail = {}
     hb = iso_epoch(r["heartbeat_at"])
-    stale = bool((r["state"] or "unknown") != "idle" and hb and (time.time() - hb) > PROC_STALE_SEC)
+    stale = bool(
+        (r["state"] or "unknown") != "idle"
+        and hb
+        and (time.time() - hb) > SCANNER_STALE_SEC
+    )
     return {"mode": r["state"] or "unknown",
             "stale": stale,
             "heartbeatAt": r["heartbeat_at"], "detail": detail}
