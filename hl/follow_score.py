@@ -283,11 +283,17 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         score -= min(0.06, abs(_num(recent7)) * 0.4)
         reasons.append("7天归一化收益为负")
     liqs = int(_num(metrics.get("copy_bt_liquidations")))
-    # Liquidation losses already reduce replay PnL, max drawdown, worst margin return and therefore
-    # ``copy_risk_score``.  Charging another fixed five points per event double-counted the same risk and
-    # made profitable Core contributors look artificially weak.  Keep the count as explanation only.
+    liquidation_rate = liqs / c30 if c30 > 0 else 0.0
+    # The monetary loss is already present in PnL/drawdown, so never charge a fixed amount per event or use
+    # a zero-liquidation veto.  Frequency is separate repeatability evidence, however: recurring isolated
+    # liquidations rank below an equally profitable wallet with a cleaner path.  Keep the continuous penalty
+    # bounded so a thick post-loss net edge can still win.
     if liqs > 0:
-        reasons.append(f"copy爆仓{liqs}次（已计入收益/回撤）")
+        liquidation_frequency_penalty = min(0.10, liquidation_rate * 0.50)
+        score -= liquidation_frequency_penalty
+        reasons.append(
+            f"copy爆仓{liqs}次/{c30}回合（损失已计收益，频率扣分{liquidation_frequency_penalty:.3f}）"
+        )
     score = _clamp(score)
     return score, {
         "rawScore": raw,
@@ -307,6 +313,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "executionScore": execution,
         "openFillRate": metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")),
         "liquidations": liqs,
+        "liquidationRate": liquidation_rate,
         "feeDrag": metrics.get("copy_bt_fee_drag"),
         "reasons": reasons,
     }

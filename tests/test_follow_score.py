@@ -130,11 +130,13 @@ class FollowScoreTests(unittest.TestCase):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])
 
-    def test_liquidation_count_is_not_charged_twice_after_risk_and_pnl(self):
+    def test_liquidation_frequency_is_bounded_ranking_evidence_not_a_veto(self):
         baseline, _ = compute_follow_score(evidence(copy_bt_liquidations=0, copy_risk_score=0.0))
         liquidated, detail = compute_follow_score(evidence(copy_bt_liquidations=3, copy_risk_score=0.0))
-        self.assertAlmostEqual(liquidated, baseline)
-        self.assertTrue(any("已计入收益/回撤" in reason for reason in detail["reasons"]))
+        self.assertLess(liquidated, baseline)
+        self.assertGreater(liquidated, baseline - 0.10)
+        self.assertAlmostEqual(detail["liquidationRate"], 3 / 16)
+        self.assertTrue(any("损失已计收益" in reason for reason in detail["reasons"]))
 
     def test_negative_bootstrap_lcb_is_scored_but_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_return_lcb=-0.05))
