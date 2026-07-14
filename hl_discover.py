@@ -270,6 +270,9 @@ def main() -> int:
     rs.add_argument("--generation")
     rs.add_argument("--stamp")
     rs.add_argument("--replace-existing", action="store_true")
+    fg = sub.add_parser("finalize-profiled", help="finish a cached profiled generation without wallet refetch")
+    fg.add_argument("--generation")
+    fg.add_argument("--stamp")
 
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
@@ -316,6 +319,11 @@ def main() -> int:
     elif args.cmd == "repair-selection":
         result = scanner.repair_published_selection(
             db, args.generation, stamp=args.stamp, replace_existing=args.replace_existing,
+        )
+        print(json.dumps(result, sort_keys=True, default=str))
+    elif args.cmd == "finalize-profiled":
+        result = scanner.finalize_profiled_generation(
+            db, generation_id=args.generation, stamp=args.stamp,
         )
         print(json.dumps(result, sort_keys=True, default=str))
     db.close()

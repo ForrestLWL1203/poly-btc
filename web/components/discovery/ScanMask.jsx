@@ -3,7 +3,7 @@ const STAGES_FE = [
   [["fetch_history"], "拉取历史 & 算指标"],
   [["score_filter"], "评分 · 网格/扛单过滤"],
   [["rebuild_watchlist", "prepare_selection_candidates"], "重建被跟名单"],
-  [["prefetch_selection_paths", "selection_search", "auto_tune"], "组合回测调参"],
+  [["prefetch_selection_paths", "portfolio_tune", "selection_search", "auto_tune"], "组合回测调参"],
   [["persist"], "写库 & 校验"],
 ];
 
@@ -14,6 +14,7 @@ const POST_PROFILE_PROGRESS = {
   rebuild_watchlist: 78,
   prepare_selection_candidates: 82,
   prefetch_selection_paths: 86,
+  portfolio_tune: 89,
   selection_search: 91,
   auto_tune: 96,
   persist: 99,

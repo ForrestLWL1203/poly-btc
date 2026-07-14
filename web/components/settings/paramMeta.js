@@ -32,6 +32,7 @@ export const PARAM_META = {
   HARVEST_WEEK_VLM_MAX: { name: "周成交量范围", desc: "近7天成交额在范围内才看", range: "$300k–$30m" },
   inactive_days: { name: "最长不活跃天数", desc: "超过此天数没成交则剔除", range: "1–7 天", up: "更宽容沉默", dn: "更快剔除" },
   EXCLUDE_HFT: { name: "过滤高频HFT(开关)", desc: "剔除秒级快炒钱包——他们赚钱但我们延迟太大抄不了;接入高频WS后可关掉", range: "—" },
+  CORE_INITIAL_MAX_N: { name: "初始跟单上限", desc: "先整体调参的最高质量Core钱包数;之后只从质量末尾缩减", range: "4–24" },
 };
 
 export const UNIT = { usd: "$", pct: "%", x: "×" };

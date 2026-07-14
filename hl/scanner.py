@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import (auto_tune, config, follow_score, generation, metrics, offline_core_optimizer,
+from . import (auto_tune, config, core_formation, follow_score, generation, metrics, offline_core_optimizer,
                params, pipeline_audit, rest, selection, storage, strategy_revision)
 from .copy_backtest import run_backtest, slice_backtest_result
 from .fills import build_episodes, is_spot
@@ -1365,6 +1365,191 @@ def _selection_prefetch_candidates(db, limit=None) -> list[str]:
     ]
 
 
+def _quality_core_profiles(db, generation_id) -> list[dict]:
+    """Current-generation, individually Core-ready profiles in immutable quality order."""
+    cur = db.execute(
+        "SELECT p.addr,p.status,p.reason,p.score,p.profile_generation,p.data_status,p.evidence_status,p.last_copyable_open_ms,"
+        "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
+        "p.copy_positive_probability,p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
+        "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
+        "p.execution_score,p.open_probability_48h,"
+        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json,p.acct_value "
+        "FROM profile p WHERE p.profile_generation=?",
+        (generation_id,),
+    )
+    names = [desc[0] for desc in cur.description]
+    controls = {
+        (addr or "").lower(): bool(enabled)
+        for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
+    }
+    rows = []
+    for raw in cur.fetchall():
+        row = dict(zip(names, raw))
+        addr = (row.get("addr") or "").lower()
+        row["addr"] = addr
+        row["follow_score"] = follow_score.compute_follow_score(row)[0]
+        row["follow_qualification"] = follow_score.evaluate_follow_eligibility({
+            **row,
+            "copy_bt_data_status": row.get("data_status"),
+            "copy_bt_evidence_status": row.get("evidence_status"),
+        })
+        if (
+            row.get("status") in {"active", "qualified"}
+            and (row.get("follow_qualification") or {}).get("coreEligible")
+            and (row.get("data_status") or "valid") == "valid"
+            and controls.get(addr, True)
+        ):
+            rows.append(row)
+    rows.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
+    return rows
+
+
+def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
+    validation = dict(tune_result.get("validation") or {})
+    folds = list(validation.get("folds") or ())
+
+    def side(prefix, stress_key, stress_liq_key, proposal):
+        net = sum(f(row.get(f"{prefix}Net")) for row in folds)
+        max_dd = max((f(row.get(f"{prefix}MaxDD")) for row in folds), default=1.0)
+        open_rate = min((f(row.get(f"{prefix}OpenRate")) for row in folds), default=0.0)
+        capacity = min((f(row.get(f"{prefix}CapacityFit")) for row in folds), default=0.0)
+        liquidations = max(
+            [int(row.get(f"{prefix}Liquidations") or 0) for row in folds]
+            + [int(validation.get(stress_liq_key) or 0)]
+        )
+        return core_formation.PrefixEvaluation(
+            count=int(count), net_pnl=net,
+            stress_net_pnl=f(validation.get(stress_key)), max_drawdown=max_dd,
+            actionable_open_rate=open_rate, capacity_fit=capacity,
+            liquidations=liquidations, params=dict(proposal or {}),
+            payload={"initialBalance": float(initial_balance)},
+        )
+
+    challenger = side(
+        "challenger", "stressNet", "stressLiquidations", tune_result.get("proposal") or {},
+    )
+    baseline = side(
+        "baseline", "baselineStressNet", "baselineStressLiquidations",
+        tune_result.get("baseline_proposal") or {},
+    )
+    feasible = [value for value in (challenger, baseline) if value.feasible]
+    return max(
+        feasible or [challenger, baseline],
+        key=lambda value: (value.utility, value.stress_net_pnl),
+    )
+
+
+def form_quality_prefix(db, generation_id, stamp, now_ms=None) -> dict:
+    """Tune the top-quality initial Core and find a smaller economic prefix in O(log N) tune runs."""
+    now_ms = int(now_ms or time.time() * 1000)
+    ranked = _quality_core_profiles(db, generation_id)
+    upper = max(1, min(
+        int(config.MAX_TARGETS),
+        int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
+    ))
+    initial = ranked[:upper]
+    if not initial:
+        return {
+            "selected": (), "ranked": (), "params": {}, "evaluations": (),
+            "search": {"algorithm": "quality_prefix_binary_v1", "initialCount": 0, "selectedCount": 0},
+        }
+    ordered = tuple(row["addr"] for row in initial)
+    base_follow = params.load_follow(db)
+    if "SMART_ADD" in base_follow:
+        base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
+
+    def evaluate(count):
+        _set_scan_progress(
+            db, stage="portfolio_tune", candidates_scanned=int(count), candidates_total=len(ordered),
+        )
+        result = auto_tune.maybe_tune_margins(
+            db, source="core_formation", stamp=f"{stamp}:k{int(count)}",
+            dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
+            addrs_override=list(ordered[:int(count)]), record_run=False,
+        )
+        if result.get("status") != "ok":
+            raise RuntimeError(
+                "core_prefix_tune_failed:" + str(result.get("reason") or result.get("status"))
+            )
+        value = _prefix_eval_from_tune(
+            count, result,
+            initial_balance=f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
+        )
+        db.commit()  # only reusable path-cache writes; membership and params remain untouched.
+        return value
+
+    retention = {
+        "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
+        "net_retention": float(config.CORE_PREFIX_NET_RETENTION),
+        "stress_retention": float(config.CORE_PREFIX_STRESS_RETENTION),
+        "utility_slack": float(config.CORE_PREFIX_ABS_UTILITY_SLACK),
+        "net_slack": float(config.CORE_PREFIX_ABS_NET_SLACK),
+        "stress_slack": float(config.CORE_PREFIX_ABS_STRESS_SLACK),
+        "max_dd_worsen": float(config.CORE_PREFIX_MAX_DD_WORSEN),
+    }
+    search = core_formation.search_quality_prefix(
+        len(ordered), evaluate, retention_kwargs=retention,
+        tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
+    )
+    chosen = search.selected
+    evaluations = tuple({
+        "count": value.count, "netPnl": value.net_pnl,
+        "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
+        "openRate": value.actionable_open_rate, "capacityFit": value.capacity_fit,
+        "liquidations": value.liquidations, "utility": value.utility,
+        "retained": (
+            core_formation.retains_reference(search.reference, value, **retention)
+            if search.reference.feasible else value.feasible
+        ),
+    } for value in search.evaluated)
+    return {
+        "selected": ordered[:chosen.count], "ranked": ordered,
+        "params": dict(chosen.params), "evaluations": evaluations,
+        "search": {
+            "algorithm": "quality_prefix_binary_v1", "initialCount": len(ordered),
+            "selectedCount": chosen.count, "boundary": search.boundary,
+            "evaluatedCounts": [value.count for value in search.evaluated],
+            "evaluations": evaluations,
+        },
+    }
+
+
+def _apply_formation_params(db, formation, stamp) -> bool:
+    """Stage the chosen tuning surface in the caller's publication transaction."""
+    proposal = dict((formation or {}).get("params") or {})
+    if not proposal:
+        return False
+    keys = (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+    missing = [key for key in keys if key not in proposal]
+    if missing:
+        raise RuntimeError(f"core_formation_params_incomplete:{len(missing)}")
+    previous_follow = params.load_follow(db)
+    old = {key: f(previous_follow.get(key)) for key in keys}
+    changed = any(abs(old[key] - f(proposal[key])) > 1e-12 for key in keys)
+    auto_tune._write_tune_params(db, proposal)
+    auto_tune._write_add_params(db, proposal)
+    if changed:
+        auto_tune._state_set(db, "active_tune_rollback", {
+            "appliedAt": stamp,
+            "addrs": list((formation or {}).get("selected") or ()),
+            "oldParams": old,
+            "newParams": proposal,
+            "resolved": False,
+        })
+    auto_tune.store_tune_state(
+        db,
+        {key: old[key] for key in auto_tune.TUNE_KEYS},
+        {key: f(proposal[key]) for key in auto_tune.TUNE_KEYS},
+    )
+    auto_tune.store_add_state(
+        db,
+        {key: old[key] for key in auto_tune.ADD_TUNE_KEYS},
+        {key: f(proposal[key]) for key in auto_tune.ADD_TUNE_KEYS},
+    )
+    return changed
+
+
 def _portfolio_replay_input_diagnostics(db, addrs, now_ms, window_fills=None) -> dict:
     """Compact, address-free evidence for explaining why portfolio inputs were unavailable."""
     owners = sorted({(addr or "").lower() for addr in addrs if addr})
@@ -1432,8 +1617,172 @@ def _prefetch_selection_paths(db, candidates, now_ms) -> dict:
     }
 
 
+def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles,
+                                   previous_roles, controls, registry, held,
+                                   desired_order, formation_meta):
+    """Materialize one tuned quality prefix; no arbitrary membership search is allowed here."""
+    copy_policy = load_copy_policy()
+    by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
+    desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
+    invalid = [
+        addr for addr in desired
+        if addr not in by_addr
+        or by_addr[addr].get("profile_generation") != generation_id
+        or by_addr[addr].get("status") not in {"active", "qualified"}
+        or not (by_addr[addr].get("follow_qualification") or {}).get("coreEligible")
+        or (by_addr[addr].get("data_status") or "valid") != "valid"
+        or not controls.get(addr, True)
+    ]
+    if invalid:
+        raise RuntimeError(f"quality_prefix_contains_ineligible_wallets:{len(invalid)}")
+
+    eval_cache = {}
+    if desired:
+        window_fills = auto_tune._portfolio_window_fills(db, list(desired), int(now_ms))
+        if window_fills is None or not any(window_fills.values()):
+            raise RuntimeError("quality_prefix_replay_unavailable")
+        follow = params.load_follow(db)
+        if "SMART_ADD" in follow:
+            follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
+        sigmas = auto_tune._load_sigmas(db)
+        market_ctx = auto_tune._load_market_ctx(db)
+        from . import price_path
+        all_fills = list(window_fills.get(max(window_fills)) or [])
+        path_start = int(now_ms) - (
+            max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+        ) * 86_400_000
+        shared_path = price_path.load_refined(db, all_fills, path_start, int(now_ms))
+        shared_meta = price_path.coverage(db, all_fills, path_start, int(now_ms))
+
+        def strict_evaluate(addrs):
+            key = tuple(sorted(addrs))
+            if key in eval_cache:
+                return eval_cache[key]
+            if not key:
+                value = _portfolio_selection_metrics({}, selected_n=0)
+            else:
+                filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
+                windows = auto_tune._candidate_windows(
+                    db, list(key), sigmas,
+                    {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, int(now_ms),
+                    window_fills=filtered, market_ctx=market_ctx,
+                    path_rows=shared_path, path_meta=shared_meta,
+                )
+                value = _portfolio_selection_metrics(windows, selected_n=len(key))
+            eval_cache[key] = value
+            return value
+    else:
+        def strict_evaluate(addrs):
+            return _portfolio_selection_metrics({}, selected_n=0)
+
+    transition = _quality_first_core_transition(
+        profiles,
+        generation_id=generation_id,
+        previous_roles=previous_roles,
+        controls=controls,
+        held=held,
+        desired_order=desired,
+        strict_evaluate=strict_evaluate,
+    )
+    selected_set = set(transition["selected"])
+    core_rank = {addr: rank for rank, addr in enumerate(transition["selected"], 1)}
+    previous_core = {addr for addr, role in previous_roles.items() if role == selection.CORE}
+    marginal = selection.MarginalSelectionResult(
+        selected=transition["selected"],
+        baseline=strict_evaluate(tuple(sorted(previous_core & set(by_addr)))),
+        metrics=transition["metrics"],
+        action="quality_prefix_rebuild",
+        added=tuple(sorted(selected_set - previous_core)),
+        removed=tuple(sorted(previous_core - selected_set)),
+        evaluated=len(eval_cache),
+        search_meta={
+            **dict(formation_meta or {}),
+            "membershipPolicy": "quality-prefix-v1",
+            "desiredOrder": desired,
+            "contributionOrder": transition["selected"],
+        },
+    )
+    transition_reasons = transition.get("reasons") or {}
+    transition_signals = transition.get("signals") or {}
+    rows = []
+    for rank, row in enumerate(profiles, 1):
+        addr = (row.get("addr") or "").lower()
+        enabled = controls.get(addr, True)
+        refreshed = row.get("profile_generation") == generation_id
+        data_status = row.get("data_status") or "valid"
+        selection_data_status = data_status if refreshed or data_status == "deferred_data_error" else "stale"
+        active = row.get("status") in {"active", "qualified"}
+        qualification = row.get("follow_qualification") or {}
+        candidate_ok = active and bool(qualification.get("eligible"))
+        include = True
+        if addr in selected_set and enabled:
+            role, reason = selection.CORE, transition_reasons.get(addr, "core_quality_selected")
+        elif addr in held:
+            role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
+        elif data_status != "valid":
+            role = selection.QUARANTINE
+            reason = "deferred_data_error" if data_status == "deferred_data_error" else "copy_data_error"
+            include = False
+        elif candidate_ok:
+            role = selection.CHALLENGER
+            if not enabled:
+                reason = "operator_disabled"
+            elif qualification.get("coreEligible"):
+                reason = "portfolio_not_selected"
+            else:
+                reason = qualification.get("status") or "sample_observation"
+        else:
+            role = selection.REJECTED
+            reason = qualification.get("status") or row.get("reason") or "not_qualified"
+            include = False
+        if include:
+            rows.append(selection.SelectionRow(
+                addr=addr, role=role, enabled=enabled, reason=reason,
+                utility=transition.get("utilities", {}).get(addr, f(row.get("follow_score"))),
+                follow_score=f(row.get("follow_score")),
+                selection_rank=core_rank.get(addr) if role == selection.CORE else rank,
+                data_status=selection_data_status,
+                evidence_status=row.get("evidence_status") or "",
+                model_version="selection-quality-prefix-v1",
+                policy_version=copy_policy.version,
+                acct_value=row.get("acct_value"),
+                sector_policy_json=row.get("sector_policy_json"),
+            ))
+        lifecycle_state = role if role in {
+            selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY
+        } else "quarantine" if role == selection.QUARANTINE else "rejected"
+        upsert_wallet_registry(
+            db, addr, generation=generation_id, seen_at=stamp,
+            state=lifecycle_state,
+            role=role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY} else None,
+            data_status=selection_data_status, reason=reason,
+            last_actionable_open_ms=row.get("last_copyable_open_ms"),
+            core_nominated=(transition_signals.get(addr) or {}).get("nominated"),
+            core_signal_valid=(transition_signals.get(addr) or {}).get("valid", False),
+            core_signal_previous_core=(previous_roles.get(addr) == selection.CORE),
+        )
+        db.execute(
+            "UPDATE profile SET selection_marginal_utility=? WHERE addr=?",
+            (transition.get("utilities", {}).get(addr), addr),
+        )
+    missing_policy = []
+    for item in rows:
+        if item.role != selection.CORE or not item.enabled:
+            continue
+        try:
+            policy = json.loads(item.sector_policy_json or "{}")
+        except (TypeError, ValueError):
+            policy = {}
+        if not policy.get("allowed"):
+            missing_policy.append(item.addr)
+    if missing_policy:
+        raise RuntimeError(f"selection_core_policy_missing:{len(missing_policy)}")
+    return rows, marginal
+
+
 def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False,
-                              validate_price_path=True, audit_stamp=None):
+                              validate_price_path=True, audit_stamp=None,
+                              forced_core_order=None, formation_meta=None):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     copy_policy = load_copy_policy()
     previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
@@ -1504,6 +1853,15 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     selection_mode = str(
         params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
     ).lower()
+    if forced_core_order is not None:
+        if selection_mode != "auto":
+            raise RuntimeError("quality-prefix formation requires FOLLOW_SELECTION_MODE=auto")
+        return _build_forced_prefix_selection(
+            db, generation_id, stamp, now_ms,
+            profiles=profiles, previous_roles=previous_roles, controls=controls,
+            registry=registry, held=held, desired_order=tuple(forced_core_order),
+            formation_meta=dict(formation_meta or {}),
+        )
     if selection_mode == "auto":
         # Active means the wallet itself is structurally/economically copyable.  Score orders the bounded
         # candidate pool; the shared-account replay then keeps candidates whose added net profit exceeds
@@ -2641,6 +2999,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     prefetch_candidates = _selection_prefetch_candidates(db)
     db.rollback()
     _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms)
+    formation = form_quality_prefix(db, generation_id, stamp, repair_now_ms)
     refresh_watchlist(
         db,
         stamp,
@@ -2650,9 +3009,12 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         leaderboard_generation=generation_id,
         commit=False,
     )
+    _apply_formation_params(db, formation, stamp)
     rows, marginal = _build_explicit_selection(
         db, generation_id, stamp, repair_now_ms,
         force_cold_bootstrap=not bool(existing_core),
+        forced_core_order=formation.get("selected") or (),
+        formation_meta=formation.get("search") or {},
     )
     previous_core = set(existing_core)
     selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
@@ -2702,8 +3064,17 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         },
     )
     db.commit()
-    launch = _launch_async_tuner(db, generation_id, stamp) if launch_tuner else {
-        "status": "skipped", "reason": "synchronous_optimizer",
+    try:
+        portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
+    except Exception as exc:  # noqa: BLE001
+        portfolio_replay = {"status": "error", "error": str(exc)[:300]}
+    try:
+        selection_replay = refresh_selection_copy_replay(db, generation_id, replayed_at=now_iso())
+    except Exception as exc:  # noqa: BLE001
+        selection_replay = {"status": "error", "error": str(exc)[:300]}
+    launch = {
+        "status": "complete", "reason": "synchronous_quality_prefix_formation",
+        "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
     }
     pipeline_audit._insert_event(
         db,
@@ -2726,18 +3097,17 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
 
 
 def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
-    """One synchronous operator entrypoint: path-regate Core, jointly tune all execution params, persist."""
+    """Re-form one published generation with the synchronous quality-prefix tuner."""
     generation_id = generation_id or selection.latest_published_generation(db)
     stamp = stamp or now_iso()
     selection_result = repair_published_selection(
         db, generation_id, stamp=stamp, replace_existing=True, launch_tuner=False,
     )
-    tune_result = tune_published_generation(db, generation_id, stamp=stamp)
     return {
-        "status": "ok" if tune_result.get("status") == "ok" else tune_result.get("status"),
+        "status": "ok" if selection_result.get("status") == "repaired" else selection_result.get("status"),
         "generation": generation_id,
         "selection": selection_result,
-        "tune": tune_result,
+        "tune": selection_result.get("tuner"),
     }
 
 
@@ -2979,6 +3349,152 @@ def regate(db, p, *, stamp=None, source: str = "regate",
     if not quiet:
         print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
     return n
+
+
+# ----------------------------------------------------------------------------- staged-generation finalization
+def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
+    """Finish selection/tuning from an already-profiled generation without fetching wallet history."""
+    stamp = stamp or now_iso()
+    if generation_id is None:
+        row = db.execute(
+            "SELECT generation FROM scan_generation "
+            "WHERE status NOT IN ('published','failed') AND leaderboard_valid=1 "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        generation_id = row[0] if row else None
+    if not generation_id:
+        raise RuntimeError("no_profiled_generation_to_finalize")
+    meta = db.execute(
+        "SELECT status,leaderboard_valid,workset_n,leaderboard_rows FROM scan_generation WHERE generation=?",
+        (generation_id,),
+    ).fetchone()
+    if not meta or meta[0] in {"published", "failed"} or not int(meta[1] or 0):
+        raise RuntimeError("generation_not_resumable")
+    workset_n = int(meta[2] or 0)
+    profile_total = int(db.execute(
+        "SELECT COUNT(*) FROM profile WHERE profile_generation=?", (generation_id,),
+    ).fetchone()[0] or 0)
+    if workset_n <= 0 or profile_total < workset_n:
+        raise RuntimeError(f"profile_generation_incomplete:{profile_total}:{workset_n}")
+    staged_n = int(db.execute(
+        "SELECT COUNT(*) FROM leaderboard_staging WHERE generation=?", (generation_id,),
+    ).fetchone()[0] or 0)
+    if staged_n != int(meta[3] or 0):
+        raise RuntimeError("staged_leaderboard_count_mismatch")
+
+    now_ms = int(time.time() * 1000)
+    previous_core = selection.published_core_addrs(db) or []
+    _set_scan_progress(
+        db, state="scanning", stage="prepare_selection_candidates",
+        candidates_scanned=profile_total, candidates_total=profile_total,
+    )
+    refresh_watchlist(
+        db, stamp, source="resume_finalize_preview", update_follow_line=False,
+        update_follow_history=False, leaderboard_generation=generation_id, commit=False,
+    )
+    preview = _selection_prefetch_candidates(
+        db, limit=int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N)),
+    )
+    db.rollback()
+    if preview:
+        _set_scan_progress(db, stage="prefetch_selection_paths")
+        _prefetch_selection_paths(db, preview, now_ms)
+    formation = form_quality_prefix(db, generation_id, stamp, now_ms)
+    publication_stamp = now_iso()
+    try:
+        refresh_watchlist(
+            db, publication_stamp, source="resume_finalize",
+            update_follow_line=False, update_follow_history=False,
+            leaderboard_generation=generation_id, commit=False,
+        )
+        _apply_formation_params(db, formation, publication_stamp)
+        rows, marginal = _build_explicit_selection(
+            db, generation_id, publication_stamp, now_ms,
+            forced_core_order=formation.get("selected") or (),
+            formation_meta=formation.get("search") or {},
+            audit_stamp=stamp,
+        )
+        valid = int(db.execute(
+            "SELECT COUNT(*) FROM profile WHERE profile_generation=? "
+            "AND COALESCE(data_status,'valid') NOT IN ('deferred_data_error','rejected')",
+            (generation_id,),
+        ).fetchone()[0] or 0)
+        deferred = int(db.execute(
+            "SELECT COUNT(*) FROM profile WHERE profile_generation=? AND data_status='deferred_data_error'",
+            (generation_id,),
+        ).fetchone()[0] or 0)
+        rejected = max(0, profile_total - valid - deferred)
+        generation.mark_generation_ready(
+            db, generation_id, profile_total=profile_total, profile_valid=valid,
+            profile_deferred=deferred, profile_rejected=rejected,
+            profile_complete=True, ready_at=publication_stamp,
+        )
+        selection.replace_selection_rows(db, generation_id, rows, selected_at=publication_stamp)
+        generation.publish_generation(db, generation_id, published_at=publication_stamp)
+        current_core = _record_explicit_follow_history(
+            db, rows, publication_stamp, previous_core, generation_id,
+        )
+        active_strategy = strategy_revision.create_revision(
+            db, generation_id, source="resume_finalize", reason="quality_prefix_formation",
+            validation=formation.get("search") or {}, stamp=publication_stamp,
+        )
+        for item in rows:
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="resume_finalize", stage="selection",
+                addr=item.addr, status=item.role, reason=item.reason,
+                follow_score=item.follow_score,
+                payload={
+                    "generation": generation_id, "selectionRank": item.selection_rank,
+                    "marginalUtility": item.utility, "dataStatus": item.data_status,
+                    "evidenceStatus": item.evidence_status,
+                },
+            )
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="resume_finalize", stage="selection_summary",
+            status="ok", reason="quality_prefix_formation",
+            payload={
+                "generation": generation_id, "core": len(current_core),
+                "challenger": sum(1 for item in rows if item.role == selection.CHALLENGER),
+                "search": formation.get("search") or {},
+                "strategyRevision": active_strategy["revision"],
+            },
+        )
+        db.execute(
+            "UPDATE commands SET status='done',done_at=?,result_json=? "
+            "WHERE type='rescan' AND status='acked'",
+            (publication_stamp, json.dumps({
+                "resumed": True, "generation": generation_id, "active": len(current_core),
+            }, sort_keys=True)),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        _set_scan_progress(db, state="idle", stage="error")
+        raise
+
+    try:
+        portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
+    except Exception as exc:  # noqa: BLE001
+        portfolio_replay = {"status": "error", "error": str(exc)[:300]}
+    try:
+        selection_replay = refresh_selection_copy_replay(db, generation_id, replayed_at=now_iso())
+    except Exception as exc:  # noqa: BLE001
+        selection_replay = {"status": "error", "error": str(exc)[:300]}
+    auto_tune.bind_active_tune_rollback_core(db, current_core)
+    _set_scan_progress(
+        db, state="idle", stage="persist", candidates_scanned=profile_total,
+        candidates_total=profile_total,
+    )
+    _set_scanner_proc(db, "idle", {"last_scan_at": now_iso(), "active": len(current_core)})
+    db.commit()
+    return {
+        "status": "published", "generation": generation_id,
+        "core": len(current_core),
+        "challenger": sum(1 for item in rows if item.role == selection.CHALLENGER),
+        "search": formation.get("search") or {},
+        "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
+        "strategyRevision": active_strategy["revision"],
+    }
 
 
 # ----------------------------------------------------------------------------- scan
@@ -3286,6 +3802,9 @@ def scan(db, p) -> None:
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
         try:
+            formation = None
+            if selection_mode == "auto":
+                formation = form_quality_prefix(db, generation_id, stamp, now_ms)
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),
                 candidates_total=len(workset),
@@ -3307,8 +3826,11 @@ def scan(db, p) -> None:
                 selection_rows = selection.current_selection_rows(db)
                 marginal = None
             else:
+                _apply_formation_params(db, formation, selection_stamp)
                 selection_rows, marginal = _build_explicit_selection(
                     db, generation_id, selection_stamp, now_ms, audit_stamp=stamp,
+                    forced_core_order=(formation or {}).get("selected") or (),
+                    formation_meta=(formation or {}).get("search") or {},
                 )
             # Publication timestamps describe when the complete decision became visible, not when the
             # hours-long scan started.  Use one actual completion stamp for ready/selection/publish/history
@@ -3373,7 +3895,8 @@ def scan(db, p) -> None:
                 generation_id,
                 source="scanner",
                 reason=("manual_selection_preserved" if selection_mode == "manual"
-                        else "published_selection"),
+                        else "quality_prefix_formation"),
+                validation=(formation or {}).get("search") or {},
                 stamp=publication_stamp,
             )
             pipeline_audit._insert_event(
@@ -3450,14 +3973,27 @@ def scan(db, p) -> None:
 
     if published:
         _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
-        launch = _launch_async_tuner(db, generation_id, publication_stamp or now_iso())
+        try:
+            portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
+        except Exception as exc:  # noqa: BLE001 - published strategy remains authoritative
+            portfolio_replay = {"status": "error", "error": str(exc)[:300]}
+        try:
+            selection_replay = refresh_selection_copy_replay(
+                db, generation_id, replayed_at=now_iso(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            selection_replay = {"status": "error", "error": str(exc)[:300]}
+        launch = {
+            "status": "complete", "reason": "synchronous_quality_prefix_formation",
+            "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
+        }
         pipeline_audit._insert_event(
             db,
             stamp=stamp,
             source="scan",
             stage="tuner_launch",
             status=launch.get("status"),
-            reason=launch.get("reason") or "generation_bound_async",
+            reason=launch.get("reason"),
             payload=launch,
         )
         db.commit()

@@ -1275,8 +1275,11 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
             "challengerNet": challenger_net,
             "baselineMaxDD": float(base.get("max_drawdown") or 0.0),
             "challengerMaxDD": float(challenger.get("max_drawdown") or 0.0),
+            "baselineOpenRate": float(base.get("open_fill_rate") or 0.0),
             "challengerOpenRate": float(challenger.get("open_fill_rate") or 0.0),
+            "baselineCapacityFit": float(base.get("capacity_open_fit") or 0.0),
             "challengerCapacityFit": float(challenger.get("capacity_open_fit") or 0.0),
+            "baselineLiquidations": int(base.get("liquidations") or 0),
             "challengerLiquidations": int(challenger.get("liquidations") or 0),
             "win": win,
         })
@@ -1509,8 +1512,13 @@ def resolve_active_tune_rollback(db, reason: str) -> bool:
 
 def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_run: bool = False,
                        mode: str | None = None, follow_values: dict | None = None,
-                       data_complete: bool = True, expected_generation: str | None = None) -> dict:
+                       data_complete: bool = True, expected_generation: str | None = None,
+                       addrs_override: list[str] | tuple[str, ...] | None = None,
+                       record_run: bool = True) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
+    ephemeral = addrs_override is not None
+    if ephemeral and expected_generation:
+        raise ValueError("addrs_override cannot target a published generation")
     tune_started = time.monotonic()
     time_budget_s = float(getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 600))
     deadline = (
@@ -1556,7 +1564,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     if mode not in {"off", "shadow", "apply"}:
         mode = "shadow"
     effective_shadow = bool(dry_run or mode != "apply")
-    rollback_result = _maybe_rollback_applied(
+    rollback_result = None if ephemeral else _maybe_rollback_applied(
         db, follow, int(time.time() * 1000), expected_generation=expected_generation,
         expected_strategy_revision=expected_strategy_revision,
     )
@@ -1569,10 +1577,11 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "shadow": True,
             "applied": False,
         }
-        _record_run(
-            db, source, stamp, None, False, 0, {}, result,
-            generation_id=expected_generation,
-        )
+        if record_run:
+            _record_run(
+                db, source, stamp, None, False, 0, {}, result,
+                generation_id=expected_generation,
+            )
         db.commit()
         return result
     if rollback_result and rollback_result.get("status") == "rolled_back":
@@ -1582,22 +1591,28 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         )
     if mode == "off":
         result = {"status": "disabled", "reason": "auto_tune_mode_off", "mode": mode, "applied": False}
-        _record_run(db, source, stamp, None, False, 0, {}, result,
-                    generation_id=expected_generation)
+        if record_run:
+            _record_run(db, source, stamp, None, False, 0, {}, result,
+                        generation_id=expected_generation)
         db.commit()
         return result
     if not follow.get("AUTO_TUNE_MARGIN_ENABLE", getattr(config, "AUTO_TUNE_MARGIN_ENABLE", True)):
         result = {"status": "disabled", "mode": mode, "applied": False}
-        _record_run(db, source, stamp, None, False, 0, {}, result,
-                    generation_id=expected_generation)
+        if record_run:
+            _record_run(db, source, stamp, None, False, 0, {}, result,
+                        generation_id=expected_generation)
         db.commit()
         return result
 
-    addrs = _load_followed_wallets(db, follow)
+    addrs = (
+        list(dict.fromkeys((addr or "").lower() for addr in addrs_override if addr))
+        if ephemeral else _load_followed_wallets(db, follow)
+    )
     if len(addrs) < int(getattr(config, "AUTO_TUNE_MARGIN_MIN_FOLLOWED", 1)):
         result = {"status": "no_followed_wallets", "applied": False, "followed_n": len(addrs)}
-        _record_run(db, source, stamp, None, False, len(addrs), {}, result,
-                    generation_id=expected_generation)
+        if record_run:
+            _record_run(db, source, stamp, None, False, len(addrs), {}, result,
+                        generation_id=expected_generation)
         db.commit()
         return result
 
@@ -1618,8 +1633,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "applied": False,
             "followed_n": len(addrs),
         }
-        _record_run(db, source, stamp, None, False, len(addrs), base, result,
-                    generation_id=expected_generation)
+        if record_run:
+            _record_run(db, source, stamp, None, False, len(addrs), base, result,
+                        generation_id=expected_generation)
         db.commit()
         return result
     if not data_complete or not any(window_fills.values()):
@@ -1630,8 +1646,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "applied": False,
             "followed_n": len(addrs),
         }
-        _record_run(db, source, stamp, None, False, len(addrs), base, result,
-                    generation_id=expected_generation)
+        if record_run:
+            _record_run(db, source, stamp, None, False, len(addrs), base, result,
+                        generation_id=expected_generation)
         db.commit()
         return result
     path_fills = list(window_fills.get(max(window_fills)) or [])
@@ -1813,9 +1830,18 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen
     selected_margins = {key: selected_params[key] for key in MARGIN_KEYS}
     follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
-    apply_validation = _proposal_apply_eligibility(
-        db, addrs, follow, current_combined, proposal_combined, walk_forward, stamp,
-    )
+    if ephemeral:
+        model = _model_validation(walk_forward, load_copy_policy(follow))
+        apply_validation = {
+            "eligible": bool(model.get("eligible")),
+            "reasons": list(model.get("reasons") or ()),
+            "relativeGain": float(model.get("relativeGain") or 0.0),
+            **walk_forward,
+        }
+    else:
+        apply_validation = _proposal_apply_eligibility(
+            db, addrs, follow, current_combined, proposal_combined, walk_forward, stamp,
+        )
     effective_shadow = bool(effective_shadow or not apply_validation.get("eligible"))
 
     # Tuning is expensive and runs outside the scanner process.  The generation can change while the
@@ -1923,6 +1949,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "eligible_to_apply": bool(apply_validation.get("eligible")),
         "validation": apply_validation,
         "proposal": proposal_combined,
+        "baseline_proposal": current_combined,
         "strategyRevision": (applied_revision or {}).get("revision"),
         "parentStrategyRevision": expected_strategy_revision,
         "reloadDeferredForSelection": bool(applied_revision),
@@ -1931,7 +1958,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
     }
-    _record_run(db, source, stamp, selected, applied, len(addrs), base, result,
-                generation_id=expected_generation)
+    if record_run:
+        _record_run(db, source, stamp, selected, applied, len(addrs), base, result,
+                    generation_id=expected_generation)
     db.commit()
     return result

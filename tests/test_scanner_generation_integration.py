@@ -85,6 +85,42 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 
+    def test_finalize_profiled_generation_reuses_cache_without_wallet_fetch(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,source,status,started_at,leaderboard_rows,leaderboard_unique_rows,"
+                "leaderboard_complete_rows,leaderboard_completeness,leaderboard_valid,workset_n) "
+                "VALUES ('cached-g','scan','leaderboard_validated','start',1,1,1,1,1,1)"
+            )
+            db.execute(
+                "INSERT INTO leaderboard_staging(generation,addr,is_candidate,fetched_at) "
+                "VALUES('cached-g','0xaaa',1,'start')"
+            )
+            db.execute(
+                "INSERT INTO profile(addr,status,reason,score,profile_generation,data_status,evidence_status) "
+                "VALUES('0xaaa','rejected','thin_edge',0.1,'cached-g','rejected','economically_disqualified')"
+            )
+            db.execute(
+                "INSERT INTO commands(type,status,created_at,acked_at) "
+                "VALUES('rescan','acked','start','start')"
+            )
+            db.commit()
+
+            with patch.object(scanner.rest, "post", side_effect=AssertionError("wallet fetch forbidden")):
+                result = scanner.finalize_profiled_generation(db, "cached-g", stamp="finish")
+
+            self.assertEqual(result["status"], "published")
+            self.assertEqual(result["core"], 0)
+            self.assertEqual(db.execute(
+                "SELECT status,complete,is_current FROM scan_generation WHERE generation='cached-g'"
+            ).fetchone(), ("published", 1, 1))
+            self.assertEqual(db.execute(
+                "SELECT status FROM commands WHERE type='rescan'"
+            ).fetchone(), ("done",))
+
     def test_selection_replay_uses_current_params_without_mutating_profile(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -310,7 +346,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertGreater(current[3], current[4])
             self.assertIsNone(selection_row)
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
-            launch.assert_called_once()
+            launch.assert_not_called()
 
     def test_cold_paper_bootstrap_stages_first_qualified_wallet_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:
@@ -386,16 +422,23 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 },
             }
 
+            follow = params.load_follow(db)
+            proposal = {
+                key: follow[key]
+                for key in (*scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS)
+            }
+            formation = {
+                "selected": ("0xaaa",), "ranked": ("0xaaa",), "params": proposal,
+                "search": {"algorithm": "quality_prefix_binary_v1", "initialCount": 1,
+                           "selectedCount": 1},
+            }
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
+                    patch.object(scanner, "form_quality_prefix", return_value=formation), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_windows), \
-                    patch.object(scanner.offline_core_optimizer, "optimize_membership",
-                                 side_effect=select_after_watchlist), \
-                    patch.object(scanner.offline_core_optimizer, "choose_robust_candidate",
-                                 return_value=robust), \
                     patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -480,7 +523,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             ).fetchone()[0], 1)
             build.assert_called_once()
             self.assertTrue(build.call_args.kwargs["force_cold_bootstrap"])
-            launch.assert_called_once()
+            self.assertEqual(result["tuner"]["status"], "complete")
+            launch.assert_not_called()
 
     def test_repair_existing_selection_refreshes_watchlist_before_rebuild(self):
         with tempfile.TemporaryDirectory() as td:

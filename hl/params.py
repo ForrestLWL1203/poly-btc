@@ -47,6 +47,8 @@ PARAM_SPEC = [
         "完整重拉分片数", ""),
     ("RANDOM_EXPLORATION_RATIO", "scanner", "hidden", "pct", "rescan", config.RANDOM_EXPLORATION_RATIO * 100,
         "随机探索比例", ""),
+    ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
+        "初始跟单上限", "每轮先取质量最优且达到Core硬标准的钱包（不足则全取），整体调参后只从质量末尾做前缀缩减"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),

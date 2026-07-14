@@ -36,6 +36,17 @@ MIN_FOLLOW_SCORE = 0.70     # follow watchlist wallets with score >= this. v10 (
 #                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
 
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
+# Every complete generation starts from the highest-quality individually Core-ready wallets.  Portfolio
+# tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
+CORE_INITIAL_MAX_N = 16
+CORE_PREFIX_UTILITY_RETENTION = 0.97
+CORE_PREFIX_NET_RETENTION = 0.95
+CORE_PREFIX_STRESS_RETENTION = 0.90
+CORE_PREFIX_TIE_TOLERANCE = 0.02
+CORE_PREFIX_ABS_UTILITY_SLACK = 50.0
+CORE_PREFIX_ABS_NET_SLACK = 100.0
+CORE_PREFIX_ABS_STRESS_SLACK = 100.0
+CORE_PREFIX_MAX_DD_WORSEN = 0.01
 # vNext publishes an explicit Core/Challenger selection.  The legacy score-line path remains as a
 # migration fallback until the first successful selection generation is published.
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual

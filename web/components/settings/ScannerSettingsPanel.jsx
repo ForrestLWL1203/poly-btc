@@ -9,6 +9,7 @@ const BASIC_SCANNER_KEYS = new Set([
   WEEK_VLM_MAX,
   "EXCLUDE_HFT",
   "inactive_days",
+  "CORE_INITIAL_MAX_N",
 ]);
 
 function HarvestVolumeRangeRow({ paramsByKey, vals, dirty, onChange }) {
