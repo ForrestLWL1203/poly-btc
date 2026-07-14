@@ -348,6 +348,43 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
             launch.assert_not_called()
 
+    def test_complete_profiles_remain_resumable_when_portfolio_formation_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+
+            def fake_profile(db_, addr, start_ms, now_ms, p, prior, lb, stamp, universe,
+                             force_full=False):
+                row = {
+                    "addr": addr, "status": "active", "reason": "ok", "score": .8,
+                    "profile_generation": p.scan_generation, "data_status": "valid",
+                    "evidence_status": "qualified", "last_copyable_open_ms": now_ms,
+                }
+                cols = storage.PROFILE_COLS.split(",")
+                with scanner._db_lock:
+                    db_.execute(
+                        f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
+                        f"VALUES ({','.join('?' for _ in cols)})",
+                        [row.get(col) for col in cols],
+                    )
+                    db_.commit()
+                return "active", "ok", row, False
+
+            with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
+                    patch.object(scanner, "_profile_one", side_effect=fake_profile), \
+                    patch.object(scanner, "form_quality_prefix", side_effect=RuntimeError("tune failed")), \
+                    patch.object(scanner, "_prune_discovery_cache", return_value={}):
+                scanner.scan(db, scan_args())
+
+            row = db.execute(
+                "SELECT status,complete,workset_n FROM scan_generation ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row, ("leaderboard_validated", 0, 1))
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM profile WHERE profile_generation=("
+                "SELECT generation FROM scan_generation ORDER BY id DESC LIMIT 1)"
+            ).fetchone()[0], 1)
+
     def test_cold_paper_bootstrap_stages_first_qualified_wallet_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

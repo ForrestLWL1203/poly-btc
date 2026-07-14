@@ -3941,7 +3941,14 @@ def scan(db, p) -> None:
             published = True
         except Exception as exc:  # noqa: BLE001 - rollback restores old watchlist/selection atomically
             db.rollback()
-            generation.fail_generation(db, generation_id, f"finalize_error:{exc}")
+            # Profiles/fill cache are already complete and durable.  A transient portfolio/path/tuner
+            # failure must retain them for ``finalize-profiled`` instead of forcing another 825-wallet
+            # network sweep merely because atomic publication did not complete.
+            db.execute(
+                "UPDATE scan_generation SET status='leaderboard_validated',complete=0,publishable=0,"
+                "is_current=0,error=? WHERE generation=?",
+                (f"finalize_error:{str(exc)[:500]}", generation_id),
+            )
             pipeline_audit._insert_event(
                 db,
                 stamp=stamp,
