@@ -213,11 +213,6 @@ def _candidate_valid(candidate: dict, baseline: dict) -> bool:
         )
         if float(candidate_open_rate or 0.0) < min_open_rate:
             return False
-    for days, result in windows.items():
-        base_result = base_windows.get(days) or {}
-        if int(result.get("liquidations") or 0) > int(base_result.get("liquidations") or 0):
-            return False
-
     base_skips = _capacity_skips(base_primary)
     skip_allow = max(2, int((base_primary.get("target_open_events") or 0) * float(getattr(config, "AUTO_TUNE_MARGIN_CAP_SKIP_FRAC", 0.05))))
     if _capacity_skips(result_primary) > base_skips + skip_allow:
@@ -258,24 +253,17 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     base_primary = base_windows.get(30) or (base_windows.get(max(base_windows)) if base_windows else {})
     primary_net = _result_pnl(primary)
     base_net = _result_pnl(base_primary)
-    base_liquidations = int(base_primary.get("liquidations") or 0)
-    target_reduction = max(0.0, min(1.0, float(getattr(
-        config, "AUTO_TUNE_TARGET_LIQUIDATION_REDUCTION", 0.20,
-    ))))
-    target_liquidations = math.floor(base_liquidations * (1.0 - target_reduction))
-    profit_preserved = primary_net >= base_net
-    liquidation_reduced = liquidations < base_liquidations
-    reduction_target_met = liquidations <= target_liquidations
+    # Isolated-liquidation losses are already debited from every window's net PnL and represented in
+    # equity drawdown.  Profit is therefore the primary objective; counting liquidations ahead of PnL
+    # would double-charge the loss and systematically select near-zero-return leverage surfaces.  The raw
+    # count remains a final tie-break/audit signal when economic results are otherwise equal.
     return (
-        int(profit_preserved and reduction_target_met),
-        int(profit_preserved and liquidation_reduced),
-        int(profit_preserved),
         weighted_net,
         primary_net,
-        -liquidations,
         risk_adjusted_utility,
         _result_pnl(windows.get(14, {})),
         _result_pnl(windows.get(7, {})),
+        -liquidations,
         -_candidate_distance(candidate, baseline),
     )
 
@@ -1395,10 +1383,6 @@ def _model_validation(validation: dict, policy) -> dict:
         reasons.append("holdout_not_better")
     if validation.get("stressNet", 0.0) <= 0:
         reasons.append("stress_not_profitable")
-    stress_liquidations = int(validation.get("stressLiquidations") or 0)
-    baseline_stress_liquidations = int(validation.get("baselineStressLiquidations") or 0)
-    if stress_liquidations > 0 and stress_liquidations >= baseline_stress_liquidations:
-        reasons.append("stress_liquidation")
     if relative_gain < policy.tune_min_relative_gain:
         reasons.append("relative_gain_below_floor")
     if folds and min(float(fold.get("challengerOpenRate") or 0.0) for fold in folds) < 0.70:
@@ -1432,8 +1416,7 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
     new_net = float(applied.get("copy_net_pnl") or 0.0)
     utility_drop = old_net - new_net
     hurdle = max(1.0, abs(old_net) * float(getattr(config, "AUTO_TUNE_ROLLBACK_RELATIVE_DROP", 0.10)))
-    new_liquidation = int(applied.get("liquidations") or 0) > int(champion.get("liquidations") or 0)
-    should_rollback = utility_drop > hurdle or new_liquidation
+    should_rollback = utility_drop > hurdle
     if should_rollback:
         if expected_generation:
             db.commit()
@@ -1456,7 +1439,7 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
                 }
         _write_tune_params(db, old_params)
         _write_add_params(db, old_params)
-        reason = "new_liquidation" if new_liquidation else "forward_utility_drop"
+        reason = "forward_utility_drop"
         rollback_revision = None
         if expected_generation:
             parent = strategy_revision.load_active(db)

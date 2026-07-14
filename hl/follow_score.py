@@ -179,12 +179,18 @@ def evaluate_follow_eligibility(
     probability_ok = _num(positive_probability, 0.5) >= policy.entry_positive_probability
     lcb_ok = _num(return_lcb) >= policy.min_return_lcb
     standard_samples = c30 >= min_closed30 and evidence_days >= min_evidence_days and c7 >= min_closed7
-    strong_samples = c30 >= policy.strong_min_closed_30d and evidence_days >= policy.strong_min_evidence_days
-    strong_entry = pnl30 >= strong_floor and strong_samples and probability_ok
     recent_warning = (
-        c7 >= min_closed7 and pnl7 < 0.0
-        and recent_loss_ratio >= policy.recent_warning_loss_ratio
+        (
+            c7 >= min_closed7 and pnl7 < 0.0
+            and recent_loss_ratio >= policy.recent_warning_loss_ratio
+        )
+        or (c14 >= min_closed14 and pnl14 <= 0.0)
     )
+    strong_samples = c30 >= policy.strong_min_closed_30d and evidence_days >= policy.strong_min_evidence_days
+    # Strong 30d evidence may waive the thin 7d/LCB confidence checks, but never a confirmed recent
+    # deterioration.  A wallet whose sampled 14d copy window is already non-positive remains worth
+    # observing, not opening in Core, even when its older 30d history was excellent.
+    strong_entry = pnl30 >= strong_floor and strong_samples and probability_ok and not recent_warning
     standard_entry = (
         pnl30 >= core_floor and standard_samples and probability_ok and lcb_ok and not recent_warning
     )

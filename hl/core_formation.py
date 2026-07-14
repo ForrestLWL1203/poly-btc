@@ -31,10 +31,15 @@ class PrefixEvaluation:
 
     @property
     def feasible(self) -> bool:
+        # Copy positions use isolated margin.  A liquidation loses that position's bounded margin and the
+        # loss is already debited from net_pnl and reflected in max_drawdown.  Treating the count itself as
+        # a veto double-charges the same loss and can let one profitable wallet collapse an otherwise valid
+        # quality prefix.  Account ruin is still impossible to admit: the portfolio must stay solvent and
+        # profitable in both the normal and stressed replays.
         return (
             self.net_pnl > 0
             and self.stress_net_pnl > 0
-            and self.liquidations <= 0
+            and self.max_drawdown < 1.0
             and self.actionable_open_rate >= 0.70
             and self.capacity_fit >= 0.85
         )
@@ -72,7 +77,6 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
         and candidate.net_pnl >= net_floor
         and candidate.stress_net_pnl >= stress_floor
         and candidate.max_drawdown <= reference.max_drawdown + max_dd_worsen
-        and candidate.liquidations <= reference.liquidations
     )
 
 

@@ -1,5 +1,6 @@
 import tempfile
 import inspect
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,6 +82,41 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             candidates = scanner._selection_prefetch_candidates(db, limit=2)
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
+
+    def test_quality_prefix_uses_allowed_sector_copy_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile "
+                "(addr,status,reason,score,profile_generation,data_status,evidence_status,"
+                "copy_bt_net_pnl,copy_bt_closed_n,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
+                "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,copy_expected_return,copy_return_lcb,"
+                "copy_positive_probability,copy_evidence_days,actionable_open_rate,capacity_fit,"
+                "sector_policy_json,sector_copy_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "0xsector", "active", "ok", .9, "g-sector", "valid", "qualified",
+                    2_000, 30, 1_000, 15, 500, 8, .05, .02, .9, 12, .9, .9,
+                    json.dumps({"crypto": {"allow": True}, "stock": {"allow": False},
+                                "allowed": ["crypto"]}),
+                    json.dumps({
+                        "crypto": {
+                            "30": {"copy_net_pnl": 100, "closed_n": 10},
+                            "14": {"copy_net_pnl": 50, "closed_n": 5},
+                            "7": {"copy_net_pnl": 20, "closed_n": 5},
+                        },
+                        "stock": {
+                            "30": {"copy_net_pnl": 1_900, "closed_n": 20},
+                            "14": {"copy_net_pnl": 950, "closed_n": 10},
+                            "7": {"copy_net_pnl": 480, "closed_n": 5},
+                        },
+                    }),
+                ),
+            )
+            db.commit()
+
+            ranked = scanner._quality_core_profiles(db, "g-sector")
+
+        self.assertEqual(ranked, [])
 
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

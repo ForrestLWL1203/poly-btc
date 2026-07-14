@@ -271,7 +271,7 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(overrides["DEPLOY_FULL_PCT"], 0.50)
         self.assertEqual(overrides["ADD_STRATEGY"], "smart")
 
-    def test_choose_candidate_prioritizes_fewer_full_window_liquidations(self):
+    def test_choose_candidate_prices_liquidation_loss_through_net_pnl(self):
         baseline = {
             "mult": 1.0,
             "windows": {
@@ -297,7 +297,7 @@ class AutoTuneTests(unittest.TestCase):
 
         selected = auto_tune.choose_margin_candidate([baseline, recent_winner_with_older_liqs], baseline)
 
-        self.assertEqual(selected["mult"], 1.0)
+        self.assertEqual(selected["mult"], 1.4)
 
     def test_build_add_candidate_changes_smart_add_core_params(self):
         follow = {
@@ -558,6 +558,29 @@ class AutoTuneTests(unittest.TestCase):
             "baselineStressLiquidations": 8,
             "stressNet": 100.0,
             "stressLiquidations": 1,
+        }
+        policy = auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": 0.05})
+
+        result = auto_tune._model_validation(validation, policy)
+
+        self.assertTrue(result["eligible"])
+        self.assertNotIn("stress_liquidation", result["reasons"])
+
+    def test_model_validation_does_not_veto_profitable_stress_liquidations(self):
+        folds = [
+            {
+                "baselineNet": 100.0, "challengerNet": 140.0,
+                "challengerOpenRate": 0.90, "challengerCapacityFit": 0.90,
+            }
+            for _ in range(3)
+        ]
+        validation = {
+            "folds": folds,
+            "foldWins": 3,
+            "holdout": folds[-1],
+            "baselineStressLiquidations": 0,
+            "stressNet": 500.0,
+            "stressLiquidations": 2,
         }
         policy = auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": 0.05})
 

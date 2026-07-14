@@ -1374,7 +1374,7 @@ def _quality_core_profiles(db, generation_id) -> list[dict]:
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
         "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
-        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json,p.acct_value "
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
         "FROM profile p WHERE p.profile_generation=?",
         (generation_id,),
     )
@@ -1825,7 +1825,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
         "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
-        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json,p.acct_value "
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
         "FROM profile p"
     )
     names = [desc[0] for desc in cur.description]

@@ -87,7 +87,21 @@ class FollowScoreTests(unittest.TestCase):
         one = evaluate_follow_eligibility(evidence(copy_bt_14d_net_pnl=-50, copy_bt_7d_net_pnl=20))
         both = evaluate_follow_eligibility(evidence(copy_bt_14d_net_pnl=-50, copy_bt_7d_net_pnl=-220))
         self.assertTrue(one["eligible"])
+        self.assertFalse(one["coreEligible"])
+        self.assertEqual(one["status"], "challenger_recent_decline")
         self.assertEqual(both["status"], "recent_copy_collapse")
+
+    def test_strong_30d_evidence_does_not_override_sampled_14d_decline(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=2500, copy_bt_closed_n=40, copy_evidence_days=15,
+            copy_bt_14d_closed_n=12, copy_bt_14d_net_pnl=-100,
+            copy_bt_7d_closed_n=4, copy_bt_7d_net_pnl=80,
+            copy_return_lcb=-0.02,
+        ))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_recent_decline")
 
     def test_quality_tiers_match_operator_examples(self):
         strong = evaluate_follow_eligibility(evidence(

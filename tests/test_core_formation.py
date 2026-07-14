@@ -3,7 +3,7 @@ import unittest
 from hl.core_formation import PrefixEvaluation, search_quality_prefix
 
 
-def value(count, utility, *, feasible=True):
+def value(count, utility, *, feasible=True, liquidations=0):
     drawdown = 0.02
     net = utility + drawdown * 10_000
     return PrefixEvaluation(
@@ -13,7 +13,7 @@ def value(count, utility, *, feasible=True):
         max_drawdown=drawdown,
         actionable_open_rate=0.9 if feasible else 0.1,
         capacity_fit=0.95 if feasible else 0.1,
-        liquidations=0 if feasible else 1,
+        liquidations=liquidations if feasible else max(1, liquidations),
         params={"n": count},
         payload={"initialBalance": 10_000},
     )
@@ -51,6 +51,26 @@ class QualityPrefixSearchTests(unittest.TestCase):
         )
         self.assertEqual(result.boundary, 12)
         self.assertEqual(result.selected.count, 12)
+
+    def test_profitable_isolated_liquidations_do_not_veto_a_prefix(self):
+        # The loss from each isolated liquidation is already present in net PnL and drawdown.  The full
+        # portfolio remains the economic reference, and the more profitable/risk-adjusted 9-wallet prefix
+        # is allowed to win instead of forcing the search down to a zero-liquidation 2-wallet prefix.
+        metrics = {
+            16: value(16, 27_287, liquidations=14),
+            8: value(8, 20_000, liquidations=8),
+            12: value(12, 30_000, liquidations=12),
+            10: value(10, 32_000, liquidations=10),
+            9: value(9, 33_588, liquidations=11),
+        }
+
+        result = search_quality_prefix(
+            16, lambda count: metrics.get(count, value(count, 1_000, liquidations=count)),
+            tie_tolerance=0,
+        )
+
+        self.assertTrue(result.reference.feasible)
+        self.assertEqual(result.selected.count, 9)
 
     def test_rejects_when_even_one_quality_wallet_is_infeasible(self):
         with self.assertRaisesRegex(RuntimeError, "no_feasible_quality_prefix"):
