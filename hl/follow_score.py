@@ -13,7 +13,7 @@ from typing import Mapping
 
 from . import config
 from .copy_policy import load_copy_policy
-from .sector import apply_allowed_sector_copy_metrics
+from .sector import apply_allowed_sector_copy_metrics, parse_json_obj
 
 
 def _num(v, default: float = 0.0) -> float:
@@ -55,7 +55,12 @@ def evaluate_follow_eligibility(
     min_evidence_days: int | None = None,
     min_pnl_per_closed=None,
 ) -> dict:
-    """Classify Core eligibility from normalized, non-overlapping evidence."""
+    """Classify one wallet as Core-eligible, Challenger-quality, or rejected.
+
+    ``eligible`` means the wallet is good enough to remain in the discovery/Challenger pool.
+    ``coreEligible`` is the stricter individual admission signal consumed by the portfolio selector.
+    This split keeps thin-but-promising wallets visible without letting weak wallets originate opens.
+    """
     policy = load_copy_policy()
     min_closed30 = policy.min_closed_30d if min_closed30 is None else int(min_closed30)
     min_closed14 = policy.min_closed_14d if min_closed14 is None else int(min_closed14)
@@ -65,6 +70,7 @@ def evaluate_follow_eligibility(
         policy.min_expected_margin_return if min_expected_return is None else float(min_expected_return)
     )
     min_evidence_days = min(5, min_closed30) if min_evidence_days is None else int(min_evidence_days)
+    source_metrics = metrics
     metrics = apply_allowed_sector_copy_metrics(metrics)
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
     c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
@@ -75,19 +81,28 @@ def evaluate_follow_eligibility(
     evidence_days = int(_num(metrics.get("copy_evidence_days")))
     recent14 = metrics.get("copy_recent_return_14d")
     recent7 = metrics.get("copy_recent_return_7d")
+    pnl30 = _num(metrics.get("copy_bt_net_pnl"))
+    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
+    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
+    initial_balance = max(1.0, float(getattr(config, "INITIAL_BALANCE", 10_000.0)))
+    challenger_floor = initial_balance * policy.challenger_min_return_30d
+    core_floor = initial_balance * policy.core_min_return_30d
+    strong_floor = initial_balance * policy.strong_core_return_30d
     data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
     if data_status and data_status not in {"valid", "ok"}:
         return {
             "eligible": False,
+            "coreEligible": False,
             "status": "copy_data_error",
             "role": "quarantine",
             "deferred": True,
             "reasons": ["copy回放数据无效，禁止进入实跟集合"],
         }
-    if evidence_status in {"invalid", "no_evidence", "no_fills", "no_open_events"}:
+    if evidence_status in {"invalid", "no_evidence", "no_fills", "no_open_events", "economically_disqualified"}:
         return {
             "eligible": False,
+            "coreEligible": False,
             "status": "no_copy_evidence" if evidence_status != "invalid" else "copy_data_error",
             "role": "rejected" if evidence_status != "invalid" else "quarantine",
             "deferred": evidence_status == "invalid",
@@ -96,30 +111,51 @@ def evaluate_follow_eligibility(
     if not _has_copy_evidence(metrics, c30, c14, c7):
         return {
             "eligible": False,
+            "coreEligible": False,
             "status": "normalized_evidence_missing",
             "role": "rejected",
             "reasons": ["缺少保证金归一化的非重叠copy证据"],
         }
-    if c30 < min_closed30 or evidence_days < min_evidence_days:
+    policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
+    allowed = set(policy_json.get("allowed") or ())
+    policy_hard_recent = any(
+        isinstance(policy_json.get(sector), dict)
+        and isinstance(policy_json[sector].get("recent"), dict)
+        and bool(policy_json[sector]["recent"].get("hard"))
+        for sector in allowed
+    )
+    recent_loss_ratio = abs(min(0.0, pnl7)) / max(1.0, pnl30)
+    sustained_recent_loss = c14 >= min_closed14 and c7 >= min_closed7 and pnl14 <= 0.0 and pnl7 <= 0.0
+    severe_recent_loss = (
+        c7 >= min_closed7 and pnl7 < 0.0
+        and recent_loss_ratio >= policy.recent_hard_loss_ratio
+    ) or sustained_recent_loss or policy_hard_recent
+    if severe_recent_loss:
         return {
             "eligible": False,
-            "status": "thin_independent_evidence",
+            "coreEligible": False,
+            "status": "recent_copy_collapse",
             "role": "rejected",
-            "reasons": [f"独立证据不足({c30}笔/{evidence_days}天)"],
+            "recentLossRatio": recent_loss_ratio,
+            "reasons": ["近期严格Copy收益相对30天优势严重恶化"],
+        }
+    if pnl30 < challenger_floor:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_value_below_challenger_floor",
+            "role": "rejected",
+            "reasons": [
+                f"30天严格Copy收益{pnl30:+.0f}低于候选价值线{challenger_floor:.0f}"
+            ],
         }
     if _num(expected_return) < min_expected_return:
         return {
             "eligible": False,
+            "coreEligible": False,
             "status": "thin_copy_edge",
             "role": "rejected",
             "reasons": [f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%经济底线"],
-        }
-    if _num(positive_probability, 0.5) < policy.entry_positive_probability:
-        return {
-            "eligible": False,
-            "status": "positive_probability_low",
-            "role": "rejected",
-            "reasons": [f"未来copy盈利概率低于{policy.entry_positive_probability * 100:.0f}%"],
         }
     execution = metrics.get("execution_score")
     open_fill_rate = metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate"))
@@ -127,6 +163,7 @@ def evaluate_follow_eligibility(
     if open_fill_rate is not None and _num(open_fill_rate, 1.0) < min_open_fill_rate:
         return {
             "eligible": False,
+            "coreEligible": False,
             "status": "low_fill_rate",
             "role": "rejected",
             "reasons": [f"开仓跟随率低于{min_open_fill_rate * 100:.0f}%"],
@@ -134,23 +171,54 @@ def evaluate_follow_eligibility(
     if capacity is not None and _num(capacity) < policy.min_capacity_fit:
         return {
             "eligible": False,
+            "coreEligible": False,
             "status": "capacity_fit_low",
             "role": "rejected",
             "reasons": [f"资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%"],
         }
-    if recent7 is not None and c7 >= min_closed7 and _num(recent7) <= 0.0:
+    probability_ok = _num(positive_probability, 0.5) >= policy.entry_positive_probability
+    lcb_ok = _num(return_lcb) >= policy.min_return_lcb
+    standard_samples = c30 >= min_closed30 and evidence_days >= min_evidence_days and c7 >= min_closed7
+    strong_samples = c30 >= policy.strong_min_closed_30d and evidence_days >= policy.strong_min_evidence_days
+    strong_entry = pnl30 >= strong_floor and strong_samples and probability_ok
+    recent_warning = (
+        c7 >= min_closed7 and pnl7 < 0.0
+        and recent_loss_ratio >= policy.recent_warning_loss_ratio
+    )
+    standard_entry = (
+        pnl30 >= core_floor and standard_samples and probability_ok and lcb_ok and not recent_warning
+    )
+    core_eligible = bool(strong_entry or standard_entry)
+    if core_eligible:
         return {
-            "eligible": False,
-            "status": "recent_copy_loss",
-            "role": "rejected",
-            "reasons": ["7天有效样本的保证金净收益不为正"],
+            "eligible": True,
+            "coreEligible": True,
+            "strongEntry": bool(strong_entry),
+            "status": "core_eligible_strong" if strong_entry else "core_eligible",
+            "role": "core_eligible",
+            "returnLcb": return_lcb,
+            "executionScore": execution,
+            "recentLossRatio": recent_loss_ratio,
+            "reasons": ["个人严格Copy证据达到Core准入线"],
         }
+
+    if recent_warning:
+        status, reason = "challenger_recent_decline", "近期回撤尚未达到硬淘汰线"
+    elif pnl30 < core_floor:
+        status, reason = "challenger_return_watch", "30天Copy收益达到候选线但未达到Core线"
+    elif c30 < min_closed30 or evidence_days < min_evidence_days or c7 < min_closed7:
+        status, reason = "challenger_sample_watch", "Copy样本或独立证据尚不足"
+    else:
+        status, reason = "challenger_confidence_watch", "LCB或盈利概率尚未达到Core线"
     return {
         "eligible": True,
-        "status": "eligible",
+        "coreEligible": False,
+        "status": status,
+        "role": "challenger",
         "returnLcb": return_lcb,
         "executionScore": execution,
-        "reasons": ["非重叠copy证据、执行与容量均合格"],
+        "recentLossRatio": recent_loss_ratio,
+        "reasons": [reason],
     }
 
 

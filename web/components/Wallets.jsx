@@ -9,8 +9,12 @@ const marketLabel = (market) => ({ crypto: "加密", stock: "美股/指数", mix
 
 const dataWarning = (status) => {
   if (!status || status === "valid") return null;
-  if (["stale", "deferred_data_error"].includes(status)) return ["数据延迟", "tint-amber"];
-  return ["数据异常", "tint-red"];
+  if (status === "stale") return ["数据延迟", "tint-amber"];
+  if (status === "deferred_data_error") return ["数据延迟", "tint-amber"];
+  if (["replay_error", "invalid", "copy_data_error", "quarantine"].includes(status)) {
+    return ["数据异常", "tint-red"];
+  }
+  return null;
 };
 
 export function Wallets({ confirm, toast }) {

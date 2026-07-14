@@ -67,13 +67,15 @@ class FollowScoreTests(unittest.TestCase):
     def test_independent_days_not_overlapping_window_counts_control_confidence(self):
         thin = evidence(copy_evidence_days=2, copy_bt_14d_closed_n=16, copy_bt_7d_closed_n=16)
         result = evaluate_follow_eligibility(thin)
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "thin_independent_evidence")
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_sample_watch")
 
     def test_low_positive_probability_is_challenger(self):
         result = evaluate_follow_eligibility(evidence(copy_positive_probability=0.64))
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "positive_probability_low")
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_confidence_watch")
 
     def test_execution_and_capacity_are_real_gates(self):
         low_fill = evaluate_follow_eligibility(evidence(actionable_open_rate=0.55))
@@ -82,10 +84,33 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(low_capacity["status"], "capacity_fit_low")
 
     def test_recent_7d_loss_with_enough_sample_is_rejected(self):
-        one = evaluate_follow_eligibility(evidence(copy_recent_return_14d=-0.03, copy_recent_return_7d=0.01))
-        both = evaluate_follow_eligibility(evidence(copy_recent_return_14d=-0.03, copy_recent_return_7d=-0.04))
+        one = evaluate_follow_eligibility(evidence(copy_bt_14d_net_pnl=-50, copy_bt_7d_net_pnl=20))
+        both = evaluate_follow_eligibility(evidence(copy_bt_14d_net_pnl=-50, copy_bt_7d_net_pnl=-220))
         self.assertTrue(one["eligible"])
-        self.assertEqual(both["status"], "recent_copy_loss")
+        self.assertEqual(both["status"], "recent_copy_collapse")
+
+    def test_quality_tiers_match_operator_examples(self):
+        strong = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=1365, copy_bt_closed_n=43, copy_bt_7d_closed_n=3,
+            copy_bt_7d_net_pnl=772, copy_return_lcb=-0.009, copy_evidence_days=13,
+        ))
+        sample_watch = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=504, copy_bt_closed_n=9, copy_bt_7d_closed_n=3,
+            copy_bt_7d_net_pnl=217, copy_return_lcb=-0.067, copy_evidence_days=7,
+        ))
+        collapse = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=274, copy_bt_14d_net_pnl=-305, copy_bt_7d_net_pnl=-730,
+            copy_bt_closed_n=24, copy_bt_14d_closed_n=18, copy_bt_7d_closed_n=10,
+        ))
+        protected = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=3429, copy_bt_14d_net_pnl=1000, copy_bt_7d_net_pnl=-247,
+            copy_bt_closed_n=33, copy_bt_14d_closed_n=15, copy_bt_7d_closed_n=10,
+            copy_evidence_days=12,
+        ))
+        self.assertTrue(strong["coreEligible"])
+        self.assertEqual(sample_watch["status"], "challenger_sample_watch")
+        self.assertEqual(collapse["status"], "recent_copy_collapse")
+        self.assertTrue(protected["coreEligible"])
 
     def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))

@@ -45,6 +45,15 @@ CORE_ENTRY_MAX_OPEN_AGE_H = 24.0
 CORE_KEEP_MAX_OPEN_AGE_H = 72.0
 CORE_ENTRY_MIN_OOS_CLOSED = 7
 CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
+# Individual Copy economics are classified before the shared-account selector.  Challenger is a
+# real observation tier, not a dumping ground for economically worthless wallets.
+CHALLENGER_MIN_COPY_RETURN_30D = 0.03
+CORE_MIN_COPY_RETURN_30D = 0.05
+CORE_STRONG_COPY_RETURN_30D = 0.10
+CORE_STRONG_MIN_CLOSED_30D = 20
+CORE_STRONG_MIN_EVIDENCE_DAYS = 10
+CORE_RECENT_WARNING_LOSS_RATIO = 0.10
+CORE_RECENT_HARD_LOSS_RATIO = 0.25
 CORE_SOFT_CONFIRM_GENERATIONS = 3
 CORE_SOFT_MIN_WEAK_H = 48.0
 CORE_MAX_SOFT_MEMBERSHIP_CHANGES = 1
@@ -464,8 +473,8 @@ AUTO_TUNE_MARGIN_MIN_FOLLOWED = 1
 MAX_CONCURRENT_POS = 15  # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。
-MAX_SINGLE_ADDS_PER_EP = 20  # 单个 round-trip 最多允许的 scale-in 次数. median_adds 抓"典型网格",
-#                              max_adds 抓"偶发但关键的重DCA":20+ 到 100+ 次这类我们结构上跟不了,提前拒绝。
+MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行侧智能间距/单币cap/ADD_MAX_HARD
+#                              已阻止完整照抄。30+ 的完整回合仍视为不可复制的极端重DCA。
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
 # target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. The extra 7d

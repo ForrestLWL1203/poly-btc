@@ -220,7 +220,7 @@ CREATE TABLE IF NOT EXISTS profile (
 CREATE TABLE IF NOT EXISTS episode (
     addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, seq INTEGER DEFAULT 0, close_ms INTEGER,
     hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER,
-    open_px REAL, close_px REAL,
+    open_px REAL, close_px REAL, open_complete INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (addr, coin, open_ms, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_ep_addr ON episode(addr);
@@ -323,6 +323,8 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     evidence_status TEXT,
     model_version   TEXT,
     policy_version  TEXT,
+    acct_value      REAL,
+    sector_policy_json TEXT,
     replay_copy_bt_net_pnl        REAL,
     replay_copy_bt_win_rate       REAL,
     replay_copy_bt_closed_n       INTEGER,
@@ -880,6 +882,9 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replayed_at TEXT",
     "ALTER TABLE follow_selection ADD COLUMN follow_score REAL",
     "ALTER TABLE follow_selection ADD COLUMN selection_rank INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN acct_value REAL",
+    "ALTER TABLE follow_selection ADD COLUMN sector_policy_json TEXT",
+    "ALTER TABLE episode ADD COLUMN open_complete INTEGER NOT NULL DEFAULT 1",
     # Desired portfolio membership is evidence, not immediate authority.  These streaks let the scanner
     # publish a stable Core while still recomputing the ideal strict-replay portfolio every generation.
     "ALTER TABLE wallet_registry ADD COLUMN core_nomination_streak INTEGER NOT NULL DEFAULT 0",
@@ -982,16 +987,17 @@ def _migrate_episode_seq(db: sqlite3.Connection) -> None:
         CREATE TABLE episode (
             addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, seq INTEGER DEFAULT 0, close_ms INTEGER,
             hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER,
-            open_px REAL, close_px REAL,
+            open_px REAL, close_px REAL, open_complete INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (addr, coin, open_ms, seq)
         );
         """
     )
     seq_expr = "COALESCE(seq, 0)" if "seq" in names else "0"
+    complete_expr = "COALESCE(open_complete, 1)" if "open_complete" in names else "1"
     db.execute(
         "INSERT OR IGNORE INTO episode "
-        "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px) "
-        f"SELECT addr,coin,side,open_ms,{seq_expr},close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px "
+        "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px,open_complete) "
+        f"SELECT addr,coin,side,open_ms,{seq_expr},close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px,{complete_expr} "
         "FROM episode_migrate_old"
     )
     db.execute("DROP TABLE episode_migrate_old")

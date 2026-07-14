@@ -252,7 +252,9 @@ class Observer:
         return bool(coin) and (not self.valid_coins or coin in self.valid_coins)
 
     def _sector_allowed(self, addr: str, coin: str) -> bool:
-        return policy_allows_coin(self.target_sector_policy.get((addr or "").lower()), coin, default=True)
+        # Published targets must carry an explicit immutable sector policy.  Missing/corrupt context is
+        # not permission to trade every sector.
+        return policy_allows_coin(self.target_sector_policy.get((addr or "").lower()), coin, default=False)
 
     def _manual_close_cooldown_until(self, addr: str, coin: str):
         """Return the active manual-close cooldown expiry for wallet+coin, or None.

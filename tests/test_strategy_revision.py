@@ -25,11 +25,13 @@ class StrategyRevisionTests(unittest.TestCase):
         )
         db.execute(
             "INSERT INTO watchlist (rank,addr,score,acct_value,sector_policy_json,updated_at) "
-            "VALUES (1,'0xaaa',.9,12345,'{\"crypto\":true}','now')"
+            "VALUES (1,'0xaaa',.9,12345,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
         )
         db.execute(
-            "INSERT INTO follow_selection (generation,addr,role,enabled,utility,selected_at) "
-            "VALUES ('g1','0xaaa','core',1,9,'now')"
+            "INSERT INTO follow_selection "
+            "(generation,addr,role,enabled,utility,acct_value,sector_policy_json,selected_at) "
+            "VALUES ('g1','0xaaa','core',1,9,12345,"
+            "'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
         )
         db.execute("INSERT INTO episode (addr,coin,open_ms,seq) VALUES ('0xaaa','BTC',1,0)")
         db.commit()

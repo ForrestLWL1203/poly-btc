@@ -280,6 +280,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         try:
             asyncio.set_event_loop(loop)
             obs = Observer(db, [], {})
+            obs.target_sector_policy = {
+                "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
+            }
 
             with patch.object(obs, "_open_position") as open_position:
                 obs._dispatch_fill(
@@ -312,6 +315,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         try:
             asyncio.set_event_loop(loop)
             obs = Observer(db, [], {})
+            obs.target_sector_policy = {
+                "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
+            }
 
             with patch.object(obs, "_open_position") as open_position:
                 obs._dispatch_fill(

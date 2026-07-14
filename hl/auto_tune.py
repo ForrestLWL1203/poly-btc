@@ -375,8 +375,31 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
     qs = ",".join("?" for _ in addrs)
     policies = {
         (r[0] or "").lower(): parse_json_obj(r[1])
-        for r in db.execute(f"SELECT addr,sector_policy_json FROM watchlist WHERE addr IN ({qs})", addrs).fetchall()
+        for r in db.execute(
+            f"SELECT addr,sector_policy_json FROM profile WHERE lower(addr) IN ({qs})", addrs,
+        ).fetchall()
     }
+    missing = [addr for addr in addrs if not (policies.get(addr) or {}).get("allowed")]
+    if missing:
+        mqs = ",".join("?" for _ in missing)
+        for addr, raw in db.execute(
+            f"SELECT addr,sector_policy_json FROM watchlist WHERE lower(addr) IN ({mqs})", missing,
+        ).fetchall():
+            policy = parse_json_obj(raw)
+            if policy.get("allowed"):
+                policies[(addr or "").lower()] = policy
+    missing = [addr for addr in addrs if not (policies.get(addr) or {}).get("allowed")]
+    generation = selection.latest_published_generation(db)
+    if missing and generation:
+        mqs = ",".join("?" for _ in missing)
+        for addr, raw in db.execute(
+            f"SELECT addr,sector_policy_json FROM follow_selection "
+            f"WHERE generation=? AND lower(addr) IN ({mqs})",
+            (generation, *missing),
+        ).fetchall():
+            policy = parse_json_obj(raw)
+            if policy.get("allowed"):
+                policies[(addr or "").lower()] = policy
     return load_copyable_fills(
         db,
         addrs,

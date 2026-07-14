@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from hl import storage
+from hl.fills import build_episodes
 from hl.scanner import _episode_rows
 
 
@@ -29,6 +30,7 @@ class EpisodeConsistencyTests(unittest.TestCase):
             migrated = storage.connect(str(path), storage.DISCOVERY_SCHEMA)
             cols = [r[1] for r in migrated.execute("PRAGMA table_info(episode)").fetchall()]
             self.assertIn("seq", cols)
+            self.assertIn("open_complete", cols)
             migrated.execute(
                 "INSERT INTO episode (addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -74,6 +76,18 @@ class EpisodeConsistencyTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 2)
         self.assertEqual([r[4] for r in rows], [0, 1])
+
+    def test_left_censored_episode_is_marked_incomplete(self):
+        episodes, _ = build_episodes([
+            {"coin": "HYPE", "time": 1000, "px": "10", "sz": "1", "side": "B",
+             "startPosition": "1", "oid": 1, "fee": "0", "closedPnl": "0"},
+            {"coin": "HYPE", "time": 2000, "px": "11", "sz": "2", "side": "A",
+             "startPosition": "2", "oid": 2, "fee": "0", "closedPnl": "2"},
+        ])
+
+        self.assertEqual(len(episodes), 1)
+        self.assertFalse(episodes[0]["open_complete"])
+        self.assertEqual(_episode_rows("0xabc", episodes)[0][-1], 0)
 
 
 if __name__ == "__main__":

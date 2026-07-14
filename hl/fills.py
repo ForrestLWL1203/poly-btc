@@ -22,10 +22,13 @@ def is_spot(coin: str) -> bool:
     return ("/" in coin) or coin.startswith("@")
 
 
-def _new_ep(coin, side, x):
+def _new_ep(coin, side, x, *, open_complete=None):
+    if open_complete is None:
+        open_complete = abs(f(x.get("startPosition"))) < config.FLAT
     return {"coin": coin, "side": side, "open_ms": x["time"], "open_px": f(x["px"]),
             "net_pnl": 0.0, "fee": 0.0, "max_notl": 0.0, "n_fills": 0,
-            "close_ms": x["time"], "close_px": f(x["px"]), "_grow_oids": set()}
+            "close_ms": x["time"], "close_px": f(x["px"]), "open_complete": bool(open_complete),
+            "_grow_oids": set()}
 
 
 def _finalize(ep):
@@ -81,7 +84,7 @@ def build_episodes(fills: list):
                 episodes.append(_finalize(ep))
                 ep = None
                 if flipped:                             # same fill opened the opposite side -> new episode
-                    ep = _new_ep(coin, "long" if pos1 > 0 else "short", x)
+                    ep = _new_ep(coin, "long" if pos1 > 0 else "short", x, open_complete=True)
                     ep["n_fills"] = 1                    # the flip fill opened it (its closedPnl already
                     ep["max_notl"] = abs(pos1) * px      # counted to the old side; don't double-count)
                     ep["_grow_oids"].add(x.get("oid"))

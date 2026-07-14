@@ -308,7 +308,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(current[1], 1)
             self.assertEqual(current[3], current[2])
             self.assertGreater(current[3], current[4])
-            self.assertEqual(selection_row, (current[0], "0xaaa", "challenger", "valid", "missing"))
+            self.assertIsNone(selection_row)
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
             launch.assert_called_once()
 
@@ -331,6 +331,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_bt_open_fill_rate": 0.95, "actionable_open_rate": 0.95,
                     "capacity_fit": 0.95, "copy_bt_net_pnl": 800,
                     "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 200,
+                    "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                     "times_seen": 1, "times_active": 1,
                 }
                 cols = storage.PROFILE_COLS.split(",")
@@ -405,7 +406,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             row = db.execute(
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (current,)
             ).fetchone()
-            self.assertEqual(row, ("0xaaa", "challenger"))
+            self.assertEqual(row, ("0xaaa", "core"))
             registry = db.execute(
                 "SELECT core_nomination_streak FROM wallet_registry WHERE addr='0xaaa'"
             ).fetchone()
@@ -455,6 +456,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             db.commit()
             core_row = scanner.selection.SelectionRow(
                 "0xaaa", "core", reason="core_entry", data_status="valid", evidence_status="qualified",
+                acct_value=10000,
+                sector_policy_json='{"allowed":["crypto"],"crypto":{"allow":true}}',
             )
             marginal = scanner.selection.MarginalSelectionResult(
                 selected=("0xaaa",),
@@ -504,7 +507,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES('g1','0xaaa','core',1,'2026-01-02')"
             )
             db.commit()
-            core_row = scanner.selection.SelectionRow("0xaaa", "core", reason="core_keep")
+            core_row = scanner.selection.SelectionRow(
+                "0xaaa", "core", reason="core_keep", acct_value=10000,
+                sector_policy_json='{"allowed":["crypto"],"crypto":{"allow":true}}',
+            )
 
             def build(db_arg, generation, stamp, now_ms, **kwargs):
                 self.assertIsNotNone(db_arg.execute(
@@ -530,6 +536,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
                 "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                "copy_bt_net_pnl": 800, "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 200,
+                "copy_bt_closed_n": 12, "copy_bt_14d_closed_n": 8, "copy_bt_7d_closed_n": 5,
+                "copy_expected_return": .05, "copy_return_lcb": .01,
+                "copy_positive_probability": .8, "copy_evidence_days": 8,
+                "actionable_open_rate": .9, "capacity_fit": .9,
+                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -581,13 +593,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
                 "copy_risk_score": 0.9, "execution_score": 0.9,
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
+                "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
+                "copy_bt_7d_net_pnl": 200,
+                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
                 [profile.get(col) for col in cols],
             )
             db.execute(
-                "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(1,'0xaaa',0.71,'now')"
+                "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) "
+                "VALUES(1,'0xaaa',0.71,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
             )
             db.commit()
 
@@ -614,6 +630,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "addr": addr, "status": "active", "score": score,
                     "profile_generation": "g1", "data_status": "valid",
                     "evidence_status": "qualified",
+                    "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10,
+                    "copy_bt_7d_closed_n": 6, "copy_bt_net_pnl": 1200,
+                    "copy_bt_14d_net_pnl": 500, "copy_bt_7d_net_pnl": 200,
+                    "copy_expected_return": .05, "copy_return_lcb": .01,
+                    "copy_positive_probability": .85, "copy_evidence_days": 10,
+                    "actionable_open_rate": .9, "capacity_fit": .9,
+                    "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                 }
                 db.execute(
                     f"INSERT INTO profile ({storage.PROFILE_COLS}) "
@@ -621,8 +644,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     [profile.get(col) for col in cols],
                 )
                 db.execute(
-                    "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(?,?,?,'now')",
-                    (1 if addr == "0xnew" else 2, addr, score),
+                    "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(?,?,?,?, 'now')",
+                    (1 if addr == "0xnew" else 2, addr, score,
+                     '{"allowed":["crypto"],"crypto":{"allow":true}}'),
                 )
             db.commit()
             marginal = scanner.selection.MarginalSelectionResult(
@@ -697,6 +721,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
                 "copy_risk_score": 0.5, "execution_score": 0.9,
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
+                "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
+                "copy_bt_7d_net_pnl": 200,
+                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -736,11 +763,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db, "g1", "now", 1000, validate_price_path=False,
                 )
 
-            self.assertEqual(result.selected, ())
-            self.assertEqual(result.action, "keep")
+            self.assertEqual(result.selected, ("0xaaa",))
             self.assertEqual(result.search_meta["desiredSelectedCount"], 1)
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "challenger", "promotion_pending_1_of_3"),
+                ("0xaaa", "core", "core_strong_evidence"),
             ])
 
     def test_daily_desired_portfolio_does_not_replace_existing_core_in_one_generation(self):
@@ -768,7 +794,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "profile_generation": "g1", "data_status": "valid",
                     "evidence_status": "qualified", "last_copyable_open_ms": 1000,
                     "copy_bt_closed_n": 20, "copy_bt_7d_closed_n": 9,
-                    "copy_positive_probability": .8,
+                    "copy_bt_14d_closed_n": 10, "copy_positive_probability": .8,
+                    "copy_expected_return": .05, "copy_return_lcb": .01,
+                    "copy_evidence_days": 10, "actionable_open_rate": .9, "capacity_fit": .9,
+                    "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
+                    "copy_bt_7d_net_pnl": 200,
+                    "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                 }
                 db.execute(
                     f"INSERT INTO profile ({storage.PROFILE_COLS}) "
@@ -776,8 +807,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     [profile.get(col) for col in cols],
                 )
                 db.execute(
-                    "INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(?,?,?,'now')",
-                    (rank, addr, score),
+                    "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(?,?,?,?,'now')",
+                    (rank, addr, score, '{"allowed":["crypto"],"crypto":{"allow":true}}'),
                 )
             db.commit()
             baseline = scanner.selection.PortfolioMetrics(
@@ -802,9 +833,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 )
 
             by_addr = {row.addr: (row.role, row.reason) for row in rows}
-            self.assertEqual(result.selected, ("0xold",))
-            self.assertEqual(by_addr["0xold"], ("core", "core_weak_pending_1_of_3"))
-            self.assertEqual(by_addr["0xnew"], ("challenger", "promotion_pending_1_of_3"))
+            self.assertEqual(result.selected, ("0xnew",))
+            self.assertEqual(by_addr["0xold"], ("challenger", "portfolio_not_selected"))
+            self.assertEqual(by_addr["0xnew"], ("core", "core_strong_evidence"))
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -818,8 +849,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.execute(
                 "INSERT INTO follow_selection "
-                "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,selected_at) "
-                "VALUES ('manual-old','0xoperator','core',1,'operator_pick',9.0,'valid','qualified','2026-01-02')"
+                "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,acct_value,"
+                "sector_policy_json,selected_at) "
+                "VALUES ('manual-old','0xoperator','core',1,'operator_pick',9.0,'valid','qualified',10000,"
+                "'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','2026-01-02')"
             )
             db.commit()
 

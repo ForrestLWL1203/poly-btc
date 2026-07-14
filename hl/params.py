@@ -234,6 +234,10 @@ def seed_params(db):
     stamp = now_iso()
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
+        # Approved policy migration: the old hidden heavy-DCA threshold was 20.  This is a deliberate
+        # strategy change, not a metadata-default refresh, so existing databases must move with the code.
+        if key == "max_single_adds":
+            db.execute("UPDATE params SET value=? WHERE key=? AND value='20'", (dv, key))
         db.execute(
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)",

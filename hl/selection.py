@@ -148,6 +148,8 @@ def current_selection_rows(db) -> list:
         + expr("evidence_status", "''") + ","
         + expr("model_version", "''") + ","
         + expr("policy_version", "''")
+        + "," + expr("acct_value", "NULL")
+        + "," + expr("sector_policy_json", "NULL")
         + " FROM follow_selection WHERE generation=? ORDER BY addr",
         (generation,),
     ).fetchall()
@@ -156,6 +158,7 @@ def current_selection_rows(db) -> list:
             addr=row[0], role=row[1], enabled=bool(row[2]), reason=row[3] or "",
             utility=row[4], follow_score=row[5], selection_rank=row[6], data_status=row[7] or "valid",
             evidence_status=row[8] or "", model_version=row[9] or "", policy_version=row[10] or "",
+            acct_value=row[11], sector_policy_json=row[12],
         )
         for row in rows
     ]
@@ -174,6 +177,8 @@ class SelectionRow:
     evidence_status: str = ""
     model_version: str = ""
     policy_version: str = ""
+    acct_value: Optional[float] = None
+    sector_policy_json: Optional[str] = None
 
 
 def _coerce_selection_row(value) -> SelectionRow:
@@ -229,6 +234,8 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("evidence_status", lambda r: r.evidence_status),
         ("model_version", lambda r: r.model_version),
         ("policy_version", lambda r: r.policy_version),
+        ("acct_value", lambda r: r.acct_value),
+        ("sector_policy_json", lambda r: r.sector_policy_json),
         ("selected_at", lambda r: selected_at),
     )
     fields = [(name, getter) for name, getter in field_values if name in cols]

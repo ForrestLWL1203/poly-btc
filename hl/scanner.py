@@ -56,7 +56,8 @@ def _episode_rows(addr: str, eps: list) -> list:
         seq = seen.get(key, 0)
         seen[key] = seq + 1
         rows.append((addr, e["coin"], e["side"], e["open_ms"], seq, e["close_ms"], e["hold_s"],
-                     e["net_pnl"], e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"]))
+                     e["net_pnl"], e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"],
+                     1 if e.get("open_complete", True) else 0))
     return rows
 
 
@@ -106,8 +107,8 @@ def _replace_episode_rows(db, addr: str, eps: list) -> None:
     if erows:
         db.executemany(
             "INSERT OR REPLACE INTO episode "
-            "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px,open_complete)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             erows)
     stored = db.execute("SELECT COUNT(*) FROM episode WHERE addr=?", (addr,)).fetchone()[0]
     if stored != len(eps):
@@ -723,6 +724,25 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         ok, reason = False, "hit_page_cap"
     else:
         ok, reason = metrics.gates_structural(m, p)
+        # A previously sealed sector policy is an execution boundary.  Behavior in a disabled sector must
+        # not disqualify a still-copyable allowed sector (for example stock DCA while Crypto-only is live).
+        if not ok and reason in {
+            "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca", "too_many_concurrent",
+        }:
+            try:
+                prior_policy = json.loads((prior or {}).get("sector_policy_json") or "{}")
+            except (TypeError, ValueError):
+                prior_policy = {}
+            allowed = set(prior_policy.get("allowed") or ())
+            if allowed and allowed != {"crypto", "stock"}:
+                allowed_perp = [x for x in perp if classify_coin(x.get("coin")) in allowed]
+                allowed_eps, _ = build_episodes(allowed_perp)
+                allowed_metrics = metrics.compute_metrics(allowed_perp, allowed_eps, now_ms, p.days)
+                if allowed_metrics:
+                    allowed_metrics["perp_frac"] = 1.0
+                    sector_ok, _sector_reason = metrics.gates_structural(allowed_metrics, p)
+                    if sector_ok:
+                        ok, reason = True, "ok"
 
     # STAGE B — fetch the LIVE open-position snapshot (un-blinds the funnel to held positions), fold in
     # realized+unrealized roi, then re-judge: held position = ACTIVE, 扛单 bags drag roi_total negative,
@@ -1191,6 +1211,88 @@ def _stable_core_transition(
     }
 
 
+def _quality_first_core_transition(
+    profiles,
+    *,
+    generation_id,
+    previous_roles,
+    controls,
+    held,
+    desired_order,
+    strict_evaluate,
+):
+    """Publish the current strict result without entry/exit hysteresis.
+
+    Profile/data errors and wallets that no longer clear the individual Core gate cannot originate new
+    positions.  Open copies are handled by the caller as Exit-only; they never justify stale Core authority.
+    """
+    rows = {(row.get("addr") or "").lower(): row for row in profiles}
+    previous_core = {
+        (addr or "").lower() for addr, role in previous_roles.items() if role == selection.CORE
+    }
+    desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
+    selected = []
+    reasons = {}
+    signals = {}
+    hard_removed = set()
+    inactive_removed = set()
+    for addr, row in rows.items():
+        refreshed = row.get("profile_generation") == generation_id
+        data_valid = refreshed and (row.get("data_status") or "valid") == "valid"
+        enabled = controls.get(addr, True)
+        qualification = row.get("follow_qualification") or {}
+        core_ok = (
+            row.get("status") in {"active", "qualified"}
+            and bool(qualification.get("coreEligible"))
+            and data_valid and enabled
+        )
+        nominated = core_ok and addr in desired
+        signals[addr] = {"nominated": nominated, "valid": data_valid}
+        if nominated:
+            selected.append(addr)
+            reasons[addr] = (
+                "core_strong_evidence" if qualification.get("strongEntry") else "core_quality_selected"
+            )
+        elif addr in previous_core:
+            hard_removed.add(addr)
+            reasons[addr] = (
+                "portfolio_not_selected" if core_ok
+                else qualification.get("status") or row.get("reason") or "core_not_selected"
+            )
+        elif row.get("status") in {"active", "qualified"}:
+            reasons[addr] = qualification.get("status") or "portfolio_not_selected"
+
+    # Contribution order remains the operator-facing Core rank.
+    published = set(selected)
+    final_metrics = strict_evaluate(tuple(sorted(published)))
+    base_utility = f(
+        final_metrics.risk_adjusted_utility
+        if final_metrics.risk_adjusted_utility is not None else final_metrics.net_lcb
+    )
+    contribution_rows = []
+    desired_rank = {addr: rank for rank, addr in enumerate(desired)}
+    for addr in published:
+        without = strict_evaluate(tuple(sorted(published - {addr})))
+        without_utility = f(
+            without.risk_adjusted_utility
+            if without.risk_adjusted_utility is not None else without.net_lcb
+        )
+        contribution_rows.append((base_utility - without_utility, -desired_rank.get(addr, 999999), addr))
+    contribution_rows.sort(reverse=True)
+    final_order = tuple(row[-1] for row in contribution_rows)
+    return {
+        "selected": final_order,
+        "reasons": reasons,
+        "signals": signals,
+        "utilities": {row[-1]: row[0] for row in contribution_rows},
+        "softAction": None,
+        "hardRemoved": tuple(sorted(hard_removed)),
+        "inactiveRemoved": tuple(sorted(inactive_removed)),
+        "desired": desired,
+        "metrics": final_metrics,
+    }
+
+
 def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     """Compact shared-account replay into actual-dollar selection economics.
 
@@ -1374,7 +1476,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
         "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
-        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json "
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_policy_json,p.acct_value "
         "FROM profile p"
     )
     names = [desc[0] for desc in cur.description]
@@ -1391,6 +1493,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             f(watch_scores[addr]) if addr in watch_scores
             else follow_score.compute_follow_score(row)[0]
         )
+        row["follow_qualification"] = follow_score.evaluate_follow_eligibility({
+            **row,
+            "copy_bt_data_status": row.get("data_status"),
+            "copy_bt_evidence_status": row.get("evidence_status"),
+        })
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -1404,6 +1511,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         ranked_candidates = [
             (row.get("addr") or "").lower() for row in profiles
             if row.get("status") in {"active", "qualified"}
+            and (row.get("follow_qualification") or {}).get("coreEligible")
             and controls.get((row.get("addr") or "").lower(), True)
         ]
         # Active incumbents remain inside the bounded optimizer even when a one-day score move pushes them
@@ -1918,20 +2026,14 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         if marginal is not None and evaluate is not None:
             desired_marginal = marginal
             effective_evaluate = validate if validate_price_path else evaluate
-            transition = _stable_core_transition(
+            transition = _quality_first_core_transition(
                 profiles,
                 generation_id=generation_id,
-                stamp=stamp,
-                now_ms=now_ms,
                 previous_roles=previous_roles,
-                registry=registry,
                 controls=controls,
                 held=held,
                 desired_order=desired_marginal.selected,
                 strict_evaluate=effective_evaluate,
-                validate_fold=validate_fold,
-                constraints=constraints,
-                copy_policy=copy_policy,
             )
             selected_set = set(transition["selected"])
             core_rank = {
@@ -1949,7 +2051,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 "softAction": transition["softAction"],
                 "hardExitCount": len(transition["hardRemoved"]),
                 "inactiveExitCount": len(transition["inactiveRemoved"]),
-                "membershipPolicy": "stable-core-v1",
+                "membershipPolicy": "quality-first-v1",
             })
             marginal = selection.MarginalSelectionResult(
                 selected=transition["selected"],
@@ -1971,13 +2073,13 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 stage="selection_membership_transition",
                 status="ok",
                 reason=(transition["softAction"] or {}).get("action") or (
-                    "activity_or_hard_exit"
+                    "quality_first_change"
                     if transition["hardRemoved"] or transition["inactiveRemoved"]
-                    else "stable_keep"
+                    else "quality_first_publish"
                 ),
                 payload={
                     "generation": generation_id,
-                    "policy": "stable-core-v1",
+                    "policy": "quality-first-v1",
                     "previousCount": len(previous_core_set),
                     "desiredCount": len(transition["desired"]),
                     "publishedCount": len(transition["selected"]),
@@ -1986,12 +2088,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     "hardExitCount": len(transition["hardRemoved"]),
                     "inactiveExitCount": len(transition["inactiveRemoved"]),
                     "softAction": transition["softAction"],
-                    "entryConfirmations": int(getattr(
-                        config, "CORE_ENTRY_CONFIRM_GENERATIONS", 3,
-                    )),
-                    "softConfirmations": int(getattr(
-                        config, "CORE_SOFT_CONFIRM_GENERATIONS", 3,
-                    )),
+                    "entryConfirmations": 1,
+                    "softConfirmations": 1,
                     "keepMaxOpenAgeH": float(copy_policy.keep_max_open_age_h),
                 },
             )
@@ -2007,6 +2105,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             data_status = row.get("data_status") or "valid"
             selection_data_status = data_status if refreshed_now or data_status == "deferred_data_error" else "stale"
             active = row.get("status") in {"active", "qualified"}
+            qualification = row.get("follow_qualification") or {}
+            candidate_ok = active and bool(qualification.get("eligible"))
             previous_role = previous_roles.get(addr) or registry.get(addr, {}).get("role")
             if addr in selected_set and enabled:
                 role = selection.CORE
@@ -2014,12 +2114,14 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     "portfolio_positive_net_contribution" if marginal is not None
                     else "portfolio_replay_unavailable_keep_core"
                 )
-            elif data_status == "deferred_data_error" and previous_role == selection.CORE and enabled:
-                role, reason = selection.CORE, "deferred_data_error"
             elif addr in held:
                 role = selection.EXIT_ONLY
                 reason = transition_reasons.get(addr, "exit_only_open_position")
-            elif active:
+            elif data_status != "valid":
+                role = selection.QUARANTINE
+                reason = "deferred_data_error" if data_status == "deferred_data_error" else "copy_data_error"
+                include_selection = False
+            elif candidate_ok:
                 role = selection.CHALLENGER
                 if transition_reasons.get(addr):
                     reason = transition_reasons[addr]
@@ -2032,8 +2134,10 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 else:
                     reason = "portfolio_replay_unavailable"
             else:
-                role = selection.CHALLENGER
-                reason = transition_reasons.get(addr, row.get("reason") or "not_qualified")
+                role = selection.REJECTED
+                reason = qualification.get("status") or transition_reasons.get(
+                    addr, row.get("reason") or "not_qualified"
+                )
                 include_selection = False
             if include_selection:
                 rows.append(selection.SelectionRow(
@@ -2047,16 +2151,22 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     data_status=selection_data_status,
                     evidence_status=row.get("evidence_status") or "",
                     model_version=(
-                        "selection-stable-core-v1" if transition is not None
+                        "selection-quality-first-v1" if transition is not None
                         else "selection-smart-expansion-v1" if marginal is not None
                         else "selection-path-fallback-v1" if path_fallback
                         else "selection-replay-unavailable-v1"
                     ),
                     policy_version=copy_policy.version,
+                    acct_value=row.get("acct_value"),
+                    sector_policy_json=row.get("sector_policy_json"),
                 ))
             lifecycle_state = role if role in {
                 selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY
             } else "qualified"
+            if role == selection.QUARANTINE:
+                lifecycle_state = "quarantine"
+            elif role == selection.REJECTED:
+                lifecycle_state = "rejected"
             if role not in {selection.CORE, selection.EXIT_ONLY} and not active:
                 lifecycle_state = (
                     "cooldown" if row.get("evidence_status") == "economically_disqualified"
@@ -2068,7 +2178,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 generation=generation_id,
                 seen_at=stamp,
                 state=lifecycle_state,
-                role=role,
+                role=role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY} else None,
                 data_status=selection_data_status,
                 reason=reason,
                 last_actionable_open_ms=row.get("last_copyable_open_ms"),
@@ -2095,8 +2205,10 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 selection_rank=core_rank.get(addr),
                 data_status="stale",
                 evidence_status=prior.evidence_status,
-                model_version="selection-stable-core-v1",
+                model_version="selection-quality-first-v1",
                 policy_version=copy_policy.version,
+                acct_value=prior.acct_value,
+                sector_policy_json=prior.sector_policy_json,
             ))
             upsert_wallet_registry(
                 db,
@@ -2108,6 +2220,18 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 data_status="unobserved",
                 reason="core_profile_missing_keep",
             )
+        missing_core_policy = []
+        for selected_row in rows:
+            if selected_row.role != selection.CORE or not selected_row.enabled:
+                continue
+            try:
+                sealed_policy = json.loads(selected_row.sector_policy_json or "{}")
+            except (TypeError, ValueError):
+                sealed_policy = {}
+            if not sealed_policy.get("allowed"):
+                missing_core_policy.append(selected_row.addr)
+        if missing_core_policy:
+            raise RuntimeError(f"selection_core_policy_missing:{len(missing_core_policy)}")
         return rows, marginal
     raise RuntimeError("explicit selection builder requires FOLLOW_SELECTION_MODE=auto")
 

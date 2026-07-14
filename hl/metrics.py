@@ -133,6 +133,7 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
     _win_pt_list = sorted(e["net_pnl"] / e["max_notl"] * 100 for e in eps if e["net_pnl"] > 0 and e.get("max_notl"))
     _win_pt = _win_pt_list[len(_win_pt_list) // 2] if _win_pt_list else 0.0
     _max_concurrent = _peak_concurrent(eps)   # 峰值同时持仓数 → "开仓太多我们装不下" 的可复制性闸
+    complete_eps = [e for e in eps if e.get("open_complete", True)]
     m = {
         "crypto_frac": crypto_frac,
         "market_type": ("crypto" if crypto_frac >= 0.7 else "stock" if crypto_frac <= 0.3 else "mixed"),
@@ -153,8 +154,11 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         # GRID/DCA signature: distinct scale-in ORDERS per round-trip. A directional swing trader adds
         # 0–few times; a grid/ladder trader stuffs one episode with dozens (e.g. 73 on SKHX). median_eps
         # (round-trips/day) can't see this — it all rolls into one episode. max = worst single episode.
-        "max_adds_per_ep": max((e.get("n_adds", 0) for e in eps), default=0),
-        "median_adds_per_ep": sorted(e.get("n_adds", 0) for e in eps)[len(eps) // 2],
+        "max_adds_per_ep": max((e.get("n_adds", 0) for e in complete_eps), default=0),
+        "median_adds_per_ep": (
+            sorted(e.get("n_adds", 0) for e in complete_eps)[len(complete_eps) // 2]
+            if complete_eps else 0
+        ),
         # ALGO-SLICER signature: use the p90 of per-episode fills, NOT the average (hidden by light episodes,
         # e.g. avg 34 but a 294-fill round-trip) and NOT the max (a single outlier — a swing trader forced to
         # slice ONE illiquid-stock fill shows max 114 but p90 15; killing it is a false positive). p90 fires

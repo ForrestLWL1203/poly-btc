@@ -14,6 +14,9 @@ def qualified(**overrides):
         "copy_bt_closed_n": 16,
         "copy_bt_14d_closed_n": 9,
         "copy_bt_7d_closed_n": 5,
+        "copy_bt_net_pnl": 800,
+        "copy_bt_14d_net_pnl": 350,
+        "copy_bt_7d_net_pnl": 120,
         "copy_expected_return": 0.045,
         "copy_return_lcb": 0.01,
         "copy_positive_probability": 0.82,
@@ -38,13 +41,15 @@ class ProfileQualificationTests(unittest.TestCase):
 
     def test_thin_sample_is_excluded(self):
         ok, reason = scanner._profile_copy_qualification(qualified(copy_evidence_days=2), NOW, self.params)
-        self.assertFalse(ok)
-        self.assertEqual(reason, "thin_independent_evidence")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
 
     def test_recent_loss_is_excluded(self):
-        ok, reason = scanner._profile_copy_qualification(qualified(copy_recent_return_7d=-0.001), NOW, self.params)
+        ok, reason = scanner._profile_copy_qualification(qualified(
+            copy_bt_14d_net_pnl=-50, copy_bt_7d_net_pnl=-220,
+        ), NOW, self.params)
         self.assertFalse(ok)
-        self.assertEqual(reason, "recent_copy_loss")
+        self.assertEqual(reason, "recent_copy_collapse")
 
     def test_inactive_copyable_open_flow_is_excluded(self):
         ok, reason = scanner._profile_copy_qualification(

@@ -59,8 +59,9 @@ def target_snapshot(db, generation: str) -> list[dict]:
             "sectorPolicy": parse_json_obj(row[2]),
         }
         for row in db.execute(
-            f"SELECT addr,acct_value,sector_policy_json FROM watchlist WHERE lower(addr) IN ({marks})",
-            tuple(addrs),
+            f"SELECT addr,acct_value,sector_policy_json FROM follow_selection "
+            f"WHERE generation=? AND lower(addr) IN ({marks})",
+            (generation, *addrs),
         ).fetchall()
     }
     seed = {addr: [] for addr in addrs}
@@ -71,6 +72,9 @@ def target_snapshot(db, generation: str) -> list[dict]:
     ).fetchall():
         if addr in seed and coin:
             seed[addr].append(coin)
+    missing = [addr for addr in addrs if not (wallet.get(addr, {}).get("sectorPolicy") or {}).get("allowed")]
+    if missing:
+        raise RuntimeError(f"strategy_target_policy_missing:{len(missing)}")
     return [
         {
             "addr": addr,
