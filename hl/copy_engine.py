@@ -61,6 +61,41 @@ class ProfitTailDecision:
     giveback_fraction: float
 
 
+def smart_add_margin_ceiling(
+    *,
+    coin_room: float,
+    min_add_margin: float,
+    reserved_adds: int = config.SMART_ADD_MIN_CAPACITY,
+) -> float:
+    """Largest first margin that still leaves an executable final reserved add.
+
+    With four reserved adds, open plus the first three full-sized adds consume
+    four first-margin units. The fourth add may fill the remaining coin room.
+    """
+    adds = max(1, int(reserved_adds or 1))
+    return max(0.0, (max(0.0, coin_room) - max(0.0, min_add_margin)) / adds)
+
+
+def smart_add_order_margin(
+    *,
+    first_margin: float,
+    target_ratio: float,
+    followed_margin: float,
+    coin_room: float,
+    risk_available: float,
+) -> float:
+    """Size one target add order; a single order cannot consume multiple add slots."""
+    first = max(0.0, float(first_margin or 0.0))
+    followed = max(0.0, float(followed_margin or 0.0))
+    desired_total = min(
+        max(0.0, float(target_ratio or 0.0)) * first,
+        first,
+        followed + max(0.0, float(coin_room or 0.0)),
+        followed + max(0.0, float(risk_available or 0.0)),
+    )
+    return max(0.0, desired_total - followed)
+
+
 def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
                    coin: str | None = None) -> str:
     # BTC is the only market eligible for the stable tier. Calm ETH, altcoins and stock/builder perps must
@@ -218,13 +253,18 @@ def plan_open_sizing(
     wanted_margin = max(0.0, margin_equity * margin_pct)
     room = max(0.0, params.tier_coin_cap[tier] * risk_equity - existing_coin_margin)
     deploy_room = max(0.0, risk_available - (1.0 - params.max_deploy_pct) * risk_equity)
-    margin = min(wanted_margin, room, deploy_room)
+    min_add_margin = params.min_open_margin_pct * margin_equity
+    add_capacity_margin = smart_add_margin_ceiling(
+        coin_room=room,
+        min_add_margin=min_add_margin,
+    )
+    margin = min(wanted_margin, room, deploy_room, add_capacity_margin)
     # The relative dust threshold follows the same manual sizing base.  Otherwise lowering the sizing
     # budget would silently turn valid proportional opens into "margin_too_small" skips.  Fixed per-tier
     # minimum notionals remain real execution/economic floors and are intentionally not scaled.
-    if margin < params.min_open_margin_pct * margin_equity:
+    if margin < min_add_margin:
         reason = (
-            "coin_full" if room < wanted_margin else
+            "coin_full" if min(room, add_capacity_margin) < wanted_margin else
             "no_cash" if risk_available < wanted_margin else
             "deploy_cap" if deploy_room < wanted_margin else
             "margin_too_small"

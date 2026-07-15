@@ -30,7 +30,7 @@ from . import config, rest, selection, strategy_revision, volatility, ws
 from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
-                          tier_for_sigma)
+                          smart_add_order_margin, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .risk_radar import RiskRadar
 from .sector import parse_json_obj, policy_allows_coin
@@ -1547,7 +1547,7 @@ class Observer:
                         return _observe_only()
                     if ep["add_count"] >= self.add_max_hard:     # 硬顶(A/B 共用)
                         return _observe_only(final=True)
-                # ③ 比例镜像(目标本次加仓额 ÷ 目标首仓额)× 我们首仓,封顶到该币"三档单币预算"剩余
+                # ③ 比例镜像，但单个目标加仓订单最多消耗一个我方首仓额度；不足整笔时填满单币余量。
                 ratio = target_add_notl / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
                 async with book.acct_lock:
                     risk_equity = self._risk_equity(book)
@@ -1556,13 +1556,14 @@ class Observer:
                                    for (a2, c2), e in book.open_ep.items()
                                    if c2 == coin and e.get("side") == ep["side"])   # incl THIS ep (its current margin)
                     followed_margin = order["followed_margin"] if order else 0.0
-                    desired_total = min(
-                        ratio * fm,
-                        followed_margin + max(0.0, coin_cap - existing),
-                        followed_margin + self._risk_available(book),
+                    add_margin = smart_add_order_margin(
+                        first_margin=fm,
+                        target_ratio=ratio,
+                        followed_margin=followed_margin,
+                        coin_room=max(0.0, coin_cap - existing),
+                        risk_available=self._risk_available(book),
                     )
-                    add_margin = max(0.0, desired_total - followed_margin)
-                if add_margin < self.min_open_margin_pct * risk_equity:  # 预算用尽 / 太小,不值得
+                if add_margin < self.min_open_margin_pct * risk_equity * self.margin_equity_pct:  # 预算用尽 / 太小
                     return _observe_only()
             else:                                     # hardcap: 分档次数上限 + 固定 ADD_FRAC(老逻辑)
                 if ep["add_count"] >= self.tier_max_adds.get(tier, 0):

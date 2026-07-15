@@ -16,7 +16,7 @@ from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
-                          tier_for_sigma)
+                          smart_add_order_margin, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .util import f
 
@@ -532,13 +532,14 @@ class Backtest:
                     return self._observe_add(ep, oid)
             ratio = target_order_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
             followed_margin = order["followed_margin"] if order else 0.0
-            desired_total = min(
-                ratio * ep["first_margin"],
-                followed_margin + coin_room,
-                followed_margin + self.risk_available(),
+            add_margin = smart_add_order_margin(
+                first_margin=ep["first_margin"],
+                target_ratio=ratio,
+                followed_margin=followed_margin,
+                coin_room=coin_room,
+                risk_available=self.risk_available(),
             )
-            add_margin = max(0.0, desired_total - followed_margin)
-            if add_margin < self.min_open_margin_pct * risk_equity:
+            if add_margin < self.min_open_margin_pct * risk_equity * self.margin_equity_pct:
                 return False if already_counted else self._observe_add(ep, oid)
         else:
             max_adds = self.tier_max_adds[tier]

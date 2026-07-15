@@ -8,6 +8,34 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_margin_candidates_obey_four_add_ceiling_in_all_tiers(self):
+        follow = {
+            "MARGIN_EQUITY_PCT": 1.0,
+            "MIN_OPEN_MARGIN_PCT": 0.005,
+            "STABLE_COIN_CAP_PCT": 0.40,
+            "MID_COIN_CAP_PCT": 0.22,
+            "HIGH_COIN_CAP_PCT": 0.15,
+            "STABLE_MARGIN_MIN_PCT": 0.02,
+            "MID_MARGIN_MIN_PCT": 0.02,
+            "HIGH_MARGIN_MIN_PCT": 0.012,
+        }
+        base = {
+            "STABLE_MARGIN_PCT": 0.13, "MID_MARGIN_PCT": 0.06, "HIGH_MARGIN_PCT": 0.04,
+            "STABLE_LEV_CAP": 28, "MID_LEV_CAP": 9, "HIGH_LEV_CAP": 6,
+            "DEPLOY_FULL_PCT": 0.50,
+        }
+
+        ceilings = auto_tune.margin_add_capacity_ceilings(follow)
+        self.assertEqual(ceilings, {
+            "STABLE_MARGIN_PCT": 0.09875,
+            "MID_MARGIN_PCT": 0.05375,
+            "HIGH_MARGIN_PCT": 0.03625,
+        })
+        candidates = auto_tune.independent_margin_candidates(base, follow)
+        for candidate in candidates:
+            for key, ceiling in ceilings.items():
+                self.assertLessEqual(candidate["params"][key], ceiling)
+
     def test_manual_margin_equity_pct_is_not_an_auto_tune_axis(self):
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.TUNE_KEYS)
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.ADD_TUNE_KEYS)
@@ -268,7 +296,7 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertAlmostEqual(overrides["STABLE_MARGIN_PCT"], 0.056)
         self.assertAlmostEqual(overrides["MID_MARGIN_PCT"], 0.042)
-        self.assertAlmostEqual(overrides["HIGH_MARGIN_PCT"], 0.042)
+        self.assertAlmostEqual(overrides["HIGH_MARGIN_PCT"], 0.03625)
         self.assertEqual(overrides["STABLE_LEV_CAP"], 35)
         self.assertEqual(overrides["MID_LEV_CAP"], 12)
         self.assertEqual(overrides["HIGH_LEV_CAP"], 5)

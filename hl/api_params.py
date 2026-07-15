@@ -3,7 +3,7 @@
 import json
 import sqlite3
 
-from . import params as params_mod
+from . import config, params as params_mod
 from .api_common import score100
 from .coin_filter import format_coin_blacklist
 from .util import now_iso
@@ -11,6 +11,16 @@ from .util import now_iso
 
 WRITABLE_LEVELS = {"green", "yellow", "blue"}
 REMOVED_PARAMS = {"MIN_FOLLOW_SCORE", "COPY_STOP_ENABLE", "STOP_MARGIN_PCT"}
+ADD_CAPACITY_KEYS = {
+    "MARGIN_EQUITY_PCT", "MIN_OPEN_MARGIN_PCT",
+    "STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT",
+    "STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT",
+}
+ADD_CAPACITY_TIERS = (
+    ("STABLE_MARGIN_PCT", "STABLE_COIN_CAP_PCT", "稳定档"),
+    ("MID_MARGIN_PCT", "MID_COIN_CAP_PCT", "中档"),
+    ("HIGH_MARGIN_PCT", "HIGH_COIN_CAP_PCT", "剧烈档"),
+)
 
 
 def rw_connect(path):
@@ -97,6 +107,30 @@ def patch_params(db_path, category, updates):
             if (tail_values.get("TAIL_CLOSE_HARD_REMAIN_PCT", 0.0)
                     > tail_values.get("TAIL_CLOSE_RISK_REMAIN_PCT", 100.0)):
                 raise ValueError("TAIL_CLOSE_HARD_REMAIN_PCT must not exceed TAIL_CLOSE_RISK_REMAIN_PCT")
+        if category == "follow" and ADD_CAPACITY_KEYS.intersection(out):
+            capacity_values = {
+                row["key"]: float(row["value"])
+                for row in db.execute(
+                    "SELECT key,value FROM params WHERE key IN (?,?,?,?,?,?,?,?)",
+                    tuple(sorted(ADD_CAPACITY_KEYS)),
+                ).fetchall()
+            }
+            margin_equity = capacity_values.get(
+                "MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT * 100.0,
+            ) / 100.0
+            min_add = capacity_values.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT * 100.0)
+            for margin_key, cap_key, label in ADD_CAPACITY_TIERS:
+                margin = capacity_values.get(margin_key, getattr(config, margin_key) * 100.0)
+                cap = capacity_values.get(cap_key, getattr(config, cap_key) * 100.0)
+                required = (4.0 * margin + min_add) * margin_equity
+                if required > cap + 1e-9:
+                    ceiling = max(0.0, (
+                        cap / max(margin_equity, 1e-9) - min_add
+                    ) / 4.0)
+                    raise ValueError(
+                        f"{label}保证金上限过高：当前单币上限至少容纳不了4次加仓；"
+                        f"请将保证金上限降至{ceiling:.3f}%以内或提高单币上限"
+                    )
         if category == "follow" and out:
             _enqueue_follow_revision(db, "dashboard_params")
         db.commit()

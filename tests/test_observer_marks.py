@@ -700,7 +700,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 (pos_id,),
             ).fetchall()
             self.assertEqual(row["add_count"], 2)
-            self.assertGreater(row["margin"], 939.0)
+            self.assertAlmostEqual(row["margin"], 1878.0, places=4)
             self.assertAlmostEqual(row["master_open_px"], 64514.5, places=4)
             self.assertEqual(row["master_peak_sz"], 4.0)
             self.assertEqual(len(actions), 2)

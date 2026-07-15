@@ -297,7 +297,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("近7日钱包 开 / 平", wallets)
         self.assertIn("当前参数回放", wallets)
         self.assertIn("30日已平", wallets)
-        self.assertIn("开放仓位估值待确认", wallets)
+        self.assertIn("持仓估值待确认", wallets)
         self.assertIn("7日合计", wallets)
         self.assertIn("实际跟单", wallets)
         self.assertIn("forwardNetPnl", wallets)

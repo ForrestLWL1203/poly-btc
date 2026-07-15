@@ -110,6 +110,47 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_follow_api_rejects_tier_margin_that_cannot_fit_four_adds(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            rows = [
+                ("MARGIN_EQUITY_PCT", "100"), ("MIN_OPEN_MARGIN_PCT", "0.5"),
+                ("STABLE_MARGIN_PCT", "8.5"), ("STABLE_COIN_CAP_PCT", "40"),
+                ("MID_MARGIN_PCT", "5.2"), ("MID_COIN_CAP_PCT", "22"),
+                ("HIGH_MARGIN_PCT", "3.625"), ("HIGH_COIN_CAP_PCT", "15"),
+            ]
+            db.executemany(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES (?,?,'follow','yellow','pct','immediate',?,NULL)",
+                [(key, value, value) for key, value in rows],
+            )
+            db.commit()
+            db.close()
+
+            self.assertEqual(
+                api_params.patch_params(path, "follow", {"STABLE_MARGIN_PCT": 8.5}),
+                {"STABLE_MARGIN_PCT": 8.5},
+            )
+            with self.assertRaisesRegex(ValueError, "容纳不了4次加仓"):
+                api_params.patch_params(path, "follow", {"HIGH_MARGIN_PCT": 3.7})
+            db = sqlite3.connect(path)
+            self.assertEqual(db.execute(
+                "SELECT value FROM params WHERE key='HIGH_MARGIN_PCT'"
+            ).fetchone()[0], "3.625")
+            db.close()
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def test_tail_close_api_rejects_inverted_thresholds_atomically(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

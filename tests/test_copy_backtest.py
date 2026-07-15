@@ -122,6 +122,25 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["followed_adds"], 1)
         self.assertGreater(result["copy_net_pnl"], 0)
 
+    def test_large_target_add_is_capped_to_one_first_margin_in_replay(self):
+        fills = [
+            fill(1, "BTC", "B", 100, 0, 100.0, 20),
+            fill(2, "BTC", "B", 200, 100, 98.0, 21),  # target adds 2x its first order
+            fill(3, "BTC", "A", 300, 300, 101.0, 22),
+        ]
+        result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
+            "STABLE_MARGIN_PCT": 0.085,
+            "STABLE_MARGIN_MIN_PCT": 0.085,
+            "STABLE_COIN_CAP_PCT": 0.40,
+            "STABLE_LEV_CAP": 1.0,
+            "STABLE_MIN_NOTIONAL": 0.0,
+            "ADD_GAP_K": 0.01,
+            "ADD_GAP_SHRINK_G": 1.0,
+        })
+
+        self.assertEqual(result["followed_adds"], 1)
+        self.assertAlmostEqual(result["positions"][0]["margin"], 1700.0)
+
     def test_positive_add_waits_for_gap_when_enabled(self):
         fills = [
             fill(1, "ZEC", "B", 10, 0, 100.0, 30),

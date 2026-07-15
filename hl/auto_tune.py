@@ -25,11 +25,39 @@ from .sector import parse_json_obj
 from .util import f, now_iso
 
 MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
+COIN_CAP_KEYS = ("STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
 DEPLOY_KEYS = ("DEPLOY_FULL_PCT",)
 TUNE_KEYS = MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS
 ADD_TUNE_KEYS = ("ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD")
 CAPACITY_SKIP_KEYS = ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small")
+
+
+def margin_add_capacity_ceilings(follow: dict) -> dict[str, float]:
+    """Per-tier margin ceilings that preserve four executable smart-add slots."""
+    margin_equity_pct = max(1e-9, float(
+        follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    ))
+    min_add_pct = max(0.0, float(
+        follow.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
+    ))
+    add_capacity = max(1, int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4))
+    return {
+        margin_key: max(0.0, (
+            float(follow.get(cap_key, getattr(config, cap_key)))
+            - min_add_pct * margin_equity_pct
+        ) / (add_capacity * margin_equity_pct))
+        for margin_key, cap_key in zip(MARGIN_KEYS, COIN_CAP_KEYS)
+    }
+
+
+def enforce_margin_add_capacity(values: dict, follow: dict) -> dict:
+    """Clamp every tier to the operator's coin cap instead of compounding upward forever."""
+    out = dict(values)
+    ceilings = margin_add_capacity_ceilings(follow)
+    for key in MARGIN_KEYS:
+        out[key] = min(float(out[key]), ceilings[key])
+    return out
 
 
 def prepare_refined_price_path(db, fills: list[dict], start_ms: int, end_ms: int,
@@ -693,7 +721,7 @@ def _unique_lev_sets(values, current=None):
     return out
 
 
-def tune_candidates_from_axes(base: dict) -> list[dict]:
+def tune_candidates_from_axes(base: dict, follow: dict | None = None) -> list[dict]:
     margin_mults = _unique_values(getattr(
         config, "AUTO_TUNE_MARGIN_FACTORS",
         getattr(config, "AUTO_TUNE_MARGIN_MULTS", (0.8, 1.0, 1.2, 1.4, 1.6)),
@@ -706,10 +734,15 @@ def tune_candidates_from_axes(base: dict) -> list[dict]:
         getattr(config, "AUTO_TUNE_DEPLOY_FULL_PCTS", (0.30, 0.40, 0.50)),
         float(base["DEPLOY_FULL_PCT"]),
     )
-    return [
+    candidates = [
         build_tune_candidate(base, mult, levs, deploy)
         for mult, levs, deploy in itertools.product(margin_mults, lev_sets, deploy_fulls)
     ]
+    if follow is not None:
+        for candidate in candidates:
+            candidate["params"] = enforce_margin_add_capacity(candidate["params"], follow)
+            candidate["margins"] = {key: candidate["params"][key] for key in MARGIN_KEYS}
+    return candidates
 
 
 def _candidate_from_params(params_: dict, *, axis: str) -> dict:
@@ -728,6 +761,8 @@ def _candidate_from_params(params_: dict, *, axis: str) -> dict:
 
 def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
     """Coordinate-polish each tier around a jointly selected sizing surface."""
+    base = enforce_margin_add_capacity(base, follow)
+    ceilings = margin_add_capacity_ceilings(follow)
     factors = _unique_values(
         getattr(
             config, "AUTO_TUNE_MARGIN_FACTORS",
@@ -738,7 +773,8 @@ def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
     for key in MARGIN_KEYS:
         floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
         floor = float(follow.get(floor_key) or 0.0)
-        for value in sorted({max(floor, float(base[key]) * factor) for factor in factors}):
+        safe_floor = min(floor, ceilings[key])
+        for value in sorted({min(ceilings[key], max(safe_floor, float(base[key]) * factor)) for factor in factors}):
             if abs(value - float(base[key])) <= 1e-12:
                 continue
             candidates.append(_candidate_from_params(
@@ -847,10 +883,11 @@ def add_candidates_from_axes(base: dict) -> list[dict]:
 def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
     out = dict(follow)
     params_ = candidate.get("params") or {}
+    ceilings = margin_add_capacity_ceilings(follow)
     for key in MARGIN_KEYS:
         min_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
-        floor = float(follow.get(min_key) or 0.0)
-        out[key] = max(floor, float(params_[key]))
+        floor = min(float(follow.get(min_key) or 0.0), ceilings[key])
+        out[key] = min(ceilings[key], max(floor, float(params_[key])))
     for key in LEV_KEYS:
         out[key] = float(params_[key])
     out["DEPLOY_FULL_PCT"] = float(params_["DEPLOY_FULL_PCT"])
@@ -996,6 +1033,10 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         ),
         "deployFullPct": f(follow.get("DEPLOY_FULL_PCT")),
         "add": {key: f(follow.get(key)) for key in ADD_TUNE_KEYS},
+        "smartAddCapacity": {
+            "reservedAdds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4),
+            "marginCeilings": margin_add_capacity_ceilings(follow),
+        },
     }
     summary = {
         "generation": generation_id,
@@ -1608,7 +1649,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # Every generation optimizes against the parameters that are actually active in Observer and displayed
     # by the dashboard. A historical manual baseline can be useful for rollback bookkeeping, but using it as
     # the candidate comparator silently discards the entire neighbourhood above that old leverage surface.
-    base = dict(current)
+    base = enforce_margin_add_capacity(current, follow)
     baseline_reset = False
     sigmas = _load_sigmas(db)
     now_ms = int(time.time() * 1000)
@@ -1930,6 +1971,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "followed_n": len(addrs),
         "selected_mult": None,
         "margins": selected_margins,
+        "smart_add_capacity": {
+            "reserved_adds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4),
+            "margin_ceilings": margin_add_capacity_ceilings(follow),
+        },
         "lev_caps": selected.get("lev_caps"),
         "deploy_full_pct": selected.get("deploy_full_pct"),
         "params": selected_params,

@@ -1,11 +1,59 @@
 import unittest
 from dataclasses import replace
 
-from hl.copy_engine import OpenSizingParams, plan_open_sizing, profit_tail_close_decision
+from hl.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
+                            smart_add_order_margin)
 from hl.sizing import sizing_equity_for_drawdown
 
 
 class CopyEngineTests(unittest.TestCase):
+    def test_all_tiers_reserve_four_adds_and_last_add_fills_remaining_cap(self):
+        params = OpenSizingParams(
+            stable_sigma_max=0.05,
+            high_sigma_min=0.09,
+            tier_margin={"stable": 0.085, "mid": 0.05274, "high": 0.03625},
+            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.012},
+            tier_lev_cap={"stable": 20.0, "mid": 9.0, "high": 6.0},
+            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
+            tier_coin_cap={"stable": 0.40, "mid": 0.22, "high": 0.15},
+            min_lev=1.0,
+            stock_max_lev=10.0,
+            deploy_full_pct=0.40,
+            max_deploy_pct=0.80,
+            min_open_margin_pct=0.005,
+        )
+        cases = (("BTC", 0.04, 850.0), ("ETH", 0.06, 527.4), ("ZEC", 0.12, 362.5))
+        for coin, sigma, expected_margin in cases:
+            with self.subTest(coin=coin):
+                plan = plan_open_sizing(
+                    coin=coin, side="long", entry_px=100.0, sigma=sigma,
+                    balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+                    master_notional=1_000_000.0, master_leverage=20.0, params=params,
+                )
+                self.assertTrue(plan.ok)
+                self.assertAlmostEqual(plan.margin, expected_margin)
+
+        # BTC: open + three full adds = 34%; the fourth add fills the remaining 6%.
+        self.assertEqual(smart_add_order_margin(
+            first_margin=850.0, target_ratio=2.0, followed_margin=0.0,
+            coin_room=600.0, risk_available=10_000.0,
+        ), 600.0)
+        self.assertEqual(smart_add_order_margin(
+            first_margin=850.0, target_ratio=2.0, followed_margin=0.0,
+            coin_room=0.0, risk_available=10_000.0,
+        ), 0.0)
+
+    def test_one_large_target_add_cannot_consume_multiple_slots(self):
+        self.assertEqual(smart_add_order_margin(
+            first_margin=850.0, target_ratio=2.0, followed_margin=0.0,
+            coin_room=4_000.0, risk_available=10_000.0,
+        ), 850.0)
+        # Later slices of the same target order can only top that order up to one first margin.
+        self.assertEqual(smart_add_order_margin(
+            first_margin=850.0, target_ratio=2.0, followed_margin=200.0,
+            coin_room=3_800.0, risk_available=10_000.0,
+        ), 650.0)
+
     def test_drawdown_sizing_compounds_gains_and_smooths_losses(self):
         self.assertEqual(sizing_equity_for_drawdown(15_000, 10_000), 15_000)
         self.assertEqual(sizing_equity_for_drawdown(10_000, 10_000), 10_000)
@@ -52,7 +100,8 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(loss_plan.risk_equity, 5_000.0)
         self.assertAlmostEqual(gain_plan.margin, 150.0)
         self.assertAlmostEqual(capped_plan.room, 10.0)
-        self.assertAlmostEqual(capped_plan.margin, 10.0)
+        self.assertFalse(capped_plan.ok)
+        self.assertEqual(capped_plan.reason, "coin_full")
 
     def test_margin_equity_pct_scales_open_only_and_keeps_full_account_caps(self):
         params = OpenSizingParams(

@@ -1,15 +1,15 @@
 export const PARAM_META = {
   // follow
   STABLE_MARGIN_MIN_PCT: { name: "稳定档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
-  STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "2–5", up: "低频期每单更重", dn: "低频期每单更轻" },
+  STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "2–10", up: "低频期每单更重", dn: "加仓余量更多" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
   STABLE_MIN_NOTIONAL: { name: "稳定档·最低名义额", desc: "BTC/大饼单笔名义额低于此(封顶到主力后)就不开,太小没意义", range: "$3k–8k", up: "过滤更多小单", dn: "连很小的也跟" },
   MID_MARGIN_MIN_PCT: { name: "中档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
-  MID_MARGIN_PCT: { name: "中档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "2–5", up: "低频期每单更重", dn: "低频期每单更轻" },
+  MID_MARGIN_PCT: { name: "中档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "2–6", up: "低频期每单更重", dn: "加仓余量更多" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "σ 5–9%的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MIN_NOTIONAL: { name: "中档·最低名义额", desc: "ETH/SOL等单笔名义额低于此就不开", range: "$2k–5k", up: "过滤更多小单", dn: "连很小的也跟" },
   HIGH_MARGIN_MIN_PCT: { name: "剧烈档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "0.5–2", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
-  HIGH_MARGIN_PCT: { name: "剧烈档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "1–4", up: "低频期每单更重", dn: "低频期每单更轻" },
+  HIGH_MARGIN_PCT: { name: "剧烈档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "1–4", up: "低频期每单更重", dn: "加仓余量更多" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥9%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
   HIGH_MIN_NOTIONAL: { name: "剧烈档·最低名义额", desc: "meme/野币单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)", range: "$500–1k", up: "过滤更多小单", dn: "连很小的也跟" },
   TAIL_CLOSE_ENABLE: { name: "盈利尾仓保护", desc: "目标分批减仓后，按剩余仓位比例与该币种强平风险决定是否一次性锁定利润", range: "—" },

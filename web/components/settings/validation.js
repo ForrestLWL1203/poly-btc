@@ -27,6 +27,16 @@ export function validateFollowParams(vals) {
     if (okMin && okMax && numVal(g.min) > numVal(g.max)) {
       markErr(`${g.label}保证金下限不能高于上限`, [g.min, g.max]);
     }
+    const cap = numVal(g.cap);
+    const marginEquity = numVal("MARGIN_EQUITY_PCT") / 100;
+    const minAdd = numVal("MIN_OPEN_MARGIN_PCT");
+    if (okMax && Number.isFinite(cap) && Number.isFinite(marginEquity) && Number.isFinite(minAdd)) {
+      const required = (4 * numVal(g.max) + minAdd) * marginEquity;
+      if (required > cap + 1e-9) {
+        const ceiling = Math.max(0, (cap / Math.max(marginEquity, 1e-9) - minAdd) / 4);
+        markErr(`${g.label}保证金上限最多 ${ceiling.toFixed(3)}%，否则单币上限无法容纳4次加仓`, [g.max, g.cap]);
+      }
+    }
   });
   const marginEquity = numVal("MARGIN_EQUITY_PCT");
   if (!Number.isFinite(marginEquity) || marginEquity < 10 || marginEquity > 100) {

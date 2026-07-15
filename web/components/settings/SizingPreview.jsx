@@ -11,6 +11,7 @@ export function SizingPreview({ vals }) {
   const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_MIN_PCT", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"],
     mid: ["MID_MARGIN_MIN_PCT", "MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_MIN_PCT", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
+  const TC = { stable: "STABLE_COIN_CAP_PCT", mid: "MID_COIN_CAP_PCT", high: "HIGH_COIN_CAP_PCT" };
   const DOT = { stable: "var(--green)", mid: "var(--amber)", high: "var(--red)" };
   const dft = { STABLE_MARGIN_MIN_PCT: 2, STABLE_MARGIN_PCT: 3.5, STABLE_LEV_CAP: 25,
     MID_MARGIN_MIN_PCT: 2, MID_MARGIN_PCT: 3, MID_LEV_CAP: 10, HIGH_MARGIN_MIN_PCT: 1.2, HIGH_MARGIN_PCT: 2, HIGH_LEV_CAP: 4 };
@@ -26,10 +27,13 @@ export function SizingPreview({ vals }) {
   };
   const calc = s0 => {
     const s = Math.max(0.1, s0), t = tier(s);
-    const mPct = marginPct(t), cap = n(TM[t][2], dft[TM[t][2]]);
-    const lev = Math.max(MINL, Math.floor(cap));   // v10: 杠杆 = 档位上限(再被目标杠杆+股票上限封顶)
-    const margin = marginEquity * mPct;
-    return { t, margin, lev, notl: margin * lev };
+    const mPct = marginPct(t), levCap = n(TM[t][2], dft[TM[t][2]]);
+    const lev = Math.max(MINL, Math.floor(levCap));
+    const coinCap = bal * n(TC[t], t === "stable" ? 30 : (t === "mid" ? 22 : 15)) / 100;
+    const minAdd = marginEquity * n("MIN_OPEN_MARGIN_PCT", 0.5) / 100;
+    const margin = Math.min(marginEquity * mPct, Math.max(0, (coinCap - minAdd) / 4));
+    const fourthAdd = Math.max(0, coinCap - 4 * margin);
+    return { t, margin, lev, notl: margin * lev, fourthAdd };
   };
   const COINS = [["BTC", 3.9], ["ETH", 5.3], ["ZEC", 14.6]];   /* 每档一个代表:稳定 / 中 / 剧烈 */
   return (
@@ -44,7 +48,7 @@ export function SizingPreview({ vals }) {
       </div>
       <div className="sz-grid">
         <div className="sz-hdr">币种</div><div className="sz-hdr sz-num">σ</div>
-        <div className="sz-hdr sz-num">杠杆</div><div className="sz-hdr sz-num">保证金 / 名义</div>
+        <div className="sz-hdr sz-num">杠杆</div><div className="sz-hdr sz-num">保证金 / 名义 · 第4次余量</div>
         {COINS.map(([sym, sig]) => {
           const r = calc(sig);
           return (
@@ -52,13 +56,13 @@ export function SizingPreview({ vals }) {
               <div className="sz-cell sz-coin"><span className="sz-dot" style={{ color: DOT[r.t] }} />{sym}</div>
               <div className="sz-cell sz-num">{sig.toFixed(1)}%</div>
               <div className="sz-cell sz-lev">{r.lev}x</div>
-              <div className="sz-cell sz-num">{usd(r.margin)}<span className="sz-sub"> / {usd(r.notl)}</span></div>
+              <div className="sz-cell sz-num">{usd(r.margin)}<span className="sz-sub"> / {usd(r.notl)} · {usd(r.fourthAdd)}</span></div>
             </div>
           );
         })}
       </div>
       <div className="sz-foot">
-        杠杆 = <b>σ 档位上限</b>(σ 定档,再被目标杠杆+股票上限封顶)· 保证金 = 完整权益 × <b>{marginEquityPct}%额度</b> × 动态区间%；其余权益仍可用，并非冻结
+        每档首仓都为至少 <b>4 次加仓</b>预留单币空间；每个目标加仓订单最多一个首仓额度，最后不足整笔时填满单币上限
       </div>
     </div>
   );
