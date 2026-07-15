@@ -106,6 +106,26 @@ class RiskApiTests(unittest.TestCase):
         self.assertEqual(at_90["wouldBlock"], 0)
         self.assertAlmostEqual(at_90["hypotheticalNetBenefit"], 0)
 
+    def test_shadow_intents_are_server_paginated(self):
+        for n in range(7):
+            pos_id = self.db.execute(
+                "INSERT INTO copy_position (addr,coin,side,status,opened_at) VALUES (?,?,?,?,?)",
+                (f"0x{n}", "BTC", "long", "open", f"t{n}"),
+            ).lastrowid
+            self.db.execute(
+                "INSERT INTO market_risk_intent (pos_id,addr,coin,side,opened_at,status) "
+                "VALUES (?,?,?,?,?,'open')",
+                (pos_id, f"0x{n}", "BTC", "long", f"t{n}"),
+            )
+        self.db.commit()
+
+        payload = ep_risk_intents(self.db, {"page": ["1"], "size": ["5"]})
+
+        self.assertEqual(len(payload["intents"]), 2)
+        self.assertEqual(payload["pagination"], {
+            "page": 1, "size": 5, "total": 7, "totalPages": 2,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -121,7 +121,13 @@ def ep_risk_radar(db, qs=None):
 
 
 def ep_risk_intents(db, qs):
-    limit = max(1, min(200, int((qs.get("limit", [100]) or [100])[0])))
+    qs = qs or {}
+    legacy_limit = _query_int(qs, "limit", 5)
+    size = max(1, min(50, _query_int(qs, "size", legacy_limit)))
+    total_row = q1(db, "SELECT COUNT(*) total FROM market_risk_intent")
+    total = int(total_row["total"] or 0) if total_row else 0
+    total_pages = max(1, (total + size - 1) // size)
+    page = min(max(0, _query_int(qs, "page", 0)), total_pages - 1)
     rows = qall(db, "SELECT i.*,a.bullish_score,a.bearish_score,a.block_side,"
                     "cp.unrealized_pnl,cp.realized_pnl AS baseline_realized,cp.mark_px,cp.entry_px,"
                     "e.episode_id,e.entry_blocked,e.delayed_entry,e.blocked_entries,e.allowed_entries,"
@@ -133,7 +139,8 @@ def ep_risk_intents(db, qs):
                     "LEFT JOIN market_risk_assessment a ON a.assessment_id=i.assessment_id "
                     "LEFT JOIN copy_position cp ON cp.pos_id=i.pos_id "
                     "LEFT JOIN market_risk_episode e ON e.pos_id=i.pos_id "
-                    "ORDER BY i.intent_id DESC LIMIT ?", (config.TAKER_FEE, limit))
+                    "ORDER BY i.intent_id DESC LIMIT ? OFFSET ?",
+                (config.TAKER_FEE, size, page * size))
     pos_ids = [r["pos_id"] for r in rows]
     actions_by_pos = {pid: [] for pid in pos_ids}
     if pos_ids:
@@ -187,7 +194,9 @@ def ep_risk_intents(db, qs):
                         "estimated": r["episode_status"] == "open"} if r["episode_id"] is not None else None),
             "actions": actions_by_pos.get(r["pos_id"], []),
         })
-    return {"intents": intents}
+    return {"intents": intents, "pagination": {
+        "page": page, "size": size, "total": total, "totalPages": total_pages,
+    }}
 
 
 def ep_risk_thresholds(db):
