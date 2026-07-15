@@ -727,6 +727,129 @@ CREATE TABLE IF NOT EXISTS auto_tune_runs (
     rollback_reason TEXT,
     created_at    TEXT
 );
+
+-- ===== AI risk radar (Observer-owned business state) =====
+-- Dashboard routes are read-only for these tables.  Start/stop and credential changes travel through
+-- `commands`, then the Observer validates and persists them, preserving the single-writer boundary.
+CREATE TABLE IF NOT EXISTS market_risk_snapshot (
+    snapshot_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    assessed_for_ms   INTEGER NOT NULL UNIQUE,
+    features_json     TEXT NOT NULL,
+    coverage_json     TEXT NOT NULL,
+    input_hash        TEXT NOT NULL,
+    created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_risk_snapshot_created
+    ON market_risk_snapshot(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_risk_assessment (
+    assessment_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id         INTEGER,
+    assessed_for_ms     INTEGER NOT NULL,
+    model               TEXT,
+    prompt_version      TEXT,
+    status              TEXT NOT NULL,
+    raw_bullish_score   REAL,
+    bullish_score       REAL,
+    bearish_score       REAL,
+    confidence          REAL,
+    regime              TEXT,
+    risky_direction     TEXT,
+    block_side          TEXT,
+    confirmation_mode   TEXT,
+    active_block        INTEGER NOT NULL DEFAULT 0,
+    previous_assessment_id INTEGER,
+    valid_until_ms      INTEGER,
+    reason              TEXT,
+    evidence_json       TEXT,
+    invalidation_json   TEXT,
+    response_json       TEXT,
+    latency_ms          INTEGER,
+    prompt_tokens       INTEGER,
+    completion_tokens   INTEGER,
+    estimated_cost       REAL,
+    cost_currency        TEXT,
+    error               TEXT,
+    created_at          TEXT NOT NULL,
+    FOREIGN KEY(snapshot_id) REFERENCES market_risk_snapshot(snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_market_risk_assessment_time
+    ON market_risk_assessment(assessed_for_ms DESC, assessment_id DESC);
+
+CREATE TABLE IF NOT EXISTS market_risk_state (
+    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    mode                  TEXT NOT NULL DEFAULT 'off',
+    status                TEXT NOT NULL DEFAULT 'stopped',
+    current_assessment_id INTEGER,
+    block_side            TEXT,
+    risk_score            REAL,
+    confirmation_mode     TEXT,
+    valid_until_ms        INTEGER,
+    connection_status     TEXT NOT NULL DEFAULT 'not_configured',
+    last_assessed_at      TEXT,
+    last_error            TEXT,
+    updated_at            TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS market_risk_intent (
+    intent_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pos_id              INTEGER NOT NULL UNIQUE,
+    addr                TEXT NOT NULL,
+    coin                TEXT NOT NULL,
+    side                TEXT NOT NULL,
+    source_oid          INTEGER,
+    assessment_id       INTEGER,
+    risk_score          REAL,
+    would_block         INTEGER NOT NULL DEFAULT 0,
+    confirmation_mode   TEXT,
+    decision_reason     TEXT,
+    opened_at           TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'open',
+    checkpoint_pnl      REAL,
+    realized_pnl        REAL,
+    fee                 REAL,
+    net_pnl             REAL,
+    outcome             TEXT,
+    resolved_at         TEXT,
+    FOREIGN KEY(pos_id) REFERENCES copy_position(pos_id),
+    FOREIGN KEY(assessment_id) REFERENCES market_risk_assessment(assessment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_market_risk_intent_opened
+    ON market_risk_intent(opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_risk_intent_shadow
+    ON market_risk_intent(would_block, status, opened_at DESC);
+
+-- Envelope-encrypted provider credentials.  No plaintext is persisted; the private wrapping key lives
+-- outside SQLite and is readable only by the Observer service account.
+CREATE TABLE IF NOT EXISTS provider_credential (
+    provider          TEXT PRIMARY KEY,
+    envelope_version  INTEGER NOT NULL,
+    key_id            TEXT NOT NULL,
+    wrapped_key       TEXT NOT NULL,
+    nonce             TEXT NOT NULL,
+    ciphertext        TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    last_error        TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    last_validated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS provider_balance_snapshot (
+    balance_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider          TEXT NOT NULL,
+    checked_at        TEXT NOT NULL,
+    currency          TEXT,
+    total_balance     REAL,
+    granted_balance   REAL,
+    topped_up_balance REAL,
+    is_available      INTEGER,
+    estimated_days    REAL,
+    estimated_requests INTEGER,
+    error             TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_provider_balance_latest
+    ON provider_balance_snapshot(provider, checked_at DESC);
 """
 
 
@@ -896,6 +1019,10 @@ _MIGRATIONS = (
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_position ADD COLUMN peak_size REAL",
+    # AI risk radar development migrations (safe no-ops on a fresh schema).
+    "ALTER TABLE market_risk_intent ADD COLUMN source_oid INTEGER",
+    "ALTER TABLE market_risk_assessment ADD COLUMN estimated_cost REAL",
+    "ALTER TABLE market_risk_assessment ADD COLUMN cost_currency TEXT",
 )
 
 

@@ -316,6 +316,12 @@ def book_top(coin: str):
     return None
 
 
+def book_snapshot(coin: str):
+    """Raw aggregated L2 book for risk/microstructure features (weight 2, sampled at radar cadence)."""
+    book = post_soft({"type": "l2Book", "coin": coin})
+    return book if isinstance(book, dict) else None
+
+
 def all_mids(dex: str = None, realtime: bool = False) -> dict:
     """Current mid prices. With dex='xyz', keys are fully-qualified builder coins like 'xyz:MU'."""
     body = {"type": "allMids"}

@@ -7,6 +7,7 @@ Usage (from repo root):  python3 web/dev/seed_mock.py data/hl_mock.db
 import math, os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from hl import storage, params
+from hl.credentials import ensure_instance_keypair
 from hl.util import now_iso, now_ms
 
 DB = sys.argv[1] if len(sys.argv) > 1 else "data/hl_mock.db"
@@ -14,7 +15,9 @@ db = storage.connect(DB, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 params.seed_params(db)
 for t in ("account_stats", "copy_position", "copy_action", "coin_vol", "watchlist",
           "target_controls", "profile", "leaderboard", "scan_runs", "follow_selection",
-          "scan_generation", "wallet_registry", "pipeline_audit", "follow_history"):
+          "scan_generation", "wallet_registry", "pipeline_audit", "follow_history",
+          "market_risk_intent", "market_risk_assessment", "market_risk_snapshot",
+          "provider_balance_snapshot", "provider_credential"):
     db.execute(f"DELETE FROM {t}")
 
 def ago(s):
@@ -110,15 +113,17 @@ O = [
     (W[2][0], "SOL",  "long",  172.0, 10, 1800, 18000, 158.4, 156.0),
     (W[3][0], "AAPL", "long",  214.5, 3,  1200, 3600,  219.8, 150.0),
 ]
+open_ids = []
 for addr, coin, side, entry, lev, margin, notl, mark, liq in O:
     size = notl / entry
     sgn = 1 if side == "long" else -1
     upnl = size * (mark - entry) * sgn
-    db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,leverage,margin,notional,"
+    cur = db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,leverage,margin,notional,"
                "size,rem_size,liq_px,mark_px,unrealized_pnl,open_lag_sec,opened_at) "
                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (addr, coin, side, "open", entry, lev, margin, notl, size, size, liq, mark, upnl,
                 round(0.8 + (lev % 3) * 0.4, 1), ago(3600 * (2 + lev % 4))))
+    open_ids.append(cur.lastrowid)
 
 C = [
     (W[0][0], "BTC",  "long",  980.0, 26000), (W[0][0], "ETH", "short", 210.0, 8000),
@@ -126,9 +131,49 @@ C = [
     (W[2][0], "SOL",  "short", -95.0, 3600),  (W[2][0], "BTC", "long",  620.0, 30000),
     (W[3][0], "AAPL", "long",  150.0, 20000), (W[4][0], "DOGE","long", -260.0, 4200),
 ]
+closed_ids = []
 for addr, coin, side, pnl, dur in C:
-    db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,realized_pnl,opened_at,closed_at) "
+    cur = db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,realized_pnl,opened_at,closed_at) "
                "VALUES (?,?,?,?,?,?,?,?)", (addr, coin, side, "closed", 100, pnl, ago(dur + 1200), ago(1200)))
+    closed_ids.append(cur.lastrowid)
+
+# AI risk radar: two consecutive bearish assessments confirm a long-entry shadow block.
+assessed_prev = (now_ms() // 900_000 - 1) * 900_000
+assessed_now = assessed_prev + 900_000
+db.execute("INSERT INTO market_risk_assessment (assessed_for_ms,model,prompt_version,status,raw_bullish_score,"
+           "bullish_score,bearish_score,confidence,regime,risky_direction,block_side,active_block,valid_until_ms,"
+           "reason,evidence_json,invalidation_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           (assessed_prev, "deepseek-v4-pro", "risk-radar-v1", "ok", 18, 24, 76, 82, "risk_off", "bearish",
+            "long", 0, assessed_prev + 1200_000, "BTC 与 ETH 同步跌破 1h 趋势结构。", '["1h EMA 空头排列"]',
+            '["BTC 重回 1h EMA21"]', ago(900)))
+prev_aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+db.execute("INSERT INTO market_risk_assessment (assessed_for_ms,model,prompt_version,status,raw_bullish_score,"
+           "bullish_score,bearish_score,confidence,regime,risky_direction,block_side,confirmation_mode,active_block,"
+           "previous_assessment_id,valid_until_ms,reason,evidence_json,invalidation_json,latency_ms,created_at) "
+           "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+           (assessed_now, "deepseek-v4-pro", "risk-radar-v1", "ok", 12, 19, 81, 86, "risk_off", "bearish", "long",
+            "steady", 1, prev_aid, assessed_now + 1200_000, "抛压延续，BTC/ETH 多周期结构仍偏空。",
+            '["15m MACD 下行","BTC/ETH 1h EMA 空头排列"]', '["15m CVD 转正并收复 EMA21"]', 1280, ago(30)))
+current_aid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+db.execute("INSERT OR REPLACE INTO market_risk_state (id,mode,status,current_assessment_id,block_side,risk_score,"
+           "confirmation_mode,valid_until_ms,connection_status,last_assessed_at,updated_at) VALUES (1,'shadow','running',?,?,?,?,?,'connected',?,?)",
+           (current_aid, "long", 81, "steady", assessed_now + 1200_000, ago(30), now_iso()))
+
+intent_rows = [
+    (open_ids[0], O[0][0], "BTC", "long", 81, 1, "open", None, None),
+    (open_ids[2], O[2][0], "SOL", "long", 81, 1, "open", None, None),
+    (closed_ids[2], C[2][0], "ETH", "long", 81, 1, "resolved", C[2][3], "avoided_loss"),
+    (closed_ids[0], C[0][0], "BTC", "long", 81, 1, "resolved", C[0][3], "missed_profit"),
+]
+for pos_id, addr, coin, side, risk, block, status, pnl, outcome in intent_rows:
+    db.execute("INSERT INTO market_risk_intent (pos_id,addr,coin,side,assessment_id,risk_score,would_block,confirmation_mode,"
+               "decision_reason,opened_at,status,realized_pnl,net_pnl,outcome,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (pos_id, addr, coin, side, current_aid, risk, block, "steady", "confirmed directional conflict",
+                ago(7200), status, pnl, pnl, outcome, ago(1200) if status == "resolved" else None))
+db.execute("INSERT INTO provider_balance_snapshot (provider,checked_at,currency,total_balance,granted_balance,"
+           "topped_up_balance,is_available,estimated_days,estimated_requests) VALUES ('deepseek',?,'CNY',42.8,2.8,40,1,18.4,1765)",
+           (now_iso(),))
+ensure_instance_keypair(db)
 
 # paper account: realized equity = initial + sum(closed realized) so overview live-derive is realistic
 realized_cum = sum(pnl for *_, pnl, _ in C)

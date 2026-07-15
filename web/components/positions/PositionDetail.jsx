@@ -9,6 +9,7 @@ export function PositionDetail({ d }) {
   return (
     <div className="pos-detail">
       <div className="pos-detail-sum">
+        {d.shadowRisk?.wouldBlock && <span><i className="tint tint-ai">Shadow · AI拟拦截</i> 风险 <b>{d.shadowRisk.riskScore?.toFixed(1) || "—"}</b> · {d.shadowRisk.confirmationMode || "—"}</span>}
         <span>目标加仓 <b>{d.masterAdds}</b> 次 · 我们跟 <b>{d.ourAdds}</b> 次</span>
         <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b></span>
         <span>我方成本均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>

@@ -6,6 +6,27 @@ INFO_URL = "https://api.hyperliquid.xyz/info"
 WS_URL = "wss://api.hyperliquid.xyz/ws"
 UA = {"User-Agent": "hl-copytrade/0.3", "Accept": "application/json", "Content-Type": "application/json"}
 
+# AI risk radar.  It is shadow-only in v1: assessments can annotate an executable first open but can never
+# veto Observer execution.  Secrets are installed through the encrypted provider-credential command flow.
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+RISK_RADAR_MODEL = "deepseek-v4-pro"
+RISK_RADAR_PROMPT_VERSION = "risk-radar-v1"
+RISK_RADAR_INTERVAL_S = 15 * 60
+RISK_RADAR_VALID_FOR_S = 20 * 60
+RISK_RADAR_REQUEST_TIMEOUT_S = 45
+RISK_RADAR_BALANCE_INTERVAL_S = 6 * 60 * 60
+RISK_RADAR_RETENTION_DAYS = 180
+RISK_RADAR_WARN_SCORE = 65
+RISK_RADAR_BLOCK_SCORE = 75
+RISK_RADAR_EXTREME_SCORE = 90
+RISK_RADAR_MIN_CONFIDENCE = 35
+# DeepSeek V4-Pro official CNY list price per 1M tokens (2026-07-15).  Runway uses actual usage fields and
+# the latest balance; cache-unknown input is deliberately costed at the conservative cache-miss rate.
+DEEPSEEK_V4_PRO_INPUT_CACHE_HIT_CNY_PER_M = 0.025
+DEEPSEEK_V4_PRO_INPUT_CACHE_MISS_CNY_PER_M = 3.0
+DEEPSEEK_V4_PRO_OUTPUT_CNY_PER_M = 6.0
+
 # numeric
 FLAT = 1e-6                 # |position| below this (coin units) counts as flat
 MIN_POST_INTERVAL = 1.1     # global REST pace (s/POST). HL /info budget = 1200 WEIGHT/min/IP, and

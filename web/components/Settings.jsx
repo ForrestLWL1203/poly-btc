@@ -3,6 +3,7 @@ import { AddSettingsPanel } from "./settings/AddSettingsPanel.jsx";
 import { FollowSettingsPanel } from "./settings/FollowSettingsPanel.jsx";
 import { ScannerSettingsPanel } from "./settings/ScannerSettingsPanel.jsx";
 import { SizingPreview } from "./settings/SizingPreview.jsx";
+import { ConnectionsPanel } from "./settings/ConnectionsPanel.jsx";
 import { ADD_KEYS } from "./settings/paramMeta.js";
 import { useSettingsParams } from "./settings/useSettingsParams.js";
 import { validateFollowParams } from "./settings/validation.js";
@@ -25,7 +26,7 @@ export function Settings({ confirm }) {
 
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
 
-  const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
+  const list = tab === "connections" ? [] : tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const tabDirty = list.filter(p => dirty[p.key]);
   const followValidation = tab === "follow" ? validateFollowParams(vals) : { errors: [], badKeys: new Set() };
   const validationErrors = followValidation.errors;
@@ -101,20 +102,22 @@ export function Settings({ confirm }) {
         <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
         <div className={"tab" + (tab === "add" ? " on" : "")} onClick={() => setTab("add")}>加仓策略</div>
-        <button className="btn" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}
+        <div className={"tab" + (tab === "connections" ? " on" : "")} onClick={() => setTab("connections")}>安全与连接</div>
+        {tab !== "connections" && <button className="btn" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}
           style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12, padding: "4px 12px" }}>↺ 恢复默认</button>
+        }
       </div>
 
       {tab === "follow" && <SizingPreview vals={vals} />}
 
-      <div className="tbl-wrap">
+      {tab === "connections" ? <ConnectionsPanel confirm={confirm} /> : <div className="tbl-wrap">
         {tab === "scanner" && <ScannerSettingsPanel list={list} vals={vals} dirty={dirty} onChange={setValue} />}
         {tab === "follow" && <FollowSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers}
           validationErrors={validationErrors} badKeys={followValidation.badKeys} onChange={setValue} />}
         {tab === "add" && <AddSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers} onChange={setValue} />}
-      </div>
+      </div>}
 
       {tabDirty.length > 0 && (
         <div className="apply-bar">

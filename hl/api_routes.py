@@ -2,7 +2,8 @@
 
 import time
 
-from .api_commands import ALLOWED_COMMANDS, PROCESS_COMMANDS, ep_command, exec_process_command, insert_command
+from .api_commands import (ALLOWED_COMMANDS, PROCESS_COMMANDS, ep_command, exec_process_command,
+                           insert_command, validate_command_payload)
 from .api_discovery import (
     ep_discovery,
     ep_pipeline_audit,
@@ -14,6 +15,8 @@ from .api_discovery import (
 from .api_overview import ep_equity, ep_insights, ep_overview, ep_strategy_revisions
 from .api_params import ep_params, patch_params, reset_params
 from .api_positions import ep_position_detail, ep_positions
+from .api_risk import (ep_connections, ep_credential_wrap_key, ep_risk_intents,
+                       ep_risk_radar, ep_risk_thresholds)
 from .api_wallets import ep_wallet_detail, ep_wallets
 
 
@@ -60,6 +63,11 @@ GET_ROUTES = {
     "/api/strategy-revisions": lambda db, qs: ep_strategy_revisions(
         db, int(qs.get("limit", [50])[0])
     ),
+    "/api/risk-radar": lambda db, qs: ep_risk_radar(db, qs),
+    "/api/risk-radar/intents": lambda db, qs: ep_risk_intents(db, qs),
+    "/api/risk-radar/thresholds": lambda db, qs: ep_risk_thresholds(db),
+    "/api/connections": lambda db, qs: ep_connections(db),
+    "/api/credential-wrap-key": lambda db, qs: ep_credential_wrap_key(db),
 }
 
 
@@ -98,11 +106,14 @@ def _post_command_payload(db_path, auth, path, body, authed):
     if ctype not in ALLOWED_COMMANDS:
         return 400, {"error": "bad_command_type", "detail": ctype}
     try:
+        payload = validate_command_payload(ctype, body.get("payload"))
         if ctype in PROCESS_COMMANDS:
-            cmd_id, status = exec_process_command(db_path, ctype, body.get("payload"))
+            cmd_id, status = exec_process_command(db_path, ctype, payload)
         else:
-            cmd_id, status = insert_command(db_path, ctype, body.get("payload"), body.get("idempotencyKey"))
+            cmd_id, status = insert_command(db_path, ctype, payload, body.get("idempotencyKey"))
         return 202, {"commandId": cmd_id, "status": status}
+    except ValueError as e:
+        return 422, {"error": "invalid_payload", "detail": str(e)}
     except Exception as e:  # noqa: BLE001
         return 500, {"error": "server_error", "detail": str(e)}
 

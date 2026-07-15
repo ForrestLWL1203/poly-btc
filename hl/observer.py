@@ -32,6 +32,7 @@ from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
                           stop_px as engine_stop_px, tier_for_sigma)
 from .fill_transition import classify_fill_transition
+from .risk_radar import RiskRadar
 from .sector import parse_json_obj, policy_allows_coin
 from .util import f, now_iso, now_ms
 
@@ -170,6 +171,7 @@ class Observer:
         self.paused = False              # dashboard pause: stop opening NEW copies; existing keep to close
         self._proc_state = "running"     # process_status state machine (running|pausing|paused|resuming)
         self._proc_owner = f"observer:{os.getpid()}"
+        self.risk_radar = RiskRadar(db)
 
     # -- paper account ------------------------------------------------------
     def _available(self, book=None) -> float:
@@ -890,6 +892,7 @@ class Observer:
             )
             self.db.execute("DELETE FROM account_stats WHERE ts < ?", (stats_cutoff,))
             self.db.commit()
+            self.risk_radar.prune()
             if n:
                 _log(f"pruned {n} live_fills older than {config.LIVE_FILLS_RETENTION_DAYS}d")
             await asyncio.sleep(6 * 3600)
@@ -912,7 +915,9 @@ class Observer:
         """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
         toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
-        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle", "reload_params")
+        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle", "reload_params",
+                 "risk_radar_start", "risk_radar_stop", "set_provider_credential",
+                 "delete_provider_credential", "test_provider_connection")
         last_hb = 0.0
         while not self.stop:
             try:
@@ -958,6 +963,22 @@ class Observer:
             return await self._cmd_close_all()
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
+        if ctype == "risk_radar_start":
+            return await self.risk_radar.set_mode(True)
+        if ctype == "risk_radar_stop":
+            return await self.risk_radar.set_mode(False)
+        if ctype == "set_provider_credential":
+            if payload.get("provider") != "deepseek" or not isinstance(payload.get("envelope"), dict):
+                raise ValueError("a DeepSeek encrypted credential envelope is required")
+            return await self.risk_radar.install_credential(payload["envelope"])
+        if ctype == "delete_provider_credential":
+            if payload.get("provider") != "deepseek":
+                raise ValueError("unsupported provider")
+            return self.risk_radar.delete_credential()
+        if ctype == "test_provider_connection":
+            if payload.get("provider") != "deepseek":
+                raise ValueError("unsupported provider")
+            return await self.risk_radar.test_connection()
         if ctype == "reload_params":               # UI saved follow params or Core membership changed
             created = None
             if payload.get("createStrategyRevision"):
@@ -1161,6 +1182,8 @@ class Observer:
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
         asyncio.create_task(self.reconcile_loop())    # periodic orphan-check: close copies whose master exited
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
+        asyncio.create_task(self.risk_radar.assessment_loop())  # 15m AI+local risk assessment (shadow-only)
+        asyncio.create_task(self.risk_radar.balance_loop())     # low-frequency DeepSeek balance/runway check
         asyncio.create_task(self.poll_stock_mids())   # stock/commodity marks (REST allMids, fast)
         asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book, slower)
         asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)
@@ -1411,6 +1434,16 @@ class Observer:
                 self.db.commit()
                 book.open_ep.pop((addr, coin), None)
                 return
+            # Shadow-only: capture the immutable entry-time decision after every existing execution gate has
+            # passed, but before the paper fill is committed.  This call never influences `plan.ok` or sizing.
+            if book is self.taker and coin in self.crypto_coins:
+                try:
+                    self.risk_radar.record_intent(
+                        ep["pos_id"], addr, coin, ep["side"], source_oid=ep.get("open_oid")
+                    )
+                except Exception as exc:  # noqa: BLE001 — radar audit must never break copy execution
+                    self._rollback_db()
+                    _log(f"risk radar intent audit failed for pos {ep['pos_id']}: {exc}")
             lev = plan.leverage
             margin = plan.margin
             notional = plan.notional
@@ -1693,6 +1726,12 @@ class Observer:
             self._save_account(book)
             self.db.commit()
             if closing:
+                if book is self.taker:
+                    try:
+                        self.risk_radar.resolve_intent(ep["pos_id"])
+                    except Exception as exc:  # noqa: BLE001 — settlement annotation is non-execution state
+                        self._rollback_db()
+                        _log(f"risk radar settlement failed for pos {ep['pos_id']}: {exc}")
                 if book.stats_loaded:
                     book.closed_n += 1
                     book.wins_n += 1 if ep["realized_pnl"] > 0 else 0

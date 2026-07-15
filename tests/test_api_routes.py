@@ -15,6 +15,11 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("/api/params", api_routes.GET_ROUTES)
         self.assertIn("/api/scan-status", api_routes.GET_ROUTES)
         self.assertIn("/api/score-dist", api_routes.GET_ROUTES)
+        self.assertIn("/api/risk-radar", api_routes.GET_ROUTES)
+        self.assertIn("/api/risk-radar/intents", api_routes.GET_ROUTES)
+        self.assertIn("/api/risk-radar/thresholds", api_routes.GET_ROUTES)
+        self.assertIn("/api/connections", api_routes.GET_ROUTES)
+        self.assertIn("/api/credential-wrap-key", api_routes.GET_ROUTES)
         self.assertNotIn("/api/shadow", api_routes.GET_ROUTES)
 
         prefixes = [prefix for prefix, _handler in api_routes.GET_PREFIX_ROUTES]
@@ -70,6 +75,13 @@ class ApiRouteTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(code, 401)
         self.assertEqual(payload, {"error": "unauthorized"})
+
+    def test_credential_command_rejects_plaintext_before_database_insert(self):
+        body = {"type": "set_provider_credential", "payload": {"provider": "deepseek", "apiKey": "plaintext"}}
+        handled, code, payload = api_routes.dispatch_post("db", object(), "/api/commands", body, True)
+        self.assertTrue(handled)
+        self.assertEqual(code, 422)
+        self.assertEqual(payload["error"], "invalid_payload")
 
     def test_dispatch_patch_updates_params_payload(self):
         with patch.object(api_routes, "patch_params", return_value={"X": 1}) as patch_params:

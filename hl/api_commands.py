@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import base64
 
 from . import procman
 from .api_common import q1
@@ -10,8 +11,39 @@ from .util import now_iso
 
 ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
                     "observer_start", "observer_stop", "rescan", "scan_stop",
-                    "patch_params", "reload_params"}
+                    "patch_params", "reload_params", "risk_radar_start", "risk_radar_stop",
+                    "set_provider_credential", "delete_provider_credential", "test_provider_connection"}
 PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan", "scan_stop"}
+
+
+def validate_command_payload(ctype, payload):
+    """Reject plaintext/oversized credential payloads before they can enter the command table."""
+    payload = payload or {}
+    if ctype in {"risk_radar_start", "risk_radar_stop"}:
+        if payload:
+            raise ValueError("risk radar control payload must be empty")
+    elif ctype in {"delete_provider_credential", "test_provider_connection"}:
+        if payload != {"provider": "deepseek"}:
+            raise ValueError("unsupported provider payload")
+    elif ctype == "set_provider_credential":
+        if set(payload) != {"provider", "envelope"} or payload.get("provider") != "deepseek":
+            raise ValueError("only an encrypted DeepSeek credential envelope is accepted")
+        envelope = payload.get("envelope")
+        required = {"envelopeVersion", "keyId", "wrappedKey", "nonce", "ciphertext"}
+        if not isinstance(envelope, dict) or set(envelope) != required or envelope.get("envelopeVersion") != 1:
+            raise ValueError("invalid credential envelope")
+        if not isinstance(envelope.get("keyId"), str) or len(envelope["keyId"]) != 24:
+            raise ValueError("invalid credential wrapping key id")
+        limits = {"wrappedKey": 1024, "nonce": 64, "ciphertext": 16_384}
+        for field, limit in limits.items():
+            value = envelope.get(field)
+            if not isinstance(value, str) or len(value) > limit:
+                raise ValueError("invalid credential envelope field")
+            try:
+                base64.b64decode(value, validate=True)
+            except (ValueError, TypeError):
+                raise ValueError("invalid credential envelope encoding") from None
+    return payload
 
 
 def rw_connect(path):

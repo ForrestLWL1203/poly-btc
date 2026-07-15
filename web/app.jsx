@@ -5,6 +5,7 @@ import { History } from "./components/History.jsx";
 import { ObsMask } from "./components/ObsMask.jsx";
 import { Overview } from "./components/Overview.jsx";
 import { Positions } from "./components/Positions.jsx";
+import { RiskRadar } from "./components/RiskRadar.jsx";
 import { Settings } from "./components/Settings.jsx";
 import { Wallets } from "./components/Wallets.jsx";
 import {
@@ -26,10 +27,10 @@ const DASH_PW = "mock123";
 
 /* ----------------------------------------------------------------- shell */
 const NAV = [
-  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
+  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets], ["risk", "风险雷达", IC.risk]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", risk: "风险雷达 Risk Radar", discovery: "采集 Discovery", settings: "策略参数 Settings" };
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
@@ -174,6 +175,7 @@ function Dashboard({ onLogout }) {
         {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} streamOpen={livePositions} />}
         {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} toast={toast} />}
+        {page === "risk" && <RiskRadar />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings confirm={setConfirmCfg} />}
       </main>
