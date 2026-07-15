@@ -211,6 +211,15 @@ tr.detail-row > td { padding: 0 !important; background: rgba(255, 255, 255, .015
 .strip-item span { font-size: 10px; color: var(--t3); text-transform: uppercase; letter-spacing: .5px; }
 .strip-item b { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono);
   font-size: 16px; line-height: 1.2; font-weight: 600; color: var(--t1); white-space: nowrap; }
+.strip-item.strip-radar { gap: 2px; }
+.strip-radar-title { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.strip-radar-title .dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; }
+.strip-radar-values { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; width: 100%; min-width: 0; }
+.strip-radar-values b { font-size: 12px; }
+.strip-radar-values small { color: var(--t3); font-family: var(--mono); font-size: 8px; white-space: nowrap; }
+.strip-risk-split { display: flex; width: 100%; height: 3px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.05); }
+.strip-risk-split i,.strip-risk-split em { display: block; height: 100%; }
+.strip-risk-split i { background: var(--red); }.strip-risk-split em { background: var(--green); }
 
 /* content */
 .content { padding: 4px 26px 40px; }

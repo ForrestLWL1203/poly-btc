@@ -123,8 +123,27 @@ class RiskApiTests(unittest.TestCase):
 
         self.assertEqual(len(payload["intents"]), 2)
         self.assertEqual(payload["pagination"], {
-            "page": 1, "size": 5, "total": 7, "totalPages": 2,
+            "page": 1, "size": 5, "total": 7, "totalPages": 2, "affectedOnly": False,
         })
+
+    def test_shadow_intents_can_hide_pure_pass_through_rows(self):
+        for n, blocked in enumerate((0, 1)):
+            pos_id = self.db.execute(
+                "INSERT INTO copy_position (addr,coin,side,status,opened_at) VALUES (?,?,?,?,?)",
+                (f"0xfilter{n}", "ETH", "short", "open", f"t{n}"),
+            ).lastrowid
+            self.db.execute(
+                "INSERT INTO market_risk_intent (pos_id,addr,coin,side,would_block,opened_at,status) "
+                "VALUES (?,?,?,?,?,?,'open')",
+                (pos_id, f"0xfilter{n}", "ETH", "short", blocked, f"t{n}"),
+            )
+        self.db.commit()
+
+        payload = ep_risk_intents(self.db, {"affectedOnly": ["1"], "size": ["5"]})
+
+        self.assertEqual([row["wallet"] for row in payload["intents"]], ["0xfilter1"])
+        self.assertEqual(payload["pagination"]["total"], 1)
+        self.assertTrue(payload["pagination"]["affectedOnly"])
 
 
 if __name__ == "__main__":

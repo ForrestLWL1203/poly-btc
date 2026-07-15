@@ -64,6 +64,10 @@ function Dashboard({ onLogout }) {
 
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const obsUp = obs === "running" || obs === "paused";            // process is alive (vs not started)
+  const radarState = ov && ov.system && ov.system.riskRadar ? ov.system.riskRadar : {};
+  const radarRunning = !!radarState.enabled && obsUp;
+  const radarBull = radarState.bullishScore == null ? 50 : Number(radarState.bullishScore);
+  const radarBear = radarState.bearishScore == null ? 50 : Number(radarState.bearishScore);
   const pausing = !!obsPending;
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
@@ -164,7 +168,11 @@ function Dashboard({ onLogout }) {
             <div className="strip-item"><span>今日</span><b className={cls(ov.todayPct)}>{fPct(ov.todayPct)}</b></div>
             <div className="strip-item"><span>在持</span><b>{ov.openCount}</b></div>
             <div className="strip-item"><span>可用</span><b>{fUsd(ov.availableBalance)}</b></div>
-            <div className="strip-item"><span>被跟</span><b>{ov.system.watchlistCount}</b></div>
+            <div className="strip-item strip-radar">
+              <span className="strip-radar-title"><i className="dot" style={{ background: radarRunning ? "var(--green)" : "var(--red)", animation: radarRunning ? "pulse 1.6s infinite" : "none" }} />风险雷达运行状态</span>
+              <div className="strip-radar-values"><b className={radarRunning ? "up" : "down"}>{radarRunning ? "运行中" : "未运行"}</b><small>空 {radarBear.toFixed(0)} / 多 {radarBull.toFixed(0)}</small></div>
+              <div className="strip-risk-split" aria-label={`空 ${radarBear.toFixed(0)}，多 ${radarBull.toFixed(0)}`}><i style={{ width: radarBear + "%" }} /><em style={{ width: radarBull + "%" }} /></div>
+            </div>
             <div className="strip-item"><span>浮动</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</b></div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
               return <div className="strip-item"><span>采集</span><b style={{ color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</b></div>; })()}

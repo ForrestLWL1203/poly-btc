@@ -29,7 +29,7 @@ export function RiskRadar() {
   const load = useCallback(async () => {
     const [r, i, t] = await Promise.all([
       api.get(`/api/risk-radar?assessmentPage=${assessmentPage}&assessmentSize=10`),
-      api.get(`/api/risk-radar/intents?page=${episodePage}&size=5`),
+      api.get(`/api/risk-radar/intents?page=${episodePage}&size=5&affectedOnly=1`),
       api.get("/api/risk-radar/thresholds"),
     ]);
     setRadar(r);
@@ -106,9 +106,9 @@ export function RiskRadar() {
         </div>
       </div>
 
-      <div className="section-h"><h2>Shadow 动作轨迹</h2><span className="muted">每页 5 条 · 仅显示决策与双账本结果</span></div>
+      <div className="section-h"><h2>Shadow 影响记录</h2><span className="muted">仅展示发生拦截、延迟入场或净影响的单子 · 每页 5 条</span></div>
       <div className="card shadow-list">
-        {!intents.length && <div className="empty">尚无雷达开启后的 Crypto 敞口动作</div>}
+        {!intents.length && <div className="empty">尚无产生实际差异的 Shadow 记录</div>}
         {intents.map(i => {
           const s = i.shadow;
           const baseline = s?.baselineNetPnl ?? (i.netPnl != null ? i.netPnl : i.estimatedPnl);

@@ -122,9 +122,14 @@ def ep_risk_radar(db, qs=None):
 
 def ep_risk_intents(db, qs):
     qs = qs or {}
+    affected_only = str((qs.get("affectedOnly", [""]) or [""])[0]).lower() in {"1", "true", "yes", "on"}
+    affected_where = (" WHERE (i.would_block=1 OR COALESCE(e.entry_blocked,0)=1 "
+                      "OR COALESCE(e.delayed_entry,0)=1 OR COALESCE(e.blocked_entries,0)>0 "
+                      "OR ABS(COALESCE(e.net_benefit,0))>0.000000001)" if affected_only else "")
     legacy_limit = _query_int(qs, "limit", 5)
     size = max(1, min(50, _query_int(qs, "size", legacy_limit)))
-    total_row = q1(db, "SELECT COUNT(*) total FROM market_risk_intent")
+    total_row = q1(db, "SELECT COUNT(*) total FROM market_risk_intent i "
+                       "LEFT JOIN market_risk_episode e ON e.pos_id=i.pos_id" + affected_where)
     total = int(total_row["total"] or 0) if total_row else 0
     total_pages = max(1, (total + size - 1) // size)
     page = min(max(0, _query_int(qs, "page", 0)), total_pages - 1)
@@ -139,6 +144,7 @@ def ep_risk_intents(db, qs):
                     "LEFT JOIN market_risk_assessment a ON a.assessment_id=i.assessment_id "
                     "LEFT JOIN copy_position cp ON cp.pos_id=i.pos_id "
                     "LEFT JOIN market_risk_episode e ON e.pos_id=i.pos_id "
+                    + affected_where + " "
                     "ORDER BY i.intent_id DESC LIMIT ? OFFSET ?",
                 (config.TAKER_FEE, size, page * size))
     pos_ids = [r["pos_id"] for r in rows]
@@ -196,6 +202,7 @@ def ep_risk_intents(db, qs):
         })
     return {"intents": intents, "pagination": {
         "page": page, "size": size, "total": total, "totalPages": total_pages,
+        "affectedOnly": affected_only,
     }}
 
 

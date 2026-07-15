@@ -146,6 +146,27 @@ class ApiOverviewPerfTests(unittest.TestCase):
 
         self.assertEqual(overview["closedCount"], 2)
 
+    def test_overview_exposes_compact_risk_radar_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            assessment_id = db.execute(
+                "INSERT INTO market_risk_assessment "
+                "(assessed_for_ms,status,bullish_score,bearish_score,created_at) VALUES (1,'ok',78,22,'now')"
+            ).lastrowid
+            db.execute(
+                "INSERT OR REPLACE INTO market_risk_state "
+                "(id,mode,status,current_assessment_id,updated_at) VALUES (1,'shadow','running',?,'now')",
+                (assessment_id,),
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        self.assertEqual(overview["system"]["riskRadar"], {
+            "enabled": True, "bullishScore": 78.0, "bearishScore": 22.0,
+        })
+
     def test_overview_reuses_gross_traded_until_copy_actions_change(self):
         if hasattr(api_overview, "_GROSS_TRADED_CACHE"):
             api_overview._GROSS_TRADED_CACHE.clear()
