@@ -105,7 +105,7 @@ export function WalletDrawer({ address, onClose }) {
                       <div className="score-window" key={label}>
                         <span>{label}</span>
                         <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
-                        <small>{n || 0} 笔{openPnl != null && Math.abs(openPnl) >= 0.5 ? ` · 开放 ${fSign(openPnl, 0)}` : ""}</small>
+                        <small>{n || 0} 笔{openPnl != null && Math.abs(openPnl) >= 0.5 ? ` · ${openPnl < 0 ? "持仓亏损" : "持仓盈利"} ${fSign(openPnl, 0)}` : ""}</small>
                       </div>
                     ))}
                   </div>

@@ -89,12 +89,12 @@ export function Wallets({ confirm, toast }) {
                       <b style={{ color: (w.copyBacktestNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.copyBacktestNetPnl != null ? fSign(w.copyBacktestNetPnl, 0) : "—"}</b>
                       <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
                         30日已平 {w.copyBacktestNetPnl != null ? fSign((w.copyBacktestNetPnl || 0) - (w.copyBacktestUnrealizedPnl || 0), 0) : "—"}
-                        {Math.abs(w.copyBacktestUnrealizedPnl || 0) >= 0.5 && <React.Fragment> · 开放 <span style={{ color: (w.copyBacktestUnrealizedPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.copyBacktestUnrealizedPnl, 0)}</span></React.Fragment>}
+                        {Math.abs(w.copyBacktestUnrealizedPnl || 0) >= 0.5 && <React.Fragment> · {(w.copyBacktestUnrealizedPnl || 0) < 0 ? "持仓亏损" : "持仓盈利"} <span style={{ color: (w.copyBacktestUnrealizedPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.copyBacktestUnrealizedPnl, 0)}</span></React.Fragment>}
                       </div>
                       <div style={{ fontSize: 11, marginTop: 2, color: (w.copyBacktest7dNetPnl || 0) < 0 ? "var(--red-l)" : "var(--t2)" }}>
                         7日合计 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"} · {w.copyBacktest7dClosedN || 0}笔
                       </div>
-                      {w.copyBacktestValuationStatus && w.copyBacktestValuationStatus !== "complete" && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>开放仓位估值待确认</div>}
+                      {w.copyBacktestValuationStatus && w.copyBacktestValuationStatus !== "complete" && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>持仓估值待确认</div>}
                     </td>
                     <td className="num">
                       {w.followCount > 0 ? <React.Fragment>
