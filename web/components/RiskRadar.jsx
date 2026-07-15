@@ -71,7 +71,7 @@ export function RiskRadar() {
   const actionCount = (summary.blockedEntries || 0) + (summary.allowedEntries || 0);
   const impactTitle = benefit > 0 ? "AI 净保护" : benefit < 0 ? "AI 净伤害" : "AI 净影响";
   const impactNote = benefit > 0 ? "过滤动作后收益优于基准" : benefit < 0 ? "过滤动作后收益低于基准" : "已结算样本暂无净差异";
-  const assessmentPager = radar.assessmentPagination || { page: 0, total: radar.assessments?.length || 0, totalPages: 1, retentionLimit: 0 };
+  const assessmentPager = radar.assessmentPagination || { page: 0, total: radar.assessments?.length || 0, totalPages: 1, retentionHours: 48 };
   const verdict = liveBlock ? `拟拦截开${current.blockSide === "long" ? "多" : "空"}` : "未确认拦截";
 
   return (
@@ -152,7 +152,7 @@ export function RiskRadar() {
           </div>;
         })}
         {!radar.assessments?.length && <div className="empty">暂无判断记录</div>}
-        <Pager meta={assessmentPager} onPage={setAssessmentPage} note={`数据库保留最近 ${assessmentPager.retentionLimit?.toLocaleString()} 条`} />
+        <Pager meta={assessmentPager} onPage={setAssessmentPage} note={`普通判断仅保留近 ${assessmentPager.retentionHours || 48} 小时`} />
       </div>
     </div>
   );

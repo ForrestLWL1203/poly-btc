@@ -2,6 +2,7 @@ import asyncio
 import base64
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -80,6 +81,39 @@ class RiskRadarTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(tuple(rows[0]), (0, "short", None))
         self.assertEqual(tuple(rows[1]), (1, "short", "steady"))
+
+    def test_concurrent_triggers_share_one_assessment_for_the_same_slot(self):
+        features = {"asOfMs": 1, "markets": {
+            coin: {interval: {"available": True, "emaStack": 1, "macdHistogramPct": .01, "rsi14": 62}
+                   for interval in ("15m", "1h", "4h")} for coin in ("BTC", "ETH")
+        }, "context": {}, "local": {"bullishScore": 80, "evidenceGroups": ["trend:up"]}}
+        self.radar.mode = "shadow"
+        self.radar._set_state(mode="shadow", status="running")
+        self.radar.credentials.secret = lambda _provider: "dummy"
+
+        def build_features():
+            time.sleep(.05)
+            return features, {"present": 6, "expected": 6, "ratio": 1}
+
+        calls = []
+
+        def assess(_client, _features):
+            calls.append(1)
+            return ({"bullish_score": 80, "confidence": 100, "regime": "up", "reason": "trend",
+                     "evidence": ["trend"], "invalidating_conditions": ["reversal"]},
+                    {"choices": []}, 10, {"prompt_tokens": 1000, "completion_tokens": 100})
+
+        self.radar.build_features = build_features
+
+        async def run_both():
+            return await asyncio.gather(self.radar.assess_once(), self.radar.assess_once())
+
+        with patch("hl.risk_radar.DeepSeekClient.assess", assess), patch(
+                "hl.risk_radar.now_ms", return_value=1_800_000):
+            asyncio.run(run_both())
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM market_risk_assessment").fetchone()[0], 1)
 
     def test_intent_decision_is_immutable_and_resolves_once(self):
         self.radar.mode = "shadow"
@@ -207,6 +241,28 @@ class RiskRadarTests(unittest.TestCase):
         self.assertEqual([r[0] for r in self.db.execute(
             "SELECT snapshot_id FROM market_risk_snapshot ORDER BY snapshot_id"
         )], [3, 4, 5])
+
+    def test_prune_removes_unreferenced_duplicate_slot_rows(self):
+        self.db.execute(
+            "INSERT INTO market_risk_snapshot (snapshot_id,assessed_for_ms,features_json,coverage_json,input_hash,created_at) "
+            "VALUES (1,900000, '{}','{}','slot','now')"
+        )
+        for assessment_id in (1, 2):
+            self.db.execute(
+                "INSERT INTO market_risk_assessment (assessment_id,snapshot_id,assessed_for_ms,status,created_at) "
+                "VALUES (?,1,900000,'ok','now')",
+                (assessment_id,),
+            )
+        self.db.commit()
+
+        self.radar.prune()
+
+        self.assertEqual([r[0] for r in self.db.execute(
+            "SELECT assessment_id FROM market_risk_assessment ORDER BY assessment_id"
+        )], [2])
+        self.assertEqual([r[0] for r in self.db.execute(
+            "SELECT snapshot_id FROM market_risk_snapshot ORDER BY snapshot_id"
+        )], [1])
 
     def test_invalid_model_output_fails_closed_to_no_assessment(self):
         with self.assertRaises(ValueError):

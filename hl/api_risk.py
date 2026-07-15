@@ -116,6 +116,7 @@ def ep_risk_radar(db, qs=None):
             "total": assessment_total,
             "totalPages": assessment_pages,
             "retentionLimit": config.RISK_RADAR_MAX_ASSESSMENTS,
+            "retentionHours": config.RISK_RADAR_RETENTION_DAYS * 24,
         },
     }
 

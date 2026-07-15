@@ -210,6 +210,7 @@ class RiskRadar:
         self.mode = self._load_mode()
         self.stop = False
         self._next_assessment_attempt_ms = 0
+        self._assessment_inflight = False
         self._ensure_state()
 
     def _load_mode(self):
@@ -346,6 +347,17 @@ class RiskRadar:
         return features, {"present": present, "expected": expected, "ratio": present / expected}
 
     async def assess_once(self):
+        # set_mode/install/test and the 15-second loop may all request an immediate assessment.  Serialize
+        # them before the first await so one 15-minute slot can never spend provider balance twice.
+        if self._assessment_inflight:
+            return None
+        self._assessment_inflight = True
+        try:
+            return await self._assess_once_serialized()
+        finally:
+            self._assessment_inflight = False
+
+    async def _assess_once_serialized(self):
         if self.mode != "shadow":
             return None
         if now_ms() < self._next_assessment_attempt_ms:
@@ -692,9 +704,41 @@ class RiskRadar:
         self.db.execute("DELETE FROM provider_balance_snapshot WHERE checked_at < ?", (cutoff,))
         self.db.execute("DELETE FROM market_risk_assessment WHERE created_at < ? AND assessment_id NOT IN "
                         "(SELECT assessment_id FROM market_risk_intent WHERE assessment_id IS NOT NULL UNION "
-                        " SELECT assessment_id FROM market_risk_action WHERE assessment_id IS NOT NULL)", (cutoff,))
+                        " SELECT assessment_id FROM market_risk_action WHERE assessment_id IS NOT NULL) "
+                        "AND assessment_id NOT IN (SELECT current_assessment_id FROM market_risk_state "
+                        "WHERE current_assessment_id IS NOT NULL)", (cutoff,))
         self.db.execute("DELETE FROM market_risk_snapshot WHERE created_at < ? AND snapshot_id NOT IN "
                         "(SELECT snapshot_id FROM market_risk_assessment WHERE snapshot_id IS NOT NULL)", (cutoff,))
+        # Older builds could launch set_mode/test/loop assessments concurrently.  Keep every order-referenced
+        # verdict (plus the current state), otherwise retain only the newest row for each 15-minute slot.
+        protected = {
+            int(row[0]) for row in self.db.execute(
+                "SELECT assessment_id FROM market_risk_intent WHERE assessment_id IS NOT NULL UNION "
+                "SELECT assessment_id FROM market_risk_action WHERE assessment_id IS NOT NULL UNION "
+                "SELECT current_assessment_id FROM market_risk_state WHERE current_assessment_id IS NOT NULL"
+            ).fetchall()
+        }
+        duplicate_ids = []
+        slot_rows = self.db.execute(
+            "SELECT assessment_id,assessed_for_ms FROM market_risk_assessment "
+            "ORDER BY assessed_for_ms DESC,assessment_id DESC"
+        ).fetchall()
+        by_slot = {}
+        for assessment_id, assessed_for_ms in slot_rows:
+            by_slot.setdefault(assessed_for_ms, []).append(int(assessment_id))
+        for ids in by_slot.values():
+            if len(ids) <= 1:
+                continue
+            keep = {assessment_id for assessment_id in ids if assessment_id in protected}
+            if not keep:
+                keep.add(ids[0])
+            duplicate_ids.extend(assessment_id for assessment_id in ids if assessment_id not in keep)
+        if duplicate_ids:
+            marks = ",".join("?" for _ in duplicate_ids)
+            self.db.execute(
+                f"DELETE FROM market_risk_assessment WHERE assessment_id IN ({marks})",
+                tuple(duplicate_ids),
+            )
         # Bound the high-frequency judgement trail by row count as well as age.  Open/resolvable Shadow
         # bookkeeping keeps its referenced assessment; all other rows outside the newest budget are removed.
         self.db.execute(

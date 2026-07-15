@@ -64,7 +64,7 @@ class RiskApiTests(unittest.TestCase):
         self.assertEqual(payload["currentAssessment"]["id"], 5)
         self.assertEqual(payload["assessmentPagination"], {
             "page": 1, "size": 2, "total": 5, "totalPages": 3,
-            "retentionLimit": 2880,
+            "retentionLimit": 192, "retentionHours": 48,
         })
 
     def test_v2_summary_and_projection_compare_action_filtered_ledger(self):
