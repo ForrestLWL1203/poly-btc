@@ -58,6 +58,40 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
         self.assertEqual(windows[30]["closed_n"], 1)
         self.assertGreater(windows[30]["copy_net_pnl"], 0)
 
+    def test_open_position_terminal_mark_is_included_in_every_economic_window(self):
+        day = 86_400_000
+        now = 40 * day
+        addr = "0xabc"
+        fills = [{
+            "user": addr, "time": now - day, "tid": 1, "coin": "BTC", "side": "B",
+            "sz": "100", "startPosition": "0", "px": "100", "oid": 1, "crossed": True,
+        }]
+
+        windows = scanner_copy_bt.copy_bt_results(
+            addr, fills, now, self._params(), valuation_marks={"BTC": 90},
+        )
+
+        for days in (30, 14, 7):
+            self.assertEqual(windows[days]["valuation_status"], "complete")
+            self.assertLess(windows[days]["unrealized_pnl"], 0)
+            self.assertAlmostEqual(
+                windows[days]["copy_net_pnl"],
+                windows[days]["closed_net_pnl"] + windows[days]["unrealized_pnl"],
+            )
+
+    def test_open_position_without_terminal_mark_is_not_core_safe(self):
+        day = 86_400_000
+        now = 40 * day
+        addr = "0xabc"
+        fills = [{
+            "user": addr, "time": now - day, "tid": 1, "coin": "BTC", "side": "B",
+            "sz": "100", "startPosition": "0", "px": "100", "oid": 1, "crossed": True,
+        }]
+
+        windows = scanner_copy_bt.copy_bt_results(addr, fills, now, self._params())
+
+        self.assertEqual(windows[7]["valuation_status"], "missing_marks")
+
 
 if __name__ == "__main__":
     unittest.main()

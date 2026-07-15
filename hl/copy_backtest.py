@@ -85,7 +85,7 @@ def _price_events(price_path) -> list[dict]:
 
 class Backtest:
     def __init__(self, addr, sigmas=None, initial_balance=None, overrides=None, market_ctx=None,
-                 price_path_meta=None):
+                 price_path_meta=None, valuation_marks=None, valuation_asof_ms=None):
         overrides = overrides or {}
         self.addr = (addr or "").lower()
         self.sigmas = sigmas or {}
@@ -168,7 +168,12 @@ class Backtest:
         self.market_ctx = market_ctx or {}
         self.replay_cost_mult = max(1.0, f(overrides.get("REPLAY_COST_MULT", 1.0)))
         self.price_path_points = 0
+        self.path_mark_coins = set()
         self.price_path_meta = price_path_meta or {}
+        self.valuation_marks = {
+            str(coin): f(px) for coin, px in (valuation_marks or {}).items() if f(px) > 0
+        }
+        self.valuation_asof_ms = int(valuation_asof_ms or 0) or None
         self.path_boundary_skips = 0
         self.ambiguous_path_events = set()
         self.ambiguous_path_mode = str(overrides.get("AMBIGUOUS_PATH_MODE", "ignore") or "ignore")
@@ -364,6 +369,7 @@ class Backtest:
             lo, hi = hi, lo
         close = f(x.get("close")) or (lo + hi) / 2
         self.last_px[coin] = close
+        self.path_mark_coins.add(coin)
         self._mark_stops_range(
             coin, lo, hi, x.get("time"), candle_open_time=x.get("open_time"),
             ambiguous=bool(x.get("has_fill_events")), candle_close_time=x.get("close_time"),
@@ -695,9 +701,27 @@ class Backtest:
 
     def result(self):
         unreal = 0.0
+        valued_open = 0
+        missing_mark_coins = []
+        open_positions = []
         for (_, coin), ep in self.open.items():
-            px = self.last_px.get(coin) or ep["entry_px"]
-            unreal += ep["rem_size"] * (px - ep["entry_px"]) * ep["sign"]
+            terminal_mark = self.valuation_marks.get(coin)
+            path_mark = self.last_px.get(coin) if coin in self.path_mark_coins else None
+            mark_px = terminal_mark or path_mark
+            mark_valid = bool(mark_px and mark_px > 0)
+            if mark_valid:
+                valued_open += 1
+            else:
+                missing_mark_coins.append(coin)
+                # Retain the historical fallback for diagnostics only. Qualification consumes
+                # valuation_status and must not treat a last fill as a trustworthy current mark.
+                mark_px = self.last_px.get(coin) or ep["entry_px"]
+            position_unreal = ep["rem_size"] * (mark_px - ep["entry_px"]) * ep["sign"]
+            unreal += position_unreal
+            open_positions.append(summarize_position(
+                ep, mark_px=mark_px, unrealized_pnl=position_unreal,
+                valuation_complete=mark_valid,
+            ))
         closed_net = sum(p["realized_net"] for p in self.closed)
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
         stops = sum(1 for p in self.closed if p.get("status") == "stopped")
@@ -780,6 +804,10 @@ class Backtest:
             "closed_net_pnl": closed_net,
             "copy_gross_pnl": self.gross_pnl,
             "unrealized_pnl": unreal,
+            "valuation_status": "complete" if not missing_mark_coins else "missing_marks",
+            "valuation_coverage": valued_open / len(self.open) if self.open else 1.0,
+            "valuation_missing_coins": sorted(set(missing_mark_coins)),
+            "valuation_asof_ms": self.valuation_asof_ms,
             "fee_drag": self.fee_drag,
             "target_open_events": self.target_open_events,
             "opened_n": self.opened_n,
@@ -832,12 +860,12 @@ class Backtest:
             "fallback_reasons": fallback_reasons,
             "skip_reasons": dict(self.skip_reasons),
             "positions": [summarize_position(p) for p in self.closed],
-            "open_positions": [summarize_position(p) for p in self.open.values()],
+            "open_positions": open_positions,
         }
 
 
-def summarize_position(p):
-    return {
+def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_complete=None):
+    out = {
         "addr": p.get("addr"),
         "coin": p["coin"],
         "side": p["side"],
@@ -860,22 +888,33 @@ def summarize_position(p):
         "master_leverage": p.get("master_leverage"),
         "leverage": p["leverage"],
         "margin": p["margin"],
+        "remaining_size": p.get("rem_size"),
     }
+    if mark_px is not None:
+        out["mark_px"] = mark_px
+    if unrealized_pnl is not None:
+        out["unrealized_pnl"] = unrealized_pnl
+    if valuation_complete is not None:
+        out["valuation_complete"] = bool(valuation_complete)
+    return out
 
 
 def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None,
-                 market_ctx=None, price_path_meta=None):
+                 market_ctx=None, price_path_meta=None, valuation_marks=None,
+                 valuation_asof_ms=None):
     return Backtest(addr, sigmas=sigmas, initial_balance=initial_balance,
                     overrides=overrides, market_ctx=market_ctx,
-                    price_path_meta=price_path_meta).run(fills, price_path=price_path)
+                    price_path_meta=price_path_meta, valuation_marks=valuation_marks,
+                    valuation_asof_ms=valuation_asof_ms).run(fills, price_path=price_path)
 
 
 def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> dict:
-    """Slice a warm replay into a closed-position evaluation window.
+    """Slice a warm replay into a current economic evaluation window.
 
     The replay starts before ``start_ms`` so positions already open at the
-    boundary are reconstructed. Only positions closed inside the requested
-    window contribute samples, PnL and drawdown.
+    boundary are reconstructed. Closed samples remain window-local, while currently
+    open canonical positions contribute their terminal mark-to-market overlay. This
+    prevents an open loss from disappearing merely because it has not closed yet.
     """
     out = dict(result or {})
     positions = [
@@ -885,6 +924,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     ]
     positions.sort(key=lambda position: int(position.get("closed_at") or 0))
     closed_net = sum(f(position.get("net_pnl")) for position in positions)
+    open_positions = [dict(position) for position in (out.get("open_positions") or [])]
+    open_unrealized = sum(f(position.get("unrealized_pnl")) for position in open_positions)
+    valuation_status = str(out.get("valuation_status") or (
+        "complete" if not open_positions else "missing_marks"
+    ))
     gross = sum(f(position.get("gross_pnl")) for position in positions)
     fees = sum(f(position.get("fee_drag")) for position in positions)
     wins = sum(1 for position in positions if f(position.get("net_pnl")) > 0)
@@ -940,10 +984,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "ambiguous_liquidations": len(ambiguous_ranges),
         "ambiguous_path_ranges": ambiguous_ranges,
         "copy_win_rate": wins / len(positions) if positions else 0.0,
-        "copy_net_pnl": closed_net,
+        "copy_net_pnl": closed_net + open_unrealized,
         "closed_net_pnl": closed_net,
         "copy_gross_pnl": gross,
-        "unrealized_pnl": 0.0,
+        "unrealized_pnl": open_unrealized,
+        "valuation_status": valuation_status,
         "fee_drag": fees,
         "fee_slippage_drag": fees,
         "equity_curve": curve,
@@ -951,6 +996,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "worst_day": min(daily_values, default=0.0),
         "cvar95": sum(daily_values[:tail_n]) / tail_n if tail_n else 0.0,
         "positions": positions,
+        "open_positions": open_positions,
         "pnl_concentration": {
             "wallet": concentration(lambda position: position.get("addr")),
             "coin": concentration(lambda position: position.get("coin")),

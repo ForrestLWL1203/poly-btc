@@ -64,7 +64,7 @@ def copy_bt_min_closed_for_days(p, days):
     return explicit
 
 
-def copy_bt_result(addr, fills, now_ms, p, days=None):
+def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None):
     days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
     start_ms = now_ms - days * 86400_000
     replay_fills = [
@@ -94,6 +94,12 @@ def copy_bt_result(addr, fills, now_ms, p, days=None):
             sigmas=getattr(p, "copy_bt_sigmas", None) or {},
             overrides=getattr(p, "copy_bt_overrides", None) or {},
             market_ctx=getattr(p, "copy_bt_market_ctx", None) or {},
+            valuation_marks=(
+                valuation_marks
+                if valuation_marks is not None
+                else getattr(p, "copy_bt_valuation_marks", None)
+            ) or {},
+            valuation_asof_ms=now_ms,
         )
         # Keep window boundaries on the in-memory replay result so recent-loss
         # checks can compare the latest seven days with a non-overlapping
@@ -133,17 +139,22 @@ def copy_bt_result(addr, fills, now_ms, p, days=None):
         }
 
 
-def copy_bt_results(addr, fills, now_ms, p):
+def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
     days_list = copy_bt_window_days(p)
     primary_days = max(days_list)
     warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
-    warm = copy_bt_result(addr, fills, now_ms, p, days=primary_days + warmup_days)
+    warm = copy_bt_result(
+        addr, fills, now_ms, p, days=primary_days + warmup_days,
+        valuation_marks=valuation_marks,
+    )
     if warm.get("valid") is False:
         return {days: dict(warm, _window_days=days) for days in days_list}
 
     out = {}
     for days in days_list:
-        direct = copy_bt_result(addr, fills, now_ms, p, days=days)
+        direct = copy_bt_result(
+            addr, fills, now_ms, p, days=days, valuation_marks=valuation_marks,
+        )
         sliced = slice_backtest_result(
             warm,
             now_ms - int(days) * 86_400_000,
@@ -170,9 +181,12 @@ def copy_bt_results(addr, fills, now_ms, p):
     return out
 
 
-def sector_copy_bt_results(addr, fills, now_ms, p):
+def sector_copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
     return {
-        sector: copy_bt_results(addr, filter_fills(fills, sector), now_ms, p)
+        sector: copy_bt_results(
+            addr, filter_fills(fills, sector), now_ms, p,
+            valuation_marks=valuation_marks,
+        )
         for sector in SECTORS
     }
 
@@ -184,6 +198,8 @@ def record_primary_copy_bt(metrics, result):
     target_open = int(result.get("target_open_events") or 0)
     metrics.update(
         copy_bt_net_pnl=result.get("copy_net_pnl"),
+        copy_bt_unrealized_pnl=result.get("unrealized_pnl"),
+        copy_bt_valuation_status=result.get("valuation_status"),
         copy_bt_win_rate=result.get("copy_win_rate"),
         copy_bt_closed_n=int(result.get("closed_n") or 0),
         copy_bt_open_fill_rate=(opened / target_open) if target_open else None,
@@ -229,9 +245,11 @@ def record_recent_copy_bt(metrics, days, result):
         return
     if days == 14:
         metrics["copy_bt_14d_net_pnl"] = result.get("copy_net_pnl")
+        metrics["copy_bt_14d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_14d_closed_n"] = int(result.get("closed_n") or 0)
     elif days == 7:
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
+        metrics["copy_bt_7d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
 
 

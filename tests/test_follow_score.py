@@ -11,7 +11,7 @@ def evidence(**overrides):
         "copy_bt_7d_closed_n": 5,
         "copy_bt_net_pnl": 800.0,
         "copy_bt_14d_net_pnl": 350.0,
-        "copy_bt_7d_net_pnl": 120.0,
+        "copy_bt_7d_net_pnl": 300.0,
         "copy_expected_return": 0.045,
         "copy_return_lcb": 0.012,
         "copy_return_volatility": 0.08,
@@ -116,7 +116,7 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_net_pnl=274, copy_bt_14d_net_pnl=-305, copy_bt_7d_net_pnl=-730,
             copy_bt_closed_n=24, copy_bt_14d_closed_n=18, copy_bt_7d_closed_n=10,
         ))
-        protected = evaluate_follow_eligibility(evidence(
+        recent_below_weekly_floor = evaluate_follow_eligibility(evidence(
             copy_bt_net_pnl=3429, copy_bt_14d_net_pnl=1000, copy_bt_7d_net_pnl=-247,
             copy_bt_closed_n=33, copy_bt_14d_closed_n=15, copy_bt_7d_closed_n=10,
             copy_evidence_days=12,
@@ -124,7 +124,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(strong["coreEligible"])
         self.assertEqual(sample_watch["status"], "challenger_sample_watch")
         self.assertEqual(collapse["status"], "recent_copy_collapse")
-        self.assertTrue(protected["coreEligible"])
+        self.assertEqual(recent_below_weekly_floor["status"], "challenger_weekly_return_watch")
 
     def test_profit_floors_use_manual_margin_equity_budget(self):
         challenger = evaluate_follow_eligibility(
@@ -146,6 +146,25 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(strong["coreEligible"])
         self.assertTrue(strong["strongEntry"])
         self.assertEqual(rejected["status"], "copy_value_below_challenger_floor")
+
+    def test_weekly_economic_floor_applies_to_standard_and_strong_core(self):
+        standard = evaluate_follow_eligibility(evidence(copy_bt_7d_net_pnl=249))
+        strong = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=1800, copy_bt_closed_n=25, copy_evidence_days=12,
+            copy_bt_7d_closed_n=2, copy_bt_7d_net_pnl=249, copy_return_lcb=-0.05,
+        ))
+
+        self.assertEqual(standard["status"], "challenger_weekly_return_watch")
+        self.assertEqual(strong["status"], "challenger_weekly_return_watch")
+        self.assertFalse(standard["coreEligible"])
+        self.assertFalse(strong["coreEligible"])
+
+    def test_missing_open_valuation_is_challenger_not_data_error(self):
+        result = evaluate_follow_eligibility(evidence(copy_bt_valuation_status="missing_marks"))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_open_valuation_pending")
 
     def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))

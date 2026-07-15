@@ -12,11 +12,12 @@ const marketLabel = (m) => ({ crypto: "加密", stock: "美股/指数", mixed: "
 
 const copyWindowRows = (breakdown) => {
   const pnl = breakdown.copyPnl || {};
+  const open = breakdown.copyUnrealizedPnl || {};
   const closed = breakdown.closedN || {};
   return [
-    ["30 天", pnl["30d"], closed["30d"]],
-    ["14 天", pnl["14d"], closed["14d"]],
-    ["7 天", pnl["7d"], closed["7d"]],
+    ["30 天", pnl["30d"], closed["30d"], open["30d"]],
+    ["14 天", pnl["14d"], closed["14d"], open["14d"]],
+    ["7 天", pnl["7d"], closed["7d"], open["7d"]],
   ].filter((row) => Number(row[2] || 0) > 0 || Math.abs(Number(row[1] || 0)) > 0);
 };
 
@@ -100,11 +101,11 @@ export function WalletDrawer({ address, onClose }) {
               <DecisionCard title="当前参数回放" tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
                   <div className="score-window-grid">
-                    {copyRows.map(([label, pnl, n]) => (
+                    {copyRows.map(([label, pnl, n, openPnl]) => (
                       <div className="score-window" key={label}>
                         <span>{label}</span>
                         <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
-                        <small>{n || 0} 笔</small>
+                        <small>{n || 0} 笔{openPnl != null && Math.abs(openPnl) >= 0.5 ? ` · 开放 ${fSign(openPnl, 0)}` : ""}</small>
                       </div>
                     ))}
                   </div>

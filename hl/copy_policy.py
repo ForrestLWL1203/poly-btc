@@ -25,6 +25,7 @@ class CopyPolicy:
     entry_positive_probability: float
     challenger_min_return_30d: float
     core_min_return_30d: float
+    core_min_return_7d: float
     strong_core_return_30d: float
     strong_min_closed_30d: int
     strong_min_evidence_days: int
@@ -75,6 +76,7 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         entry_positive_probability=float(_value(values, "CORE_ENTRY_MIN_POSITIVE_PROB", 0.70)),
         challenger_min_return_30d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_30D", 0.03)),
         core_min_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.05)),
+        core_min_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.025)),
         strong_core_return_30d=float(_value(values, "CORE_STRONG_COPY_RETURN_30D", 0.10)),
         strong_min_closed_30d=int(_value(values, "CORE_STRONG_MIN_CLOSED_30D", 20)),
         strong_min_evidence_days=int(_value(values, "CORE_STRONG_MIN_EVIDENCE_DAYS", 10)),

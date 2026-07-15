@@ -33,6 +33,9 @@ def _json_obj(raw):
 def _selection_reason_text(row, *, now_ms=None):
     """Translate internal selection states into one operator-facing explanation."""
     reason = str(_col(row, "selection_reason") or "").strip().lower()
+    exit_pending = reason.endswith(":exit_pending")
+    if exit_pending:
+        reason = reason.removesuffix(":exit_pending")
     labels = {
         "portfolio_no_positive_marginal": "组合评估未通过（旧记录）",
         "portfolio_no_profit_improvement": "加入后组合净收益没有提高",
@@ -60,6 +63,8 @@ def _selection_reason_text(row, *, now_ms=None):
         "challenger_sample_watch": "样本观察：Copy样本或独立证据尚不足",
         "challenger_confidence_watch": "置信观察：LCB或盈利概率尚未达到Core线",
         "challenger_recent_decline": "近期衰退：回撤未达到硬淘汰线，继续观察",
+        "challenger_weekly_return_watch": "近期收益不足：7日经济收益未达到Core周收益线",
+        "challenger_open_valuation_pending": "开放仓位估值待确认：暂不进入Core",
         "copy_value_below_challenger_floor": "30日Copy收益低于候选价值线",
         "recent_copy_collapse": "近期严格Copy收益严重恶化",
         "entry_actionable_open_stale": "近期没有可跟随的新开仓",
@@ -80,7 +85,8 @@ def _selection_reason_text(row, *, now_ms=None):
         "core_retained_portfolio_value": "近期偏弱，但保留后组合仍更优",
     }
     if reason in labels:
-        return labels[reason]
+        text = labels[reason]
+        return f"{text} · 旧仓退出中" if exit_pending else text
     if reason.startswith("promotion_pending_"):
         progress = reason.removeprefix("promotion_pending_").replace("_of_", "/")
         return f"候选观察中（{progress}轮）"
@@ -129,9 +135,13 @@ def _score_breakdown(row):
         "copy_bt_open_fill_rate": _col(row, "copy_bt_open_fill_rate"),
         "copy_bt_liquidations": _col(row, "copy_bt_liquidations"),
         "copy_bt_fee_drag": _col(row, "copy_bt_fee_drag"),
+        "copy_bt_unrealized_pnl": _col(row, "copy_bt_unrealized_pnl"),
+        "copy_bt_valuation_status": _col(row, "copy_bt_valuation_status"),
         "copy_bt_14d_net_pnl": _col(row, "copy_bt_14d_net_pnl"),
+        "copy_bt_14d_unrealized_pnl": _col(row, "copy_bt_14d_unrealized_pnl"),
         "copy_bt_14d_closed_n": _col(row, "copy_bt_14d_closed_n"),
         "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
+        "copy_bt_7d_unrealized_pnl": _col(row, "copy_bt_7d_unrealized_pnl"),
         "copy_bt_7d_closed_n": _col(row, "copy_bt_7d_closed_n"),
         "copy_expected_return": _col(row, "copy_expected_return"),
         "copy_return_lcb": _col(row, "copy_return_lcb"),
@@ -153,6 +163,12 @@ def _score_breakdown(row):
         "copyScore": score100(detail.get("copyScore")) if detail.get("copyScore") is not None else None,
         "confidencePct": round((detail.get("confidence") or 0.0) * 100, 0),
         "copyPnl": detail.get("copyPnl"),
+        "copyUnrealizedPnl": {
+            "30d": _col(row, "copy_bt_unrealized_pnl"),
+            "14d": _col(row, "copy_bt_14d_unrealized_pnl"),
+            "7d": _col(row, "copy_bt_7d_unrealized_pnl"),
+        },
+        "copyValuationStatus": _col(row, "copy_bt_valuation_status"),
         "closedN": detail.get("closedN"),
         "expectedReturnPct": round(detail.get("expectedReturn") * 100, 2) if detail.get("expectedReturn") is not None else None,
         "returnLcbPct": round(detail.get("returnLcb") * 100, 2) if detail.get("returnLcb") is not None else None,
@@ -233,7 +249,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "              ELSE NULL END AS legacy_follow_score,"
         "         fs.data_status AS selection_data_status,"
         "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_closed_n,"
+        "         fs.replay_copy_bt_unrealized_pnl,fs.replay_copy_bt_valuation_status,"
         "         fs.replay_copy_bt_7d_net_pnl,"
+        "         fs.replay_copy_bt_7d_unrealized_pnl,"
         "         fs.replay_copy_bt_7d_closed_n,fs.replay_sector_copy_json,"
         "         fs.replayed_at "
         "  FROM follow_selection fs "
@@ -261,8 +279,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "s.selection_follow_score,s.legacy_follow_score,"
         "w.market_type,w.score,w.win_rate,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_valuation_status ELSE p.copy_bt_valuation_status END AS copy_bt_valuation_status,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
         "p.sector_policy_json,p.data_status,"
@@ -307,8 +328,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
                 else (_col(r, "actionable_open_events_7d") or 0)
             ),
             "copyBacktestNetPnl": _col(display_metrics, "copy_bt_net_pnl"),
+            "copyBacktestUnrealizedPnl": _col(display_metrics, "copy_bt_unrealized_pnl"),
+            "copyBacktestValuationStatus": _col(display_metrics, "copy_bt_valuation_status"),
             "copyBacktestClosedN": _col(display_metrics, "copy_bt_closed_n") or 0,
             "copyBacktest7dNetPnl": _col(display_metrics, "copy_bt_7d_net_pnl"),
+            "copyBacktest7dUnrealizedPnl": _col(display_metrics, "copy_bt_7d_unrealized_pnl"),
             "copyBacktest7dClosedN": _col(display_metrics, "copy_bt_7d_closed_n") or 0,
             "forwardNetPnl": _col(r, "fwd_net") or 0,
             "isNew": _is_new_followed(_col(r, "first_followed_at")),
@@ -421,9 +445,13 @@ def ep_wallet_detail(db, addr, qs=None):
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_open_fill_rate ELSE p.copy_bt_open_fill_rate END AS copy_bt_open_fill_rate,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_valuation_status ELSE p.copy_bt_valuation_status END AS copy_bt_valuation_status,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_net_pnl ELSE p.copy_bt_14d_net_pnl END AS copy_bt_14d_net_pnl,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_unrealized_pnl ELSE p.copy_bt_14d_unrealized_pnl END AS copy_bt_14d_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_closed_n ELSE p.copy_bt_14d_closed_n END AS copy_bt_14d_closed_n,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
             "p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
             "p.copy_positive_probability,p.copy_evidence_days,p.copy_recent_return_14d,"

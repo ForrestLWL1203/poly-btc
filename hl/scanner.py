@@ -603,6 +603,7 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
     up_loss, up_win, bag_n, max_bag_d, max_win_d = 0.0, 0.0, 0, 0.0, 0.0
     open_position_count = material_open_count = 0
     perp_short, perp_notl = {}, 0.0                              # for spot-hedge detection
+    mark_prices = {}
     for dex in dexes:
         cs = rest.clearinghouse_state(addr, dex=dex)             # dex None -> standard perp dex
         if not isinstance(cs, dict):
@@ -621,6 +622,8 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
                 continue
             open_position_count += 1
             upnl = f(p_.get("unrealizedPnl"))                    # HL's authoritative current unrealized
+            if szi and pv:
+                mark_prices[coin] = abs(pv / szi)
             days = (now_ms - open_ms[coin]) / _DAY_MS if coin in open_ms else 0.0
             perp_notl += abs(pv)
             if szi < 0:                                          # a SHORT — candidate hedge of a spot long
@@ -667,7 +670,23 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
             "open_loss_frac": up_loss / a, "open_win_frac": up_win / a,
             "bag_count": bag_n, "max_bag_days": max_bag_d, "max_win_days": max_win_d,
             "open_position_count": open_position_count, "material_open_count": material_open_count,
-            "hedge_ratio": hedge_ratio}
+            "hedge_ratio": hedge_ratio, "mark_prices": mark_prices}
+
+
+def _current_copy_valuation_marks():
+    """Load one shared terminal-mark snapshot for cache-only replay paths.
+
+    Fresh profile scans use each wallet's already-fetched clearinghouse snapshot. Regate and post-tune
+    replay do not fetch one snapshot per wallet, so two bounded allMids calls cover the standard and
+    transparent builder universes without adding per-wallet REST pressure.
+    """
+    out = {}
+    for dex in (None, *rest.BUILDER_DEXES):
+        for coin, px in (rest.all_mids(dex=dex) or {}).items():
+            value = f(px)
+            if value > 0:
+                out[str(coin)] = value
+    return out
 
 
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
@@ -795,8 +814,13 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         m["pf_turnover"], m["pf_edge_bps"] = _pw.get("turnover"), _pw.get("edge_bps")
         ok, reason = metrics.gates_state(m, now_ms, p)
     if ok:
-        copy_results = _copy_bt_results(addr, perp_full, now_ms, p)
-        sector_results = _sector_copy_bt_results(addr, perp_full, now_ms, p)
+        valuation_marks = snap.get("mark_prices") or {}
+        copy_results = _copy_bt_results(
+            addr, perp_full, now_ms, p, valuation_marks=valuation_marks,
+        )
+        sector_results = _sector_copy_bt_results(
+            addr, perp_full, now_ms, p, valuation_marks=valuation_marks,
+        )
         ok, reason = _apply_sector_copy_bt_gate(
             m, copy_results, sector_results, p,
             previous_policy=(prior or {}).get("sector_policy_json"),
@@ -811,7 +835,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         if allowed_sectors and allowed_sectors != {"crypto", "stock"}:
             allowed_fills = [x for x in perp_full if classify_coin(x.get("coin")) in allowed_sectors]
             evidence_fills = allowed_fills
-            evidence_results = _copy_bt_results(addr, allowed_fills, now_ms, p)
+            evidence_results = _copy_bt_results(
+                addr, allowed_fills, now_ms, p, valuation_marks=valuation_marks,
+            )
         m.update(_open_flow_metrics(evidence_fills, now_ms))
         _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now_ms)
         if not sector_policy.get("allowed") and m.get("evidence_status") not in {"missing", "invalid"}:
@@ -876,8 +902,9 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
         "p.perp_frac, p.lev_proxy, p.margin_type, p.cur_leverage, p.liq_worst_pct, "
         "p.times_active, p.first_added, p.last_fill_ms, "
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
-        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
         "p.profile_generation,p.evaluated_at,p.data_status,p.evidence_status,"
         "p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,p.copy_positive_probability,"
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
@@ -1394,7 +1421,8 @@ def _quality_core_profiles(db, generation_id) -> list[dict]:
         "p.copy_positive_probability,p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
-        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
+        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,"
         "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
         "FROM profile p WHERE p.profile_generation=?",
         (generation_id,),
@@ -1739,7 +1767,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         include = True
         if addr in selected_set and enabled:
             role, reason = selection.CORE, transition_reasons.get(addr, "core_quality_selected")
-        elif addr in held:
+        elif addr in held and data_status != "valid":
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         elif data_status != "valid":
             role = selection.QUARANTINE
@@ -1753,6 +1781,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 reason = "portfolio_not_selected"
             else:
                 reason = qualification.get("status") or "sample_observation"
+            if addr in held:
+                reason = f"{reason}:exit_pending"
+        elif addr in held:
+            role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         else:
             role = selection.REJECTED
             reason = qualification.get("status") or row.get("reason") or "not_qualified"
@@ -1846,7 +1878,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "p.copy_positive_probability,p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
-        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_14d_net_pnl,p.copy_bt_7d_net_pnl,"
+        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,"
         "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
         "FROM profile p"
     )
@@ -2495,7 +2528,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     "portfolio_positive_net_contribution" if marginal is not None
                     else "portfolio_replay_unavailable_keep_core"
                 )
-            elif addr in held:
+            elif addr in held and data_status != "valid":
                 role = selection.EXIT_ONLY
                 reason = transition_reasons.get(addr, "exit_only_open_position")
             elif data_status != "valid":
@@ -2508,12 +2541,19 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     reason = transition_reasons[addr]
                 elif not enabled:
                     reason = "operator_disabled"
+                elif not qualification.get("coreEligible"):
+                    reason = qualification.get("status") or "challenger_confidence_watch"
                 elif marginal is not None and addr in portfolio_candidates:
                     reason = portfolio_rejections.get(addr, "portfolio_no_profit_improvement")
                 elif path_fallback:
                     reason = "path_validation_failed"
                 else:
                     reason = "portfolio_replay_unavailable"
+                if addr in held:
+                    reason = f"{reason}:exit_pending"
+            elif addr in held:
+                role = selection.EXIT_ONLY
+                reason = transition_reasons.get(addr, "exit_only_open_position")
             else:
                 role = selection.REJECTED
                 reason = qualification.get("status") or transition_reasons.get(
@@ -2728,6 +2768,7 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
         copy_bt_sigmas=_copy_bt_sigmas(db),
         copy_bt_market_ctx=_copy_bt_market_ctx(db),
         copy_bt_overrides=overrides,
+        copy_bt_valuation_marks=_current_copy_valuation_marks(),
         scan_generation=generation_id,
     )
     updates = []
@@ -2745,16 +2786,20 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
             int(primary.get("closed_n") or 0),
             (opened / target_open) if target_open else None,
             int(primary.get("liquidations") or 0), primary.get("fee_drag"),
-            recent14.get("copy_net_pnl"), int(recent14.get("closed_n") or 0),
-            recent7.get("copy_net_pnl"), int(recent7.get("closed_n") or 0),
+            primary.get("unrealized_pnl"), primary.get("valuation_status"),
+            recent14.get("copy_net_pnl"), recent14.get("unrealized_pnl"),
+            int(recent14.get("closed_n") or 0),
+            recent7.get("copy_net_pnl"), recent7.get("unrealized_pnl"),
+            int(recent7.get("closed_n") or 0),
             json.dumps(compact_sector_results(sectors), sort_keys=True),
             replay_hash, stamp, generation_id, addr,
         ))
     db.executemany(
         "UPDATE follow_selection SET replay_copy_bt_net_pnl=?,replay_copy_bt_win_rate=?,"
         "replay_copy_bt_closed_n=?,replay_copy_bt_open_fill_rate=?,replay_copy_bt_liquidations=?,"
-        "replay_copy_bt_fee_drag=?,replay_copy_bt_14d_net_pnl=?,replay_copy_bt_14d_closed_n=?,"
-        "replay_copy_bt_7d_net_pnl=?,replay_copy_bt_7d_closed_n=?,replay_sector_copy_json=?,"
+        "replay_copy_bt_fee_drag=?,replay_copy_bt_unrealized_pnl=?,replay_copy_bt_valuation_status=?,"
+        "replay_copy_bt_14d_net_pnl=?,replay_copy_bt_14d_unrealized_pnl=?,replay_copy_bt_14d_closed_n=?,"
+        "replay_copy_bt_7d_net_pnl=?,replay_copy_bt_7d_unrealized_pnl=?,replay_copy_bt_7d_closed_n=?,replay_sector_copy_json=?,"
         "replay_params_hash=?,replayed_at=? WHERE generation=? AND addr=?",
         updates,
     )
@@ -3202,6 +3247,9 @@ def regate(db, p, *, stamp=None, source: str = "regate",
     p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
     p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
     p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
+    p.copy_bt_valuation_marks = (
+        getattr(p, "copy_bt_valuation_marks", None) or _current_copy_valuation_marks()
+    )
     p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     published_generation = selection.latest_published_generation(db)
     row_scope = ""
@@ -3225,8 +3273,9 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         "p.pf_turnover,p.pf_mon_pnl,p.pf_mon_vlm,p.pf_week_pnl,p.pf_equity,"   # v7 portfolio net metrics (gates + ROI)
         "p.payoff_ratio,p.pf_week_vlm,"   # v9: needed so regate applies the SAME payoff + edge-decay gates as a scan
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
-        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
+        "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr" + row_scope,
         row_args,
     ).fetchall()
@@ -3268,7 +3317,8 @@ def regate(db, p, *, stamp=None, source: str = "regate",
          roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
          wkroi, moroi, alroi, pf_turn, pf_mpnl, pf_mvlm, pf_wpnl, pf_eq, pay, pf_wvlm,
          copy_net, copy_wr, copy_closed, copy_open_fill_rate, copy_liqs, copy_fee,
-         copy14_net, copy14_closed, copy7_net, copy7_closed, sector_copy_json, sector_policy_json) = r
+         copy_unreal, copy_valuation, copy14_net, copy14_unreal, copy14_closed,
+         copy7_net, copy7_unreal, copy7_closed, sector_copy_json, sector_policy_json) = r
         m = {"n_trades": n_tr or 0, "n_fills": n_fills or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -3298,8 +3348,11 @@ def regate(db, p, *, stamp=None, source: str = "regate",
              "copy_bt_net_pnl": copy_net, "copy_bt_win_rate": copy_wr,
              "copy_bt_closed_n": copy_closed, "copy_bt_open_fill_rate": copy_open_fill_rate,
              "copy_bt_liquidations": copy_liqs, "copy_bt_fee_drag": copy_fee,
-             "copy_bt_14d_net_pnl": copy14_net, "copy_bt_14d_closed_n": copy14_closed,
-             "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_closed_n": copy7_closed,
+             "copy_bt_unrealized_pnl": copy_unreal, "copy_bt_valuation_status": copy_valuation,
+             "copy_bt_14d_net_pnl": copy14_net, "copy_bt_14d_unrealized_pnl": copy14_unreal,
+             "copy_bt_14d_closed_n": copy14_closed,
+             "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_unrealized_pnl": copy7_unreal,
+             "copy_bt_7d_closed_n": copy7_closed,
              "sector_copy_json": sector_copy_json, "sector_policy_json": sector_policy_json}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
@@ -3342,8 +3395,9 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         db.execute(
             "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
-            "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_14d_net_pnl=?,copy_bt_14d_closed_n=?,"
-            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=?,"
+            "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_unrealized_pnl=?,copy_bt_valuation_status=?,"
+            "copy_bt_14d_net_pnl=?,copy_bt_14d_unrealized_pnl=?,copy_bt_14d_closed_n=?,"
+            "copy_bt_7d_net_pnl=?,copy_bt_7d_unrealized_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=?,"
             "copy_expected_return=?,copy_return_lcb=?,copy_return_volatility=?,copy_positive_probability=?,"
             "copy_evidence_days=?,copy_recent_return_14d=?,copy_recent_return_7d=?,copy_risk_score=?,"
             "execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
@@ -3351,8 +3405,11 @@ def regate(db, p, *, stamp=None, source: str = "regate",
             (status, reason, score, m.get("raw_quality_score"), m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
-             m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_closed_n"),
-             m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_closed_n"),
+             m.get("copy_bt_unrealized_pnl"), m.get("copy_bt_valuation_status"),
+             m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_unrealized_pnl"),
+             m.get("copy_bt_14d_closed_n"),
+             m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_unrealized_pnl"),
+             m.get("copy_bt_7d_closed_n"),
              m.get("sector_copy_json"), m.get("sector_policy_json"),
              m.get("copy_expected_return"), m.get("copy_return_lcb"), m.get("copy_return_volatility"),
              m.get("copy_positive_probability"), m.get("copy_evidence_days"),

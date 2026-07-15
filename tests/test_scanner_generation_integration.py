@@ -449,7 +449,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "execution_score": 0.95, "open_probability_48h": 0.8,
                     "copy_bt_open_fill_rate": 0.95, "actionable_open_rate": 0.95,
                     "capacity_fit": 0.95, "copy_bt_net_pnl": 800,
-                    "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 200,
+                    "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 300,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                     "times_seen": 1, "times_active": 1,
                 }
@@ -663,7 +663,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
                 "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
-                "copy_bt_net_pnl": 800, "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 200,
+                "copy_bt_net_pnl": 800, "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 300,
                 "copy_bt_closed_n": 12, "copy_bt_14d_closed_n": 8, "copy_bt_7d_closed_n": 5,
                 "copy_expected_return": .05, "copy_return_lcb": .01,
                 "copy_positive_probability": .8, "copy_evidence_days": 8,
@@ -721,7 +721,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_risk_score": 0.9, "execution_score": 0.9,
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
                 "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
-                "copy_bt_7d_net_pnl": 200,
+                "copy_bt_7d_net_pnl": 300,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
@@ -759,7 +759,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "evidence_status": "qualified",
                     "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10,
                     "copy_bt_7d_closed_n": 6, "copy_bt_net_pnl": 1200,
-                    "copy_bt_14d_net_pnl": 500, "copy_bt_7d_net_pnl": 200,
+                    "copy_bt_14d_net_pnl": 500, "copy_bt_7d_net_pnl": 300,
                     "copy_expected_return": .05, "copy_return_lcb": .01,
                     "copy_positive_probability": .85, "copy_evidence_days": 10,
                     "actionable_open_rate": .9, "capacity_fit": .9,
@@ -849,7 +849,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_risk_score": 0.5, "execution_score": 0.9,
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
                 "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
-                "copy_bt_7d_net_pnl": 200,
+                "copy_bt_7d_net_pnl": 300,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
@@ -925,7 +925,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_expected_return": .05, "copy_return_lcb": .01,
                     "copy_evidence_days": 10, "actionable_open_rate": .9, "capacity_fit": .9,
                     "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
-                    "copy_bt_7d_net_pnl": 200,
+                    "copy_bt_7d_net_pnl": 300,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                 }
                 db.execute(
@@ -937,6 +937,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(?,?,?,?,'now')",
                     (rank, addr, score, '{"allowed":["crypto"],"crypto":{"allow":true}}'),
                 )
+            db.execute(
+                "INSERT INTO copy_position(addr,coin,side,status,opened_at) "
+                "VALUES('0xold','BTC','long','open','now')"
+            )
             db.commit()
             baseline = scanner.selection.PortfolioMetrics(
                 100, 100, 0, .95, .95, .01, .5, .05,
@@ -961,7 +965,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             by_addr = {row.addr: (row.role, row.reason) for row in rows}
             self.assertEqual(result.selected, ("0xnew",))
-            self.assertEqual(by_addr["0xold"], ("challenger", "portfolio_not_selected"))
+            self.assertEqual(
+                by_addr["0xold"],
+                ("challenger", "portfolio_not_selected:exit_pending"),
+            )
             self.assertEqual(by_addr["0xnew"], ("core", "core_strong_evidence"))
 
     def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):

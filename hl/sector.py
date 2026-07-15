@@ -75,7 +75,8 @@ def _window_result(windows: Mapping, days: int) -> dict:
 
 def _compact_result(result: Mapping) -> dict:
     keys = (
-        "copy_net_pnl", "closed_n", "wins", "liquidations", "fee_drag",
+        "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "valuation_status",
+        "valuation_coverage", "closed_n", "wins", "liquidations", "fee_drag",
         "target_open_events", "opened_n", "open_fill_rate", "capacity_open_fit",
         "target_adds", "followed_adds", "missed_adds",
     )
@@ -345,6 +346,8 @@ def _aggregate_window(copy_json: Mapping, allowed: set[str], days: int) -> dict 
         "opened_n": 0,
         "liquidations": 0,
         "fee_drag": 0.0,
+        "unrealized_pnl": 0.0,
+        "valuation_status": "complete",
     }
     seen = False
     for sector in allowed:
@@ -359,6 +362,9 @@ def _aggregate_window(copy_json: Mapping, allowed: set[str], days: int) -> dict 
         total["opened_n"] += _int(result.get("opened_n"))
         total["liquidations"] += _int(result.get("liquidations"))
         total["fee_drag"] += _num(result.get("fee_drag"))
+        total["unrealized_pnl"] += _num(result.get("unrealized_pnl"))
+        if str(result.get("valuation_status") or "complete") != "complete":
+            total["valuation_status"] = "missing_marks"
     if not seen:
         return None
     target_open = total["target_open_events"]
@@ -385,6 +391,8 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         out["copy_bt_open_fill_rate"] = primary["open_fill_rate"]
         out["copy_bt_liquidations"] = primary["liquidations"]
         out["copy_bt_fee_drag"] = primary["fee_drag"]
+        out["copy_bt_unrealized_pnl"] = primary["unrealized_pnl"]
+        out["copy_bt_valuation_status"] = primary["valuation_status"]
     for days, net_key, n_key in (
         (14, "copy_bt_14d_net_pnl", "copy_bt_14d_closed_n"),
         (7, "copy_bt_7d_net_pnl", "copy_bt_7d_closed_n"),
@@ -393,5 +401,6 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         if agg:
             out[net_key] = agg["copy_net_pnl"]
             out[n_key] = agg["closed_n"]
+            out[f"copy_bt_{days}d_unrealized_pnl"] = agg["unrealized_pnl"]
     out["allowed_sectors"] = sorted(allowed)
     return out
