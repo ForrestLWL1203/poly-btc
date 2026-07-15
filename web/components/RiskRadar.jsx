@@ -7,6 +7,17 @@ const CONFIRM = { steady: "双次强信号", accelerating: "风险加速", extre
 const OUTCOME = { improved: "AI 改善", harmed: "AI 拖累", avoided_loss: "AI 改善", missed_profit: "AI 拖累", flat: "持平", allowed: "允许开仓" };
 const signedUsd = (v, d = 1) => v == null ? "—" : (Number(v) >= 0 ? "+" : "−") + fUsd(Math.abs(Number(v)), d);
 
+const assessmentTrend = (a) => {
+  if (a.status === "error") return { cls: "error", icon: "!", label: "评估失败" };
+  if (a.blockSide === "short" || (a.blockSide !== "long" && a.bullishScore > a.bearishScore)) {
+    return { cls: "up", icon: "↑", label: a.activeBlock ? "看多 · 拟拦截空单" : "偏多 · 尚未确认拦截" };
+  }
+  if (a.blockSide === "long" || a.bearishScore > a.bullishScore) {
+    return { cls: "down", icon: "↓", label: a.activeBlock ? "看空 · 拟拦截多单" : "偏空 · 尚未确认拦截" };
+  }
+  return { cls: "flat", icon: "→", label: "方向中性" };
+};
+
 function Pager({ meta, onPage, note }) {
   const p = meta || { page: 0, total: 0, totalPages: 1 };
   return <div className="radar-pagination">
@@ -129,14 +140,17 @@ export function RiskRadar() {
         <Pager meta={episodePager || { page: 0, total: intents.length, totalPages: 1 }} onPage={setEpisodePage} />
       </div>
 
-      <div className="section-h"><h2>15 分钟判断轨迹</h2><span className="muted">红点 = 拟拦截 · 绿点 = 放行 · 每页 10 条</span></div>
+      <div className="section-h"><h2>15 分钟判断轨迹</h2><span className="muted">绿色 ↑ 看多 / 拦截空单 · 红色 ↓ 看空 / 拦截多单 · 每页 10 条</span></div>
       <div className="card assessment-list">
-        {(radar.assessments || []).map(a => <div className="assessment-row" key={a.id}>
-          <span className={"assessment-dot " + (a.activeBlock ? "hot" : a.status === "error" ? "err" : "")} />
-          <b>{a.status === "error" ? "评估失败" : `${a.bearishScore?.toFixed(0)} 空 / ${a.bullishScore?.toFixed(0)} 多`}</b>
-          <p>{a.reason || a.error || "—"}</p>
-          <em>{new Date(a.assessedForMs).toLocaleTimeString()}</em>
-        </div>)}
+        {(radar.assessments || []).map(a => {
+          const trend = assessmentTrend(a);
+          return <div className="assessment-row" key={a.id}>
+            <span className={"assessment-trend " + trend.cls} title={trend.label} aria-label={trend.label}>{trend.icon}</span>
+            <b>{a.status === "error" ? "评估失败" : `${a.bearishScore?.toFixed(0)} 空 / ${a.bullishScore?.toFixed(0)} 多`}</b>
+            <p>{a.reason || a.error || "—"}</p>
+            <em>{new Date(a.assessedForMs).toLocaleTimeString()}</em>
+          </div>;
+        })}
         {!radar.assessments?.length && <div className="empty">暂无判断记录</div>}
         <Pager meta={assessmentPager} onPage={setAssessmentPage} note={`数据库保留最近 ${assessmentPager.retentionLimit?.toLocaleString()} 条`} />
       </div>
