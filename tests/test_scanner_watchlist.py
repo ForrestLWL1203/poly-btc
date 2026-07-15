@@ -628,8 +628,20 @@ class ScannerWatchlistTests(unittest.TestCase):
             params.seed_params(db)
             cols = storage.PROFILE_COLS.split(",")
             db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g-current','published',1,1,1,'now','now')"
+            )
+            db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
-                _profile_row("0xaaa", "retired", 0.0, reason="low_quality"),
+                _profile_row(
+                    "0xaaa", "retired", 0.0,
+                    reason="low_quality", profile_generation="g-current",
+                ),
+            )
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row("0xstale", "active", 0.8, profile_generation="g-old"),
             )
             db.commit()
             p = SimpleNamespace()
@@ -656,6 +668,10 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual(row[1], "ok")
             self.assertAlmostEqual(row[2], 0.581)
             self.assertAlmostEqual(row[3], 0.581)
+            stale = db.execute(
+                "SELECT status,reason,score FROM profile WHERE addr='0xstale'"
+            ).fetchone()
+            self.assertEqual(tuple(stale), ("retired", "stale_generation", 0.0))
 
     def test_regate_retires_low_copy_fill_rate_profile(self):
         with tempfile.TemporaryDirectory() as td:

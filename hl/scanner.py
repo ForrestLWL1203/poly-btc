@@ -3203,6 +3203,19 @@ def regate(db, p, *, stamp=None, source: str = "regate",
     p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
     p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
     p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    published_generation = selection.latest_published_generation(db)
+    row_scope = ""
+    row_args = ()
+    if published_generation:
+        # A published generation is the qualification evidence boundary. Old-generation profiles may be
+        # retained for history/rotation, but must not be reactivated into the current derived watchlist.
+        db.execute(
+            "UPDATE profile SET status='retired',reason='stale_generation',score=0 "
+            "WHERE status='active' AND COALESCE(profile_generation,'')<>?",
+            (published_generation,),
+        )
+        row_scope = " WHERE p.profile_generation=?"
+        row_args = (published_generation,)
     rows = db.execute(
         "SELECT p.addr,status,n_trades,n_fills,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
@@ -3214,7 +3227,9 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_n,"
         "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
-        "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr").fetchall()
+        "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr" + row_scope,
+        row_args,
+    ).fetchall()
     repaired_eps = repair_missing_episode_rows(db, [r[0] for r in rows])
     if repaired_eps:
         print(f"regate: repaired {repaired_eps} missing episode caches from candidate_fills")
