@@ -17,6 +17,9 @@ RISK_RADAR_VALID_FOR_S = 20 * 60
 RISK_RADAR_REQUEST_TIMEOUT_S = 45
 RISK_RADAR_BALANCE_INTERVAL_S = 6 * 60 * 60
 RISK_RADAR_RETENTION_DAYS = 180
+# 30 days at the normal 15-minute cadence.  This is a hard row budget for the raw judgement trail;
+# assessments still referenced by an open Shadow episode are retained until that episode can settle safely.
+RISK_RADAR_MAX_ASSESSMENTS = 30 * 24 * 4
 RISK_RADAR_WARN_SCORE = 65
 RISK_RADAR_BLOCK_SCORE = 75
 RISK_RADAR_EXTREME_SCORE = 90

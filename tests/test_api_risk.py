@@ -48,6 +48,25 @@ class RiskApiTests(unittest.TestCase):
         self.assertEqual(at_75["wouldBlock"], 1)
         self.assertEqual(at_75["avoidedLosses"], 1)
 
+    def test_assessment_trail_is_server_paginated_and_keeps_current_projection(self):
+        for assessment_id in range(1, 6):
+            self.db.execute(
+                "INSERT INTO market_risk_assessment (assessment_id,assessed_for_ms,status,bullish_score,"
+                "bearish_score,active_block,created_at) VALUES (?,?, 'ok',?,?,0,'now')",
+                (assessment_id, assessment_id, 50 + assessment_id, 50 - assessment_id),
+            )
+        self.db.execute("UPDATE market_risk_state SET current_assessment_id=5 WHERE id=1")
+        self.db.commit()
+
+        payload = ep_risk_radar(self.db, {"assessmentPage": ["1"], "assessmentSize": ["2"]})
+
+        self.assertEqual([row["id"] for row in payload["assessments"]], [3, 2])
+        self.assertEqual(payload["currentAssessment"]["id"], 5)
+        self.assertEqual(payload["assessmentPagination"], {
+            "page": 1, "size": 2, "total": 5, "totalPages": 3,
+            "retentionLimit": 2880,
+        })
+
     def test_v2_summary_and_projection_compare_action_filtered_ledger(self):
         self.db.execute("INSERT INTO market_risk_assessment (assessment_id,assessed_for_ms,status,bullish_score,bearish_score,"
                         "block_side,active_block,created_at) VALUES (2,2,'ok',20,80,'long',1,'now')")

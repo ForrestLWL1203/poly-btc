@@ -29,12 +29,36 @@ def _assessment(row):
     }
 
 
+def _query_int(qs, key, default):
+    try:
+        return int((qs.get(key, [default]) or [default])[0])
+    except (TypeError, ValueError):
+        return default
+
+
 def ep_risk_radar(db, qs=None):
+    qs = qs or {}
     state = q1(db, "SELECT * FROM market_risk_state WHERE id=1")
     worker = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     heartbeat = iso_epoch(worker["heartbeat_at"]) if worker else None
     worker_available = bool(heartbeat and time.time() - heartbeat <= 45)
-    latest = qall(db, "SELECT * FROM market_risk_assessment ORDER BY assessed_for_ms DESC,assessment_id DESC LIMIT 24")
+    assessment_size = max(1, min(50, _query_int(qs, "assessmentSize", 10)))
+    assessment_total_row = q1(db, "SELECT COUNT(*) total FROM market_risk_assessment")
+    assessment_total = int(assessment_total_row["total"] or 0) if assessment_total_row else 0
+    assessment_pages = max(1, (assessment_total + assessment_size - 1) // assessment_size)
+    assessment_page = min(max(0, _query_int(qs, "assessmentPage", 0)), assessment_pages - 1)
+    latest = qall(
+        db,
+        "SELECT * FROM market_risk_assessment ORDER BY assessed_for_ms DESC,assessment_id DESC LIMIT ? OFFSET ?",
+        (assessment_size, assessment_page * assessment_size),
+    )
+    current = None
+    if state and state["current_assessment_id"] is not None:
+        current = q1(db, "SELECT * FROM market_risk_assessment WHERE assessment_id=?",
+                     (state["current_assessment_id"],))
+    if current is None:
+        current = q1(db, "SELECT * FROM market_risk_assessment "
+                         "ORDER BY assessed_for_ms DESC,assessment_id DESC LIMIT 1")
     legacy = q1(db, "SELECT COUNT(*) total,COALESCE(SUM(would_block),0) blocked,"
                     "COALESCE(SUM(CASE WHEN outcome='avoided_loss' THEN 1 ELSE 0 END),0) avoided_losses,"
                     "COALESCE(SUM(CASE WHEN outcome='missed_profit' THEN 1 ELSE 0 END),0) missed_profits,"
@@ -84,7 +108,15 @@ def ep_risk_radar(db, qs=None):
         "workerAvailable": worker_available,
         "workerState": worker["state"] if worker else "stopped",
         "summary": summary,
+        "currentAssessment": _assessment(current) if current else None,
         "assessments": [_assessment(row) for row in latest],
+        "assessmentPagination": {
+            "page": assessment_page,
+            "size": assessment_size,
+            "total": assessment_total,
+            "totalPages": assessment_pages,
+            "retentionLimit": config.RISK_RADAR_MAX_ASSESSMENTS,
+        },
     }
 
 

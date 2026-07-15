@@ -695,4 +695,20 @@ class RiskRadar:
                         " SELECT assessment_id FROM market_risk_action WHERE assessment_id IS NOT NULL)", (cutoff,))
         self.db.execute("DELETE FROM market_risk_snapshot WHERE created_at < ? AND snapshot_id NOT IN "
                         "(SELECT snapshot_id FROM market_risk_assessment WHERE snapshot_id IS NOT NULL)", (cutoff,))
+        # Bound the high-frequency judgement trail by row count as well as age.  Open/resolvable Shadow
+        # bookkeeping keeps its referenced assessment; all other rows outside the newest budget are removed.
+        self.db.execute(
+            "DELETE FROM market_risk_assessment WHERE assessment_id NOT IN ("
+            " SELECT assessment_id FROM market_risk_assessment "
+            " ORDER BY assessed_for_ms DESC,assessment_id DESC LIMIT ?"
+            ") AND assessment_id NOT IN ("
+            " SELECT assessment_id FROM market_risk_intent WHERE assessment_id IS NOT NULL"
+            " UNION SELECT assessment_id FROM market_risk_action WHERE assessment_id IS NOT NULL"
+            ") AND assessment_id NOT IN ("
+            " SELECT current_assessment_id FROM market_risk_state WHERE current_assessment_id IS NOT NULL"
+            ")",
+            (config.RISK_RADAR_MAX_ASSESSMENTS,),
+        )
+        self.db.execute("DELETE FROM market_risk_snapshot WHERE snapshot_id NOT IN "
+                        "(SELECT snapshot_id FROM market_risk_assessment WHERE snapshot_id IS NOT NULL)")
         self.db.commit()

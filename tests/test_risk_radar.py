@@ -184,6 +184,30 @@ class RiskRadarTests(unittest.TestCase):
         for key in ("spreadBps", "bidDepth10bps", "askDepth10bps", "micropriceOffsetBps"):
             self.assertIn(key, features)
 
+    def test_prune_caps_assessments_by_count_and_removes_orphan_snapshots(self):
+        for assessment_id in range(1, 6):
+            self.db.execute(
+                "INSERT INTO market_risk_snapshot (snapshot_id,assessed_for_ms,features_json,coverage_json,input_hash,created_at) "
+                "VALUES (?,?, '{}','{}',?,'now')",
+                (assessment_id, assessment_id, str(assessment_id)),
+            )
+            self.db.execute(
+                "INSERT INTO market_risk_assessment (assessment_id,snapshot_id,assessed_for_ms,status,created_at) "
+                "VALUES (?,?,?,'ok','now')",
+                (assessment_id, assessment_id, assessment_id),
+            )
+        self.db.commit()
+
+        with patch("hl.risk_radar.config.RISK_RADAR_MAX_ASSESSMENTS", 3):
+            self.radar.prune()
+
+        self.assertEqual([r[0] for r in self.db.execute(
+            "SELECT assessment_id FROM market_risk_assessment ORDER BY assessment_id"
+        )], [3, 4, 5])
+        self.assertEqual([r[0] for r in self.db.execute(
+            "SELECT snapshot_id FROM market_risk_snapshot ORDER BY snapshot_id"
+        )], [3, 4, 5])
+
     def test_invalid_model_output_fails_closed_to_no_assessment(self):
         with self.assertRaises(ValueError):
             validate_model_output({"bullish_score": 150, "confidence": "high"})

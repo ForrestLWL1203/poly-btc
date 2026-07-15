@@ -15,14 +15,15 @@ const signedUsd = (v, d = 1) => v == null ? "—" : (Number(v) >= 0 ? "+" : "−
 
 export function RiskRadar() {
   const [radar, setRadar] = useState(null);
+  const [assessmentPage, setAssessmentPage] = useState(0);
   const [intents, setIntents] = useState([]);
   const [thresholds, setThresholds] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const load = useCallback(async () => {
-    const [r, i, t] = await Promise.all([api.get("/api/risk-radar"), api.get("/api/risk-radar/intents?limit=80"), api.get("/api/risk-radar/thresholds")]);
-    setRadar(r); setIntents(i.intents || []); setThresholds(t.comparison || []);
-  }, []);
+    const [r, i, t] = await Promise.all([api.get(`/api/risk-radar?assessmentPage=${assessmentPage}&assessmentSize=10`), api.get("/api/risk-radar/intents?limit=80"), api.get("/api/risk-radar/thresholds")]);
+    setRadar(r); setAssessmentPage(r.assessmentPagination?.page || 0); setIntents(i.intents || []); setThresholds(t.comparison || []);
+  }, [assessmentPage]);
   useEffect(() => { load().catch(() => setError("雷达数据加载失败")); const id = setInterval(() => load().catch(() => {}), 10000); return () => clearInterval(id); }, [load]);
   const toggle = async () => {
     setBusy(true); setError(null);
@@ -31,7 +32,7 @@ export function RiskRadar() {
     finally { setBusy(false); }
   };
   if (!radar) return <div className="content"><div className="loading">加载中…</div></div>;
-  const current = radar.assessments?.find(a => a.id === radar.currentAssessmentId) || radar.assessments?.[0];
+  const current = radar.currentAssessment || radar.assessments?.find(a => a.id === radar.currentAssessmentId) || radar.assessments?.[0];
   const bull = current?.bullishScore ?? 50, bear = current?.bearishScore ?? 50;
   const liveBlock = radar.mode === "shadow" && current?.activeBlock;
   const summary = radar.summary || {};
@@ -39,6 +40,7 @@ export function RiskRadar() {
   const actionCount = (summary.blockedEntries || 0) + (summary.allowedEntries || 0);
   const impactTitle = benefit > 0 ? "AI 净保护" : benefit < 0 ? "AI 净伤害" : "AI 净影响";
   const impactNote = benefit > 0 ? "过滤动作后收益优于基准" : benefit < 0 ? "过滤动作后收益低于基准" : "已结算样本暂无净差异";
+  const assessmentPager = radar.assessmentPagination || { page: 0, total: radar.assessments?.length || 0, totalPages: 1, retentionLimit: 0 };
   return (
     <div className="content radar-page">
       <div className="radar-command">
@@ -93,7 +95,7 @@ export function RiskRadar() {
       </div>
 
       <div className="radar-bottom">
-        <div><div className="section-h"><h2>15 分钟判断轨迹</h2></div><div className="card assessment-list">{(radar.assessments || []).slice(0, 10).map(a => <div className="assessment-row" key={a.id}><span className={"assessment-dot " + (a.activeBlock ? "hot" : a.status === "error" ? "err" : "")} /><div><b>{a.status === "error" ? "评估失败" : `${a.bearishScore?.toFixed(0)} 空 / ${a.bullishScore?.toFixed(0)} 多`}</b><span>{a.reason || a.error || "—"}</span></div><em>{new Date(a.assessedForMs).toLocaleTimeString()}</em></div>)}</div></div>
+        <div><div className="section-h"><h2>15 分钟判断轨迹</h2><span className="muted">每页 10 条</span></div><div className="card assessment-list">{(radar.assessments || []).map(a => <div className="assessment-row" key={a.id}><span className={"assessment-dot " + (a.activeBlock ? "hot" : a.status === "error" ? "err" : "")} /><div><b>{a.status === "error" ? "评估失败" : `${a.bearishScore?.toFixed(0)} 空 / ${a.bullishScore?.toFixed(0)} 多`}</b><span>{a.reason || a.error || "—"}</span></div><em>{new Date(a.assessedForMs).toLocaleTimeString()}</em></div>)}{!radar.assessments?.length && <div className="empty">暂无判断记录</div>}<div className="radar-pagination"><button type="button" aria-label="上一页" disabled={assessmentPager.page <= 0} onClick={() => setAssessmentPage(p => Math.max(0, p - 1))}>←</button><span><b>{assessmentPager.page + 1}</b> / {assessmentPager.totalPages} 页 · 共 {assessmentPager.total} 条</span><button type="button" aria-label="下一页" disabled={assessmentPager.page >= assessmentPager.totalPages - 1} onClick={() => setAssessmentPage(p => p + 1)}>→</button><em>数据库保留最近 {assessmentPager.retentionLimit?.toLocaleString()} 条</em></div></div></div>
         <div><div className="section-h"><h2>阈值回放</h2></div><div className="card threshold-list">{thresholds.map(t => <div className="threshold-row" key={t.threshold}><b>{t.threshold}</b><div><span style={{ width: Math.min(100, t.wouldBlock * 8) + "%" }} /></div><em className={cls(t.hypotheticalNetBenefit)}>{t.wouldBlock} 动作 · {signedUsd(t.hypotheticalNetBenefit, 0)}</em></div>)}<p>逐动作重放不同阈值；正式标签仍采用动作发生时冻结的双周期确认结果。</p></div></div>
       </div>
     </div>
