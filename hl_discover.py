@@ -187,7 +187,8 @@ def main() -> int:
         # v3 ELIGIBILITY gates (the few binary thresholds; QUALITY is the continuous score in
         # metrics.score, shaped by config constants). No more hardcoded win/roi/dd cutoffs.
         pr.add_argument("--min-perp", type=float, default=0.6, help="min copyable-perp share of fills")
-        pr.add_argument("--inactive-days", type=float, default=3.0, help="reject if no fill within N days")
+        pr.add_argument("--inactive-days", type=float, default=config.INACTIVE_DAYS,
+                        help="reject if no copyable open within N days")
         pr.add_argument("--max-daily-eps", type=float, default=30.0, help="reject bots: max median episodes/active-day")
         pr.add_argument("--min-activity", type=float, default=0.21,
                         help="MINIMAL floor on active_days/lookback (~3 of 14d) — just rejects one-shot "

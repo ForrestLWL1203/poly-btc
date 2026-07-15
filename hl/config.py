@@ -302,6 +302,7 @@ HARVEST_WEEK_VLM_MAX = 30_000_000.0  # 7d VOLUME ceiling — higher-volume accou
 HARVEST_PNL_VOL_MIN = 0.001         # 7d pnl/volume FLOOR (0.1%) — below = razor-thin MM, not directional
 HARVEST_PNL_VOL_MAX = 0.08          # 7d pnl/volume CEILING (8%) — above = profit too big for the volume
 #                                     = NOT from trading (deposit/spot/airdrop ghost); real traders 0.2-4%
+INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
 # RETIRED (leaderboard ROI contaminated; daily turnover doesn't separate MMs from our high-churn keeps):
 HARVEST_MON_ROI_MIN = 0.0           # was 0.15 — return magnitude is now a SCORE input, not a gate
 HARVEST_MON_ROI_MAX = 1e9           # was 3.0
@@ -417,17 +418,15 @@ PORTFOLIO_MIN_EDGE_BPS = 10.0     # 边际硬底线 = 30d 净利/成交量 ×1e4
 WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
 WINDFALL_WIN_MAX = 0.60  # (亏损尚未覆盖,ROI 此刻还正)→ reject。真·高胜率的集中不算(它靠稳定胜率不靠一把)。
 GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量)→ reject:月度光环掩盖近期反转,当下在亏。
-# === v10: quality magnitude lives in score() as smooth factors (NOT末尾 hard gates — those fight the composite
-# score + over-cut). gates stay binary (copyability + validity + evidence). A single MIN_ACTIVE_SCORE quality
-# line then makes `active` = the pool of genuinely-good, followable wallets (watchlist); we follow the top-N. ===
+# === v10: quality magnitude lives in score() as smooth ranking factors. Qualification is decided by the
+# structural/data/evidence/strict-Copy economic gates below; raw profile score must never veto a wallet that
+# passes those authoritative checks. ===
 # Winning-trade thickness (`win_pt`) is intentionally observational only. Portfolio edge bps is the hard
 # thin-edge gate, and copy replay is the authoritative copyability check.
 SCORE_PAYOFF_REF  = 1.0   # 盈亏比≥此(1.0)=满分,只罚真·大亏小赚(payoff<1); payoff 和胜率联动,高胜率天生不需高盈亏比
 SCORE_PAYOFF_FLOOR= 0.6    # → 轻推,不双重惩罚高胜率盘(0x770493 payoff1.0/胜78% 不再被压)
 EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 → insufficient_evidence(无战绩无从评判,取消趋势豁免)
 EVIDENCE_MIN_TRADES = 7   #                已平回合 < 此 同理. 5天/7回合≈0.5单/天,砍纯持有+小样本尾巴,不误伤好钱包
-MIN_ACTIVE_SCORE  = 0.60  # 质量线:score < 此 → 不进 active. 让 active = 全是好钱包(watchlist),跟单再从中取前N
-#                          (operator-tuned 0.60: 质量线切掉 ~72 个尾巴,active 只留够优质的)
 COPY_BT_GATE_ENABLE = True  # active 准入二次校验: 用历史 fills 按当前 observer 规则回放,目标赚但我们亏 → 不跟
 COPY_BT_DAYS = 30           # copy 回测窗口。用 30d 覆盖 14d 评分外的复制不稳定性,但仍是近期窗口
 COPY_BT_WARMUP_DAYS = 7     # 每个窗口额外预热7天，恢复窗口开始前已经打开的仓位

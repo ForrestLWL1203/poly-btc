@@ -537,10 +537,17 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
                 return True, "copy_backtest_deferred_data_error"
             return False, result.get("status") or "copy_unqualified"
     last_open = int(m.get("last_copyable_open_ms") or 0)
-    max_age_ms = int(getattr(p, "inactive_days", 1.0) * 86_400_000)
+    max_age_ms = int(getattr(p, "inactive_days", config.INACTIVE_DAYS) * 86_400_000)
     if not last_open or now_ms - last_open > max_age_ms:
         return False, "inactive_copyable_open"
     return True, "ok" if copy_gate_enabled else "copy_gate_disabled"
+
+
+def _finalize_profile_qualification(m, ok: bool, reason: str) -> tuple[bool, str, float]:
+    """Attach the raw quality score without turning that ranking prior into a qualification gate."""
+    score = metrics.score(m) if ok else 0.0
+    m["raw_quality_score"] = score
+    return ok, reason, score
 
 
 def _defer_profile(db, addr, prior, stamp, reason):
@@ -821,10 +828,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     m["age_days"] = (prior or {}).get("age_days")
 
     prev_status = (prior or {}).get("status")
-    m["score"] = metrics.score(m) if ok else 0.0
-    m["raw_quality_score"] = m["score"]
-    if ok and m["score"] < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
-        ok, reason, m["score"] = False, "low_quality", 0.0
+    ok, reason, m["score"] = _finalize_profile_qualification(m, ok, reason)
     status = "active" if ok else ("retired" if prev_status == "active" else "rejected")
     row = dict(m)                                    # keys match column names -> robust positional build
     row.update(addr=addr, status=status, reason=reason, last_refreshed=stamp,
@@ -3302,35 +3306,26 @@ def regate(db, p, *, stamp=None, source: str = "regate",
                 current_policy = {}
             allowed_sectors = set(current_policy.get("allowed") or [])
             evidence_results = copy_results
+            evidence_fills = replay_fills
             if allowed_sectors and allowed_sectors != {"crypto", "stock"}:
                 allowed_fills = [
                     x for x in replay_fills if classify_coin(x.get("coin")) in allowed_sectors
                 ]
+                evidence_fills = allowed_fills
                 evidence_results = _copy_bt_results(addr, allowed_fills, now, p)
+            m.update(_open_flow_metrics(evidence_fills, now))
             _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now)
-            qualification = follow_score.evaluate_follow_eligibility(
-                {
-                    **m,
-                    "copy_bt_data_status": m.get("data_status"),
-                    "copy_bt_evidence_status": m.get("evidence_status"),
-                },
-                min_closed30=getattr(p, "evidence_min_trades", config.EVIDENCE_MIN_TRADES),
-                min_evidence_days=getattr(p, "evidence_min_days", config.EVIDENCE_MIN_DAYS),
-                min_expected_return=getattr(
-                    p, "copy_min_expected_margin_return", config.COPY_MIN_EXPECTED_MARGIN_RETURN
-                ),
-                margin_equity_pct=getattr(p, "margin_equity_pct", config.MARGIN_EQUITY_PCT),
-            )
-            if not qualification.get("eligible") and not qualification.get("deferred"):
-                ok, reason = False, qualification.get("status") or "copy_unqualified"
-        score = metrics.score(m) if ok else 0.0
-        if ok and score < getattr(p, "min_active_score", config.MIN_ACTIVE_SCORE):
-            ok, reason, score = False, "low_quality", 0.0
-        # A cached/manual regate may retire an old Active, but cannot reactivate
-        # a rejected wallet without a fresh network generation.
-        status = ("active" if ok else "retired") if old == "active" else old
+            ok, reason = _profile_copy_qualification(m, now, p)
+        ok, reason, score = _finalize_profile_qualification(m, ok, reason)
+        # Only policy-only outcomes removed by this release may be safely reactivated from the current
+        # cached replay. Structural/data failures still require a fresh network generation.
+        policy_recheck = old_reason in {"low_quality", "inactive_copyable_open"}
+        if old == "active" or policy_recheck:
+            status = "active" if ok else "retired"
+        else:
+            status = old
         db.execute(
-            "UPDATE profile SET status=?,reason=?,score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
+            "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
             "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_14d_net_pnl=?,copy_bt_14d_closed_n=?,"
             "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=?,"
@@ -3338,7 +3333,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
             "copy_evidence_days=?,copy_recent_return_14d=?,copy_recent_return_7d=?,copy_risk_score=?,"
             "execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
             "actionable_open_rate=?,capacity_fit=?,evidence_status=? WHERE addr=?",
-            (status, reason, score, m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
+            (status, reason, score, m.get("raw_quality_score"), m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
              m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_closed_n"),

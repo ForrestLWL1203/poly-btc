@@ -22,6 +22,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MAX"], 30_000_000.0)
+            self.assertEqual(scanner["inactive_days"], 2)
             self.assertFalse(follow["COPY_STOP_ENABLE"])
             self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
 
@@ -49,7 +50,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertIn("PORTFOLIO_MAX_TURNOVER", scanner_keys)
             self.assertIn("PORTFOLIO_MIN_EDGE_BPS", scanner_keys)
             self.assertIn("MAX_CONCURRENT_POS", scanner_keys)
-            self.assertIn("MIN_ACTIVE_SCORE", scanner_keys)
+            self.assertNotIn("MIN_ACTIVE_SCORE", scanner_keys)
             self.assertIn("EVIDENCE_MIN_DAYS", scanner_keys)
             self.assertIn("EVIDENCE_MIN_TRADES", scanner_keys)
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
@@ -82,6 +83,21 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(row["level"], "blue")
             self.assertEqual(row["type"], "int")
             self.assertEqual(row["effect"], "rescan")
+
+    def test_seed_params_removes_obsolete_raw_score_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.execute(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES ('MIN_ACTIVE_SCORE','0.6','scanner','blue','float','rescan','0.6','old')"
+            )
+            db.commit()
+
+            params.seed_params(db)
+
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM params WHERE key='MIN_ACTIVE_SCORE'"
+            ).fetchone())
 
     def test_db_score_rows_do_not_override_code_score_weights(self):
         original = {

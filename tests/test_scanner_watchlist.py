@@ -600,7 +600,6 @@ class ScannerWatchlistTests(unittest.TestCase):
                 portfolio_min_edge_bps=10,
                 windfall_conc=0.8,
                 windfall_win_max=0.6,
-                min_active_score=0.0,
                 copy_bt_gate_enable=True,
                 copy_bt_days=30,
                 copy_bt_min_closed=7,
@@ -622,6 +621,41 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "SELECT status,reason,copy_bt_net_pnl,copy_bt_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
             self.assertEqual(tuple(row), ("retired", "normalized_evidence_missing", -25.0, 9))
+
+    def test_regate_reactivates_obsolete_low_quality_outcome_when_copy_gates_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                _profile_row("0xaaa", "retired", 0.0, reason="low_quality"),
+            )
+            db.commit()
+            p = SimpleNamespace()
+
+            with (
+                patch.object(scanner.metrics, "gates_structural", return_value=(True, "ok")),
+                patch.object(scanner.metrics, "gates_state", return_value=(True, "ok")),
+                patch.object(scanner.metrics, "score", return_value=0.581),
+                patch.object(scanner, "_copy_bt_cached_fills", return_value=[]),
+                patch.object(scanner, "_copy_bt_results", return_value={}),
+                patch.object(scanner, "_sector_copy_bt_results", return_value={}),
+                patch.object(scanner, "_apply_sector_copy_bt_gate", return_value=(True, "ok")),
+                patch.object(scanner, "_copy_profile_evidence"),
+                patch.object(scanner, "_profile_copy_qualification", return_value=(True, "ok")),
+                patch.object(scanner.pipeline_audit, "record_profile_snapshot"),
+                patch.object(scanner, "refresh_watchlist", return_value=1),
+            ):
+                scanner.regate(db, p, quiet=True)
+
+            row = db.execute(
+                "SELECT status,reason,score,raw_quality_score FROM profile WHERE addr='0xaaa'"
+            ).fetchone()
+            self.assertEqual(row[0], "active")
+            self.assertEqual(row[1], "ok")
+            self.assertAlmostEqual(row[2], 0.581)
+            self.assertAlmostEqual(row[3], 0.581)
 
     def test_regate_retires_low_copy_fill_rate_profile(self):
         with tempfile.TemporaryDirectory() as td:
@@ -675,7 +709,6 @@ class ScannerWatchlistTests(unittest.TestCase):
                 portfolio_min_edge_bps=10,
                 windfall_conc=0.8,
                 windfall_win_max=0.6,
-                min_active_score=0.0,
                 copy_bt_gate_enable=True,
                 copy_bt_days=30,
                 copy_bt_min_closed=7,
@@ -752,7 +785,6 @@ class ScannerWatchlistTests(unittest.TestCase):
                 portfolio_min_edge_bps=10,
                 windfall_conc=0.8,
                 windfall_win_max=0.6,
-                min_active_score=0.0,
                 copy_bt_gate_enable=True,
                 copy_bt_days=30,
                 copy_bt_min_closed=7,
@@ -778,7 +810,6 @@ class ScannerWatchlistTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
-            db.execute("UPDATE params SET value='0' WHERE key='MIN_ACTIVE_SCORE'")
             cols = storage.PROFILE_COLS.split(",")
             now_ms = int(time.time() * 1000)
             quality = dict(
@@ -838,7 +869,6 @@ class ScannerWatchlistTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
-            db.execute("UPDATE params SET value='0' WHERE key='MIN_ACTIVE_SCORE'")
             cols = storage.PROFILE_COLS.split(",")
             now_ms = int(time.time() * 1000)
             db.execute(
@@ -1368,7 +1398,6 @@ class ScannerWatchlistTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
-            db.execute("UPDATE params SET value='0' WHERE key='MIN_ACTIVE_SCORE'")
             cols = storage.PROFILE_COLS.split(",")
             quality = dict(
                 n_trades=12,

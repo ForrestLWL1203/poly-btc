@@ -31,7 +31,7 @@ PARAM_SPEC = [
         "盈利/成交量上限(防幽灵号)", ""),   # v10: 藏 —— 冷门幽灵号预筛,和已 hidden 的下限对齐
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
-    ("inactive_days",        "scanner", "green",  "int",     "rescan", 1,
+    ("inactive_days",        "scanner", "green",  "int",     "rescan", config.INACTIVE_DAYS,
         "最长开仓静默天数", "最近一次可复制新开仓超过此天数，资格阶段直接排除；已有跟单持仓仍按Exit-only安全退出"),
     ("DAILY_SCAN_TIME_BUDGET_MIN", "scanner", "hidden", "int", "rescan", config.DAILY_SCAN_TIME_BUDGET_MIN,
         "每日扫描时间预算", ""),
@@ -69,8 +69,6 @@ PARAM_SPEC = [
     # (MIN_PAYOFF removed v10 — the small_win_big_loss hard gate is gone; 盈亏比 now a smooth g_payoff factor in score)
     ("MAX_CONCURRENT_POS",   "scanner", "blue",   "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
-    ("MIN_ACTIVE_SCORE",     "scanner", "blue",   "float",   "rescan", config.MIN_ACTIVE_SCORE,
-        "入选质量线", "综合评分 < 此 → 不进 active。让 active(watchlist)=全是够优质的好钱包,跟单再从中按资金取前N。低质量尾巴在这一刀切掉"),
     ("EVIDENCE_MIN_DAYS",    "scanner", "blue",   "int",     "rescan", config.EVIDENCE_MIN_DAYS,
         "证据·最低独立天数", "Copy已平episode分布的独立交易日少于此值，资格阶段直接排除"),
     ("EVIDENCE_MIN_TRADES",  "scanner", "blue",   "int",     "rescan", config.EVIDENCE_MIN_TRADES,
@@ -247,6 +245,9 @@ def parse(value, ptype):
 def seed_params(db):
     """Insert missing params and refresh metadata without overwriting operator-edited values."""
     stamp = now_iso()
+    # Retired policy: raw profile score remains a ranking/explanation input, never a qualification veto.
+    # Delete the obsolete persisted knob so old databases cannot silently restore the historical hard cut.
+    db.execute("DELETE FROM params WHERE key='MIN_ACTIVE_SCORE'")
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
         # Approved policy migration: the old hidden heavy-DCA threshold was 20.  This is a deliberate
@@ -388,7 +389,7 @@ SCANNER_ARG_MAP = {
     "COPY_BT_GATE_ENABLE": "copy_bt_gate_enable", "COPY_BT_DAYS": "copy_bt_days",
     "COPY_BT_MIN_CLOSED": "copy_bt_min_closed", "COPY_BT_MIN_NET_PNL": "copy_bt_min_net_pnl",
     "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
-    "MAX_CONCURRENT_POS": "max_concurrent_pos", "MIN_ACTIVE_SCORE": "min_active_score",
+    "MAX_CONCURRENT_POS": "max_concurrent_pos",
     "EVIDENCE_MIN_DAYS": "evidence_min_days", "EVIDENCE_MIN_TRADES": "evidence_min_trades",
     "DAILY_SCAN_TIME_BUDGET_MIN": "daily_scan_time_budget_min",
     "CORE_REFRESH_DEADLINE_MIN": "core_refresh_deadline_min",

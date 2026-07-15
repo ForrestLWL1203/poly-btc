@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from hl import scanner
 
@@ -53,10 +54,27 @@ class ProfileQualificationTests(unittest.TestCase):
 
     def test_inactive_copyable_open_flow_is_excluded(self):
         ok, reason = scanner._profile_copy_qualification(
-            qualified(last_copyable_open_ms=NOW - 25 * 3_600_000), NOW, self.params,
+            qualified(last_copyable_open_ms=NOW - 49 * 3_600_000), NOW, self.params,
         )
         self.assertFalse(ok)
         self.assertEqual(reason, "inactive_copyable_open")
+
+    def test_copyable_open_within_48_hours_remains_qualified(self):
+        self.assertEqual(
+            scanner._profile_copy_qualification(
+                qualified(last_copyable_open_ms=NOW - 47 * 3_600_000), NOW, self.params,
+            ),
+            (True, "ok"),
+        )
+
+    def test_raw_quality_score_is_ranking_only_not_a_qualification_veto(self):
+        row = qualified()
+        with patch.object(scanner.metrics, "score", return_value=0.581):
+            ok, reason, score = scanner._finalize_profile_qualification(row, True, "ok")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(score, 0.581)
+        self.assertEqual(row["raw_quality_score"], 0.581)
 
     def test_thin_normalized_copy_edge_is_excluded(self):
         ok, reason = scanner._profile_copy_qualification(qualified(copy_expected_return=0.019), NOW, self.params)
