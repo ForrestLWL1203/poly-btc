@@ -3347,7 +3347,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
             "copy_expected_return=?,copy_return_lcb=?,copy_return_volatility=?,copy_positive_probability=?,"
             "copy_evidence_days=?,copy_recent_return_14d=?,copy_recent_return_7d=?,copy_risk_score=?,"
             "execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
-            "actionable_open_rate=?,capacity_fit=?,evidence_status=? WHERE addr=?",
+            "actionable_open_rate=?,capacity_fit=?,data_status=?,evidence_status=? WHERE addr=?",
             (status, reason, score, m.get("raw_quality_score"), m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
@@ -3359,7 +3359,8 @@ def regate(db, p, *, stamp=None, source: str = "regate",
              m.get("copy_recent_return_14d"), m.get("copy_recent_return_7d"),
              m.get("copy_risk_score"), m.get("execution_score"), m.get("model_coverage"),
              m.get("oos_net_pnl"), m.get("oos_max_drawdown"), m.get("oos_cvar95"),
-             m.get("actionable_open_rate"), m.get("capacity_fit"), m.get("evidence_status"),
+             m.get("actionable_open_rate"), m.get("capacity_fit"),
+             m.get("data_status") or "valid", m.get("evidence_status"),
              addr),
         )
         n_active += 1 if ok else 0

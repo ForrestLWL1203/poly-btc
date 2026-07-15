@@ -662,12 +662,14 @@ class ScannerWatchlistTests(unittest.TestCase):
                 scanner.regate(db, p, quiet=True)
 
             row = db.execute(
-                "SELECT status,reason,score,raw_quality_score FROM profile WHERE addr='0xaaa'"
+                "SELECT status,reason,score,raw_quality_score,data_status "
+                "FROM profile WHERE addr='0xaaa'"
             ).fetchone()
             self.assertEqual(row[0], "active")
             self.assertEqual(row[1], "ok")
             self.assertAlmostEqual(row[2], 0.581)
             self.assertAlmostEqual(row[3], 0.581)
+            self.assertEqual(row[4], "valid")
             stale = db.execute(
                 "SELECT status,reason,score FROM profile WHERE addr='0xstale'"
             ).fetchone()
