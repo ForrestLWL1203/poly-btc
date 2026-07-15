@@ -44,13 +44,25 @@ export function FollowSettingsPanel({
   return (
     <React.Fragment>
       {visibleTopRows.map(row)}
-      {tailEnableParam && <section className={"param-dependent-group" + (vals[tailEnableKey] ? " open" : "")}>
-        {row(tailEnableParam)}
-        {vals[tailEnableKey] && <div className="param-dependent-children">
-          <div className="param-dependent-note">开启后生效</div>
+      {tailEnableParam && <div className="tail-dependent-group">
+        <button type="button"
+          className={"expand-head tail-dependent-head" + (vals[tailEnableKey] ? " open" : "") + (dirty[tailEnableKey] ? " dirty" : "")}
+          aria-expanded={!!vals[tailEnableKey]}
+          aria-pressed={!!vals[tailEnableKey]}
+          disabled={!editableParam(tailEnableParam)}
+          onClick={() => editableParam(tailEnableParam) && onChange(tailEnableKey, !vals[tailEnableKey])}>
+          <span className="tail-dependent-caret">{vals[tailEnableKey] ? "▾" : "▸"}</span>
+          <span className="pill tint-green">盈利尾仓保护</span>
+          <span className="tail-dependent-desc">{tailEnableParam.desc}</span>
+          <span className="tail-dependent-summary">{vals[tailEnableKey] ? "3 项参数已生效" : "已关闭"}</span>
+          <span className={"toggle " + (vals[tailEnableKey] ? "on" : "")} aria-hidden="true">
+            <span className="knob" />
+          </span>
+        </button>
+        {vals[tailEnableKey] && <div className="expand-body tail-dependent-body">
           {tailChildParams.map(row)}
         </div>}
-      </section>}
+      </div>}
       {blacklistParam && <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
         value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
         onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />}
