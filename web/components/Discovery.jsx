@@ -5,6 +5,7 @@ import { ScanControls, ScanStatusCard } from "./discovery/ScanStatusCard.jsx";
 import { ScanHistoryTable } from "./discovery/ScanHistoryTable.jsx";
 
 export { ScanMask } from "./discovery/ScanMask.jsx";
+export { scanStageLabel } from "./discovery/ScanMask.jsx";
 
 const { useState, useEffect, useCallback, useRef } = React;
 

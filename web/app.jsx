@@ -1,6 +1,6 @@
 import { api } from "./lib/api.js";
 import { Confirm } from "./components/Confirm.jsx";
-import { Discovery, ScanMask } from "./components/Discovery.jsx";
+import { Discovery, ScanMask, scanStageLabel } from "./components/Discovery.jsx";
 import { History } from "./components/History.jsx";
 import { ObsMask } from "./components/ObsMask.jsx";
 import { Overview } from "./components/Overview.jsx";
@@ -168,14 +168,20 @@ function Dashboard({ onLogout }) {
             <div className="strip-item"><span>今日</span><b className={cls(ov.todayPct)}>{fPct(ov.todayPct)}</b></div>
             <div className="strip-item"><span>在持</span><b>{ov.openCount}</b></div>
             <div className="strip-item"><span>可用</span><b>{fUsd(ov.availableBalance)}</b></div>
+            <div className="strip-item"><span>浮动</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</b></div>
             <div className="strip-item strip-radar">
               <span className="strip-radar-title"><i className="dot" style={{ background: radarRunning ? "var(--green)" : "var(--red)", animation: radarRunning ? "pulse 1.6s infinite" : "none" }} />风险雷达运行状态</span>
               <div className="strip-radar-values"><b className={radarRunning ? "up" : "down"}>{radarRunning ? "运行中" : "未运行"}</b><small>空 {radarBear.toFixed(0)} / 多 {radarBull.toFixed(0)}</small></div>
               <div className="strip-risk-split" aria-label={`空 ${radarBear.toFixed(0)}，多 ${radarBull.toFixed(0)}`}><i style={{ width: radarBear + "%" }} /><em style={{ width: radarBull + "%" }} /></div>
             </div>
-            <div className="strip-item"><span>浮动</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</b></div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
-              return <div className="strip-item"><span>采集</span><b style={{ color: scannerColor(sc, stale) }}>{SCANNER_LABEL[sc] || sc}{stale && sc !== "idle" ? " ⚠" : ""}</b></div>; })()}
+              const active = sc === "scanning" && !stale;
+              const stage = active ? scanStageLabel(ov.system.scannerStage) : (SCANNER_LABEL[sc] || sc);
+              return <div className="strip-item strip-scanner">
+                <span className="strip-scanner-title"><i className="dot" style={{ background: stale ? "var(--red)" : active ? "var(--green)" : "var(--gray)", animation: active || stale ? "pulse 1.6s infinite" : "none" }} />采集运行状态</span>
+                <div className="strip-scanner-values"><b title={stage} style={{ color: scannerColor(sc, stale) }}>{stage}{stale && sc !== "idle" ? " ⚠" : ""}</b><small>{active ? "采集中" : stale ? "心跳超时" : "等待任务"}</small></div>
+                <div className={"strip-scanner-line" + (active ? " active" : stale ? " stale" : "")} />
+              </div>; })()}
           </div>
         )}
 

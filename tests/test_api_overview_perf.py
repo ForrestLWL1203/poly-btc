@@ -167,6 +167,20 @@ class ApiOverviewPerfTests(unittest.TestCase):
             "enabled": True, "bullishScore": 78.0, "bearishScore": 22.0,
         })
 
+    def test_overview_exposes_current_scan_stage(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT OR REPLACE INTO scan_progress (id,state,stage,updated_at) "
+                "VALUES (1,'scanning','selection_search','now')"
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        self.assertEqual(overview["system"]["scannerStage"], "selection_search")
+
     def test_overview_reuses_gross_traded_until_copy_actions_change(self):
         if hasattr(api_overview, "_GROSS_TRADED_CACHE"):
             api_overview._GROSS_TRADED_CACHE.clear()

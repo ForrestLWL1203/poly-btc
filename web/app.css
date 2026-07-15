@@ -220,6 +220,16 @@ tr.detail-row > td { padding: 0 !important; background: rgba(255, 255, 255, .015
 .strip-risk-split { display: flex; width: 100%; height: 3px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.05); }
 .strip-risk-split i,.strip-risk-split em { display: block; height: 100%; }
 .strip-risk-split i { background: var(--red); }.strip-risk-split em { background: var(--green); }
+.strip-item.strip-scanner { gap: 2px; }
+.strip-scanner-title { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.strip-scanner-title .dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; }
+.strip-scanner-values { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; width: 100%; min-width: 0; }
+.strip-scanner-values b { min-width: 0; font-size: 11px; text-overflow: ellipsis; }
+.strip-scanner-values small { color: var(--t3); font-family: var(--mono); font-size: 8px; white-space: nowrap; }
+.strip-scanner-line { width: 100%; height: 3px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.07); }
+.strip-scanner-line.active { background: linear-gradient(90deg, rgba(63,207,142,.18), var(--green), rgba(63,207,142,.18)); background-size: 180% 100%; animation: scannerSweep 1.8s ease-in-out infinite; }
+.strip-scanner-line.stale { background: var(--red); opacity: .75; }
+@keyframes scannerSweep { 0%,100% { background-position: 100% 0; opacity: .55; } 50% { background-position: 0 0; opacity: 1; } }
 
 /* content */
 .content { padding: 4px 26px 40px; }

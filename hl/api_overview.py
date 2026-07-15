@@ -103,6 +103,7 @@ def ep_overview(db):
 
     obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
     ss = scanner_status(db)
+    scan_progress = q1(db, "SELECT state,stage FROM scan_progress WHERE id=1")
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     wl = {"c": followed_count(db)}
 
@@ -130,6 +131,7 @@ def ep_overview(db):
         "scannerStale": ss["stale"],
         "scannerHeartbeatAt": ss["heartbeatAt"],
         "scannerDetail": ss["detail"],
+        "scannerStage": (scan_progress["stage"] if scan_progress and scan_progress["state"] == "scanning" else None),
         "lastScanAt": (last_scan["m"] if last_scan else None),
         "watchlistCount": (wl["c"] if wl else 0),
         "riskRadar": {

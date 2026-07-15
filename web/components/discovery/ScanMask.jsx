@@ -1,4 +1,4 @@
-const STAGES_FE = [
+export const SCAN_STAGES = [
   [["scan_leaderboard"], "扫描排行榜"],
   [["fetch_history"], "拉取历史 & 算指标"],
   [["score_filter"], "评分 · 网格/扛单过滤"],
@@ -6,6 +6,11 @@ const STAGES_FE = [
   [["prefetch_selection_paths", "portfolio_tune", "selection_search", "auto_tune"], "组合回测调参"],
   [["persist"], "写库 & 校验"],
 ];
+
+export const scanStageLabel = (stage) => {
+  const match = SCAN_STAGES.find(([keys]) => keys.includes(stage));
+  return match ? match[1] : "处理中";
+};
 
 // Wallet profiling is only the first, linear part of a scan. Once every wallet is profiled the API's
 // scanned/total ratio is 100%, but strict price-path preparation, portfolio search and publication still
@@ -25,7 +30,7 @@ const { useState } = React;
 export function ScanMask({ status, onStop, stopping = false, stopError = null }) {
   const [confirmStop, setConfirmStop] = useState(false);
   const stage = status && status.stage;
-  const curIdx = STAGES_FE.findIndex(([keys]) => keys.includes(stage));
+  const curIdx = SCAN_STAGES.findIndex(([keys]) => keys.includes(stage));
   const pct = POST_PROFILE_PROGRESS[stage] ?? ((status && status.progressPct) || 0);
   const el = (status && status.elapsedSec) || 0;
   const mm = String(Math.floor(el / 60)).padStart(2, "0"), ss = String(el % 60).padStart(2, "0");
@@ -45,7 +50,7 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
         <span>已扫描 {(status && status.candidatesScanned) || 0} / {(status && status.candidatesTotal) || "—"}</span>
       </div>
       <div className="stage-list">
-        {STAGES_FE.map(([keys, label], i) => {
+        {SCAN_STAGES.map(([keys, label], i) => {
           const st = curIdx < 0 ? "" : i < curIdx ? "done" : i === curIdx ? "active" : "";
           return <div key={keys[0]} className={"stage-item " + st}>
             <span className="stage-dot">{st === "done" ? "✓" : st === "active" ? "●" : ""}</span>{label}</div>;
