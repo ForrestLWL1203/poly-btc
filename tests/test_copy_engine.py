@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import replace
 
-from hl.copy_engine import OpenSizingParams, plan_open_sizing
+from hl.copy_engine import OpenSizingParams, plan_open_sizing, profit_tail_close_decision
 from hl.sizing import sizing_equity_for_drawdown
 
 
@@ -179,6 +179,60 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "XRP"), "mid")
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "xyz:GOLD"), "mid")
         self.assertEqual(tier_for_sigma(0.12, 0.05, 0.10, "BTC"), "high")
+
+    def test_profit_tail_uses_percentages_and_asset_liquidation_risk(self):
+        decision = profit_tail_close_decision(
+            rem_size=1578.73231,
+            peak_size=4007.55125,
+            reduce_frac=242.88189 / 1578.73231,
+            execution_px=0.14868,
+            risk_px=0.14868,
+            entry_px=0.14898,
+            side="long",
+            realized_pnl=59.30,
+            liq_px=0.119184,
+            fee_rate=0.00045,
+        )
+
+        self.assertTrue(decision.close)
+        self.assertEqual(decision.reason, "liq_risk_profit_tail")
+        self.assertAlmostEqual(decision.remaining_fraction, 1 / 3, places=3)
+        self.assertGreater(decision.giveback_fraction, 0.6)
+
+    def test_profit_tail_never_turns_into_a_loss_stop(self):
+        decision = profit_tail_close_decision(
+            rem_size=30,
+            peak_size=100,
+            reduce_frac=0.5,
+            execution_px=90,
+            risk_px=90,
+            entry_px=100,
+            side="long",
+            realized_pnl=0,
+            liq_px=80,
+            fee_rate=0.00045,
+        )
+
+        self.assertFalse(decision.close)
+        self.assertLess(decision.close_now_profit, 0)
+
+    def test_hard_profit_tail_is_direction_symmetric(self):
+        decision = profit_tail_close_decision(
+            rem_size=25,
+            peak_size=100,
+            reduce_frac=0.4,
+            execution_px=90,
+            risk_px=90,
+            entry_px=100,
+            side="short",
+            realized_pnl=10,
+            liq_px=120,
+            fee_rate=0.00045,
+        )
+
+        self.assertTrue(decision.close)
+        self.assertEqual(decision.reason, "hard_profit_tail")
+        self.assertAlmostEqual(decision.remaining_fraction, 0.15)
 
 
 if __name__ == "__main__":

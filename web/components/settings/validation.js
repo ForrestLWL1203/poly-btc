@@ -37,6 +37,12 @@ export function validateFollowParams(vals) {
   if (okFull && okLock && numVal("DEPLOY_FULL_PCT") >= numVal("MAX_DEPLOY_PCT")) {
     markErr("满火力占用线必须低于组合部署上限", ["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
   }
+  const okTailHard = validatePct("尾仓直接清理线", "TAIL_CLOSE_HARD_REMAIN_PCT");
+  const okTailRisk = validatePct("尾仓风险评估线", "TAIL_CLOSE_RISK_REMAIN_PCT");
+  validatePct("尾仓最大利润回吐", "TAIL_CLOSE_PROFIT_GIVEBACK_PCT");
+  if (okTailHard && okTailRisk && numVal("TAIL_CLOSE_HARD_REMAIN_PCT") > numVal("TAIL_CLOSE_RISK_REMAIN_PCT")) {
+    markErr("尾仓直接清理线不能高于风险评估线", ["TAIL_CLOSE_HARD_REMAIN_PCT", "TAIL_CLOSE_RISK_REMAIN_PCT"]);
+  }
 
   return { errors, badKeys };
 }

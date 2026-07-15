@@ -1,6 +1,6 @@
 import { cls, fNum, fPrice, fSign, fTime, fUsd } from "../../lib/format.js";
 
-const ACT_TINT = { 开仓: "tint-green", 加仓: "tint-blue", 减仓: "tint-amber", 平仓: "tint-gray" };
+const ACT_TINT = { 开仓: "tint-green", 加仓: "tint-blue", 减仓: "tint-amber", 平仓: "tint-gray", 尾盈平仓: "tint-green" };
 
 export function PositionDetail({ d }) {
   if (!d) return <div className="muted" style={{ padding: "14px 16px" }}>加载中…</div>;

@@ -24,6 +24,8 @@ def _close_type(row) -> str:
         return "liq"
     if status == "stopped":
         return "stop"
+    if status == "tail_closed":
+        return "tail"
     return "mirror"
 
 
@@ -179,9 +181,12 @@ def ep_position_detail(db, pos_id):
         sz = g["sz"]
         px = (g["px_n"] / sz) if sz else None
         entry = g["action"] in ("open", "add")
+        action_label = act_labels.get(g["action"], g["action"])
+        if g["action"] == "close" and p["status"] == "tail_closed":
+            action_label = "尾盈平仓"
         fills.append({
             "atSec": (g["ts"] or 0) / 1000.0, "action": g["action"],
-            "actionLabel": act_labels.get(g["action"], g["action"]),
+            "actionLabel": action_label,
             "fillCount": g["n"], "px": px, "qty": sz,
             "margin": (sz * px / lev) if (px and lev) else None,
             "pnl": g["pnl"] if not entry else None,

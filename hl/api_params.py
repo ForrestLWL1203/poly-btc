@@ -43,6 +43,10 @@ def patch_params(db_path, category, updates):
     db = rw_connect(db_path)
     try:
         out = {}
+        tail_pct_keys = {
+            "TAIL_CLOSE_HARD_REMAIN_PCT", "TAIL_CLOSE_RISK_REMAIN_PCT",
+            "TAIL_CLOSE_PROFIT_GIVEBACK_PCT",
+        }
         for key, val in (updates or {}).items():
             if key in REMOVED_PARAMS:
                 continue
@@ -60,6 +64,13 @@ def patch_params(db_path, category, updates):
                     raise ValueError("MARGIN_EQUITY_PCT must be numeric") from exc
                 if not 10.0 <= margin_equity_pct <= 100.0:
                     raise ValueError("MARGIN_EQUITY_PCT must be between 10 and 100")
+            if key in tail_pct_keys:
+                try:
+                    tail_pct = float(val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"{key} must be numeric") from exc
+                if not 0.0 <= tail_pct <= 100.0:
+                    raise ValueError(f"{key} must be between 0 and 100")
             if key == "COIN_BLACKLIST":
                 stored = format_coin_blacklist(val)
             else:
@@ -68,6 +79,17 @@ def patch_params(db_path, category, updates):
                     else "false" if stored is False else str(stored))
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (sval, now_iso(), key))
             out[key] = val
+        if category == "follow" and tail_pct_keys.intersection(out):
+            tail_values = {
+                row["key"]: float(row["value"])
+                for row in db.execute(
+                    "SELECT key,value FROM params WHERE key IN (?,?,?)",
+                    tuple(sorted(tail_pct_keys)),
+                ).fetchall()
+            }
+            if (tail_values.get("TAIL_CLOSE_HARD_REMAIN_PCT", 0.0)
+                    > tail_values.get("TAIL_CLOSE_RISK_REMAIN_PCT", 100.0)):
+                raise ValueError("TAIL_CLOSE_HARD_REMAIN_PCT must not exceed TAIL_CLOSE_RISK_REMAIN_PCT")
         if category == "follow" and out:
             _enqueue_follow_revision(db, "dashboard_params")
         db.commit()

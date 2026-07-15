@@ -28,7 +28,8 @@ import websockets
 
 from . import config, rest, selection, strategy_revision, volatility, ws
 from .coin_filter import coin_is_blocked, parse_coin_blacklist
-from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing, reduce_leaves_dust,
+from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
+                          profit_tail_close_decision, reduce_leaves_dust,
                           stop_px as engine_stop_px, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .sector import parse_json_obj, policy_allows_coin
@@ -143,6 +144,10 @@ class Observer:
         self.copy_stop_enable = config.COPY_STOP_ENABLE
         # (v10: RISK_BUDGET / σ-scaled leverage removed — leverage is now the σ-tier's cap, see _sizing_for)
         self.stop_margin_pct = config.STOP_MARGIN_PCT        # v10: cut at this fraction of the position's margin
+        self.tail_close_enable = config.TAIL_CLOSE_ENABLE
+        self.tail_close_hard_remain_pct = config.TAIL_CLOSE_HARD_REMAIN_PCT
+        self.tail_close_risk_remain_pct = config.TAIL_CLOSE_RISK_REMAIN_PCT
+        self.tail_close_profit_giveback_pct = config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -364,6 +369,10 @@ class Observer:
             if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
             # (v10: RISK_BUDGET removed — leverage = σ-tier cap)
             if f.get("STOP_MARGIN_PCT"): self.stop_margin_pct = f["STOP_MARGIN_PCT"]
+            if f.get("TAIL_CLOSE_ENABLE") is not None: self.tail_close_enable = bool(f["TAIL_CLOSE_ENABLE"])
+            if f.get("TAIL_CLOSE_HARD_REMAIN_PCT") is not None: self.tail_close_hard_remain_pct = f["TAIL_CLOSE_HARD_REMAIN_PCT"]
+            if f.get("TAIL_CLOSE_RISK_REMAIN_PCT") is not None: self.tail_close_risk_remain_pct = f["TAIL_CLOSE_RISK_REMAIN_PCT"]
+            if f.get("TAIL_CLOSE_PROFIT_GIVEBACK_PCT") is not None: self.tail_close_profit_giveback_pct = f["TAIL_CLOSE_PROFIT_GIVEBACK_PCT"]
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
 
@@ -371,12 +380,13 @@ class Observer:
         book = book or self.taker
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
-            "margin,notional,entry_px,size,rem_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
+            "margin,notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
             f"master_margin,master_leverage FROM {book.pos_table} WHERE status='open'").fetchall()
         loaded = 0
         closed_dust = 0
+        reconstructed_peaks = []
         for r in rows:
-            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, liq, rpnl, adds, mae, na, stopx,
+            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, peak_sz, liq, rpnl, adds, mae, na, stopx,
              m_mgn, m_lev) = r
             rem = rem or 0.0
             sz = sz or 0.0
@@ -388,11 +398,23 @@ class Observer:
             ev = asyncio.Event()
             if epx is not None:
                 ev.set()
+            if peak_sz is None:
+                running_size = 0.0
+                reconstructed_peak = 0.0
+                for (qty_delta,) in self.db.execute(
+                    f"SELECT our_qty_delta FROM {book.act_table} WHERE pos_id=? ORDER BY act_id",
+                    (pid,),
+                ).fetchall():
+                    running_size += f(qty_delta) or 0.0
+                    reconstructed_peak = max(reconstructed_peak, abs(running_size))
+                peak_sz = max(reconstructed_peak, abs(rem))
+                reconstructed_peaks.append((peak_sz, pid))
             book.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
                 "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
                 "notional": notl or 0.0, "entry_px": epx, "size": sz, "rem_size": rem,
+                "peak_size": peak_sz or abs(rem),
                 "liq_px": liq or 0.0, "stop_px": stopx or 0.0, "realized_pnl": rpnl or 0.0,
                 "add_count": adds or 0, "entries_ready": ev, "lock": asyncio.Lock(),
                 # smart-add restart recovery: first_margin ≈ margin/(1+adds·frac); master首仓额 from open snapshot;
@@ -404,6 +426,12 @@ class Observer:
                     f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "
                     "('open','add')", (pid,)).fetchall() if o is not None}}
             loaded += 1
+        if reconstructed_peaks:
+            self.db.executemany(
+                f"UPDATE {book.pos_table} SET peak_size=? WHERE pos_id=? AND peak_size IS NULL",
+                reconstructed_peaks,
+            )
+            self.db.commit()
         if loaded or closed_dust:
             extra = f", closed {closed_dust} dust" if closed_dust else ""
             _log(f"reloaded {loaded} open {book.name} copy positions from db{extra}")
@@ -1347,14 +1375,14 @@ class Observer:
             liq_px = plan.liq_px
             stop_px = plan.stop_px
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
-                      size=size, rem_size=size, liq_px=liq_px, stop_px=stop_px,
+                      size=size, rem_size=size, peak_size=size, liq_px=liq_px, stop_px=stop_px,
                       master_first_notl=master_notl,      # 目标首仓名义额 → smart 加仓比例基准
                       last_add_px=px)                     # 我们上次入场价 → smart 波动闸基准 (adds = first_margin × ...)
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
-                f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,"
+                f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
                 "liq_px=?,stop_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
                 "WHERE pos_id=?",
-                (lev, margin, notional, px, size, size, liq_px, stop_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
+                (lev, margin, notional, px, size, size, size, liq_px, stop_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
             book.balance -= abs(size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.commit()
@@ -1459,6 +1487,7 @@ class Observer:
                               if new_size else px)    # size-weighted average entry
             ep["rem_size"] = new_size
             ep["size"] += add_size
+            ep["peak_size"] = max(ep.get("peak_size", 0.0), new_size)
             ep["margin"] += add_margin
             ep["notional"] += add_margin * lev
             margin_row = self.db.execute(
@@ -1478,9 +1507,9 @@ class Observer:
             book.balance -= abs(add_size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.execute(
-                f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,liq_px=?,stop_px=?,"
+                f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,stop_px=?,"
                 "add_count=?,master_open_px=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
-                ep["rem_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
+                ep["rem_size"], ep["peak_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
             self.db.commit()                                  # the add is in the action table
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq,
@@ -1519,9 +1548,33 @@ class Observer:
                     return
                 reduce_frac = min(1.0, cum_frac)              # rem still matches `anchor` → cut the whole ratio
                 ep["reduce_anchor"] = abs(pos1)               # open a fresh 10% window from here
-            if not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, exit_px):
+            tail_close = False
+            tail_decision = None
+            dust_close = not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, exit_px)
+            if dust_close:
                 reduce_frac = 1.0
                 closing = True
+            elif (not closing and forced_frac is None and not liq and not stop and not gap):
+                tail_decision = profit_tail_close_decision(
+                    rem_size=ep["rem_size"],
+                    peak_size=ep.get("peak_size") or max(ep.get("size", 0.0), ep["rem_size"]),
+                    reduce_frac=reduce_frac,
+                    execution_px=exit_px,
+                    risk_px=self.mark_mid.get(coin) or exit_px,
+                    entry_px=ep["entry_px"],
+                    side=ep["side"],
+                    realized_pnl=ep.get("realized_pnl", 0.0),
+                    liq_px=ep.get("liq_px", 0.0),
+                    fee_rate=config.TAKER_FEE,
+                    enabled=self.tail_close_enable,
+                    hard_remain_pct=self.tail_close_hard_remain_pct,
+                    risk_remain_pct=self.tail_close_risk_remain_pct,
+                    max_profit_giveback_pct=self.tail_close_profit_giveback_pct,
+                )
+                if tail_decision.close:
+                    reduce_frac = 1.0
+                    closing = True
+                    tail_close = True
             close_size = ep["rem_size"] * reduce_frac
             fee = abs(close_size * exit_px) * config.TAKER_FEE
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"] - fee    # NET of our exit fee
@@ -1533,6 +1586,7 @@ class Observer:
             self._record_action(ep, addr, coin, t, action, oid, master_px, signed, pos1,
                                 -close_size * ep["sign"], exit_px, pnl, slip, book=book)
             status = ("liquidated" if (closing and liq) else "stopped" if (closing and stop)
+                      else "tail_closed" if (closing and tail_close)
                       else "gap_closed" if (closing and gap) else "closed" if closing else "open")
             was_liq = 1 if (closing and liq) else 0
             was_stopped = 1 if (closing and stop) else 0
@@ -1554,6 +1608,14 @@ class Observer:
                     _log(f"[{book.name}] LIQUIDATED {addr[:10]} {coin} {ep['side']} -${ep['margin']:,.0f}  bal=${book.balance:,.0f}")
                 elif stop:                                    # 扛单 copy-side stop: cut before the master does
                     _log(f"[{book.name}] STOPPED {addr[:10]} {coin} {ep['side']} pnl=${ep['realized_pnl']:+,.0f}  bal=${book.balance:,.0f}")
+                elif tail_close and tail_decision:
+                    self._tally("tail_profit_close", book)
+                    _log(
+                        f"[{book.name}] TAIL-CLOSE {addr[:10]} {coin} {ep['side']} "
+                        f"remain={tail_decision.remaining_fraction:.1%} "
+                        f"giveback={tail_decision.giveback_fraction:.0%} "
+                        f"pnl=${ep['realized_pnl']:+,.0f}"
+                    )
 
     async def _liquidate(self, addr, coin, ep, book=None):
         book = book or self.taker

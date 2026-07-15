@@ -243,6 +243,66 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_reload_reconstructs_peak_size_from_actions_for_existing_position(self):
+        db = self._db()
+        pos_id = db.execute(
+            "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+        ).fetchone()["pos_id"]
+        db.execute(
+            "UPDATE copy_position SET size=6,rem_size=3,peak_size=NULL WHERE pos_id=?",
+            (pos_id,),
+        )
+        db.executemany(
+            "INSERT INTO copy_action (pos_id,addr,coin,ts,action,our_qty_delta,our_px) "
+            "VALUES (?,'0xaaa','BTC',?,?,?,100)",
+            [
+                (pos_id, 1, "open", 4.0),
+                (pos_id, 2, "reduce", -3.0),
+                (pos_id, 3, "add", 2.0),
+            ],
+        )
+        db.commit()
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs._reload_open()
+
+            self.assertEqual(obs.taker.open_ep[("0xaaa", "BTC")]["peak_size"], 4.0)
+            stored = db.execute(
+                "SELECT peak_size FROM copy_position WHERE pos_id=?", (pos_id,),
+            ).fetchone()["peak_size"]
+            self.assertEqual(stored, 4.0)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_target_reduce_closes_profitable_risky_tail(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            ep.update(peak_size=2, liq_px=80, realized_pnl=1)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            await obs._apply_reduce(
+                "0xaaa", "BTC", ep, now_ms(), 110.0, -1.3, 0.7,
+                closing=False, liq=False, forced_px=110.0,
+            )
+
+            row = db.execute(
+                "SELECT status,rem_size,realized_pnl FROM copy_position WHERE pos_id=?", (pos_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "tail_closed")
+            self.assertEqual(row["rem_size"], 0)
+            self.assertGreater(row["realized_pnl"], 0)
+            self.assertNotIn(("0xaaa", "BTC"), obs.taker.open_ep)
+        asyncio.run(run())
+
     def test_manual_full_close_adds_wallet_coin_cooldown(self):
         async def run():
             db = self._db()

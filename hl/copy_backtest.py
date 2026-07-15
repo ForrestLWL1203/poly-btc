@@ -15,7 +15,8 @@ from . import config
 from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
-                          plan_open_sizing, reduce_leaves_dust, stop_px, tier_for_sigma)
+                          plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
+                          stop_px, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .util import f
 
@@ -151,6 +152,13 @@ class Backtest:
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
+        self.tail_close_enable = bool(overrides.get("TAIL_CLOSE_ENABLE", config.TAIL_CLOSE_ENABLE))
+        self.tail_close_hard_remain_pct = overrides.get(
+            "TAIL_CLOSE_HARD_REMAIN_PCT", config.TAIL_CLOSE_HARD_REMAIN_PCT)
+        self.tail_close_risk_remain_pct = overrides.get(
+            "TAIL_CLOSE_RISK_REMAIN_PCT", config.TAIL_CLOSE_RISK_REMAIN_PCT)
+        self.tail_close_profit_giveback_pct = overrides.get(
+            "TAIL_CLOSE_PROFIT_GIVEBACK_PCT", config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT)
         self.coin_blacklist = parse_coin_blacklist(overrides.get("COIN_BLACKLIST", config.COIN_BLACKLIST))
         self.block_korean_stocks = bool(overrides.get("BLOCK_KOREAN_STOCKS", config.BLOCK_KOREAN_STOCKS))
         self.low_liquidity_filter_enable = bool(overrides.get(
@@ -429,6 +437,7 @@ class Backtest:
             "entry_px": px,
             "size": size,
             "rem_size": size,
+            "peak_size": size,
             "margin": margin,
             "first_margin": margin,
             "notional": notional,
@@ -524,6 +533,7 @@ class Backtest:
         ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size if new_size else px)
         ep["rem_size"] = new_size
         ep["size"] += add_size
+        ep["peak_size"] = max(ep.get("peak_size", 0.0), new_size)
         ep["margin"] += add_margin
         ep["notional"] += add_margin * ep["leverage"]
         ep["liq_px"] = isolated_liq_px(
@@ -570,10 +580,32 @@ class Backtest:
                 return
             reduce_frac = min(1.0, reduce_frac)
             ep["reduce_anchor"] = abs(pos1)
-        if not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, px):
+        dust_close = not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, px)
+        if dust_close:
             reduce_frac = 1.0
             closing = True
             status = "closed"
+        elif not closing:
+            decision = profit_tail_close_decision(
+                rem_size=ep["rem_size"],
+                peak_size=ep.get("peak_size") or max(ep["size"], ep["rem_size"]),
+                reduce_frac=reduce_frac,
+                execution_px=px,
+                risk_px=self.last_px.get(coin) or px,
+                entry_px=ep["entry_px"],
+                side=ep["side"],
+                realized_pnl=ep["gross_pnl"] - ep["exit_fees"],
+                liq_px=ep.get("liq_px", 0.0),
+                fee_rate=config.TAKER_FEE * self.replay_cost_mult,
+                enabled=self.tail_close_enable,
+                hard_remain_pct=self.tail_close_hard_remain_pct,
+                risk_remain_pct=self.tail_close_risk_remain_pct,
+                max_profit_giveback_pct=self.tail_close_profit_giveback_pct,
+            )
+            if decision.close:
+                reduce_frac = 1.0
+                closing = True
+                status = "tail_closed"
         close_size = ep["rem_size"] * reduce_frac
         gross = close_size * (px - ep["entry_px"]) * ep["sign"]
         fee = abs(close_size * px) * config.TAKER_FEE * self.replay_cost_mult
@@ -638,6 +670,7 @@ class Backtest:
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
         stops = sum(1 for p in self.closed if p.get("status") == "stopped")
         liquidations = sum(1 for p in self.closed if p.get("status") == "liquidated")
+        tail_profit_closes = sum(1 for p in self.closed if p.get("status") == "tail_closed")
         natural_closes = max(0, len(self.closed) - stops - liquidations)
         path_completion_rate = natural_closes / len(self.closed) if self.closed else 1.0
         initial_notl = sum(p["target_initial_notl"] for p in self.closed) + sum(p["target_initial_notl"] for p in self.open.values())
@@ -704,6 +737,7 @@ class Backtest:
             "wins": wins,
             "stops": stops,
             "liquidations": liquidations,
+            "tail_profit_closes": tail_profit_closes,
             "natural_closes": natural_closes,
             "path_completion_rate": path_completion_rate,
             "liquidation_rate": liquidations / len(self.closed) if self.closed else 0.0,
@@ -824,6 +858,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     wins = sum(1 for position in positions if f(position.get("net_pnl")) > 0)
     stops = sum(1 for position in positions if position.get("status") == "stopped")
     liquidations = sum(1 for position in positions if position.get("status") == "liquidated")
+    tail_profit_closes = sum(1 for position in positions if position.get("status") == "tail_closed")
     natural_closes = max(0, len(positions) - stops - liquidations)
     path_completion_rate = natural_closes / len(positions) if positions else 1.0
     open_rate = f(out.get("actionable_open_rate")) if out.get("actionable_open_rate") is not None else 1.0
@@ -865,6 +900,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "wins": wins,
         "stops": stops,
         "liquidations": liquidations,
+        "tail_profit_closes": tail_profit_closes,
         "natural_closes": natural_closes,
         "path_completion_rate": path_completion_rate,
         "liquidation_rate": liquidations / len(positions) if positions else 0.0,

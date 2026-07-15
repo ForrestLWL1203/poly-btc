@@ -54,6 +54,16 @@ class OpenSizingPlan:
     margin_equity: float
 
 
+@dataclass(frozen=True)
+class ProfitTailDecision:
+    close: bool
+    reason: str
+    remaining_fraction: float
+    close_now_profit: float
+    loss_to_liquidation: float
+    giveback_fraction: float
+
+
 def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
                    coin: str | None = None) -> str:
     # BTC is the only market eligible for the stable tier. Calm ETH, altcoins and stock/builder perps must
@@ -89,6 +99,70 @@ def reduce_leaves_dust(rem_size: float, reduce_frac: float, px: float,
         return False
     remaining_size = max(0.0, abs(rem_size) * (1.0 - max(0.0, reduce_frac)))
     return remaining_size * abs(px) <= dust_notional
+
+
+def profit_tail_close_decision(
+    *,
+    rem_size: float,
+    peak_size: float,
+    reduce_frac: float,
+    execution_px: float,
+    risk_px: float | None,
+    entry_px: float,
+    side: str,
+    realized_pnl: float,
+    liq_px: float,
+    fee_rate: float,
+    enabled: bool = config.TAIL_CLOSE_ENABLE,
+    hard_remain_pct: float = config.TAIL_CLOSE_HARD_REMAIN_PCT,
+    risk_remain_pct: float = config.TAIL_CLOSE_RISK_REMAIN_PCT,
+    max_profit_giveback_pct: float = config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT,
+) -> ProfitTailDecision:
+    """Return a scale-free, asset-aware decision for closing a profitable tail.
+
+    The risk branch uses the position's isolated liquidation price, which already embeds that market's
+    Hyperliquid maintenance requirement. This remains profit protection rather than a hidden stop-loss:
+    an episode that would be net losing if flattened now is left to the normal mirror/stop policy.
+    """
+    zero = ProfitTailDecision(False, "", 1.0, 0.0, 0.0, 0.0)
+    if not enabled or rem_size <= 0 or peak_size <= 0 or execution_px <= 0 or entry_px <= 0:
+        return zero
+    reduce_frac = max(0.0, min(1.0, float(reduce_frac)))
+    if reduce_frac >= 1.0:
+        return zero
+    remaining_size = abs(rem_size) * (1.0 - reduce_frac)
+    remaining_fraction = remaining_size / max(abs(peak_size), abs(rem_size), 1e-12)
+    hard = max(0.0, min(1.0, float(hard_remain_pct)))
+    risk_limit = max(hard, min(1.0, float(risk_remain_pct)))
+    if remaining_fraction > risk_limit:
+        return ProfitTailDecision(False, "", remaining_fraction, 0.0, 0.0, 0.0)
+
+    sign = 1.0 if side == "long" else -1.0
+    close_now_profit = (
+        float(realized_pnl or 0.0)
+        + abs(rem_size) * (execution_px - entry_px) * sign
+        - abs(rem_size) * execution_px * max(0.0, float(fee_rate or 0.0))
+    )
+    if close_now_profit <= 0:
+        return ProfitTailDecision(False, "", remaining_fraction, close_now_profit, 0.0, 0.0)
+    if remaining_fraction <= hard:
+        return ProfitTailDecision(True, "hard_profit_tail", remaining_fraction, close_now_profit, 0.0, 0.0)
+
+    mark = float(risk_px or execution_px)
+    liq = float(liq_px or 0.0)
+    adverse_distance = (max(0.0, mark - liq) if side == "long"
+                        else max(0.0, liq - mark))
+    loss_to_liquidation = remaining_size * adverse_distance
+    giveback_fraction = loss_to_liquidation / close_now_profit if close_now_profit > 0 else 0.0
+    close = giveback_fraction >= max(0.0, float(max_profit_giveback_pct))
+    return ProfitTailDecision(
+        close,
+        "liq_risk_profit_tail" if close else "",
+        remaining_fraction,
+        close_now_profit,
+        loss_to_liquidation,
+        giveback_fraction,
+    )
 
 
 def extract_master_leverage(fill: dict | None) -> float | None:

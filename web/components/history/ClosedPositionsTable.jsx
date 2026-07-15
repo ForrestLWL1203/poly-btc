@@ -5,6 +5,7 @@ const CLOSE_TYPE = {
   mirror: { label: "镜像", tint: "tint-blue" },
   stop: { label: "止损", tint: "tint-amber" },
   liq: { label: "爆仓", tint: "tint-red" },
+  tail: { label: "尾盈", tint: "tint-green" },
 };
 
 export function ClosedPositionsTable({

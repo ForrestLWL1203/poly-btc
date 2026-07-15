@@ -187,6 +187,10 @@ REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge 
 #                             a FULL close always executes (exact flat). If he dumps it in 2 big fills, we follow both.
 DUST_CLOSE_NOTIONAL = 1.0    # after a mirrored reduce, if our leftover position is below this notional, close it
 #                             immediately instead of leaving a $0 open-row dust position on the dashboard.
+TAIL_CLOSE_ENABLE = True     # protect already-earned episode profit after a mirrored partial reduce.
+TAIL_CLOSE_HARD_REMAIN_PCT = 0.20  # profitable tail at/below this share of our peak position exits outright.
+TAIL_CLOSE_RISK_REMAIN_PCT = 0.35  # larger tails are eligible when their asset-specific liq risk is material.
+TAIL_CLOSE_PROFIT_GIVEBACK_PCT = 0.50  # exit if tail-to-liq loss can erase this share of close-now profit.
 STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz:*), regardless of σ-tier or
 #                           master lev. Stocks GAP (earnings/news) and their calm realized σ (e.g. TSLA 4%)
 #                           badly understates tail risk — mean-daily-range σ let TSLA into the STABLE tier at

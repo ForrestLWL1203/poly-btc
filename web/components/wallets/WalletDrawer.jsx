@@ -6,7 +6,7 @@ import { PositionDetail } from "../positions/PositionDetail.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
-const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平", liquidated: "爆仓" };
+const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平", liquidated: "爆仓", tail_closed: "尾盈平" };
 
 const marketLabel = (m) => ({ crypto: "加密", stock: "美股/指数", mixed: "混合" }[m] || m || "—");
 

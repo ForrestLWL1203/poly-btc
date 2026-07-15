@@ -110,6 +110,47 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_tail_close_api_rejects_inverted_thresholds_atomically(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            db.executemany(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES (?,?,'follow','yellow','pct','immediate',?,NULL)",
+                [
+                    ("TAIL_CLOSE_HARD_REMAIN_PCT", "20", "20"),
+                    ("TAIL_CLOSE_RISK_REMAIN_PCT", "35", "35"),
+                    ("TAIL_CLOSE_PROFIT_GIVEBACK_PCT", "50", "50"),
+                ],
+            )
+            db.commit()
+            db.close()
+
+            with self.assertRaisesRegex(ValueError, "must not exceed"):
+                api_params.patch_params(path, "follow", {
+                    "TAIL_CLOSE_HARD_REMAIN_PCT": 40,
+                    "TAIL_CLOSE_RISK_REMAIN_PCT": 30,
+                })
+
+            db = sqlite3.connect(path)
+            stored = dict(db.execute(
+                "SELECT key,value FROM params WHERE key LIKE 'TAIL_CLOSE_%'"
+            ).fetchall())
+            db.close()
+            self.assertEqual(stored["TAIL_CLOSE_HARD_REMAIN_PCT"], "20")
+            self.assertEqual(stored["TAIL_CLOSE_RISK_REMAIN_PCT"], "35")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def test_ep_params_can_include_score_distribution(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

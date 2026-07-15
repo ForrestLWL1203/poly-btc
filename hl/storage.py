@@ -543,7 +543,8 @@ CREATE TABLE IF NOT EXISTS copy_position (
     master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
     master_leverage REAL, master_margin REAL,     -- target's leverage + margin captured AT OPEN
     leverage REAL, margin REAL, notional REAL,    -- our sizing (margin = 2% of available at open)
-    entry_px REAL, size REAL, rem_size REAL,       -- our fill px, position size (coin), remaining
+    entry_px REAL, size REAL, rem_size REAL,       -- our fill px, cumulative followed size, remaining
+    peak_size REAL,                                -- historical peak live size; tail exits use rem/peak
     liq_px REAL,                                   -- isolated liquidation price (loss = margin)
     stop_px REAL,                                  -- copy-side stop price (target-TP-relative); cut before liq
     realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
@@ -894,6 +895,7 @@ _MIGRATIONS = (
     "ALTER TABLE wallet_registry ADD COLUMN last_core_signal_generation TEXT",
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
+    "ALTER TABLE copy_position ADD COLUMN peak_size REAL",
 )
 
 

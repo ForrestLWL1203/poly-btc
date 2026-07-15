@@ -344,6 +344,39 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["positions"][0]["status"], "closed")
         self.assertEqual(result["positions"][0]["closed_at"], 2_000)
 
+    def test_profitable_risky_tail_closes_on_target_reduce(self):
+        fills = [
+            fill(1_000, "ETH", "B", 100, 0, 100.0, 100),
+            fill(2_000, "ETH", "A", 65, 100, 110.0, 101),
+            fill(3_000, "ETH", "A", 35, 35, 80.0, 102),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ETH": 0.08}, overrides={
+            "MID_MIN_NOTIONAL": 0.0,
+            "TAIL_CLOSE_ENABLE": True,
+        })
+
+        self.assertEqual(result["closed_n"], 1)
+        self.assertEqual(result["tail_profit_closes"], 1)
+        self.assertEqual(result["positions"][0]["status"], "tail_closed")
+        self.assertEqual(result["positions"][0]["closed_at"], 2_000)
+        self.assertGreater(result["copy_net_pnl"], 0)
+
+    def test_losing_small_tail_is_not_force_closed(self):
+        fills = [
+            fill(1_000, "ETH", "B", 100, 0, 100.0, 110),
+            fill(2_000, "ETH", "A", 80, 100, 95.0, 111),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ETH": 0.08}, overrides={
+            "MID_MIN_NOTIONAL": 0.0,
+            "TAIL_CLOSE_ENABLE": True,
+        })
+
+        self.assertEqual(result["closed_n"], 0)
+        self.assertEqual(result["tail_profit_closes"], 0)
+        self.assertEqual(len(result["open_positions"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
