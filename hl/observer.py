@@ -409,6 +409,22 @@ class Observer:
                     reconstructed_peak = max(reconstructed_peak, abs(running_size))
                 peak_sz = max(reconstructed_peak, abs(rem))
                 reconstructed_peaks.append((peak_sz, pid))
+            first_entry_row = self.db.execute(
+                f"SELECT SUM(ABS(our_qty_delta)*our_px) FROM {book.act_table} "
+                "WHERE pos_id=? AND action='open' AND ABS(our_qty_delta)>1e-12 AND our_px IS NOT NULL",
+                (pid,),
+            ).fetchone()
+            exact_first_margin = (
+                (f(first_entry_row[0]) / f(lev))
+                if first_entry_row and f(first_entry_row[0]) > 0 and f(lev) > 0
+                else (mgn or 0.0) / (1 + (adds or 0) * self.add_frac)
+            )
+            last_followed_add = self.db.execute(
+                f"SELECT master_px FROM {book.act_table} WHERE pos_id=? AND action='add' "
+                "AND ABS(our_qty_delta)>1e-12 AND master_px IS NOT NULL ORDER BY act_id DESC LIMIT 1",
+                (pid,),
+            ).fetchone()
+            exact_last_add_px = f(last_followed_add[0]) if last_followed_add else epx
             book.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
@@ -417,10 +433,10 @@ class Observer:
                 "peak_size": peak_sz or abs(rem),
                 "liq_px": liq or 0.0, "stop_px": stopx or 0.0, "realized_pnl": rpnl or 0.0,
                 "add_count": adds or 0, "entries_ready": ev, "lock": asyncio.Lock(),
-                # smart-add restart recovery: first_margin ≈ margin/(1+adds·frac); master首仓额 from open snapshot;
-                # 波动闸 reference resets to current avg (safe — next add just needs a fresh x move from here).
-                "first_margin": (mgn or 0.0) / (1 + (adds or 0) * self.add_frac),
-                "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0), "last_add_px": epx,
+                # Reconstruct smart-add anchors from the immutable action audit.  Using total margin/add_count
+                # is wrong when proportional smart adds differ from ADD_FRAC and can oversize after restart.
+                "first_margin": exact_first_margin,
+                "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0), "last_add_px": exact_last_add_px,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False, "add_orders": {},
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
                     f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "

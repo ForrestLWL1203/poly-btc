@@ -278,6 +278,42 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_reload_reconstructs_exact_smart_add_anchors_from_actions(self):
+        db = self._db()
+        pos_id = db.execute(
+            "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+        ).fetchone()["pos_id"]
+        db.execute(
+            "UPDATE copy_position SET leverage=5,margin=260,add_count=2,master_margin=20,"
+            "master_leverage=5,entry_px=110 WHERE pos_id=?",
+            (pos_id,),
+        )
+        db.executemany(
+            "INSERT INTO copy_action "
+            "(pos_id,addr,coin,ts,action,master_oid,master_px,our_qty_delta,our_px) "
+            "VALUES (?,'0xaaa','BTC',?,?,?,?,?,?)",
+            [
+                (pos_id, 1, "open", 10, 100, 5.0, 100),
+                (pos_id, 2, "add", 11, 108, 2.0, 108),
+                (pos_id, 3, "add", 12, 115, 1.0, 115),
+            ],
+        )
+        db.commit()
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs._reload_open()
+
+            ep = obs.taker.open_ep[("0xaaa", "BTC")]
+            self.assertEqual(ep["first_margin"], 100.0)
+            self.assertEqual(ep["last_add_px"], 115.0)
+            self.assertEqual(ep["master_first_notl"], 100.0)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
     def test_target_reduce_closes_profitable_risky_tail(self):
         async def run():
             db = self._db()
