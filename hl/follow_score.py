@@ -54,6 +54,7 @@ def evaluate_follow_eligibility(
     min_expected_return: float | None = None,
     min_evidence_days: int | None = None,
     min_pnl_per_closed=None,
+    margin_equity_pct: float | None = None,
 ) -> dict:
     """Classify one wallet as Core-eligible, Challenger-quality, or rejected.
 
@@ -85,9 +86,13 @@ def evaluate_follow_eligibility(
     pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
     initial_balance = max(1.0, float(getattr(config, "INITIAL_BALANCE", 10_000.0)))
-    challenger_floor = initial_balance * policy.challenger_min_return_30d
-    core_floor = initial_balance * policy.core_min_return_30d
-    strong_floor = initial_balance * policy.strong_core_return_30d
+    if margin_equity_pct is None:
+        margin_equity_pct = metrics.get("margin_equity_pct", config.MARGIN_EQUITY_PCT)
+    margin_equity_pct = max(0.0, min(1.0, _num(margin_equity_pct, config.MARGIN_EQUITY_PCT)))
+    qualification_equity = initial_balance * margin_equity_pct
+    challenger_floor = qualification_equity * policy.challenger_min_return_30d
+    core_floor = qualification_equity * policy.core_min_return_30d
+    strong_floor = qualification_equity * policy.strong_core_return_30d
     data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
     if data_status and data_status not in {"valid", "ok"}:

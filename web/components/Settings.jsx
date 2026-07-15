@@ -52,11 +52,14 @@ export function Settings({ confirm }) {
         onConfirm: doIt,
       });
     } else if (tabDirty.some(p => p.level === "yellow")) {
+      const marginEquityChanged = tabDirty.some(p => p.key === "MARGIN_EQUITY_PCT");
       confirm({
         title: "保存跟单参数",
         danger: false,
         ok: "保存",
-        body: "包含谨慎级参数(影响每一笔新仓),确认即时生效?",
+        body: marginEquityChanged
+          ? "保证金权益额度将从下一笔新仓立即生效；已有仓位不变。Core资格和组合回测不会自动重跑，将在下一次重采或单独重评后更新。确认保存?"
+          : "包含谨慎级参数(影响每一笔新仓),确认即时生效?",
         onConfirm: doIt,
       });
     } else {

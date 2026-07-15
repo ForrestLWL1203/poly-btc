@@ -10,6 +10,7 @@ import {
 
 const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.min, g.max, g.lev, g.notl, g.cap]));
 const deployKeys = new Set(["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
+const marginEquityKey = "MARGIN_EQUITY_PCT";
 
 export function FollowSettingsPanel({
   list,
@@ -24,11 +25,12 @@ export function FollowSettingsPanel({
   const paramsByKey = new Map(list.map(p => [p.key, p]));
   const autoTuneParam = paramsByKey.get(AUTO_TUNE_KEY);
   const blacklistParam = paramsByKey.get(BLACKLIST_KEY);
+  const marginEquityParam = paramsByKey.get(marginEquityKey);
   const row = p => (
     <ParamRow key={p.key} param={p} value={vals[p.key]} dirty={dirty[p.key]}
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
-  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY));
+  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY || p.key === marginEquityKey));
 
   return (
     <React.Fragment>
@@ -48,6 +50,10 @@ export function FollowSettingsPanel({
           </div>
         </div>}
       </div>
+      {marginEquityParam && row(marginEquityParam)}
+      {marginEquityParam && <div className="param-inline-note">
+        只缩小每笔新仓的保证金计算基数；未计入的权益仍是可用资金，不会被冻结。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
+      </div>}
       <DeployRangeRow paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
       {validationErrors.length > 0 && (
         <div className="param-errors">

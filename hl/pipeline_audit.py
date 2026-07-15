@@ -11,7 +11,7 @@ import json
 import sqlite3
 from typing import Iterable
 
-from . import follow_score
+from . import config, follow_score, params
 from .util import now_iso
 
 
@@ -196,11 +196,14 @@ def record_watchlist_snapshot(db: sqlite3.Connection, stamp: str, source: str, f
         "FROM watchlist w LEFT JOIN profile p ON p.addr=w.addr "
         "LEFT JOIN target_controls c ON c.addr=w.addr ORDER BY w.rank"
     ))
+    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     for r in rows:
         detail = (detail_by_addr or {}).get(r["addr"]) or {}
         enabled = int(r["enabled"] if r["enabled"] is not None else 1) == 1
         followed = enabled and float(r["follow_score"] or 0.0) >= float(follow_line or 0.0)
-        eligibility = detail.get("follow_eligibility") or follow_score.evaluate_follow_eligibility(r)
+        eligibility = detail.get("follow_eligibility") or follow_score.evaluate_follow_eligibility(
+            r, margin_equity_pct=margin_equity_pct,
+        )
         if not enabled:
             status, reason = "disabled", "operator_disabled"
         elif not eligibility.get("eligible"):

@@ -7,6 +7,8 @@ export function SizingPreview({ vals }) {
   const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 9);
   const MINL = Math.max(1, n("MIN_LEV", 1));
   const SM = n("STOP_MARGIN_PCT", 70);
+  const marginEquityPct = Math.max(10, Math.min(100, n("MARGIN_EQUITY_PCT", 100)));
+  const marginEquity = bal * marginEquityPct / 100;
   const stopOn = vals["COPY_STOP_ENABLE"] !== false;
   const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_MIN_PCT", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"],
@@ -28,7 +30,7 @@ export function SizingPreview({ vals }) {
     const s = Math.max(0.1, s0), t = tier(s);
     const mPct = marginPct(t), cap = n(TM[t][2], dft[TM[t][2]]);
     const lev = Math.max(MINL, Math.floor(cap));   // v10: 杠杆 = 档位上限(再被目标杠杆+股票上限封顶)
-    const margin = bal * mPct;
+    const margin = marginEquity * mPct;
     const stopLoss = Math.min(SM / 100, 1), stopDist = stopLoss / lev * 100;  // 硬亏=SM%保证金(固定),逆向价格=SM%÷杠杆
     return { t, margin, lev, notl: margin * lev, stopDist, stopLoss };
   };
@@ -41,6 +43,7 @@ export function SizingPreview({ vals }) {
           <input type="number" value={bal} onChange={e => setBal(Number(e.target.value) || 0)} /></div>
         <div className="sz-bal"><label>已占用%</label>
           <input type="number" value={deploy} onChange={e => setDeploy(Number(e.target.value) || 0)} /></div>
+        <div className="sz-bal"><label>保证金计算权益</label><b>{usd(marginEquity)} · {marginEquityPct}%</b></div>
       </div>
       <div className="sz-grid">
         <div className="sz-hdr">币种</div><div className="sz-hdr sz-num">σ</div>
@@ -62,7 +65,7 @@ export function SizingPreview({ vals }) {
         })}
       </div>
       <div className="sz-foot">
-        杠杆 = <b>σ 档位上限</b>(σ 定档,再被目标杠杆+股票上限封顶)· 保证金 = 权益 × 动态区间%{stopOn
+        杠杆 = <b>σ 档位上限</b>(σ 定档,再被目标杠杆+股票上限封顶)· 保证金 = 完整权益 × <b>{marginEquityPct}%额度</b> × 动态区间%；其余权益仍可用，并非冻结{stopOn
           ? <React.Fragment> · 止损 = 亏到 <b>{Math.round(SM)}%</b> 保证金就平(与币种无关的硬亏),换算逆向价格 = <b>{Math.round(SM)}%÷杠杆</b></React.Fragment>
           : <React.Fragment> · <b>止损已关闭</b>,仅靠强平兜底</React.Fragment>}
       </div>

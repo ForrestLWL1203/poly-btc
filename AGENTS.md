@@ -181,6 +181,9 @@ only when its generation matches the current published generation.
 - Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
   through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
   remain hard execution boundaries.
+- `MARGIN_EQUITY_PCT` is a manual-only sizing base (default 100%, UI range 10–100%). It scales each new
+  position's drawdown-adjusted equity base without freezing the remainder; real cash, per-coin caps and total
+  deployment still use full risk equity. Auto-tune and Core-count selection must not modify this value.
 - `COPY_STOP_ENABLE` is currently false by default. Do not assume stop-loss behavior exists unless the persisted
   follow params enable it.
 - Core/strategy reloads are command-driven (`reload_params`) and do not copy historical fills.

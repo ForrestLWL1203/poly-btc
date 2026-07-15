@@ -28,6 +28,10 @@ export function validateFollowParams(vals) {
       markErr(`${g.label}保证金下限不能高于上限`, [g.min, g.max]);
     }
   });
+  const marginEquity = numVal("MARGIN_EQUITY_PCT");
+  if (!Number.isFinite(marginEquity) || marginEquity < 10 || marginEquity > 100) {
+    markErr("保证金权益额度必须在 10–100% 之间", ["MARGIN_EQUITY_PCT"]);
+  }
   const okFull = validatePct("满火力占用线", "DEPLOY_FULL_PCT");
   const okLock = validatePct("组合部署上限", "MAX_DEPLOY_PCT");
   if (okFull && okLock && numVal("DEPLOY_FULL_PCT") >= numVal("MAX_DEPLOY_PCT")) {

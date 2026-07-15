@@ -24,6 +24,24 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_manual_margin_equity_budget_scales_replay_open_and_pnl(self):
+        fills = [
+            fill(1, "BTC", "B", 100, 0, 100.0, 1),
+            fill(2, "BTC", "A", 100, 100, 101.0, 2),
+        ]
+        full = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
+            "MARGIN_EQUITY_PCT": 1.0,
+        })
+        half = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
+            "MARGIN_EQUITY_PCT": 0.5,
+        })
+
+        self.assertEqual(full["margin_equity_pct"], 1.0)
+        self.assertEqual(half["margin_equity_pct"], 0.5)
+        self.assertEqual(half["initial_margin_equity"], 5_000.0)
+        self.assertAlmostEqual(half["positions"][0]["margin"], full["positions"][0]["margin"] * 0.5)
+        self.assertAlmostEqual(half["copy_net_pnl"], full["copy_net_pnl"] * 0.5)
+
     def test_low_liquidity_crypto_open_is_skipped(self):
         fills = [
             fill(1_000, "VINE", "A", 100_000, 0, 0.0098, 1),

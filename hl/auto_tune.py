@@ -990,6 +990,10 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
     effective_params = {
         "leverageCaps": {key: f(follow.get(key)) for key in LEV_KEYS},
         "marginPct": {key: f(follow.get(key)) for key in MARGIN_KEYS},
+        "marginEquityPct": f(follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)),
+        "initialMarginEquity": f(config.INITIAL_BALANCE) * f(
+            follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+        ),
         "deployFullPct": f(follow.get("DEPLOY_FULL_PCT")),
         "add": {key: f(follow.get(key)) for key in ADD_TUNE_KEYS},
     }
@@ -1150,6 +1154,7 @@ def _compact_backtest(result: dict) -> dict:
     keys = (
         "closed_n", "open_n", "wins", "stops", "liquidations", "copy_win_rate",
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "fee_drag",
+        "margin_equity_pct", "initial_margin_equity",
         "target_open_events", "opened_n", "open_fill_rate", "target_adds",
         "followed_adds", "missed_adds", "missed_add_rate", "add_dependency",
         "target_peak_concurrent", "copy_peak_concurrent", "max_concurrent_fit",

@@ -127,6 +127,8 @@ PARAM_SPEC = [
     ("AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", "follow", "hidden", "pct", "immediate",
         config.AUTO_TUNE_PRICE_PATH_MIN_COVERAGE * 100,
         "价格路径覆盖门槛", "真钱建议95%;Paper验证可设0"),
+    ("MARGIN_EQUITY_PCT",   "follow",  "yellow", "pct",     "immediate", config.MARGIN_EQUITY_PCT * 100,
+        "保证金权益额度", "单笔开仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结"),
     ("DEPLOY_FULL_PCT",      "follow",  "yellow", "pct",     "immediate", config.DEPLOY_FULL_PCT * 100,
         "满火力占用线", "总保证金占用≤此比例时按保证金上限开新仓;超过后线性缩到下限"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,

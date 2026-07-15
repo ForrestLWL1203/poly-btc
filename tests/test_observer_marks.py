@@ -86,6 +86,22 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertNotIn("FROM copy_position WHERE status!='open'", sql)
         self.assertNotIn("FROM copy_action", sql)
 
+    def test_margin_equity_reload_changes_future_sizing_not_existing_positions(self):
+        db = self._db()
+        before = db.execute(
+            "SELECT margin,notional,size FROM copy_position WHERE addr='0xaaa'"
+        ).fetchone()
+        obs = Observer(db, [], {})
+
+        obs._reload_params({"MARGIN_EQUITY_PCT": 0.5})
+
+        after = db.execute(
+            "SELECT margin,notional,size FROM copy_position WHERE addr='0xaaa'"
+        ).fetchone()
+        self.assertEqual(obs.margin_equity_pct, 0.5)
+        self.assertEqual(obs._open_sizing_params().margin_equity_pct, 0.5)
+        self.assertEqual(tuple(after), tuple(before))
+
     def test_bbo_tick_immediately_persists_that_coin_marks(self):
         db = self._db()
         obs = Observer(db, [], {})

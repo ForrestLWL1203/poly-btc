@@ -8,6 +8,10 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_manual_margin_equity_pct_is_not_an_auto_tune_axis(self):
+        self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.TUNE_KEYS)
+        self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.ADD_TUNE_KEYS)
+
     def test_generation_bound_tune_skips_if_generation_changes_before_apply(self):
         db = self._db()
         params.seed_params(db)

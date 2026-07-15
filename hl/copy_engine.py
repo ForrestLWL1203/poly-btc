@@ -28,6 +28,7 @@ class OpenSizingParams:
     capital_anchor: float = config.INITIAL_BALANCE
     drawdown_exponent: float = config.SIZING_DRAWDOWN_EXPONENT
     drawdown_max_multiplier: float = config.SIZING_DRAWDOWN_MAX_MULTIPLIER
+    margin_equity_pct: float = config.MARGIN_EQUITY_PCT
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class OpenSizingPlan:
     master_notional: float
     risk_equity: float
     sizing_equity: float
+    margin_equity: float
 
 
 def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
@@ -138,6 +140,8 @@ def plan_open_sizing(
         exponent=params.drawdown_exponent,
         max_multiplier=params.drawdown_max_multiplier,
     )
+    margin_equity_pct = max(0.0, min(1.0, float(params.margin_equity_pct)))
+    margin_equity = sizing_equity * margin_equity_pct
     locked = max(0.0, risk_equity - risk_available)
     margin_pct = margin_pct_for_deploy(
         params.tier_margin[tier],
@@ -147,11 +151,14 @@ def plan_open_sizing(
         locked,
         risk_equity,
     )
-    wanted_margin = max(0.0, sizing_equity * margin_pct)
+    wanted_margin = max(0.0, margin_equity * margin_pct)
     room = max(0.0, params.tier_coin_cap[tier] * risk_equity - existing_coin_margin)
     deploy_room = max(0.0, risk_available - (1.0 - params.max_deploy_pct) * risk_equity)
     margin = min(wanted_margin, room, deploy_room)
-    if margin < params.min_open_margin_pct * risk_equity:
+    # The relative dust threshold follows the same manual sizing base.  Otherwise lowering the sizing
+    # budget would silently turn valid proportional opens into "margin_too_small" skips.  Fixed per-tier
+    # minimum notionals remain real execution/economic floors and are intentionally not scaled.
+    if margin < params.min_open_margin_pct * margin_equity:
         reason = (
             "coin_full" if room < wanted_margin else
             "no_cash" if risk_available < wanted_margin else
@@ -160,7 +167,7 @@ def plan_open_sizing(
         )
         return OpenSizingPlan(False, reason, tier, side, margin_pct, margin, 0.0, lev, 0.0, 0.0, 0.0,
                               room, deploy_room, risk_available, wanted_margin, master_notional,
-                              risk_equity, sizing_equity)
+                              risk_equity, sizing_equity, margin_equity)
 
     notional = margin * lev
     if master_notional > 0 and notional > master_notional:
@@ -169,7 +176,7 @@ def plan_open_sizing(
     if notional < params.tier_min_notional[tier]:
         return OpenSizingPlan(False, "small_notl", tier, side, margin_pct, margin, notional, lev, 0.0, 0.0, 0.0,
                               room, deploy_room, risk_available, wanted_margin, master_notional,
-                              risk_equity, sizing_equity)
+                              risk_equity, sizing_equity, margin_equity)
 
     size = notional / entry_px if entry_px else 0.0
     is_buy = side == "long"
@@ -177,4 +184,4 @@ def plan_open_sizing(
     stop = stop_px(entry_px, is_buy, lev, params.copy_stop_enable, params.stop_margin_pct)
     return OpenSizingPlan(True, "", tier, side, margin_pct, margin, notional, lev, size, liq, stop,
                           room, deploy_room, risk_available, wanted_margin, master_notional,
-                          risk_equity, sizing_equity)
+                          risk_equity, sizing_equity, margin_equity)

@@ -35,6 +35,16 @@ def scan_args():
 
 
 class ScannerGenerationIntegrationTests(unittest.TestCase):
+    def test_margin_equity_snapshot_change_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            scanner._assert_margin_equity_snapshot(db, 1.0)
+            db.execute("UPDATE params SET value='50' WHERE key='MARGIN_EQUITY_PCT'")
+            db.commit()
+            with self.assertRaisesRegex(RuntimeError, "margin_equity_pct_changed_during_generation"):
+                scanner._assert_margin_equity_snapshot(db, 1.0)
+
     def test_selection_uses_effective_params_not_historical_tune_baseline(self):
         source = inspect.getsource(scanner._build_explicit_selection)
 

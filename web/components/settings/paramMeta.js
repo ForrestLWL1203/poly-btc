@@ -12,6 +12,7 @@ export const PARAM_META = {
   HIGH_MARGIN_PCT: { name: "剧烈档·保证金上限", desc: "组合占用低时的单笔保证金上限", range: "1–4", up: "低频期每单更重", dn: "低频期每单更轻" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥9%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
   HIGH_MIN_NOTIONAL: { name: "剧烈档·最低名义额", desc: "meme/野币单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)", range: "$500–1k", up: "过滤更多小单", dn: "连很小的也跟" },
+  MARGIN_EQUITY_PCT: { name: "保证金权益额度", desc: "每笔新仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结", range: "10–100", up: "每个信号开得更重", dn: "单笔更轻、可容纳更多信号" },
   DEPLOY_FULL_PCT: { name: "满火力占用线", desc: "组合保证金占用不超过此值时按各档保证金上限开新仓", range: "30–50", up: "更久保持大单", dn: "更早开始缩仓" },
   MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–85", up: "允许更多新仓", dn: "更早锁住新仓" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },

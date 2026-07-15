@@ -389,6 +389,19 @@ def _self_liquidations(fills, addr, acct):
 _DAY_MS = 86400_000.0
 
 
+def _current_margin_equity_pct(db) -> float:
+    return float(params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT))
+
+
+def _assert_margin_equity_snapshot(db, expected: float) -> None:
+    """Fail closed before publication if an operator changed the manual sizing base mid-generation."""
+    current = _current_margin_equity_pct(db)
+    if abs(current - float(expected)) > 1e-12:
+        raise RuntimeError(
+            f"margin_equity_pct_changed_during_generation:{float(expected):.6f}:{current:.6f}"
+        )
+
+
 def _open_flow_metrics(fills: list, now_ms: int) -> dict:
     """Measure copyable *new-position* supply rather than treating every fill as activity."""
     opens = []
@@ -517,6 +530,7 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
             min_expected_return=getattr(
                 p, "copy_min_expected_margin_return", config.COPY_MIN_EXPECTED_MARGIN_RETURN
             ),
+            margin_equity_pct=getattr(p, "margin_equity_pct", config.MARGIN_EQUITY_PCT),
         )
         if not result.get("eligible"):
             if result.get("deferred"):
@@ -844,6 +858,7 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
     if commit:
         params.seed_params(db)
     prev_followed = set(selection.published_core_addrs(db) or [])
+    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     db.execute("DELETE FROM watchlist")
     leaderboard_join = (
         "LEFT JOIN leaderboard_staging l ON l.addr=p.addr AND l.generation=?"
@@ -873,7 +888,9 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
     for r in rows:
         score, detail = follow_score.compute_follow_score(r)
         detail = dict(detail or {})
-        eligibility = follow_score.evaluate_follow_eligibility(r)
+        eligibility = follow_score.evaluate_follow_eligibility(
+            r, margin_equity_pct=margin_equity_pct,
+        )
         base_score = float(score or 0.0)
         stability = {
             "previouslyFollowed": (r["addr"] or "").lower() in prev_followed,
@@ -1384,6 +1401,7 @@ def _quality_core_profiles(db, generation_id) -> list[dict]:
         for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
     }
     rows = []
+    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     for raw in cur.fetchall():
         row = dict(zip(names, raw))
         addr = (row.get("addr") or "").lower()
@@ -1393,7 +1411,7 @@ def _quality_core_profiles(db, generation_id) -> list[dict]:
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        })
+        }, margin_equity_pct=margin_equity_pct)
         if (
             row.get("status") in {"active", "qualified"}
             and (row.get("follow_qualification") or {}).get("coreEligible")
@@ -1836,6 +1854,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         (addr or "").lower(): score
         for addr, score in db.execute("SELECT addr,score FROM watchlist").fetchall()
     }
+    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     for row in profiles:
         addr = (row.get("addr") or "").lower()
         row["follow_score"] = (
@@ -1846,7 +1865,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        })
+        }, margin_equity_pct=margin_equity_pct)
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -3179,6 +3198,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
     p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
     p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
     p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
+    p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     rows = db.execute(
         "SELECT p.addr,status,n_trades,n_fills,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
@@ -3299,6 +3319,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
                 min_expected_return=getattr(
                     p, "copy_min_expected_margin_return", config.COPY_MIN_EXPECTED_MARGIN_RETURN
                 ),
+                margin_equity_pct=getattr(p, "margin_equity_pct", config.MARGIN_EQUITY_PCT),
             )
             if not qualification.get("eligible") and not qualification.get("deferred"):
                 ok, reason = False, qualification.get("status") or "copy_unqualified"
@@ -3365,7 +3386,8 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     if not generation_id:
         raise RuntimeError("no_profiled_generation_to_finalize")
     meta = db.execute(
-        "SELECT status,leaderboard_valid,workset_n,leaderboard_rows FROM scan_generation WHERE generation=?",
+        "SELECT status,leaderboard_valid,workset_n,leaderboard_rows,metrics_json "
+        "FROM scan_generation WHERE generation=?",
         (generation_id,),
     ).fetchone()
     if not meta or meta[0] in {"published", "failed"} or not int(meta[1] or 0):
@@ -3381,6 +3403,14 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     ).fetchone()[0] or 0)
     if staged_n != int(meta[3] or 0):
         raise RuntimeError("staged_leaderboard_count_mismatch")
+    try:
+        generation_metrics = json.loads(meta[4] or "{}")
+    except (TypeError, ValueError):
+        generation_metrics = {}
+    expected_margin_equity_pct = float(
+        generation_metrics.get("marginEquityPct", _current_margin_equity_pct(db))
+    )
+    _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
 
     now_ms = int(time.time() * 1000)
     previous_core = selection.published_core_addrs(db) or []
@@ -3400,6 +3430,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
         _set_scan_progress(db, stage="prefetch_selection_paths")
         _prefetch_selection_paths(db, preview, now_ms)
     formation = form_quality_prefix(db, generation_id, stamp, now_ms)
+    _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:
         refresh_watchlist(
@@ -3414,6 +3445,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
             formation_meta=formation.get("search") or {},
             audit_stamp=stamp,
         )
+        _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
         valid = int(db.execute(
             "SELECT COUNT(*) FROM profile WHERE profile_generation=? "
             "AND COALESCE(data_status,'valid') NOT IN ('deferred_data_error','rejected')",
@@ -3545,6 +3577,7 @@ def scan(db, p) -> None:
     p.copy_bt_sigmas = _copy_bt_sigmas(db)
     p.copy_bt_market_ctx = _copy_bt_market_ctx(db)
     p.copy_bt_overrides = _copy_bt_overrides(db)
+    p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     rest.reset_request_stats()
 
     try:
@@ -3670,7 +3703,9 @@ def scan(db, p) -> None:
         deferred_n=workset_info["counts"]["deferred"],
         metrics={"estimatedProfileSec": estimated_profile_s,
                  "warmupBackfillDue": len(warmup_backfill_addrs),
-                 "warmupBackfillScheduled": len(migration_backfill)},
+                 "warmupBackfillScheduled": len(migration_backfill),
+                 "marginEquityPct": float(p.margin_equity_pct),
+                 "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct)},
     )
     db.commit()
     workset, mode = workset_info["workset"], workset_info["mode"]
@@ -3802,6 +3837,7 @@ def scan(db, p) -> None:
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
         try:
+            _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             formation = None
             if selection_mode == "auto":
                 formation = form_quality_prefix(db, generation_id, stamp, now_ms)
@@ -3832,6 +3868,7 @@ def scan(db, p) -> None:
                     forced_core_order=(formation or {}).get("selected") or (),
                     formation_meta=(formation or {}).get("search") or {},
                 )
+            _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             # Publication timestamps describe when the complete decision became visible, not when the
             # hours-long scan started.  Use one actual completion stamp for ready/selection/publish/history
             # so operational ordering remains monotonic and Observer reload commands have honest times.
@@ -3931,6 +3968,8 @@ def scan(db, p) -> None:
                 "selectionAction": marginal.action if marginal else "keep",
                 "selectionEvaluated": marginal.evaluated if marginal else 0,
                 "selectionSearch": marginal.search_meta if marginal else None,
+                "marginEquityPct": float(p.margin_equity_pct),
+                "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct),
                 **rest.request_stats(),
             }
             db.execute(

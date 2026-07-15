@@ -76,6 +76,40 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_margin_equity_pct_api_enforces_manual_range(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            db.execute(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES ('MARGIN_EQUITY_PCT','100','follow','yellow','pct','immediate','100',NULL)"
+            )
+            db.commit()
+            db.close()
+
+            self.assertEqual(
+                api_params.patch_params(path, "follow", {"MARGIN_EQUITY_PCT": 50}),
+                {"MARGIN_EQUITY_PCT": 50},
+            )
+            with self.assertRaisesRegex(ValueError, "between 10 and 100"):
+                api_params.patch_params(path, "follow", {"MARGIN_EQUITY_PCT": 5})
+            db = sqlite3.connect(path)
+            self.assertEqual(db.execute(
+                "SELECT value FROM params WHERE key='MARGIN_EQUITY_PCT'"
+            ).fetchone()[0], "50")
+            db.close()
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def test_ep_params_can_include_score_distribution(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

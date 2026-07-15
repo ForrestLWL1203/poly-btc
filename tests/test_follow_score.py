@@ -126,6 +126,27 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(collapse["status"], "recent_copy_collapse")
         self.assertTrue(protected["coreEligible"])
 
+    def test_profit_floors_use_manual_margin_equity_budget(self):
+        challenger = evaluate_follow_eligibility(
+            evidence(copy_bt_net_pnl=200), margin_equity_pct=0.50,
+        )
+        core = evaluate_follow_eligibility(
+            evidence(copy_bt_net_pnl=260), margin_equity_pct=0.50,
+        )
+        strong = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=500, copy_bt_closed_n=20, copy_evidence_days=10,
+            copy_bt_7d_closed_n=3, copy_return_lcb=-0.05,
+        ), margin_equity_pct=0.50)
+        rejected = evaluate_follow_eligibility(
+            evidence(copy_bt_net_pnl=149), margin_equity_pct=0.50,
+        )
+
+        self.assertEqual(challenger["status"], "challenger_return_watch")
+        self.assertTrue(core["coreEligible"])
+        self.assertTrue(strong["coreEligible"])
+        self.assertTrue(strong["strongEntry"])
+        self.assertEqual(rejected["status"], "copy_value_below_challenger_floor")
+
     def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])

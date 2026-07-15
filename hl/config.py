@@ -220,6 +220,10 @@ FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有
 STABLE_COIN_CAP_PCT = 0.30
 MID_COIN_CAP_PCT    = 0.22
 HIGH_COIN_CAP_PCT   = 0.15
+MARGIN_EQUITY_PCT = 1.00    # manual sizing base: each new open uses this share of drawdown-adjusted equity.
+#                            The remainder is NOT reserved/frozen: real available cash, per-coin caps and
+#                            portfolio deployment limits still use full risk equity, so it remains usable by
+#                            other wallets, later signals and adds.  This knob is deliberately not auto-tuned.
 DEPLOY_FULL_PCT = 0.40      # <= this deployed margin: use each tier's upper-bound margin. Between this and
 #                           MAX_DEPLOY_PCT, new-open margin linearly shrinks to the tier lower bound.
 MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin

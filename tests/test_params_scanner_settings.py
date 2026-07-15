@@ -23,6 +23,11 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MAX"], 30_000_000.0)
             self.assertFalse(follow["COPY_STOP_ENABLE"])
+            self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
+
+            visible_follow = {p["key"]: p for p in params.get_all(db)["follow"]}
+            self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["value"], 100.0)
+            self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["level"], "yellow")
 
     def test_scanner_settings_expose_basic_and_folded_advanced_knobs(self):
         with tempfile.TemporaryDirectory() as td:

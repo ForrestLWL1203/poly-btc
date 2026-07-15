@@ -147,6 +147,7 @@ class Backtest:
         self.add_frac = overrides.get("ADD_FRAC", config.ADD_FRAC)
         self.deploy_full_pct = overrides.get("DEPLOY_FULL_PCT", config.DEPLOY_FULL_PCT)
         self.max_deploy_pct = overrides.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
+        self.margin_equity_pct = overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
         self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
@@ -188,6 +189,7 @@ class Backtest:
             capital_anchor=self.initial_balance,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
             drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
+            margin_equity_pct=self.margin_equity_pct,
         )
 
     def sigma(self, coin):
@@ -707,6 +709,8 @@ class Backtest:
             "liquidation_rate": liquidations / len(self.closed) if self.closed else 0.0,
             "copy_win_rate": wins / len(self.closed) if self.closed else 0.0,
             "copy_net_pnl": equity_pnl,
+            "margin_equity_pct": self.margin_equity_pct,
+            "initial_margin_equity": self.initial_balance * self.margin_equity_pct,
             "closed_net_pnl": closed_net,
             "copy_gross_pnl": self.gross_pnl,
             "unrealized_pnl": unreal,

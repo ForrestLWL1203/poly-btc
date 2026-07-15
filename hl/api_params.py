@@ -53,6 +53,13 @@ def patch_params(db_path, category, updates):
                 continue
             if row["level"] not in WRITABLE_LEVELS or row["type"] == "display":
                 raise ValueError(f"{key} is read-only")
+            if key == "MARGIN_EQUITY_PCT":
+                try:
+                    margin_equity_pct = float(val)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("MARGIN_EQUITY_PCT must be numeric") from exc
+                if not 10.0 <= margin_equity_pct <= 100.0:
+                    raise ValueError("MARGIN_EQUITY_PCT must be between 10 and 100")
             if key == "COIN_BLACKLIST":
                 stored = format_coin_blacklist(val)
             else:

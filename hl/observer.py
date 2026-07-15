@@ -122,6 +122,7 @@ class Observer:
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
         self.deploy_full_pct = config.DEPLOY_FULL_PCT        # <= this deployed margin: use tier margin upper bound
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
+        self.margin_equity_pct = config.MARGIN_EQUITY_PCT    # manual per-open sizing base; full cash remains available
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
                                   "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
@@ -338,6 +339,7 @@ class Observer:
             if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
             if f.get("DEPLOY_FULL_PCT") is not None: self.deploy_full_pct = f["DEPLOY_FULL_PCT"]
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
+            if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
             for tier, mk, min_mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_MARGIN_MIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
@@ -599,6 +601,7 @@ class Observer:
             capital_anchor=book.initial_balance,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
             drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
+            margin_equity_pct=self.margin_equity_pct,
         )
 
     def _coin_liquidity_block_reason(self, coin: str):
