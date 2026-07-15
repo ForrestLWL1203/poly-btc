@@ -388,7 +388,7 @@ SCORE_FRAG_SPAN = 1.0     # 超出 FREE 后再涨此幅 → 守卫降到下限(f
 # open_underwater 由 scanner 先过滤 dust 仓(仓位名义额/账户权益低于下方阈值),再取最深逆向;
 # 总账面压力仍看 open_loss_frac。这样不会让几十刀小仓把一个 copy 回测很强的钱包踢出 active。
 OPEN_RISK_MIN_POSITION_EQUITY_FRAC = 0.002  # 低于账户 0.2% 的当前仓位只算账面浮亏,不参与"最深逆向"打分
-SCORE_BAG_REF  = 0.10     # 当前单仓浮亏达账户此比例才开始轻扣(软化:10%起;isolated+自有止损让它只是小信号)
+SCORE_BAG_REF  = 0.10     # 当前单仓浮亏达账户此比例才开始轻扣(软化:10%起;isolated+有界仓位让它保持为软信号)
 SCORE_BAG_SPAN = 0.20     # 浮亏超出 BAG_REF 后再涨此幅 → g_deep 降到 DEEP_FLOOR
 SCORE_DEEP_FLOOR = 0.75   # 当前深亏守卫下限(最多扣 25%)
 SCORE_GUARD_FLOOR = 0.25  # 刷胜率守卫下限(最差也保留 25%,靠分数线压在线下,而非硬杀)
@@ -560,21 +560,6 @@ UNREAL_RISK_W = 0.5
 # long of the same token, it's hedging spot (market-neutral), not trading directionally — reject. Its
 # perp 'profit' is cancelled by spot, so copying the naked perp leg is a loss for us.
 HEDGE_MAX_FRAC = 0.5
-
-# COPY-SIDE STOP — our isolated-account tail guard: cut a copy when its unrealized loss reaches a fixed
-# fraction of ITS OWN MARGIN. v10 (2026-07-01): MARGIN-BASED — replaces the old σ-multiple stop.
-# WHY the change: a price-distance stop (σ× or flat-%) is leverage-BLIND — the same adverse price % costs 5×
-# more margin at 5x than at 1x — so the σ-stop fired inside normal intraday noise on leveraged positions and
-# cut positions the master rode back to profit (verified 2026-07-01: 6 σ-stops = −$682, 4 of which the master
-# recovered to profit; the tight stop was net-negative even counting the 2 it correctly protected). And
-# drawdown DEPTH doesn't separate "recovers" from "bags" (SILVER bagged at 0.5σ, XLM recovered at 0.77σ) —
-# that is a wallet-SELECTION signal, not a stop signal. So the stop is now a pure catastrophe backstop in
-# MARGIN terms: cut at STOP_MARGIN_PCT of margin. Leverage-aware (adverse price move = STOP_MARGIN_PCT ÷ lev),
-# coin-agnostic, always BEFORE liquidation (liq = 100% of margin). COPY_STOP_ENABLE = master toggle (UI).
-COPY_STOP_ENABLE = False
-STOP_MARGIN_PCT  = 0.70     # cut when unrealized loss ≥ this fraction of the position's margin (0.70 = bail
-#                             at 70% of the way to liquidation). Leverage-aware adverse price: 5x → ~14%,
-#                             3x → ~23%, 7x → ~10%. UI-tunable follow param. Disable → ride to liquidation.
 
 # paper-copy simulation
 LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one

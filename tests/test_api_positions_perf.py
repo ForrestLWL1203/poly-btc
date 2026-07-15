@@ -66,8 +66,8 @@ class ApiPositionsPerfTests(unittest.TestCase):
         db.execute(
             "INSERT INTO copy_position "
             "(addr,coin,side,status,realized_pnl,entry_px,leverage,notional,master_peak_sz,"
-            "master_open_px,was_stopped,was_liq,opened_at,closed_at,add_count) "
-            "VALUES ('0xaaa','ETH','short','closed',10,200,4,800,4,200,0,0,"
+            "master_open_px,was_liq,opened_at,closed_at,add_count) "
+            "VALUES ('0xaaa','ETH','short','closed',10,200,4,800,4,200,0,"
             "'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z',1)"
         )
         db.commit()
@@ -88,8 +88,8 @@ class ApiPositionsPerfTests(unittest.TestCase):
         db.execute(
             "INSERT INTO copy_position "
             "(addr,coin,side,status,realized_pnl,entry_px,leverage,notional,master_peak_sz,"
-            "master_open_px,was_stopped,was_liq,opened_at,closed_at,add_count) "
-            "VALUES ('0xaaa','DOGE','long','closed',-10,100,4,400,4,100,0,1,"
+            "master_open_px,was_liq,opened_at,closed_at,add_count) "
+            "VALUES ('0xaaa','DOGE','long','closed',-10,100,4,400,4,100,1,"
             "'2026-01-01T00:00:00Z','2026-01-01T02:00:00Z',0)"
         )
         db.commit()
@@ -103,8 +103,8 @@ class ApiPositionsPerfTests(unittest.TestCase):
         pos_id = db.execute(
             "INSERT INTO copy_position "
             "(addr,coin,side,status,realized_pnl,entry_px,leverage,notional,master_peak_sz,"
-            "master_open_px,was_stopped,was_liq,opened_at,closed_at,add_count) "
-            "VALUES ('0xaaa','SOL','long','closed',-10,100,4,1000,10,100,0,0,"
+            "master_open_px,was_liq,opened_at,closed_at,add_count) "
+            "VALUES ('0xaaa','SOL','long','closed',-10,100,4,1000,10,100,0,"
             "'2026-01-01T00:00:00Z','2026-01-01T02:00:00Z',0)"
         ).lastrowid
         db.executemany(

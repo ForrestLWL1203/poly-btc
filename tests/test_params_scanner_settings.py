@@ -8,10 +8,9 @@ from hl import config, params, storage
 
 
 class ScannerSettingsParamTests(unittest.TestCase):
-    def test_product_defaults_use_requested_volume_box_and_disable_copy_stop(self):
+    def test_product_defaults_use_requested_volume_box_and_no_hard_stop_params(self):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
         self.assertEqual(config.HARVEST_WEEK_VLM_MAX, 30_000_000.0)
-        self.assertFalse(config.COPY_STOP_ENABLE)
 
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -23,7 +22,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MAX"], 30_000_000.0)
             self.assertEqual(scanner["inactive_days"], 2)
-            self.assertFalse(follow["COPY_STOP_ENABLE"])
+            self.assertNotIn("COPY_STOP_ENABLE", follow)
+            self.assertNotIn("STOP_MARGIN_PCT", follow)
             self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
 
             visible_follow = {p["key"]: p for p in params.get_all(db)["follow"]}

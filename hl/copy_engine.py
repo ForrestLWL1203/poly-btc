@@ -23,8 +23,6 @@ class OpenSizingParams:
     deploy_full_pct: float
     max_deploy_pct: float
     min_open_margin_pct: float
-    copy_stop_enable: bool
-    stop_margin_pct: float
     capital_anchor: float = config.INITIAL_BALANCE
     drawdown_exponent: float = config.SIZING_DRAWDOWN_EXPONENT
     drawdown_max_multiplier: float = config.SIZING_DRAWDOWN_MAX_MULTIPLIER
@@ -43,7 +41,6 @@ class OpenSizingPlan:
     leverage: float
     size: float
     liq_px: float
-    stop_px: float
     room: float
     deploy_room: float
     available: float
@@ -71,13 +68,6 @@ def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
     if str(coin or "").upper() == "BTC" and sigma <= stable_sigma_max:
         return "stable"
     return "high" if sigma >= high_sigma_min else "mid"
-
-
-def stop_px(entry_px: float, is_buy: bool, leverage: float, copy_stop_enable: bool, stop_margin_pct: float) -> float:
-    if not copy_stop_enable or not entry_px or not leverage or not stop_margin_pct:
-        return 0.0
-    d = stop_margin_pct / leverage
-    return entry_px * (1 - d) if is_buy else entry_px * (1 + d)
 
 
 def isolated_liq_px(entry_px: float, side: str, size: float, margin: float,
@@ -239,7 +229,7 @@ def plan_open_sizing(
             "deploy_cap" if deploy_room < wanted_margin else
             "margin_too_small"
         )
-        return OpenSizingPlan(False, reason, tier, side, margin_pct, margin, 0.0, lev, 0.0, 0.0, 0.0,
+        return OpenSizingPlan(False, reason, tier, side, margin_pct, margin, 0.0, lev, 0.0, 0.0,
                               room, deploy_room, risk_available, wanted_margin, master_notional,
                               risk_equity, sizing_equity, margin_equity)
 
@@ -248,14 +238,12 @@ def plan_open_sizing(
         notional = master_notional
         margin = notional / lev if lev else margin
     if notional < params.tier_min_notional[tier]:
-        return OpenSizingPlan(False, "small_notl", tier, side, margin_pct, margin, notional, lev, 0.0, 0.0, 0.0,
+        return OpenSizingPlan(False, "small_notl", tier, side, margin_pct, margin, notional, lev, 0.0, 0.0,
                               room, deploy_room, risk_available, wanted_margin, master_notional,
                               risk_equity, sizing_equity, margin_equity)
 
     size = notional / entry_px if entry_px else 0.0
-    is_buy = side == "long"
     liq = isolated_liq_px(entry_px, side, size, margin, maintenance_leverage, lev)
-    stop = stop_px(entry_px, is_buy, lev, params.copy_stop_enable, params.stop_margin_pct)
-    return OpenSizingPlan(True, "", tier, side, margin_pct, margin, notional, lev, size, liq, stop,
+    return OpenSizingPlan(True, "", tier, side, margin_pct, margin, notional, lev, size, liq,
                           room, deploy_room, risk_available, wanted_margin, master_notional,
                           risk_equity, sizing_equity, margin_equity)

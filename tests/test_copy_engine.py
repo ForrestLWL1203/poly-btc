@@ -27,8 +27,6 @@ class CopyEngineTests(unittest.TestCase):
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
-            copy_stop_enable=False,
-            stop_margin_pct=0.70,
             capital_anchor=10_000.0,
         )
 
@@ -70,8 +68,6 @@ class CopyEngineTests(unittest.TestCase):
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
-            copy_stop_enable=False,
-            stop_margin_pct=0.70,
             margin_equity_pct=0.50,
         )
         plan = plan_open_sizing(
@@ -116,8 +112,6 @@ class CopyEngineTests(unittest.TestCase):
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
-            copy_stop_enable=True,
-            stop_margin_pct=0.70,
         )
 
         plan = plan_open_sizing(
@@ -140,7 +134,6 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(plan.margin, 100.0)
         self.assertEqual(plan.size, 5.0)
         self.assertAlmostEqual(plan.liq_px, 80.0)
-        self.assertAlmostEqual(plan.stop_px, 86.0)
 
     def test_open_sizing_never_exceeds_market_max_leverage(self):
         params = OpenSizingParams(
@@ -156,8 +149,6 @@ class CopyEngineTests(unittest.TestCase):
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
-            copy_stop_enable=False,
-            stop_margin_pct=0.70,
         )
 
         plan = plan_open_sizing(

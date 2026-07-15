@@ -151,6 +151,41 @@ class ApiParamsTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_tail_close_api_allows_disabling_with_stale_child_thresholds(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE params ("
+                "key TEXT PRIMARY KEY,value TEXT,category TEXT,level TEXT,type TEXT,"
+                "effect TEXT,default_value TEXT,updated_at TEXT)"
+            )
+            db.executemany(
+                "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES (?,?, 'follow',? ,?,'immediate',?,NULL)",
+                [
+                    ("TAIL_CLOSE_ENABLE", "true", "green", "bool", "true"),
+                    ("TAIL_CLOSE_HARD_REMAIN_PCT", "20", "yellow", "pct", "20"),
+                    ("TAIL_CLOSE_RISK_REMAIN_PCT", "35", "yellow", "pct", "35"),
+                ],
+            )
+            db.commit()
+            db.close()
+
+            result = api_params.patch_params(path, "follow", {
+                "TAIL_CLOSE_ENABLE": False,
+                "TAIL_CLOSE_HARD_REMAIN_PCT": 40,
+                "TAIL_CLOSE_RISK_REMAIN_PCT": 30,
+            })
+
+            self.assertFalse(result["TAIL_CLOSE_ENABLE"])
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
     def test_ep_params_can_include_score_distribution(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

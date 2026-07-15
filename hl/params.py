@@ -105,9 +105,9 @@ PARAM_SPEC = [
     # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — redundant with the scanner EVIDENCE gate,
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
-    #  tier cap + master-lev cap + margin/coin/deploy limits + σ-stop)
+    #  tier cap + master-lev cap + margin/coin/deploy limits)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
-        "自动调保证金", "每日采集/重筛后按当前跟单钱包组合回测,小网格微调仓位上限/杠杆/满火力线与智能加仓k/g/硬顶;下限/单币上限/总上限/止损由人工控制"),
+        "自动调保证金", "每日采集/重筛后按当前跟单钱包组合回测,小网格微调仓位上限/杠杆/满火力线与智能加仓k/g/硬顶;下限/单币上限/总上限由人工控制"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
         "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、压力、回撤与爆仓门槛"),
     ("AUTO_TUNE_APPLY_MIN_SHADOW_DAYS", "follow", "hidden", "int", "immediate",
@@ -189,10 +189,6 @@ PARAM_SPEC = [
     ("TAIL_CLOSE_PROFIT_GIVEBACK_PCT", "follow", "yellow", "pct", "immediate",
         config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT * 100,
         "尾仓最大利润回吐", "尾仓继续持有至强平可能吃掉当前整笔利润达到此比例时，立即全平"),
-    ("COPY_STOP_ENABLE",     "follow",  "green",  "bool",    "immediate", config.COPY_STOP_ENABLE,
-        "启用止损", "亏损达到止损保证金比例时自动平仓；回测显示开启后收益更低，因此默认关闭"),
-    ("STOP_MARGIN_PCT",      "follow",  "yellow", "pct",     "immediate", config.STOP_MARGIN_PCT * 100,
-        "止损=亏损保证金%", "亏掉本仓这么多%保证金就平仓(70=亏到70%保证金,爆仓前兜底)。带杠杆自动换算逆向价格:5x→14%、3x→23%、7x→10%"),
     # (COIN_MARGIN_CAP_PCT removed 2026-07-02 — superseded by the σ-tiered 分档单笔上限 in the 加仓策略 tab)
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
     ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "BTC稳定档σ上界", ""),
@@ -245,9 +241,9 @@ def parse(value, ptype):
 def seed_params(db):
     """Insert missing params and refresh metadata without overwriting operator-edited values."""
     stamp = now_iso()
-    # Retired policy: raw profile score remains a ranking/explanation input, never a qualification veto.
-    # Delete the obsolete persisted knob so old databases cannot silently restore the historical hard cut.
-    db.execute("DELETE FROM params WHERE key='MIN_ACTIVE_SCORE'")
+    # Retired policies: raw profile score is no longer a qualification veto, and copy execution no longer
+    # supports a hard-threshold stop. Purge their old rows so stale databases cannot expose or restore them.
+    db.execute("DELETE FROM params WHERE key IN ('MIN_ACTIVE_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT')")
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
         # Approved policy migration: the old hidden heavy-DCA threshold was 20.  This is a deliberate

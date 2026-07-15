@@ -288,12 +288,12 @@ def score(m: dict) -> float:
 
     # ── guards ROI can't capture (NO 反噬/worst-loss dock — ROI handles 小赚大亏) ──
     wl = abs(g("worst_loss_pct"))     # worst realized single loss / acct — used only by the 刷胜率 guard below
-    # 刷胜率: ≥WIN_FLOOR 胜率 且 几乎从不兑现亏损 = 靠扛浮亏藏亏刷假胜率(ROI 看不出,因为亏损没兑现)。我们的
-    # σ-止损会替他兑现所扛的亏,故其胜率对我们是误导 → 罚。真会止损的高胜率钱包(wl≥LOSS_REF)不受影响。
+    # 刷胜率: ≥WIN_FLOOR 胜率 且 几乎从不兑现亏损 = 靠扛浮亏藏亏刷假胜率(ROI 看不出,因为亏损没兑现)。
+    # 这会让跟单组合承接未入账的尾部风险，故其胜率对我们是误导 → 罚。会及时兑现亏损的高胜率钱包(wl≥LOSS_REF)不受影响。
     manuf = (_clip((win - config.SCORE_MANUF_WIN_FLOOR) / (1.0 - config.SCORE_MANUF_WIN_FLOOR), 0.0, 1.0)
              * _clip(1.0 - wl / config.SCORE_MANUF_LOSS_REF, 0.0, 1.0))
     g_manuf = _clip(1.0 - manuf * config.SCORE_MANUF_PEN, config.SCORE_GUARD_FLOOR, 1.0)
-    # 当前深亏轻推(此刻正在扛的单仓最惨浮亏);地板高——isolated + 我们自有止损让它只是小信号,不是重罚
+    # 当前深亏轻推(此刻正在扛的单仓最惨浮亏);地板高——isolated + 有界仓位让它是软信号,不是重罚
     bag = abs(min(0.0, g("open_underwater")))
     g_deep = _clip(1.0 - max(0.0, bag - config.SCORE_BAG_REF) / config.SCORE_BAG_SPAN, config.SCORE_DEEP_FLOOR, 1.0)
 

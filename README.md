@@ -87,7 +87,6 @@ The current Paper defaults allow automatic application after the validation gate
 ```text
 FOLLOW_SELECTION_MODE=auto
 AUTO_TUNE_MODE=apply
-COPY_STOP_ENABLE=false
 ```
 
 Paper uses zero-day/zero-forward-count exploration thresholds so the complete loop can be tested from a cold

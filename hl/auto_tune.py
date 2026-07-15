@@ -1152,7 +1152,7 @@ def _enqueue_reload(db, source: str) -> None:
 
 def _compact_backtest(result: dict) -> dict:
     keys = (
-        "closed_n", "open_n", "wins", "stops", "liquidations", "copy_win_rate",
+        "closed_n", "open_n", "wins", "liquidations", "copy_win_rate",
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "fee_drag",
         "margin_equity_pct", "initial_margin_equity",
         "target_open_events", "opened_n", "open_fill_rate", "target_adds",

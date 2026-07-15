@@ -3,7 +3,7 @@ import { PositionDetail } from "../positions/PositionDetail.jsx";
 
 const CLOSE_TYPE = {
   mirror: { label: "镜像", tint: "tint-blue" },
-  stop: { label: "止损", tint: "tint-amber" },
+  legacy: { label: "旧策略", tint: "tint-gray" },
   liq: { label: "爆仓", tint: "tint-red" },
   tail: { label: "尾盈", tint: "tint-green" },
 };
@@ -39,7 +39,7 @@ export function ClosedPositionsTable({
                 <td className="num muted" title="源(目标钱包)的加权均价(随其加仓更新)· 杠杆">{fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</td>
                 <td className="num" title="我们的加权均价 · 杠杆">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x</td>
                 <td>{(() => { const t = CLOSE_TYPE[p.closeType] || CLOSE_TYPE.mirror; return <span className={"tint " + t.tint}>{t.label}</span>; })()}
-                  <div className="muted" style={{ fontSize: 11 }} title="我们实际平仓价(止损=被砍价 / 镜像=跟随目标平仓价)">@ {fPrice(p.closePx)}</div></td>
+                  <div className="muted" style={{ fontSize: 11 }} title="我们的实际平仓价">@ {fPrice(p.closePx)}</div></td>
                 <td className="num">{fUsd(p.notional)}
                   <div className="muted" title="源(目标钱包)这一单的名义额">源 {fUsd(p.masterNotional)}</div></td>
                 <td className={"num " + cls(p.realizedPnl)}>{fSign(p.realizedPnl, 1)}</td>

@@ -219,7 +219,6 @@ class CopyBacktestTests(unittest.TestCase):
             "MID_COIN_CAP_PCT": 1.0,
             "DEPLOY_FULL_PCT": 0.08,
             "MAX_DEPLOY_PCT": 0.50,
-            "COPY_STOP_ENABLE": False,
         })
 
         margins = [p["margin"] for p in sorted(result["open_positions"], key=lambda p: p["opened_at"])]
@@ -238,12 +237,11 @@ class CopyBacktestTests(unittest.TestCase):
             fill(3_000, "BTC", "A", 100, 100, 101.0, 41),
         ]
 
-        fills_only = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={"COPY_STOP_ENABLE": False})
+        fills_only = run_backtest("0xabc", fills, sigmas={"BTC": 0.04})
         with_path = run_backtest(
             "0xabc",
             fills,
             sigmas={"BTC": 0.04},
-            overrides={"COPY_STOP_ENABLE": False},
             price_path={"BTC": [{"time": 2_000, "low": 95.0, "high": 100.0}]},
         )
 
@@ -257,7 +255,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(with_path["behavior_replication_rate"], 0.0)
         self.assertLess(with_path["copy_net_pnl"], 0)
 
-    def test_price_path_can_stop_between_target_fills_before_liquidation(self):
+    def test_price_path_adverse_move_without_liquidation_does_not_force_close(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 50),
             fill(3_000, "BTC", "A", 100, 100, 101.0, 51),
@@ -267,12 +265,12 @@ class CopyBacktestTests(unittest.TestCase):
             "0xabc",
             fills,
             sigmas={"BTC": 0.04},
-            overrides={"COPY_STOP_ENABLE": True, "STOP_MARGIN_PCT": 0.70},
             price_path={"BTC": [{"time": 2_000, "low": 97.0, "high": 100.0}]},
         )
 
-        self.assertEqual(result["positions"][0]["status"], "stopped")
-        self.assertEqual(result["stops"], 1)
+        self.assertEqual(result["positions"][0]["status"], "closed")
+        self.assertEqual(result["positions"][0]["closed_at"], 3_000)
+        self.assertNotIn("stops", result)
         self.assertEqual(result["liquidations"], 0)
 
     def test_fill_candle_crossing_is_ambiguous_not_confirmed(self):
@@ -282,10 +280,9 @@ class CopyBacktestTests(unittest.TestCase):
         ]
         path = [{"coin": "BTC", "time": 2_000, "open_time": 1, "close_time": 2_000,
                  "low": 95.0, "high": 101.0, "close": 100.0}]
-        best = run_backtest("0xabc", fills, sigmas={"BTC": 0.04},
-                            overrides={"COPY_STOP_ENABLE": False}, price_path=path)
+        best = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, price_path=path)
         worst = run_backtest("0xabc", fills, sigmas={"BTC": 0.04},
-                             overrides={"COPY_STOP_ENABLE": False, "AMBIGUOUS_PATH_MODE": "liquidate"},
+                             overrides={"AMBIGUOUS_PATH_MODE": "liquidate"},
                              price_path=path)
         self.assertEqual(0, best["liquidations"])
         self.assertEqual(1, best["ambiguous_liquidations"])
@@ -300,7 +297,6 @@ class CopyBacktestTests(unittest.TestCase):
         ]
 
         result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04}, overrides={
-            "COPY_STOP_ENABLE": False,
             "STABLE_MIN_NOTIONAL": 0.0,
         })
 
@@ -318,7 +314,6 @@ class CopyBacktestTests(unittest.TestCase):
         ]
 
         result = run_backtest("0xabc", fills, sigmas={"ETH": 0.08}, overrides={
-            "COPY_STOP_ENABLE": False,
             "MID_MIN_NOTIONAL": 0.0,
         })
 
@@ -335,7 +330,6 @@ class CopyBacktestTests(unittest.TestCase):
         ]
 
         result = run_backtest("0xabc", fills, sigmas={"ETH": 0.08}, overrides={
-            "COPY_STOP_ENABLE": False,
             "MID_MIN_NOTIONAL": 0.0,
         })
 

@@ -11,6 +11,13 @@ import {
 const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.min, g.max, g.lev, g.notl, g.cap]));
 const deployKeys = new Set(["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
 const marginEquityKey = "MARGIN_EQUITY_PCT";
+const tailEnableKey = "TAIL_CLOSE_ENABLE";
+const tailChildKeys = [
+  "TAIL_CLOSE_HARD_REMAIN_PCT",
+  "TAIL_CLOSE_RISK_REMAIN_PCT",
+  "TAIL_CLOSE_PROFIT_GIVEBACK_PCT",
+];
+const tailKeys = new Set([tailEnableKey, ...tailChildKeys]);
 
 export function FollowSettingsPanel({
   list,
@@ -26,15 +33,24 @@ export function FollowSettingsPanel({
   const autoTuneParam = paramsByKey.get(AUTO_TUNE_KEY);
   const blacklistParam = paramsByKey.get(BLACKLIST_KEY);
   const marginEquityParam = paramsByKey.get(marginEquityKey);
+  const tailEnableParam = paramsByKey.get(tailEnableKey);
+  const tailChildParams = tailChildKeys.map(key => paramsByKey.get(key)).filter(Boolean);
   const row = p => (
     <ParamRow key={p.key} param={p} value={vals[p.key]} dirty={dirty[p.key]}
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
-  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY || p.key === marginEquityKey));
+  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || tailKeys.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY || p.key === marginEquityKey));
 
   return (
     <React.Fragment>
       {visibleTopRows.map(row)}
+      {tailEnableParam && <section className={"param-dependent-group" + (vals[tailEnableKey] ? " open" : "")}>
+        {row(tailEnableParam)}
+        {vals[tailEnableKey] && <div className="param-dependent-children">
+          <div className="param-dependent-note">开启后生效</div>
+          {tailChildParams.map(row)}
+        </div>}
+      </section>}
       {blacklistParam && <CoinBlacklistEditor key={blacklistParam.key} param={blacklistParam}
         value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
         onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />}

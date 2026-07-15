@@ -42,7 +42,7 @@ export function History() {
                 <option value="all">盈亏 · 全部</option><option value="win">仅盈利</option><option value="loss">仅亏损</option>
               </select>
               <select className="fdrop" value={ctype} onChange={e => { setCtype(e.target.value); setPage(0); }}>
-                <option value="all">平仓类型 · 全部</option><option value="mirror">镜像跟随</option><option value="stop">主动止损</option><option value="liq">爆仓</option>
+                <option value="all">平仓类型 · 全部</option><option value="mirror">镜像跟随</option><option value="liq">爆仓</option><option value="tail">尾仓保护</option>
               </select>
             </div>
           </div>

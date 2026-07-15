@@ -16,13 +16,9 @@ from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
-                          stop_px, tier_for_sigma)
+                          tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .util import f
-
-
-def _stop_px(entry_px: float, is_buy: bool, lev: float, copy_stop_enable: bool, stop_margin_pct: float) -> float:
-    return stop_px(entry_px, is_buy, lev, copy_stop_enable, stop_margin_pct)
 
 
 def _row_time(row: dict) -> int:
@@ -150,8 +146,6 @@ class Backtest:
         self.max_deploy_pct = overrides.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
         self.margin_equity_pct = overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
-        self.copy_stop_enable = bool(overrides.get("COPY_STOP_ENABLE", config.COPY_STOP_ENABLE))
-        self.stop_margin_pct = overrides.get("STOP_MARGIN_PCT", config.STOP_MARGIN_PCT)
         self.tail_close_enable = bool(overrides.get("TAIL_CLOSE_ENABLE", config.TAIL_CLOSE_ENABLE))
         self.tail_close_hard_remain_pct = overrides.get(
             "TAIL_CLOSE_HARD_REMAIN_PCT", config.TAIL_CLOSE_HARD_REMAIN_PCT)
@@ -197,8 +191,6 @@ class Backtest:
             deploy_full_pct=self.deploy_full_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
-            copy_stop_enable=self.copy_stop_enable,
-            stop_margin_pct=self.stop_margin_pct,
             capital_anchor=self.initial_balance,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
             drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
@@ -309,7 +301,7 @@ class Backtest:
         if px <= 0:
             return
         self.last_px[coin] = px
-        self._mark_stops(coin, px, x.get("time"))
+        self._mark_liquidations(coin, px, x.get("time"))
 
         sz = f(x.get("sz"))
         signed = sz if x.get("side") == "B" else -sz
@@ -370,7 +362,7 @@ class Backtest:
         close = f(x.get("close")) or (lo + hi) / 2
         self.last_px[coin] = close
         self.path_mark_coins.add(coin)
-        self._mark_stops_range(
+        self._mark_liquidations_range(
             coin, lo, hi, x.get("time"), candle_open_time=x.get("open_time"),
             ambiguous=bool(x.get("has_fill_events")), candle_close_time=x.get("close_time"),
         )
@@ -452,7 +444,6 @@ class Backtest:
             "maintenance_leverage": maintenance_leverage,
             "master_leverage": master_lev,
             "liq_px": plan.liq_px,
-            "stop_px": plan.stop_px,
             "last_add_px": px,
             "add_count": 0,
             "followed_adds": 0,
@@ -573,7 +564,6 @@ class Backtest:
             ep["entry_px"], ep["side"], ep["size"], ep["margin"],
             ep.get("maintenance_leverage"), ep["leverage"],
         )
-        ep["stop_px"] = _stop_px(ep["entry_px"], is_buy, ep["leverage"], self.copy_stop_enable, self.stop_margin_pct)
         first_copy_for_order = not (order and order["counted"])
         if first_copy_for_order:
             ep["add_count"] += 1
@@ -662,19 +652,16 @@ class Backtest:
             self.open.pop(key, None)
         self._sample_deploy(t)
 
-    def _mark_stops(self, coin, px, t):
+    def _mark_liquidations(self, coin, px, t):
         for (addr, c), ep in list(self.open.items()):
             if c != coin:
                 continue
             liq_hit = px <= ep["liq_px"] if ep["side"] == "long" else px >= ep["liq_px"]
-            stop_hit = self.copy_stop_enable and ep["stop_px"] and (px <= ep["stop_px"] if ep["side"] == "long" else px >= ep["stop_px"])
             if liq_hit:
                 self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated", t=t)
-            elif stop_hit:
-                self._apply_reduce(addr, coin, px, 0.0, 0.0, closing=True, status="stopped", t=t)
 
-    def _mark_stops_range(self, coin, low, high, t, candle_open_time=None,
-                          ambiguous=False, candle_close_time=None):
+    def _mark_liquidations_range(self, coin, low, high, t, candle_open_time=None,
+                                 ambiguous=False, candle_close_time=None):
         for (addr, c), ep in list(self.open.items()):
             if c != coin:
                 continue
@@ -684,11 +671,9 @@ class Backtest:
             boundary = candle_open_time is not None and int(ep.get("opened_at") or 0) > int(candle_open_time)
             if ep["side"] == "long":
                 liq_hit = low <= ep["liq_px"]
-                stop_hit = self.copy_stop_enable and ep["stop_px"] and low <= ep["stop_px"]
             else:
                 liq_hit = high >= ep["liq_px"]
-                stop_hit = self.copy_stop_enable and ep["stop_px"] and high >= ep["stop_px"]
-            if (ambiguous or boundary) and (liq_hit or stop_hit):
+            if (ambiguous or boundary) and liq_hit:
                 self.path_boundary_skips += 1
                 self.ambiguous_path_events.add((coin, int(candle_open_time or t or 0),
                                                 int(candle_close_time or t or 0)))
@@ -696,8 +681,6 @@ class Backtest:
                     continue
             if liq_hit:
                 self._apply_reduce(addr, coin, ep["liq_px"], 0.0, 0.0, closing=True, status="liquidated", t=t)
-            elif stop_hit:
-                self._apply_reduce(addr, coin, ep["stop_px"], 0.0, 0.0, closing=True, status="stopped", t=t)
 
     def result(self):
         unreal = 0.0
@@ -724,10 +707,9 @@ class Backtest:
             ))
         closed_net = sum(p["realized_net"] for p in self.closed)
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
-        stops = sum(1 for p in self.closed if p.get("status") == "stopped")
         liquidations = sum(1 for p in self.closed if p.get("status") == "liquidated")
         tail_profit_closes = sum(1 for p in self.closed if p.get("status") == "tail_closed")
-        natural_closes = max(0, len(self.closed) - stops - liquidations)
+        natural_closes = max(0, len(self.closed) - liquidations)
         path_completion_rate = natural_closes / len(self.closed) if self.closed else 1.0
         initial_notl = sum(p["target_initial_notl"] for p in self.closed) + sum(p["target_initial_notl"] for p in self.open.values())
         add_notl = sum(p["target_add_notl"] for p in self.closed) + sum(p["target_add_notl"] for p in self.open.values())
@@ -791,7 +773,6 @@ class Backtest:
             "closed_n": len(self.closed),
             "open_n": len(self.open),
             "wins": wins,
-            "stops": stops,
             "liquidations": liquidations,
             "tail_profit_closes": tail_profit_closes,
             "natural_closes": natural_closes,
@@ -932,10 +913,9 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     gross = sum(f(position.get("gross_pnl")) for position in positions)
     fees = sum(f(position.get("fee_drag")) for position in positions)
     wins = sum(1 for position in positions if f(position.get("net_pnl")) > 0)
-    stops = sum(1 for position in positions if position.get("status") == "stopped")
     liquidations = sum(1 for position in positions if position.get("status") == "liquidated")
     tail_profit_closes = sum(1 for position in positions if position.get("status") == "tail_closed")
-    natural_closes = max(0, len(positions) - stops - liquidations)
+    natural_closes = max(0, len(positions) - liquidations)
     path_completion_rate = natural_closes / len(positions) if positions else 1.0
     open_rate = f(out.get("actionable_open_rate")) if out.get("actionable_open_rate") is not None else 1.0
     add_capture = 1.0 - (f(out.get("missed_add_rate")) if out.get("missed_add_rate") is not None else 0.0)
@@ -974,7 +954,6 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     out.update({
         "closed_n": len(positions),
         "wins": wins,
-        "stops": stops,
         "liquidations": liquidations,
         "tail_profit_closes": tail_profit_closes,
         "natural_closes": natural_closes,

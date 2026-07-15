@@ -10,7 +10,7 @@ from .util import now_iso
 
 
 WRITABLE_LEVELS = {"green", "yellow", "blue"}
-REMOVED_PARAMS = {"MIN_FOLLOW_SCORE"}
+REMOVED_PARAMS = {"MIN_FOLLOW_SCORE", "COPY_STOP_ENABLE", "STOP_MARGIN_PCT"}
 
 
 def rw_connect(path):
@@ -79,7 +79,14 @@ def patch_params(db_path, category, updates):
                     else "false" if stored is False else str(stored))
             db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (sval, now_iso(), key))
             out[key] = val
-        if category == "follow" and tail_pct_keys.intersection(out):
+        tail_enabled = out.get("TAIL_CLOSE_ENABLE")
+        if tail_enabled is None:
+            enabled_row = db.execute(
+                "SELECT value FROM params WHERE key='TAIL_CLOSE_ENABLE'"
+            ).fetchone()
+            tail_enabled = (str(enabled_row["value"]).lower() in ("1", "true", "yes")
+                            if enabled_row else True)
+        if category == "follow" and tail_enabled and tail_pct_keys.intersection(out):
             tail_values = {
                 row["key"]: float(row["value"])
                 for row in db.execute(

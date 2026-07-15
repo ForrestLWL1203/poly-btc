@@ -23,7 +23,7 @@ def _close_type(row) -> str:
     if status == "liquidated":
         return "liq"
     if status == "stopped":
-        return "stop"
+        return "legacy"
     if status == "tail_closed":
         return "tail"
     return "mirror"
@@ -41,7 +41,7 @@ def ep_positions(db, qs):
                     ", closed_base AS ("
                     "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                     "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
-                    "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id,"
+                    "cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id,"
                     "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
                     "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl "
                     "FROM copy_position cp LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "
@@ -170,7 +170,7 @@ def ep_positions(db, qs):
 
 def ep_position_detail(db, pos_id):
     p = q1(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.entry_px,cp.leverage,cp.margin,cp.size,cp.rem_size,cp.master_open_px,"
-               "cp.realized_pnl,cp.unrealized_pnl,cp.was_liq,cp.was_stopped,cp.opened_at,cp.closed_at,cp.strategy_revision_id,"
+               "cp.realized_pnl,cp.unrealized_pnl,cp.was_liq,cp.opened_at,cp.closed_at,cp.strategy_revision_id,"
                "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
                "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl "
                "FROM copy_position cp LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "

@@ -30,7 +30,7 @@ from . import config, rest, selection, strategy_revision, volatility, ws
 from .coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
-                          stop_px as engine_stop_px, tier_for_sigma)
+                          tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from .risk_radar import RiskRadar
 from .sector import parse_json_obj, policy_allows_coin
@@ -141,10 +141,7 @@ class Observer:
                               "high": config.HIGH_COIN_CAP_PCT}  # 三档单币最大保证金占用%
         self.max_entry_chase_pct = config.MAX_ENTRY_CHASE_PCT
         self.vol_fallback_sigma = config.VOL_FALLBACK_SIGMA
-        # 扛单 copy-side stop: MARGIN-based catastrophe cut (v10). UI-tunable via _reload_params.
-        self.copy_stop_enable = config.COPY_STOP_ENABLE
         # (v10: RISK_BUDGET / σ-scaled leverage removed — leverage is now the σ-tier's cap, see _sizing_for)
-        self.stop_margin_pct = config.STOP_MARGIN_PCT        # v10: cut at this fraction of the position's margin
         self.tail_close_enable = config.TAIL_CLOSE_ENABLE
         self.tail_close_hard_remain_pct = config.TAIL_CLOSE_HARD_REMAIN_PCT
         self.tail_close_risk_remain_pct = config.TAIL_CLOSE_RISK_REMAIN_PCT
@@ -386,9 +383,7 @@ class Observer:
                 if f.get(ck) is not None: self.tier_coin_cap[tier] = f[ck]
             self.max_entry_chase_pct = f.get("MAX_ENTRY_CHASE_PCT")     # None = chase guard off
             if f.get("VOL_FALLBACK_SIGMA"): self.vol_fallback_sigma = f["VOL_FALLBACK_SIGMA"]
-            if f.get("COPY_STOP_ENABLE") is not None: self.copy_stop_enable = bool(f["COPY_STOP_ENABLE"])
             # (v10: RISK_BUDGET removed — leverage = σ-tier cap)
-            if f.get("STOP_MARGIN_PCT"): self.stop_margin_pct = f["STOP_MARGIN_PCT"]
             if f.get("TAIL_CLOSE_ENABLE") is not None: self.tail_close_enable = bool(f["TAIL_CLOSE_ENABLE"])
             if f.get("TAIL_CLOSE_HARD_REMAIN_PCT") is not None: self.tail_close_hard_remain_pct = f["TAIL_CLOSE_HARD_REMAIN_PCT"]
             if f.get("TAIL_CLOSE_RISK_REMAIN_PCT") is not None: self.tail_close_risk_remain_pct = f["TAIL_CLOSE_RISK_REMAIN_PCT"]
@@ -402,13 +397,13 @@ class Observer:
             self._prune_legacy_profit_cooldowns()
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
-            "margin,notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
+            "margin,notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,"
             f"master_margin,master_leverage FROM {book.pos_table} WHERE status='open'").fetchall()
         loaded = 0
         closed_dust = 0
         reconstructed_peaks = []
         for r in rows:
-            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, peak_sz, liq, rpnl, adds, mae, na, stopx,
+            (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, peak_sz, liq, rpnl, adds, mae, na,
              m_mgn, m_lev) = r
             rem = rem or 0.0
             sz = sz or 0.0
@@ -453,7 +448,7 @@ class Observer:
                 "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
                 "notional": notl or 0.0, "entry_px": epx, "size": sz, "rem_size": rem,
                 "peak_size": peak_sz or abs(rem),
-                "liq_px": liq or 0.0, "stop_px": stopx or 0.0, "realized_pnl": rpnl or 0.0,
+                "liq_px": liq or 0.0, "realized_pnl": rpnl or 0.0,
                 "add_count": adds or 0, "entries_ready": ev, "lock": asyncio.Lock(),
                 # Reconstruct smart-add anchors from the immutable action audit.  Using total margin/add_count
                 # is wrong when proportional smart adds differ from ADD_FRAC and can oversize after restart.
@@ -637,16 +632,6 @@ class Observer:
         """BTC alone may enter stable; every other market starts at mid and can rise to high by σ."""
         return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin)
 
-    def _stop_px_for(self, entry_px: float, is_buy: bool, leverage: float = 0.0) -> float:
-        """Stop PRICE from entry (v10, MARGIN-based): cut when the position's unrealized loss reaches
-        STOP_MARGIN_PCT of its margin. For an isolated position margin-loss% = leverage × adverse-price-%,
-        so the adverse move that costs STOP_MARGIN_PCT of margin is (STOP_MARGIN_PCT ÷ leverage) — down for
-        a long, up for a short (same geometry as liq_px). Leverage-aware and coin-agnostic, and always
-        before liquidation (liq is at 1.0/lev = 100% of margin > STOP_MARGIN_PCT/lev). 0 = disabled."""
-        if not self.copy_stop_enable or not entry_px or not leverage:
-            return 0.0
-        return engine_stop_px(entry_px, is_buy, leverage, self.copy_stop_enable, self.stop_margin_pct)
-
     def _open_sizing_params(self, book=None):
         book = book or self.taker
         return OpenSizingParams(
@@ -662,8 +647,6 @@ class Observer:
             deploy_full_pct=self.deploy_full_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
-            copy_stop_enable=self.copy_stop_enable,
-            stop_margin_pct=self.stop_margin_pct,
             capital_anchor=book.initial_balance,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
             drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
@@ -1117,7 +1100,6 @@ class Observer:
                                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                                 ep["mae"] = max(ep.get("mae", 0.0), adv)
                         self._maybe_liquidate(coin, mid, self.taker)
-                        self._maybe_stop(coin, mid, self.taker)
                 if coins and time.time() - last_log > 300:
                     _log(f"stock mids refreshed: {len(coins)} coins")
                     last_log = time.time()
@@ -1226,7 +1208,6 @@ class Observer:
                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
         self._maybe_liquidate(coin, mid, self.taker)
-        self._maybe_stop(coin, mid, self.taker)
 
     def _record_fill(self, addr, x) -> bool:
         """Insert the (aggregated, trade-level) fill; True if NEW, False if this tid was already seen
@@ -1342,7 +1323,7 @@ class Observer:
         ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
               "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
-              "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "stop_px": 0.0, "realized_pnl": 0.0,
+              "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
               "add_count": 0, "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
               "num_actions": 0, "gap": False, "seen_oids": {oid}, "add_orders": {}}  # order accumulators
         if forced_entry_px is not None:
@@ -1446,16 +1427,15 @@ class Observer:
             notional = plan.notional
             size = plan.size
             liq_px = plan.liq_px
-            stop_px = plan.stop_px
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
-                      size=size, rem_size=size, peak_size=size, liq_px=liq_px, stop_px=stop_px,
+                      size=size, rem_size=size, peak_size=size, liq_px=liq_px,
                       master_first_notl=master_notl,      # 目标首仓名义额 → smart 加仓比例基准
                       last_add_px=px)                     # 我们上次入场价 → smart 波动闸基准 (adds = first_margin × ...)
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
-                "liq_px=?,stop_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
+                "liq_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
                 "WHERE pos_id=?",
-                (lev, margin, notional, px, size, size, size, liq_px, stop_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
+                (lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
             book.balance -= abs(size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.commit()
@@ -1618,7 +1598,6 @@ class Observer:
                 ep["entry_px"], ep["side"], ep["size"], ep["margin"],
                 margin_row[0] if margin_row and margin_row[0] else None, lev,
             )
-            ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, lev)  # re-anchor margin-stop to new avg entry
             first_copy_for_order = not (order and order["counted"])
             if first_copy_for_order:
                 ep["add_count"] += 1
@@ -1641,14 +1620,14 @@ class Observer:
             book.balance -= abs(add_size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.execute(
-                f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,stop_px=?,"
+                f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,"
                 "add_count=?,master_open_px=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
-                ep["rem_size"], ep["peak_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
+                ep["rem_size"], ep["peak_size"], ep["liq_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
             self.db.commit()                                  # the add is in the action table
             return True
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq,
-                            oid=None, gap=False, forced_px=None, stop=False, forced_frac=None, book=None):
+                            oid=None, gap=False, forced_px=None, forced_frac=None, book=None):
         book = book or self.taker
         async with ep["lock"]:
             try:
@@ -1689,7 +1668,7 @@ class Observer:
             if dust_close:
                 reduce_frac = 1.0
                 closing = True
-            elif (not closing and forced_frac is None and not liq and not stop and not gap):
+            elif (not closing and forced_frac is None and not liq and not gap):
                 tail_decision = profit_tail_close_decision(
                     rem_size=ep["rem_size"],
                     peak_size=ep.get("peak_size") or max(ep.get("size", 0.0), ep["rem_size"]),
@@ -1726,17 +1705,14 @@ class Observer:
                     ep["pos_id"], action, ep["side"], -close_size * ep["sign"], exit_px, reduce_frac,
                     copy_act_id=act_id, source_oid=oid,
                 )
-            status = ("liquidated" if (closing and liq) else "stopped" if (closing and stop)
-                      else "tail_closed" if (closing and tail_close)
+            status = ("liquidated" if (closing and liq) else "tail_closed" if (closing and tail_close)
                       else "gap_closed" if (closing and gap) else "closed" if closing else "open")
             was_liq = 1 if (closing and liq) else 0
-            was_stopped = 1 if (closing and stop) else 0
             ep["was_liq"] = was_liq
-            ep["was_stopped"] = was_stopped
             self.db.execute(
-                f"UPDATE {book.pos_table} SET rem_size=?,realized_pnl=?,mae_pct=?,was_liq=?,was_stopped=?,status=?,"
+                f"UPDATE {book.pos_table} SET rem_size=?,realized_pnl=?,mae_pct=?,was_liq=?,status=?,"
                 "closed_at=? WHERE pos_id=?", (ep["rem_size"], ep["realized_pnl"], ep["mae"],
-                was_liq, was_stopped, status,
+                was_liq, status,
                 now_iso() if closing else None, ep["pos_id"]))
             self._save_account(book)
             self.db.commit()
@@ -1753,8 +1729,6 @@ class Observer:
                 book.open_ep.pop((addr, coin), None)         # normal closes are in the position table; only
                 if liq:                                       # liquidation (our isolated stop-out) is logged
                     _log(f"[{book.name}] LIQUIDATED {addr[:10]} {coin} {ep['side']} -${ep['margin']:,.0f}  bal=${book.balance:,.0f}")
-                elif stop:                                    # 扛单 copy-side stop: cut before the master does
-                    _log(f"[{book.name}] STOPPED {addr[:10]} {coin} {ep['side']} pnl=${ep['realized_pnl']:+,.0f}  bal=${book.balance:,.0f}")
                 elif tail_close and tail_decision:
                     self._tally("tail_profit_close", book)
                     _log(
@@ -1781,30 +1755,6 @@ class Observer:
                 hit = mid <= ep["liq_px"] if ep["side"] == "long" else mid >= ep["liq_px"]
                 if hit:
                     asyncio.create_task(self._liquidate(a, coin, ep, book))
-
-    async def _stop_out(self, addr, coin, ep, mid, book=None):
-        """扛单 copy-side stop: the target's thesis (mean-revert by ~tp_move) is broken — price ran the
-        adverse way past our stop. Exit NOW at the live mid instead of riding it to our far liquidation
-        (we don't bag-hold with the target). A real reduce/close on the master still flows normally."""
-        book = book or self.taker
-        if ep.get("stopping") or ep.get("liquidating") or (addr, coin) not in book.open_ep:
-            return
-        ep["stopping"] = True
-        await self._apply_reduce(addr, coin, ep, now_ms(), mid, 0.0, 0.0,
-                                 closing=True, liq=False, forced_px=mid, stop=True, book=book)
-
-    def _maybe_stop(self, coin, mid, book=None):
-        book = book or self.taker
-        if not self.copy_stop_enable:
-            return
-        if not mid or mid <= 0:          # bad/one-sided book tick → never stop on a garbage price
-            return
-        for (a, c), ep in list(book.open_ep.items()):
-            if (c == coin and ep.get("stop_px") and ep["rem_size"] > config.FLAT
-                    and not ep.get("liquidating") and not ep.get("stopping")):
-                hit = mid <= ep["stop_px"] if ep["side"] == "long" else mid >= ep["stop_px"]
-                if hit:
-                    asyncio.create_task(self._stop_out(a, coin, ep, mid, book))
 
     def _record_action(self, ep, addr, coin, t, action, oid, master_px, sz_delta, pos_after,
                        our_qty_delta, our_px, realized, slip, book=None):

@@ -555,10 +555,9 @@ CREATE TABLE IF NOT EXISTS copy_position (
     entry_px REAL, size REAL, rem_size REAL,       -- our fill px, cumulative followed size, remaining
     peak_size REAL,                                -- historical peak live size; tail exits use rem/peak
     liq_px REAL,                                   -- isolated liquidation price (loss = margin)
-    stop_px REAL,                                  -- copy-side stop price (target-TP-relative); cut before liq
     realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
     add_count INTEGER DEFAULT 0,                   -- follow-on adds taken (capped at MAX_ADDS)
-    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, was_stopped INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
+    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
     opened_at TEXT, closed_at TEXT,
     strategy_revision_id TEXT
 );
@@ -943,11 +942,9 @@ _MIGRATIONS = (
     # the next scan repopulates these).
     "ALTER TABLE watchlist ADD COLUMN worst_single_loss_pct REAL",
     "ALTER TABLE watchlist ADD COLUMN grid REAL",
-    # 扛单 copy-side stop + take-profit signature (non-destructive on existing DBs).
+    # Take-profit signature (non-destructive on existing DBs).
     "ALTER TABLE profile ADD COLUMN tp_move_pct REAL DEFAULT 0",
     "ALTER TABLE watchlist ADD COLUMN tp_move_pct REAL DEFAULT 0",
-    "ALTER TABLE copy_position ADD COLUMN stop_px REAL",
-    "ALTER TABLE copy_position ADD COLUMN was_stopped INTEGER DEFAULT 0",
     # v4 open-position character (realized+unrealized perf, trend value, 扛单 bag burden).
     "ALTER TABLE profile ADD COLUMN roi_total REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN open_unrealized REAL DEFAULT 0",
