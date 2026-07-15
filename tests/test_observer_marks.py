@@ -480,6 +480,86 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_same_oid_dust_slice_accumulates_and_follows_full_add_once(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            initial_size = 939.0 * 20 / 64075.0
+            db.execute(
+                "UPDATE copy_position SET side='short',entry_px=64075,leverage=20,margin=939,"
+                "notional=18780,size=?,rem_size=?,peak_size=?,master_open_px=64021,"
+                "master_peak_sz=2,master_margin=3190.85,master_leverage=20,add_count=1 "
+                "WHERE pos_id=?",
+                (initial_size, initial_size, initial_size, pos_id),
+            )
+            db.commit()
+
+            obs = Observer(db, [], {})
+            obs.low_liquidity_filter_enable = False
+            obs.add_strategy = "smart"
+            obs.add_gap_k = 0.04
+            obs.add_shrink_g = 1.3
+            obs.add_max_hard = 10
+            obs.min_open_margin_pct = 0.005
+            obs.tier_coin_cap["stable"] = 0.30
+            obs.vol["BTC"] = 0.034
+            ep = self._live_ep(pos_id, "short", 64075, initial_size)
+            ep.update(
+                sign=-1,
+                leverage=20,
+                margin=939.0,
+                notional=18780.0,
+                peak_size=initial_size,
+                master_open_px=64021.0,
+                master_peak=2.0,
+                first_margin=939.0,
+                master_first_notl=63817.0,
+                last_add_px=64335.0,
+                add_count=1,
+                seen_oids={1},
+                add_orders={},
+            )
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+            t = now_ms()
+
+            with patch.object(obs, "_sector_allowed", return_value=True):
+                obs._dispatch_fill("0xaaa", "BTC", ("0xaaa", "BTC"), t, -0.00028,
+                                   -2.0, -2.00028, 65008.0, False, 99)
+                await asyncio.sleep(0.05)
+
+                first = db.execute(
+                    "SELECT our_qty_delta FROM copy_action WHERE pos_id=? AND master_oid=99 ORDER BY act_id",
+                    (pos_id,),
+                ).fetchall()
+                self.assertEqual(len(first), 1)
+                self.assertEqual(first[0]["our_qty_delta"], 0)
+                self.assertNotIn(99, ep["seen_oids"])
+
+                obs._dispatch_fill("0xaaa", "BTC", ("0xaaa", "BTC"), t + 1, -1.99972,
+                                   -2.00028, -4.0, 65008.0, False, 99)
+                await asyncio.sleep(0.05)
+
+            row = db.execute(
+                "SELECT add_count,margin,master_open_px,master_peak_sz FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            actions = db.execute(
+                "SELECT our_qty_delta FROM copy_action WHERE pos_id=? AND master_oid=99 ORDER BY act_id",
+                (pos_id,),
+            ).fetchall()
+            self.assertEqual(row["add_count"], 2)
+            self.assertGreater(row["margin"], 939.0)
+            self.assertAlmostEqual(row["master_open_px"], 64514.5, places=4)
+            self.assertEqual(row["master_peak_sz"], 4.0)
+            self.assertEqual(len(actions), 2)
+            self.assertEqual(actions[0]["our_qty_delta"], 0)
+            self.assertLess(actions[1]["our_qty_delta"], 0)
+            self.assertIn(99, ep["seen_oids"])
+
+        asyncio.run(run())
+
     def test_normal_close_does_not_persist_stale_liquidation_flag(self):
         async def run():
             db = self._db()

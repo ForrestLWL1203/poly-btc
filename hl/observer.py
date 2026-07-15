@@ -421,7 +421,7 @@ class Observer:
                 # 波动闸 reference resets to current avg (safe — next add just needs a fresh x move from here).
                 "first_margin": (mgn or 0.0) / (1 + (adds or 0) * self.add_frac),
                 "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0), "last_add_px": epx,
-                "mae": mae or 0.0, "num_actions": na or 0, "gap": False,
+                "mae": mae or 0.0, "num_actions": na or 0, "gap": False, "add_orders": {},
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
                     f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "
                     "('open','add')", (pid,)).fetchall() if o is not None}}
@@ -1229,13 +1229,13 @@ class Observer:
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if transition == "add":
-            # A scale-in is a NEW ORDER (new oid) growing the position. Same-oid continued fills are
-            # one resting order filling over time (slices) — aggregateByTime only merges same-INSTANT
-            # fills, so a limit order filling over several seconds reappears as same-oid fills; counting
-            # those as adds is the slice-as-add bug. Fold them in (peak already tracked above), no add.
-            if oid is not None and oid in ep.get("seen_oids", ()):
+            # One target order may fill in many slices over tens of seconds.  Keep feeding slices from
+            # an order that is still being accumulated; ``_apply_add`` sizes from the cumulative order
+            # notional and counts/follows the oid only once.  Old already-finalised orders loaded from
+            # disk remain ignored, preserving restart idempotence.
+            add_orders = ep.setdefault("add_orders", {})
+            if oid is not None and oid in ep.get("seen_oids", ()) and oid not in add_orders:
                 return
-            ep.setdefault("seen_oids", set()).add(oid)
             if self.paused or addr in self.held_off or not self._sector_allowed(addr, coin):
                 self._tally("skip_paused_add" if self.paused else
                             "skip_heldoff_add" if addr in self.held_off else
@@ -1278,7 +1278,7 @@ class Observer:
               "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
               "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "stop_px": 0.0, "realized_pnl": 0.0,
               "add_count": 0, "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
-              "num_actions": 0, "gap": False, "seen_oids": {oid}}   # orders consumed (open + real adds)
+              "num_actions": 0, "gap": False, "seen_oids": {oid}, "add_orders": {}}  # order accumulators
         if forced_entry_px is not None:
             ep["forced_entry_px"] = forced_entry_px
         book.open_ep[(addr, coin)] = ep
@@ -1396,7 +1396,13 @@ class Observer:
                          book=None, forced_px=None):
         """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
         first_margin × ADD_FRAC (half the first-open by default) at the current price; avg entry + liq_px recompute.
-        Past the cap we record his add but don't follow (the delta-based exit still mirrors him)."""
+
+        Hyperliquid can fill one order as many same-oid slices.  Smart mode therefore keeps an order-level
+        accumulator: tiny early slices may remain below the minimum order size, while later slices increase
+        the desired cumulative copy margin.  The oid consumes one add slot, but later slices can top that same
+        copied add up to the cumulative target ratio.  This prevents both slice-as-many-adds and the inverse
+        failure where a dust first fill caused the whole target order to be skipped.
+        """
         book = book or self.taker
         async with ep["lock"]:
             try:
@@ -1404,7 +1410,8 @@ class Observer:
             except asyncio.TimeoutError:
                 pass
             if ep.get("entry_px") is None or (addr, coin) not in book.open_ep:
-                return
+                return False
+            ep["master_peak"] = max(ep.get("master_peak", 0.0), abs(pos1))
             # 源(目标)加权均价:每次目标加仓都把 master_open_px 更新为其 size 加权均价(此前只存首开价 →
             # 多次加仓的"源"价没更新、和我们的均价没法比)。用目标的真实仓位量(pos1 = 加仓后仓位,signed = 本笔量)。
             # 即使超过我们的跟随上限(下面 observe-only 分支)也更新 —— 目标仍在摊他的均价。
@@ -1412,6 +1419,26 @@ class Observer:
             if m_now > 0 and master_px and ep.get("master_open_px"):
                 m_prev = abs(pos1 - signed)           # 目标加仓前的仓位量
                 ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * master_px) / m_now
+
+            order = None
+            decision_master_px = master_px
+            target_add_notl = abs(signed) * master_px
+            if oid is not None and self.add_strategy == "smart":
+                order = ep.setdefault("add_orders", {}).setdefault(oid, {
+                    "target_notl": 0.0,
+                    "target_abs_sz": 0.0,
+                    "target_px_notl": 0.0,
+                    "followed_margin": 0.0,
+                    "counted": False,
+                    "base_add_count": ep.get("add_count", 0),
+                })
+                order["target_notl"] += target_add_notl
+                order["target_abs_sz"] += abs(signed)
+                order["target_px_notl"] += abs(signed) * master_px
+                target_add_notl = order["target_notl"]
+                if order["target_abs_sz"] > 0:
+                    decision_master_px = order["target_px_notl"] / order["target_abs_sz"]
+
             is_buy = ep["side"] == "long"             # adding to a long => buy more
             stale = (now_ms() - t) > STALE_MS
             px = forced_px if forced_px is not None else (
@@ -1421,51 +1448,66 @@ class Observer:
             sigma = self._sigma(coin); tier = self._tier(sigma, coin)
             fm = ep.get("first_margin", ep["margin"])
 
-            def _observe_only():                      # record his add, DON'T follow; keep the source avg fresh
+            def _observe_only(final=False):           # record his slice, DON'T follow; keep source state fresh
                 self._record_action(ep, addr, coin, t, "add", oid, master_px, signed, pos1,
                                     0.0, master_px, 0.0, 0.0, book=book)
-                self.db.execute(f"UPDATE {book.pos_table} SET master_open_px=? WHERE pos_id=?",
-                                (ep["master_open_px"], ep["pos_id"]))
+                self.db.execute(
+                    f"UPDATE {book.pos_table} SET master_open_px=?,master_peak_sz=? WHERE pos_id=?",
+                    (ep["master_open_px"], ep["master_peak"], ep["pos_id"]),
+                )
+                if final and oid is not None:
+                    ep.setdefault("seen_oids", set()).add(oid)
+                    ep.setdefault("add_orders", {}).pop(oid, None)
                 self.db.commit()
+                return False
 
             if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
                 self._tally("skip_coin_blacklist_add", book)
-                return _observe_only()
+                return _observe_only(final=True)
 
             if self._coin_liquidity_block_reason(coin):
                 self._tally("skip_low_liquidity_add", book)
-                return _observe_only()
+                return _observe_only(final=True)
 
             if self.add_strategy == "smart":
                 # 逆向(adv>0=价格朝我们不利方向,摊低)走 ADD_GAP_K;
                 # 正向(adv<0=顺势加仓)也要过 POS_ADD_GAP_K,避免 1.01/1.02/1.03 这类小碎追单全跟。
                 last = ep.get("last_add_px") or ep["entry_px"]
-                adv = (((last - master_px) if is_buy else (master_px - last)) / last) if last else 0.0
-                gap_mult = self.add_shrink_g ** ep["add_count"]
+                adv = (((last - decision_master_px) if is_buy else (decision_master_px - last)) / last) if last else 0.0
+                base_add_count = order["base_add_count"] if order else ep["add_count"]
+                gap_mult = self.add_shrink_g ** base_add_count
                 x = self.add_gap_k * sigma * gap_mult
                 pos_x = self.pos_add_gap_k * sigma * gap_mult
-                if adv >= x:                                     # ① B 逆向:摊低幅度够 → 跟
-                    pass
-                elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_x:
-                    pass
-                else:                                            # 逆向但幅度不够 / 正向但A关 → 只观察
-                    return _observe_only()
-                if ep["add_count"] >= self.add_max_hard:         # 硬顶(A/B 共用)
-                    return _observe_only()
+                already_counted = bool(order and order["counted"])
+                if not already_counted:
+                    if adv >= x:                                 # ① B 逆向:摊低幅度够 → 跟
+                        pass
+                    elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_x:
+                        pass
+                    else:                                        # later same-oid slices may make weighted px actionable
+                        return _observe_only()
+                    if ep["add_count"] >= self.add_max_hard:     # 硬顶(A/B 共用)
+                        return _observe_only(final=True)
                 # ③ 比例镜像(目标本次加仓额 ÷ 目标首仓额)× 我们首仓,封顶到该币"三档单币预算"剩余
-                ratio = (abs(signed) * master_px) / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
+                ratio = target_add_notl / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
                 async with book.acct_lock:
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
                     existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                    for (a2, c2), e in book.open_ep.items()
                                    if c2 == coin and e.get("side") == ep["side"])   # incl THIS ep (its current margin)
-                    add_margin = max(0.0, min(ratio * fm, coin_cap - existing, self._risk_available(book)))
+                    followed_margin = order["followed_margin"] if order else 0.0
+                    desired_total = min(
+                        ratio * fm,
+                        followed_margin + max(0.0, coin_cap - existing),
+                        followed_margin + self._risk_available(book),
+                    )
+                    add_margin = max(0.0, desired_total - followed_margin)
                 if add_margin < self.min_open_margin_pct * risk_equity:  # 预算用尽 / 太小,不值得
                     return _observe_only()
             else:                                     # hardcap: 分档次数上限 + 固定 ADD_FRAC(老逻辑)
                 if ep["add_count"] >= self.tier_max_adds.get(tier, 0):
-                    return _observe_only()
+                    return _observe_only(final=True)
                 async with book.acct_lock:
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
@@ -1480,7 +1522,7 @@ class Observer:
                         self._risk_available(book),
                     ))
                 if add_margin <= 0:
-                    return _observe_only()
+                    return _observe_only(final=True)
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
@@ -1498,12 +1540,19 @@ class Observer:
                 margin_row[0] if margin_row and margin_row[0] else None, lev,
             )
             ep["stop_px"] = self._stop_px_for(ep["entry_px"], is_buy, lev)  # re-anchor margin-stop to new avg entry
-            ep["add_count"] += 1
-            ep["last_add_px"] = px                    # advance the smart 波动闸 reference to this fill
+            first_copy_for_order = not (order and order["counted"])
+            if first_copy_for_order:
+                ep["add_count"] += 1
+            ep["last_add_px"] = decision_master_px    # one order advances the gap reference once, at target VWAP
             ep["reduce_anchor"] = None                # master grew → invalidate the reduce-step window
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             self._record_action(ep, addr, coin, t, "add", oid, master_px, signed, pos1,
                                 add_size * ep["sign"], px, 0.0, slip, book=book)
+            if order is not None:
+                order["followed_margin"] += add_margin
+                order["counted"] = True
+            if oid is not None:
+                ep.setdefault("seen_oids", set()).add(oid)
             book.balance -= abs(add_size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.execute(
@@ -1511,6 +1560,7 @@ class Observer:
                 "add_count=?,master_open_px=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
                 ep["rem_size"], ep["peak_size"], ep["liq_px"], ep["stop_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
             self.db.commit()                                  # the add is in the action table
+            return True
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq,
                             oid=None, gap=False, forced_px=None, stop=False, forced_frac=None, book=None):

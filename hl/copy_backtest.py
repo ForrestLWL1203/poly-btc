@@ -339,7 +339,8 @@ class Backtest:
 
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if transition == "add":
-            if oid is not None and oid in ep["seen_oids"]:
+            add_orders = ep.setdefault("add_orders", {})
+            if oid is not None and oid in ep["seen_oids"] and oid not in add_orders:
                 return
             # Do not consume an order id until an add was actually copied.  HL
             # can match one order in many slices; the first tiny slice may miss
@@ -455,6 +456,7 @@ class Backtest:
             "gross_pnl": 0.0,
             "realized_net": -fee,
             "seen_oids": ({oid} if oid is not None else set()),
+            "add_orders": {},
             "observed_add_oids": set(),
             "missed_add_oids": set(),
             "reduce_anchor": None,
@@ -480,6 +482,24 @@ class Backtest:
             ep["master_open_px"] = (m_prev * ep["master_open_px"] + abs(signed) * px) / m_now
         add_notl = abs(signed) * px
         ep["target_add_notl"] += add_notl
+        order = None
+        decision_px = px
+        target_order_notl = add_notl
+        if oid is not None and self.add_strategy == "smart":
+            order = ep.setdefault("add_orders", {}).setdefault(oid, {
+                "target_notl": 0.0,
+                "target_abs_sz": 0.0,
+                "target_px_notl": 0.0,
+                "followed_margin": 0.0,
+                "counted": False,
+                "base_add_count": ep.get("add_count", 0),
+            })
+            order["target_notl"] += add_notl
+            order["target_abs_sz"] += abs(signed)
+            order["target_px_notl"] += abs(signed) * px
+            target_order_notl = order["target_notl"]
+            if order["target_abs_sz"] > 0:
+                decision_px = order["target_px_notl"] / order["target_abs_sz"]
         if oid is None or oid not in ep["observed_add_oids"]:
             ep["target_adds"] += 1
             self.target_adds += 1
@@ -498,24 +518,31 @@ class Backtest:
         coin_room = max(0.0, self.coin_cap_pct(tier) * risk_equity - existing)
         if self.add_strategy == "smart":
             last = ep.get("last_add_px") or ep["entry_px"]
-            adv = (((last - px) if is_buy else (px - last)) / last) if last else 0.0
-            gap_mult = self.add_shrink_g ** ep["add_count"]
+            adv = (((last - decision_px) if is_buy else (decision_px - last)) / last) if last else 0.0
+            base_add_count = order["base_add_count"] if order else ep["add_count"]
+            gap_mult = self.add_shrink_g ** base_add_count
             threshold = self.add_gap_k * sigma * gap_mult
             pos_threshold = self.pos_add_gap_k * sigma * gap_mult
-            if adv >= threshold:
-                pass
-            elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_threshold:
-                pass
-            else:
-                return self._observe_add(ep, oid)
-            if ep["add_count"] >= self.add_max_hard:
-                return self._observe_add(ep, oid)
-            ratio = add_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
-            add_margin = max(0.0, min(ratio * ep["first_margin"],
-                                      coin_room,
-                                      self.risk_available()))
+            already_counted = bool(order and order["counted"])
+            if not already_counted:
+                if adv >= threshold:
+                    pass
+                elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_threshold:
+                    pass
+                else:
+                    return self._observe_add(ep, oid)
+                if ep["add_count"] >= self.add_max_hard:
+                    return self._observe_add(ep, oid)
+            ratio = target_order_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
+            followed_margin = order["followed_margin"] if order else 0.0
+            desired_total = min(
+                ratio * ep["first_margin"],
+                followed_margin + coin_room,
+                followed_margin + self.risk_available(),
+            )
+            add_margin = max(0.0, desired_total - followed_margin)
             if add_margin < self.min_open_margin_pct * risk_equity:
-                return self._observe_add(ep, oid)
+                return False if already_counted else self._observe_add(ep, oid)
         else:
             max_adds = self.tier_max_adds[tier]
             if ep["add_count"] >= max_adds:
@@ -541,16 +568,21 @@ class Backtest:
             ep.get("maintenance_leverage"), ep["leverage"],
         )
         ep["stop_px"] = _stop_px(ep["entry_px"], is_buy, ep["leverage"], self.copy_stop_enable, self.stop_margin_pct)
-        ep["add_count"] += 1
-        ep["followed_adds"] += 1
-        ep["last_add_px"] = px
+        first_copy_for_order = not (order and order["counted"])
+        if first_copy_for_order:
+            ep["add_count"] += 1
+            ep["followed_adds"] += 1
+            self.followed_adds += 1
+        ep["last_add_px"] = decision_px
         ep["reduce_anchor"] = None
         fee = abs(add_size * px) * config.TAKER_FEE * self.replay_cost_mult
         ep["entry_fees"] += fee
         ep["realized_net"] -= fee
         self.balance -= fee
         self.fee_drag += fee
-        self.followed_adds += 1
+        if order is not None:
+            order["followed_margin"] += add_margin
+            order["counted"] = True
         # A later slice of a previously rejected order can make the order
         # actionable.  In that case it is followed, not both missed and
         # followed, at order granularity.
