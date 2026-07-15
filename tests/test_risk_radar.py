@@ -104,6 +104,67 @@ class RiskRadarTests(unittest.TestCase):
         row = self.db.execute("SELECT status,outcome,net_pnl FROM market_risk_intent WHERE pos_id=?", (pos_id,)).fetchone()
         self.assertEqual(tuple(row), ("resolved", "avoided_loss", -12))
 
+    def test_blocked_open_can_become_profitable_delayed_entry_on_later_add(self):
+        self.radar.mode = "shadow"
+        future = 9_999_999_999_999
+        self.db.execute("INSERT INTO market_risk_assessment (assessment_id,assessed_for_ms,status,bullish_score,"
+                        "bearish_score,block_side,active_block,created_at) VALUES (1,1,'ok',82,18,'short',1,'now')")
+        self.radar._set_state(mode="shadow", status="running", current_assessment_id=1,
+                              block_side="short", risk_score=82, confirmation_mode="steady", valid_until_ms=future)
+        cur = self.db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,size,rem_size,realized_pnl,opened_at) "
+                              "VALUES ('0xa','BTC','short','open',105,2,2,0,'now')")
+        pos_id = cur.lastrowid
+        self.radar.record_intent(pos_id, "0xa", "BTC", "short", source_oid=10)
+        open_act = self.db.execute("INSERT INTO copy_action (pos_id,addr,coin,action,master_oid,our_qty_delta,our_px) "
+                                   "VALUES (?,?,?,'open',10,-1,100)", (pos_id, "0xa", "BTC")).lastrowid
+        self.assertEqual(self.radar.record_exposure_action(
+            pos_id, "open", "short", -1, 100, copy_act_id=open_act, source_oid=10), "blocked_open")
+
+        self.radar._set_state(block_side=None, risk_score=60, confirmation_mode=None, valid_until_ms=future)
+        add_act = self.db.execute("INSERT INTO copy_action (pos_id,addr,coin,action,master_oid,our_qty_delta,our_px) "
+                                  "VALUES (?,?,?,'add',11,-1,120)", (pos_id, "0xa", "BTC")).lastrowid
+        self.assertEqual(self.radar.record_exposure_action(
+            pos_id, "add", "short", -1, 120, copy_act_id=add_act, source_oid=11), "delayed_entry")
+        close_act = self.db.execute("INSERT INTO copy_action (pos_id,addr,coin,action,master_oid,our_qty_delta,our_px,realized_pnl) "
+                                    "VALUES (?,?,?,'close',12,2,110,-10)", (pos_id, "0xa", "BTC")).lastrowid
+        self.radar.record_exit_action(
+            pos_id, "close", "short", 2, 110, 1, copy_act_id=close_act, source_oid=12)
+        self.db.execute("UPDATE copy_position SET status='closed',realized_pnl=-10,closed_at='later' WHERE pos_id=?", (pos_id,))
+        self.db.commit()
+        self.assertTrue(self.radar.resolve_intent(pos_id))
+
+        episode = self.db.execute(
+            "SELECT entry_blocked,delayed_entry,blocked_entries,allowed_entries,shadow_net_pnl,net_benefit,outcome "
+            "FROM market_risk_episode WHERE pos_id=?", (pos_id,)
+        ).fetchone()
+        self.assertEqual(tuple(episode[:4]), (1, 1, 1, 1))
+        self.assertGreater(episode[4], 0)  # only the 120 short add was copied, then closed at 110
+        self.assertGreater(episode[5], episode[4])  # baseline lost, so AI delta is larger than AI PnL itself
+        self.assertEqual(episode[6], "improved")
+        decisions = [r[0] for r in self.db.execute(
+            "SELECT decision FROM market_risk_action WHERE pos_id=? ORDER BY risk_action_id", (pos_id,)
+        )]
+        self.assertEqual(decisions, ["blocked_open", "delayed_entry", "mandatory_exit"])
+
+    def test_same_add_order_reuses_its_first_frozen_verdict(self):
+        self.radar.mode = "shadow"
+        future = 9_999_999_999_999
+        self.db.execute("INSERT INTO market_risk_assessment (assessment_id,assessed_for_ms,status,bullish_score,"
+                        "bearish_score,block_side,active_block,created_at) VALUES (1,1,'ok',80,20,'short',1,'now')")
+        self.radar._set_state(mode="shadow", status="running", current_assessment_id=1,
+                              block_side=None, risk_score=60, confirmation_mode=None, valid_until_ms=future)
+        pos_id = self.db.execute("INSERT INTO copy_position (addr,coin,side,status,opened_at) "
+                                 "VALUES ('0xa','BTC','short','open','now')").lastrowid
+        self.radar.record_intent(pos_id, "0xa", "BTC", "short", source_oid=1)
+        self.radar.record_exposure_action(pos_id, "open", "short", -1, 100, copy_act_id=1, source_oid=1)
+        self.radar._set_state(block_side="short", risk_score=80, confirmation_mode="steady", valid_until_ms=future)
+        first = self.radar.record_exposure_action(pos_id, "add", "short", -.5, 110, copy_act_id=2, source_oid=22)
+        self.radar._set_state(block_side=None, risk_score=50, confirmation_mode=None, valid_until_ms=future)
+        second = self.radar.record_exposure_action(pos_id, "add", "short", -.5, 111, copy_act_id=3, source_oid=22)
+        self.assertEqual((first, second), ("blocked_add", "blocked_add"))
+        blocked = self.db.execute("SELECT blocked_entries FROM market_risk_episode WHERE pos_id=?", (pos_id,)).fetchone()[0]
+        self.assertEqual(blocked, 1)
+
     def test_indicator_features_cover_macd_bollinger_rsi_and_atr(self):
         rows = []
         for i in range(80):

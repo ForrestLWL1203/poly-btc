@@ -31,9 +31,10 @@ export function ClosedPositionsTable({
               <tr onClick={() => toggleRow(p.id)} style={{ cursor: "pointer" }} className={isOpen ? "row-open" : ""}>
                 <td><span className="row-caret" style={{ transform: isOpen ? "rotate(90deg)" : "none" }}>▸</span> <b>{p.coin}</b>
                   {p.addCount > 0 && <span className="tint tint-gray" style={{ marginLeft: 8 }} title="目标加仓、我们跟进的次数">加仓{p.addCount}</span>}
-                  {p.shadowRisk?.wouldBlock && <span className="tint tint-ai" title={`开仓时风险分 ${p.shadowRisk.riskScore?.toFixed(1) || "—"}`}>Shadow · AI拟拦截</span>}
-                  {p.shadowRisk?.outcome === "avoided_loss" && <span className="tint tint-green" style={{ marginLeft: 6 }}>本可避免亏损</span>}
-                  {p.shadowRisk?.outcome === "missed_profit" && <span className="tint tint-red" style={{ marginLeft: 6 }}>会错过盈利</span>}</td>
+                  {p.shadowRisk?.wouldBlock && <span className="tint tint-ai" title={`开仓时风险分 ${p.shadowRisk.riskScore?.toFixed(1) || "—"}`}>Shadow · 首仓拟拦截</span>}
+                  {p.shadowRisk?.delayedEntry && <span className="tint tint-blue" style={{ marginLeft: 6 }}>AI 延迟入场</span>}
+                  {p.shadowRisk?.outcome === "avoided_loss" && <span className="tint tint-green" style={{ marginLeft: 6 }}>AI 改善 {p.shadowRisk.netBenefit != null ? fSign(p.shadowRisk.netBenefit, 1) : ""}</span>}
+                  {p.shadowRisk?.outcome === "missed_profit" && <span className="tint tint-red" style={{ marginLeft: 6 }}>AI 拖累 {p.shadowRisk.netBenefit != null ? fSign(p.shadowRisk.netBenefit, 1) : ""}</span>}</td>
                 <td><span className={"tint " + (p.side === "long" ? "tint-green" : "tint-red")}>{p.side === "long" ? "多" : "空"}</span></td>
                 <td className="num muted" title="源(目标钱包)的加权均价(随其加仓更新)· 杠杆">{fPrice(p.masterEntry)} · {fNum(p.masterLeverage, 0)}x</td>
                 <td className="num" title="我们的加权均价 · 杠杆">{fPrice(p.entry)} · {fNum(p.leverage, 0)}x</td>

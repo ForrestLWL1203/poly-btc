@@ -42,8 +42,10 @@ def ep_positions(db, qs):
                     "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                     "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
                     "cp.was_stopped,cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id,"
-                    "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status "
-                    "FROM copy_position cp LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id WHERE " + " AND ".join(where) +
+                    "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
+                    "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl "
+                    "FROM copy_position cp LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "
+                    "LEFT JOIN market_risk_episode re ON re.pos_id=cp.pos_id WHERE " + " AND ".join(where) +
                     " ORDER BY cp.closed_at DESC LIMIT 100"
                     ") "
                     "SELECT cb.*,w.rank AS wrank,fs.follow_pos,"
@@ -79,7 +81,10 @@ def ep_positions(db, qs):
                         "strategyRevision": r["strategy_revision_id"],
                         "shadowRisk": ({"wouldBlock": bool(r["would_block"]), "riskScore": r["risk_score"],
                                         "confirmationMode": r["confirmation_mode"], "decisionReason": r["decision_reason"],
-                                        "outcome": r["outcome"], "status": r["risk_status"]}
+                                        "outcome": r["outcome"], "status": r["risk_status"],
+                                        "delayedEntry": bool(r["delayed_entry"]), "blockedEntries": r["blocked_entries"],
+                                        "allowedEntries": r["allowed_entries"], "netBenefit": r["net_benefit"],
+                                        "shadowNetPnl": r["shadow_net_pnl"]}
                                        if r["risk_status"] is not None else None)})
         sw = "cp.status!='open'" + ("".join(f" AND {c}=?" for c, k in
              (("cp.coin", "coin"), ("cp.addr", "wallet"), ("cp.side", "side")) if qs.get(k)))
@@ -121,9 +126,11 @@ def ep_positions(db, qs):
         "cp.rem_size,cp.liq_px,cp.mark_px,cp.unrealized_pnl,cp.open_lag_sec,cp.addr,cp.add_count,"
         "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,cp.strategy_revision_id,"
         "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
+        "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos "
         "FROM copy_position cp "
         "LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "
+        "LEFT JOIN market_risk_episode re ON re.pos_id=cp.pos_id "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
         "LEFT JOIN profile pr ON pr.addr=cp.addr "
         "LEFT JOIN follow_set fs ON fs.addr=cp.addr "
@@ -152,7 +159,10 @@ def ep_positions(db, qs):
             "strategyRevision": r["strategy_revision_id"],
             "shadowRisk": ({"wouldBlock": bool(r["would_block"]), "riskScore": r["risk_score"],
                             "confirmationMode": r["confirmation_mode"], "decisionReason": r["decision_reason"],
-                            "outcome": r["outcome"], "status": r["risk_status"]}
+                            "outcome": r["outcome"], "status": r["risk_status"],
+                            "delayedEntry": bool(r["delayed_entry"]), "blockedEntries": r["blocked_entries"],
+                            "allowedEntries": r["allowed_entries"], "netBenefit": r["net_benefit"],
+                            "shadowNetPnl": r["shadow_net_pnl"]}
                            if r["risk_status"] is not None else None),
         })
     return {"summary": {"floatingPnl": float_total, "openCount": len(out)}, "positions": out}
@@ -161,8 +171,10 @@ def ep_positions(db, qs):
 def ep_position_detail(db, pos_id):
     p = q1(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.entry_px,cp.leverage,cp.margin,cp.size,cp.rem_size,cp.master_open_px,"
                "cp.realized_pnl,cp.unrealized_pnl,cp.was_liq,cp.was_stopped,cp.opened_at,cp.closed_at,cp.strategy_revision_id,"
-               "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status "
-               "FROM copy_position cp LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id WHERE cp.pos_id=?", (pos_id,))
+               "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
+               "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl "
+               "FROM copy_position cp LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "
+               "LEFT JOIN market_risk_episode re ON re.pos_id=cp.pos_id WHERE cp.pos_id=?", (pos_id,))
     if not p:
         return {"error": "not_found"}
     lev = p["leverage"] or 1.0
@@ -213,7 +225,10 @@ def ep_position_detail(db, pos_id):
         "realizedPnl": p["realized_pnl"], "unrealizedPnl": p["unrealized_pnl"],
         "shadowRisk": ({"wouldBlock": bool(p["would_block"]), "riskScore": p["risk_score"],
                         "confirmationMode": p["confirmation_mode"], "decisionReason": p["decision_reason"],
-                        "outcome": p["outcome"], "status": p["risk_status"]}
+                        "outcome": p["outcome"], "status": p["risk_status"],
+                        "delayedEntry": bool(p["delayed_entry"]), "blockedEntries": p["blocked_entries"],
+                        "allowedEntries": p["allowed_entries"], "netBenefit": p["net_benefit"],
+                        "shadowNetPnl": p["shadow_net_pnl"]}
                        if p["risk_status"] is not None else None),
         "fills": fills,
     }

@@ -1,10 +1,17 @@
 import { api } from "../lib/api.js";
-import { cls, fSign, fTime, fUsd, short } from "../lib/format.js";
+import { cls, fUsd, short } from "../lib/format.js";
 
 const { useCallback, useEffect, useState } = React;
 
 const CONFIRM = { steady: "双次强信号", accelerating: "风险加速", extreme: "单次极端" };
-const OUTCOME = { avoided_loss: "本可避免亏损", missed_profit: "会错过盈利", flat: "持平", allowed: "允许开仓" };
+const OUTCOME = { improved: "AI 改善", harmed: "AI 拖累", avoided_loss: "AI 改善", missed_profit: "AI 拖累", flat: "持平", allowed: "允许开仓" };
+const DECISION = {
+  blocked_open: ["首仓拦截", "block"], blocked_add: ["加仓拦截", "block"],
+  allowed_open: ["首仓放行", "allow"], allowed_add: ["加仓放行", "allow"],
+  delayed_entry: ["延迟入场", "delay"], radar_unavailable_allow: ["失效放行", "muted"],
+  mandatory_exit: ["退出执行", "exit"],
+};
+const signedUsd = (v, d = 1) => v == null ? "—" : (Number(v) >= 0 ? "+" : "−") + fUsd(Math.abs(Number(v)), d);
 
 export function RiskRadar() {
   const [radar, setRadar] = useState(null);
@@ -27,6 +34,11 @@ export function RiskRadar() {
   const current = radar.assessments?.find(a => a.id === radar.currentAssessmentId) || radar.assessments?.[0];
   const bull = current?.bullishScore ?? 50, bear = current?.bearishScore ?? 50;
   const liveBlock = radar.mode === "shadow" && current?.activeBlock;
+  const summary = radar.summary || {};
+  const benefit = summary.hypotheticalNetBenefit || 0;
+  const actionCount = (summary.blockedEntries || 0) + (summary.allowedEntries || 0);
+  const impactTitle = benefit > 0 ? "AI 净保护" : benefit < 0 ? "AI 净伤害" : "AI 净影响";
+  const impactNote = benefit > 0 ? "过滤动作后收益优于基准" : benefit < 0 ? "过滤动作后收益低于基准" : "已结算样本暂无净差异";
   return (
     <div className="content radar-page">
       <div className="radar-command">
@@ -56,21 +68,33 @@ export function RiskRadar() {
       </div>
 
       <div className="grid4 radar-kpis">
-        <div className="card"><div className="card-lbl">真实开仓意图</div><div className="kpi">{radar.summary.intents}</div><div className="kpi-sub">仅记录通过原执行闸门的首开仓</div></div>
-        <div className="card"><div className="card-lbl">AI 拟拦截</div><div className="kpi">{radar.summary.wouldBlock}</div><div className="kpi-sub">Shadow，不影响实际 Paper 下单</div></div>
-        <div className="card"><div className="card-lbl">本可避免亏损</div><div className="kpi up">{radar.summary.avoidedLosses}</div><div className="kpi-sub">拟拦截且最终亏损</div></div>
-        <div className="card"><div className="card-lbl">假设净改善</div><div className={"kpi " + cls(radar.summary.hypotheticalNetBenefit)}>{fSign(radar.summary.hypotheticalNetBenefit, 1)}</div><div className="kpi-sub">历史结算单的反事实总和</div></div>
+        <div className="card"><div className="card-lbl">逐次敞口动作</div><div className="kpi">{actionCount}</div><div className="kpi-sub">首仓与每笔加仓分别冻结判断</div></div>
+        <div className="card"><div className="card-lbl">AI 过滤 / 延迟入场</div><div className="kpi">{summary.blockedEntries || 0} <small>/ {summary.delayedEntries || 0}</small></div><div className="kpi-sub">拦截不会终止后续加仓观察</div></div>
+        <div className="card"><div className="card-lbl">改善 / 拖累</div><div className="kpi"><span className="up">{summary.improvedEpisodes || 0}</span> <small>/</small> <span className="down">{summary.harmedEpisodes || 0}</span></div><div className="kpi-sub">仅统计已结算的动作级 episode</div></div>
+        <div className={"card radar-impact " + (benefit < 0 ? "harm" : benefit > 0 ? "protect" : "flat")}><div className="card-lbl">{impactTitle}</div><div className={"kpi " + cls(benefit)}>{signedUsd(benefit)}</div><div className="kpi-sub">{impactNote}</div></div>
       </div>
 
-      <div className="section-h"><h2>Shadow 逐单对比</h2><span className="muted">开仓时冻结判断，整单最终平仓后结算一次</span></div>
-      <div className="tbl-wrap"><table><thead><tr><th>时间</th><th>币种 / 方向</th><th>钱包</th><th className="num">风险分</th><th>Shadow 决策</th><th className="num">实际结果</th><th>归因</th></tr></thead><tbody>
-        {!intents.length && <tr><td colSpan="7" className="empty">尚无雷达开启后的真实首开仓样本</td></tr>}
-        {intents.map(i => { const displayPnl = i.netPnl != null ? i.netPnl : i.estimatedPnl; return <tr key={i.id}><td className="mono muted">{new Date(i.openedAt).toLocaleString()}</td><td><b>{i.coin}</b> <span className={"tint " + (i.side === "long" ? "tint-green" : "tint-red")}>{i.side === "long" ? "多" : "空"}</span></td><td className="addr">{short(i.wallet)}</td><td className="num mono">{i.riskScore != null ? i.riskScore.toFixed(1) : "—"}</td><td>{i.wouldBlock ? <span className="tint tint-red">AI 拟拦截 · {CONFIRM[i.confirmationMode] || i.confirmationMode}</span> : <span className="tint tint-gray">允许</span>}</td><td className={"num " + cls(displayPnl)}>{displayPnl != null ? fUsd(displayPnl) + (i.status === "open" ? " 估" : "") : "持仓中"}</td><td>{i.outcome ? <span className={"tint " + (i.outcome === "avoided_loss" ? "tint-green" : i.outcome === "missed_profit" ? "tint-red" : "tint-gray")}>{OUTCOME[i.outcome] || i.outcome}</span> : <span className="muted">待结算</span>}</td></tr>; })}
-      </tbody></table></div>
+      <div className="radar-ledgers">
+        <div><span>基准 Paper 账本</span><b className={cls(summary.baselinePnl)}>{summary.baselinePnl == null ? "等待 V2 结算" : signedUsd(summary.baselinePnl)}</b></div>
+        <i>→</i>
+        <div><span>AI 动作过滤账本</span><b className={cls(summary.shadowPnl)}>{summary.shadowPnl == null ? "等待 V2 结算" : signedUsd(summary.shadowPnl)}</b></div>
+        <i>=</i>
+        <div><span>净影响 · {summary.resolvedEpisodes || 0} 单</span><b className={cls(benefit)}>{signedUsd(benefit)}</b></div>
+      </div>
+
+      <div className="section-h"><h2>Shadow 动作轨迹</h2><span className="muted">只过滤增加敞口；减仓和平仓永远执行</span></div>
+      <div className="shadow-episodes">
+        {!intents.length && <div className="card empty">尚无雷达开启后的 Crypto 敞口动作</div>}
+        {intents.map(i => { const s = i.shadow; const baseline = s?.baselineNetPnl ?? (i.netPnl != null ? i.netPnl : i.estimatedPnl); const aiPnl = s?.shadowNetPnl; const delta = s?.netBenefit; return <article className="card shadow-episode" key={i.id}>
+          <div className="episode-head"><div><span className={"tint " + (i.side === "long" ? "tint-green" : "tint-red")}>{i.side === "long" ? "多" : "空"}</span><b>{i.coin}</b><span className="addr">{short(i.wallet)}</span>{s?.delayedEntry && <span className="tint tint-blue">AI 延迟入场</span>}</div><time dateTime={i.openedAt}>{new Date(i.openedAt).toLocaleString()}</time></div>
+          <div className="episode-ledger"><div><span>基准</span><b className={cls(baseline)}>{baseline == null ? "持仓中" : signedUsd(baseline)}{s?.estimated ? " 估" : ""}</b></div><div><span>AI Shadow</span><b className={cls(aiPnl)}>{aiPnl == null ? "—" : signedUsd(aiPnl)}{s?.estimated ? " 估" : ""}</b></div><div><span>净影响</span><b className={cls(delta)}>{delta == null ? "待结算" : signedUsd(delta)}{s?.estimated ? " 估" : ""}</b></div><div><span>结果</span>{i.outcome ? <b className={i.outcome === "improved" || i.outcome === "avoided_loss" ? "up" : i.outcome === "harmed" || i.outcome === "missed_profit" ? "down" : ""}>{OUTCOME[i.outcome] || i.outcome}</b> : <b className="muted">进行中</b>}</div></div>
+          <div className="action-rail">{(i.actions || []).length ? i.actions.map(a => { const d = DECISION[a.decision] || [a.decision, "muted"]; return <div className={"risk-action " + d[1]} key={a.id}><i /><div><b>{d[0]}</b><span>{a.action === "open" ? "首仓" : a.action === "add" ? "加仓" : a.action === "reduce" ? "减仓" : "平仓"} @ {a.baselinePx ? Number(a.baselinePx).toLocaleString() : "—"}</span></div><em>{a.riskScore != null ? `风险 ${a.riskScore.toFixed(0)}` : "强制退出"}</em></div>; }) : <span className="muted">旧版整单样本，无动作轨迹</span>}</div>
+        </article>; })}
+      </div>
 
       <div className="radar-bottom">
         <div><div className="section-h"><h2>15 分钟判断轨迹</h2></div><div className="card assessment-list">{(radar.assessments || []).slice(0, 10).map(a => <div className="assessment-row" key={a.id}><span className={"assessment-dot " + (a.activeBlock ? "hot" : a.status === "error" ? "err" : "")} /><div><b>{a.status === "error" ? "评估失败" : `${a.bearishScore?.toFixed(0)} 空 / ${a.bullishScore?.toFixed(0)} 多`}</b><span>{a.reason || a.error || "—"}</span></div><em>{new Date(a.assessedForMs).toLocaleTimeString()}</em></div>)}</div></div>
-        <div><div className="section-h"><h2>阈值回放</h2></div><div className="card threshold-list">{thresholds.map(t => <div className="threshold-row" key={t.threshold}><b>{t.threshold}</b><div><span style={{ width: Math.min(100, t.wouldBlock * 8) + "%" }} /></div><em>{t.wouldBlock} 单 · {fSign(t.hypotheticalNetBenefit, 0)}</em></div>)}<p>仅作阈值敏感性参考；正式标签始终采用开仓当时的双周期确认结果。</p></div></div>
+        <div><div className="section-h"><h2>阈值回放</h2></div><div className="card threshold-list">{thresholds.map(t => <div className="threshold-row" key={t.threshold}><b>{t.threshold}</b><div><span style={{ width: Math.min(100, t.wouldBlock * 8) + "%" }} /></div><em className={cls(t.hypotheticalNetBenefit)}>{t.wouldBlock} 动作 · {signedUsd(t.hypotheticalNetBenefit, 0)}</em></div>)}<p>逐动作重放不同阈值；正式标签仍采用动作发生时冻结的双周期确认结果。</p></div></div>
       </div>
     </div>
   );

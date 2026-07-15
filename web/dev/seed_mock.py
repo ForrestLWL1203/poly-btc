@@ -16,6 +16,7 @@ params.seed_params(db)
 for t in ("account_stats", "copy_position", "copy_action", "coin_vol", "watchlist",
           "target_controls", "profile", "leaderboard", "scan_runs", "follow_selection",
           "scan_generation", "wallet_registry", "pipeline_audit", "follow_history",
+          "market_risk_action", "market_risk_episode",
           "market_risk_intent", "market_risk_assessment", "market_risk_snapshot",
           "provider_balance_snapshot", "provider_credential"):
     db.execute(f"DELETE FROM {t}")
@@ -170,6 +171,45 @@ for pos_id, addr, coin, side, risk, block, status, pnl, outcome in intent_rows:
                "decision_reason,opened_at,status,realized_pnl,net_pnl,outcome,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (pos_id, addr, coin, side, current_aid, risk, block, "steady", "confirmed directional conflict",
                 ago(7200), status, pnl, pnl, outcome, ago(1200) if status == "resolved" else None))
+
+# V2 action-level AI counterfactuals: blocked opens stay latent; later allowed adds can enter independently.
+episode_rows = [
+    (open_ids[0], O[0][0], "BTC", "long", "open", 1, 1, 1, 1, .08, 65500, -2.1, None, None, None, None),
+    (open_ids[2], O[2][0], "SOL", "long", "open", 1, 0, 1, 0, 0, None, 0, None, None, None, None),
+    (closed_ids[2], C[2][0], "ETH", "long", "resolved", 1, 1, 1, 1, 0, None, 25, -180, 25, 205, "improved"),
+    (closed_ids[0], C[0][0], "BTC", "long", "resolved", 1, 1, 1, 1, 0, None, 300, 980, 300, -680, "harmed"),
+]
+for row in episode_rows:
+    pos_id, addr, coin, side, status, entry_blocked, delayed, blocked, allowed, qty, entry, shadow_realized, baseline, shadow, benefit, result = row
+    eid = db.execute("INSERT INTO market_risk_episode (pos_id,addr,coin,side,status,entry_blocked,delayed_entry,"
+                     "blocked_entries,allowed_entries,shadow_qty,shadow_entry_px,shadow_realized_pnl,baseline_net_pnl,"
+                     "shadow_net_pnl,net_benefit,outcome,opened_at,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (pos_id, addr, coin, side, status, entry_blocked, delayed, blocked, allowed, qty, entry,
+                      shadow_realized, baseline, shadow, benefit, result, ago(7200), ago(1200) if status == "resolved" else None)).lastrowid
+    open_px = {"BTC": 64200, "ETH": 3420, "SOL": 172}.get(coin, 100)
+    add_px = {"BTC": 65500, "ETH": 3500, "SOL": 180}.get(coin, open_px)
+    close_px = {"BTC": 66000, "ETH": 3600, "SOL": 160}.get(coin, open_px)
+    db.execute("INSERT INTO market_risk_action (episode_id,pos_id,decision_group,source_oid,action,side,assessment_id,"
+               "risk_score,would_block,confirmation_mode,decision,decision_reason,baseline_qty_delta,baseline_px,"
+               "shadow_qty_delta,shadow_px,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               (eid, pos_id, "open:oid:1", 1, "open", side, current_aid, 81, 1, "steady", "blocked_open",
+                "confirmed directional conflict", .2 if side == "long" else -.2, open_px,
+                0, None, ago(7200)))
+    if allowed:
+        decision = "delayed_entry" if delayed else "allowed_add"
+        db.execute("INSERT INTO market_risk_action (episode_id,pos_id,decision_group,source_oid,action,side,assessment_id,"
+                   "risk_score,would_block,decision,decision_reason,baseline_qty_delta,baseline_px,shadow_qty_delta,"
+                   "shadow_px,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (eid, pos_id, "add:oid:2", 2, "add", side, current_aid, 63, 0, decision,
+                    "no confirmed conflict", .08 if side == "long" else -.08, add_px,
+                    .08 if side == "long" else -.08, add_px, ago(3600)))
+    if status == "resolved":
+        db.execute("INSERT INTO market_risk_action (episode_id,pos_id,decision_group,source_oid,action,side,would_block,"
+                   "decision,decision_reason,baseline_qty_delta,baseline_px,shadow_qty_delta,shadow_px,"
+                   "shadow_realized_pnl,close_fraction,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (eid, pos_id, "close:oid:3", 3, "close", side, 0, "mandatory_exit",
+                    "risk reduction is never blocked", -.28 if side == "long" else .28, close_px,
+                    -.08 if allowed and side == "long" else .08 if allowed else 0, close_px, shadow_realized, 1, ago(1200)))
 db.execute("INSERT INTO provider_balance_snapshot (provider,checked_at,currency,total_balance,granted_balance,"
            "topped_up_balance,is_available,estimated_days,estimated_requests) VALUES ('deepseek',?,'CNY',42.8,2.8,40,1,18.4,1765)",
            (now_iso(),))

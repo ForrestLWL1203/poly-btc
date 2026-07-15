@@ -9,7 +9,9 @@ export function PositionDetail({ d }) {
   return (
     <div className="pos-detail">
       <div className="pos-detail-sum">
-        {d.shadowRisk?.wouldBlock && <span><i className="tint tint-ai">Shadow · AI拟拦截</i> 风险 <b>{d.shadowRisk.riskScore?.toFixed(1) || "—"}</b> · {d.shadowRisk.confirmationMode || "—"}</span>}
+        {d.shadowRisk?.wouldBlock && <span><i className="tint tint-ai">Shadow · 首仓拟拦截</i> 风险 <b>{d.shadowRisk.riskScore?.toFixed(1) || "—"}</b> · {d.shadowRisk.confirmationMode || "—"}</span>}
+        {d.shadowRisk?.delayedEntry && <span><i className="tint tint-blue">AI 延迟入场</i> 过滤 <b>{d.shadowRisk.blockedEntries || 0}</b> 次 · 放行 <b>{d.shadowRisk.allowedEntries || 0}</b> 次</span>}
+        {d.shadowRisk?.netBenefit != null && <span>AI 净影响 <b className={cls(d.shadowRisk.netBenefit)}>{fSign(d.shadowRisk.netBenefit, 1)}</b></span>}
         <span>目标加仓 <b>{d.masterAdds}</b> 次 · 我们跟 <b>{d.ourAdds}</b> 次</span>
         <span>目标成本均价 <b>{fPrice(d.masterEntry)}</b></span>
         <span>我方成本均价 <b>{fPrice(d.ourEntry)}</b> · {fNum(d.ourLeverage, 0)}x</span>

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from hl import storage
 from hl.api_positions import ep_positions
-from hl.api_risk import ep_connections, ep_credential_wrap_key, ep_risk_radar, ep_risk_thresholds
+from hl.api_risk import ep_connections, ep_credential_wrap_key, ep_risk_intents, ep_risk_radar, ep_risk_thresholds
 from hl.risk_radar import RiskRadar
 
 
@@ -47,6 +47,45 @@ class RiskApiTests(unittest.TestCase):
         at_75 = next(x for x in ep_risk_thresholds(self.db)["comparison"] if x["threshold"] == 75)
         self.assertEqual(at_75["wouldBlock"], 1)
         self.assertEqual(at_75["avoidedLosses"], 1)
+
+    def test_v2_summary_and_projection_compare_action_filtered_ledger(self):
+        self.db.execute("INSERT INTO market_risk_assessment (assessment_id,assessed_for_ms,status,bullish_score,bearish_score,"
+                        "block_side,active_block,created_at) VALUES (2,2,'ok',20,80,'long',1,'now')")
+        pos_id = self.db.execute("INSERT INTO copy_position (addr,coin,side,status,entry_px,realized_pnl,opened_at,closed_at) "
+                                 "VALUES ('0xb','BTC','long','closed',100,-100,'a','b')").lastrowid
+        self.db.execute("INSERT INTO market_risk_intent (pos_id,addr,coin,side,assessment_id,risk_score,would_block,"
+                        "opened_at,status,net_pnl,outcome) VALUES (?,?,?,?,2,80,1,'a','resolved',-100,'avoided_loss')",
+                        (pos_id, "0xb", "BTC", "long"))
+        episode_id = self.db.execute("INSERT INTO market_risk_episode (pos_id,addr,coin,side,status,entry_blocked,"
+                                     "delayed_entry,blocked_entries,allowed_entries,baseline_net_pnl,shadow_net_pnl,"
+                                     "net_benefit,outcome,opened_at,resolved_at) "
+                                     "VALUES (?,?,?,?, 'resolved',1,1,1,1,-100,20,120,'improved','a','b')",
+                                     (pos_id, "0xb", "BTC", "long")).lastrowid
+        self.db.execute("INSERT INTO market_risk_action (episode_id,pos_id,decision_group,action,side,assessment_id,"
+                        "risk_score,would_block,decision,baseline_qty_delta,baseline_px,created_at) "
+                        "VALUES (?,?,?,'open','long',2,80,1,'blocked_open',1,100,'a')",
+                        (episode_id, pos_id, "open:oid:1"))
+        self.db.execute("INSERT INTO market_risk_action (episode_id,pos_id,decision_group,action,side,risk_score,"
+                        "would_block,decision,baseline_qty_delta,baseline_px,shadow_qty_delta,shadow_px,created_at) "
+                        "VALUES (?,?,?,'add','long',60,0,'delayed_entry',1,90,1,90,'a')",
+                        (episode_id, pos_id, "add:oid:2"))
+        self.db.execute("INSERT INTO market_risk_action (episode_id,pos_id,decision_group,action,side,would_block,"
+                        "decision,baseline_qty_delta,baseline_px,shadow_qty_delta,shadow_px,close_fraction,created_at) "
+                        "VALUES (?,?,?,'close','long',0,'mandatory_exit',-2,110,-1,110,1,'b')",
+                        (episode_id, pos_id, "close:act:3"))
+        self.db.commit()
+
+        summary = ep_risk_radar(self.db)["summary"]
+        self.assertEqual(summary["accountingVersion"], 2)
+        self.assertEqual(summary["delayedEntries"], 1)
+        self.assertEqual(summary["hypotheticalNetBenefit"], 120)
+        intent = ep_risk_intents(self.db, {"limit": [10]})["intents"][0]
+        self.assertEqual(intent["shadow"]["netBenefit"], 120)
+        self.assertEqual([a["decision"] for a in intent["actions"]],
+                         ["blocked_open", "delayed_entry", "mandatory_exit"])
+        at_90 = next(x for x in ep_risk_thresholds(self.db)["comparison"] if x["threshold"] == 90)
+        self.assertEqual(at_90["wouldBlock"], 0)
+        self.assertAlmostEqual(at_90["hypotheticalNetBenefit"], 0)
 
 
 if __name__ == "__main__":

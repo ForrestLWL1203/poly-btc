@@ -488,9 +488,7 @@ class RiskRadar:
                 self._set_state(connection_status="error", last_error=str(exc)[:500])
             await asyncio.sleep(config.RISK_RADAR_BALANCE_INTERVAL_S)
 
-    def record_intent(self, pos_id, addr, coin, side, source_oid=None):
-        if self.mode != "shadow":
-            return None
+    def _entry_decision(self, side):
         row = self.db.execute(
             "SELECT current_assessment_id,block_side,risk_score,confirmation_mode,valid_until_ms,status "
             "FROM market_risk_state WHERE id=1"
@@ -498,14 +496,151 @@ class RiskRadar:
         fresh = bool(row and row[0] and row[4] and int(row[4]) >= now_ms() and row[5] == "running")
         would_block = int(fresh and row[1] == side)
         reason = "confirmed directional conflict" if would_block else ("no confirmed conflict" if fresh else "radar unavailable or stale")
+        return {"assessment_id": row[0] if fresh else None, "risk_score": row[2] if fresh else None,
+                "would_block": would_block, "confirmation_mode": row[3] if fresh else None,
+                "reason": reason, "fresh": fresh}
+
+    def record_intent(self, pos_id, addr, coin, side, source_oid=None):
+        """Freeze the first-open verdict and create the V2 latent episode.
+
+        The normal Paper open still executes.  A blocked entry starts its AI counterfactual with zero exposure,
+        but the episode remains alive so a later add can independently become a delayed entry.
+        """
+        if self.mode != "shadow":
+            return None
+        decision = self._entry_decision(side)
+        opened_at = now_iso()
         cur = self.db.execute(
             "INSERT OR IGNORE INTO market_risk_intent (pos_id,addr,coin,side,source_oid,assessment_id,risk_score,"
             "would_block,confirmation_mode,decision_reason,opened_at,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,'open')",
-            (pos_id, addr, coin, side, source_oid, row[0] if fresh else None, row[2] if fresh else None,
-             would_block, row[3] if fresh else None, reason, now_iso()),
+            (pos_id, addr, coin, side, source_oid, decision["assessment_id"], decision["risk_score"],
+             decision["would_block"], decision["confirmation_mode"], decision["reason"], opened_at),
         )
-        self.db.commit()
+        self.db.execute(
+            "INSERT OR IGNORE INTO market_risk_episode (pos_id,addr,coin,side,status,entry_blocked,opened_at) "
+            "VALUES (?,?,?,?, 'open',?,?)",
+            (pos_id, addr, coin, side, decision["would_block"], opened_at),
+        )
         return cur.lastrowid or None
+
+    def record_exposure_action(self, pos_id, action, side, qty_delta, px, copy_act_id=None, source_oid=None):
+        """Apply one baseline open/add to the AI-filtered ledger using only its entry-time verdict.
+
+        Exchange fills sharing an order id reuse the first verdict.  Allowed exposure copies only the baseline
+        action's incremental quantity; it never catches up quantities rejected earlier in the episode.
+        """
+        if action not in ("open", "add"):
+            raise ValueError("risk exposure action must be open or add")
+        if copy_act_id is not None and self.db.execute(
+                "SELECT 1 FROM market_risk_action WHERE copy_act_id=?", (copy_act_id,)).fetchone():
+            return None
+        episode = self.db.execute(
+            "SELECT episode_id,shadow_qty,shadow_entry_px,shadow_fee FROM market_risk_episode "
+            "WHERE pos_id=? AND status='open'", (pos_id,)
+        ).fetchone()
+        if not episode:
+            return None  # V1/pre-radar position: do not fabricate a partial counterfactual mid-episode.
+        decision_group = f"{action}:oid:{source_oid}" if source_oid is not None else f"{action}:act:{copy_act_id or now_ms()}"
+        prior = self.db.execute(
+            "SELECT assessment_id,risk_score,would_block,confirmation_mode,decision_reason "
+            "FROM market_risk_action WHERE pos_id=? AND decision_group=? ORDER BY risk_action_id LIMIT 1",
+            (pos_id, decision_group),
+        ).fetchone()
+        new_decision_group = not bool(prior)
+        if prior:
+            decision = {"assessment_id": prior[0], "risk_score": prior[1], "would_block": int(prior[2]),
+                        "confirmation_mode": prior[3], "reason": prior[4], "fresh": prior[0] is not None}
+        elif action == "open":
+            intent = self.db.execute(
+                "SELECT assessment_id,risk_score,would_block,confirmation_mode,decision_reason "
+                "FROM market_risk_intent WHERE pos_id=?", (pos_id,)
+            ).fetchone()
+            if not intent:
+                return None
+            decision = {"assessment_id": intent[0], "risk_score": intent[1], "would_block": int(intent[2]),
+                        "confirmation_mode": intent[3], "reason": intent[4], "fresh": intent[0] is not None}
+        else:
+            decision = self._entry_decision(side)
+
+        amount = abs(f(qty_delta))
+        execution_px = f(px)
+        sign = 1.0 if side == "long" else -1.0
+        old_qty, old_entry = f(episode[1]), f(episode[2])
+        shadow_delta = 0.0
+        delayed = False
+        if not decision["would_block"] and amount > 0 and execution_px > 0:
+            new_qty = old_qty + amount
+            new_entry = ((old_qty * old_entry + amount * execution_px) / new_qty) if new_qty else execution_px
+            shadow_delta = amount * sign
+            delayed = action == "add" and old_qty <= config.FLAT
+            entry_fee = amount * execution_px * config.TAKER_FEE
+            self.db.execute(
+                "UPDATE market_risk_episode SET shadow_qty=?,shadow_entry_px=?,shadow_realized_pnl=shadow_realized_pnl-?,"
+                "shadow_fee=shadow_fee+?,allowed_entries=allowed_entries+?,delayed_entry=MAX(delayed_entry,?) "
+                "WHERE episode_id=?",
+                (new_qty, new_entry, entry_fee, entry_fee, 1 if new_decision_group else 0,
+                 1 if delayed else 0, episode[0]),
+            )
+        else:
+            self.db.execute(
+                "UPDATE market_risk_episode SET blocked_entries=blocked_entries+? WHERE episode_id=?",
+                (1 if new_decision_group else 0, episode[0]),
+            )
+        if decision["would_block"]:
+            verdict = "blocked_open" if action == "open" else "blocked_add"
+        elif delayed:
+            verdict = "delayed_entry"
+        elif not decision["fresh"]:
+            verdict = "radar_unavailable_allow"
+        else:
+            verdict = "allowed_open" if action == "open" else "allowed_add"
+        self.db.execute(
+            "INSERT INTO market_risk_action (episode_id,pos_id,copy_act_id,decision_group,source_oid,action,side,"
+            "assessment_id,risk_score,would_block,confirmation_mode,decision,decision_reason,baseline_qty_delta,"
+            "baseline_px,shadow_qty_delta,shadow_px,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (episode[0], pos_id, copy_act_id, decision_group, source_oid, action, side,
+             decision["assessment_id"], decision["risk_score"], decision["would_block"],
+             decision["confirmation_mode"], verdict, decision["reason"], f(qty_delta), execution_px,
+             shadow_delta, execution_px if shadow_delta else None, now_iso()),
+        )
+        return verdict
+
+    def record_exit_action(self, pos_id, action, side, baseline_qty_delta, px, close_fraction,
+                           copy_act_id=None, source_oid=None):
+        """Mirror an exit proportionally into the AI ledger.  Risk reduction is never vetoed by AI."""
+        if action not in ("reduce", "close"):
+            raise ValueError("risk exit action must be reduce or close")
+        if copy_act_id is not None and self.db.execute(
+                "SELECT 1 FROM market_risk_action WHERE copy_act_id=?", (copy_act_id,)).fetchone():
+            return None
+        episode = self.db.execute(
+            "SELECT episode_id,shadow_qty,shadow_entry_px FROM market_risk_episode "
+            "WHERE pos_id=? AND status='open'", (pos_id,)
+        ).fetchone()
+        if not episode:
+            return None
+        shadow_qty = f(episode[1])
+        fraction = max(0.0, min(1.0, f(close_fraction)))
+        close_qty = shadow_qty if action == "close" else shadow_qty * fraction
+        execution_px, entry_px = f(px), f(episode[2])
+        sign = 1.0 if side == "long" else -1.0
+        exit_fee = abs(close_qty * execution_px) * config.TAKER_FEE
+        realized = close_qty * (execution_px - entry_px) * sign - exit_fee if close_qty else 0.0
+        remaining = max(0.0, shadow_qty - close_qty)
+        self.db.execute(
+            "UPDATE market_risk_episode SET shadow_qty=?,shadow_entry_px=?,"
+            "shadow_realized_pnl=shadow_realized_pnl+?,shadow_fee=shadow_fee+? WHERE episode_id=?",
+            (remaining, entry_px if remaining > config.FLAT else None, realized, exit_fee, episode[0]),
+        )
+        self.db.execute(
+            "INSERT INTO market_risk_action (episode_id,pos_id,copy_act_id,decision_group,source_oid,action,side,"
+            "would_block,decision,decision_reason,baseline_qty_delta,baseline_px,shadow_qty_delta,shadow_px,"
+            "shadow_realized_pnl,close_fraction,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (episode[0], pos_id, copy_act_id, f"{action}:act:{copy_act_id or now_ms()}", source_oid, action, side,
+             0, "mandatory_exit", "risk reduction is never blocked", f(baseline_qty_delta), execution_px,
+             -close_qty * sign, execution_px if close_qty else None, realized, fraction, now_iso()),
+        )
+        return realized
 
     def resolve_intent(self, pos_id):
         row = self.db.execute(
@@ -528,11 +663,26 @@ class RiskRadar:
         intent = self.db.execute("SELECT would_block FROM market_risk_intent WHERE pos_id=?", (pos_id,)).fetchone()
         if not intent:
             return False
-        outcome = ("avoided_loss" if net_pnl < 0 else "missed_profit" if net_pnl > 0 else "flat") if intent[0] else "allowed"
+        episode = self.db.execute(
+            "SELECT episode_id,shadow_realized_pnl FROM market_risk_episode WHERE pos_id=?", (pos_id,)
+        ).fetchone()
+        if episode:
+            shadow_net = f(episode[1])
+            benefit = shadow_net - net_pnl
+            outcome = "improved" if benefit > 1e-9 else "harmed" if benefit < -1e-9 else "flat"
+            self.db.execute(
+                "UPDATE market_risk_episode SET status='resolved',shadow_qty=0,shadow_entry_px=NULL,"
+                "baseline_net_pnl=?,shadow_net_pnl=?,net_benefit=?,outcome=?,resolved_at=? WHERE episode_id=?",
+                (net_pnl, shadow_net, benefit, outcome, now_iso(), episode[0]),
+            )
+            legacy_outcome = "avoided_loss" if benefit > 1e-9 else "missed_profit" if benefit < -1e-9 else "flat"
+        else:
+            legacy_outcome = (("avoided_loss" if net_pnl < 0 else "missed_profit" if net_pnl > 0 else "flat")
+                              if intent[0] else "allowed")
         self.db.execute(
             "UPDATE market_risk_intent SET status='resolved',realized_pnl=?,fee=?,net_pnl=?,outcome=?,resolved_at=? "
             "WHERE pos_id=? AND status='open'",
-            (realized, fee, net_pnl, outcome, now_iso(), pos_id),
+            (realized, fee, net_pnl, legacy_outcome, now_iso(), pos_id),
         )
         self.db.commit()
         return True
@@ -541,7 +691,8 @@ class RiskRadar:
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - config.RISK_RADAR_RETENTION_DAYS * 86400))
         self.db.execute("DELETE FROM provider_balance_snapshot WHERE checked_at < ?", (cutoff,))
         self.db.execute("DELETE FROM market_risk_assessment WHERE created_at < ? AND assessment_id NOT IN "
-                        "(SELECT assessment_id FROM market_risk_intent WHERE assessment_id IS NOT NULL)", (cutoff,))
+                        "(SELECT assessment_id FROM market_risk_intent WHERE assessment_id IS NOT NULL UNION "
+                        " SELECT assessment_id FROM market_risk_action WHERE assessment_id IS NOT NULL)", (cutoff,))
         self.db.execute("DELETE FROM market_risk_snapshot WHERE created_at < ? AND snapshot_id NOT IN "
                         "(SELECT snapshot_id FROM market_risk_assessment WHERE snapshot_id IS NOT NULL)", (cutoff,))
         self.db.commit()

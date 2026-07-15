@@ -819,6 +819,72 @@ CREATE INDEX IF NOT EXISTS idx_market_risk_intent_opened
 CREATE INDEX IF NOT EXISTS idx_market_risk_intent_shadow
     ON market_risk_intent(would_block, status, opened_at DESC);
 
+-- V2 action-level counterfactual.  The normal Paper position remains the baseline book.  This episode
+-- holds only the AI-filtered exposure: a blocked first open leaves shadow_qty=0, while a later allowed
+-- add can create a delayed entry without catching up the exposure that was previously rejected.
+CREATE TABLE IF NOT EXISTS market_risk_episode (
+    episode_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pos_id              INTEGER NOT NULL UNIQUE,
+    addr                TEXT NOT NULL,
+    coin                TEXT NOT NULL,
+    side                TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'open',
+    entry_blocked       INTEGER NOT NULL DEFAULT 0,
+    delayed_entry       INTEGER NOT NULL DEFAULT 0,
+    blocked_entries     INTEGER NOT NULL DEFAULT 0,
+    allowed_entries     INTEGER NOT NULL DEFAULT 0,
+    shadow_qty          REAL NOT NULL DEFAULT 0,
+    shadow_entry_px     REAL,
+    shadow_realized_pnl REAL NOT NULL DEFAULT 0,
+    shadow_fee          REAL NOT NULL DEFAULT 0,
+    baseline_net_pnl    REAL,
+    shadow_net_pnl      REAL,
+    net_benefit         REAL,
+    outcome             TEXT,
+    opened_at           TEXT NOT NULL,
+    resolved_at         TEXT,
+    FOREIGN KEY(pos_id) REFERENCES copy_position(pos_id)
+);
+CREATE INDEX IF NOT EXISTS idx_market_risk_episode_status
+    ON market_risk_episode(status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_risk_episode_benefit
+    ON market_risk_episode(status, net_benefit);
+
+-- One immutable entry-time decision per copied exposure action.  Multiple fills from the same master
+-- order reuse the first decision_group verdict, so exchange slicing cannot repeatedly query or flip AI.
+-- Exit actions have decision='mandatory_exit': AI is never allowed to prevent risk reduction.
+CREATE TABLE IF NOT EXISTS market_risk_action (
+    risk_action_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id          INTEGER NOT NULL,
+    pos_id              INTEGER NOT NULL,
+    copy_act_id         INTEGER UNIQUE,
+    decision_group      TEXT,
+    source_oid          INTEGER,
+    action              TEXT NOT NULL,
+    side                TEXT NOT NULL,
+    assessment_id       INTEGER,
+    risk_score          REAL,
+    would_block         INTEGER NOT NULL DEFAULT 0,
+    confirmation_mode   TEXT,
+    decision            TEXT NOT NULL,
+    decision_reason     TEXT,
+    baseline_qty_delta  REAL NOT NULL DEFAULT 0,
+    baseline_px         REAL,
+    shadow_qty_delta    REAL NOT NULL DEFAULT 0,
+    shadow_px           REAL,
+    shadow_realized_pnl REAL NOT NULL DEFAULT 0,
+    close_fraction      REAL,
+    created_at          TEXT NOT NULL,
+    FOREIGN KEY(episode_id) REFERENCES market_risk_episode(episode_id),
+    FOREIGN KEY(pos_id) REFERENCES copy_position(pos_id),
+    FOREIGN KEY(copy_act_id) REFERENCES copy_action(act_id),
+    FOREIGN KEY(assessment_id) REFERENCES market_risk_assessment(assessment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_market_risk_action_episode
+    ON market_risk_action(episode_id, risk_action_id);
+CREATE INDEX IF NOT EXISTS idx_market_risk_action_decision_group
+    ON market_risk_action(pos_id, decision_group, risk_action_id);
+
 -- Envelope-encrypted provider credentials.  No plaintext is persisted; the private wrapping key lives
 -- outside SQLite and is readable only by the Observer service account.
 CREATE TABLE IF NOT EXISTS provider_credential (

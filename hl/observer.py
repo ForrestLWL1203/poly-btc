@@ -1437,13 +1437,10 @@ class Observer:
             # Shadow-only: capture the immutable entry-time decision after every existing execution gate has
             # passed, but before the paper fill is committed.  This call never influences `plan.ok` or sizing.
             if book is self.taker and coin in self.crypto_coins:
-                try:
-                    self.risk_radar.record_intent(
-                        ep["pos_id"], addr, coin, ep["side"], source_oid=ep.get("open_oid")
-                    )
-                except Exception as exc:  # noqa: BLE001 — radar audit must never break copy execution
-                    self._rollback_db()
-                    _log(f"risk radar intent audit failed for pos {ep['pos_id']}: {exc}")
+                self._risk_audit(
+                    "entry intent", self.risk_radar.record_intent,
+                    ep["pos_id"], addr, coin, ep["side"], source_oid=ep.get("open_oid"),
+                )
             lev = plan.leverage
             margin = plan.margin
             notional = plan.notional
@@ -1464,8 +1461,14 @@ class Observer:
             self.db.commit()
         ep["entries_ready"].set()
         msz = ep["master_peak"] * ep["sign"]
-        self._record_action(ep, addr, coin, t, "open", ep["open_oid"], master_px,
-                            msz, msz, size * ep["sign"], px, 0.0, chase, book=book)
+        act_id = self._record_action(ep, addr, coin, t, "open", ep["open_oid"], master_px,
+                                     msz, msz, size * ep["sign"], px, 0.0, chase, book=book)
+        if book is self.taker and coin in self.crypto_coins:
+            self._risk_audit(
+                "open action", self.risk_radar.record_exposure_action,
+                ep["pos_id"], "open", ep["side"], size * ep["sign"], px,
+                copy_act_id=act_id, source_oid=ep.get("open_oid"),
+            )
         self.db.commit()                                      # the open is in copy_position/copy_action
 
     async def _apply_add(self, addr, coin, ep, t, master_px, signed, pos1, oid,
@@ -1622,8 +1625,14 @@ class Observer:
             ep["last_add_px"] = decision_master_px    # one order advances the gap reference once, at target VWAP
             ep["reduce_anchor"] = None                # master grew → invalidate the reduce-step window
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
-            self._record_action(ep, addr, coin, t, "add", oid, master_px, signed, pos1,
-                                add_size * ep["sign"], px, 0.0, slip, book=book)
+            act_id = self._record_action(ep, addr, coin, t, "add", oid, master_px, signed, pos1,
+                                         add_size * ep["sign"], px, 0.0, slip, book=book)
+            if book is self.taker and coin in self.crypto_coins:
+                self._risk_audit(
+                    "add action", self.risk_radar.record_exposure_action,
+                    ep["pos_id"], "add", ep["side"], add_size * ep["sign"], px,
+                    copy_act_id=act_id, source_oid=oid,
+                )
             if order is not None:
                 order["followed_margin"] += add_margin
                 order["counted"] = True
@@ -1709,8 +1718,14 @@ class Observer:
             book.balance += pnl                       # realize (net of fee) into the paper account
             slip = (master_px - exit_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             action = "close" if closing else "reduce"
-            self._record_action(ep, addr, coin, t, action, oid, master_px, signed, pos1,
-                                -close_size * ep["sign"], exit_px, pnl, slip, book=book)
+            act_id = self._record_action(ep, addr, coin, t, action, oid, master_px, signed, pos1,
+                                         -close_size * ep["sign"], exit_px, pnl, slip, book=book)
+            if book is self.taker and coin in self.crypto_coins:
+                self._risk_audit(
+                    f"{action} action", self.risk_radar.record_exit_action,
+                    ep["pos_id"], action, ep["side"], -close_size * ep["sign"], exit_px, reduce_frac,
+                    copy_act_id=act_id, source_oid=oid,
+                )
             status = ("liquidated" if (closing and liq) else "stopped" if (closing and stop)
                       else "tail_closed" if (closing and tail_close)
                       else "gap_closed" if (closing and gap) else "closed" if closing else "open")
@@ -1796,7 +1811,7 @@ class Observer:
         book = book or self.taker
         self._tally(f"act_{action}", book)   # copy activity by kind (open/add/reduce/stop/close) — taker only
         ep["num_actions"] += 1
-        self.db.execute(
+        cur = self.db.execute(
             f"INSERT INTO {book.act_table} (pos_id,addr,coin,ts,recv_ms,action,master_oid,master_px,"
             "master_sz_delta,master_pos_after,our_qty_delta,our_px,realized_pnl,slippage_bps,"
             "strategy_revision_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1809,6 +1824,22 @@ class Observer:
             book.fees_cum += traded * config.TAKER_FEE
         self.db.execute(f"UPDATE {book.pos_table} SET num_actions=?, master_peak_sz=? WHERE pos_id=?",
                         (ep["num_actions"], ep["master_peak"], ep["pos_id"]))
+        return cur.lastrowid
+
+    def _risk_audit(self, label, fn, *args, **kwargs):
+        """Keep optional radar bookkeeping inside a savepoint so it can never roll back Paper execution."""
+        savepoint = "risk_radar_action_audit"
+        self.db.execute(f"SAVEPOINT {savepoint}")
+        try:
+            result = fn(*args, **kwargs)
+            self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return result
+        except Exception as exc:  # noqa: BLE001 — risk audit is always fail-open for execution
+            self.db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            pos_id = args[0] if args else "?"
+            _log(f"risk radar {label} audit failed for pos {pos_id}: {exc}")
+            return None
 
     async def _poll_fills(self, addr: str, since: int):
         """SIGNAL fetch: REST-pull the wallet's fills since `since` (a few seconds back — the live
