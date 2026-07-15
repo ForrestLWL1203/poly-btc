@@ -316,6 +316,18 @@ def book_top(coin: str):
     return None
 
 
+def realtime_book_top(coin: str, timeout: float = 5.0):
+    """Unpaced best bid/ask for one latency-sensitive execution decision."""
+    b = realtime_post_soft({"type": "l2Book", "coin": coin}, timeout=timeout)
+    lv = b.get("levels") if isinstance(b, dict) else None
+    if lv and len(lv) == 2 and lv[0] and lv[1]:
+        from .util import f as _f
+        bid, ask = _f(lv[0][0]["px"]), _f(lv[1][0]["px"])
+        if bid > 0 and ask >= bid:
+            return bid, ask
+    return None
+
+
 def book_snapshot(coin: str):
     """Raw aggregated L2 book for risk/microstructure features (weight 2, sampled at radar cadence)."""
     book = post_soft({"type": "l2Book", "coin": coin})

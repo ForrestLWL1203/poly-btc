@@ -50,6 +50,11 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "lock": asyncio.Lock(),
         }
 
+    @staticmethod
+    def _set_bbo(obs, coin, bid, ask):
+        obs.bbo[coin] = (bid, ask)
+        obs.bbo_ms[coin] = now_ms()
+
     def test_stats_snapshot_reuses_startup_lifetime_counters(self):
         db = self._db()
         db.execute(
@@ -124,7 +129,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         )
         db.commit()
         obs = Observer(db, [], {})
-        obs.bbo["xyz:MU"] = (941, 943)
+        self._set_bbo(obs, "xyz:MU", 941, 943)
         obs.mark_mid["xyz:MU"] = 937
 
         obs._refresh_coin_marks("xyz:MU")
@@ -132,6 +137,82 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         mu = db.execute("SELECT mark_px,unrealized_pnl FROM copy_position WHERE coin='xyz:MU'").fetchone()
         self.assertEqual(mu["mark_px"], 937)
         self.assertEqual(mu["unrealized_pnl"], 37)
+
+    def test_execution_price_uses_only_fresh_cached_crypto_quote(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            self._set_bbo(obs, "BTC", 99.0, 101.0)
+            self.assertEqual(await obs._execution_px("BTC", True, 105.0), 101.0)
+
+            obs.bbo_ms["BTC"] = now_ms() - config.EXECUTION_QUOTE_MAX_AGE_MS - 1
+            self.assertEqual(await obs._execution_px("BTC", True, 105.0), 105.0)
+
+        asyncio.run(run())
+
+    def test_stale_builder_quote_is_refetched_before_execution(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.bbo["xyz:IBM"] = (220.0, 221.0)
+            obs.bbo_ms["xyz:IBM"] = now_ms() - config.EXECUTION_QUOTE_MAX_AGE_MS - 1
+
+            with patch("hl.observer.rest.realtime_book_top", return_value=(222.0, 223.0)) as fetch:
+                px = await obs._execution_px("xyz:IBM", True, 224.0)
+
+            self.assertEqual(px, 223.0)
+            self.assertEqual(obs.bbo["xyz:IBM"], (222.0, 223.0))
+            fetch.assert_called_once_with("xyz:IBM")
+
+        asyncio.run(run())
+
+    def test_smart_add_gap_compares_target_prices_not_our_execution_price(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.low_liquidity_filter_enable = False
+            obs.add_strategy = "smart"
+            obs.follow_pos_add = True
+            obs.add_gap_k = 0.12
+            obs.pos_add_gap_k = 0.08
+            obs.add_shrink_g = 1.0
+            obs.min_open_margin_pct = 0.001
+            obs.vol["BTC"] = 0.10
+            # Our opening execution was 5% above the target.  That execution slippage must not make a
+            # target add only 0.2% away from its own open look like a 4.6% adverse move.
+            ep = self._live_ep(pos_id, "long", 105.0, 2.0)
+            ep.update(
+                margin=100.0,
+                notional=200.0,
+                master_open_px=100.0,
+                master_peak=2.0,
+                first_margin=100.0,
+                master_first_notl=200.0,
+                last_target_add_px=100.0,
+                add_count=0,
+                seen_oids={1},
+                add_orders={},
+            )
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+            self._set_bbo(obs, "BTC", 104.9, 105.0)
+
+            copied = await obs._apply_add(
+                "0xaaa", "BTC", ep, now_ms(), 100.2, 1.0, 3.0, 2, obs.taker,
+            )
+
+            self.assertFalse(copied)
+            self.assertEqual(ep["add_count"], 0)
+            action = db.execute(
+                "SELECT master_px,our_qty_delta FROM copy_action WHERE pos_id=? AND action='add'",
+                (pos_id,),
+            ).fetchone()
+            self.assertEqual(action["master_px"], 100.2)
+            self.assertEqual(action["our_qty_delta"], 0)
+
+        asyncio.run(run())
 
     def test_manual_close_uses_taker_bid_for_long(self):
         async def run():
@@ -141,7 +222,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchone()["pos_id"]
             obs = Observer(db, [], {})
             obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
-            obs.bbo["BTC"] = (99.0, 101.0)
+            self._set_bbo(obs, "BTC", 99.0, 101.0)
 
             res = await obs._cmd_close(pos_id)
 
@@ -162,7 +243,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             db.commit()
             obs = Observer(db, [], {})
             obs.taker.open_ep[("0xshort", "ETH")] = self._live_ep(pos_id, "short", 200, 1)
-            obs.bbo["ETH"] = (198.0, 202.0)
+            self._set_bbo(obs, "ETH", 198.0, 202.0)
 
             res = await obs._cmd_close(pos_id)
 
@@ -308,7 +389,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
             ep = obs.taker.open_ep[("0xaaa", "BTC")]
             self.assertEqual(ep["first_margin"], 100.0)
-            self.assertEqual(ep["last_add_px"], 115.0)
+            self.assertEqual(ep["last_target_add_px"], 115.0)
             self.assertEqual(ep["master_first_notl"], 100.0)
         finally:
             asyncio.set_event_loop(None)
@@ -347,7 +428,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchone()["pos_id"]
             obs = Observer(db, [], {})
             obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
-            obs.bbo["BTC"] = (99.0, 101.0)
+            self._set_bbo(obs, "BTC", 99.0, 101.0)
 
             res = await obs._cmd_close(pos_id)
 
@@ -371,7 +452,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchone()["pos_id"]
             obs = Observer(db, [], {})
             obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
-            obs.bbo["BTC"] = (110.0, 111.0)
+            self._set_bbo(obs, "BTC", 110.0, 111.0)
 
             res = await obs._cmd_close(pos_id)
 
@@ -400,7 +481,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchone()["pos_id"]
             obs = Observer(db, [], {})
             obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
-            obs.bbo["BTC"] = (99.0, 101.0)
+            self._set_bbo(obs, "BTC", 99.0, 101.0)
 
             res = await obs._cmd_close(pos_id, frac=0.5)
 
@@ -423,7 +504,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             obs.target_sector_policy = {
                 "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
             }
-            obs.bbo["BTC"] = (99.0, 101.0)
+            self._set_bbo(obs, "BTC", 99.0, 101.0)
             await obs._cmd_close(pos_id, frac=0.5)
 
             with patch.object(obs, "_apply_add", new_callable=AsyncMock) as apply_add:
@@ -447,7 +528,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             obs = Observer(db, [], {})
             ep = self._live_ep(pos_id, "long", 100, 2)
             obs.taker.open_ep[("0xaaa", "BTC")] = ep
-            obs.bbo["BTC"] = (110.0, 111.0)
+            self._set_bbo(obs, "BTC", 110.0, 111.0)
             await obs._cmd_close(pos_id, frac=0.5)
 
             with patch.object(obs, "_apply_reduce", new_callable=AsyncMock) as apply_reduce:
@@ -608,7 +689,8 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchone()["pos_id"]
             obs = Observer(db, [], {})
             ep = self._live_ep(pos_id, "long", 100, 2)
-            ep.update(master_open_px=100, first_margin=100, master_first_notl=200, last_add_px=100,
+            ep.update(master_open_px=100, first_margin=100, master_first_notl=200,
+                      last_target_add_px=100,
                       add_count=0, seen_oids={1})
             obs.taker.open_ep[("0xaaa", "BTC")] = ep
 
@@ -666,7 +748,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 master_peak=2.0,
                 first_margin=939.0,
                 master_first_notl=63817.0,
-                last_add_px=64335.0,
+                last_target_add_px=64335.0,
                 add_count=1,
                 seen_oids={1},
                 add_orders={},

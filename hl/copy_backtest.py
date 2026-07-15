@@ -444,7 +444,7 @@ class Backtest:
             "maintenance_leverage": maintenance_leverage,
             "master_leverage": master_lev,
             "liq_px": plan.liq_px,
-            "last_add_px": px,
+            "last_target_add_px": px,
             "add_count": 0,
             "followed_adds": 0,
             "missed_adds": 0,
@@ -514,7 +514,7 @@ class Backtest:
         )
         coin_room = max(0.0, self.coin_cap_pct(tier) * risk_equity - existing)
         if self.add_strategy == "smart":
-            last = ep.get("last_add_px") or ep["entry_px"]
+            last = ep.get("last_target_add_px") or ep["master_open_px"]
             adv = (((last - decision_px) if is_buy else (decision_px - last)) / last) if last else 0.0
             base_add_count = order["base_add_count"] if order else ep["add_count"]
             gap_mult = self.add_shrink_g ** base_add_count
@@ -570,7 +570,7 @@ class Backtest:
             ep["add_count"] += 1
             ep["followed_adds"] += 1
             self.followed_adds += 1
-        ep["last_add_px"] = decision_px
+        ep["last_target_add_px"] = decision_px
         ep["reduce_anchor"] = None
         fee = abs(add_size * px) * config.TAKER_FEE * self.replay_cost_mult
         ep["entry_fees"] += fee

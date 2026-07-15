@@ -153,6 +153,7 @@ class Observer:
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.target_sector_policy: dict = {}  # addr -> sector allow/deny policy from watchlist
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
+        self.bbo_ms: dict = {}           # coin -> local receive time; stale cached quotes cannot execute
         self.mark_mid: dict = {}         # coin -> authoritative display/risk mark (builder allMids, etc.)
         self.mark_write_ms: dict = {}    # coin -> last DB mark write ms (throttle BBO-triggered writes)
         self.hb: dict = {}               # per-heartbeat-interval tally (fills seen / copied / skipped-by-reason);
@@ -322,10 +323,25 @@ class Observer:
     # -- pricing off the live book -------------------------------------------
     def _fill_px(self, coin, is_buy, fallback):
         ba = self.bbo.get(coin)
-        if not ba or not ba[0] or not ba[1]:
+        age = now_ms() - int(self.bbo_ms.get(coin) or 0)
+        if (not ba or not ba[0] or not ba[1]
+                or age > int(getattr(config, "EXECUTION_QUOTE_MAX_AGE_MS", 5_000))):
             return fallback                       # book not ready -> master px (slippage ~0 anyway)
         bid, ask = ba
         return ask if is_buy else bid             # honest taker catch-up across the spread, CURRENT book
+
+    async def _execution_px(self, coin, is_buy, fallback):
+        """Return a fresh Paper quote without reusing an undated/stale order book."""
+        cached = self._fill_px(coin, is_buy, None)
+        if cached:
+            return cached
+        if coin.startswith("xyz:") or coin in self.stock_coins:
+            ba = await asyncio.to_thread(rest.realtime_book_top, coin)
+            if ba and ba[0] and ba[1] and ba[1] >= ba[0] > 0:
+                self.bbo[coin] = ba
+                self.bbo_ms[coin] = now_ms()
+                return ba[1] if is_buy else ba[0]
+        return fallback
 
     def _mark_px(self, coin: str, fallback=None):
         mid = self.mark_mid.get(coin)
@@ -437,11 +453,11 @@ class Observer:
                 else (mgn or 0.0) / (1 + (adds or 0) * self.add_frac)
             )
             last_followed_add = self.db.execute(
-                f"SELECT master_px FROM {book.act_table} WHERE pos_id=? AND action='add' "
+                f"SELECT master_px FROM {book.act_table} WHERE pos_id=? AND action IN ('open','add') "
                 "AND ABS(our_qty_delta)>1e-12 AND master_px IS NOT NULL ORDER BY act_id DESC LIMIT 1",
                 (pid,),
             ).fetchone()
-            exact_last_add_px = f(last_followed_add[0]) if last_followed_add else epx
+            exact_last_target_add_px = f(last_followed_add[0]) if last_followed_add else mpx
             book.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
@@ -453,7 +469,8 @@ class Observer:
                 # Reconstruct smart-add anchors from the immutable action audit.  Using total margin/add_count
                 # is wrong when proportional smart adds differ from ADD_FRAC and can oversize after restart.
                 "first_margin": exact_first_margin,
-                "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0), "last_add_px": exact_last_add_px,
+                "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0),
+                "last_target_add_px": exact_last_target_add_px,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False, "add_orders": {},
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
                     f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "
@@ -1127,6 +1144,7 @@ class Observer:
                         ba = None
                     if ba:
                         self.bbo[coin] = ba                              # used for execution bid/ask
+                        self.bbo_ms[coin] = now_ms()
             await asyncio.sleep(2 if self.stock_coins else 5)
 
     @staticmethod
@@ -1200,6 +1218,7 @@ class Observer:
         if not bid or not ask or bid <= 0 or ask <= 0 or ask < bid:   # crossed/zero book → junk tick, ignore
             return
         self.bbo[coin] = (bid, ask)
+        self.bbo_ms[coin] = now_ms()
         self._refresh_coin_marks_throttled(coin)
         mid = (bid + ask) / 2
         for (a, c), ep in self.open_ep.items():     # track worst adverse excursion while open
@@ -1338,7 +1357,7 @@ class Observer:
         stale = (now_ms() - t) > STALE_MS            # backfilled-late: book is no longer the fill's
         forced_entry_px = ep.get("forced_entry_px")
         px = forced_entry_px if forced_entry_px is not None else (
-            master_px if stale else self._fill_px(coin, is_buy, master_px)
+            master_px if stale else await self._execution_px(coin, is_buy, master_px)
         )
         if not px or px <= 0 or not master_px or master_px <= 0:   # can't price it -> don't hold a 0-price
             self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))  # position (also
@@ -1430,7 +1449,7 @@ class Observer:
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
                       size=size, rem_size=size, peak_size=size, liq_px=liq_px,
                       master_first_notl=master_notl,      # 目标首仓名义额 → smart 加仓比例基准
-                      last_add_px=px)                     # 我们上次入场价 → smart 波动闸基准 (adds = first_margin × ...)
+                      last_target_add_px=master_px)       # 波动闸只比较目标成交价；我方BBO只负责执行/PnL
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
                 "liq_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
@@ -1501,7 +1520,7 @@ class Observer:
             is_buy = ep["side"] == "long"             # adding to a long => buy more
             stale = (now_ms() - t) > STALE_MS
             px = forced_px if forced_px is not None else (
-                master_px if stale else self._fill_px(coin, is_buy, master_px)
+                master_px if stale else await self._execution_px(coin, is_buy, master_px)
             )
             lev = ep["leverage"]
             sigma = self._sigma(coin); tier = self._tier(sigma, coin)
@@ -1531,7 +1550,7 @@ class Observer:
             if self.add_strategy == "smart":
                 # 逆向(adv>0=价格朝我们不利方向,摊低)走 ADD_GAP_K;
                 # 正向(adv<0=顺势加仓)也要过 POS_ADD_GAP_K,避免 1.01/1.02/1.03 这类小碎追单全跟。
-                last = ep.get("last_add_px") or ep["entry_px"]
+                last = ep.get("last_target_add_px") or ep.get("master_open_px") or master_px
                 adv = (((last - decision_master_px) if is_buy else (decision_master_px - last)) / last) if last else 0.0
                 base_add_count = order["base_add_count"] if order else ep["add_count"]
                 gap_mult = self.add_shrink_g ** base_add_count
@@ -1602,7 +1621,7 @@ class Observer:
             first_copy_for_order = not (order and order["counted"])
             if first_copy_for_order:
                 ep["add_count"] += 1
-            ep["last_add_px"] = decision_master_px    # one order advances the gap reference once, at target VWAP
+            ep["last_target_add_px"] = decision_master_px  # target VWAP anchor; never an execution quote
             ep["reduce_anchor"] = None                # master grew → invalidate the reduce-step window
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             act_id = self._record_action(ep, addr, coin, t, "add", oid, master_px, signed, pos1,
@@ -1640,7 +1659,7 @@ class Observer:
             is_buy = ep["side"] == "short"           # closing a long => sell; closing a short => buy
             stale = (now_ms() - t) > STALE_MS
             exit_px = (forced_px if forced_px is not None
-                       else master_px if stale else self._fill_px(coin, is_buy, master_px))
+                       else master_px if stale else await self._execution_px(coin, is_buy, master_px))
             # delta-based: close the SAME fraction of our position the master just closed of his —
             # correct for any build-up (adds we followed, adds we skipped past the cap, or none).
             if forced_frac is not None:                       # operator manual close: EXACT fraction of rem_size
