@@ -561,8 +561,8 @@ CREATE INDEX IF NOT EXISTS idx_cp_addr_status_opened ON copy_position(addr, stat
 CREATE INDEX IF NOT EXISTS idx_cp_coin_status_opened ON copy_position(coin, status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_cp_side_status_opened ON copy_position(side, status, opened_at DESC);
 
--- Operator manual exits create a short wallet+coin cooldown. If we manually flatten a risky copy,
--- the observer must not immediately re-enter the same wallet/coin when the master adds/flips/reopens.
+-- Operator manual loss exits create a short wallet+coin cooldown. Profitable full exits and all partial
+-- exits keep normal follow eligibility; partial exits retain their live episode for later adds/reduces.
 CREATE TABLE IF NOT EXISTS manual_close_cooldown (
     addr       TEXT NOT NULL,
     coin       TEXT NOT NULL,

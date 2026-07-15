@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from hl import config, storage
 from hl.observer import Observer
@@ -339,7 +339,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertNotIn(("0xaaa", "BTC"), obs.taker.open_ep)
         asyncio.run(run())
 
-    def test_manual_full_close_adds_wallet_coin_cooldown(self):
+    def test_manual_full_loss_adds_wallet_coin_cooldown(self):
         async def run():
             db = self._db()
             pos_id = db.execute(
@@ -352,13 +352,43 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             res = await obs._cmd_close(pos_id)
 
             row = db.execute(
-                "SELECT addr,coin,pos_id,created_at,expires_at FROM manual_close_cooldown "
+                "SELECT addr,coin,pos_id,reason,created_at,expires_at FROM manual_close_cooldown "
                 "WHERE addr='0xaaa' AND coin='BTC'"
             ).fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["pos_id"], pos_id)
+            self.assertEqual(row["reason"], "manual_stop_loss")
             self.assertGreater(row["expires_at"], row["created_at"])
             self.assertEqual(res["cooldownUntil"], row["expires_at"])
+
+        asyncio.run(run())
+
+    def test_manual_full_profit_does_not_add_cooldown(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.taker.open_ep[("0xaaa", "BTC")] = self._live_ep(pos_id, "long", 100, 2)
+            obs.bbo["BTC"] = (110.0, 111.0)
+
+            res = await obs._cmd_close(pos_id)
+
+            self.assertGreater(res["realizedPnl"], 0)
+            self.assertIsNone(res["cooldownUntil"])
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM manual_close_cooldown"
+            ).fetchone()[0], 0)
+            obs.target_sector_policy = {
+                "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
+            }
+            with patch.object(obs, "_open_position") as open_position:
+                obs._dispatch_fill(
+                    "0xaaa", "BTC", ("0xaaa", "BTC"), now_ms(),
+                    1.0, 0.0, 1.0, 109.0, False, 125,
+                )
+            open_position.assert_called_once()
 
         asyncio.run(run())
 
@@ -378,6 +408,58 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertEqual(n, 0)
             self.assertFalse(res["closed"])
             self.assertIsNone(res.get("cooldownUntil"))
+
+        asyncio.run(run())
+
+    def test_manual_partial_loss_keeps_following_target_adds(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+            obs.target_sector_policy = {
+                "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
+            }
+            obs.bbo["BTC"] = (99.0, 101.0)
+            await obs._cmd_close(pos_id, frac=0.5)
+
+            with patch.object(obs, "_apply_add", new_callable=AsyncMock) as apply_add:
+                obs._dispatch_fill(
+                    "0xaaa", "BTC", ("0xaaa", "BTC"), now_ms(),
+                    1.0, 2.0, 3.0, 98.0, False, 123,
+                )
+                await asyncio.sleep(0)
+
+            apply_add.assert_awaited_once()
+            self.assertIn(("0xaaa", "BTC"), obs.taker.open_ep)
+
+        asyncio.run(run())
+
+    def test_manual_partial_profit_keeps_following_target_reduces(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+            obs.bbo["BTC"] = (110.0, 111.0)
+            await obs._cmd_close(pos_id, frac=0.5)
+
+            with patch.object(obs, "_apply_reduce", new_callable=AsyncMock) as apply_reduce:
+                obs._dispatch_fill(
+                    "0xaaa", "BTC", ("0xaaa", "BTC"), now_ms(),
+                    -2.0, 2.0, 0.0, 109.0, False, 124,
+                )
+                await asyncio.sleep(0)
+
+            apply_reduce.assert_awaited_once()
+            self.assertTrue(apply_reduce.await_args.kwargs["closing"])
+            self.assertIn(("0xaaa", "BTC"), obs.taker.open_ep)
 
         asyncio.run(run())
 
@@ -415,6 +497,38 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         finally:
             asyncio.set_event_loop(None)
             loop.close()
+
+    def test_restart_prunes_legacy_profitable_but_keeps_losing_cooldown(self):
+        async def run():
+            db = self._db()
+            profit_pos = db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,realized_pnl,opened_at,closed_at) "
+                "VALUES ('0xprofit','SOL','long','closed',100,12,'old','old')"
+            ).lastrowid
+            loss_pos = db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,realized_pnl,opened_at,closed_at) "
+                "VALUES ('0xloss','HYPE','long','closed',100,-12,'old','old')"
+            ).lastrowid
+            db.executemany(
+                "INSERT INTO manual_close_cooldown "
+                "(addr,coin,pos_id,reason,created_at,expires_at) VALUES (?,?,?,?,?,?)",
+                [
+                    ("0xprofit", "SOL", profit_pos, "manual_close", "old", "2999-01-01T00:00:00Z"),
+                    ("0xloss", "HYPE", loss_pos, "manual_close", "old", "2999-01-01T00:00:00Z"),
+                ],
+            )
+            db.commit()
+
+            Observer(db, [], {})._reload_open()
+
+            rows = db.execute(
+                "SELECT addr,coin FROM manual_close_cooldown ORDER BY addr"
+            ).fetchall()
+            self.assertEqual([tuple(row) for row in rows], [("0xloss", "HYPE")])
+
+        asyncio.run(run())
 
     def test_expired_manual_cooldown_allows_new_open(self):
         db = self._db()

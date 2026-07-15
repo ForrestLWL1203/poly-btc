@@ -265,8 +265,8 @@ class Observer:
     def _manual_close_cooldown_until(self, addr: str, coin: str):
         """Return the active manual-close cooldown expiry for wallet+coin, or None.
 
-        Manual closes are an operator override: after we flatten a wallet's risky coin, the observer should
-        stay out of that wallet+coin for a full day even if the master adds, flips, or reopens.
+        A loss-cutting manual flatten is an operator risk override: stay out of that wallet+coin for a full
+        day even if the master adds, flips, or reopens. Profitable manual exits do not create this row.
         """
         addr = (addr or "").lower()
         if not addr or not coin:
@@ -287,6 +287,24 @@ class Observer:
         self.db.commit()
         return None
 
+    def _clear_manual_close_cooldown(self, addr: str, coin: str):
+        self.db.execute(
+            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?)",
+            ((addr or "").lower(), coin),
+        )
+        self.db.commit()
+
+    def _prune_legacy_profit_cooldowns(self):
+        """Remove cooldowns written by the old all-manual-full-closes policy for non-losing exits."""
+        cur = self.db.execute(
+            "DELETE FROM manual_close_cooldown WHERE reason='manual_close' AND EXISTS ("
+            "SELECT 1 FROM copy_position p WHERE p.pos_id=manual_close_cooldown.pos_id "
+            "AND COALESCE(p.realized_pnl,0)>=0)"
+        )
+        self.db.commit()
+        if cur.rowcount:
+            _log(f"cleared {cur.rowcount} legacy profitable manual-close cooldowns")
+
     def _add_manual_close_cooldown(self, addr: str, coin: str, pos_id: int):
         addr = (addr or "").lower()
         created_at = now_iso()
@@ -297,7 +315,7 @@ class Observer:
             "ON CONFLICT(addr,coin) DO UPDATE SET "
             "pos_id=excluded.pos_id,reason=excluded.reason,created_at=excluded.created_at,"
             "expires_at=excluded.expires_at",
-            (addr, coin, pos_id, "manual_close", created_at, expires_at),
+            (addr, coin, pos_id, "manual_stop_loss", created_at, expires_at),
         )
         self.db.commit()
         return expires_at
@@ -378,6 +396,8 @@ class Observer:
 
     def _reload_open(self, book=None):
         book = book or self.taker
+        if book is self.taker:
+            self._prune_legacy_profit_cooldowns()
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
             "margin,notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,stop_px,"
@@ -989,7 +1009,14 @@ class Observer:
                                  closing=(frac >= 0.999), liq=False,
                                  forced_px=exit_px, forced_frac=frac)
         full = frac >= 0.999
-        cooldown_until = self._add_manual_close_cooldown(addr, coin, pos_id) if full else None
+        # Partial manual profit-taking/stop-loss keeps this episode live: subsequent target adds and reduces
+        # continue through the same ``ep``. A full manual loss is a risk veto and gets 24h cooldown; a full
+        # profitable/breakeven exit is merely early profit-taking and must not block the target's next episode.
+        cooldown_until = None
+        if full and f(ep.get("realized_pnl")) < 0:
+            cooldown_until = self._add_manual_close_cooldown(addr, coin, pos_id)
+        elif full:
+            self._clear_manual_close_cooldown(addr, coin)
         _log(f"MANUAL-{'CLOSE' if full else f'REDUCE {int(round(frac*100))}%'} {addr[:10]} {coin} {ep['side']} "
              f"@ {exit_px:g}  pnl=${ep['realized_pnl']:+,.1f}  bal=${self.balance:,.0f}")
         return {"positionId": pos_id, "exit": exit_px, "fraction": frac, "closed": full,
