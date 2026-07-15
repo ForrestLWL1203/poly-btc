@@ -77,6 +77,35 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["status"], "challenger_confidence_watch")
 
+    def test_near_core_thin_edge_with_strong_dollar_economics_is_challenger(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_expected_return=0.01886,
+            copy_bt_net_pnl=987,
+            copy_bt_14d_net_pnl=853,
+            copy_bt_7d_net_pnl=371,
+            copy_bt_closed_n=50,
+            copy_bt_14d_closed_n=25,
+            copy_bt_7d_closed_n=10,
+            copy_evidence_days=13,
+            copy_positive_probability=0.8275,
+            copy_return_lcb=-0.0132,
+        ))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["role"], "challenger")
+        self.assertEqual(result["status"], "challenger_thin_edge_watch")
+
+    def test_thin_edge_without_core_dollar_economics_stays_rejected(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_expected_return=0.005,
+            copy_bt_net_pnl=499,
+            copy_bt_7d_net_pnl=249,
+        ))
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "thin_copy_edge")
+
     def test_execution_and_capacity_are_real_gates(self):
         low_fill = evaluate_follow_eligibility(evidence(actionable_open_rate=0.55))
         low_capacity = evaluate_follow_eligibility(evidence(capacity_fit=0.70))

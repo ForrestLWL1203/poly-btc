@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS profile (
     sector_policy_json TEXT,              -- per-sector allow/deny policy consumed by observer
     profile_generation TEXT,              -- last complete generation that evaluated this profile
     evaluated_at TEXT,
-    data_status TEXT DEFAULT 'valid',     -- valid / deferred_data_error / rejected
+    data_status TEXT DEFAULT 'valid',     -- valid / deferred_data_error; business rejection belongs to status/reason
     evidence_status TEXT,                 -- qualified / thin / missing / invalid
     last_copyable_open_ms INTEGER,
     open_events_7d INTEGER DEFAULT 0,

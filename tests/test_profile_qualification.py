@@ -76,8 +76,17 @@ class ProfileQualificationTests(unittest.TestCase):
         self.assertEqual(score, 0.581)
         self.assertEqual(row["raw_quality_score"], 0.581)
 
-    def test_thin_normalized_copy_edge_is_excluded(self):
-        ok, reason = scanner._profile_copy_qualification(qualified(copy_expected_return=0.019), NOW, self.params)
+    def test_near_core_thin_edge_with_strong_dollar_economics_remains_observable(self):
+        ok, reason = scanner._profile_copy_qualification(qualified(
+            copy_expected_return=0.019, copy_bt_7d_net_pnl=300,
+        ), NOW, self.params)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
+    def test_truly_thin_normalized_copy_edge_is_excluded(self):
+        ok, reason = scanner._profile_copy_qualification(qualified(
+            copy_expected_return=0.005, copy_bt_net_pnl=499, copy_bt_7d_net_pnl=249,
+        ), NOW, self.params)
         self.assertFalse(ok)
         self.assertEqual(reason, "thin_copy_edge")
 

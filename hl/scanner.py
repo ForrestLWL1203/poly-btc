@@ -859,7 +859,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     row = dict(m)                                    # keys match column names -> robust positional build
     row.update(addr=addr, status=status, reason=reason, last_refreshed=stamp,
                profile_generation=getattr(p, "scan_generation", None), evaluated_at=stamp,
-               data_status="valid" if ok else "rejected",
+               # Business qualification is not data health. Structural/economic rejects still had a
+               # complete profile and must never be relabelled as copy_data_error by selection/UI code.
+               # True fetch/cache/replay failures return through _defer_profile before reaching this write.
+               data_status=m.get("data_status") or "valid",
                evidence_status=m.get("evidence_status") or ("qualified" if ok else "rejected"),
                first_added=(prior or {}).get("first_added") or (stamp if ok else None),
                times_seen=(prior or {}).get("times_seen", 0) + 1)
@@ -3387,7 +3390,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         ok, reason, score = _finalize_profile_qualification(m, ok, reason)
         # Only policy-only outcomes removed by this release may be safely reactivated from the current
         # cached replay. Structural/data failures still require a fresh network generation.
-        policy_recheck = old_reason in {"low_quality", "inactive_copyable_open"}
+        policy_recheck = old_reason in {"low_quality", "inactive_copyable_open", "thin_copy_edge"}
         if old == "active" or policy_recheck:
             status = "active" if ok else "retired"
         else:

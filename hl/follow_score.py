@@ -156,14 +156,7 @@ def evaluate_follow_eligibility(
                 f"30天严格Copy收益{pnl30:+.0f}低于候选价值线{challenger_floor:.0f}"
             ],
         }
-    if _num(expected_return) < min_expected_return:
-        return {
-            "eligible": False,
-            "coreEligible": False,
-            "status": "thin_copy_edge",
-            "role": "rejected",
-            "reasons": [f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%经济底线"],
-        }
+    thin_edge = _num(expected_return) < min_expected_return
     execution = metrics.get("execution_score")
     open_fill_rate = metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate"))
     capacity = metrics.get("capacity_fit")
@@ -195,16 +188,36 @@ def evaluate_follow_eligibility(
     )
     strong_samples = c30 >= policy.strong_min_closed_30d and evidence_days >= policy.strong_min_evidence_days
     weekly_economics_ok = pnl7 >= weekly_core_floor
+    # The 2% episode-normalized edge remains a Core boundary, but must not erase a wallet whose actual
+    # account-level Copy economics are already strong and well sampled.  Those near-boundary disagreements
+    # remain visible as Challenger evidence; genuinely thin wallets that do not also clear the full Core
+    # 30d/7d dollar floors and standard evidence requirements are still rejected.
+    thin_edge_watch = bool(
+        thin_edge
+        and pnl30 >= core_floor
+        and weekly_economics_ok
+        and standard_samples
+        and probability_ok
+        and valuation_status == "complete"
+    )
+    if thin_edge and not thin_edge_watch:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "thin_copy_edge",
+            "role": "rejected",
+            "reasons": [f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%经济底线"],
+        }
     # Strong 30d evidence may waive the thin 7d/LCB confidence checks, but never a confirmed recent
     # deterioration.  A wallet whose sampled 14d copy window is already non-positive remains worth
     # observing, not opening in Core, even when its older 30d history was excellent.
     strong_entry = (
         pnl30 >= strong_floor and strong_samples and probability_ok and not recent_warning
-        and weekly_economics_ok and valuation_status == "complete"
+        and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     standard_entry = (
         pnl30 >= core_floor and standard_samples and probability_ok and lcb_ok and not recent_warning
-        and weekly_economics_ok and valuation_status == "complete"
+        and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     core_eligible = bool(strong_entry or standard_entry)
     if core_eligible:
@@ -224,6 +237,11 @@ def evaluate_follow_eligibility(
         status, reason = "challenger_open_valuation_pending", "开放仓位缺少可靠末端估值，暂不进入Core"
     elif recent_warning:
         status, reason = "challenger_recent_decline", "近期回撤尚未达到硬淘汰线"
+    elif thin_edge_watch:
+        status, reason = (
+            "challenger_thin_edge_watch",
+            f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%Core线，但总收益与样本仍合格",
+        )
     elif pnl30 < core_floor:
         status, reason = "challenger_return_watch", "30天Copy收益达到候选线但未达到Core线"
     elif not strong_samples and (
