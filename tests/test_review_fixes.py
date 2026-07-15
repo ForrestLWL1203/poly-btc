@@ -47,6 +47,20 @@ class ReviewFixTests(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_process_scan_stop_is_resolved_inline(self):
+        path = self._commands_db()
+        try:
+            with patch.object(api_commands.procman, "stop_scan", return_value={"stopped": True}) as stop:
+                cmd_id, status = api_commands.exec_process_command(path, "scan_stop", {})
+            db = sqlite3.connect(path)
+            row = db.execute("SELECT type,status FROM commands WHERE id=?", (cmd_id,)).fetchone()
+            db.close()
+            self.assertEqual("done", status)
+            self.assertEqual(("scan_stop", "done"), row)
+            stop.assert_called_once_with(path)
+        finally:
+            os.remove(path)
+
     def test_incremental_run_does_not_claim_midrun_full_request(self):
         path = self._commands_db()
         try:

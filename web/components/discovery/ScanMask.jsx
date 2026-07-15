@@ -20,7 +20,10 @@ const POST_PROFILE_PROGRESS = {
   persist: 99,
 };
 
-export function ScanMask({ status }) {
+const { useState } = React;
+
+export function ScanMask({ status, onStop, stopping = false, stopError = null }) {
+  const [confirmStop, setConfirmStop] = useState(false);
   const stage = status && status.stage;
   const curIdx = STAGES_FE.findIndex(([keys]) => keys.includes(stage));
   const pct = POST_PROFILE_PROGRESS[stage] ?? ((status && status.progressPct) || 0);
@@ -48,7 +51,25 @@ export function ScanMask({ status }) {
             <span className="stage-dot">{st === "done" ? "✓" : st === "active" ? "●" : ""}</span>{label}</div>;
         })}
       </div>
-      <div className="mask-lock">⚠ 页面已锁定 · 重采期间禁止操作</div>
+      <div className="mask-stop-zone">
+        {!confirmStop ? (
+          <button className="btn btn-danger mask-stop-btn" onClick={() => setConfirmStop(true)} disabled={stopping}>
+            紧急终止采集
+          </button>
+        ) : (
+          <div className="mask-stop-confirm" role="alert">
+            <p>终止会丢弃本轮未发布结果，并保留上一次已发布名单。确定继续？</p>
+            <div>
+              <button className="btn" onClick={() => setConfirmStop(false)} disabled={stopping}>返回等待</button>
+              <button className="btn btn-stop" onClick={onStop} disabled={stopping}>
+                {stopping ? "正在终止…" : "确认紧急终止"}
+              </button>
+            </div>
+          </div>
+        )}
+        {stopError && <div className="mask-stop-error">{stopError}</div>}
+      </div>
+      <div className="mask-lock">⚠ 页面已锁定 · 仅保留紧急终止操作</div>
     </div>
   );
 }

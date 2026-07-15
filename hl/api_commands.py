@@ -9,8 +9,9 @@ from .util import now_iso
 
 
 ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
-                    "observer_start", "observer_stop", "rescan", "patch_params", "reload_params"}
-PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan"}
+                    "observer_start", "observer_stop", "rescan", "scan_stop",
+                    "patch_params", "reload_params"}
+PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan", "scan_stop"}
 
 
 def rw_connect(path):
@@ -56,6 +57,8 @@ def exec_process_command(db_path, ctype, payload=None):
             res = procman.start_observer(db_path)
         elif ctype == "observer_stop":
             res = procman.stop_observer(db_path)
+        elif ctype == "scan_stop":
+            res = procman.stop_scan(db_path)
         else:
             procman.start_scan(db_path, full=bool((payload or {}).get("full")))
             return cmd_id, "pending"

@@ -410,7 +410,15 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .stage-item.done { color: var(--green-l); } .stage-item.active { color: var(--t1); }
 .stage-dot { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 10px; }
 .stage-item.active .stage-dot { border-color: var(--accent); color: var(--accent); }
-.mask-lock { margin-top: 22px; font-size: 11px; color: var(--t4); letter-spacing: .5px; }
+.mask-stop-zone { width: 360px; margin-top: 22px; text-align: center; }
+.mask-stop-btn { min-width: 142px; justify-content: center; }
+.mask-stop-confirm { padding: 12px; border-radius: 13px; border: 1px solid rgba(255,92,92,.28);
+  background: rgba(255,92,92,.075); }
+.mask-stop-confirm p { margin: 0 0 10px; color: var(--t2); font-size: 12px; line-height: 1.45; }
+.mask-stop-confirm > div { display: flex; justify-content: center; gap: 8px; }
+.mask-stop-confirm .btn { justify-content: center; }
+.mask-stop-error { margin-top: 8px; color: var(--red-l); font-size: 12px; }
+.mask-lock { margin-top: 12px; font-size: 11px; color: var(--t4); letter-spacing: .5px; }
 
 /* ---------- settings ---------- */
 /* folder-style tabs: sit flush on top of the content panel below (no gap, bottoms merge into it) */
@@ -725,8 +733,10 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .modal-row .btn { justify-content: center; }
   .mask { padding: 22px; text-align: center; }
   .mask-prog,
-  .stage-list { width: min(100%, 340px); }
+  .stage-list,
+  .mask-stop-zone { width: min(100%, 340px); }
   .mask-meta { flex-wrap: wrap; justify-content: center; gap: 8px 18px; }
+  .mask-stop-confirm > div { flex-direction: column-reverse; }
 
   .apply-bar {
     left: 0;

@@ -45,9 +45,14 @@ def _gross_traded(db):
 def ep_overview(db):
     # LIVE-DERIVE from copy_position + copy_account so cards are not delayed by account_stats snapshots.
     acct = q1(db, "SELECT initial_balance, balance FROM copy_account WHERE id=1")
+    closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
+                    "FROM copy_position WHERE status!='open'") or {"n": 0, "wins": 0}
+    closed_n = closed["n"] or 0
+    win_rate = ((closed["wins"] or 0) / closed_n) if closed_n else 0.0
     if acct is None:
         base = {"equity": 0, "roiPct": 0, "todayPct": 0, "realizedPnl": 0, "unrealizedPnl": 0,
-                "winRatePct": 0, "openCount": 0, "availableBalance": 0, "availablePctOfEquity": 0,
+                "winRatePct": win_rate * 100, "openCount": 0, "closedCount": closed_n,
+                "availableBalance": 0, "availablePctOfEquity": 0,
                 "risk": {"gross": 0, "net": 0, "netGrossRatioPct": 0, "longPct": 0, "shortPct": 0},
                 "fees": {"cumulative": 0, "netPerGrossBp": 0}, "lastUpdate": None}
     else:
@@ -72,10 +77,6 @@ def ep_overview(db):
         locked = (open_risk["locked"] if open_risk else 0.0) or 0.0
         gross = (open_risk["gross"] if open_risk else 0.0) or 0.0
         net = (open_risk["net"] if open_risk else 0.0) or 0.0
-        closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
-                        "FROM copy_position WHERE status!='open'") or {"n": 0, "wins": 0}
-        closed_n = closed["n"] or 0
-        win_rate = ((closed["wins"] or 0) / closed_n) if closed_n else 0.0
         gross_traded = _gross_traded(db)
         equity = balance + upnl
         realized = balance - init
@@ -89,7 +90,7 @@ def ep_overview(db):
         base = {
             "equity": equity, "roiPct": (equity / init - 1) * 100, "todayPct": today,
             "realizedPnl": realized, "unrealizedPnl": upnl,
-            "winRatePct": win_rate * 100, "openCount": open_n,
+            "winRatePct": win_rate * 100, "openCount": open_n, "closedCount": closed_n,
             "availableBalance": available,
             "availablePctOfEquity": (available / equity * 100) if equity else 0.0,
             "risk": {"gross": gross, "net": net,

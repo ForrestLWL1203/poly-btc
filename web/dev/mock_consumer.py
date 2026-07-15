@@ -44,16 +44,28 @@ async def scanner_sim(db):
             db.execute("UPDATE commands SET status='acked',acked_at=? WHERE id=?", (now_iso(), cid)); db.commit()
             total, started = 1240, now_iso()
             db.execute("INSERT OR REPLACE INTO scan_progress "
-                       "(id,state,started_at,stage,candidates_scanned,candidates_total,eta_sec,updated_at) "
-                       "VALUES (1,'scanning',?,?,0,?,?,?)", (started, STAGES[0], total, 20, now_iso()))
+                       "(id,state,started_at,stage,candidates_scanned,candidates_total,eta_sec,manual,updated_at) "
+                       "VALUES (1,'scanning',?,?,0,?,?,1,?)", (started, STAGES[0], total, 20, now_iso()))
             db.commit()
             steps = len(STAGES) * 4
+            cancelled = False
             for i, stage in enumerate(STAGES):
                 for step in range(4):
                     await asyncio.sleep(0.6)
+                    status = db.execute("SELECT status FROM commands WHERE id=?", (cid,)).fetchone()
+                    if not status or status[0] != "acked":
+                        cancelled = True
+                        break
                     scanned = int(total * ((i * 4 + step + 1) / steps))
                     db.execute("UPDATE scan_progress SET stage=?,candidates_scanned=?,updated_at=? WHERE id=1",
                                (stage, scanned, now_iso())); db.commit()
+                if cancelled:
+                    break
+            if cancelled:
+                db.execute("UPDATE scan_progress SET state='idle',stage='cancelled',updated_at=? WHERE id=1",
+                           (now_iso(),)); db.commit()
+                print("scanner-sim: rescan cancelled", flush=True)
+                continue
             db.execute("INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,probed_new,added,"
                        "retired,kept,rejected,n_active) VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (started, now_iso(), 12.0, total, 55, 2, 1, 24, 860, 26))

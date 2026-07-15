@@ -240,6 +240,35 @@ def _scan_argv(db_path):
     return [PYTHON, os.path.join(REPO, "hl_discover.py"), "--db", db_path, "scan", "--days", "14"]
 
 
+def _repair_scan_state(db_path):
+    """Let the scanner maintenance CLI restore published watchlist/progress state after a hard stop."""
+    try:
+        r = subprocess.run(
+            [PYTHON, os.path.join(REPO, "hl_discover.py"), "--db", db_path, "repair-watchlist"],
+            cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45,
+        )
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001 — caller reports a bounded process-control failure
+        return False
+
+
+def _cancel_rescan_commands(db_path):
+    """Retire the interrupted request so a later incremental click cannot inherit an old full flag."""
+    try:
+        c = _db(db_path)
+        cur = c.execute(
+            "UPDATE commands SET status='failed',done_at=?,error=?,result_json=? "
+            "WHERE type='rescan' AND status IN ('pending','acked')",
+            (_now_iso(), "cancelled_by_operator", json.dumps({"cancelled": True, "retry": True})),
+        )
+        c.commit()
+        count = max(0, int(cur.rowcount or 0))
+        c.close()
+        return count
+    except sqlite3.Error:
+        return 0
+
+
 def _unit_state(unit):
     r = _systemctl("is-active", unit)
     return (r.stdout.strip() if r else "") or "unknown"
@@ -294,6 +323,26 @@ def start_scan(db_path, full=False):
     else:
         pid, _ = _spawn(db_path, SCAN, _scan_argv(db_path))
     return {"scanning": True, "started": True, "pid": pid}
+
+
+def stop_scan(db_path):
+    """Emergency-stop the current scan without changing the last published generation.
+
+    systemd kills the whole service cgroup on the VPS; the local backend kills the detached process
+    group.  The maintenance CLI then restores read state from the immutable published generation.
+    """
+    was_running = scan_running(db_path)
+    if _use_systemd():
+        r = _systemctl("stop", SCAN_UNIT, timeout=45)
+        if r is None or r.returncode != 0 or _unit_state(SCAN_UNIT) in ("active", "activating"):
+            raise RuntimeError("scan_stop_failed")
+    else:
+        _stop(db_path, SCAN)
+    cancelled = _cancel_rescan_commands(db_path)
+    if _scan_progress_scanning(db_path) and not _repair_scan_state(db_path):
+        raise RuntimeError("scan_state_repair_failed")
+    return {"scanning": False, "stopped": True, "wasRunning": was_running,
+            "cancelledCommands": cancelled}
 
 
 def reconcile(db_path):

@@ -597,7 +597,7 @@ CREATE INDEX IF NOT EXISTS idx_ca_pos_action_ts ON copy_action(pos_id, action, t
 -- execute, and flip status. owner+TTL lets a consumer self-heal a stuck flag if the issuer dies.
 CREATE TABLE IF NOT EXISTS commands (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    type            TEXT,                 -- pause|resume|close_position|close_all|wallet_toggle|rescan|patch_params
+    type            TEXT,                 -- pause|resume|close_position|close_all|wallet_toggle|rescan|scan_stop|patch_params
     payload_json    TEXT,
     idempotency_key TEXT UNIQUE,          -- client-supplied dedup key (optional)
     owner           TEXT,                 -- issuing dashboard instance

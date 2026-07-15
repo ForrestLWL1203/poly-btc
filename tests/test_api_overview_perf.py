@@ -122,10 +122,29 @@ class ApiOverviewPerfTests(unittest.TestCase):
             overview = api_overview.ep_overview(GuardedDb(db))
 
         self.assertEqual(overview["openCount"], 2)
+        self.assertEqual(overview["closedCount"], 0)
         self.assertEqual(overview["unrealizedPnl"], 94.0)
         self.assertEqual(overview["availableBalance"], 9870.0)
         self.assertEqual(overview["risk"]["gross"], 1300.0)
         self.assertEqual(overview["risk"]["net"], -300.0)
+
+    def test_overview_exposes_closed_position_count_for_navigation(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO copy_account (id,initial_balance,balance,updated_at) VALUES (1,10000,10000,'now')"
+            )
+            db.executemany(
+                "INSERT INTO copy_position (addr,coin,side,status,realized_pnl,opened_at,closed_at) "
+                "VALUES (?,?,?,'closed',?,'2026-01-01T00:00:00Z','2026-01-01T01:00:00Z')",
+                [("0x1", "BTC", "long", 50), ("0x2", "ETH", "short", -30)],
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        self.assertEqual(overview["closedCount"], 2)
 
     def test_overview_reuses_gross_traded_until_copy_actions_change(self):
         if hasattr(api_overview, "_GROSS_TRADED_CACHE"):

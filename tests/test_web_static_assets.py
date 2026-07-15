@@ -93,6 +93,15 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("setInterval", dashboard)
         self.assertNotIn("/api/scan-status", dashboard)
 
+    def test_navigation_counts_history_and_manual_scan_can_be_stopped(self):
+        jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")
+        mask = (ROOT / "web" / "components" / "discovery" / "ScanMask.jsx").read_text(encoding="utf-8")
+
+        self.assertIn('k === "history" ? ov.closedCount', jsx)
+        self.assertIn('api.cmd("scan_stop", {})', jsx)
+        self.assertIn("紧急终止采集", mask)
+        self.assertIn("确认紧急终止", mask)
+
     def test_dashboard_build_bundles_source_modules(self):
         build = (ROOT / "web" / "build.sh").read_text(encoding="utf-8")
         jsx = (ROOT / "web" / "app.jsx").read_text(encoding="utf-8")

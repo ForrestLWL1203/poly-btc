@@ -36,10 +36,30 @@ function Dashboard({ onLogout }) {
   const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
   const [confirmCfg, setConfirmCfg] = useState(null);
   const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
+  const [scanStopping, setScanStopping] = useState(false);
+  const [scanStopError, setScanStopError] = useState(null);
   const mobileNavRef = useRef(null);
   const toast = () => {};   // 右上角 tooltip 已废弃 — 各动作改用整页/按钮内联 loading 反馈
 
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
+  const stopRescan = useCallback(async () => {
+    setScanStopping(true);
+    setScanStopError(null);
+    try {
+      const result = await api.cmd("scan_stop", {});
+      if (!result || result.error || result.status === "error") throw new Error("scan_stop_failed");
+      setScanning(false);
+    } catch (_e) {
+      setScanStopping(false);
+      setScanStopError("终止失败，扫描仍可能在运行，请稍后重试");
+    }
+  }, []);
+  useEffect(() => {
+    if (!scanning) {
+      setScanStopping(false);
+      setScanStopError(null);
+    }
+  }, [scanning]);
 
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const obsUp = obs === "running" || obs === "paused";            // process is alive (vs not started)
@@ -87,7 +107,8 @@ function Dashboard({ onLogout }) {
             <div className="nav-group">{grp}</div>
             {items.map(([k, label, d]) => {
               const cnt = (ov && ov.system)
-                ? (k === "positions" ? ov.openCount : k === "wallets" ? ov.system.watchlistCount : null)
+                ? (k === "positions" ? ov.openCount : k === "history" ? ov.closedCount
+                  : k === "wallets" ? ov.system.watchlistCount : null)
                 : null;
               return (
                 <div key={k} className={"nav-item" + (page === k ? " active" : "")} onClick={() => setPage(k)}>
@@ -160,7 +181,8 @@ function Dashboard({ onLogout }) {
       <nav className="mobile-nav" aria-label="移动端导航" ref={mobileNavRef}>
         {mobileNavItems.map(([k, label, d]) => {
           const cnt = (ov && ov.system)
-            ? (k === "positions" ? ov.openCount : k === "wallets" ? ov.system.watchlistCount : null)
+            ? (k === "positions" ? ov.openCount : k === "history" ? ov.closedCount
+              : k === "wallets" ? ov.system.watchlistCount : null)
             : null;
           return (
             <button key={k} className={"mobile-nav-item" + (page === k ? " active" : "")} onClick={() => setPage(k)} type="button">
@@ -176,7 +198,8 @@ function Dashboard({ onLogout }) {
         </button>
       </nav>
 
-      {scanning && <ScanMask status={scanStatus} />}{/* scanning = MANUAL scan only; 24h auto runs silent */}
+      {scanning && <ScanMask status={scanStatus} onStop={stopRescan} stopping={scanStopping}
+        stopError={scanStopError} />}{/* scanning = MANUAL scan only; 24h auto runs silent */}
       {obsPending && <ObsMask label={obsPending.label} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
     </div>
