@@ -92,6 +92,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             },
         }))
 
+    def test_formation_ranking_uses_effective_surface_replay_not_scan_time_score(self):
+        rows = [
+            {"addr": "0xold", "follow_score": .95},
+            {"addr": "0xstrong", "follow_score": .50},
+        ]
+
+        def replay(_db, row, _now_ms, **_kwargs):
+            return {
+                "score": .90 if row["addr"] == "0xstrong" else .40,
+                "qualification": {
+                    "eligible": True, "coreEligible": True, "status": "core_eligible",
+                },
+            }
+
+        with patch.object(scanner, "_effective_follow_replay", side_effect=replay):
+            ranked = scanner._rank_formation_candidates_for_surface(
+                None, rows, 1000, generation_id="g1", follow={}, valuation_marks={},
+                sigmas={}, market_ctx={},
+            )
+
+        self.assertEqual([row["addr"] for row in ranked], ["0xstrong", "0xold"])
+        self.assertEqual(ranked[0]["follow_score"], .90)
+
     def test_selection_consistency_reuses_validated_params_without_retuning(self):
         source = inspect.getsource(scanner.tune_published_generation)
 

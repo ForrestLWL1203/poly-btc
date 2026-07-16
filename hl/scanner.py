@@ -1855,6 +1855,35 @@ def _formation_tune_candidate(row) -> bool:
     )
 
 
+def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, follow,
+                                           valuation_marks, sigmas, market_ctx) -> list[dict]:
+    """Re-rank the bounded quality pool under the exact active parameter surface.
+
+    Profile Copy columns are immutable scan-time evidence and may have been produced before the latest
+    generation-bound tuner revision.  Using them to order a second formation pass makes the UI's current
+    replay and the optimizer disagree.  Recompute from cached fills once here; this is CPU-only and uses the
+    same marks, market metadata and follow snapshot for every wallet.
+    """
+    ranked = []
+    for row in rows:
+        effective = _effective_follow_replay(
+            db, row, now_ms, generation_id=generation_id, follow=follow,
+            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+        )
+        qualification = dict(effective.get("qualification") or {})
+        if qualification.get("deferred") or qualification.get("role") == "quarantine":
+            continue
+        if not qualification.get("eligible"):
+            continue
+        ranked.append({
+            **row,
+            "follow_score": f(effective.get("score")),
+            "follow_qualification": qualification,
+        })
+    ranked.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
+    return ranked
+
+
 def _core_prefix_retention() -> dict:
     return {
         "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
@@ -1875,6 +1904,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     if "SMART_ADD" in base_follow:
         base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
     previous_core = _latest_published_core(db)
+    sigmas = auto_tune._load_sigmas(db)
+    market_ctx = auto_tune._load_market_ctx(db)
+    valuation_marks = _current_copy_valuation_marks()
+    surface_ranked = _rank_formation_candidates_for_surface(
+        db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
+        valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+    )
     upper = max(1, min(
         int(config.MAX_TARGETS),
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
@@ -1883,7 +1919,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     # Temporal entry confirmation is evaluated *after* the winning parameters are known; applying it here
     # creates a circular exclusion where a strong Challenger can never influence the parameters needed to
     # prove that it belongs in Core.
-    tune_ranked = [row for row in ranked_candidates if _formation_tune_candidate(row)][:upper]
+    tune_ranked = [row for row in surface_ranked if _formation_tune_candidate(row)][:upper]
     if not tune_ranked:
         return {
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
@@ -1940,9 +1976,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             base_follow, None, retune=False,
         )
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
-    sigmas = auto_tune._load_sigmas(db)
-    market_ctx = auto_tune._load_market_ctx(db)
-    valuation_marks = _current_copy_valuation_marks()
 
     # Parameter tuning changes leverage, initial margin and add behaviour.  Replaying only the portfolio
     # after that change is insufficient: every potential owner must still clear the percentage-based
