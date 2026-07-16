@@ -1,3 +1,5 @@
+import { IC, Ico } from "../../lib/icons.jsx";
+
 export const SCAN_STAGES = [
   [["scan_leaderboard"], "扫描排行榜"],
   [["fetch_history"], "拉取历史 & 算指标"],
@@ -58,8 +60,8 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
       </div>
       <div className="mask-stop-zone">
         {!confirmStop ? (
-          <button className="btn btn-danger mask-stop-btn" onClick={() => setConfirmStop(true)} disabled={stopping}>
-            紧急终止采集
+          <button className="btn btn-stop" onClick={() => setConfirmStop(true)} disabled={stopping}>
+            <Ico d={IC.close} />紧急终止采集
           </button>
         ) : (
           <div className="mask-stop-confirm" role="alert">

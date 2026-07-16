@@ -502,7 +502,6 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .stage-dot { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 10px; }
 .stage-item.active .stage-dot { border-color: var(--accent); color: var(--accent); }
 .mask-stop-zone { width: 360px; margin-top: 22px; text-align: center; }
-.mask-stop-btn { min-width: 142px; justify-content: center; }
 .mask-stop-confirm { padding: 12px; border-radius: 13px; border: 1px solid rgba(255,92,92,.28);
   background: rgba(255,92,92,.075); }
 .mask-stop-confirm p { margin: 0 0 10px; color: var(--t2); font-size: 12px; line-height: 1.45; }
