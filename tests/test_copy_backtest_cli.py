@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from hl import params
-from hl.copy_backtest_cli import position_rows, run_wallet
+from hl.copy_backtest_cli import followed_wallets, position_rows, run_wallet
 
 
 class CopyBacktestCliTests(unittest.TestCase):
@@ -99,6 +99,79 @@ class CopyBacktestCliTests(unittest.TestCase):
             self.assertEqual(result["closed_n"], 1)
             self.assertAlmostEqual(result["positions"][0]["margin"], 150.0)
             self.assertEqual(result["positions"][0]["leverage"], 25.0)
+
+    def test_run_wallet_applies_published_wallet_sector_policy(self):
+        db = sqlite3.connect(":memory:")
+        db.executescript(
+            """
+            CREATE TABLE candidate_fills (
+                addr TEXT NOT NULL, tid INTEGER NOT NULL, time INTEGER NOT NULL,
+                fill_json TEXT NOT NULL, PRIMARY KEY (addr, tid)
+            );
+            CREATE TABLE coin_vol (
+                coin TEXT PRIMARY KEY, sigma REAL, day_ntl_vlm REAL,
+                oi_notional REAL, updated_at TEXT
+            );
+            CREATE TABLE scan_generation (
+                id INTEGER PRIMARY KEY, generation TEXT, status TEXT,
+                complete INTEGER, is_current INTEGER
+            );
+            CREATE TABLE follow_selection (
+                generation TEXT, addr TEXT, role TEXT, enabled INTEGER,
+                selection_rank INTEGER, sector_policy_json TEXT
+            );
+            """
+        )
+        db.execute(
+            "INSERT INTO scan_generation VALUES (1,'g1','published',1,1)"
+        )
+        db.execute(
+            "INSERT INTO follow_selection VALUES ('g1','0xabc','core',1,1,?)",
+            (json.dumps({
+                "crypto": {"allow": True}, "stock": {"allow": False},
+                "allowed": ["crypto"],
+            }),),
+        )
+        fills = [
+            {"time": 1, "tid": 1, "coin": "BTC", "side": "B", "sz": "10000", "startPosition": "0", "px": "100"},
+            {"time": 2, "tid": 2, "coin": "BTC", "side": "A", "sz": "10000", "startPosition": "10000", "px": "110"},
+            {"time": 3, "tid": 3, "coin": "xyz:AAPL", "side": "B", "sz": "1", "startPosition": "0", "px": "200"},
+            {"time": 4, "tid": 4, "coin": "xyz:AAPL", "side": "A", "sz": "1", "startPosition": "1", "px": "210"},
+        ]
+        db.executemany(
+            "INSERT INTO candidate_fills VALUES (?,?,?,?)",
+            [("0xabc", row["tid"], row["time"], json.dumps(row)) for row in fills],
+        )
+
+        result = run_wallet(db, "0xabc", start_ms=0)
+
+        self.assertEqual(result["fills"], 2)
+        self.assertEqual({row["coin"] for row in result["positions"]}, {"BTC"})
+
+    def test_followed_wallets_uses_published_core_including_empty_core(self):
+        db = sqlite3.connect(":memory:")
+        db.executescript(
+            """
+            CREATE TABLE scan_generation (
+                id INTEGER PRIMARY KEY, generation TEXT, status TEXT,
+                complete INTEGER, is_current INTEGER
+            );
+            CREATE TABLE follow_selection (
+                generation TEXT, addr TEXT, role TEXT, enabled INTEGER,
+                selection_rank INTEGER
+            );
+            CREATE TABLE target_controls (addr TEXT PRIMARY KEY, enabled INTEGER);
+            CREATE TABLE watchlist (addr TEXT PRIMARY KEY, score REAL, rank INTEGER);
+            """
+        )
+        db.execute("INSERT INTO scan_generation VALUES (1,'g1','published',1,1)")
+        db.execute("INSERT INTO watchlist VALUES ('0xlegacy',0.99,1)")
+
+        self.assertEqual(followed_wallets(db, 10), [])
+
+        db.execute("INSERT INTO follow_selection VALUES ('g1','0xcore','core',1,2)")
+        db.execute("INSERT INTO follow_selection VALUES ('g1','0xchallenge','challenger',1,1)")
+        self.assertEqual(followed_wallets(db, 10), ["0xcore"])
 
     def test_position_rows_sort_by_add_dependency(self):
         rows = [{

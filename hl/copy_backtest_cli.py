@@ -8,6 +8,8 @@ import time
 
 from . import config, params as params_mod
 from .copy_backtest import run_backtest
+from .copy_data import load_copyable_fills
+from .sector import parse_json_obj
 
 
 def load_sigmas(db) -> dict:
@@ -28,18 +30,53 @@ def load_market_ctx(db) -> dict:
     return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2]} for r in rows}
 
 
+def _wallet_sector_policy(db, addr: str) -> dict | None:
+    """Return the same wallet policy used by production replay, when available.
+
+    Published selection is authoritative.  Profile is a useful fallback for a
+    rejected/unselected wallet being investigated manually.  A present but
+    empty policy remains fail-closed; only an old database with no policy
+    tables at all falls back to the product-wide executable scope.
+    """
+    addr = (addr or "").lower()
+    try:
+        generation = db.execute(
+            "SELECT generation FROM scan_generation "
+            "WHERE status='published' AND complete=1 AND is_current=1 "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if generation:
+            row = db.execute(
+                "SELECT sector_policy_json FROM follow_selection "
+                "WHERE generation=? AND lower(addr)=? LIMIT 1",
+                (generation[0], addr),
+            ).fetchone()
+            if row:
+                return parse_json_obj(row[0])
+    except sqlite3.Error:
+        pass
+    try:
+        row = db.execute(
+            "SELECT sector_policy_json FROM profile WHERE lower(addr)=? LIMIT 1",
+            (addr,),
+        ).fetchone()
+        if row:
+            return parse_json_obj(row[0])
+    except sqlite3.Error:
+        pass
+    return None
+
+
 def load_cached_fills(db, addr: str, start_ms: int = 0) -> list:
-    rows = db.execute(
-        "SELECT fill_json FROM candidate_fills WHERE addr=? AND time>=? ORDER BY time",
-        ((addr or "").lower(), int(start_ms or 0)),
-    ).fetchall()
-    fills = []
-    for (raw,) in rows:
-        try:
-            fills.append(json.loads(raw))
-        except (TypeError, ValueError):
-            continue
-    return fills
+    addr = (addr or "").lower()
+    policy = _wallet_sector_policy(db, addr)
+    return load_copyable_fills(
+        db,
+        [addr],
+        int(start_ms or 0),
+        policies={addr: policy} if policy is not None else None,
+        policy_default=False if policy is not None else True,
+    )
 
 
 def load_follow_overrides(db) -> dict:
@@ -104,6 +141,29 @@ def _param_float(db, key, default):
 
 
 def followed_wallets(db, limit: int, min_score: float | None = None) -> list[str]:
+    # Once an explicit generation exists it is the only production membership
+    # truth, including an intentionally empty Core.  The legacy score line is
+    # allowed only for databases predating generation-based selection.
+    try:
+        generation = db.execute(
+            "SELECT generation FROM scan_generation "
+            "WHERE status='published' AND complete=1 AND is_current=1 "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if generation:
+            return [
+                row[0]
+                for row in db.execute(
+                    "SELECT fs.addr FROM follow_selection fs "
+                    "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+                    "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 "
+                    "AND COALESCE(tc.enabled,1)=1 "
+                    "ORDER BY COALESCE(fs.selection_rank,999999),fs.addr LIMIT ?",
+                    (generation[0], int(limit)),
+                ).fetchall()
+            ]
+    except sqlite3.Error:
+        pass
     line = config.MIN_FOLLOW_SCORE if min_score is None else min_score
     if min_score is None:
         line = _param_float(db, "MIN_FOLLOW_SCORE", line)
