@@ -8,6 +8,50 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_candidate_can_improve_a_baseline_already_below_absolute_open_floor(self):
+        baseline = {
+            "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},
+            "windows": {
+                30: {
+                    "copy_net_pnl": 1000, "closed_n": 10,
+                    "open_fill_rate": 0.60, "capacity_open_fit": 0.80,
+                    "target_open_events": 10, "skip_reasons": {},
+                },
+            },
+        }
+        preserved = {
+            **baseline,
+            "windows": {30: {**baseline["windows"][30], "copy_net_pnl": 1100}},
+        }
+        degraded = {
+            **baseline,
+            "windows": {30: {
+                **baseline["windows"][30], "copy_net_pnl": 1200,
+                "open_fill_rate": 0.40, "capacity_open_fit": 0.60,
+            }},
+        }
+
+        self.assertTrue(auto_tune._candidate_valid(preserved, baseline))
+        self.assertFalse(auto_tune._candidate_valid(degraded, baseline))
+
+    def test_walk_forward_validation_uses_relative_execution_floor_below_absolute_floor(self):
+        policy = auto_tune.load_copy_policy()
+        folds = [{
+            "baselineNet": 100.0, "challengerNet": 120.0,
+            "baselineOpenRate": 0.60, "challengerOpenRate": 0.60,
+            "baselineCapacityFit": 0.80, "challengerCapacityFit": 0.80,
+        } for _ in range(3)]
+        validation = {
+            "folds": folds, "foldWins": 3, "holdout": folds[-1],
+            "baselineStressNet": 100.0, "stressNet": 120.0,
+        }
+
+        model = auto_tune._model_validation(validation, policy)
+
+        self.assertTrue(model["eligible"])
+        self.assertNotIn("open_rate_below_floor", model["reasons"])
+        self.assertNotIn("capacity_fit_below_floor", model["reasons"])
+
     def test_margin_candidates_obey_four_add_ceiling_in_all_tiers(self):
         follow = {
             "MARGIN_EQUITY_PCT": 1.0,
@@ -39,6 +83,66 @@ class AutoTuneTests(unittest.TestCase):
     def test_manual_margin_equity_pct_is_not_an_auto_tune_axis(self):
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.TUNE_KEYS)
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.ADD_TUNE_KEYS)
+
+    def test_margin_polish_combines_two_profitable_tier_moves(self):
+        db = self._db()
+        params.seed_params(db)
+        follow = params.load_follow(db)
+        follow["STABLE_MARGIN_PCT"] = 0.04
+        follow["HIGH_MARGIN_PCT"] = 0.02
+        base_stable = float(follow["STABLE_MARGIN_PCT"])
+        base_high = float(follow["HIGH_MARGIN_PCT"])
+
+        def evaluate(_db, _addrs, _follow, candidate, **_kwargs):
+            out = dict(candidate)
+            values = dict(candidate.get("params") or {})
+            reward = 0.0
+            if float(values["HIGH_MARGIN_PCT"]) > base_high + 1e-9:
+                reward += 1000.0
+            if float(values["STABLE_MARGIN_PCT"]) > base_stable + 1e-9:
+                reward += 500.0
+            out["params"] = values
+            out["margins"] = {key: values[key] for key in auto_tune.MARGIN_KEYS}
+            out["lev_caps"] = {key: values[key] for key in auto_tune.LEV_KEYS}
+            out["deploy_full_pct"] = values["DEPLOY_FULL_PCT"]
+            out["windows"] = {
+                days: {
+                    "copy_net_pnl": 1000.0 + reward,
+                    "closed_n": 20,
+                    "open_fill_rate": 0.90,
+                    "capacity_open_fit": 0.95,
+                    "target_open_events": 20,
+                    "liquidations": 0,
+                    "skip_reasons": {},
+                }
+                for days in (30, 14, 7)
+            }
+            return out
+
+        fold = {
+            "baselineNet": 100.0, "challengerNet": 130.0,
+            "baselineOpenRate": 0.90, "challengerOpenRate": 0.90,
+            "baselineCapacityFit": 0.95, "challengerCapacityFit": 0.95,
+        }
+        validation = {
+            "folds": [dict(fold) for _ in range(3)], "foldWins": 3,
+            "holdout": dict(fold), "baselineStressNet": 100.0, "stressNet": 130.0,
+        }
+        with patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}], 14: [{}], 7: [{}]}), \
+                patch.object(auto_tune, "prepare_refined_price_path", return_value=([], {})), \
+                patch.object(auto_tune, "evaluate_tune_candidate", side_effect=evaluate), \
+                patch.object(auto_tune, "add_candidates_from_axes", return_value=[]), \
+                patch.object(auto_tune, "_walk_forward_validation", return_value=validation):
+            result = auto_tune.maybe_tune_margins(
+                db, source="test", dry_run=True, mode="apply",
+                follow_values=follow, addrs_override=["0xaaa"], record_run=False,
+            )
+
+        self.assertTrue(result["eligible_to_apply"])
+        self.assertGreater(result["proposal"]["HIGH_MARGIN_PCT"], base_high)
+        self.assertGreater(result["proposal"]["STABLE_MARGIN_PCT"], base_stable)
+        self.assertEqual(len(result["margin_rounds"]), 2)
+        self.assertTrue(all(row["changed"] for row in result["margin_rounds"]))
 
     def test_generation_bound_tune_skips_if_generation_changes_before_apply(self):
         db = self._db()
@@ -349,7 +453,7 @@ class AutoTuneTests(unittest.TestCase):
         self.assertAlmostEqual(overrides["ADD_GAP_SHRINK_G"], 1.3)
         self.assertEqual(overrides["ADD_MAX_HARD"], 6)
 
-    def test_maybe_tune_margins_writes_add_params_after_sizing_grid(self):
+    def test_maybe_tune_margins_retains_active_params_when_validation_fails(self):
         db = self._db()
         params.seed_params(db)
         base_windows = {
@@ -409,7 +513,8 @@ class AutoTuneTests(unittest.TestCase):
         self.assertFalse(res["applied"])
         self.assertFalse(res["eligible_to_apply"])
         self.assertIn("fewer_than_two_fold_wins", res["validation"]["reasons"])
-        self.assertAlmostEqual(res["add_params"]["ADD_GAP_K"], 0.06)
+        self.assertAlmostEqual(res["add_params"]["ADD_GAP_K"], 0.12)
+        self.assertAlmostEqual(res["proposal"]["ADD_GAP_K"], 0.12)
         rows = dict(db.execute(
             "SELECT key,value FROM params WHERE key IN ('ADD_GAP_K','ADD_GAP_SHRINK_G','ADD_MAX_HARD')"
         ).fetchall())

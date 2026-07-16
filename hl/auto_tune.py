@@ -225,19 +225,25 @@ def _candidate_valid(candidate: dict, baseline: dict) -> bool:
     if not result_primary:
         return False
 
+    max_fit_drop = float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03))
+    absolute_fit_floor = float(getattr(config, "AUTO_TUNE_MARGIN_MIN_OPEN_FIT", 0.75))
+    base_fit = _capacity_fit(base_primary)
+    # A parameter search must not become permanently disabled merely because the currently published
+    # baseline is already below a live-money absolute floor.  In that situation require the proposal to
+    # preserve (or improve) the baseline; once the baseline clears the floor, the absolute floor applies.
     min_open_fit = max(
-        float(getattr(config, "AUTO_TUNE_MARGIN_MIN_OPEN_FIT", 0.75)),
-        _capacity_fit(base_primary) - float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03)),
+        absolute_fit_floor if base_fit >= absolute_fit_floor else 0.0,
+        base_fit - max_fit_drop,
     )
     if _capacity_fit(result_primary) < min_open_fit:
         return False
     candidate_open_rate = result_primary.get("open_fill_rate")
     if candidate_open_rate is not None:
         base_open_rate = base_primary.get("open_fill_rate")
+        base_open_rate = float(base_open_rate or 0.0)
         min_open_rate = max(
-            0.70,
-            float(base_open_rate or 0.0)
-            - float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03)),
+            0.70 if base_open_rate >= 0.70 else 0.0,
+            base_open_rate - max_fit_drop,
         )
         if float(candidate_open_rate or 0.0) < min_open_rate:
             return False
@@ -781,6 +787,10 @@ def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
                 {**base, key: value}, axis=f"independent_margin_{key.lower()}",
             ))
     return candidates
+
+
+def _same_margin_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
+    return all(abs(float(a.get(key, 0.0)) - float(b.get(key, 0.0))) <= eps for key in MARGIN_KEYS)
 
 
 def independent_leverage_candidates(base: dict) -> list[dict]:
@@ -1431,10 +1441,27 @@ def _model_validation(validation: dict, policy) -> dict:
         reasons.append("stress_not_profitable")
     if relative_gain < policy.tune_min_relative_gain:
         reasons.append("relative_gain_below_floor")
-    if folds and min(float(fold.get("challengerOpenRate") or 0.0) for fold in folds) < 0.70:
-        reasons.append("open_rate_below_floor")
-    if folds and min(float(fold.get("challengerCapacityFit") or 0.0) for fold in folds) < 0.85:
-        reasons.append("capacity_fit_below_floor")
+    max_fit_drop = float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03))
+    for fold in folds:
+        base_open = float(fold.get("baselineOpenRate") or 0.0)
+        candidate_open = float(fold.get("challengerOpenRate") or 0.0)
+        required_open = max(
+            0.70 if base_open >= 0.70 else 0.0,
+            base_open - max_fit_drop,
+        )
+        if candidate_open < required_open:
+            reasons.append("open_rate_below_floor")
+            break
+    for fold in folds:
+        base_capacity = float(fold.get("baselineCapacityFit") or 0.0)
+        candidate_capacity = float(fold.get("challengerCapacityFit") or 0.0)
+        required_capacity = max(
+            0.85 if base_capacity >= 0.85 else 0.0,
+            base_capacity - max_fit_drop,
+        )
+        if candidate_capacity < required_capacity:
+            reasons.append("capacity_fit_below_floor")
+            break
     return {"eligible": not reasons, "reasons": reasons, "relativeGain": relative_gain}
 
 
@@ -1742,20 +1769,42 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )
     selected_joint = choose_margin_candidate(joint_candidates, baseline)
     joint_params = selected_joint.get("params") or base
+    # Bounded coordinate closure: one independent sweep can raise only one volatility tier.  Rebuild the
+    # same small neighbourhood around its winner so combinations such as high+stable are actually tested,
+    # without restoring the expensive three-tier Cartesian grid.  Two rounds means at most two accepted
+    # tier moves and remains finite even when every move improves in-sample profit.
     margin_candidates = []
-    for candidate in independent_margin_candidates(joint_params, follow):
-        check_budget("margin_polish")
-        margin_candidates.append(evaluate_tune_candidate(
-            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-        ))
-    margin_baseline = next(
-        (candidate for candidate in margin_candidates
-         if _same_tune_values(candidate.get("params") or {}, joint_params)),
-        margin_candidates[0],
-    )
-    selected_margin = choose_margin_candidate(margin_candidates, margin_baseline)
-    margin_params = selected_margin.get("params") or joint_params
+    margin_rounds = []
+    margin_params = dict(joint_params)
+    margin_round_limit = max(1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2))
+    for round_index in range(margin_round_limit):
+        round_candidates = []
+        for candidate in independent_margin_candidates(margin_params, follow):
+            check_budget("margin_polish")
+            round_candidates.append(evaluate_tune_candidate(
+                db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            ))
+        if not round_candidates:
+            break
+        margin_candidates.extend(round_candidates)
+        margin_baseline = next(
+            (candidate for candidate in round_candidates
+             if _same_tune_values(candidate.get("params") or {}, margin_params)),
+            round_candidates[0],
+        )
+        selected_margin = choose_margin_candidate(round_candidates, margin_baseline)
+        next_params = dict(selected_margin.get("params") or margin_params)
+        changed = not _same_margin_values(next_params, margin_params)
+        margin_rounds.append({
+            "round": round_index + 1,
+            "candidates": len(round_candidates),
+            "changed": changed,
+            "params": {key: float(next_params[key]) for key in MARGIN_KEYS},
+        })
+        margin_params = next_params
+        if not changed:
+            break
     deploy_polish = []
     for candidate in deploy_candidates(margin_params):
         check_budget("deploy_polish")
@@ -1851,6 +1900,12 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             chosen = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
             break
     if chosen is None:
+        # No proposal passed folds/holdout/stress. Return the exact active baseline for audit, never an
+        # attractive but invalid in-sample fallback. Callers may safely retain it while publishing a Core
+        # formed under current parameters.
+        selected = baseline
+        selected_params = {key: float(current[key]) for key in TUNE_KEYS}
+        selected_add_params = {key: float(current_add[key]) for key in ADD_TUNE_KEYS}
         combined = {**selected_params, **selected_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
@@ -1991,6 +2046,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "rollback": rollback_result,
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
+        "margin_rounds": margin_rounds,
     }
     if record_run:
         _record_run(db, source, stamp, selected, applied, len(addrs), base, result,

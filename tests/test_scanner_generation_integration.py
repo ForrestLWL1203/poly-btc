@@ -51,6 +51,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("resolve_tune_baseline", source)
         self.assertNotIn("resolve_add_baseline", source)
 
+    def test_core_formation_never_seals_an_explicitly_invalid_tune_proposal(self):
+        base = {
+            key: 1.0 for key in (
+                *scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS,
+            )
+        }
+        invalid = {
+            "eligible_to_apply": False,
+            "proposal": {**base, "STABLE_MARGIN_PCT": 9.0},
+            "validation": {"reasons": ["holdout_not_better"]},
+        }
+
+        surface, eligible, reason = scanner._formation_param_surface(base, invalid)
+
+        self.assertFalse(eligible)
+        self.assertEqual(surface["STABLE_MARGIN_PCT"], 1.0)
+        self.assertEqual(reason, "holdout_not_better")
+
+    def test_selection_consistency_reuses_validated_params_without_retuning(self):
+        source = inspect.getsource(scanner.tune_published_generation)
+
+        self.assertIn("retune_formation=False", source)
+
     def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
         source = inspect.getsource(scanner._build_explicit_selection)
 

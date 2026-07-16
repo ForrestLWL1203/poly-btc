@@ -1799,7 +1799,30 @@ def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
     )
 
 
-def form_quality_prefix(db, generation_id, stamp, now_ms=None) -> dict:
+def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
+    """Return the only parameter surface Core formation is allowed to seal."""
+    tuned = {
+        key: f(base_follow.get(key))
+        for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+    }
+    if not retune:
+        return tuned, None, "retune_disabled"
+    # Rolling-deploy test doubles may omit this field. Production's explicit false is authoritative.
+    eligible = (tune_result or {}).get("eligible_to_apply") is not False
+    reason = (
+        "validated_proposal" if eligible
+        else ",".join(((tune_result or {}).get("validation") or {}).get("reasons") or ())
+        or "no_validated_finalist"
+    )
+    if eligible:
+        proposal = dict((tune_result or {}).get("params") or {})
+        proposal.update((tune_result or {}).get("add_params") or {})
+        proposal.update((tune_result or {}).get("proposal") or {})
+        tuned.update({key: f(proposal.get(key, tuned[key])) for key in tuned})
+    return tuned, eligible, reason
+
+
+def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -> dict:
     """Tune the full quality pool once, then compare smaller prefixes under that same sizing surface."""
     now_ms = int(now_ms or time.time() * 1000)
     ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False)
@@ -1843,25 +1866,25 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None) -> dict:
         }
     tune_ordered = tuple(row["addr"] for row in initial)
 
-    _set_scan_progress(
-        db, stage="portfolio_tune", candidates_scanned=len(tune_ordered), candidates_total=len(tune_ordered),
-    )
-    tune_result = auto_tune.maybe_tune_margins(
-        db, source="core_formation", stamp=f"{stamp}:full",
-        dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
-        addrs_override=list(tune_ordered), record_run=False,
-    )
-    if tune_result.get("status") != "ok":
-        raise RuntimeError(
-            "core_prefix_tune_failed:" + str(tune_result.get("reason") or tune_result.get("status"))
+    tune_result = None
+    tune_eligible = None
+    tune_reason = "retune_disabled"
+    if retune:
+        _set_scan_progress(
+            db, stage="portfolio_tune", candidates_scanned=len(tune_ordered), candidates_total=len(tune_ordered),
         )
-    tuned_reference = _prefix_eval_from_tune(
-        len(tune_ordered), tune_result,
-        initial_balance=f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
+        tune_result = auto_tune.maybe_tune_margins(
+            db, source="core_formation", stamp=f"{stamp}:full",
+            dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
+            addrs_override=list(tune_ordered), record_run=False,
+        )
+        if tune_result.get("status") != "ok":
+            raise RuntimeError(
+                "core_prefix_tune_failed:" + str(tune_result.get("reason") or tune_result.get("status"))
+            )
+    tuned_params, tune_eligible, tune_reason = _formation_param_surface(
+        base_follow, tune_result, retune=retune,
     )
-    tuned_params = dict(tuned_reference.params or {})
-    if not tuned_params:
-        raise RuntimeError("core_prefix_tune_missing_params")
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
     sigmas = auto_tune._load_sigmas(db)
     market_ctx = auto_tune._load_market_ctx(db)
@@ -2009,8 +2032,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None) -> dict:
             "algorithm": "quality_prefix_fixed_surface_v3", "initialCount": len(ordered),
             "selectedCount": chosen.count, "boundary": search.boundary,
             "evaluatedCounts": [value.count for value in search.evaluated],
-            "evaluations": evaluations, "fullTuneRuns": 1,
+            "evaluations": evaluations, "fullTuneRuns": int(bool(retune)),
             "tunedInputCount": len(tune_ordered), "effectiveRejected": temporal_rejected,
+            "formationTuneEligible": tune_eligible,
+            "formationTuneReason": tune_reason,
             "temporalRejected": temporal_rejected, "temporalAdmission": temporal_audit,
         },
     }
@@ -3335,7 +3360,7 @@ def tune_published_generation(db, generation_id, stamp=None, source="scan"):
             try:
                 consistency = repair_published_selection(
                     db, generation_id, stamp=now_iso(),
-                    replace_existing=True, launch_tuner=False,
+                    replace_existing=True, launch_tuner=False, retune_formation=False,
                 )
                 if consistency.get("status") != "repaired":
                     raise RuntimeError(
@@ -3493,7 +3518,7 @@ def _launch_async_tuner(db, generation_id, stamp):
 
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
-                               launch_tuner=True):
+                               launch_tuner=True, retune_formation=True):
     """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
     This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
@@ -3537,7 +3562,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     prefetch_candidates = _selection_prefetch_candidates(db)
     db.rollback()
     _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms)
-    formation = form_quality_prefix(db, generation_id, stamp, repair_now_ms)
+    formation = form_quality_prefix(
+        db, generation_id, stamp, repair_now_ms, retune=retune_formation,
+    )
     refresh_watchlist(
         db,
         stamp,
