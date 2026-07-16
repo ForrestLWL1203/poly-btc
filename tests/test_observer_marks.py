@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from hl import config, storage
+from hl import config, storage, volatility
 from hl.observer import Observer
 from hl.util import now_ms
 
@@ -54,6 +54,29 @@ class ObserverMarkRefreshTests(unittest.TestCase):
     def _set_bbo(obs, coin, bid, ask):
         obs.bbo[coin] = (bid, ask)
         obs.bbo_ms[coin] = now_ms()
+
+    def test_null_sigma_placeholder_is_not_loaded_as_warm_cache(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO coin_vol (coin,sigma,updated_at) VALUES ('xyz:SP500',NULL,'now')"
+        )
+        db.commit()
+
+        self.assertNotIn("xyz:SP500", volatility.load_all(db))
+
+    def test_ensure_vol_refreshes_existing_null_placeholder(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs.vol["xyz:SP500"] = None
+
+            with patch("hl.observer.volatility.refresh", return_value=0.0095) as refresh:
+                await obs._ensure_vol("xyz:SP500")
+
+            refresh.assert_called_once_with(db, "xyz:SP500")
+            self.assertAlmostEqual(obs.vol["xyz:SP500"], 0.0095)
+
+        asyncio.run(run())
 
     def test_stats_snapshot_reuses_startup_lifetime_counters(self):
         db = self._db()

@@ -88,4 +88,12 @@ def refresh(db, coin: str, asset_ctx=None):
 
 def load_all(db) -> dict:
     """Read the whole coin_vol table into {coin: sigma} for an in-memory read-cache at startup."""
-    return {r[0]: r[1] for r in db.execute("SELECT coin, sigma FROM coin_vol").fetchall()}
+    # Scanner/market-context refreshes may legitimately create a row before any candle-derived sigma exists.
+    # Such a placeholder is not a warm volatility value: keeping ``coin: None`` in the cache makes Observer's
+    # lazy loader believe the market was already fetched and silently routes it through the 10% fallback tier.
+    return {
+        r[0]: r[1]
+        for r in db.execute(
+            "SELECT coin,sigma FROM coin_vol WHERE sigma IS NOT NULL AND sigma>0"
+        ).fetchall()
+    }

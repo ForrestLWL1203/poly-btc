@@ -701,7 +701,10 @@ class Observer:
                 (coin,),
             ).fetchone()
             needs_market_ctx = (not row) or row[0] is None or row[1] is None
-        if coin not in self.vol or needs_market_ctx:
+        # A coin_vol placeholder with NULL sigma is not warm.  This is common for builder/stock markets whose
+        # market-context row was staged before candle volatility was collected; refresh it immediately instead
+        # of sizing the first order with VOL_FALLBACK_SIGMA (which incorrectly forces the high-vol tier).
+        if not self.vol.get(coin) or needs_market_ctx:
             self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
 
     async def prewarm_vol(self):
@@ -716,7 +719,7 @@ class Observer:
                 except (TypeError, ValueError):
                     return 0.0
             for coin, ctx in sorted(ctxs.items(), key=_day_vlm, reverse=True)[:config.VOL_PREWARM_TOP]:
-                if coin in self.vol or self.stop:
+                if self.vol.get(coin) or self.stop:
                     continue
                 self.vol_coins.add(coin)
                 try:
