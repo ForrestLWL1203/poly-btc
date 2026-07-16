@@ -69,6 +69,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(surface["STABLE_MARGIN_PCT"], 1.0)
         self.assertEqual(reason, "holdout_not_better")
 
+    def test_core_formation_tune_pool_includes_parameter_sensitive_challengers_only(self):
+        self.assertTrue(scanner._formation_tune_candidate({
+            "follow_qualification": {"eligible": True, "coreEligible": True},
+        }))
+        self.assertTrue(scanner._formation_tune_candidate({
+            "follow_qualification": {
+                "eligible": True, "coreEligible": False,
+                "status": "challenger_weekly_return_watch",
+            },
+        }))
+        self.assertFalse(scanner._formation_tune_candidate({
+            "follow_qualification": {
+                "eligible": True, "coreEligible": False,
+                "status": "challenger_open_valuation_pending",
+            },
+        }))
+        self.assertFalse(scanner._formation_tune_candidate({
+            "follow_qualification": {
+                "eligible": True, "coreEligible": False,
+                "status": "challenger_sample_watch",
+            },
+        }))
+
     def test_selection_consistency_reuses_validated_params_without_retuning(self):
         source = inspect.getsource(scanner.tune_published_generation)
 
@@ -619,6 +642,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(result["status"], "launched")
             self.assertTrue(result["unit"].startswith("hl-tune-"))
             self.assertIn("--property=MemoryMax=512M", command)
+            self.assertIn("optimize", command)
+            self.assertNotIn("tune", command)
             self.assertIn("--generation", command)
             self.assertIn("generation-1", command)
 

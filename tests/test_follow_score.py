@@ -257,18 +257,46 @@ class FollowScoreTests(unittest.TestCase):
         self.assertAlmostEqual(detail["liquidationRate"], 3 / 16)
         self.assertTrue(any("损失已计收益" in reason for reason in detail["reasons"]))
 
+    def test_strict_copy_economic_power_outranks_thin_profit_with_prettier_episode_stats(self):
+        thin, _ = compute_follow_score(evidence(
+            score=.48, copy_bt_net_pnl=1674, copy_bt_14d_net_pnl=-199,
+            copy_bt_7d_net_pnl=580, copy_expected_return=.09, copy_return_lcb=.05,
+            copy_positive_probability=1.0, copy_bt_closed_n=52, copy_evidence_days=18,
+        ))
+        strong, detail = compute_follow_score(evidence(
+            score=.82, copy_bt_net_pnl=6813, copy_bt_14d_net_pnl=5193,
+            copy_bt_7d_net_pnl=4228, copy_expected_return=.032, copy_return_lcb=.009,
+            copy_positive_probability=.985, copy_bt_closed_n=88, copy_evidence_days=18,
+        ))
+
+        self.assertGreater(strong, thin)
+        self.assertAlmostEqual(detail["economicReturns"]["30d"], .6813)
+
+    def test_economic_score_scales_with_actual_replay_equity_not_fixed_dollars(self):
+        small, small_detail = compute_follow_score(evidence(
+            copy_bt_net_pnl=3000, copy_bt_14d_net_pnl=1500, copy_bt_7d_net_pnl=800,
+            initial_margin_equity=10_000,
+        ))
+        large, large_detail = compute_follow_score(evidence(
+            copy_bt_net_pnl=6000, copy_bt_14d_net_pnl=3000, copy_bt_7d_net_pnl=1600,
+            initial_margin_equity=20_000,
+        ))
+
+        self.assertAlmostEqual(small, large)
+        self.assertEqual(small_detail["economicReturns"], large_detail["economicReturns"])
+
     def test_negative_bootstrap_lcb_is_scored_but_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_return_lcb=-0.05))
         self.assertTrue(result["eligible"])
 
-    def test_absolute_dollar_scale_does_not_change_wallet_score(self):
+    def test_more_strict_copy_profit_at_the_same_equity_increases_wallet_score(self):
         low, _ = compute_follow_score(evidence(
             copy_bt_net_pnl=80, copy_bt_14d_net_pnl=35, copy_bt_7d_net_pnl=12,
         ))
         high, _ = compute_follow_score(evidence(
             copy_bt_net_pnl=80000, copy_bt_14d_net_pnl=35000, copy_bt_7d_net_pnl=12000,
         ))
-        self.assertAlmostEqual(low, high)
+        self.assertGreater(high, low)
 
     def test_overlapping_window_counts_do_not_create_confidence(self):
         low, low_detail = compute_follow_score(evidence(copy_bt_14d_closed_n=1, copy_bt_7d_closed_n=1))

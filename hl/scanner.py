@@ -1029,6 +1029,7 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
     rows = [dict(zip(row_cols, r)) for r in cur.fetchall()]
     ranked = []
     for r in rows:
+        r["margin_equity_pct"] = margin_equity_pct
         score, detail = follow_score.compute_follow_score(r)
         detail = dict(detail or {})
         eligibility = follow_score.evaluate_follow_eligibility(
@@ -1586,6 +1587,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
         row = dict(zip(names, raw))
         addr = (row.get("addr") or "").lower()
         row["addr"] = addr
+        row["margin_equity_pct"] = margin_equity_pct
         row["follow_score"] = follow_score.compute_follow_score(row)[0]
         row["follow_qualification"] = follow_score.evaluate_follow_eligibility({
             **row,
@@ -1727,6 +1729,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     # sector aggregate overwrite these final-parameter metrics while recomputing rank.
     score, _detail = follow_score.compute_follow_score({
         **row, **effective, "sector_copy_json": None,
+        "margin_equity_pct": replay_ctx.margin_equity_pct,
     })
     return {"metrics": effective, "qualification": qualification, "score": score}
 
@@ -1792,6 +1795,11 @@ def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
         "baseline", "baselineStressNet", "baselineStressLiquidations",
         tune_result.get("baseline_proposal") or {},
     )
+    # A rejected proposal must never win formation merely because its in-sample utility is attractive.
+    # The tuner already performed fold/holdout/stress validation; explicit failure is authoritative and
+    # means this wallet-count node is evaluated on its active baseline surface.
+    if tune_result.get("eligible_to_apply") is False:
+        return baseline
     feasible = [value for value in (challenger, baseline) if value.feasible]
     return max(
         feasible or [challenger, baseline],
@@ -1822,69 +1830,115 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
     return tuned, eligible, reason
 
 
+_PARAMETER_TUNABLE_CHALLENGER_STATUSES = {
+    "challenger_return_watch",
+    "challenger_weekly_return_watch",
+    "challenger_confidence_watch",
+    "challenger_thin_edge_watch",
+    "challenger_recent_decline",
+}
+
+
+def _formation_tune_candidate(row) -> bool:
+    """Whether a quality-qualified wallet should influence the joint sizing search.
+
+    Return/weekly/confidence misses can change when margin, leverage and add behaviour change, so excluding
+    them creates a circular tuner that can only optimize the incumbent Core.  Missing samples, unresolved
+    open valuation and structural-watch wallets cannot be repaired by sizing and remain observation-only.
+    """
+    qualification = dict((row or {}).get("follow_qualification") or {})
+    if not qualification.get("eligible"):
+        return False
+    return bool(
+        qualification.get("coreEligible")
+        or qualification.get("status") in _PARAMETER_TUNABLE_CHALLENGER_STATUSES
+    )
+
+
+def _core_prefix_retention() -> dict:
+    return {
+        "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
+        "net_retention": float(config.CORE_PREFIX_NET_RETENTION),
+        "stress_retention": float(config.CORE_PREFIX_STRESS_RETENTION),
+        "utility_slack": float(config.CORE_PREFIX_ABS_UTILITY_SLACK),
+        "net_slack": float(config.CORE_PREFIX_ABS_NET_SLACK),
+        "stress_slack": float(config.CORE_PREFIX_ABS_STRESS_SLACK),
+        "max_dd_worsen": float(config.CORE_PREFIX_MAX_DD_WORSEN),
+    }
+
+
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -> dict:
-    """Tune the full quality pool once, then compare smaller prefixes under that same sizing surface."""
+    """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
     now_ms = int(now_ms or time.time() * 1000)
     ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False)
-    ranked_current = [
-        row for row in ranked_candidates
-        if (row.get("follow_qualification") or {}).get("coreEligible")
-    ]
     base_follow = params.load_follow(db)
     if "SMART_ADD" in base_follow:
         base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
     previous_core = _latest_published_core(db)
-    preliminary_ranked = []
-    for row in ranked_current:
-        addr = row["addr"]
-        if addr in previous_core:
-            audit = {
-                "addr": addr, "passed": True, "existingCore": True,
-                "passCount": 1, "required": 1, "checks": [],
-            }
-        else:
-            audit = {
-                "addr": addr, "existingCore": False,
-                **_temporal_core_admission(
-                    db, row, now_ms, generation_id=generation_id, follow=base_follow,
-                ),
-            }
-        if audit["passed"]:
-            preliminary_ranked.append(row)
     upper = max(1, min(
         int(config.MAX_TARGETS),
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
     ))
-    initial = preliminary_ranked[:upper]
-    if not initial:
+    # Tune against every quality wallet whose economics can improve under a different sizing surface.
+    # Temporal entry confirmation is evaluated *after* the winning parameters are known; applying it here
+    # creates a circular exclusion where a strong Challenger can never influence the parameters needed to
+    # prove that it belongs in Core.
+    tune_ranked = [row for row in ranked_candidates if _formation_tune_candidate(row)][:upper]
+    if not tune_ranked:
         return {
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
             "search": {
-                "algorithm": "quality_prefix_fixed_surface_v2", "initialCount": 0, "selectedCount": 0,
+                "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0, "selectedCount": 0,
                 "temporalRejected": [], "temporalAdmission": [],
             },
         }
-    tune_ordered = tuple(row["addr"] for row in initial)
+    tune_ordered = tuple(row["addr"] for row in tune_ranked)
 
-    tune_result = None
     tune_eligible = None
     tune_reason = "retune_disabled"
+    tune_search = None
+    tune_runs = {}
+    retention = _core_prefix_retention()
     if retune:
-        _set_scan_progress(
-            db, stage="portfolio_tune", candidates_scanned=len(tune_ordered), candidates_total=len(tune_ordered),
-        )
-        tune_result = auto_tune.maybe_tune_margins(
-            db, source="core_formation", stamp=f"{stamp}:full",
-            dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
-            addrs_override=list(tune_ordered), record_run=False,
-        )
-        if tune_result.get("status") != "ok":
-            raise RuntimeError(
-                "core_prefix_tune_failed:" + str(tune_result.get("reason") or tune_result.get("status"))
+        def tune_evaluate(count):
+            count = int(count)
+            _set_scan_progress(
+                db, stage="portfolio_tune", candidates_scanned=count,
+                candidates_total=len(tune_ordered),
             )
-    tuned_params, tune_eligible, tune_reason = _formation_param_surface(
-        base_follow, tune_result, retune=retune,
-    )
+            result = auto_tune.maybe_tune_margins(
+                db, source="core_formation", stamp=f"{stamp}:k{count}",
+                dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
+                addrs_override=list(tune_ordered[:count]), record_run=False,
+                formation_admission=True,
+            )
+            if result.get("status") != "ok":
+                raise RuntimeError(
+                    "core_prefix_tune_failed:" + str(result.get("reason") or result.get("status"))
+                )
+            tune_runs[count] = result
+            db.commit()  # reusable path-cache writes only; membership/params remain untouched.
+            return _prefix_eval_from_tune(
+                count, result,
+                initial_balance=f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
+            )
+
+        tune_search = core_formation.search_quality_prefix(
+            len(tune_ordered), tune_evaluate, retention_kwargs=retention,
+            tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
+            exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
+        )
+        tuned_params = dict(tune_search.selected.params or {})
+        chosen_run = tune_runs.get(int(tune_search.selected.count)) or {}
+        _surface, tune_eligible, tune_reason = _formation_param_surface(
+            base_follow, chosen_run, retune=True,
+        )
+        if not tuned_params:
+            tuned_params = _surface
+    else:
+        tuned_params, tune_eligible, tune_reason = _formation_param_surface(
+            base_follow, None, retune=False,
+        )
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
     sigmas = auto_tune._load_sigmas(db)
     market_ctx = auto_tune._load_market_ctx(db)
@@ -1949,9 +2003,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "qualifications": effective_qualifications,
             "scores": effective_scores,
             "search": {
-                "algorithm": "quality_prefix_fixed_surface_v3", "initialCount": 0,
-                "selectedCount": 0, "tunedInputCount": len(tune_ordered),
+                "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0,
+                "selectedCount": 0,
+                "tunePoolCount": len(tune_ordered),
+                "tunedInputCount": (
+                    int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
+                ),
+                "fullTuneRuns": len(tune_runs),
+                "tuneEvaluatedCounts": (
+                    [value.count for value in tune_search.evaluated] if tune_search is not None else []
+                ),
                 "effectiveRejected": temporal_rejected,
+                "formationTuneEligible": tune_eligible,
+                "formationTuneReason": tune_reason,
                 "temporalRejected": temporal_rejected, "temporalAdmission": temporal_audit,
             },
         }
@@ -1999,20 +2063,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
         )
 
-    retention = {
-        "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
-        "net_retention": float(config.CORE_PREFIX_NET_RETENTION),
-        "stress_retention": float(config.CORE_PREFIX_STRESS_RETENTION),
-        "utility_slack": float(config.CORE_PREFIX_ABS_UTILITY_SLACK),
-        "net_slack": float(config.CORE_PREFIX_ABS_NET_SLACK),
-        "stress_slack": float(config.CORE_PREFIX_ABS_STRESS_SLACK),
-        "max_dd_worsen": float(config.CORE_PREFIX_MAX_DD_WORSEN),
-    }
-    search = core_formation.search_quality_prefix(
+    prefix_search = core_formation.search_quality_prefix(
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
+        exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
     )
-    chosen = search.selected
+    chosen = prefix_search.selected
     evaluations = tuple({
         "count": value.count, "netPnl": value.net_pnl,
         "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
@@ -2020,20 +2076,41 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         "liquidations": value.liquidations, "utility": value.utility,
         "feasible": bool(value.feasible),
         "retainsReference": (
-            core_formation.retains_reference(search.reference, value, **retention)
-            if search.reference.feasible else value.feasible
+            core_formation.retains_reference(prefix_search.reference, value, **retention)
+            if prefix_search.reference.feasible else value.feasible
         ),
-    } for value in search.evaluated)
+    } for value in prefix_search.evaluated)
+    tune_evaluations = tuple({
+        "count": value.count,
+        "netPnl": value.net_pnl,
+        "stressNetPnl": value.stress_net_pnl,
+        "maxDrawdown": value.max_drawdown,
+        "openRate": value.actionable_open_rate,
+        "capacityFit": value.capacity_fit,
+        "liquidations": value.liquidations,
+        "utility": value.utility,
+        "feasible": bool(value.feasible),
+    } for value in (tune_search.evaluated if tune_search is not None else ()))
     return {
         "selected": ordered[:chosen.count], "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,
         "qualifications": effective_qualifications, "scores": effective_scores,
         "search": {
-            "algorithm": "quality_prefix_fixed_surface_v3", "initialCount": len(ordered),
-            "selectedCount": chosen.count, "boundary": search.boundary,
-            "evaluatedCounts": [value.count for value in search.evaluated],
-            "evaluations": evaluations, "fullTuneRuns": int(bool(retune)),
-            "tunedInputCount": len(tune_ordered), "effectiveRejected": temporal_rejected,
+            "algorithm": "quality_prefix_joint_binary_v4", "initialCount": len(ordered),
+            "selectedCount": chosen.count, "boundary": prefix_search.boundary,
+            "evaluatedCounts": [value.count for value in prefix_search.evaluated],
+            "evaluations": evaluations,
+            "tunePoolCount": len(tune_ordered),
+            "tunedInputCount": (
+                int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
+            ),
+            "fullTuneRuns": len(tune_runs),
+            "tuneBoundary": tune_search.boundary if tune_search is not None else None,
+            "tuneEvaluatedCounts": (
+                [value.count for value in tune_search.evaluated] if tune_search is not None else []
+            ),
+            "tuneEvaluations": tune_evaluations,
+            "effectiveRejected": temporal_rejected,
             "formationTuneEligible": tune_eligible,
             "formationTuneReason": tune_reason,
             "temporalRejected": temporal_rejected, "temporalAdmission": temporal_audit,
@@ -3484,7 +3561,7 @@ def _launch_async_tuner(db, generation_id, stamp):
                     script,
                     "--db",
                     str(Path(db_path).resolve()),
-                    "tune",
+                    "optimize",
                     "--generation",
                     generation_id,
                     "--stamp",
@@ -3503,7 +3580,7 @@ def _launch_async_tuner(db, generation_id, stamp):
                 "memoryLimitMb": limit_mb,
             }
         proc = subprocess.Popen(
-            [sys.executable, script, "--db", db_path, "tune", "--generation", generation_id,
+            [sys.executable, script, "--db", db_path, "optimize", "--generation", generation_id,
              "--stamp", stamp],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

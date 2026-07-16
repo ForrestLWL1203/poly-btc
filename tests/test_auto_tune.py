@@ -8,6 +8,50 @@ from hl import auto_tune, params, storage
 
 
 class AutoTuneTests(unittest.TestCase):
+    @staticmethod
+    def _formation_validation(*, baseline_capacity, challenger_capacity,
+                              baseline_open=.80, challenger_open=.90,
+                              baseline_net=120, challenger_net=100):
+        folds = [{
+            "baselineNet": baseline_net,
+            "challengerNet": challenger_net,
+            "baselineMaxDD": .10,
+            "challengerMaxDD": .10,
+            "baselineOpenRate": baseline_open,
+            "challengerOpenRate": challenger_open,
+            "baselineCapacityFit": baseline_capacity,
+            "challengerCapacityFit": challenger_capacity,
+        } for _ in range(3)]
+        return {
+            "folds": folds,
+            "foldWins": int(challenger_net > baseline_net) * 3,
+            "holdout": folds[-1],
+            "baselineStressNet": baseline_net,
+            "stressNet": challenger_net,
+        }
+
+    def test_formation_can_accept_lower_profit_surface_that_repairs_capacity(self):
+        validation = self._formation_validation(
+            baseline_capacity=.77, challenger_capacity=.88,
+        )
+
+        model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
+
+        self.assertTrue(model["eligible"])
+        self.assertTrue(model["admissionRepair"])
+        self.assertFalse(model["baselineFeasible"])
+
+    def test_formation_keeps_normal_profit_validation_when_baseline_is_fundable(self):
+        validation = self._formation_validation(
+            baseline_capacity=.90, challenger_capacity=.92,
+        )
+
+        model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
+
+        self.assertFalse(model["eligible"])
+        self.assertTrue(model["baselineFeasible"])
+        self.assertIn("relative_gain_below_floor", model["reasons"])
+
     def test_candidate_can_improve_a_baseline_already_below_absolute_open_floor(self):
         baseline = {
             "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},

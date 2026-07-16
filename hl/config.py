@@ -500,9 +500,9 @@ AUTO_TUNE_LEV_CAP_SETS = (
     (35, 12, 4), (32, 12, 4), (30, 11, 4), (30, 10, 4),
     (28, 10, 4), (25, 10, 4), (25, 8, 4),
 )
-AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9)
-AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25)
-AUTO_TUNE_COORD_HIGH_LEV_CAPS = (4, 6)
+AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9, 8, 6)
+AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25, 20)
+AUTO_TUNE_COORD_HIGH_LEV_CAPS = (6, 4, 3)
 AUTO_TUNE_LEVERAGE_SHORTLIST = 2  # 每档保留当前/最佳代表值；组合网格最多 2^3=8，而不是 3^3=27
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.40, 0.50, 0.60)
 AUTO_TUNE_SIZING_FINALISTS = 5
@@ -521,6 +521,7 @@ AUTO_TUNE_ADD_FINALISTS = 3
 CORE_ENTRY_TEMPORAL_OFFSETS_H = (0, 24, 48)
 CORE_ENTRY_TEMPORAL_MIN_PASSES = 2
 CORE_ENTRY_TEMPORAL_LOOKBACK_DAYS = 2
+CORE_PREFIX_EXHAUSTIVE_MAX_N = 8  # small quality pools tune every 1..N prefix; larger pools use binary search
 # Backward elimination stops naturally when every remaining wallet has positive conditional economics.
 # The cap only bounds a pathological run; it is not a stability quota or a promise to retain weak wallets.
 CORE_LOO_MAX_REMOVALS = MAX_TARGETS - 1

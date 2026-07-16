@@ -45,6 +45,19 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertLess(result.selected.count, 16)
         self.assertGreaterEqual(result.selected.utility, 980)
 
+    def test_small_pool_tunes_every_wallet_count_instead_of_approximating(self):
+        calls = []
+
+        result = search_quality_prefix(
+            7,
+            lambda count: calls.append(count) or value(count, 1000 + (500 if count == 5 else 0)),
+            tie_tolerance=0,
+            exhaustive_below=8,
+        )
+
+        self.assertEqual(sorted(calls), list(range(1, 8)))
+        self.assertEqual(result.selected.count, 5)
+
     def test_inferior_full_prefix_cannot_force_the_sixteenth_wallet_into_core(self):
         # Production-shaped regression: removing the quality-tail wallet improves normal PnL, stressed PnL,
         # and risk-adjusted utility.  The old implementation nevertheless forced 16 because 15 had a little

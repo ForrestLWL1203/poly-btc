@@ -302,6 +302,29 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     )
 
 
+def _candidate_admission_rank_key(candidate: dict, baseline: dict) -> tuple:
+    """Rank a sizing surface by whether it can fund the whole proposed Core prefix.
+
+    Normal tuning is profit-led.  Formation additionally needs one capacity-led finalist; otherwise every
+    lower-margin candidate can be pruned before walk-forward validation simply because it earns a little less
+    than an already-congested baseline.
+    """
+    windows = candidate.get("windows") or {}
+    usable = [result for days, result in windows.items() if _enough_sample(result, int(days))]
+    usable = usable or list(windows.values())
+    min_capacity = min((_capacity_fit(result) for result in usable), default=0.0)
+    min_open = min((float(result.get("open_fill_rate") or 0.0) for result in usable), default=0.0)
+    profitable = bool(usable) and all(_result_pnl(result) > 0.0 for result in usable)
+    return (
+        int(profitable and min_capacity >= 0.85 and min_open >= 0.70),
+        int(profitable),
+        min(min_capacity, 0.85) + min(min_open, 0.70),
+        min_capacity,
+        min_open,
+        *_candidate_rank_key(candidate, baseline),
+    )
+
+
 def _portfolio_line_score(candidate: dict) -> float:
     windows = candidate.get("windows") or {}
     return (
@@ -786,6 +809,22 @@ def independent_margin_candidates(base: dict, follow: dict) -> list[dict]:
             candidates.append(_candidate_from_params(
                 {**base, key: value}, axis=f"independent_margin_{key.lower()}",
             ))
+    return candidates
+
+
+def global_margin_candidates(base: dict, follow: dict) -> list[dict]:
+    """Shrink/grow all volatility tiers together so formation can relieve account-wide contention."""
+    base = enforce_margin_add_capacity(base, follow)
+    ceilings = margin_add_capacity_ceilings(follow)
+    factors = _unique_values(getattr(config, "AUTO_TUNE_MARGIN_FACTORS", (0.85, 1.0, 1.15)), 1.0)
+    candidates = []
+    for factor in factors:
+        proposal = dict(base)
+        for key in MARGIN_KEYS:
+            floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+            floor = min(float(follow.get(floor_key) or 0.0), ceilings[key])
+            proposal[key] = min(ceilings[key], max(floor, float(base[key]) * float(factor)))
+        candidates.append(_candidate_from_params(proposal, axis="global_margins"))
     return candidates
 
 
@@ -1465,6 +1504,51 @@ def _model_validation(validation: dict, policy) -> dict:
     return {"eligible": not reasons, "reasons": reasons, "relativeGain": relative_gain}
 
 
+def _formation_model_validation(validation: dict, policy) -> dict:
+    """Allow a lower-risk proposal to repair an otherwise unfundable wallet-count node.
+
+    This is deliberately narrower than normal auto-tune validation: it applies only during dry-run Core
+    formation.  If the active surface already funds the prefix, the ordinary profit-improvement rules remain
+    authoritative.  If it does not, the proposal may win only by restoring every hard admission invariant.
+    """
+    folds = list(validation.get("folds") or ())
+
+    def feasible(prefix, stress_key):
+        if not folds:
+            return False
+        return (
+            sum(float(row.get(f"{prefix}Net") or 0.0) for row in folds) > 0.0
+            and float(validation.get(stress_key) or 0.0) > 0.0
+            and max(float(row.get(f"{prefix}MaxDD") or 0.0) for row in folds) < 1.0
+            and min(float(row.get(f"{prefix}OpenRate") or 0.0) for row in folds) >= 0.70
+            and min(float(row.get(f"{prefix}CapacityFit") or 0.0) for row in folds) >= 0.85
+        )
+
+    baseline_feasible = feasible("baseline", "baselineStressNet")
+    challenger_feasible = feasible("challenger", "stressNet")
+    normal = _model_validation(validation, policy)
+    if baseline_feasible:
+        return {**normal, "baselineFeasible": True, "challengerFeasible": challenger_feasible}
+    if challenger_feasible:
+        return {
+            "eligible": True,
+            "reasons": [],
+            "relativeGain": normal["relativeGain"],
+            "baselineFeasible": False,
+            "challengerFeasible": True,
+            "admissionRepair": True,
+        }
+    reasons = list(normal.get("reasons") or ())
+    reasons.append("formation_admission_still_infeasible")
+    return {
+        **normal,
+        "eligible": False,
+        "reasons": list(dict.fromkeys(reasons)),
+        "baselineFeasible": False,
+        "challengerFeasible": False,
+    }
+
+
 def _maybe_rollback_applied(db, follow: dict, now_ms: int,
                             expected_generation: str | None = None,
                             expected_strategy_revision: str | None = None) -> dict | None:
@@ -1570,7 +1654,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                        mode: str | None = None, follow_values: dict | None = None,
                        data_complete: bool = True, expected_generation: str | None = None,
                        addrs_override: list[str] | tuple[str, ...] | None = None,
-                       record_run: bool = True) -> dict:
+                       record_run: bool = True, formation_admission: bool = False) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     ephemeral = addrs_override is not None
     if ephemeral and expected_generation:
@@ -1776,6 +1860,13 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     margin_candidates = []
     margin_rounds = []
     margin_params = dict(joint_params)
+    if formation_admission:
+        for candidate in global_margin_candidates(margin_params, follow):
+            check_budget("global_margin_polish")
+            margin_candidates.append(evaluate_tune_candidate(
+                db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            ))
     margin_round_limit = max(1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2))
     for round_index in range(margin_round_limit):
         round_candidates = []
@@ -1851,6 +1942,23 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     sizing_options = _diverse_sizing_candidates(
         list(unique_finalists.values()), baseline, max(1, finalist_limit),
     )
+    if formation_admission and unique_finalists:
+        # Reserve validation space for the best capacity-restoring surfaces.  Keep ordering stable and
+        # deduplicate by the exact parameter tuple before building sizing/add combinations.
+        admission_leaders = sorted(
+            unique_finalists.values(),
+            key=lambda item: _candidate_admission_rank_key(item, baseline),
+            reverse=True,
+        )[:2]
+        combined_sizing = []
+        seen_sizing = set()
+        for candidate in [*admission_leaders, *sizing_options]:
+            key = tuple(round(float((candidate.get("params") or {})[name]), 12) for name in TUNE_KEYS)
+            if key in seen_sizing:
+                continue
+            seen_sizing.add(key)
+            combined_sizing.append(candidate)
+        sizing_options = combined_sizing[:max(1, finalist_limit)]
     if add_candidates and add_baseline:
         ranked_add = sorted(
             add_candidates,
@@ -1889,7 +1997,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             addrs, follow, combined, sigmas, window_fills, now_ms,
             path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
         )
-        model = _model_validation(validation, load_copy_policy(follow))
+        model = (
+            _formation_model_validation(validation, load_copy_policy(follow))
+            if formation_admission else _model_validation(validation, load_copy_policy(follow))
+        )
         finalist_results.append({
             "params": combined,
             "eligible": model["eligible"],
@@ -1916,7 +2027,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected_margins = {key: selected_params[key] for key in MARGIN_KEYS}
     follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     if ephemeral:
-        model = _model_validation(walk_forward, load_copy_policy(follow))
+        model = (
+            _formation_model_validation(walk_forward, load_copy_policy(follow))
+            if formation_admission else _model_validation(walk_forward, load_copy_policy(follow))
+        )
         apply_validation = {
             "eligible": bool(model.get("eligible")),
             "reasons": list(model.get("reasons") or ()),
@@ -2047,6 +2161,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
         "margin_rounds": margin_rounds,
+        "formation_admission": bool(formation_admission),
     }
     if record_run:
         _record_run(db, source, stamp, selected, applied, len(addrs), base, result,

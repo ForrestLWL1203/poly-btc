@@ -306,7 +306,7 @@ def evaluate_follow_eligibility(
 
 
 def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
-    """Rank copyability without absolute-dollar PnL or overlapping-window confidence."""
+    """Rank copyability, repeatability and account-normalized strict Copy economics."""
     metrics = apply_allowed_sector_copy_metrics(metrics)
     raw = _clamp(_num(metrics.get("score")))
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
@@ -343,8 +343,33 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         + 0.15 * risk + 0.15 * execution
     )
     shrunk_copy = 0.5 + confidence * (copy_score - 0.5)
+    pnl30 = _num(metrics.get("copy_bt_net_pnl")) + _num(metrics.get("copy_bt_unrealized_pnl"))
+    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl")) + _num(metrics.get("copy_bt_14d_unrealized_pnl"))
+    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl")) + _num(metrics.get("copy_bt_7d_unrealized_pnl"))
+    margin_equity_pct = _clamp(_num(metrics.get("margin_equity_pct"), config.MARGIN_EQUITY_PCT))
+    economic_equity = max(
+        1.0,
+        _num(
+            metrics.get("initial_margin_equity"),
+            float(getattr(config, "INITIAL_BALANCE", 10_000.0)) * margin_equity_pct,
+        ),
+    )
+    returns = {
+        "30d": pnl30 / economic_equity,
+        "14d": pnl14 / economic_equity,
+        "7d": pnl7 / economic_equity,
+    }
+    # These are saturating percentage scales, not fixed dollar bonuses.  A future $20k/$30k account with
+    # proportionally scaled replay PnL therefore receives the same economic score.  Confidence shrinkage
+    # prevents a three-trade windfall from outranking a repeatable wallet solely on one large episode.
+    economic_score = (
+        0.50 * _clamp(returns["30d"] / 0.30)
+        + 0.30 * _clamp(returns["14d"] / 0.15)
+        + 0.20 * _clamp(returns["7d"] / 0.08)
+    )
+    shrunk_economics = 0.5 + confidence * (economic_score - 0.5)
     activity = _clamp(_num(metrics.get("open_probability_48h"), 0.0))
-    score = 0.15 * raw + 0.75 * shrunk_copy + 0.10 * activity
+    score = 0.10 * raw + 0.55 * shrunk_copy + 0.25 * shrunk_economics + 0.10 * activity
     reasons = [
         f"预期保证金收益{expected * 100:+.1f}%",
         f"LCB {lcb * 100:+.1f}%",
@@ -375,6 +400,9 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     return score, {
         "rawScore": raw,
         "copyScore": copy_score,
+        "economicScore": economic_score,
+        "economicReturns": returns,
+        "economicEquity": economic_equity,
         "confidence": confidence,
         "copyPnl": {
             "30d": metrics.get("copy_bt_net_pnl"),

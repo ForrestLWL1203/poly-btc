@@ -166,6 +166,13 @@ def _score_breakdown(row):
     return {
         "rawScore": score100(detail.get("rawScore")),
         "copyScore": score100(detail.get("copyScore")) if detail.get("copyScore") is not None else None,
+        "economicScore": (
+            score100(detail.get("economicScore")) if detail.get("economicScore") is not None else None
+        ),
+        "economicReturnsPct": {
+            key: round(float(value) * 100, 2)
+            for key, value in (detail.get("economicReturns") or {}).items()
+        },
         "confidencePct": round((detail.get("confidence") or 0.0) * 100, 0),
         "copyPnl": detail.get("copyPnl"),
         "copyUnrealizedPnl": {

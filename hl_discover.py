@@ -308,7 +308,9 @@ def main() -> int:
         scanner._set_scanner_proc(db, "idle", {"last_repair_at": now_iso(), "active": n})
         print(f"watchlist {n} active")
     elif args.cmd == "tune":
-        result = scanner.tune_published_generation(db, args.generation, stamp=args.stamp)
+        # Keep the legacy hidden verb as a compatibility alias, but never tune only the incumbent Core.
+        # Full formation must jointly search wallet-count prefixes and their parameter surfaces.
+        result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "optimize":
         result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)

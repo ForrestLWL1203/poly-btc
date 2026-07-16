@@ -1,9 +1,9 @@
 """Quality-first Core formation.
 
-The expensive parameter search runs once on the full individually qualified pool.  Smaller quality prefixes
-are compared under that fixed sizing surface with a bounded binary search.  A later strict leave-one-out pass
-may remove a non-tail member only when its actual presence lowers funded shared-account net economics; this is
-not a correlation or same-coin de-duplication rule.
+Each bounded binary prefix node may own an independently tuned sizing surface.  This preserves the intended
+16 -> 8 -> 12 search: wallet count and capital sizing are evaluated together instead of measuring every count
+with parameters fitted only to the incumbent Core.  A later strict leave-one-out pass may remove a non-tail
+member only when its actual presence lowers funded shared-account net economics.
 """
 from __future__ import annotations
 
@@ -82,13 +82,13 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
 
 def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEvaluation], *,
                           retention_kwargs: Mapping[str, float] | None = None,
-                          tie_tolerance: float = .02) -> PrefixSearchResult:
-    """Evaluate O(log N) quality prefixes and return the best safe economic state.
+                          tie_tolerance: float = .02,
+                          exhaustive_below: int = 0) -> PrefixSearchResult:
+    """Evaluate quality prefixes and return the best safe economic state.
 
-    The full-size prefix is only the search anchor, never a privileged answer.  Retention steers the binary
-    exploration toward the useful boundary; the final answer is the highest-utility feasible state among
-    every evaluated count.  This distinction is essential when adding the last wallet makes the full prefix
-    worse: an inferior full-size reference must never win merely because it was the starting point.
+    Small pools are cheap enough to search exhaustively.  Larger pools use the original bounded binary
+    direction (16 -> 8 -> 12 ...) plus boundary neighbours.  The full-size prefix is only the search anchor,
+    never a privileged answer; the final answer is the highest-utility feasible evaluated state.
     """
     initial_count = int(initial_count)
     if initial_count < 1:
@@ -107,7 +107,18 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     reference = get(initial_count)
     retain_args = dict(retention_kwargs or {})
     lo, hi = 1, initial_count
-    if reference.feasible:
+    if initial_count <= max(0, int(exhaustive_below)):
+        for count in range(1, initial_count + 1):
+            get(count)
+        if reference.feasible:
+            retained = [
+                value.count for value in cache.values()
+                if retains_reference(reference, value, **retain_args)
+            ]
+            boundary = min(retained or [initial_count])
+        else:
+            boundary = max((value.count for value in cache.values() if value.feasible), default=0)
+    elif reference.feasible:
         # Find the smallest prefix that preserves the fully funded initial portfolio.
         while lo < hi:
             mid = (lo + hi) // 2
