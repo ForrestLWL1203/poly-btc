@@ -11,6 +11,7 @@ class CopyDataTests(unittest.TestCase):
             {"time": 2, "tid": 9, "user": "0xB", "coin": "BTC"},
             {"time": 1, "tid": 3, "user": "0xB", "coin": "foo:PRIVATE"},
             {"time": 1, "tid": 2, "user": "0xB", "coin": "ETH/USDC"},
+            {"time": 1, "tid": 6, "user": "0xB", "coin": "#4830", "dir": "Settlement", "px": "0"},
             {"time": 1, "tid": 4, "user": "0xB", "coin": "XYZ:MU"},
             {"time": 1, "tid": 5, "user": "0xA", "coin": "ETH"},
         ]

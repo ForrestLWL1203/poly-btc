@@ -72,11 +72,10 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["status"], "challenger_sample_watch")
 
-    def test_low_positive_probability_is_challenger(self):
+    def test_sample_complete_wallet_has_no_hidden_probability_gate(self):
         result = evaluate_follow_eligibility(evidence(copy_positive_probability=0.64))
         self.assertTrue(result["eligible"])
-        self.assertFalse(result["coreEligible"])
-        self.assertEqual(result["status"], "challenger_confidence_watch")
+        self.assertTrue(result["coreEligible"])
 
     def test_near_core_thin_edge_with_strong_dollar_economics_is_challenger(self):
         result = evaluate_follow_eligibility(evidence(
@@ -170,7 +169,8 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_closed_n=33, copy_bt_14d_closed_n=15, copy_bt_7d_closed_n=10,
             copy_evidence_days=12,
         ))
-        self.assertTrue(strong["coreEligible"])
+        self.assertFalse(strong["coreEligible"])
+        self.assertEqual(strong["status"], "challenger_sample_watch")
         self.assertEqual(sample_watch["status"], "challenger_sample_watch")
         self.assertEqual(collapse["status"], "recent_copy_collapse")
         self.assertEqual(
@@ -183,7 +183,7 @@ class FollowScoreTests(unittest.TestCase):
         )
         strong = evaluate_follow_eligibility(evidence(
             copy_bt_net_pnl=1000, copy_bt_closed_n=20, copy_evidence_days=10,
-            copy_bt_7d_closed_n=3, copy_bt_7d_net_pnl=300, copy_return_lcb=-0.05,
+            copy_bt_7d_closed_n=5, copy_bt_7d_net_pnl=300, copy_return_lcb=-0.05,
         ), margin_equity_pct=0.50)
         rejected = evaluate_follow_eligibility(
             evidence(copy_bt_net_pnl=499), margin_equity_pct=0.50,
@@ -202,7 +202,7 @@ class FollowScoreTests(unittest.TestCase):
         ))
 
         self.assertEqual(standard["status"], "challenger_weekly_return_watch")
-        self.assertEqual(strong["status"], "challenger_weekly_return_watch")
+        self.assertEqual(strong["status"], "challenger_sample_watch")
         self.assertFalse(standard["coreEligible"])
         self.assertFalse(strong["coreEligible"])
 
@@ -305,6 +305,31 @@ class FollowScoreTests(unittest.TestCase):
     def test_negative_bootstrap_lcb_is_scored_but_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_return_lcb=-0.05))
         self.assertTrue(result["eligible"])
+        self.assertTrue(result["coreEligible"])
+
+    def test_five_recent_closes_are_sufficient_core_evidence(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_bt_closed_n=9,
+            copy_bt_14d_closed_n=5,
+            copy_bt_7d_closed_n=5,
+            copy_evidence_days=5,
+            copy_bt_net_pnl=3100,
+            copy_bt_14d_net_pnl=3070,
+            copy_bt_7d_net_pnl=3070,
+            copy_return_lcb=-0.02,
+            copy_positive_probability=0.55,
+        ))
+
+        self.assertTrue(result["eligible"])
+        self.assertTrue(result["coreEligible"])
+        self.assertEqual(result["status"], "core_eligible")
+
+    def test_score_confidence_saturates_at_qualification_sample_floors(self):
+        _score, detail = compute_follow_score(evidence(
+            copy_bt_closed_n=7, copy_evidence_days=5,
+        ))
+
+        self.assertEqual(detail["confidence"], 1.0)
 
     def test_more_strict_copy_profit_at_the_same_equity_increases_wallet_score(self):
         low, _ = compute_follow_score(evidence(

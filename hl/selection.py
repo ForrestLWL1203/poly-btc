@@ -404,7 +404,7 @@ class PortfolioMetrics:
 class SelectionConstraints:
     min_relative_lcb_improvement: float = 0.05
     min_actionable_open_rate: float = 0.70
-    min_capacity_fit: float = 0.85
+    min_capacity_fit: float = 0.75
     max_drawdown_worsening: float = 0.01
     max_deploy_pct: float = 0.80
     max_cost_drag_ratio: float = 0.25

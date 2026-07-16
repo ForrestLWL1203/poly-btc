@@ -10,7 +10,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(policy.min_closed(14), policy.min_closed_14d)
         self.assertEqual(policy.min_closed(7), policy.min_closed_7d)
         self.assertGreaterEqual(policy.min_actionable_open_rate, 0.7)
-        self.assertGreaterEqual(policy.min_capacity_fit, 0.85)
+        self.assertGreaterEqual(policy.min_capacity_fit, 0.75)
         self.assertTrue(policy.version.startswith("copy-policy-"))
 
     def test_policy_version_changes_with_overrides(self):

@@ -206,8 +206,6 @@ def evaluate_follow_eligibility(
             "role": "rejected",
             "reasons": [f"资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%"],
         }
-    probability_ok = _num(positive_probability, 0.5) >= policy.entry_positive_probability
-    lcb_ok = _num(return_lcb) >= policy.min_return_lcb
     standard_samples = c30 >= min_closed30 and evidence_days >= min_evidence_days and c7 >= min_closed7
     recent_warning = (
         (
@@ -229,7 +227,6 @@ def evaluate_follow_eligibility(
         and pnl30 >= core_floor
         and weekly_economics_ok
         and standard_samples
-        and probability_ok
     )
     if thin_edge and not thin_edge_watch:
         return {
@@ -241,15 +238,17 @@ def evaluate_follow_eligibility(
                 f"保证金归一化预期收益低于候选观察线{challenger_edge_floor * 100:.1f}%"
             ],
         }
-    # Strong 30d evidence may waive the thin 7d/LCB confidence checks, but never a confirmed recent
-    # deterioration.  A wallet whose sampled 14d copy window is already non-positive remains worth
-    # observing, not opening in Core, even when its older 30d history was excellent.
+    # Five closed 7d episodes is the operator-defined recent-evidence floor.  Once the 30d/day/7d sample
+    # floors are met, bootstrap LCB and positive-probability remain continuous ranking diagnostics only;
+    # they must not override large, fee-paid strict-Copy dollars with a second hidden confidence gate.
+    # Strong 30d economics no longer waive the same five-episode recent floor.
+    strong_samples = bool(strong_samples and c7 >= min_closed7)
     strong_entry = (
-        pnl30 >= strong_floor and strong_samples and probability_ok and not recent_warning
+        pnl30 >= strong_floor and strong_samples and not recent_warning
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     standard_entry = (
-        pnl30 >= core_floor and standard_samples and probability_ok and lcb_ok and not recent_warning
+        pnl30 >= core_floor and standard_samples and not recent_warning
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     core_eligible = bool(strong_entry or standard_entry)
@@ -282,9 +281,7 @@ def evaluate_follow_eligibility(
         )
     elif pnl30 < core_floor:
         status, reason = "challenger_return_watch", "30天Copy收益达到候选线但未达到Core线"
-    elif not strong_samples and (
-        c30 < min_closed30 or evidence_days < min_evidence_days or c7 < min_closed7
-    ):
+    elif c30 < min_closed30 or evidence_days < min_evidence_days or c7 < min_closed7:
         status, reason = "challenger_sample_watch", "Copy样本或独立证据尚不足"
     elif pnl7 < weekly_core_floor:
         status, reason = (
@@ -292,7 +289,9 @@ def evaluate_follow_eligibility(
             f"7天Copy经济收益{pnl7:+.0f}低于Core周收益线{weekly_core_floor:.0f}",
         )
     else:
-        status, reason = "challenger_confidence_watch", "LCB或盈利概率尚未达到Core线"
+        # All economic/sample/valuation/structure paths above are explicit.  Keep a fail-closed business
+        # label for unforeseen policy combinations, but never call it a confidence failure.
+        status, reason = "challenger_policy_watch", "其他Core业务条件尚未满足"
     return {
         "eligible": True,
         "coreEligible": False,
@@ -334,7 +333,14 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         ) / 2.0
     execution = _clamp(_num(execution))
     evidence_days = int(_num(metrics.get("copy_evidence_days")))
-    confidence = 0.55 * _clamp(c30 / 20.0) + 0.45 * _clamp(evidence_days / 10.0)
+    policy = load_copy_policy()
+    # Qualification already defines seven 30d closes and five independent days as sufficient evidence.
+    # Continuing to shrink a qualified wallet toward a neutral 0.5 until 20 closes/10 days silently ranks
+    # a five-close +30% week behind a much thinner but older wallet.  Saturate at the actual evidence floors;
+    # below them the continuous factor still keeps observation-only wallets appropriately conservative.
+    closed_confidence = _clamp(c30 / max(1.0, float(policy.min_closed_30d)))
+    day_confidence = _clamp(evidence_days / max(1.0, float(min(5, policy.min_closed_30d))))
+    confidence = min(closed_confidence, day_confidence)
     edge_score = _clamp(0.5 + 0.5 * math.tanh(expected / 0.05))
     lcb_score = _clamp(0.5 + 0.5 * math.tanh(lcb / 0.03))
     probability_score = _clamp((probability - 0.5) / 0.5)

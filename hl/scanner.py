@@ -2063,31 +2063,35 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     shared_path = price_path.load_refined(db, all_fills, path_start, now_ms)
     shared_meta = price_path.coverage(db, all_fills, path_start, now_ms)
 
-    def evaluate(count):
+    membership_eval_cache = {}
+
+    def evaluate_members(addrs):
+        key = tuple(sorted(dict.fromkeys(addrs)))
+        if key in membership_eval_cache:
+            return membership_eval_cache[key]
         _set_scan_progress(
-            db, stage="portfolio_tune", candidates_scanned=int(count), candidates_total=len(ordered),
+            db, stage="portfolio_tune", candidates_scanned=len(key), candidates_total=len(ordered),
         )
-        addrs = ordered[:int(count)]
-        filtered = auto_tune._filter_window_fills_by_addr(window_fills, addrs)
+        filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
         windows = auto_tune._candidate_windows(
-            db, list(addrs), sigmas, fixed_follow, now_ms,
+            db, list(key), sigmas, fixed_follow, now_ms,
             window_fills=filtered, market_ctx=market_ctx,
             path_rows=shared_path, path_meta=shared_meta,
         )
         stressed = auto_tune._candidate_windows(
-            db, list(addrs), sigmas, {**fixed_follow, "REPLAY_COST_MULT": 1.5}, now_ms,
+            db, list(key), sigmas, {**fixed_follow, "REPLAY_COST_MULT": 1.5}, now_ms,
             window_fills=filtered, market_ctx=market_ctx,
             path_rows=shared_path, path_meta=shared_meta,
         )
-        metrics_ = _portfolio_selection_metrics(windows, selected_n=len(addrs))
+        metrics_ = _portfolio_selection_metrics(windows, selected_n=len(key))
         stress_net = min(
             (f(result.get("copy_net_pnl")) for result in stressed.values()), default=-1e12,
         )
         stress_liquidations = max(
             (int(result.get("liquidations") or 0) for result in stressed.values()), default=0,
         )
-        return core_formation.PrefixEvaluation(
-            count=int(count), net_pnl=f(metrics_.net_pnl), stress_net_pnl=stress_net,
+        value = core_formation.PrefixEvaluation(
+            count=len(key), net_pnl=f(metrics_.net_pnl), stress_net_pnl=stress_net,
             max_drawdown=f(metrics_.max_drawdown),
             actionable_open_rate=f(metrics_.actionable_open_rate),
             capacity_fit=f(metrics_.capacity_fit),
@@ -2095,13 +2099,24 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             params=tuned_params,
             payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
         )
+        membership_eval_cache[key] = value
+        return value
+
+    def evaluate(count):
+        return evaluate_members(ordered[:int(count)])
 
     prefix_search = core_formation.search_quality_prefix(
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
     )
-    chosen = prefix_search.selected
+    membership_search = core_formation.search_quality_membership(
+        ordered, evaluate_members,
+        initial=ordered[:prefix_search.selected.count],
+        exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
+    )
+    chosen = membership_search.metrics
+    chosen_addrs = tuple(membership_search.selected)
     evaluations = tuple({
         "count": value.count, "netPnl": value.net_pnl,
         "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
@@ -2125,14 +2140,17 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         "feasible": bool(value.feasible),
     } for value in (tune_search.evaluated if tune_search is not None else ()))
     return {
-        "selected": ordered[:chosen.count], "ranked": ordered,
+        "selected": chosen_addrs, "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,
         "qualifications": effective_qualifications, "scores": effective_scores,
         "search": {
-            "algorithm": "quality_prefix_joint_binary_v4", "initialCount": len(ordered),
-            "selectedCount": chosen.count, "boundary": prefix_search.boundary,
+            "algorithm": "quality_membership_joint_tune_v5", "initialCount": len(ordered),
+            "selectedCount": len(chosen_addrs), "boundary": prefix_search.boundary,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
+            "membershipAlgorithm": membership_search.algorithm,
+            "membershipEvaluated": membership_search.evaluated,
+            "membershipSelected": list(chosen_addrs),
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": (
                 int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
@@ -2257,7 +2275,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    previous_roles, controls, registry, held,
                                    desired_order, formation_meta,
                                    effective_qualifications=None, effective_scores=None):
-    """Materialize one tuned quality prefix; no arbitrary membership search is allowed here."""
+    """Materialize the jointly tuned, skip-aware quality membership selected during formation."""
     copy_policy = load_copy_policy()
     by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
     for addr, qualification in dict(effective_qualifications or {}).items():

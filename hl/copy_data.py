@@ -24,7 +24,10 @@ def canonical_coin(coin) -> str:
 
 def is_copyable_coin(coin, universe: Iterable[str] | None = None) -> bool:
     coin = canonical_coin(coin)
-    if not coin or is_spot(coin):
+    # ``#<id>`` rows are binary settlement/outcome markets.  They disappear from allMids after settling
+    # and the live Observer universe cannot originate them.  Replaying them as plain perps both fabricates
+    # copyability and leaves zero-price Settlement rows as phantom open positions.
+    if not coin or is_spot(coin) or coin.startswith("#"):
         return False
     # A colon outside the public xyz namespace identifies an opaque/private
     # builder dex.  It cannot be priced or copied safely by the live engine.

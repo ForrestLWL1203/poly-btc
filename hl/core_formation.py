@@ -8,7 +8,10 @@ member only when its actual presence lowers funded shared-account net economics.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import itertools
 from typing import Callable, Mapping
+
+from . import config
 
 
 @dataclass(frozen=True)
@@ -41,8 +44,86 @@ class PrefixEvaluation:
             and self.stress_net_pnl > 0
             and self.max_drawdown < 1.0
             and self.actionable_open_rate >= 0.70
-            and self.capacity_fit >= 0.85
+            and self.capacity_fit >= float(config.SELECTION_MIN_CAPACITY_FIT)
         )
+
+
+@dataclass(frozen=True)
+class MembershipSearchResult:
+    selected: tuple[str, ...]
+    metrics: PrefixEvaluation
+    evaluated: int
+    algorithm: str
+
+
+def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_below: int = 8):
+    """Find a feasible quality subset without letting one congested wallet block every later wallet.
+
+    Small Core-ready pools are exhaustively evaluated.  Larger pools start from the count search's winning
+    prefix and apply bounded best-add/best-swap closure.  The evaluator owns the shared-account parameter
+    surface; membership only compares complete portfolio replays on that one surface.
+    """
+    ordered = tuple(dict.fromkeys(str(addr).lower() for addr in candidates if addr))
+    if not ordered:
+        raise ValueError("candidates must not be empty")
+    cache = {}
+
+    def get(addrs):
+        key = tuple(sorted(dict.fromkeys(addrs)))
+        if key not in cache:
+            value = evaluate(key)
+            if int(value.count) != len(key):
+                raise ValueError("membership evaluation count mismatch")
+            cache[key] = value
+        return cache[key]
+
+    def rank(item):
+        addrs, value = item
+        return (value.utility, value.net_pnl, value.stress_net_pnl, -value.max_drawdown, -len(addrs), addrs)
+
+    if len(ordered) <= max(1, int(exhaustive_below)):
+        states = []
+        for count in range(1, len(ordered) + 1):
+            for addrs in itertools.combinations(ordered, count):
+                value = get(addrs)
+                if value.feasible:
+                    states.append((tuple(sorted(addrs)), value))
+        if not states:
+            raise RuntimeError("no_feasible_quality_membership")
+        selected, metrics = max(states, key=rank)
+        return MembershipSearchResult(selected, metrics, len(cache), "exhaustive_subset")
+
+    selected = tuple(sorted(dict.fromkeys(initial)))
+    current = get(selected) if selected else None
+    if current is None or not current.feasible:
+        singles = [((addr,), get((addr,))) for addr in ordered]
+        feasible = [item for item in singles if item[1].feasible]
+        if not feasible:
+            raise RuntimeError("no_feasible_quality_membership")
+        selected, current = max(feasible, key=rank)
+    seen = {selected}
+    for _ in range(len(ordered) * 2):
+        selected_set = set(selected)
+        outside = [addr for addr in ordered if addr not in selected_set]
+        trials = []
+        for incoming in outside:
+            addrs = tuple(sorted((*selected, incoming)))
+            value = get(addrs)
+            if value.feasible and value.utility > current.utility:
+                trials.append((addrs, value))
+            for outgoing in selected:
+                swapped = tuple(sorted((selected_set - {outgoing}) | {incoming}))
+                value = get(swapped)
+                if value.feasible and value.utility > current.utility:
+                    trials.append((swapped, value))
+        if not trials:
+            break
+        next_selected, next_metrics = max(trials, key=rank)
+        if next_selected in seen:
+            break
+        seen.add(next_selected)
+        selected, current = next_selected, next_metrics
+    return MembershipSearchResult(selected, current, len(cache), "bounded_add_swap")
 
 
 @dataclass(frozen=True)

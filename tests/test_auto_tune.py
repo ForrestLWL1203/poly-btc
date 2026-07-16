@@ -32,7 +32,7 @@ class AutoTuneTests(unittest.TestCase):
 
     def test_formation_can_accept_lower_profit_surface_that_repairs_capacity(self):
         validation = self._formation_validation(
-            baseline_capacity=.77, challenger_capacity=.88,
+            baseline_capacity=.70, challenger_capacity=.80,
         )
 
         model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
@@ -127,6 +127,18 @@ class AutoTuneTests(unittest.TestCase):
     def test_manual_margin_equity_pct_is_not_an_auto_tune_axis(self):
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.TUNE_KEYS)
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.ADD_TUNE_KEYS)
+
+    def test_joint_tuner_covers_every_tier_open_and_smart_add_axis(self):
+        self.assertEqual(auto_tune.MARGIN_KEYS, (
+            "STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT",
+        ))
+        self.assertEqual(auto_tune.LEV_KEYS, (
+            "STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP",
+        ))
+        self.assertIn("DEPLOY_FULL_PCT", auto_tune.TUNE_KEYS)
+        self.assertEqual(auto_tune.ADD_TUNE_KEYS, (
+            "ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD",
+        ))
 
     def test_margin_polish_combines_two_profitable_tier_moves(self):
         db = self._db()

@@ -314,11 +314,12 @@ def _candidate_admission_rank_key(candidate: dict, baseline: dict) -> tuple:
     usable = usable or list(windows.values())
     min_capacity = min((_capacity_fit(result) for result in usable), default=0.0)
     min_open = min((float(result.get("open_fill_rate") or 0.0) for result in usable), default=0.0)
+    capacity_floor = float(load_copy_policy().min_capacity_fit)
     profitable = bool(usable) and all(_result_pnl(result) > 0.0 for result in usable)
     return (
-        int(profitable and min_capacity >= 0.85 and min_open >= 0.70),
+        int(profitable and min_capacity >= capacity_floor and min_open >= 0.70),
         int(profitable),
-        min(min_capacity, 0.85) + min(min_open, 0.70),
+        min(min_capacity, capacity_floor) + min(min_open, 0.70),
         min_capacity,
         min_open,
         *_candidate_rank_key(candidate, baseline),
@@ -1495,7 +1496,7 @@ def _model_validation(validation: dict, policy) -> dict:
         base_capacity = float(fold.get("baselineCapacityFit") or 0.0)
         candidate_capacity = float(fold.get("challengerCapacityFit") or 0.0)
         required_capacity = max(
-            0.85 if base_capacity >= 0.85 else 0.0,
+            policy.min_capacity_fit if base_capacity >= policy.min_capacity_fit else 0.0,
             base_capacity - max_fit_drop,
         )
         if candidate_capacity < required_capacity:
@@ -1521,7 +1522,7 @@ def _formation_model_validation(validation: dict, policy) -> dict:
             and float(validation.get(stress_key) or 0.0) > 0.0
             and max(float(row.get(f"{prefix}MaxDD") or 0.0) for row in folds) < 1.0
             and min(float(row.get(f"{prefix}OpenRate") or 0.0) for row in folds) >= 0.70
-            and min(float(row.get(f"{prefix}CapacityFit") or 0.0) for row in folds) >= 0.85
+            and min(float(row.get(f"{prefix}CapacityFit") or 0.0) for row in folds) >= policy.min_capacity_fit
         )
 
     baseline_feasible = feasible("baseline", "baselineStressNet")

@@ -1,9 +1,11 @@
 import unittest
 
-from hl.core_formation import PrefixEvaluation, retains_reference, search_quality_prefix
+from hl.core_formation import (
+    PrefixEvaluation, retains_reference, search_quality_membership, search_quality_prefix,
+)
 
 
-def value(count, utility, *, feasible=True, liquidations=0):
+def value(count, utility, *, feasible=True, liquidations=0, capacity_fit=.95):
     drawdown = 0.02
     net = utility + drawdown * 10_000
     return PrefixEvaluation(
@@ -12,7 +14,7 @@ def value(count, utility, *, feasible=True, liquidations=0):
         stress_net_pnl=max(1, net * 0.3) if feasible else -1,
         max_drawdown=drawdown,
         actionable_open_rate=0.9 if feasible else 0.1,
-        capacity_fit=0.95 if feasible else 0.1,
+        capacity_fit=capacity_fit if feasible else 0.1,
         liquidations=liquidations if feasible else max(1, liquidations),
         params={"n": count},
         payload={"initialBalance": 10_000},
@@ -114,6 +116,28 @@ class QualityPrefixSearchTests(unittest.TestCase):
     def test_rejects_when_even_one_quality_wallet_is_infeasible(self):
         with self.assertRaisesRegex(RuntimeError, "no_feasible_quality_prefix"):
             search_quality_prefix(4, lambda count: value(count, 0, feasible=False))
+
+    def test_capacity_floor_is_seventy_five_percent(self):
+        self.assertTrue(value(1, 1000, capacity_fit=.75).feasible)
+        self.assertFalse(value(1, 1000, capacity_fit=.749).feasible)
+
+    def test_small_pool_skips_congested_wallet_and_selects_later_strong_wallet(self):
+        candidates = ("0xa", "0xb", "0xc")
+        utilities = {
+            ("0xa",): (1000, .95),
+            ("0xa", "0xb"): (1300, .70),
+            ("0xa", "0xc"): (1800, .80),
+            ("0xa", "0xb", "0xc"): (2000, .72),
+        }
+
+        def evaluate(addrs):
+            utility, capacity = utilities.get(tuple(sorted(addrs)), (100, .90))
+            return value(len(addrs), utility, capacity_fit=capacity)
+
+        result = search_quality_membership(candidates, evaluate, exhaustive_below=8)
+
+        self.assertEqual(result.selected, ("0xa", "0xc"))
+        self.assertEqual(result.algorithm, "exhaustive_subset")
 
 
 if __name__ == "__main__":

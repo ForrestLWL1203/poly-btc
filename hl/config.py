@@ -96,7 +96,7 @@ CORE_SOFT_MIN_WEAK_H = 48.0
 CORE_MAX_SOFT_MEMBERSHIP_CHANGES = 1
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
-SELECTION_MIN_CAPACITY_FIT = 0.85
+SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means too many fundable opens were skipped
 SELECTION_MAX_DD_WORSEN = 0.01
 # Legacy selector knobs retained for offline comparison tests only.
 CORE_SEARCH_SEED_TARGET = 6
