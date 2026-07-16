@@ -1320,7 +1320,6 @@ def _quality_first_core_transition(
     max_removals = max(0, int(getattr(config, "CORE_LOO_MAX_REMOVALS", 2) or 0))
     min_net_gain = float(getattr(config, "CORE_LOO_MIN_NET_GAIN", 1.0) or 0.0)
     stress_slack = max(0.0, float(getattr(config, "CORE_LOO_STRESS_SLACK", 25.0) or 0.0))
-    dd_slack = max(0.0, float(getattr(config, "CORE_LOO_MAX_DD_WORSEN", 0.005) or 0.0))
     removed_by_loo = []
     while len(published) > 1 and len(removed_by_loo) < max_removals:
         base = strict_evaluate(tuple(sorted(published)))
@@ -1329,14 +1328,13 @@ def _quality_first_core_transition(
             without = strict_evaluate(tuple(sorted(published - {addr})))
             net_gain = f(without.net_pnl) - f(base.net_pnl)
             stress_gain = f(without.stress_net_pnl) - f(base.stress_net_pnl)
-            dd_worsen = f(without.max_drawdown) - f(base.max_drawdown)
             feasible = (
                 f(without.net_pnl) > 0.0
                 and f(without.stress_net_pnl) > 0.0
                 and f(without.actionable_open_rate) >= load_copy_policy().min_actionable_open_rate
                 and f(without.capacity_fit) >= load_copy_policy().min_capacity_fit
             )
-            if feasible and net_gain >= min_net_gain and stress_gain >= -stress_slack and dd_worsen <= dd_slack:
+            if feasible and net_gain >= min_net_gain and stress_gain >= -stress_slack:
                 utility_gain = f(without.risk_adjusted_utility) - f(base.risk_adjusted_utility)
                 trials.append((net_gain, utility_gain, stress_gain, -desired.index(addr), addr))
         if not trials:
@@ -1756,7 +1754,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None) -> dict:
         "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
         "openRate": value.actionable_open_rate, "capacityFit": value.capacity_fit,
         "liquidations": value.liquidations, "utility": value.utility,
-        "retained": (
+        "feasible": bool(value.feasible),
+        "retainsReference": (
             core_formation.retains_reference(search.reference, value, **retention)
             if search.reference.feasible else value.feasible
         ),

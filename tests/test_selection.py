@@ -288,6 +288,38 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(set(consensus["selected"]), {"0xa", "0xb"})
         self.assertEqual(consensus["looRemoved"], ())
 
+    def test_quality_first_transition_does_not_keep_drag_to_minimize_drawdown_alone(self):
+        profiles = [
+            {
+                "addr": addr, "status": "active", "profile_generation": "g2",
+                "data_status": "valid", "follow_qualification": {"coreEligible": True},
+            }
+            for addr in ("0xa", "0xb")
+        ]
+        def portfolio(net, stress, dd):
+            return selection.PortfolioMetrics(
+                net, stress, 0, .95, .95, dd, .50, .05,
+                net_pnl=net, stress_net_pnl=stress, drawdown_dollars=dd * 10_000,
+                risk_adjusted_utility=net - dd * 10_000,
+            )
+
+        metrics = {
+            (): portfolio(0, 0, 0),
+            ("0xa",): portfolio(5_500, 2_800, .14),
+            ("0xb",): portfolio(1_000, 500, .08),
+            ("0xa", "0xb"): portfolio(5_405, 2_582, .11),
+        }
+
+        result = scanner._quality_first_core_transition(
+            profiles, generation_id="g2", previous_roles={}, controls={}, held=set(),
+            desired_order=("0xa", "0xb"),
+            strict_evaluate=lambda addrs: metrics[tuple(sorted(addrs))],
+        )
+
+        self.assertEqual(result["selected"], ("0xa",))
+        self.assertEqual(result["looRemoved"], ("0xb",))
+        self.assertEqual(result["reasons"]["0xb"], "portfolio_negative_incremental_net")
+
     def test_stable_core_replaces_only_confirmed_weak_wallet(self):
         day = 86_400_000
         now = 3 * day

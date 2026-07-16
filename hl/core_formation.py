@@ -83,11 +83,12 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
 def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEvaluation], *,
                           retention_kwargs: Mapping[str, float] | None = None,
                           tie_tolerance: float = .02) -> PrefixSearchResult:
-    """Evaluate O(log N) quality prefixes and return the best retained state.
+    """Evaluate O(log N) quality prefixes and return the best safe economic state.
 
-    Search finds the smallest prefix that preserves the fully tuned initial portfolio.  It then evaluates
-    immediate neighbours and chooses the best risk-adjusted utility, preferring fewer wallets only when the
-    utilities are within ``tie_tolerance``.
+    The full-size prefix is only the search anchor, never a privileged answer.  Retention steers the binary
+    exploration toward the useful boundary; the final answer is the highest-utility feasible state among
+    every evaluated count.  This distinction is essential when adding the last wallet makes the full prefix
+    worse: an inferior full-size reference must never win merely because it was the starting point.
     """
     initial_count = int(initial_count)
     if initial_count < 1:
@@ -132,24 +133,16 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     for count in {boundary - 1, boundary, boundary + 1, initial_count}:
         if 1 <= count <= initial_count:
             get(count)
-    retained = (
-        [
-            value for value in cache.values()
-            if value.count == initial_count or retains_reference(reference, value, **retain_args)
-        ]
-        if reference.feasible else [value for value in cache.values() if value.feasible]
-    )
-    best_utility = max(value.utility for value in retained)
+    feasible = [value for value in cache.values() if value.feasible]
+    if not feasible:
+        raise RuntimeError("no_feasible_quality_prefix")
+    best_utility = max(value.utility for value in feasible)
     tolerance = max(0.0, float(tie_tolerance))
     near_best = [
-        value for value in retained
+        value for value in feasible
         if value.utility >= best_utility - max(1.0, abs(best_utility) * tolerance)
     ]
-    selected = (
-        min(near_best, key=lambda value: (value.count, -value.utility))
-        if reference.feasible
-        else max(near_best, key=lambda value: (value.count, value.utility))
-    )
+    selected = min(near_best, key=lambda value: (value.count, -value.utility, -value.net_pnl))
     return PrefixSearchResult(
         selected=selected,
         reference=reference,

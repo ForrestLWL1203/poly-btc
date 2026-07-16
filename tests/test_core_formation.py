@@ -1,6 +1,6 @@
 import unittest
 
-from hl.core_formation import PrefixEvaluation, search_quality_prefix
+from hl.core_formation import PrefixEvaluation, retains_reference, search_quality_prefix
 
 
 def value(count, utility, *, feasible=True, liquidations=0):
@@ -45,12 +45,38 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertLess(result.selected.count, 16)
         self.assertGreaterEqual(result.selected.utility, 980)
 
-    def test_infeasible_full_prefix_searches_down_to_largest_feasible_count(self):
+    def test_inferior_full_prefix_cannot_force_the_sixteenth_wallet_into_core(self):
+        # Production-shaped regression: removing the quality-tail wallet improves normal PnL, stressed PnL,
+        # and risk-adjusted utility.  The old implementation nevertheless forced 16 because 15 had a little
+        # more drawdown than the full-size reference and therefore failed the reference-retention predicate.
+        metrics = {
+            16: PrefixEvaluation(16, 55_405, 25_829, .1111, .90, .95, 0, {}, {"initialBalance": 10_000}),
+            15: PrefixEvaluation(15, 57_740, 27_882, .1417, .90, .95, 0, {}, {"initialBalance": 10_000}),
+        }
+
+        def evaluate(count):
+            return metrics.get(
+                count,
+                PrefixEvaluation(count, 40_000 + count, 20_000 + count, .12, .90, .95, 0, {},
+                                 {"initialBalance": 10_000}),
+            )
+
+        result = search_quality_prefix(16, evaluate, tie_tolerance=0)
+
+        self.assertFalse(retains_reference(result.reference, metrics[15], max_dd_worsen=.01))
+        self.assertEqual(result.selected.count, 15)
+        self.assertGreater(result.selected.net_pnl, result.reference.net_pnl)
+        self.assertGreater(result.selected.stress_net_pnl, result.reference.stress_net_pnl)
+        self.assertGreater(result.selected.utility, result.reference.utility)
+
+    def test_infeasible_full_prefix_does_not_fill_the_largest_feasible_count(self):
         result = search_quality_prefix(
             16, lambda count: value(count, 1000, feasible=count <= 12), tie_tolerance=0,
         )
         self.assertEqual(result.boundary, 12)
-        self.assertEqual(result.selected.count, 12)
+        # Twelve is the capacity boundary, not a quota.  With identical economics the smallest evaluated
+        # portfolio wins instead of filling every safe slot.
+        self.assertEqual(result.selected.count, 1)
 
     def test_profitable_isolated_liquidations_do_not_veto_a_prefix(self):
         # The loss from each isolated liquidation is already present in net PnL and drawdown.  The full
