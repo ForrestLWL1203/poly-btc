@@ -3903,7 +3903,10 @@ def regate(db, p, *, stamp=None, source: str = "regate",
              m.get("data_status") or "valid", m.get("evidence_status"),
              addr),
         )
-        n_active += 1 if ok else 0
+        # ``ok`` can be true for a cache-only recomputation that is intentionally not allowed to revive a
+        # profile lacking a complete prior market snapshot.  Report the durable state, not the transient
+        # calculation, so the operator count always matches the rebuilt watchlist source of truth.
+        n_active += 1 if status == "active" else 0
     db.commit()
     def _record_regate_profile_audit():
         pipeline_audit.record_profile_snapshot(db, stamp, source)
