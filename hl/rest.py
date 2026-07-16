@@ -111,7 +111,11 @@ def user_fills_by_time(addr: str, start_ms: int, aggregate: bool = True):
     """Fills since start_ms. aggregate=True asks HL to COMBINE an order's partial fills (slices) into
     one row per trade — ~100x fewer rows (a sliced wallet: 1852 raw -> 19 aggregated) with all the
     fields we profile on (startPosition/closedPnl/dir/crossed/sz/fee). Trade-level granularity is
-    exactly what episode reconstruction wants; we never needed the raw slices to profile a wallet."""
+    exactly what episode reconstruction wants; we never needed the raw slices to profile a wallet.
+
+    Hyperliquid does not accept a coin or dex selector on ``userFillsByTime`` (only user, time range and
+    aggregation).  Callers must apply the executable Crypto/xyz universe immediately to the response.
+    """
     return post({"type": "userFillsByTime", "user": addr, "startTime": start_ms,
                  "aggregateByTime": aggregate})
 

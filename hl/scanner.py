@@ -21,11 +21,21 @@ from types import SimpleNamespace
 from . import (auto_tune, config, core_formation, follow_score, generation, metrics, offline_core_optimizer,
                params, pipeline_audit, rest, selection, storage, strategy_revision)
 from .copy_backtest import run_backtest, slice_backtest_result
-from .fills import build_episodes, is_spot
-from .copy_data import load_copyable_fills, normalize_copyable_fills
+from .fills import build_episodes
+from .copy_data import (
+    is_copyable_coin,
+    load_copyable_fills,
+    normalize_copyable_fills,
+    out_of_scope_fills,
+)
 from .copy_policy import load_copy_policy
 from .copy_evidence import summarize_copy_evidence
-from .sector import SECTORS, classify_coin, compact_sector_results
+from .sector import (
+    SECTORS,
+    apply_allowed_sector_copy_metrics,
+    classify_coin,
+    compact_sector_results,
+)
 from .fill_transition import classify_fill_transition
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
@@ -47,10 +57,10 @@ from .util import f, now_iso
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 
 _SECTOR_RECOVERABLE_STRUCTURE_REASONS = {
-    "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
+    "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
     "too_many_concurrent",
 }
-_SECTOR_RECOVERABLE_STATE_REASONS = {"hft_turnover"}
+_SECTOR_RECOVERABLE_STATE_REASONS = set()
 
 
 def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_generation"):
@@ -141,7 +151,7 @@ def _episode_rows(addr: str, eps: list) -> list:
 
 
 def _load_cached_fills(db, addr, since):
-    """Cached raw fills for addr in the [since, now] window (ASC). Empty for a never-scanned candidate."""
+    """Cached in-scope contract fills for addr in the window, defensively normalized."""
     with _db_lock:
         rows = db.execute("SELECT fill_json FROM candidate_fills WHERE addr=? AND time>=? ORDER BY time",
                           (addr, since)).fetchall()
@@ -151,12 +161,40 @@ def _load_cached_fills(db, addr, since):
             out.append(json.loads(r[0]))
         except (ValueError, TypeError):
             pass
-    return out
+    return normalize_copyable_fills(out, addr=addr)
 
 
-def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=False, coverage_end=None):
-    """Upsert fills (dedup by tid) + prune anything older than the window. CALLER HOLDS _db_lock."""
-    rows = [(addr, x.get("tid"), x["time"], json.dumps(x)) for x in fills if x.get("tid") is not None]
+def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=False, coverage_end=None,
+                        universe=None):
+    """Persist only executable Crypto/stock contracts; caller holds ``_db_lock``.
+
+    This is a second fail-closed boundary behind the response-time filter.  A
+    future caller cannot accidentally put spot, outcome or private-dex history
+    back into the canonical replay cache.
+    """
+    # Heal rows written by an older release, and rows for a plain perp that has since been delisted.
+    # Without this cleanup the publication audit would correctly fail, but could never self-recover on
+    # a delta scan because an immutable stale row would remain in the cache forever.
+    cached = db.execute(
+        "SELECT tid,fill_json FROM candidate_fills WHERE addr=?", (addr,),
+    ).fetchall()
+    invalid_tids = []
+    for tid, payload in cached:
+        try:
+            row = json.loads(payload)
+        except (TypeError, ValueError):
+            invalid_tids.append(tid)
+            continue
+        if not is_copyable_coin(row.get("coin"), universe=universe):
+            invalid_tids.append(tid)
+    if invalid_tids:
+        db.executemany(
+            "DELETE FROM candidate_fills WHERE addr=? AND tid=?",
+            [(addr, tid) for tid in invalid_tids],
+        )
+
+    scoped = normalize_copyable_fills(fills, addr=addr, universe=universe)
+    rows = [(addr, x.get("tid"), x["time"], json.dumps(x)) for x in scoped if x.get("tid") is not None]
     if rows:
         db.executemany("INSERT OR IGNORE INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)", rows)
     db.execute("DELETE FROM candidate_fills WHERE addr=? AND time<?", (addr, window_start))
@@ -168,6 +206,32 @@ def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=Fals
             "updated_at=excluded.updated_at",
             (addr, int(window_start), int(coverage_end or window_start), now_iso()),
         )
+
+
+def _assert_scoped_fill_cache(db, addrs, universe) -> dict:
+    """Fail publication if a profiled wallet cache contains an out-of-scope row."""
+    owners = sorted({str(addr or "").lower() for addr in addrs or [] if addr})
+    audited = invalid = 0
+    for offset in range(0, len(owners), 400):
+        batch = owners[offset:offset + 400]
+        marks = ",".join("?" for _ in batch)
+        rows = db.execute(
+            f"SELECT fill_json FROM candidate_fills WHERE lower(addr) IN ({marks})",
+            batch,
+        ).fetchall()
+        payloads = []
+        for (payload,) in rows:
+            audited += 1
+            try:
+                row = json.loads(payload)
+            except (TypeError, ValueError):
+                invalid += 1
+                continue
+            payloads.append(row)
+        invalid += len(out_of_scope_fills(payloads, universe=universe))
+    if invalid:
+        raise RuntimeError(f"market_scope_cache_violation:{invalid}:{audited}")
+    return {"audited": audited, "invalid": 0, "scope": ["crypto", "stock"]}
 
 
 def _copy_warmup_backfill_addrs(db, desired_start_ms):
@@ -209,8 +273,7 @@ def repair_missing_episode_rows(db, addrs) -> int:
         fills = _load_cached_fills(db, addr, 0)
         if not fills:
             continue
-        perp = [x for x in fills if not is_spot(x.get("coin") or "")]
-        eps, _open_eps = build_episodes(perp)
+        eps, _open_eps = build_episodes(normalize_copyable_fills(fills, addr=addr))
         if not eps:
             continue
         with _db_lock:
@@ -248,10 +311,15 @@ def _copy_bt_cached_fills(db, addr, now_ms, p):
     return normalize_copyable_fills(_load_cached_fills(db, addr, start_ms), addr=addr)
 
 
-def _fetch_profile_fills(db, addr, window_start, p, full):
-    """(raw_full ASC, hit_cap, new_fills_to_persist, fetched_full_window). Incremental unless `full`: load the cached window,
-    fetch ONLY the delta since our cursor (max cached time − overlap), merge (tid-dedup). A never-cached
-    candidate, or a delta that blows past the page cap (can't be trusted), falls back to a full re-fetch."""
+def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
+    """Fetch history, then cross the market-scope boundary immediately.
+
+    Hyperliquid's ``userFillsByTime`` has no coin/dex filter.  The returned
+    response therefore has to be filtered locally, before persistence and
+    before *any* metric sees it.  ``coverage_end_ms`` tracks the source cursor
+    independently from the last retained fill, so wallets trading only an
+    excluded market do not cause the same payload to be downloaded forever.
+    """
     # A partial page-capped cache deliberately has no complete coverage marker.  Never advance from that
     # partial tail as if it were authoritative: keep the wallet quarantined and force a bounded full-window
     # heal on the next attempt.  This separates data integrity from business qualification.
@@ -261,18 +329,28 @@ def _fetch_profile_fills(db, addr, window_start, p, full):
     ).fetchone()
     coverage_complete = bool(coverage and int(coverage[0] or 0) <= int(window_start))
     if not full and coverage_complete:
-        stored = _load_cached_fills(db, addr, window_start)
-        cursor = max((x["time"] for x in stored), default=None)
+        stored = normalize_copyable_fills(
+            _load_cached_fills(db, addr, window_start), addr=addr, universe=universe,
+        )
+        cursor = max(
+            int(coverage[1] or 0),
+            max((int(x["time"]) for x in stored), default=0),
+        )
         if cursor is not None:
             delta, hit_cap = rest.fetch_window(addr, max(window_start, cursor - config.POLL_OVERLAP_MS), p.max_pages)
             if not hit_cap:
+                scoped_delta = normalize_copyable_fills(delta, addr=addr, universe=universe)
                 merged = {x.get("tid"): x for x in stored}
-                merged.update({x.get("tid"): x for x in delta})
-                raw_full = sorted((x for x in merged.values() if x["time"] >= window_start), key=lambda x: x["time"])
-                return raw_full, False, delta, False
+                merged.update({x.get("tid"): x for x in scoped_delta})
+                scoped_full = sorted(
+                    (x for x in merged.values() if x["time"] >= window_start),
+                    key=lambda x: x["time"],
+                )
+                return scoped_full, False, scoped_delta, False
             # delta hit the cap → too many new fills to trust incrementally → full re-fetch (self-heal)
     raw_full, hit_cap = rest.fetch_window(addr, window_start, p.max_pages)
-    return raw_full, hit_cap, raw_full, True
+    scoped_full = normalize_copyable_fills(raw_full, addr=addr, universe=universe)
+    return scoped_full, hit_cap, scoped_full, True
 
 
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
@@ -379,7 +457,13 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
 
 
 def harvest(db, p, *, generation_id=None) -> int:
-    """STAGE-1 leaderboard BOX (v5) — leaderboard windows only, ZERO per-wallet API. Gate ONLY on what
+    """STAGE-1 address-discovery box — leaderboard windows only, ZERO per-wallet API.
+
+    Hyperliquid exposes no sector-filtered public leaderboard.  These account-wide fields may therefore
+    choose which addresses are worth the expensive history call, but they are never a profile score or
+    Core/Challenger qualification input.  Every survivor is re-decided from scoped contract history.
+
+    Gate ONLY on what
     the leaderboard can HONESTLY say; defer ALL profit JUDGMENT to the profile (real fills). Predicate:
       • acct ≥ floor                         → real capital (we copy by %, not $).
       • vlm_min ≤ 7d VOLUME ≤ vlm_max        → genuinely trading this week, but NOT a market-maker
@@ -631,8 +715,9 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
 
 
 def _finalize_profile_qualification(m, ok: bool, reason: str) -> tuple[bool, str, float]:
-    """Attach the raw quality score without turning that ranking prior into a qualification gate."""
-    score = metrics.score(m) if ok else 0.0
+    """Attach an allowed-sector score without turning it into another qualification gate."""
+    scoped = apply_allowed_sector_copy_metrics(m)
+    score = metrics.score(scoped) if ok else 0.0
     m["raw_quality_score"] = score
     return ok, reason, score
 
@@ -673,8 +758,15 @@ def _defer_profile(db, addr, prior, stamp, reason):
     return "quarantine", reason, row, False
 
 
-def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
-    """Current OPEN-POSITION character across EVERY dex the wallet traded — the data that un-blinds the
+def _open_snapshot(addr, dexes, open_eps, now_ms, acct, *, universe):
+    """Current OPEN-POSITION character inside the executable market scope.
+
+    Clearinghouse snapshots are returned per dex but contain every market on
+    that dex.  Each position is therefore checked against the same immutable
+    universe used for history collection; outcome/private markets must not
+    contaminate open PnL, leverage, risk or terminal replay marks.
+
+    The data un-blinds the
     funnel to live positions (a trend trader's winning holds AND a 扛单's losing holds). clearinghouse-
     State is PER-DEX (standard call omits builder/stock xyz:* positions), so we query each dex and
     combine. Returns a dict (None if no dex answered):
@@ -698,15 +790,15 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
         answered = True
         ms = cs.get("marginSummary", {})
         acct_val = max(acct_val, f(ms.get("accountValue")))      # standard dex carries the real equity
-        tot_ntl += f(ms.get("totalNtlPos"))
         for pp in cs.get("assetPositions", []) or []:
-            has_pos = True
             p_ = pp.get("position", {})
             coin = p_.get("coin")
-            types.add((p_.get("leverage") or {}).get("type"))
             szi, entry, pv = f(p_.get("szi")), f(p_.get("entryPx")), f(p_.get("positionValue"))
-            if abs(szi) < config.FLAT:
+            if not is_copyable_coin(coin, universe=universe) or abs(szi) < config.FLAT:
                 continue
+            has_pos = True
+            types.add((p_.get("leverage") or {}).get("type"))
+            tot_ntl += abs(pv)
             open_position_count += 1
             upnl = f(p_.get("unrealizedPnl"))                    # HL's authoritative current unrealized
             if szi and pv:
@@ -753,6 +845,7 @@ def _open_snapshot(addr, dexes, open_eps, now_ms, acct):
     a = acct or acct_val or 1.0
     return {"margin_type": mt if has_pos else "flat",
             "cur_leverage": (tot_ntl / acct_val if acct_val else 0.0),
+            "account_value": acct_val,
             "worst_underwater": worst_uw, "open_unrealized": up_loss + up_win,
             "open_loss_frac": up_loss / a, "open_win_frac": up_win / a,
             "bag_count": bag_n, "max_bag_days": max_bag_d, "max_win_days": max_win_d,
@@ -778,9 +871,8 @@ def _current_copy_valuation_marks():
 
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
     # ONE aggregated fetch per wallet (aggregateByTime -> ~1 page, trade-level). No separate
-    # pre-screen call: gates() already rejects dormant ("inactive"), spot/opaque-dominant
-    # ("spot_dominant") and no-trades ("no_perp_trades") on this same data — the old two-stage
-    # split only existed to avoid a heavy raw fetch, which aggregation made cheap.
+    # pre-screen call: the response crosses the executable-market boundary before cache/metrics,
+    # and gates reject dormant/no-copyable-contract evidence on that same scoped data.
     # Fetch a LONG window (PROFILE_FETCH_DAYS) via the paginated fetch_window — it sorts ASCENDING and
     # caps at max_pages*2000 fills (NOT a single 2000-row page: user_fills_latest truncated active wallets
     # at 2000 AND returned newest-first unsorted, which broke window_days/trades_per_day/last_fill_ms and
@@ -794,19 +886,18 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     full = bool(force_full or not config.INCREMENTAL_SCAN)
     try:
         raw_full, hit_cap, new_fills, fetched_full_window = _fetch_profile_fills(
-            db, addr, window_start, p, full,
+            db, addr, window_start, p, full, universe=universe,
         )
     except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
         return _defer_profile(db, addr, prior, stamp, f"fills_error:{type(exc).__name__}")
     for x in raw_full:
         x["user"] = addr
-    # only COPYABLE activity counts: crypto perps + transparent builder perps (stocks/commodities,
-    # e.g. xyz:AAPL — in `universe`). Spot is excluded (is_spot); opaque/private builder dexes are
-    # excluded by not being in `universe`. perp_frac = copyable-perp share of fills.
+    # `_fetch_profile_fills` already crossed the collection boundary: only current standard Crypto
+    # perps and transparent xyz contracts can reach this point or the cache. Normalize again as a
+    # defensive invariant, then compute every metric from this exact scoped set.
     perp_full = normalize_copyable_fills(raw_full, addr=addr, universe=universe)
-    raw = [x for x in raw_full if x["time"] >= start_ms]          # 14d window slice (scoring metrics)
     perp = [x for x in perp_full if x["time"] >= start_ms]
-    perp_frac = (len(perp) / len(raw)) if raw else 0.0
+    perp_frac = 1.0 if perp else 0.0
     eps, open_eps = build_episodes(perp)
     m = metrics.compute_metrics(perp, eps, now_ms, p.days)
     if m is None:
@@ -814,7 +905,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
              "taker_frac_notl": 0, "median_hold_s": 0, "win_rate": 0, "net_pnl": 0, "gross_pnl": 0,
              "roi_notional": 0, "total_notl": 0, "total_fee": 0, "n_coins": 0, "top_coin": None,
              "long_frac": 0, "max_drawdown": 0, "avg_notional": 0, "hold_skew": 0,
-             "last_fill_ms": raw[-1]["time"] if raw else 0, "active_days": 0, "activity_ratio": 0,
+             "last_fill_ms": perp[-1]["time"] if perp else 0, "active_days": 0, "activity_ratio": 0,
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
              "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0,
              "tp_move_pct": 0.0, "market_type": None, "crypto_frac": None}
@@ -835,7 +926,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     m["worst_loss_pct"] = (m["worst_loss"] / acct_value) if acct_value else 0.0  # loss discipline (realized)
     m["times_active"] = (prior or {}).get("times_active", 0)
     m["lev_proxy"] = (m["avg_notional"] / acct_value) if acct_value else 0.0  # hist. eff. leverage
-    m["liq_count"], m["liq_worst_pct"] = _self_liquidations(raw, addr, acct_value)
+    m["liq_count"], m["liq_worst_pct"] = _self_liquidations(perp, addr, acct_value)
     # open-position character defaults (filled by the live snapshot in stage B). roi_total starts as the
     # realized-only roi and is upgraded to realized+unrealized once we read the wallet's live positions.
     m.update(open_underwater=0.0, open_unrealized=0.0, open_loss_frac=0.0, open_win_frac=0.0,
@@ -863,7 +954,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         with _db_lock:
             _store_cached_fills(
                 db, addr, new_fills, window_start,
-                coverage_complete=False, coverage_end=now_ms,
+                coverage_complete=False, coverage_end=now_ms, universe=universe,
             )
             db.commit()
         status, deferred_reason, deferred, _ = _defer_profile(db, addr, prior, stamp, "hit_page_cap")
@@ -885,7 +976,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     # trend holders kept. Only structural survivors pay the extra clearinghouse call.
     if ok:
         dexes = {(c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}}
-        snap = _open_snapshot(addr, dexes, open_eps, now_ms, acct_value)
+        snap = _open_snapshot(addr, dexes, open_eps, now_ms, acct_value, universe=universe)
         if snap is None:
             return _defer_profile(db, addr, prior, stamp, "clearinghouse_unavailable")
         m["margin_type"] = snap["margin_type"]
@@ -896,20 +987,14 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                   "max_bag_days", "max_win_days", "hedge_ratio"):
             m[k] = snap[k]
         m["roi_total"] = ((m["net_pnl"] + snap["open_unrealized"]) / acct_value) if acct_value else 0.0
-        # v7 PORTFOLIO — authoritative NET-of-fees, deposit-adjusted account perf (one call, all windows).
-        # Fed to the ROI pillar (net, replacing leaderboard gross) + the turnover/edge-bps copyability filters.
-        _pf = rest.portfolio(addr)
-        _pw = rest.parse_portfolio(_pf, "week")
-        _pm = rest.parse_portfolio(_pf, "month")
-        if not _pw or not _pm:
-            return _defer_profile(db, addr, prior, stamp, "portfolio_unavailable")
-        m["pf_week_pnl"], m["pf_week_vlm"] = _pw.get("pnl"), _pw.get("vlm")
-        m["pf_mon_pnl"], m["pf_mon_vlm"] = _pm.get("pnl"), _pm.get("vlm")
-        m["pf_equity"] = _pw.get("equity") or _pm.get("equity")
-        m["pf_max_dd"] = _pm.get("max_drawdown") or _pw.get("max_drawdown")   # 30d curve = fuller DD picture
-        m["pf_turnover"], m["pf_edge_bps"] = _pw.get("turnover"), _pw.get("edge_bps")
-        if not m.get("pf_equity"):
-            return _defer_profile(db, addr, prior, stamp, "portfolio_equity_unavailable")
+        # The portfolio endpoint is account-wide (spot + every perp dex) and has no market filter.  Its
+        # PnL/volume/drawdown must never enter this product's quality path.  Keep only current account
+        # equity as a denominator; profitability and execution edge come exclusively from scoped fills
+        # and our fee-paid canonical Copy replay below.
+        m["pf_equity"] = acct_value or snap.get("account_value")
+        m["pf_week_pnl"] = m["pf_week_vlm"] = None
+        m["pf_mon_pnl"] = m["pf_mon_vlm"] = None
+        m["pf_max_dd"] = m["pf_turnover"] = m["pf_edge_bps"] = None
         ok, reason = metrics.gates_state(m, now_ms, p)
         if (
             not ok
@@ -980,6 +1065,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         _store_cached_fills(
             db, addr, new_fills, window_start,
             coverage_complete=bool(fetched_full_window and not hit_cap), coverage_end=now_ms,
+            universe=universe,
         )   # persist the delta + prune the window
         _replace_episode_rows(db, addr, eps)
         db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
@@ -4015,8 +4101,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
                 and sector_structure.get("allowed")
             ):
                 ok, reason = True, "ok"
-        if not ok and reason == "no_portfolio":
-            reason = "portfolio_equity_unavailable"
+        if not ok and reason == "account_equity_unavailable":
             m["data_status"] = "deferred_data_error"
             m["evidence_status"] = "invalid"
         if ok:
@@ -4052,10 +4137,7 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         # Only policy-only outcomes removed by this release may be safely reactivated from the current
         # cached replay. Structural/data failures still require a fresh network generation.
         complete_cached_snapshot = bool(
-            pf_mpnl is not None
-            and pf_mvlm is not None
-            and pf_eq is not None
-            and float(pf_eq or 0.0) > 0.0
+            float(acct or 0.0) > 0.0
             and str(m.get("data_status") or "valid").lower() == "valid"
             and str(m.get("evidence_status") or "").lower() not in {"invalid", "missing"}
         )
@@ -4328,9 +4410,13 @@ def scan(db, p) -> None:
     rest.reset_request_stats()
 
     try:
-        universe = rest.copyable_universe()       # crypto perps + transparent builder (stocks/commodities)
+        # A full/cold sweep rebuilds specialization from the exchange's current executable market set.
+        # Keep this immutable snapshot on ``p`` so every wallet replay in the generation uses the same
+        # boundary even if a listing changes while the scan is running.
+        universe = rest.copyable_universe(force=run_full)
         if not universe:
             raise RuntimeError("copyable_universe_unavailable")
+        p.copyable_universe = frozenset(universe)
         if not p.no_harvest:
             print("harvest leaderboard -> staging ...", flush=True)
             n_cand = harvest(db, p, generation_id=generation_id)
@@ -4547,6 +4633,23 @@ def scan(db, p) -> None:
 
     profile_done_at = time.time()
     complete = failed == 0
+    scope_audit = {"audited": 0, "invalid": 0, "scope": ["crypto", "stock"]}
+    if complete:
+        try:
+            # Qualified profiles are mandatory in the workset.  Audit them all rather than only successful
+            # task returns, so no stale candidate can enter shared-account selection through an old cache.
+            active_addrs = [
+                row[0] for row in db.execute(
+                    "SELECT addr FROM profile WHERE status='active'"
+                ).fetchall()
+            ]
+            scope_audit = _assert_scoped_fill_cache(
+                db, set(profiled_addrs) | set(active_addrs), universe,
+            )
+        except Exception as exc:  # fail closed before watchlist/selection publication
+            complete = False
+            failed += 1
+            print(f"generation market-scope audit failed: {exc}", flush=True)
     published = False
     publication_stamp = None
     previous_core = selection.published_core_addrs(db) or []
@@ -4719,6 +4822,11 @@ def scan(db, p) -> None:
                 "selectionSearch": marginal.search_meta if marginal else None,
                 "marginEquityPct": float(p.margin_equity_pct),
                 "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct),
+                "marketScopeAudit": scope_audit,
+                "marketScopeCount": len(universe),
+                "marketScopeHash": hashlib.sha256(
+                    "\n".join(sorted(universe)).encode("utf-8")
+                ).hexdigest(),
                 **rest.request_stats(),
             }
             db.execute(

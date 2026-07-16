@@ -76,9 +76,9 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 
 
 class ScannerWatchlistTests(unittest.TestCase):
-    def test_sector_specialization_can_recover_global_spot_and_turnover_contamination(self):
-        self.assertIn("spot_dominant", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
-        self.assertIn("hft_turnover", scanner._SECTOR_RECOVERABLE_STATE_REASONS)
+    def test_account_wide_spot_and_turnover_never_enter_sector_recovery(self):
+        self.assertNotIn("spot_dominant", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
+        self.assertNotIn("hft_turnover", scanner._SECTOR_RECOVERABLE_STATE_REASONS)
         self.assertNotIn("spot_hedge", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
 
     def test_regate_reactivates_complete_cached_snapshot_but_not_incomplete_profile(self):
@@ -121,9 +121,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                 )
 
             fetch.assert_called_once_with("0xaaa", 1_000, 5)
-            self.assertEqual(raw, fetched)
+            self.assertEqual([row["tid"] for row in raw], [2])
+            self.assertEqual(raw[0]["user"], "0xaaa")
             self.assertFalse(hit_cap)
-            self.assertEqual(new_fills, fetched)
+            self.assertEqual([row["tid"] for row in new_fills], [2])
             self.assertTrue(fetched_full)
             db.close()
 
@@ -152,7 +153,91 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertGreaterEqual(fetch.call_args.args[1], 1_000)
             self.assertEqual([row["tid"] for row in raw], [1, 2])
             self.assertFalse(hit_cap)
-            self.assertEqual(new_fills, delta)
+            self.assertEqual([row["tid"] for row in new_fills], [2])
+            self.assertEqual(new_fills[0]["user"], "0xaaa")
+            self.assertFalse(fetched_full)
+            db.close()
+
+    def test_history_response_is_filtered_before_cache_and_metrics(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            legacy = {"tid": 99, "time": 1_500, "coin": "#4830"}
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                ("0xaaa", 99, 1_500, json.dumps(legacy)),
+            )
+            db.commit()
+            fetched = [
+                {"tid": 1, "time": 2_000, "coin": "BTC"},
+                {"tid": 2, "time": 2_100, "coin": "xyz:AAPL"},
+                {"tid": 3, "time": 2_200, "coin": "#4830"},
+                {"tid": 4, "time": 2_300, "coin": "BTC/USDC"},
+                {"tid": 5, "time": 2_400, "coin": "vntl:OPENAI"},
+                {"tid": 6, "time": 2_500, "coin": "DELISTED"},
+            ]
+            with patch.object(scanner.rest, "fetch_window", return_value=(fetched, False)):
+                scoped, hit_cap, new_fills, fetched_full = scanner._fetch_profile_fills(
+                    db, "0xaaa", 1_000, SimpleNamespace(max_pages=5), full=True,
+                    universe={"BTC", "xyz:AAPL"},
+                )
+
+            self.assertEqual([row["coin"] for row in scoped], ["BTC", "xyz:AAPL"])
+            self.assertEqual([row["coin"] for row in new_fills], ["BTC", "xyz:AAPL"])
+            self.assertFalse(hit_cap)
+            self.assertTrue(fetched_full)
+
+            with scanner._db_lock:
+                scanner._store_cached_fills(
+                    db, "0xaaa", fetched, 1_000, coverage_complete=True,
+                    coverage_end=3_000, universe={"BTC", "xyz:AAPL"},
+                )
+                db.commit()
+            coins = [json.loads(row[0])["coin"] for row in db.execute(
+                "SELECT fill_json FROM candidate_fills ORDER BY time"
+            )]
+            # The persistence boundary also heals legacy/outdated rows already on disk.
+            self.assertEqual(coins, ["BTC", "xyz:AAPL"])
+            self.assertEqual(
+                scanner._assert_scoped_fill_cache(db, ["0xaaa"], {"BTC", "xyz:AAPL"})["invalid"],
+                0,
+            )
+            db.close()
+
+    def test_generation_scope_audit_fails_closed_on_legacy_invalid_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            row = {"tid": 9, "time": 9_000, "coin": "#4830"}
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                ("0xaaa", 9, 9_000, json.dumps(row)),
+            )
+            db.commit()
+
+            with self.assertRaisesRegex(RuntimeError, "market_scope_cache_violation"):
+                scanner._assert_scoped_fill_cache(db, ["0xaaa"], {"BTC", "xyz:AAPL"})
+            db.close()
+
+    def test_source_cursor_advances_when_every_new_fill_is_out_of_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) "
+                "VALUES ('0xaaa',1000,10000000,'2026-07-16T00:00:00Z')"
+            )
+            db.commit()
+            with patch.object(
+                scanner.rest, "fetch_window",
+                return_value=([{"tid": 1, "time": 10_000_100, "coin": "#99"}], False),
+            ) as fetch:
+                scoped, hit_cap, new_fills, fetched_full = scanner._fetch_profile_fills(
+                    db, "0xaaa", 1_000, SimpleNamespace(max_pages=5), full=False,
+                    universe={"BTC", "xyz:AAPL"},
+                )
+
+            self.assertGreater(fetch.call_args.args[1], 1_000)
+            self.assertEqual(scoped, [])
+            self.assertEqual(new_fills, [])
+            self.assertFalse(hit_cap)
             self.assertFalse(fetched_full)
             db.close()
 
@@ -293,10 +378,33 @@ class ScannerWatchlistTests(unittest.TestCase):
                 [{"coin": "KAITO", "open_ms": 1}, {"coin": "XPL", "open_ms": 1}],
                 scanner._DAY_MS * 4,
                 100000,
+                universe={"KAITO", "XPL"},
             )
 
         self.assertAlmostEqual(snap["worst_underwater"], -0.05, places=6)
         self.assertEqual(snap["bag_count"], 1)
+
+    def test_open_snapshot_ignores_positions_outside_executable_universe(self):
+        clearinghouse = {
+            "marginSummary": {"accountValue": "10000", "totalNtlPos": "999999"},
+            "assetPositions": [
+                {"position": {"coin": "BTC", "szi": "0.1", "entryPx": "60000",
+                              "positionValue": "6100", "unrealizedPnl": "100",
+                              "leverage": {"type": "isolated", "value": 5}}},
+                {"position": {"coin": "#4830", "szi": "1000", "entryPx": "1",
+                              "positionValue": "100", "unrealizedPnl": "-9000",
+                              "leverage": {"type": "cross", "value": 20}}},
+            ],
+        }
+        with patch.object(scanner.rest, "clearinghouse_state", return_value=clearinghouse):
+            snap = scanner._open_snapshot(
+                "0xwallet", {None}, [{"coin": "BTC", "open_ms": 1}],
+                scanner._DAY_MS, 10_000, universe={"BTC", "xyz:AAPL"},
+            )
+
+        self.assertEqual(snap["open_position_count"], 1)
+        self.assertEqual(snap["open_unrealized"], 100)
+        self.assertAlmostEqual(snap["cur_leverage"], 0.61)
 
     def test_harvest_clears_stale_candidate_flags_before_current_leaderboard(self):
         with tempfile.TemporaryDirectory() as td:

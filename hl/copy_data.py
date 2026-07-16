@@ -1,9 +1,10 @@
-"""Canonical copy-replay fill filtering, normalization, and loading.
+"""Canonical in-scope fill filtering, normalization, and loading.
 
-Every historical-copy consumer must use the same market universe and event
-ordering.  Plain symbols are standard perpetuals; only the transparent
-``xyz:*`` builder namespace is copyable.  Spot and opaque/private builder
-symbols are deliberately excluded.
+This module is the market-scope boundary for the whole product, not merely a
+last-mile replay helper.  Plain symbols are current standard Crypto perpetuals;
+only the transparent ``xyz:*`` builder namespace is copyable for stocks,
+indices and commodities.  Spot, outcome/settlement markets and opaque/private
+builder symbols are deliberately excluded before history is cached or scored.
 """
 
 from __future__ import annotations
@@ -109,6 +110,20 @@ def normalize_copyable_fills(
         out.append(item)
     out.sort(key=fill_order_key)
     return out
+
+
+def out_of_scope_fills(
+    fills: Iterable[Mapping] | None,
+    *,
+    universe: Iterable[str] | None = None,
+) -> list[Mapping]:
+    """Return rows that violate the product's executable market boundary.
+
+    Used by generation publication audits.  This intentionally does not
+    normalize rows: callers need the original offending payload for a precise
+    fail-closed count, while logs must never print the payload itself.
+    """
+    return [row for row in fills or [] if not is_copyable_coin(row.get("coin"), universe=universe)]
 
 
 def market_evidence_key(fills: Iterable[Mapping] | None) -> str:

@@ -68,7 +68,11 @@ def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None):
     days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
     start_ms = now_ms - days * 86400_000
     replay_fills = [
-        x for x in normalize_copyable_fills(fills, addr=addr)
+        x for x in normalize_copyable_fills(
+            fills,
+            addr=addr,
+            universe=getattr(p, "copyable_universe", None),
+        )
         if start_ms <= x.get("time", 0) <= now_ms
     ]
     if not replay_fills:

@@ -98,6 +98,31 @@ class MetricsGateTests(unittest.TestCase):
 
         self.assertAlmostEqual(thin, thick, places=9)
 
+    def test_account_wide_portfolio_profit_cannot_raise_scoped_quality(self):
+        scoped = {
+            "copy_bt_win_rate": 0.6,
+            "copy_bt_net_pnl": 1500.0,
+            "copy_bt_unrealized_pnl": -100.0,
+            "copy_bt_7d_net_pnl": 600.0,
+            "copy_bt_7d_unrealized_pnl": -50.0,
+            "initial_margin_equity": 10_000.0,
+            "actionable_open_events_30d": 12,
+            "open_days_30d": 8,
+            "copy_risk_score": 0.8,
+            "oos_max_drawdown": 0.05,
+            "avg_notional": 1000.0,
+            "payoff_ratio": 1.5,
+        }
+
+        rich_elsewhere = metrics.score({
+            **scoped, "pf_equity": 100_000, "pf_week_pnl": 500_000, "pf_mon_pnl": 2_000_000,
+        })
+        losing_elsewhere = metrics.score({
+            **scoped, "pf_equity": 100_000, "pf_week_pnl": -500_000, "pf_mon_pnl": -2_000_000,
+        })
+
+        self.assertAlmostEqual(rich_elsewhere, losing_elsewhere, places=12)
+
     def test_rejects_one_off_heavy_dca_even_when_median_is_low(self):
         ok, reason = metrics.gates_structural(
             gate_metrics(median_adds_per_ep=0, max_adds_per_ep=23),
@@ -135,14 +160,14 @@ class MetricsGateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
 
-    def test_target_account_thin_edge_is_warning_until_copy_replay(self):
+    def test_target_account_edge_is_ignored_in_favor_of_scoped_copy_replay(self):
         values = state_metrics(pf_mon_pnl=500.0, pf_mon_vlm=1_000_000.0)
 
         ok, reason = metrics.gates_state(values, 1000, state_params())
 
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
-        self.assertTrue(values["thin_edge_warning"])
+        self.assertNotIn("thin_edge_warning", values)
 
 
 if __name__ == "__main__":

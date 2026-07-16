@@ -43,6 +43,9 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(sector.classify_coin("HYPE"), "crypto")
         self.assertEqual(sector.classify_coin("xyz:SP500"), "stock")
         self.assertEqual(sector.classify_coin("XYZ:MU"), "stock")
+        self.assertIsNone(sector.classify_coin("#4830"))
+        self.assertIsNone(sector.classify_coin("BTC/USDC"))
+        self.assertIsNone(sector.classify_coin("vntl:OPENAI"))
 
     def test_policy_allows_profitable_sector_and_denies_losing_sector(self):
         sector_results = {

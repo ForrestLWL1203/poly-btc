@@ -12,13 +12,16 @@ import math
 from typing import Mapping
 
 from . import config
+from .copy_data import is_copyable_coin
 from .copy_policy import load_copy_policy
 
 SECTORS = ("crypto", "stock")
 
 
-def classify_coin(coin: str | None) -> str:
+def classify_coin(coin: str | None) -> str | None:
     text = str(coin or "").strip()
+    if not is_copyable_coin(text):
+        return None
     return "stock" if text.lower().startswith("xyz:") else "crypto"
 
 
@@ -39,6 +42,8 @@ def parse_json_obj(raw) -> dict:
 
 
 def policy_allows_coin(policy, coin: str | None, default: bool = True) -> bool:
+    if classify_coin(coin) not in SECTORS:
+        return False
     policy = parse_json_obj(policy)
     if not policy:
         return bool(default)

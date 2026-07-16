@@ -2,7 +2,7 @@ import json
 import sqlite3
 import unittest
 
-from hl.copy_data import load_copyable_fills, normalize_copyable_fills
+from hl.copy_data import load_copyable_fills, normalize_copyable_fills, out_of_scope_fills
 
 
 class CopyDataTests(unittest.TestCase):
@@ -39,6 +39,22 @@ class CopyDataTests(unittest.TestCase):
         )
 
         self.assertEqual([row["coin"] for row in result], ["BTC"])
+
+    def test_explicit_universe_rejects_delisted_and_other_dex_contracts(self):
+        rows = [
+            {"time": 1, "tid": 1, "coin": "BTC"},
+            {"time": 2, "tid": 2, "coin": "OLDCOIN"},
+            {"time": 3, "tid": 3, "coin": "xyz:AAPL"},
+            {"time": 4, "tid": 4, "coin": "vntl:OPENAI"},
+        ]
+
+        scoped = normalize_copyable_fills(rows, universe={"BTC", "xyz:AAPL"})
+
+        self.assertEqual([row["coin"] for row in scoped], ["BTC", "xyz:AAPL"])
+        self.assertEqual(
+            [row["coin"] for row in out_of_scope_fills(rows, universe={"BTC", "xyz:AAPL"})],
+            ["OLDCOIN", "vntl:OPENAI"],
+        )
 
 
 if __name__ == "__main__":

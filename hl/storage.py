@@ -642,10 +642,10 @@ CREATE TABLE IF NOT EXISTS scan_progress (
     updated_at         TEXT
 );
 
--- Per-candidate raw fills cache (rolling PROFILE_FETCH_DAYS window). Lets the daily re-scan fetch only
--- the INCREMENTAL fills since our cursor (max stored time) instead of re-pulling the whole 30d each time.
--- fill_json = the raw HL fill dict (all fields preserved for build_episodes/compute_metrics). Pruned to
--- the window per addr on each profile; a periodic FULL re-fetch self-heals any gap (fills are append-only).
+-- Per-candidate executable contract cache (rolling PROFILE_FETCH_DAYS window). The source endpoint returns
+-- all user fills, but only current standard Crypto perps and transparent xyz stock/index/commodity contracts
+-- may enter this table. Spot, outcome/settlement and private builder markets are discarded before persistence.
+-- fill_cache_state.coverage_end_ms is the source cursor, so filtering every row does not cause refetch loops.
 CREATE TABLE IF NOT EXISTS candidate_fills (
     addr      TEXT NOT NULL,
     tid       INTEGER NOT NULL,   -- HL trade id (unique per fill) — dedup key

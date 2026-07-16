@@ -229,26 +229,22 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
     #                                                            directional trade — copying the naked perp
     #                                                            leg loses what their spot leg offsets.
-    # v7 PORTFOLIO copyability (net-of-fees). REQUIRE pf data: no portfolio = can't net-score, and the
-    # leaderboard-ROI fallback is RETIRED (its live-vs-frozen mismatch was the old scan/regate scoring
-    # conflict). A pf-less wallet is not active until a scan populates it → scoring only ever walks ONE path.
-    if not m.get("pf_equity"):
-        return False, "no_portfolio"
-    _turn = m.get("pf_turnover")                               # 换手率 = 周成交量/权益
-    if _turn is not None and _turn > getattr(p, "portfolio_max_turnover", config.PORTFOLIO_MAX_TURNOVER):
-        return False, "hft_turnover"                           # HFT churner — unreplicable + fee-drag
-    _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")
-    if _mvlm and _mvlm > 0 and (_mpnl or 0.0) / _mvlm * 1e4 \
-            < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
-        # Target-account turnover edge is only a warning. Our capped sector policy can skip fills/adds,
-        # and the canonical Copy replay already charges our own fees.  Rejecting here would prevent that
-        # authoritative replay from ever measuring whether the follower path is actually profitable.
-        m["thin_edge_warning"] = True
+    # Hyperliquid's portfolio endpoint is account-wide and cannot be filtered to our executable dex/market
+    # scope.  Account-wide PnL, turnover and drawdown therefore have no place in qualification.  We only need
+    # a real equity denominator here; HFT/fees/edge are judged from scoped episodes and canonical Copy replay.
+    if not (m.get("acct_value") or m.get("pf_equity")):
+        return False, "account_equity_unavailable"
     return True, "ok"
 
 
 def score(m: dict) -> float:
-    """v6 QUALITY ∈ [0,1] (display = ×100). ADDITIVE core of the user's THREE roots — 胜率 / 活跃度 / ROI —
+    """Executable-scope quality in ``[0,1]`` (display = ×100).
+
+    The score is intentionally derived from retained Crypto/stock-contract
+    history and strict Copy results.  Leaderboard and account-wide portfolio
+    returns are discovery metadata only and can never raise this score.
+
+    ADDITIVE core of the user's THREE roots — 胜率 / 活跃度 / ROI —
     × only the guards ROI can't see (刷胜率 fake-win + a mild current-deep-bag), × a linear STRETCH so the
     best real wallet lands near 100 with a smooth decline (easier follow-line setting). NO 反噬/worst-loss
     guard: 小赚大亏 already surfaces as low/negative ROI (net≤0 → gated; low ROI → low ROI term). We copy
@@ -256,27 +252,31 @@ def score(m: dict) -> float:
     g = lambda k, d=0.0: (m.get(k) if m.get(k) is not None else d)
 
     # ── core positives, each ∈ [0,1] ──
-    win = _clip(g("win_rate"), 0.0, 1.0)                                   # 胜率(根本)
-    # ROI = HL 官方 return-on-capital(净利/本金)。copy 只跟【最近表现】→ 只综合近期两窗口(周+月,月度为锚);
-    # 全期(all_roi)权重=0 不计入。HL 已按出入金调整 → 不受提币污染;且是资本回报,天然含杠杆效率(net/名义 ≡ 此
-    # ÷ 杠杆,会把杠杆红利除没、埋没大体量BTC波段客)。各窗口先 clip 防单窗口带飞;缺失窗口按可得权重归一。
-    # v7: prefer PORTFOLIO net return-on-capital (fee-inclusive + deposit-adjusted; leaderboard ROI is gross
-    # and lags a day). pf_*_pnl / pf_equity = the real net weekly/monthly return. Fall back to the leaderboard
-    # windows only when pf data is absent (a profile not yet re-scanned) so the switch is safe + rollback-able.
-    _pfeq = g("pf_equity")
-    if _pfeq and _pfeq > 0:
-        _rp = [(config.ROI_W_WEEK, g("pf_week_pnl") / _pfeq), (config.ROI_W_MON, g("pf_mon_pnl") / _pfeq)]
+    win = _clip(g("copy_bt_win_rate", g("win_rate")), 0.0, 1.0)
+    # Use the exact simulated capital basis and fee-paid endpoint PnL.  The 7d/30d pair rewards recent
+    # strength without ever importing spot, outcome or a disabled specialist sector.
+    _pfeq = g("initial_margin_equity")
+    if _pfeq and _pfeq > 0 and m.get("copy_bt_net_pnl") is not None:
+        _rp = [
+            (config.ROI_W_WEEK,
+             (g("copy_bt_7d_net_pnl") + g("copy_bt_7d_unrealized_pnl")) / _pfeq),
+            (config.ROI_W_MON,
+             (g("copy_bt_net_pnl") + g("copy_bt_unrealized_pnl")) / _pfeq),
+        ]
     else:
-        _rp = []   # no pf → no ROI pillar. Leaderboard fallback RETIRED (gates_state rejects pf-less wallets,
-        #            so an active wallet always has pf; this branch only guards a defensive score() call).
+        # Structural-only defensive path: these values were already built from the scoped fill set.
+        acct = g("acct_value")
+        _rp = (
+            [(config.ROI_W_WEEK, g("net_7d") / acct), (config.ROI_W_MON, g("net_30d") / acct)]
+            if acct > 0 else []
+        )
     _rw = sum(w for w, v in _rp if v is not None)
     roi = (sum(w * _clip(v, config.ROI_CLIP_LO, config.ROI_CLIP_HI) for w, v in _rp if v is not None) / _rw
            if _rw else 0.0)
     notl = max(g("avg_notional"), config.ROI_NOTL_FLOOR)                    # 仅用于把回撤归一成 dd_eq
-    # Prefer Hyperliquid's account-equity drawdown when available.  Unrealized *gains* are not drawdown;
-    # open loss pressure is handled by the dedicated health guard below.
-    pf_dd = g("pf_max_dd", None)
-    dd_eq = max(0.0, pf_dd) if pf_dd is not None else g("max_drawdown") / notl
+    # OOS drawdown is from the same scoped Copy replay; fall back to scoped target episodes only.
+    copy_dd = g("oos_max_drawdown", None)
+    dd_eq = max(0.0, copy_dd) if copy_dd is not None else g("max_drawdown") / notl
     roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效 edge
     roi_s = 1.0 - math.exp(-roi_adj / config.SCORE_ROI_SCALE)             # 平滑饱和 [0,1)
     # Open-position evidence uses all real positions, never only losing bags (which created a reverse

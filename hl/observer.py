@@ -1161,10 +1161,13 @@ class Observer:
     # -- run: REST signal tasks + a WS connection for bbo pricing ------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
-        self.crypto_coins = rest.perp_universe()           # price via WS bbo
-        if not self.crypto_coins:                          # load-bearing: empty would make crypto
-            raise RuntimeError("perp_universe() empty — refusing a crypto-less copy universe")
-        self.valid_coins = self.crypto_coins | rest.builder_universe()  # + transparent stocks (l2Book)
+        # Use the same public executable universe boundary as Scanner/Profile.  ``copyable_universe``
+        # fails closed if either standard Crypto or the transparent builder/stock universe is missing;
+        # starting with a partial set would silently ignore one whole sector of Core signals.
+        self.valid_coins = rest.copyable_universe(force=True)
+        self.crypto_coins = rest.perp_universe()           # standard perps price via WS bbo
+        if not self.crypto_coins or not self.crypto_coins.issubset(self.valid_coins):
+            raise RuntimeError("copyable universe mismatch — refusing partial Observer market scope")
         _log(f"universe: {len(self.crypto_coins)} crypto (WS bbo) + "
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
         self._load_account(self.taker)
