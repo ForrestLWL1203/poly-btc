@@ -29,6 +29,9 @@ def main() -> int:
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
     params.seed_params(db)                          # ensure UI-tunable params exist (idempotent)
     if args.cmd == "observe":
+        # A fill insert that loses a brief scanner write race is safely retried from the in-memory cursor.
+        # Do not let SQLite's general 30s maintenance timeout freeze every Observer coroutine meanwhile.
+        db.execute(f"PRAGMA busy_timeout={int(config.OBSERVER_DB_BUSY_TIMEOUT_MS)}")
         n = args.top
         addrs, seed = observer.load_targets(db, n)
         merged = []                                   # extras first, then watchlist, capped at n

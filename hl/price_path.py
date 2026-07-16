@@ -30,6 +30,9 @@ def refresh_margin_metadata(db, fills) -> dict:
     ).fetchall()}
     missing = set(coins) - set(known)
     contexts = {}
+    # This helper owns its commit boundary.  Never carry a caller's pending write lock across a market-data
+    # request: Observer must remain able to persist fills while scanner path preparation waits on REST.
+    db.commit()
     if any(":" not in coin for coin in missing):
         contexts.update(rest.asset_contexts())
     if any(coin.startswith("xyz:") for coin in missing):
@@ -119,6 +122,10 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
         cursor = max(start_ms, cursor - step)
         if cursor >= end_ms:
             continue
+        # REST is deliberately paced (8s while Observer is active).  Holding SQLite's writer lock while
+        # waiting for the next coin turned final tuning into an Observer outage.  Each coin is its own short
+        # cache transaction, so release any inherited/past write before network I/O.
+        db.commit()
         candles = rest.candle_snapshot_range(coin, interval, cursor, end_ms)
         if not isinstance(candles, list):
             failed.append(coin)
@@ -132,6 +139,7 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
                 "retry_after=excluded.retry_after",
                 (coin, interval, "failed", error_count, now_ms, now_ms + retry_ms),
             )
+            db.commit()
             continue
         fetched += _upsert(db, coin, interval, candles, now_ms)
         db.execute(
@@ -141,6 +149,7 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
             "last_attempt=excluded.last_attempt,retry_after=0",
             (coin, interval, "ok", 0, now_ms),
         )
+        db.commit()
     deleted = prune(db, now_ms)
     db.commit()
     return {"coins": len(coins), "fetched": fetched, "failed": failed,

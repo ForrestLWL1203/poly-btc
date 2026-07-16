@@ -270,6 +270,7 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is belo
 # (the flat post-cap dust floor MIN_COPY_NOTIONAL was replaced by the per-tier STABLE/MID/HIGH_MIN_NOTIONAL
 #  above — a $4-probe master position now falls under its tier's min and is skipped.)
 EXECUTION_QUOTE_MAX_AGE_MS = 5_000  # Paper fills never reuse an older BBO; builder perps refetch l2Book on demand.
+OBSERVER_DB_BUSY_TIMEOUT_MS = 1_500  # Retry fills quickly instead of freezing the whole event loop for 30s.
 MAX_LEV = 50.0             # v10: raised 20→50 — leverage is now the VISIBLE σ-tier cap; MAX_LEV is only a
 #                            far backstop + the ceiling on the master's read leverage (so "never exceed master"
 #                            uses the master's REAL lev, not a 20-clipped one that wrongly under-levered us).

@@ -1086,6 +1086,7 @@ class Observer:
                 try:
                     await self._poll_fills(addr, since)
                 except Exception as exc:  # noqa: BLE001 — one wallet's failure must not abort the whole round
+                    self._rollback_db()
                     _log(f"poll_fills {addr[:10]} error: {exc}")
 
         while not self.stop:

@@ -63,6 +63,28 @@ class PricePathTest(unittest.TestCase):
         self.assertEqual(1, second["deferred"])
         self.assertEqual(1, fetch.call_count)
 
+    def test_multi_coin_fetch_releases_writer_lock_before_each_rest_call(self):
+        now = 4_000_000_000_000
+        fills = [
+            {"coin": coin, "time": now - 60_000, "side": "B", "sz": "1",
+             "startPosition": "0", "px": "100"}
+            for coin in ("BTC", "ETH")
+        ]
+        transaction_state = []
+
+        def fetch(_coin, _interval, _start, _end):
+            transaction_state.append(self.db.in_transaction)
+            return [{"t": now - 900_000, "T": now - 1, "o": "100", "h": "102",
+                     "l": "98", "c": "101"}]
+
+        with mock.patch("hl.price_path.time.time", return_value=now / 1000), mock.patch(
+            "hl.price_path.rest.candle_snapshot_range", side_effect=fetch,
+        ):
+            result = price_path.ensure(self.db, fills, now - 86_400_000, now)
+
+        self.assertEqual([False, False], transaction_state)
+        self.assertEqual(2, result["fetched"])
+
     def test_finer_path_only_replaces_fully_covered_candle(self):
         coarse = [{"coin": "BTC", "time": 900, "open_time": 1, "close_time": 900,
                    "low": 90, "high": 110, "close": 100, "interval": "15m"}]
