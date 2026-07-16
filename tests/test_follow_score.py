@@ -272,6 +272,23 @@ class FollowScoreTests(unittest.TestCase):
         self.assertGreater(strong, thin)
         self.assertAlmostEqual(detail["economicReturns"]["30d"], .6813)
 
+    def test_large_core_economics_do_not_saturate_at_the_minimum_admission_line(self):
+        ordinary, ordinary_detail = compute_follow_score(evidence(
+            score=.75, copy_bt_net_pnl=2442, copy_bt_14d_net_pnl=2031,
+            copy_bt_7d_net_pnl=605, copy_expected_return=.076, copy_return_lcb=.021,
+            copy_positive_probability=.983, copy_bt_closed_n=74, copy_evidence_days=21,
+        ))
+        exceptional, exceptional_detail = compute_follow_score(evidence(
+            score=.82, copy_bt_net_pnl=7173, copy_bt_14d_net_pnl=5553,
+            copy_bt_7d_net_pnl=4588, copy_expected_return=.032, copy_return_lcb=.009,
+            copy_positive_probability=.985, copy_bt_closed_n=88, copy_evidence_days=18,
+        ))
+
+        self.assertGreater(exceptional, ordinary)
+        self.assertGreater(
+            exceptional_detail["economicScore"], ordinary_detail["economicScore"] + .40,
+        )
+
     def test_economic_score_scales_with_actual_replay_equity_not_fixed_dollars(self):
         small, small_detail = compute_follow_score(evidence(
             copy_bt_net_pnl=3000, copy_bt_14d_net_pnl=1500, copy_bt_7d_net_pnl=800,

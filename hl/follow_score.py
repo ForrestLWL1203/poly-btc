@@ -363,13 +363,13 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     # proportionally scaled replay PnL therefore receives the same economic score.  Confidence shrinkage
     # prevents a three-trade windfall from outranking a repeatable wallet solely on one large episode.
     economic_score = (
-        0.50 * _clamp(returns["30d"] / 0.30)
-        + 0.30 * _clamp(returns["14d"] / 0.15)
-        + 0.20 * _clamp(returns["7d"] / 0.08)
+        0.50 * _clamp(returns["30d"] / 0.60)
+        + 0.30 * _clamp(returns["14d"] / 0.40)
+        + 0.20 * _clamp(returns["7d"] / 0.25)
     )
     shrunk_economics = 0.5 + confidence * (economic_score - 0.5)
     activity = _clamp(_num(metrics.get("open_probability_48h"), 0.0))
-    score = 0.10 * raw + 0.55 * shrunk_copy + 0.25 * shrunk_economics + 0.10 * activity
+    score = 0.10 * raw + 0.40 * shrunk_copy + 0.40 * shrunk_economics + 0.10 * activity
     reasons = [
         f"预期保证金收益{expected * 100:+.1f}%",
         f"LCB {lcb * 100:+.1f}%",
