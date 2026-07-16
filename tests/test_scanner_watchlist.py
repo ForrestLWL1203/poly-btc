@@ -150,6 +150,16 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertFalse(policy["stock"]["allow"])
         self.assertEqual(policy["stock"]["status"], "grid_dca")
 
+    def test_regate_namespace_without_days_uses_fourteen_day_structure_window(self):
+        p = SimpleNamespace(max_single_adds=30, grid_max_adds=3)
+        fills = [{"coin": "BTC"}]
+
+        with patch.object(scanner, "build_episodes", return_value=([], [])), \
+                patch.object(scanner.metrics, "compute_metrics", return_value=None) as compute:
+            scanner._current_sector_structure_policy(fills, 1_000, p)
+
+        self.assertEqual(compute.call_args.args[3], 14)
+
     def test_single_complete_heavy_dca_sector_enters_pressure_watch(self):
         p = SimpleNamespace(days=14, max_single_adds=30, grid_max_adds=3)
         fills = [{"coin": "BTC"}]

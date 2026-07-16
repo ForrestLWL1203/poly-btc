@@ -68,7 +68,9 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
             }
             continue
         episodes, _open = build_episodes(fills)
-        current = metrics.compute_metrics(fills, episodes, now_ms, p.days)
+        current = metrics.compute_metrics(
+            fills, episodes, now_ms, int(getattr(p, "days", 14) or 14),
+        )
         if not current:
             out[sector] = {
                 "allow": False, "status": "no_sector_evidence", "reason": "本轮该板块结构证据不足",
