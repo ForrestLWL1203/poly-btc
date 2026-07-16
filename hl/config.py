@@ -523,7 +523,6 @@ CORE_ENTRY_TEMPORAL_LOOKBACK_DAYS = 2
 # The cap only bounds a pathological run; it is not a stability quota or a promise to retain weak wallets.
 CORE_LOO_MAX_REMOVALS = MAX_TARGETS - 1
 CORE_LOO_MIN_NET_GAIN = 1.0
-CORE_LOO_STRESS_SLACK = 25.0
 AUTO_TUNE_FILL_CACHE_MAX_BYTES = 64 * 1024 * 1024  # raw fill_json cache guard for 1GB VPS; fallback if exceeded
 AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08

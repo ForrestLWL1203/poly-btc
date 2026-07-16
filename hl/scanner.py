@@ -1319,7 +1319,6 @@ def _quality_first_core_transition(
     published = set(selected)
     max_removals = max(0, int(getattr(config, "CORE_LOO_MAX_REMOVALS", 2) or 0))
     min_net_gain = float(getattr(config, "CORE_LOO_MIN_NET_GAIN", 1.0) or 0.0)
-    stress_slack = max(0.0, float(getattr(config, "CORE_LOO_STRESS_SLACK", 25.0) or 0.0))
     removed_by_loo = []
     while len(published) > 1 and len(removed_by_loo) < max_removals:
         base = strict_evaluate(tuple(sorted(published)))
@@ -1334,7 +1333,7 @@ def _quality_first_core_transition(
                 and f(without.actionable_open_rate) >= load_copy_policy().min_actionable_open_rate
                 and f(without.capacity_fit) >= load_copy_policy().min_capacity_fit
             )
-            if feasible and net_gain >= min_net_gain and stress_gain >= -stress_slack:
+            if feasible and net_gain >= min_net_gain:
                 utility_gain = f(without.risk_adjusted_utility) - f(base.risk_adjusted_utility)
                 trials.append((net_gain, utility_gain, stress_gain, -desired.index(addr), addr))
         if not trials:

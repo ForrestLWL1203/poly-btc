@@ -305,7 +305,9 @@ class SelectionTests(unittest.TestCase):
 
         metrics = {
             (): portfolio(0, 0, 0),
-            ("0xa",): portfolio(5_500, 2_800, .14),
+            # Even if B diversifies the stress replay, it is not entitled to Core when removing it raises
+            # normal net PnL and the remaining portfolio is still stress-profitable and operationally safe.
+            ("0xa",): portfolio(5_500, 200, .14),
             ("0xb",): portfolio(1_000, 500, .08),
             ("0xa", "0xb"): portfolio(5_405, 2_582, .11),
         }
