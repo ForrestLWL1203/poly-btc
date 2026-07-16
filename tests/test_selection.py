@@ -264,6 +264,30 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["selected"], ())
         self.assertEqual(result["reasons"]["0xidle"], "core_inactive_72h")
 
+    def test_quality_first_transition_removes_only_actual_shared_account_drag(self):
+        profiles = [
+            {
+                "addr": addr, "status": "active", "profile_generation": "g2",
+                "data_status": "valid", "follow_qualification": {"coreEligible": True},
+            }
+            for addr in ("0xa", "0xb")
+        ]
+
+        def run(nets):
+            return scanner._quality_first_core_transition(
+                profiles, generation_id="g2", previous_roles={}, controls={}, held=set(),
+                desired_order=("0xa", "0xb"),
+                strict_evaluate=lambda addrs: self._transition_metrics(nets[tuple(sorted(addrs))]),
+            )
+
+        drag = run({(): 0, ("0xa",): 100, ("0xb",): 80, ("0xa", "0xb"): 90})
+        consensus = run({(): 0, ("0xa",): 100, ("0xb",): 90, ("0xa", "0xb"): 180})
+
+        self.assertEqual(drag["selected"], ("0xa",))
+        self.assertEqual(drag["reasons"]["0xb"], "portfolio_negative_incremental_net")
+        self.assertEqual(set(consensus["selected"]), {"0xa", "0xb"})
+        self.assertEqual(consensus["looRemoved"], ())
+
     def test_stable_core_replaces_only_confirmed_weak_wallet(self):
         day = 86_400_000
         now = 3 * day

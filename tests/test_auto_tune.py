@@ -203,9 +203,8 @@ class AutoTuneTests(unittest.TestCase):
         candidates = auto_tune.independent_leverage_candidates(base)
         values = [candidate["params"] for candidate in candidates]
 
-        self.assertTrue(any(row["STABLE_LEV_CAP"] == 32 and row["MID_LEV_CAP"] == 11 for row in values))
+        self.assertTrue(any(row["STABLE_LEV_CAP"] == 32 and row["MID_LEV_CAP"] == 10 for row in values))
         self.assertTrue(any(row["STABLE_LEV_CAP"] == 32 and row["MID_LEV_CAP"] == 9 for row in values))
-        self.assertTrue(any(row["HIGH_LEV_CAP"] == 5 for row in values))
         self.assertTrue(any(row["HIGH_LEV_CAP"] == 6 for row in values))
         self.assertFalse(any(
             row["STABLE_LEV_CAP"] != 32 and row["MID_LEV_CAP"] != 12 for row in values

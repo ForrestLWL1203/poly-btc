@@ -1,9 +1,9 @@
-"""Quality-prefix Core formation.
+"""Quality-first Core formation.
 
-The candidate order is fixed by individual wallet quality.  Portfolio search is therefore a one-dimensional
-choice of prefix length, not an arbitrary subset problem.  We tune the full initial prefix first, then use a
-monotone retention predicate and binary search to find the smallest prefix that preserves its economics.
-Neighbour checks protect the final choice from a slightly non-monotone replay surface.
+The expensive parameter search runs once on the full individually qualified pool.  Smaller quality prefixes
+are compared under that fixed sizing surface with a bounded binary search.  A later strict leave-one-out pass
+may remove a non-tail member only when its actual presence lowers funded shared-account net economics; this is
+not a correlation or same-coin de-duplication rule.
 """
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
 def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEvaluation], *,
                           retention_kwargs: Mapping[str, float] | None = None,
                           tie_tolerance: float = .02) -> PrefixSearchResult:
-    """Tune O(log N) quality prefixes and return the best retained state.
+    """Evaluate O(log N) quality prefixes and return the best retained state.
 
     Search finds the smallest prefix that preserves the fully tuned initial portfolio.  It then evaluates
     immediate neighbours and chooses the best risk-adjusted utility, preferring fewer wallets only when the

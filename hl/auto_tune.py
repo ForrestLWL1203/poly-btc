@@ -1702,8 +1702,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
         axis_quick[0],
     )
+    shortlist_limit = max(1, int(getattr(config, "AUTO_TUNE_LEVERAGE_SHORTLIST", 2) or 2))
     tier_values = {
-        key: _tier_leverage_shortlist(axis_quick, quick_baseline, key, limit=3)
+        key: _tier_leverage_shortlist(axis_quick, quick_baseline, key, limit=shortlist_limit)
         for key in LEV_KEYS
     }
     combo_quick = []
@@ -1817,7 +1818,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             if key not in seen_add:
                 seen_add.add(key)
                 add_options.append(params_)
-            if len(add_options) >= 4:
+            if len(add_options) >= max(1, int(getattr(config, "AUTO_TUNE_ADD_FINALISTS", 3) or 3)):
                 break
     else:
         add_options = [selected_add_params]

@@ -40,6 +40,19 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
         self.assertEqual(result["evidence_status"], "invalid")
         self.assertNotIn("error", result)
 
+    def test_historical_cutoff_never_sees_future_cached_fills(self):
+        now = 30 * 86_400_000
+        fill = {
+            "time": now + 1, "tid": 1, "coin": "BTC", "side": "B",
+            "sz": "1", "px": "100", "startPosition": "0",
+        }
+
+        result = scanner_copy_bt.copy_bt_result("0xabc", [fill], now, self._params())
+
+        self.assertTrue(result["valid"])
+        self.assertFalse(result["has_evidence"])
+        self.assertEqual(result["evidence_status"], "no_fills")
+
     def test_warmup_restores_position_opened_before_30_day_boundary(self):
         day = 86_400_000
         now = 40 * day

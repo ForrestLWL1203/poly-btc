@@ -499,18 +499,30 @@ AUTO_TUNE_LEV_CAP_SETS = (
     (35, 12, 4), (32, 12, 4), (30, 11, 4), (30, 10, 4),
     (28, 10, 4), (25, 10, 4), (25, 8, 4),
 )
-AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 11, 10, 9)
-AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 32, 30, 28, 25)
-AUTO_TUNE_COORD_HIGH_LEV_CAPS = (4, 5, 6)
+AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9)
+AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25)
+AUTO_TUNE_COORD_HIGH_LEV_CAPS = (4, 6)
+AUTO_TUNE_LEVERAGE_SHORTLIST = 2  # 每档保留当前/最佳代表值；组合网格最多 2^3=8，而不是 3^3=27
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.40, 0.50, 0.60)
-AUTO_TUNE_SIZING_FINALISTS = 8
+AUTO_TUNE_SIZING_FINALISTS = 5
 AUTO_TUNE_TIME_BUDGET_SEC = 0  # 0 = no wall-clock cutoff; finite axes/finalist limits bound the tuner.
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.08, 0.12)
-AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.08, 0.10, 0.12)
-AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.2, 1.3)
+AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.09, 0.12)
+AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.3)
 AUTO_TUNE_ADD_MAX_HARDS = (6, 8, 10)
 AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
-AUTO_TUNE_FINALIST_LIMIT = 10  # 小范围Pareto候选进入非重叠折叠验证
+AUTO_TUNE_FINALIST_LIMIT = 6  # 粗网格只让少量Pareto候选进入昂贵的非重叠折叠验证
+AUTO_TUNE_ADD_FINALISTS = 3
+
+# 新钱包必须在当前/24h前/48h前三个无未来数据截面中至少两个仍达到个人 Core 线；老 Core
+# 不靠该门槛续命，当前不合格仍即时退出。组合形成后允许删除最多两个实际拖累共享账户净收益的成员。
+CORE_ENTRY_TEMPORAL_OFFSETS_H = (0, 24, 48)
+CORE_ENTRY_TEMPORAL_MIN_PASSES = 2
+CORE_ENTRY_TEMPORAL_LOOKBACK_DAYS = 2
+CORE_LOO_MAX_REMOVALS = 2
+CORE_LOO_MIN_NET_GAIN = 1.0
+CORE_LOO_STRESS_SLACK = 25.0
+CORE_LOO_MAX_DD_WORSEN = 0.005
 AUTO_TUNE_FILL_CACHE_MAX_BYTES = 64 * 1024 * 1024  # raw fill_json cache guard for 1GB VPS; fallback if exceeded
 AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08
@@ -523,9 +535,9 @@ MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行
 #                              已阻止完整照抄。30+ 的完整回合仍视为不可复制的极端重DCA。
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
-# target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. The extra 7d
-# is replay warm-up only; reported/scored windows remain 30/14/7d.
-PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
+# target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. The extra 7d is
+# replay warm-up and the final 2d supports no-future entry snapshots; reported/scored windows remain 30/14/7d.
+PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS + CORE_ENTRY_TEMPORAL_LOOKBACK_DAYS
 
 # INCREMENTAL scan (2026-07-01): the daily re-scan fetches only the fills SINCE our per-candidate cursor
 # (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling
