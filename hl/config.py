@@ -82,9 +82,9 @@ CORE_ENTRY_MIN_OOS_CLOSED = 7
 CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
 # Individual Copy economics are classified before the shared-account selector.  Challenger is a
 # real observation tier, not a dumping ground for economically worthless wallets.
-CHALLENGER_MIN_COPY_RETURN_30D = 0.15
+CHALLENGER_MIN_COPY_RETURN_30D = 0.10
 CHALLENGER_MIN_COPY_RETURN_7D = 0.03
-CORE_MIN_COPY_RETURN_30D = 0.15
+CORE_MIN_COPY_RETURN_30D = 0.10
 CORE_MIN_COPY_RETURN_7D = 0.05
 CORE_STRONG_COPY_RETURN_30D = 0.20
 CORE_STRONG_MIN_CLOSED_30D = 20

@@ -186,7 +186,7 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_7d_closed_n=3, copy_bt_7d_net_pnl=300, copy_return_lcb=-0.05,
         ), margin_equity_pct=0.50)
         rejected = evaluate_follow_eligibility(
-            evidence(copy_bt_net_pnl=749), margin_equity_pct=0.50,
+            evidence(copy_bt_net_pnl=499), margin_equity_pct=0.50,
         )
 
         self.assertTrue(core["coreEligible"])
@@ -208,7 +208,7 @@ class FollowScoreTests(unittest.TestCase):
 
     def test_profit_floors_use_total_realized_plus_open_pnl(self):
         result = evaluate_follow_eligibility(evidence(
-            copy_bt_net_pnl=1800, copy_bt_unrealized_pnl=-400,
+            copy_bt_net_pnl=1200, copy_bt_unrealized_pnl=-400,
             copy_bt_7d_net_pnl=600, copy_bt_7d_unrealized_pnl=-150,
         ))
 
@@ -217,7 +217,7 @@ class FollowScoreTests(unittest.TestCase):
 
     def test_profit_percentages_scale_with_canonical_replay_capital(self):
         result = evaluate_follow_eligibility(evidence(
-            copy_bt_net_pnl=2500, copy_bt_7d_net_pnl=900,
+            copy_bt_net_pnl=1900, copy_bt_7d_net_pnl=900,
             initial_margin_equity=20_000,
         ))
 
