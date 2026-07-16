@@ -97,7 +97,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(result["role"], "challenger")
         self.assertEqual(result["status"], "challenger_thin_edge_watch")
 
-    def test_thin_edge_without_core_dollar_economics_stays_rejected(self):
+    def test_materially_thin_edge_stays_rejected_despite_strict_copy_dollars(self):
         result = evaluate_follow_eligibility(evidence(
             copy_expected_return=0.005,
             copy_bt_net_pnl=1600,
@@ -106,6 +106,25 @@ class FollowScoreTests(unittest.TestCase):
 
         self.assertFalse(result["eligible"])
         self.assertEqual(result["status"], "thin_copy_edge")
+
+    def test_near_boundary_thin_edge_is_challenger_not_core(self):
+        result = evaluate_follow_eligibility(evidence(copy_expected_return=0.018))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_thin_edge_watch")
+
+    def test_no_allowed_specialty_sector_is_rejected_even_with_global_profit(self):
+        result = evaluate_follow_eligibility(evidence(
+            sector_policy_json=json.dumps({
+                "allowed": [],
+                "crypto": {"allow": False, "status": "recent_loss"},
+                "stock": {"allow": False, "status": "grid_dca"},
+            }),
+        ))
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "no_allowed_sector")
 
     def test_execution_and_capacity_are_real_gates(self):
         low_fill = evaluate_follow_eligibility(evidence(actionable_open_rate=0.55))

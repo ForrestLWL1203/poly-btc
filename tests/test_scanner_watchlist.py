@@ -76,6 +76,34 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 
 
 class ScannerWatchlistTests(unittest.TestCase):
+    def test_sector_specialization_can_recover_global_spot_and_turnover_contamination(self):
+        self.assertIn("spot_dominant", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
+        self.assertIn("hft_turnover", scanner._SECTOR_RECOVERABLE_STATE_REASONS)
+        self.assertNotIn("spot_hedge", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
+
+    def test_regate_reactivates_complete_cached_snapshot_but_not_incomplete_profile(self):
+        self.assertEqual(
+            scanner._regate_profile_status(
+                "rejected", "normalized_evidence_missing", True,
+                complete_cached_snapshot=True,
+            ),
+            "active",
+        )
+        self.assertEqual(
+            scanner._regate_profile_status(
+                "rejected", "grid_dca", True,
+                complete_cached_snapshot=False,
+            ),
+            "rejected",
+        )
+        self.assertEqual(
+            scanner._regate_profile_status(
+                "rejected", "no_portfolio", True,
+                complete_cached_snapshot=False,
+            ),
+            "rejected",
+        )
+
     def test_partial_cache_without_coverage_marker_forces_full_window_heal(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -758,6 +786,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 _profile_row(
                     "0xaaa", "retired", 0.0,
                     reason="low_quality", profile_generation="g-current",
+                    pf_equity=10_000, pf_mon_pnl=1_000, pf_mon_vlm=50_000,
                 ),
             )
             db.execute(

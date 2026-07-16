@@ -47,8 +47,10 @@ from .util import f, now_iso
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
 
 _SECTOR_RECOVERABLE_STRUCTURE_REASONS = {
-    "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca", "too_many_concurrent",
+    "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
+    "too_many_concurrent",
 }
+_SECTOR_RECOVERABLE_STATE_REASONS = {"hft_turnover"}
 
 
 def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_generation"):
@@ -906,7 +908,15 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         m["pf_equity"] = _pw.get("equity") or _pm.get("equity")
         m["pf_max_dd"] = _pm.get("max_drawdown") or _pw.get("max_drawdown")   # 30d curve = fuller DD picture
         m["pf_turnover"], m["pf_edge_bps"] = _pw.get("turnover"), _pw.get("edge_bps")
+        if not m.get("pf_equity"):
+            return _defer_profile(db, addr, prior, stamp, "portfolio_equity_unavailable")
         ok, reason = metrics.gates_state(m, now_ms, p)
+        if (
+            not ok
+            and reason in _SECTOR_RECOVERABLE_STATE_REASONS
+            and sector_structure.get("allowed")
+        ):
+            ok, reason = True, "ok"
     if ok:
         valuation_marks = snap.get("mark_prices") or {}
         copy_results = _copy_bt_results(
@@ -3699,6 +3709,13 @@ def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rej
     db.commit()
 
 
+def _regate_profile_status(old_status, old_reason, ok, *, complete_cached_snapshot=False):
+    """Resolve cache-only qualification without reviving profiles that never got a full market snapshot."""
+    if old_status == "active" or (ok and complete_cached_snapshot):
+        return "active" if ok else "retired"
+    return old_status
+
+
 def regate(db, p, *, stamp=None, source: str = "regate",
            auto_tune_enabled: bool = False, quiet: bool = False) -> int:
     """Re-apply gates() + score() on ALREADY-STORED profile metrics (no network, no re-fetch) and
@@ -3837,6 +3854,16 @@ def regate(db, p, *, stamp=None, source: str = "regate",
             ok, reason = True, "ok"
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
+            if (
+                not ok
+                and reason in _SECTOR_RECOVERABLE_STATE_REASONS
+                and sector_structure.get("allowed")
+            ):
+                ok, reason = True, "ok"
+        if not ok and reason == "no_portfolio":
+            reason = "portfolio_equity_unavailable"
+            m["data_status"] = "deferred_data_error"
+            m["evidence_status"] = "invalid"
         if ok:
             copy_results = _copy_bt_results(addr, replay_fills, now, p)
             sector_results = _sector_copy_bt_results(addr, replay_fills, now, p)
@@ -3863,18 +3890,23 @@ def regate(db, p, *, stamp=None, source: str = "regate",
                 evidence_results = _copy_bt_results(addr, allowed_fills, now, p)
             m.update(_open_flow_metrics(evidence_fills, now))
             _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now)
+            if not current_policy.get("allowed") and m.get("evidence_status") not in {"missing", "invalid"}:
+                m["evidence_status"] = "economically_disqualified"
             ok, reason = _profile_copy_qualification(m, now, p)
         ok, reason, score = _finalize_profile_qualification(m, ok, reason)
         # Only policy-only outcomes removed by this release may be safely reactivated from the current
         # cached replay. Structural/data failures still require a fresh network generation.
-        policy_recheck = old_reason in {
-            "low_quality", "inactive_copyable_open", "thin_copy_edge", "thin_edge",
-            *_SECTOR_RECOVERABLE_STRUCTURE_REASONS,
-        }
-        if old == "active" or policy_recheck:
-            status = "active" if ok else "retired"
-        else:
-            status = old
+        complete_cached_snapshot = bool(
+            pf_mpnl is not None
+            and pf_mvlm is not None
+            and pf_eq is not None
+            and float(pf_eq or 0.0) > 0.0
+            and str(m.get("data_status") or "valid").lower() == "valid"
+            and str(m.get("evidence_status") or "").lower() not in {"invalid", "missing"}
+        )
+        status = _regate_profile_status(
+            old, old_reason, ok, complete_cached_snapshot=complete_cached_snapshot,
+        )
         db.execute(
             "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"

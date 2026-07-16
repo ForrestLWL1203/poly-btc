@@ -137,6 +137,14 @@ def evaluate_follow_eligibility(
     policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
     allowed = set(policy_json.get("allowed") or ())
     structural_core_blocked = bool(policy_json.get("coreBlocked"))
+    if "allowed" in policy_json and not allowed:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "no_allowed_sector",
+            "role": "rejected",
+            "reasons": ["当轮没有同时通过结构与严格Copy验证的专精板块"],
+        }
     policy_hard_recent = any(
         isinstance(policy_json.get(sector), dict)
         and isinstance(policy_json[sector].get("recent"), dict)
@@ -210,17 +218,18 @@ def evaluate_follow_eligibility(
     )
     strong_samples = c30 >= policy.strong_min_closed_30d and evidence_days >= policy.strong_min_evidence_days
     weekly_economics_ok = pnl7 >= weekly_core_floor
-    # The 2% episode-normalized edge remains a Core boundary, but must not erase a wallet whose actual
-    # account-level Copy economics are already strong and well sampled.  Those near-boundary disagreements
-    # remain visible as Challenger evidence; genuinely thin wallets that do not also clear the full Core
-    # 30d/7d dollar floors and standard evidence requirements are still rejected.
+    # A narrow miss of the 2% normalized edge line may remain visible as Challenger when the strict Copy
+    # account result, recent economics, samples and win probability are all strong.  Materially thin or
+    # negative expected edge remains a real rejection: a large historical dollar result alone must not
+    # override an unstable/negative episode distribution.
+    challenger_edge_floor = max(0.0, min_expected_return * 0.75)
     thin_edge_watch = bool(
         thin_edge
+        and _num(expected_return) >= challenger_edge_floor
         and pnl30 >= core_floor
         and weekly_economics_ok
         and standard_samples
         and probability_ok
-        and valuation_status == "complete"
     )
     if thin_edge and not thin_edge_watch:
         return {
@@ -228,7 +237,9 @@ def evaluate_follow_eligibility(
             "coreEligible": False,
             "status": "thin_copy_edge",
             "role": "rejected",
-            "reasons": [f"保证金归一化预期收益低于{min_expected_return * 100:.1f}%经济底线"],
+            "reasons": [
+                f"保证金归一化预期收益低于候选观察线{challenger_edge_floor * 100:.1f}%"
+            ],
         }
     # Strong 30d evidence may waive the thin 7d/LCB confidence checks, but never a confirmed recent
     # deterioration.  A wallet whose sampled 14d copy window is already non-positive remains worth
