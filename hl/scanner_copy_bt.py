@@ -205,6 +205,7 @@ def record_primary_copy_bt(metrics, result):
         copy_bt_open_fill_rate=(opened / target_open) if target_open else None,
         copy_bt_liquidations=int(result.get("liquidations") or 0),
         copy_bt_fee_drag=result.get("fee_drag"),
+        initial_margin_equity=result.get("initial_margin_equity"),
         copy_bt_data_status=result.get("data_status", "valid"),
         copy_bt_evidence_status=result.get("evidence_status", "observed"),
     )

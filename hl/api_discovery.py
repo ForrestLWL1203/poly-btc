@@ -65,7 +65,8 @@ _REJECT_BUCKETS = [
     }),
     ("净Edge不足 / 近期亏损", {
         "thin_edge", "thin_copy_edge", "recent_copy_loss", "copy_return_lcb_low",
-        "positive_probability_low", "not_profitable",
+        "positive_probability_low", "not_profitable", "copy_value_below_challenger_floor",
+        "copy_recent_value_below_challenger_floor", "recent_copy_collapse",
     }),
     ("执行结构 / 容量不可跟", {
         "spot_dominant", "bot_frequency", "hft_uncopyable", "hft_turnover", "grid_dca",

@@ -24,6 +24,7 @@ class CopyPolicy:
     min_return_lcb: float
     entry_positive_probability: float
     challenger_min_return_30d: float
+    challenger_min_return_7d: float
     core_min_return_30d: float
     core_min_return_7d: float
     strong_core_return_30d: float
@@ -74,10 +75,11 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_expected_margin_return=float(_value(values, "COPY_MIN_EXPECTED_MARGIN_RETURN", 0.02)),
         min_return_lcb=float(_value(values, "COPY_MIN_RETURN_LCB", 0.0)),
         entry_positive_probability=float(_value(values, "CORE_ENTRY_MIN_POSITIVE_PROB", 0.70)),
-        challenger_min_return_30d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_30D", 0.03)),
-        core_min_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.05)),
-        core_min_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.025)),
-        strong_core_return_30d=float(_value(values, "CORE_STRONG_COPY_RETURN_30D", 0.10)),
+        challenger_min_return_30d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_30D", 0.15)),
+        challenger_min_return_7d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_7D", 0.03)),
+        core_min_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.15)),
+        core_min_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.05)),
+        strong_core_return_30d=float(_value(values, "CORE_STRONG_COPY_RETURN_30D", 0.20)),
         strong_min_closed_30d=int(_value(values, "CORE_STRONG_MIN_CLOSED_30D", 20)),
         strong_min_evidence_days=int(_value(values, "CORE_STRONG_MIN_EVIDENCE_DAYS", 10)),
         recent_warning_loss_ratio=float(_value(values, "CORE_RECENT_WARNING_LOSS_RATIO", 0.10)),

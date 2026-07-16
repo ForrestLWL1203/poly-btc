@@ -82,15 +82,26 @@ def evaluate_follow_eligibility(
     evidence_days = int(_num(metrics.get("copy_evidence_days")))
     recent14 = metrics.get("copy_recent_return_14d")
     recent7 = metrics.get("copy_recent_return_7d")
-    pnl30 = _num(metrics.get("copy_bt_net_pnl"))
-    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
-    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
+    # Admission is based on the money the copy account has actually made at the replay endpoint, not only
+    # on already-closed episodes.  Otherwise a wallet can bank a small realized profit, carry a larger open
+    # loss, and still look Core-profitable.  Window-specific unrealized PnL comes from the same canonical
+    # replay and valuation snapshot as its realized result.
+    pnl30 = _num(metrics.get("copy_bt_net_pnl")) + _num(metrics.get("copy_bt_unrealized_pnl"))
+    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl")) + _num(metrics.get("copy_bt_14d_unrealized_pnl"))
+    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl")) + _num(metrics.get("copy_bt_7d_unrealized_pnl"))
     initial_balance = max(1.0, float(getattr(config, "INITIAL_BALANCE", 10_000.0)))
     if margin_equity_pct is None:
         margin_equity_pct = metrics.get("margin_equity_pct", config.MARGIN_EQUITY_PCT)
     margin_equity_pct = max(0.0, min(1.0, _num(margin_equity_pct, config.MARGIN_EQUITY_PCT)))
-    qualification_equity = initial_balance * margin_equity_pct
+    # Canonical replay records the actual capital basis it used.  Prefer that value so the same percentages
+    # scale with a future $20k/$30k live account as well as today's $10k Paper account.  Legacy rows fall
+    # back to the configured account equity times the manual margin-equity percentage.
+    qualification_equity = max(
+        1.0,
+        _num(metrics.get("initial_margin_equity"), initial_balance * margin_equity_pct),
+    )
     challenger_floor = qualification_equity * policy.challenger_min_return_30d
+    challenger_weekly_floor = qualification_equity * policy.challenger_min_return_7d
     core_floor = qualification_equity * policy.core_min_return_30d
     weekly_core_floor = qualification_equity * policy.core_min_return_7d
     strong_floor = qualification_equity * policy.strong_core_return_30d
@@ -154,6 +165,16 @@ def evaluate_follow_eligibility(
             "role": "rejected",
             "reasons": [
                 f"30天严格Copy收益{pnl30:+.0f}低于候选价值线{challenger_floor:.0f}"
+            ],
+        }
+    if c7 >= min_closed7 and pnl7 < challenger_weekly_floor:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_recent_value_below_challenger_floor",
+            "role": "rejected",
+            "reasons": [
+                f"7天严格Copy总收益{pnl7:+.0f}低于候选价值线{challenger_weekly_floor:.0f}"
             ],
         }
     thin_edge = _num(expected_return) < min_expected_return

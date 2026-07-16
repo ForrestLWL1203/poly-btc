@@ -211,6 +211,49 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(replay[4], "later")
             self.assertEqual(profile, (100, 7))
 
+    def test_final_parameter_qualification_overrides_scan_time_core_signal(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": .9,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                "copy_bt_net_pnl": 3000, "copy_bt_14d_net_pnl": 1200,
+                "copy_bt_7d_net_pnl": 900, "copy_bt_closed_n": 20,
+                "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 8,
+                "copy_expected_return": .06, "copy_return_lcb": .02,
+                "copy_positive_probability": .9, "copy_evidence_days": 12,
+                "actionable_open_rate": .9, "capacity_fit": .9,
+                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.execute(
+                "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(1,?,?,?,'now')",
+                ("0xaaa", .9, profile["sector_policy_json"]),
+            )
+            db.commit()
+            final_qualification = {
+                "eligible": True, "coreEligible": False, "role": "challenger",
+                "status": "challenger_weekly_return_watch",
+                "reasons": ["最终参数7日收益低于Core百分比线"],
+            }
+
+            rows, marginal = scanner._build_explicit_selection(
+                db, "g1", "now", 1000,
+                forced_core_order=(), formation_meta={},
+                effective_qualifications={"0xaaa": final_qualification},
+                effective_scores={"0xaaa": .8},
+            )
+
+            self.assertEqual(marginal.selected, ())
+            self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
+                ("0xaaa", "challenger", "challenger_weekly_return_watch"),
+            ])
+
     def test_generation_tune_seals_applied_params_with_membership_before_replay(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -448,8 +491,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_recent_return_7d": 0.03, "copy_risk_score": 0.85,
                     "execution_score": 0.95, "open_probability_48h": 0.8,
                     "copy_bt_open_fill_rate": 0.95, "actionable_open_rate": 0.95,
-                    "capacity_fit": 0.95, "copy_bt_net_pnl": 800,
-                    "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 300,
+                    "capacity_fit": 0.95, "copy_bt_net_pnl": 1800,
+                    "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                     "times_seen": 1, "times_active": 1,
                 }
@@ -663,7 +706,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
                 "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
-                "copy_bt_net_pnl": 800, "copy_bt_14d_net_pnl": 400, "copy_bt_7d_net_pnl": 300,
+                "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
                 "copy_bt_closed_n": 12, "copy_bt_14d_closed_n": 8, "copy_bt_7d_closed_n": 5,
                 "copy_expected_return": .05, "copy_return_lcb": .01,
                 "copy_positive_probability": .8, "copy_evidence_days": 8,
@@ -720,8 +763,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
                 "copy_risk_score": 0.9, "execution_score": 0.9,
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
-                "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
-                "copy_bt_7d_net_pnl": 300,
+                "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900,
+                "copy_bt_7d_net_pnl": 600,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
@@ -758,8 +801,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "profile_generation": "g1", "data_status": "valid",
                     "evidence_status": "qualified",
                     "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10,
-                    "copy_bt_7d_closed_n": 6, "copy_bt_net_pnl": 1200,
-                    "copy_bt_14d_net_pnl": 500, "copy_bt_7d_net_pnl": 300,
+                    "copy_bt_7d_closed_n": 6, "copy_bt_net_pnl": 1800,
+                    "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
                     "copy_expected_return": .05, "copy_return_lcb": .01,
                     "copy_positive_probability": .85, "copy_evidence_days": 10,
                     "actionable_open_rate": .9, "capacity_fit": .9,
@@ -848,8 +891,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
                 "copy_risk_score": 0.5, "execution_score": 0.9,
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
-                "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
-                "copy_bt_7d_net_pnl": 300,
+                "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
+                "copy_bt_7d_net_pnl": 600,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
             }
             db.execute(
@@ -924,8 +967,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_bt_14d_closed_n": 10, "copy_positive_probability": .8,
                     "copy_expected_return": .05, "copy_return_lcb": .01,
                     "copy_evidence_days": 10, "actionable_open_rate": .9, "capacity_fit": .9,
-                    "copy_bt_net_pnl": 1200, "copy_bt_14d_net_pnl": 500,
-                    "copy_bt_7d_net_pnl": 300,
+                    "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
+                    "copy_bt_7d_net_pnl": 600,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                 }
                 db.execute(

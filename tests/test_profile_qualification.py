@@ -15,9 +15,9 @@ def qualified(**overrides):
         "copy_bt_closed_n": 16,
         "copy_bt_14d_closed_n": 9,
         "copy_bt_7d_closed_n": 5,
-        "copy_bt_net_pnl": 800,
-        "copy_bt_14d_net_pnl": 350,
-        "copy_bt_7d_net_pnl": 120,
+        "copy_bt_net_pnl": 1800,
+        "copy_bt_14d_net_pnl": 900,
+        "copy_bt_7d_net_pnl": 600,
         "copy_expected_return": 0.045,
         "copy_return_lcb": 0.01,
         "copy_positive_probability": 0.82,
@@ -78,14 +78,14 @@ class ProfileQualificationTests(unittest.TestCase):
 
     def test_near_core_thin_edge_with_strong_dollar_economics_remains_observable(self):
         ok, reason = scanner._profile_copy_qualification(qualified(
-            copy_expected_return=0.019, copy_bt_7d_net_pnl=300,
+            copy_expected_return=0.019, copy_bt_7d_net_pnl=600,
         ), NOW, self.params)
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
 
     def test_truly_thin_normalized_copy_edge_is_excluded(self):
         ok, reason = scanner._profile_copy_qualification(qualified(
-            copy_expected_return=0.005, copy_bt_net_pnl=499, copy_bt_7d_net_pnl=249,
+            copy_expected_return=0.005, copy_bt_net_pnl=1600, copy_bt_7d_net_pnl=400,
         ), NOW, self.params)
         self.assertFalse(ok)
         self.assertEqual(reason, "thin_copy_edge")
