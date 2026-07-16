@@ -76,6 +76,117 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 
 
 class ScannerWatchlistTests(unittest.TestCase):
+    def test_partial_cache_without_coverage_marker_forces_full_window_heal(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cached = {"tid": 1, "time": 9_000, "coin": "BTC"}
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                ("0xaaa", 1, 9_000, json.dumps(cached)),
+            )
+            db.commit()
+            fetched = [{"tid": 2, "time": 2_000, "coin": "BTC"}]
+
+            with patch.object(scanner.rest, "fetch_window", return_value=(fetched, False)) as fetch:
+                raw, hit_cap, new_fills, fetched_full = scanner._fetch_profile_fills(
+                    db, "0xaaa", 1_000, SimpleNamespace(max_pages=5), full=False,
+                )
+
+            fetch.assert_called_once_with("0xaaa", 1_000, 5)
+            self.assertEqual(raw, fetched)
+            self.assertFalse(hit_cap)
+            self.assertEqual(new_fills, fetched)
+            self.assertTrue(fetched_full)
+            db.close()
+
+    def test_complete_cache_uses_delta_and_preserves_full_specialization_window(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cached = {"tid": 1, "time": 9_000, "coin": "BTC"}
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                ("0xaaa", 1, 9_000, json.dumps(cached)),
+            )
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) "
+                "VALUES (?,?,?,?)",
+                ("0xaaa", 1_000, 9_000, "2026-07-16T00:00:00Z"),
+            )
+            db.commit()
+            delta = [{"tid": 2, "time": 10_000, "coin": "xyz:IBM"}]
+
+            with patch.object(scanner.rest, "fetch_window", return_value=(delta, False)) as fetch:
+                raw, hit_cap, new_fills, fetched_full = scanner._fetch_profile_fills(
+                    db, "0xaaa", 1_000, SimpleNamespace(max_pages=5), full=False,
+                )
+
+            self.assertEqual(fetch.call_args.args[0], "0xaaa")
+            self.assertGreaterEqual(fetch.call_args.args[1], 1_000)
+            self.assertEqual([row["tid"] for row in raw], [1, 2])
+            self.assertFalse(hit_cap)
+            self.assertEqual(new_fills, delta)
+            self.assertFalse(fetched_full)
+            db.close()
+
+    def test_current_generation_sector_structure_is_independent_of_prior_policy(self):
+        p = SimpleNamespace(days=14, max_single_adds=30, grid_max_adds=10)
+        fills = [{"coin": "BTC"}, {"coin": "xyz:IBM"}]
+        crypto_ep = {"open_complete": True, "n_adds": 0}
+        stock_ep = {"open_complete": True, "n_adds": 12}
+
+        with patch.object(scanner, "build_episodes", side_effect=[([crypto_ep], []), ([stock_ep], [])]), \
+                patch.object(scanner.metrics, "compute_metrics", side_effect=[
+                    {"median_adds_per_ep": 0, "max_adds_per_ep": 0},
+                    {"median_adds_per_ep": 12, "max_adds_per_ep": 12},
+                ]), \
+                patch.object(scanner.metrics, "gates_structural", side_effect=[
+                    (True, "ok"), (False, "grid_dca"),
+                ]):
+            policy = scanner._current_sector_structure_policy(fills, 1_000, p)
+
+        self.assertEqual(policy["source"], "current_generation")
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertFalse(policy["stock"]["allow"])
+        self.assertEqual(policy["stock"]["status"], "grid_dca")
+
+    def test_single_complete_heavy_dca_sector_enters_pressure_watch(self):
+        p = SimpleNamespace(days=14, max_single_adds=30, grid_max_adds=3)
+        fills = [{"coin": "BTC"}]
+        episodes = [
+            {"open_complete": True, "n_adds": 1},
+            {"open_complete": True, "n_adds": 31},
+            {"open_complete": False, "n_adds": 80},
+        ]
+
+        with patch.object(scanner, "build_episodes", return_value=(episodes, [])), \
+                patch.object(scanner.metrics, "compute_metrics", return_value={
+                    "median_adds_per_ep": 1,
+                    "max_adds_per_ep": 31,
+                }), \
+                patch.object(scanner.metrics, "gates_structural", return_value=(False, "heavy_dca")):
+            policy = scanner._current_sector_structure_policy(fills, 1_000, p)
+
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertTrue(policy["crypto"]["watch"])
+        self.assertTrue(policy["crypto"]["coreBlocked"])
+        self.assertEqual(policy["crypto"]["heavyEpisodeCount"], 1)
+
+    def test_structural_specialization_snapshot_is_persistable_before_copy_replay(self):
+        snapshot = scanner._structural_specialization_snapshot({
+            "source": "current_generation",
+            "allowed": ["crypto"],
+            "crypto": {"allow": True, "status": "structural_ok"},
+            "stock": {"allow": False, "status": "grid_dca"},
+        })
+
+        self.assertEqual(snapshot["allowed"], ["crypto"])
+        self.assertEqual(snapshot["specializationSource"], "current_generation")
+        self.assertEqual(snapshot["specializationPhase"], "structural")
+        self.assertTrue(snapshot["crypto"]["allow"])
+        self.assertFalse(snapshot["stock"]["allow"])
+
+
     def test_repair_missing_episode_rows_rebuilds_from_cached_fills(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

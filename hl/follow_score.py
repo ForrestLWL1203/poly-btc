@@ -136,6 +136,7 @@ def evaluate_follow_eligibility(
         }
     policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
     allowed = set(policy_json.get("allowed") or ())
+    structural_core_blocked = bool(policy_json.get("coreBlocked"))
     policy_hard_recent = any(
         isinstance(policy_json.get(sector), dict)
         and isinstance(policy_json[sector].get("recent"), dict)
@@ -241,7 +242,7 @@ def evaluate_follow_eligibility(
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     core_eligible = bool(strong_entry or standard_entry)
-    if core_eligible:
+    if core_eligible and not structural_core_blocked:
         return {
             "eligible": True,
             "coreEligible": True,
@@ -254,7 +255,12 @@ def evaluate_follow_eligibility(
             "reasons": ["个人严格Copy证据达到Core准入线"],
         }
 
-    if valuation_status != "complete":
+    if structural_core_blocked:
+        status, reason = (
+            "challenger_structural_watch",
+            "单次Heavy-DCA受限回放通过，但结构压力验证只允许候选观察",
+        )
+    elif valuation_status != "complete":
         status, reason = "challenger_open_valuation_pending", "开放仓位缺少可靠末端估值，暂不进入Core"
     elif recent_warning:
         status, reason = "challenger_recent_decline", "近期回撤尚未达到硬淘汰线"

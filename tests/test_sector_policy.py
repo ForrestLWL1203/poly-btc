@@ -66,6 +66,81 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(policy["stock"]["status"], "recent_loss")
         self.assertEqual(policy["allowed"], ["crypto"])
 
+    def test_current_generation_structure_limits_profitable_sector_without_prior_policy(self):
+        sector_results = {
+            "crypto": {30: bt(1800, 10), 14: bt(900, 6), 7: bt(600, 5)},
+            "stock": {30: bt(2200, 12), 14: bt(1100, 7), 7: bt(700, 5)},
+        }
+        structure = {
+            "source": "current_generation",
+            "crypto": {"allow": True, "status": "structural_ok"},
+            "stock": {"allow": False, "status": "grid_dca", "reason": "本轮股票板块网格"},
+        }
+
+        policy = sector.evaluate_sector_policy(
+            sector_results, previous_policy=None, structural_policy=structure,
+        )
+
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertFalse(policy["stock"]["allow"])
+        self.assertEqual(policy["stock"]["status"], "grid_dca")
+        self.assertEqual(policy["specializationSource"], "current_generation")
+
+    def test_single_heavy_dca_pressure_pass_is_challenger_only(self):
+        sector_results = {
+            "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(600, 5)},
+        }
+        structure = {
+            "source": "current_generation",
+            "crypto": {"allow": True, "watch": True, "status": "heavy_dca_watch"},
+        }
+
+        policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
+
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertEqual(policy["structuralWatch"], ["crypto"])
+        self.assertTrue(policy["coreBlocked"])
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertTrue(policy["crypto"]["coreBlocked"])
+        self.assertEqual(policy["crypto"]["status"], "heavy_dca_watch")
+
+    def test_single_heavy_dca_with_recent_loss_fails_pressure_validation(self):
+        sector_results = {
+            "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(-100, 5)},
+        }
+        structure = {
+            "source": "current_generation",
+            "crypto": {"allow": True, "watch": True, "status": "heavy_dca_watch"},
+        }
+
+        policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
+
+        self.assertEqual(policy["allowed"], [])
+        self.assertFalse(policy["coreBlocked"])
+        self.assertFalse(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["status"], "heavy_dca_pressure_failed")
+
+    def test_clean_specialty_is_not_core_blocked_by_other_heavy_dca_sector(self):
+        sector_results = {
+            "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(600, 5)},
+            "stock": {30: bt(1800, 10), 14: bt(900, 6), 7: bt(500, 5)},
+        }
+        structure = {
+            "source": "current_generation",
+            "crypto": {"allow": True, "status": "structural_ok"},
+            "stock": {"allow": True, "watch": True, "status": "heavy_dca_watch"},
+        }
+
+        policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
+
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertFalse(policy["coreBlocked"])
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertFalse(policy["stock"]["allow"])
+        self.assertTrue(policy["stock"]["watch"])
+        self.assertEqual(policy["stock"]["status"], "heavy_dca_sector_isolated")
+
     def test_six_recent_losses_are_insufficient_for_hard_rejection(self):
         sector_results = {
             "crypto": {

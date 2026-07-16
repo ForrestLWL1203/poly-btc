@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from hl.follow_score import choose_follow_line, compute_follow_score, evaluate_follow_eligibility
@@ -214,6 +215,20 @@ class FollowScoreTests(unittest.TestCase):
     def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])
+
+    def test_heavy_dca_pressure_pass_remains_challenger_even_with_core_economics(self):
+        result = evaluate_follow_eligibility(evidence(
+            sector_policy_json=json.dumps({
+                "allowed": ["crypto"],
+                "coreBlocked": True,
+                "structuralWatch": ["crypto"],
+                "crypto": {"allow": True, "status": "heavy_dca_watch"},
+            }),
+        ))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_structural_watch")
 
     def test_liquidation_frequency_is_bounded_ranking_evidence_not_a_veto(self):
         baseline, _ = compute_follow_score(evidence(copy_bt_liquidations=0, copy_risk_score=0.0))

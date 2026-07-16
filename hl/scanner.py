@@ -25,7 +25,7 @@ from .fills import build_episodes, is_spot
 from .copy_data import load_copyable_fills, normalize_copyable_fills
 from .copy_policy import load_copy_policy
 from .copy_evidence import summarize_copy_evidence
-from .sector import classify_coin, compact_sector_results
+from .sector import SECTORS, classify_coin, compact_sector_results
 from .fill_transition import classify_fill_transition
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
@@ -45,6 +45,81 @@ from .scanner_lifecycle import (
 from .util import f, now_iso
 
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
+
+_SECTOR_RECOVERABLE_STRUCTURE_REASONS = {
+    "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca", "too_many_concurrent",
+}
+
+
+def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_generation"):
+    """Build this generation's sector specialization without consulting prior profile state.
+
+    Whole-wallet structure can be contaminated by a disabled specialty (for example stock DCA beside
+    clean Crypto trading).  Every scan therefore evaluates each sector from the current fills first.  A
+    single complete Heavy-DCA outlier is the only soft structure: it may pay for a capped Copy pressure
+    replay, but the resulting wallet remains Core-blocked even if that replay passes.
+    """
+    out = {"source": source}
+    for sector in SECTORS:
+        fills = [x for x in (perp_fills or []) if classify_coin(x.get("coin")) == sector]
+        if not fills:
+            out[sector] = {
+                "allow": False, "status": "no_sector_evidence", "reason": "本轮无该板块可复制成交",
+            }
+            continue
+        episodes, _open = build_episodes(fills)
+        current = metrics.compute_metrics(fills, episodes, now_ms, p.days)
+        if not current:
+            out[sector] = {
+                "allow": False, "status": "no_sector_evidence", "reason": "本轮该板块结构证据不足",
+            }
+            continue
+        current["perp_frac"] = 1.0
+        ok, reason = metrics.gates_structural(current, p)
+        complete = [episode for episode in episodes if episode.get("open_complete", True)]
+        heavy_limit = int(getattr(p, "max_single_adds", config.MAX_SINGLE_ADDS_PER_EP))
+        heavy_count = sum(1 for episode in complete if int(episode.get("n_adds") or 0) > heavy_limit)
+        one_off_heavy = bool(
+            reason == "heavy_dca"
+            and heavy_count == 1
+            and int(current.get("median_adds_per_ep") or 0) <= int(p.grid_max_adds)
+        )
+        if one_off_heavy:
+            out[sector] = {
+                "allow": True,
+                "watch": True,
+                "coreBlocked": True,
+                "status": "heavy_dca_watch",
+                "reason": "本轮仅一个完整回合超过Heavy-DCA阈值，进入受限回放压力验证",
+                "heavyEpisodeCount": heavy_count,
+                "maxAdds": int(current.get("max_adds_per_ep") or 0),
+                "medianAdds": int(current.get("median_adds_per_ep") or 0),
+            }
+        else:
+            out[sector] = {
+                "allow": bool(ok),
+                "status": "structural_ok" if ok else str(reason or "structural_unqualified"),
+                "reason": "本轮板块结构可复制" if ok else f"本轮板块结构不合格：{reason}",
+                "heavyEpisodeCount": heavy_count,
+                "maxAdds": int(current.get("max_adds_per_ep") or 0),
+                "medianAdds": int(current.get("median_adds_per_ep") or 0),
+                "maxConcurrent": int(current.get("max_concurrent") or 0),
+            }
+    out["allowed"] = [sector for sector in SECTORS if (out.get(sector) or {}).get("allow")]
+    return out
+
+
+def _structural_specialization_snapshot(structure):
+    """Serializable preliminary policy for profiles stopped before economic Copy replay."""
+    structure = structure or {}
+    out = {
+        sector: dict(structure.get(sector) or {})
+        for sector in SECTORS
+    }
+    out["allowed"] = list(structure.get("allowed") or ())
+    out["specializationSource"] = structure.get("source") or "current_generation"
+    out["specializationPhase"] = "structural"
+    return out
 
 
 def _episode_rows(addr: str, eps: list) -> list:
@@ -170,10 +245,18 @@ def _copy_bt_cached_fills(db, addr, now_ms, p):
 
 
 def _fetch_profile_fills(db, addr, window_start, p, full):
-    """(raw_full ASC, hit_cap, new_fills_to_persist). Incremental unless `full`: load the cached window,
+    """(raw_full ASC, hit_cap, new_fills_to_persist, fetched_full_window). Incremental unless `full`: load the cached window,
     fetch ONLY the delta since our cursor (max cached time − overlap), merge (tid-dedup). A never-cached
     candidate, or a delta that blows past the page cap (can't be trusted), falls back to a full re-fetch."""
-    if not full:
+    # A partial page-capped cache deliberately has no complete coverage marker.  Never advance from that
+    # partial tail as if it were authoritative: keep the wallet quarantined and force a bounded full-window
+    # heal on the next attempt.  This separates data integrity from business qualification.
+    coverage = db.execute(
+        "SELECT coverage_start_ms,coverage_end_ms FROM fill_cache_state WHERE addr=?",
+        (addr,),
+    ).fetchone()
+    coverage_complete = bool(coverage and int(coverage[0] or 0) <= int(window_start))
+    if not full and coverage_complete:
         stored = _load_cached_fills(db, addr, window_start)
         cursor = max((x["time"] for x in stored), default=None)
         if cursor is not None:
@@ -182,10 +265,10 @@ def _fetch_profile_fills(db, addr, window_start, p, full):
                 merged = {x.get("tid"): x for x in stored}
                 merged.update({x.get("tid"): x for x in delta})
                 raw_full = sorted((x for x in merged.values() if x["time"] >= window_start), key=lambda x: x["time"])
-                return raw_full, False, delta
+                return raw_full, False, delta, False
             # delta hit the cap → too many new fills to trust incrementally → full re-fetch (self-heal)
     raw_full, hit_cap = rest.fetch_window(addr, window_start, p.max_pages)
-    return raw_full, hit_cap, raw_full
+    return raw_full, hit_cap, raw_full, True
 
 
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
@@ -706,7 +789,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     # while only the scheduler-selected migration/repair wallets perform a complete historical refetch.
     full = bool(force_full or not config.INCREMENTAL_SCAN)
     try:
-        raw_full, hit_cap, new_fills = _fetch_profile_fills(db, addr, window_start, p, full)
+        raw_full, hit_cap, new_fills, fetched_full_window = _fetch_profile_fills(
+            db, addr, window_start, p, full,
+        )
     except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
         return _defer_profile(db, addr, prior, stamp, f"fills_error:{type(exc).__name__}")
     for x in raw_full:
@@ -758,31 +843,38 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     # STAGE A — cheap structural copyability (NO api). Front-of-funnel rejects (MM/HFT/grid/spot) that do
     # NOT kill a genuine trend trader. n_trades==0 (pure-hold) skips the episode-based checks → judged on
     # live positions in stage B. (Old behaviour auto-rejected n_trades==0 as 'no_closed_episode'.)
+    sector_structure = _current_sector_structure_policy(perp, now_ms, p)
+    # Every completed profile evaluation, including cold-start structural rejects, records which sectors
+    # were independently evaluated this generation.  Strict Copy replay below replaces this preliminary
+    # snapshot with the final net-of-cost economic policy for survivors.
+    m["sector_policy_json"] = json.dumps(
+        _structural_specialization_snapshot(sector_structure), sort_keys=True,
+    )
     if not perp:
         ok, reason = False, "no_copyable_perp_fills"
     elif hit_cap:
-        ok, reason = False, "hit_page_cap"
+        # A capped history is a real data-integrity failure, never a business rejection. Persist the
+        # partial cache without marking coverage complete so the next scan is forced to heal it, then
+        # quarantine/defer the profile while preserving any previously published usable snapshot.
+        with _db_lock:
+            _store_cached_fills(
+                db, addr, new_fills, window_start,
+                coverage_complete=False, coverage_end=now_ms,
+            )
+            db.commit()
+        status, deferred_reason, deferred, _ = _defer_profile(db, addr, prior, stamp, "hit_page_cap")
+        return status, deferred_reason, deferred, True
     else:
         ok, reason = metrics.gates_structural(m, p)
-        # A previously sealed sector policy is an execution boundary.  Behavior in a disabled sector must
-        # not disqualify a still-copyable allowed sector (for example stock DCA while Crypto-only is live).
-        if not ok and reason in {
-            "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca", "too_many_concurrent",
-        }:
-            try:
-                prior_policy = json.loads((prior or {}).get("sector_policy_json") or "{}")
-            except (TypeError, ValueError):
-                prior_policy = {}
-            allowed = set(prior_policy.get("allowed") or ())
-            if allowed and allowed != {"crypto", "stock"}:
-                allowed_perp = [x for x in perp if classify_coin(x.get("coin")) in allowed]
-                allowed_eps, _ = build_episodes(allowed_perp)
-                allowed_metrics = metrics.compute_metrics(allowed_perp, allowed_eps, now_ms, p.days)
-                if allowed_metrics:
-                    allowed_metrics["perp_frac"] = 1.0
-                    sector_ok, _sector_reason = metrics.gates_structural(allowed_metrics, p)
-                    if sector_ok:
-                        ok, reason = True, "ok"
+        # Specialization is derived from this generation's fills.  It must work identically on a fresh
+        # database and may not require a previously sealed sector_policy_json to escape a whole-wallet
+        # structural false positive.
+        if (
+            not ok
+            and reason in _SECTOR_RECOVERABLE_STRUCTURE_REASONS
+            and sector_structure.get("allowed")
+        ):
+            ok, reason = True, "ok"
 
     # STAGE B — fetch the LIVE open-position snapshot (un-blinds the funnel to held positions), fold in
     # realized+unrealized roi, then re-judge: held position = ACTIVE, 扛单 bags drag roi_total negative,
@@ -823,7 +915,12 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         )
         ok, reason = _apply_sector_copy_bt_gate(
             m, copy_results, sector_results, p,
-            previous_policy=(prior or {}).get("sector_policy_json"),
+            previous_policy=(
+                None
+                if getattr(p, "rebuild_sector_policy", False)
+                else (prior or {}).get("sector_policy_json")
+            ),
+            structural_policy=sector_structure,
         )
         try:
             sector_policy = json.loads(m.get("sector_policy_json") or "{}")
@@ -870,7 +967,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     with _db_lock:
         _store_cached_fills(
             db, addr, new_fills, window_start,
-            coverage_complete=bool(full and not hit_cap), coverage_end=now_ms,
+            coverage_complete=bool(fetched_full_window and not hit_cap), coverage_end=now_ms,
         )   # persist the delta + prune the window
         _replace_episode_rows(db, addr, eps)
         db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
@@ -974,8 +1071,8 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
 
 
 _HARD_EXIT_REASONS = {
-    "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "too_many_concurrent",
-    "hit_page_cap", "no_copyable_perp_fills", "spot_hedge", "blowup_loss",
+    "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
+    "too_many_concurrent", "no_copyable_perp_fills", "spot_hedge", "blowup_loss",
 }
 
 
@@ -3720,16 +3817,34 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
         m["loss_pain"] = metrics.loss_pain(_pnl.get(addr, ()))
+        replay_fills = _copy_bt_cached_fills(db, addr, now, p)
+        structural_start = now - int(getattr(p, "days", 14)) * 86_400_000
+        structural_fills = [fill for fill in replay_fills if int(fill.get("time") or 0) >= structural_start]
+        sector_structure = _current_sector_structure_policy(
+            structural_fills, now, p, source="current_generation_regate",
+        )
+        m["sector_policy_json"] = json.dumps(
+            _structural_specialization_snapshot(sector_structure), sort_keys=True,
+        )
         ok, reason = metrics.gates_structural(m, p)
+        if (
+            not ok
+            and reason in _SECTOR_RECOVERABLE_STRUCTURE_REASONS
+            and sector_structure.get("allowed")
+        ):
+            ok, reason = True, "ok"
         if ok:
             ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
         if ok:
-            replay_fills = _copy_bt_cached_fills(db, addr, now, p)
             copy_results = _copy_bt_results(addr, replay_fills, now, p)
             sector_results = _sector_copy_bt_results(addr, replay_fills, now, p)
             ok, reason = _apply_sector_copy_bt_gate(
                 m, copy_results, sector_results, p,
-                previous_policy=sector_policy_json,
+                # Regate is an explicit deterministic rebuild of the current cached generation.  It must
+                # be able to repair a cold-start generation whose old policy was formed before sector
+                # specialization existed, so historical policy never participates in this decision.
+                previous_policy=None,
+                structural_policy=sector_structure,
             )
             try:
                 current_policy = json.loads(m.get("sector_policy_json") or "{}")
@@ -3750,7 +3865,10 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         ok, reason, score = _finalize_profile_qualification(m, ok, reason)
         # Only policy-only outcomes removed by this release may be safely reactivated from the current
         # cached replay. Structural/data failures still require a fresh network generation.
-        policy_recheck = old_reason in {"low_quality", "inactive_copyable_open", "thin_copy_edge"}
+        policy_recheck = old_reason in {
+            "low_quality", "inactive_copyable_open", "thin_copy_edge", "thin_edge",
+            *_SECTOR_RECOVERABLE_STRUCTURE_REASONS,
+        }
         if old == "active" or policy_recheck:
             status = "active" if ok else "retired"
         else:
@@ -3995,6 +4113,10 @@ def scan(db, p) -> None:
         except Exception:  # noqa: BLE001 — column already exists
             pass
     run_full = bool(getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
+    # A complete/full operator sweep is a fresh specialization decision.  Prior sector policy may help an
+    # incremental scan confirm repeated deterioration, but must never decide whether a cold/full scan gets
+    # to evaluate the current generation's Crypto/stock evidence.
+    p.rebuild_sector_policy = run_full
     generation_id = generation.begin_generation(
         db,
         source="scan",

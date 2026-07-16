@@ -240,7 +240,10 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
     _mvlm, _mpnl = m.get("pf_mon_vlm"), m.get("pf_mon_pnl")
     if _mvlm and _mvlm > 0 and (_mpnl or 0.0) / _mvlm * 1e4 \
             < getattr(p, "portfolio_min_edge_bps", config.PORTFOLIO_MIN_EDGE_BPS):
-        return False, "thin_edge"  # 权威净Edge低于成本线，结构上不值得跟
+        # Target-account turnover edge is only a warning. Our capped sector policy can skip fills/adds,
+        # and the canonical Copy replay already charges our own fees.  Rejecting here would prevent that
+        # authoritative replay from ever measuring whether the follower path is actually profitable.
+        m["thin_edge_warning"] = True
     return True, "ok"
 
 

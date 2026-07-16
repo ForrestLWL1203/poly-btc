@@ -230,11 +230,14 @@ def evaluate_sector_policy(
     sector_results: Mapping,
     min_net: float | None = None,
     previous_policy=None,
+    structural_policy=None,
 ) -> dict:
     min_net = float(config.COPY_BT_MIN_NET_PNL if min_net is None else min_net)
     previous_policy = parse_json_obj(previous_policy)
+    structural_policy = parse_json_obj(structural_policy)
     policy = {}
     allowed = []
+    structural_watch = []
     for sector in SECTORS:
         windows = sector_results.get(sector) or {}
         enough = {}
@@ -332,8 +335,85 @@ def evaluate_sector_policy(
                 "status": "thin_evidence",
                 "reason": "板块copy正收益证据不足",
             }
+        structural = structural_policy.get(sector)
+        structural = structural if isinstance(structural, dict) else {}
+        if structural and not structural.get("allow"):
+            item = {
+                **item_base,
+                "allow": False,
+                "status": str(structural.get("status") or "structural_unqualified"),
+                "reason": str(structural.get("reason") or "板块结构不可复制"),
+                "structural": structural,
+            }
+            if sector in allowed:
+                allowed.remove(sector)
+        elif structural.get("watch"):
+            primary = _window_result(windows, 30)
+            pressure_ok = bool(
+                item.get("allow")
+                and _int(primary.get("closed_n")) >= _min_closed_for_days(30)
+                and _num(primary.get("copy_net_pnl")) > min_net
+                and _int(primary.get("liquidations")) == 0
+                and _num(primary.get("open_fill_rate"), 1.0)
+                    >= load_copy_policy().min_actionable_open_rate
+                and _num(primary.get("capacity_open_fit"), 1.0)
+                    >= load_copy_policy().min_capacity_fit
+                and all(
+                    _int(_window_result(windows, days).get("closed_n")) < _min_closed_for_days(days)
+                    or _num(_window_result(windows, days).get("copy_net_pnl")) > min_net
+                    for days in (14, 7)
+                )
+            )
+            if pressure_ok:
+                item = {
+                    **item,
+                    "allow": True,
+                    "status": "heavy_dca_watch",
+                    "reason": "单次Heavy-DCA受限回放通过，仅允许候选观察",
+                    "structural": structural,
+                    "coreBlocked": True,
+                }
+                if sector not in allowed:
+                    allowed.append(sector)
+                structural_watch.append(sector)
+            else:
+                item = {
+                    **item_base,
+                    "allow": False,
+                    "status": "heavy_dca_pressure_failed",
+                    "reason": "单次Heavy-DCA受限回放未通过额外压力验证",
+                    "structural": structural,
+                }
+                if sector in allowed:
+                    allowed.remove(sector)
+        elif structural:
+            item["structural"] = structural
         policy[sector] = item
+    # A Heavy-DCA watch sector must not contaminate a clean specialty in the same wallet.  If a clean
+    # sector exists, execute/evaluate only that clean sector and leave the Heavy-DCA sector isolated for
+    # observation.  Only wallets whose sole economically usable evidence is the pressure-tested sector
+    # are admitted as Challenger-only.
+    clean_allowed = [sector for sector in allowed if sector not in structural_watch]
+    if clean_allowed:
+        for sector in structural_watch:
+            item = policy[sector]
+            policy[sector] = {
+                **item,
+                "allow": False,
+                "watch": True,
+                "status": "heavy_dca_sector_isolated",
+                "reason": "单次Heavy-DCA板块已隔离；钱包仅按其他干净专精板块评估",
+                "coreBlocked": False,
+            }
+        allowed = clean_allowed
+        core_blocked = False
+    else:
+        core_blocked = bool(structural_watch)
     policy["allowed"] = allowed
+    policy["structuralWatch"] = structural_watch
+    policy["coreBlocked"] = core_blocked
+    if structural_policy.get("source"):
+        policy["specializationSource"] = structural_policy.get("source")
     return policy
 
 

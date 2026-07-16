@@ -135,6 +135,15 @@ class MetricsGateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
 
+    def test_target_account_thin_edge_is_warning_until_copy_replay(self):
+        values = state_metrics(pf_mon_pnl=500.0, pf_mon_vlm=1_000_000.0)
+
+        ok, reason = metrics.gates_state(values, 1000, state_params())
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertTrue(values["thin_edge_warning"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,7 @@ def _selection_reason_text(row, *, now_ms=None):
         "challenger_sample_watch": "样本观察：Copy样本或独立证据尚不足",
         "challenger_confidence_watch": "置信观察：LCB或盈利概率尚未达到Core线",
         "challenger_thin_edge_watch": "收益观察：保证金预期收益接近Core经济线",
+        "challenger_structural_watch": "结构观察：单次Heavy-DCA压力回放通过，暂不进入Core",
         "challenger_recent_decline": "近期衰退：回撤未达到硬淘汰线，继续观察",
         "challenger_weekly_return_watch": "近期收益不足：7日Copy总收益未达到Core百分比线",
         "challenger_open_valuation_pending": "开放仓位估值待确认：暂不进入Core",

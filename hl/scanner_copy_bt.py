@@ -381,7 +381,8 @@ def apply_copy_bt_gate(metrics, result, p):
     return True, "ok"
 
 
-def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_policy=None):
+def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_policy=None,
+                              structural_policy=None):
     """Record global copy replay, then gate followability by profitable sector.
 
     A wallet can stay active when one sector is copyable even if another sector
@@ -393,6 +394,7 @@ def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_polic
         sector_results or {},
         min_net=float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0),
         previous_policy=previous_policy,
+        structural_policy=structural_policy,
     )
     metrics["sector_copy_json"] = json.dumps(compact, sort_keys=True)
     metrics["sector_policy_json"] = json.dumps(policy, sort_keys=True)
