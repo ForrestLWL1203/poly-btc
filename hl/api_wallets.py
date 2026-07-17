@@ -259,7 +259,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "              WHEN sfh.last_followed_generation=fs.generation THEN sfh.last_followed_score "
         "              ELSE NULL END AS legacy_follow_score,"
         "         fs.data_status AS selection_data_status,"
-        "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_closed_n,"
+        "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,"
         "         fs.replay_copy_bt_unrealized_pnl,fs.replay_copy_bt_valuation_status,"
         "         fs.replay_copy_bt_7d_net_pnl,"
         "         fs.replay_copy_bt_7d_unrealized_pnl,"
@@ -288,10 +288,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
         ") "
         "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
         "s.selection_follow_score,s.legacy_follow_score,"
-        "w.market_type,w.score,w.win_rate,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
+        "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_valuation_status ELSE p.copy_bt_valuation_status END AS copy_bt_valuation_status,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_win_rate ELSE p.copy_bt_win_rate END AS copy_bt_win_rate,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
@@ -322,13 +323,16 @@ def _ep_selected_wallets(db, generation, role, page, size):
         closed7d = _col(r, "closed_7d") or 0
         if closed7d == 0 and (_col(r, "episode_total") or 0) == 0:
             closed7d = _col(r, "copy_bt_7d_closed_n") or 0
+        display_win_rate = _col(r, "copy_bt_win_rate")
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
             "selectionReasonText": _selection_reason_text(r, now_ms=request_now_ms),
             "marketType": _col(r, "market_type") or "crypto",
             "score": score100(published_score) if published_score is not None else None,
-            "winRatePct": (_col(r, "win_rate") or 0.0) * 100,
+            # The list describes the strategy we can actually copy, not the target's raw account win rate.
+            # A missing immutable replay/profile value is unknown and must never be rendered as 0%.
+            "winRatePct": None if display_win_rate is None else display_win_rate * 100,
             "mainCoin": _col(r, "top_coin"),
             "followCount": _col(r, "follow_count") or 0,
             "enabled": bool(_col(r, "enabled", True)),

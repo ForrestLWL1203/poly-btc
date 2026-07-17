@@ -398,21 +398,24 @@ class ApiWalletsPerfTests(unittest.TestCase):
             })
             db.execute(
                 "INSERT INTO follow_selection(generation,addr,role,enabled,reason,"
-                "replay_copy_bt_net_pnl,replay_copy_bt_closed_n,replay_copy_bt_14d_net_pnl,"
+                "replay_copy_bt_net_pnl,replay_copy_bt_win_rate,replay_copy_bt_closed_n,replay_copy_bt_14d_net_pnl,"
                 "replay_copy_bt_14d_closed_n,replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_closed_n,"
                 "replay_sector_copy_json,replay_params_hash,replayed_at,selected_at) "
-                "VALUES('g1','0xaaa','core',1,'above_follow_line',999,99,888,88,777,77,"
+                "VALUES('g1','0xaaa','core',1,'above_follow_line',999,0.75,99,888,88,777,77,"
                 "?,'current123','2026-01-02T00:00:00Z','now')",
                 (sectors,),
             )
             db.execute(
                 "INSERT INTO profile(addr,status,score,copy_bt_net_pnl,copy_bt_closed_n,"
-                "copy_bt_14d_net_pnl,copy_bt_14d_closed_n,copy_bt_7d_net_pnl,copy_bt_7d_closed_n,"
+                "copy_bt_win_rate,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,copy_bt_7d_net_pnl,copy_bt_7d_closed_n,"
                 "sector_policy_json,sector_copy_json) VALUES"
-                "('0xaaa','active',0.8,-219,13,290,9,168,6,?,?)",
+                "('0xaaa','active',0.8,-219,13,0.25,290,9,168,6,?,?)",
                 (policy, sectors),
             )
-            db.execute("INSERT INTO watchlist(rank,addr,score,updated_at) VALUES(1,'0xaaa',0.8,'now')")
+            db.execute(
+                "INSERT INTO watchlist(rank,addr,score,win_rate,updated_at) "
+                "VALUES(1,'0xaaa',0.8,0.10,'now')"
+            )
             db.commit()
 
             wallet = api_wallets.ep_wallets(db, {"tab": ["followed"]})["wallets"][0]
@@ -420,6 +423,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["copyBacktestNetPnl"], 307)
         self.assertEqual(wallet["copyBacktestClosedN"], 11)
         self.assertEqual(wallet["copyBacktest7dNetPnl"], 171)
+        self.assertEqual(wallet["winRatePct"], 75.0)
         self.assertNotIn("copyBacktest14dNetPnl", wallet)
         self.assertNotIn("copyReplayParamsHash", wallet)
         self.assertEqual(wallet["selectionReasonText"], "达到跟单线")
