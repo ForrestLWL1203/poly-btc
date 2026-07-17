@@ -829,6 +829,34 @@ def global_margin_candidates(base: dict, follow: dict) -> list[dict]:
     return candidates
 
 
+def capacity_margin_candidates(base: dict, follow: dict) -> list[dict]:
+    """Probe a tiny absolute cold-start grid anchored to each tier's executable add capacity.
+
+    Percentage perturbations around a freshly seeded 3.5% stable margin cannot rediscover a previously
+    useful 6-7% surface in a bounded number of rounds.  Three shared ceiling fractions span that missing
+    range while adding only three portfolio replays, not a stable/mid/high Cartesian product.
+    """
+    base = enforce_margin_add_capacity(base, follow)
+    ceilings = margin_add_capacity_ceilings(follow)
+    fractions = _unique_values(
+        getattr(config, "AUTO_TUNE_MARGIN_CEILING_FRACTIONS", (0.50, 0.75, 1.00)),
+    )
+    proposals = [dict(base)]
+    for fraction in fractions:
+        proposal = dict(base)
+        for key in MARGIN_KEYS:
+            floor_key = key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+            floor = min(float(follow.get(floor_key) or 0.0), ceilings[key])
+            proposal[key] = min(ceilings[key], max(floor, ceilings[key] * float(fraction)))
+        proposals.append(proposal)
+    out = []
+    for proposal in proposals:
+        if any(_same_margin_values(proposal, item.get("params") or {}) for item in out):
+            continue
+        out.append(_candidate_from_params(proposal, axis="capacity_margin_grid"))
+    return out
+
+
 def _same_margin_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
     return all(abs(float(a.get(key, 0.0)) - float(b.get(key, 0.0))) <= eps for key in MARGIN_KEYS)
 
@@ -1475,8 +1503,11 @@ def _model_validation(validation: dict, policy) -> dict:
     reasons = []
     if validation.get("foldWins", 0) < 2:
         reasons.append("fewer_than_two_fold_wins")
-    if float(holdout.get("challengerNet") or 0.0) <= max(0.0, float(holdout.get("baselineNet") or 0.0)):
-        reasons.append("holdout_not_better")
+    # The holdout is already fold three and therefore already participates in the two-of-three win rule.
+    # Requiring it to beat baseline a second time made that one slice a hidden double veto.  It still must
+    # be independently profitable; a proposal cannot buy older-window gains with a currently losing surface.
+    if float(holdout.get("challengerNet") or 0.0) <= 0.0:
+        reasons.append("holdout_not_profitable")
     if validation.get("stressNet", 0.0) <= 0:
         reasons.append("stress_not_profitable")
     if relative_gain < policy.tune_min_relative_gain:
@@ -1860,14 +1891,23 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # tier moves and remains finite even when every move improves in-sample profit.
     margin_candidates = []
     margin_rounds = []
-    margin_params = dict(joint_params)
+    for candidate in capacity_margin_candidates(joint_params, follow):
+        check_budget("capacity_margin_grid")
+        margin_candidates.append(evaluate_tune_candidate(
+            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        ))
     if formation_admission:
-        for candidate in global_margin_candidates(margin_params, follow):
+        for candidate in global_margin_candidates(joint_params, follow):
             check_budget("global_margin_polish")
             margin_candidates.append(evaluate_tune_candidate(
                 db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
                 window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
             ))
+    selected_margin_seed = choose_margin_candidate(
+        [selected_joint, *margin_candidates], baseline,
+    )
+    margin_params = dict(selected_margin_seed.get("params") or joint_params)
     margin_round_limit = max(1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2))
     for round_index in range(margin_round_limit):
         round_candidates = []
@@ -2011,7 +2051,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         if model["eligible"]:
             chosen = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
             break
-    if chosen is None:
+    no_validated_finalist = chosen is None
+    if no_validated_finalist:
         # No proposal passed folds/holdout/stress. Return the exact active baseline for audit, never an
         # attractive but invalid in-sample fallback. Callers may safely retain it while publishing a Core
         # formed under current parameters.
@@ -2032,10 +2073,29 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             _formation_model_validation(walk_forward, load_copy_policy(follow))
             if formation_admission else _model_validation(walk_forward, load_copy_policy(follow))
         )
+        validation_reasons = list(model.get("reasons") or ())
+        if no_validated_finalist:
+            # The fallback compares the active baseline with itself, so its zero-gain fold diagnostics are
+            # mathematically inevitable and say nothing about why the actual proposals failed.  Preserve a
+            # truthful aggregate of finalist failures instead of publishing that misleading self-comparison.
+            validation_reasons = ["no_validated_tune_finalist"]
+            for item in finalist_results:
+                validation_reasons.extend(item.get("reasons") or ())
+            validation_reasons = list(dict.fromkeys(validation_reasons))
         apply_validation = {
-            "eligible": bool(model.get("eligible")),
-            "reasons": list(model.get("reasons") or ()),
+            "eligible": bool(model.get("eligible")) and not no_validated_finalist,
+            "reasons": validation_reasons,
             "relativeGain": float(model.get("relativeGain") or 0.0),
+            **walk_forward,
+        }
+    elif no_validated_finalist:
+        validation_reasons = ["no_validated_tune_finalist"]
+        for item in finalist_results:
+            validation_reasons.extend(item.get("reasons") or ())
+        apply_validation = {
+            "eligible": False,
+            "reasons": list(dict.fromkeys(validation_reasons)),
+            "relativeGain": 0.0,
             **walk_forward,
         }
     else:

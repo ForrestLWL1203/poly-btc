@@ -292,7 +292,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
         self.assertEqual(policy["allowed"], ["crypto"])
         self.assertTrue(policy["crypto"]["watch"])
-        self.assertTrue(policy["crypto"]["coreBlocked"])
+        self.assertFalse(policy["crypto"]["coreBlocked"])
         self.assertEqual(policy["crypto"]["heavyEpisodeCount"], 1)
 
     def test_structural_specialization_snapshot_is_persistable_before_copy_replay(self):

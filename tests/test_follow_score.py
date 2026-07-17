@@ -72,6 +72,34 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["status"], "challenger_sample_watch")
 
+    def test_high_return_thin_sector_remains_sample_challenger(self):
+        replay = {
+            "copy_net_pnl": 1900.0,
+            "unrealized_pnl": 0.0,
+            "closed_n": 2,
+            "wins": 2,
+            "target_open_events": 2,
+            "opened_n": 2,
+            "liquidations": 0,
+            "fee_drag": 5.0,
+            "valuation_status": "complete",
+        }
+        result = evaluate_follow_eligibility(evidence(
+            copy_bt_evidence_status="thin",
+            sector_policy_json=json.dumps({
+                "allowed": [],
+                "watch": ["crypto"],
+                "crypto": {"allow": False, "watch": True, "status": "thin_evidence"},
+            }),
+            sector_copy_json=json.dumps({
+                "crypto": {"30": replay, "14": replay, "7": replay},
+            }),
+        ))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_sample_watch")
+
     def test_sample_complete_wallet_has_no_hidden_probability_gate(self):
         result = evaluate_follow_eligibility(evidence(copy_positive_probability=0.64))
         self.assertTrue(result["eligible"])

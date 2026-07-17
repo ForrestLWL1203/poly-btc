@@ -68,8 +68,8 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
 
     Whole-wallet structure can be contaminated by a disabled specialty (for example stock DCA beside
     clean Crypto trading).  Every scan therefore evaluates each sector from the current fills first.  A
-    single complete Heavy-DCA outlier is the only soft structure: it may pay for a capped Copy pressure
-    replay, but the resulting wallet remains Core-blocked even if that replay passes.
+    single complete Heavy-DCA outlier is the only soft structure: it must pass the same capped Copy pressure
+    replay used by execution before it can participate in Core formation.
     """
     out = {"source": source}
     for sector in SECTORS:
@@ -102,7 +102,7 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
             out[sector] = {
                 "allow": True,
                 "watch": True,
-                "coreBlocked": True,
+                "coreBlocked": False,
                 "status": "heavy_dca_watch",
                 "reason": "本轮仅一个完整回合超过Heavy-DCA阈值，进入受限回放压力验证",
                 "heavyEpisodeCount": heavy_count,
@@ -1024,17 +1024,22 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         except (TypeError, ValueError):
             sector_policy = {}
         allowed_sectors = set(sector_policy.get("allowed") or [])
+        evidence_sectors = allowed_sectors or set(sector_policy.get("watch") or [])
         evidence_results = copy_results
         evidence_fills = perp_full
-        if allowed_sectors and allowed_sectors != {"crypto", "stock"}:
-            allowed_fills = [x for x in perp_full if classify_coin(x.get("coin")) in allowed_sectors]
+        if evidence_sectors and evidence_sectors != {"crypto", "stock"}:
+            allowed_fills = [x for x in perp_full if classify_coin(x.get("coin")) in evidence_sectors]
             evidence_fills = allowed_fills
             evidence_results = _copy_bt_results(
                 addr, allowed_fills, now_ms, p, valuation_marks=valuation_marks,
             )
         m.update(_open_flow_metrics(evidence_fills, now_ms))
         _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now_ms)
-        if not sector_policy.get("allowed") and m.get("evidence_status") not in {"missing", "invalid"}:
+        if (
+            not sector_policy.get("allowed")
+            and not sector_policy.get("watch")
+            and m.get("evidence_status") not in {"missing", "invalid"}
+        ):
             m["evidence_status"] = "economically_disqualified"
         if m.get("data_status") == "deferred_data_error":
             return _defer_profile(db, addr, prior, stamp, "copy_replay_unavailable")
@@ -1644,6 +1649,42 @@ def _selection_prefetch_candidates(db, limit=None) -> list[str]:
     ]
 
 
+def _is_parameter_return_probe(row, margin_equity_pct: float) -> bool:
+    """Whether a below-floor wallet is close enough to inform cold-start sizing without being published.
+
+    The public Challenger line remains 10%.  This internal set exists only to break the circular dependency
+    where a low seeded margin rejects a strong wallet before the tuner can test the larger safe margin that
+    would make it qualify.  Final replay must still clear the real line before the wallet can be published.
+    """
+    if str(row.get("reason") or "") != "copy_value_below_challenger_floor":
+        return False
+    policy = load_copy_policy()
+    scoped = apply_allowed_sector_copy_metrics(row)
+    qualification_equity = max(
+        1.0, float(config.INITIAL_BALANCE) * max(0.0, min(1.0, float(margin_equity_pct))),
+    )
+    pnl30 = f(scoped.get("copy_bt_net_pnl")) + f(scoped.get("copy_bt_unrealized_pnl"))
+    pnl7 = f(scoped.get("copy_bt_7d_net_pnl")) + f(scoped.get("copy_bt_7d_unrealized_pnl"))
+    try:
+        sector_policy = json.loads(row.get("sector_policy_json") or "{}")
+    except (TypeError, ValueError):
+        sector_policy = {}
+    return bool(
+        sector_policy.get("allowed")
+        and str(scoped.get("copy_bt_valuation_status") or "complete") == "complete"
+        and int(scoped.get("copy_bt_closed_n") or 0) >= policy.min_closed_30d
+        and int(scoped.get("copy_bt_7d_closed_n") or 0) >= policy.min_closed_7d
+        and int(row.get("copy_evidence_days") or 0) >= min(5, policy.min_closed_30d)
+        and pnl30 >= qualification_equity * float(
+            getattr(config, "CORE_TUNE_PROBE_MIN_RETURN_30D", 0.05)
+        )
+        and pnl7 >= qualification_equity * policy.challenger_min_return_7d
+        and f(row.get("copy_expected_return")) >= policy.min_expected_margin_return
+        and f(row.get("actionable_open_rate")) >= policy.min_actionable_open_rate
+        and f(row.get("capacity_fit")) >= policy.min_capacity_fit
+    )
+
+
 def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
     """Current-generation follow-quality profiles in immutable quality order.
 
@@ -1680,83 +1721,22 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
         }, margin_equity_pct=margin_equity_pct)
-        if (
+        qualified = (
             row.get("status") in {"active", "qualified"}
             and (row.get("follow_qualification") or {}).get(
                 "coreEligible" if core_only else "eligible"
             )
+        )
+        probe = bool(not core_only and _is_parameter_return_probe(row, margin_equity_pct))
+        if (
+            (qualified or probe)
             and (row.get("data_status") or "valid") == "valid"
             and controls.get(addr, True)
         ):
+            row["formation_probe"] = probe
             rows.append(row)
     rows.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     return rows
-
-
-def _latest_published_core(db) -> set[str]:
-    generation_id = selection.latest_published_generation(db)
-    if not generation_id:
-        return set()
-    return {
-        (addr or "").lower() for (addr,) in db.execute(
-            "SELECT addr FROM follow_selection WHERE generation=? AND role='core' AND enabled=1",
-            (generation_id,),
-        ).fetchall()
-        if addr
-    }
-
-
-def _historical_core_qualification(db, row, cutoff_ms, *, generation_id, follow) -> dict:
-    """Re-run one wallet strictly as-of ``cutoff_ms``; future cached fills are never visible.
-
-    This is an entry-only robustness check.  It intentionally uses the wallet's currently approved sector
-    policy and the same immutable follow-parameter snapshot as formation.  Historical terminal marks are
-    inferred only from fills already known at the cutoff, rather than leaking today's open-state marks.
-    """
-    addr = (row.get("addr") or "").lower()
-    replay_ctx = SimpleNamespace(
-        copy_bt_days=int(config.COPY_BT_DAYS),
-        copy_bt_sigmas=_copy_bt_sigmas(db),
-        copy_bt_market_ctx=_copy_bt_market_ctx(db),
-        copy_bt_overrides=dict(follow),
-        scan_generation=generation_id,
-        margin_equity_pct=follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT),
-    )
-    fills = _copy_bt_cached_fills(db, addr, int(cutoff_ms), replay_ctx)
-    fills = [fill for fill in fills if int(fill.get("time") or 0) <= int(cutoff_ms)]
-    try:
-        sector_policy = json.loads(row.get("sector_policy_json") or "{}")
-    except (TypeError, ValueError):
-        sector_policy = {}
-    allowed = set(sector_policy.get("allowed") or ())
-    if not allowed:
-        return {"eligible": False, "coreEligible": False, "status": "temporal_sector_policy_missing"}
-    evidence_fills = [
-        fill for fill in fills if classify_coin(fill.get("coin")) in allowed
-    ]
-    marks = {}
-    for fill in evidence_fills:
-        coin = fill.get("coin")
-        px = f(fill.get("px"))
-        if coin and px > 0:
-            marks[coin] = px
-    results = _copy_bt_results(
-        addr, evidence_fills, int(cutoff_ms), replay_ctx, valuation_marks=marks,
-    )
-    metrics_at_cutoff = {}
-    _apply_copy_bt_gate(metrics_at_cutoff, results, replay_ctx)
-    metrics_at_cutoff.update(_open_flow_metrics(evidence_fills, int(cutoff_ms)))
-    _copy_profile_evidence(
-        metrics_at_cutoff, results, replay_ctx, addr=addr, now_ms=int(cutoff_ms),
-    )
-    return follow_score.evaluate_follow_eligibility(
-        {
-            **metrics_at_cutoff,
-            "copy_bt_data_status": metrics_at_cutoff.get("data_status", "valid"),
-            "copy_bt_evidence_status": metrics_at_cutoff.get("evidence_status"),
-        },
-        margin_equity_pct=replay_ctx.margin_equity_pct,
-    )
 
 
 def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuation_marks,
@@ -1783,7 +1763,8 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     except (TypeError, ValueError):
         sector_policy = {}
     allowed = set(sector_policy.get("allowed") or ())
-    if not allowed:
+    evidence_sectors = allowed or set(sector_policy.get("watch") or ())
+    if not evidence_sectors:
         return {
             "metrics": {}, "score": 0.0,
             "qualification": {
@@ -1792,7 +1773,9 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
                 "deferred": True, "reasons": ["最终参数回放缺少板块策略"],
             },
         }
-    evidence_fills = [fill for fill in fills if classify_coin(fill.get("coin")) in allowed]
+    evidence_fills = [
+        fill for fill in fills if classify_coin(fill.get("coin")) in evidence_sectors
+    ]
     results = _copy_bt_results(
         addr, evidence_fills, int(now_ms), replay_ctx,
         valuation_marks=replay_ctx.copy_bt_valuation_marks,
@@ -1818,39 +1801,6 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         "margin_equity_pct": replay_ctx.margin_equity_pct,
     })
     return {"metrics": effective, "qualification": qualification, "score": score}
-
-
-def _temporal_core_admission(db, row, now_ms, *, generation_id, follow,
-                             current_qualification=None) -> dict:
-    """Require a new entrant to clear Core on at least two of current/24h/48h evidence snapshots."""
-    offsets = tuple(int(value) for value in getattr(
-        config, "CORE_ENTRY_TEMPORAL_OFFSETS_H", (0, 24, 48),
-    ))
-    required = max(1, min(
-        len(offsets), int(getattr(config, "CORE_ENTRY_TEMPORAL_MIN_PASSES", 2) or 2),
-    ))
-    checks = []
-    for offset_h in offsets:
-        if offset_h == 0:
-            qualification = current_qualification or row.get("follow_qualification") or {}
-        else:
-            try:
-                qualification = _historical_core_qualification(
-                    db, row, int(now_ms) - offset_h * 3_600_000,
-                    generation_id=generation_id, follow=follow,
-                )
-            except Exception:  # noqa: BLE001 - an unverifiable entry stays Challenger; scan may still publish
-                qualification = {
-                    "eligible": True, "coreEligible": False,
-                    "status": "temporal_replay_unavailable",
-                }
-        checks.append({
-            "offsetHours": offset_h,
-            "passed": bool(qualification.get("coreEligible")),
-            "status": qualification.get("status") or "unknown",
-        })
-    passed = sum(1 for check in checks if check["passed"])
-    return {"passed": passed >= required, "passCount": passed, "required": required, "checks": checks}
 
 
 def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
@@ -1933,6 +1883,8 @@ def _formation_tune_candidate(row) -> bool:
     open valuation and structural-watch wallets cannot be repaired by sizing and remain observation-only.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
+    if (row or {}).get("formation_probe"):
+        return qualification.get("status") == "copy_value_below_challenger_floor"
     if not qualification.get("eligible"):
         return False
     return bool(
@@ -1959,7 +1911,11 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
         qualification = dict(effective.get("qualification") or {})
         if qualification.get("deferred") or qualification.get("role") == "quarantine":
             continue
-        if not qualification.get("eligible"):
+        parameter_probe = bool(
+            row.get("formation_probe")
+            and qualification.get("status") == "copy_value_below_challenger_floor"
+        )
+        if not qualification.get("eligible") and not parameter_probe:
             continue
         ranked.append({
             **row,
@@ -1989,7 +1945,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     base_follow = params.load_follow(db)
     if "SMART_ADD" in base_follow:
         base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
-    previous_core = _latest_published_core(db)
     sigmas = auto_tune._load_sigmas(db)
     market_ctx = auto_tune._load_market_ctx(db)
     valuation_marks = _current_copy_valuation_marks()
@@ -2002,16 +1957,15 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
     ))
     # Tune against every quality wallet whose economics can improve under a different sizing surface.
-    # Temporal entry confirmation is evaluated *after* the winning parameters are known; applying it here
-    # creates a circular exclusion where a strong Challenger can never influence the parameters needed to
-    # prove that it belongs in Core.
+    # Individual qualification is recomputed once under the winning surface; portfolio folds/holdout/stress
+    # are the only stability checks and no second time-based admission gate may override them.
     tune_ranked = [row for row in surface_ranked if _formation_tune_candidate(row)][:upper]
     if not tune_ranked:
         return {
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
             "search": {
                 "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0, "selectedCount": 0,
-                "temporalRejected": [], "temporalAdmission": [],
+                "qualificationRejected": [], "admission": [],
             },
         }
     tune_ordered = tuple(row["addr"] for row in tune_ranked)
@@ -2020,6 +1974,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     tune_reason = "retune_disabled"
     tune_search = None
     tune_runs = {}
+    chosen_run = {}
     retention = _core_prefix_retention()
     if retune:
         def tune_evaluate(count):
@@ -2069,8 +2024,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     effective_qualifications = {}
     effective_scores = {}
     effective_ranked = []
-    temporal_audit = []
-    temporal_rejected = []
+    admission_audit = []
+    qualification_rejected = []
     for row in ranked_candidates:
         effective = _effective_follow_replay(
             db, row, now_ms, generation_id=generation_id, follow=fixed_follow,
@@ -2082,36 +2037,16 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
         effective_qualifications[addr] = qualification
         effective_scores[addr] = f(effective.get("score"))
-        if addr in previous_core:
-            audit = {
-                "addr": addr, "passed": bool(qualification.get("coreEligible")),
-                "existingCore": True, "passCount": int(bool(qualification.get("coreEligible"))),
-                "required": 1, "checks": [{
-                    "offsetHours": 0, "passed": bool(qualification.get("coreEligible")),
-                    "status": qualification.get("status") or "unknown",
-                }],
-            }
-        elif qualification.get("coreEligible"):
-            audit = {
-                "addr": addr, "existingCore": False,
-                **_temporal_core_admission(
-                    db, row, now_ms, generation_id=generation_id, follow=fixed_follow,
-                    current_qualification=qualification,
-                ),
-            }
-        else:
-            audit = {
-                "addr": addr, "passed": False, "existingCore": False,
-                "passCount": 0, "required": 1, "checks": [{
-                    "offsetHours": 0, "passed": False,
-                    "status": qualification.get("status") or "unknown",
-                }],
-            }
-        temporal_audit.append(audit)
-        if qualification.get("coreEligible") and audit["passed"]:
+        passed = bool(qualification.get("coreEligible"))
+        admission_audit.append({
+            "addr": addr,
+            "passed": passed,
+            "status": qualification.get("status") or "unknown",
+        })
+        if passed:
             effective_ranked.append(row)
         else:
-            temporal_rejected.append(addr)
+            qualification_rejected.append(addr)
     effective_ranked.sort(key=lambda row: (
         -effective_scores.get(row["addr"], 0.0), row["addr"],
     ))
@@ -2132,10 +2067,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 "tuneEvaluatedCounts": (
                     [value.count for value in tune_search.evaluated] if tune_search is not None else []
                 ),
-                "effectiveRejected": temporal_rejected,
+                "effectiveRejected": qualification_rejected,
                 "formationTuneEligible": tune_eligible,
                 "formationTuneReason": tune_reason,
-                "temporalRejected": temporal_rejected, "temporalAdmission": temporal_audit,
+                "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
+                "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
+                "qualificationRejected": qualification_rejected,
+                "admission": admission_audit,
             },
         }
     window_fills = auto_tune._portfolio_window_fills(db, list(ordered), now_ms)
@@ -2247,10 +2185,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 [value.count for value in tune_search.evaluated] if tune_search is not None else []
             ),
             "tuneEvaluations": tune_evaluations,
-            "effectiveRejected": temporal_rejected,
+            "effectiveRejected": qualification_rejected,
             "formationTuneEligible": tune_eligible,
             "formationTuneReason": tune_reason,
-            "temporalRejected": temporal_rejected, "temporalAdmission": temporal_audit,
+            "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
+            "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
+            "qualificationRejected": qualification_rejected,
+            "admission": admission_audit,
         },
     }
 
@@ -2368,6 +2309,11 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         addr = (addr or "").lower()
         if addr in by_addr:
             by_addr[addr]["follow_qualification"] = dict(qualification or {})
+            if (qualification or {}).get("eligible"):
+                # A cold-start parameter probe was intentionally not active on the seeded surface.  Once
+                # the sealed surface clears the real public qualification line, treat that exact replay as
+                # authoritative for this publication transaction.
+                by_addr[addr]["status"] = "active"
     for addr, score in dict(effective_scores or {}).items():
         addr = (addr or "").lower()
         if addr in by_addr:
@@ -2449,7 +2395,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         evaluated=len(eval_cache),
         search_meta={
             **dict(formation_meta or {}),
-            "membershipPolicy": "quality-prefix-temporal-loo-v2",
+            "membershipPolicy": "quality-prefix-current-evidence-loo-v3",
             "desiredOrder": desired,
             "contributionOrder": transition["selected"],
             "looRemoved": list(transition.get("looRemoved") or ()),
@@ -2481,10 +2427,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             if not enabled:
                 reason = "operator_disabled"
             elif qualification.get("coreEligible"):
-                if addr in set((formation_meta or {}).get("temporalRejected") or ()):
-                    reason = "temporal_admission_watch"
-                else:
-                    reason = transition_reasons.get(addr, "portfolio_not_selected")
+                reason = transition_reasons.get(addr, "portfolio_not_selected")
             else:
                 reason = qualification.get("status") or "sample_observation"
             if addr in held:
@@ -2503,7 +2446,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 selection_rank=core_rank.get(addr) if role == selection.CORE else rank,
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
-                model_version="selection-quality-prefix-temporal-loo-v2",
+                model_version="selection-quality-prefix-current-loo-v3",
                 policy_version=copy_policy.version,
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
@@ -3459,7 +3402,7 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
     if not generation_id or current != generation_id:
         return {"status": "skipped", "reason": "generation_not_current", "generation": generation_id}
     rows = db.execute(
-        "SELECT addr FROM follow_selection WHERE generation=? "
+        "SELECT addr,sector_policy_json FROM follow_selection WHERE generation=? "
         "AND role IN ('core','challenger') ORDER BY addr",
         (generation_id,),
     ).fetchall()
@@ -3481,10 +3424,21 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
         scan_generation=generation_id,
     )
     updates = []
-    for (addr,) in rows:
+    for addr, raw_policy in rows:
         fills = _copy_bt_cached_fills(db, addr, now_ms, replay_ctx)
-        windows = _copy_bt_results(addr, fills, now_ms, replay_ctx)
-        sectors = _sector_copy_bt_results(addr, fills, now_ms, replay_ctx)
+        try:
+            sector_policy = json.loads(raw_policy or "{}")
+        except (TypeError, ValueError):
+            sector_policy = {}
+        evidence_sectors = set(sector_policy.get("allowed") or ()) or set(
+            sector_policy.get("watch") or ()
+        )
+        evidence_fills = (
+            [fill for fill in fills if classify_coin(fill.get("coin")) in evidence_sectors]
+            if evidence_sectors else fills
+        )
+        windows = _copy_bt_results(addr, evidence_fills, now_ms, replay_ctx)
+        sectors = _sector_copy_bt_results(addr, evidence_fills, now_ms, replay_ctx)
         primary = (windows.get(30) or windows.get(max(windows))) if windows else {}
         recent14 = windows.get(14) or {}
         recent7 = windows.get(7) or {}
@@ -4120,17 +4074,22 @@ def regate(db, p, *, stamp=None, source: str = "regate",
             except (TypeError, ValueError):
                 current_policy = {}
             allowed_sectors = set(current_policy.get("allowed") or [])
+            evidence_sectors = allowed_sectors or set(current_policy.get("watch") or [])
             evidence_results = copy_results
             evidence_fills = replay_fills
-            if allowed_sectors and allowed_sectors != {"crypto", "stock"}:
+            if evidence_sectors and evidence_sectors != {"crypto", "stock"}:
                 allowed_fills = [
-                    x for x in replay_fills if classify_coin(x.get("coin")) in allowed_sectors
+                    x for x in replay_fills if classify_coin(x.get("coin")) in evidence_sectors
                 ]
                 evidence_fills = allowed_fills
                 evidence_results = _copy_bt_results(addr, allowed_fills, now, p)
             m.update(_open_flow_metrics(evidence_fills, now))
             _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now)
-            if not current_policy.get("allowed") and m.get("evidence_status") not in {"missing", "invalid"}:
+            if (
+                not current_policy.get("allowed")
+                and not current_policy.get("watch")
+                and m.get("evidence_status") not in {"missing", "invalid"}
+            ):
                 m["evidence_status"] = "economically_disqualified"
             ok, reason = _profile_copy_qualification(m, now, p)
         ok, reason, score = _finalize_profile_qualification(m, ok, reason)

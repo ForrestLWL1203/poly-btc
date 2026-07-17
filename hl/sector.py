@@ -242,6 +242,7 @@ def evaluate_sector_policy(
     structural_policy = parse_json_obj(structural_policy)
     policy = {}
     allowed = []
+    evidence_watch = []
     structural_watch = []
     for sector in SECTORS:
         windows = sector_results.get(sector) or {}
@@ -373,10 +374,10 @@ def evaluate_sector_policy(
                 item = {
                     **item,
                     "allow": True,
-                    "status": "heavy_dca_watch",
-                    "reason": "单次Heavy-DCA受限回放通过，仅允许候选观察",
+                    "status": "heavy_dca_pressure_passed",
+                    "reason": "单次Heavy-DCA已通过实际跟单规则压力回放",
                     "structural": structural,
-                    "coreBlocked": True,
+                    "coreBlocked": False,
                 }
                 if sector not in allowed:
                     allowed.append(sector)
@@ -393,28 +394,26 @@ def evaluate_sector_policy(
                     allowed.remove(sector)
         elif structural:
             item["structural"] = structural
+        # A profitable sector with too few closed samples is useful Challenger evidence, not a live-trading
+        # permission.  Keep it on a separate watch list so scoring can apply the same percentage economics
+        # while Observer remains fail-closed until the normal 30/14/7 sample floors are met.
+        if (
+            not item.get("allow")
+            and item.get("status") == "thin_evidence"
+            and closed[30] > 0
+            and pnl[30] > min_net
+            and (not structural or structural.get("allow"))
+        ):
+            item["watch"] = True
+            item["reason"] = "板块严格Copy盈利但样本不足，进入样本观察"
+            evidence_watch.append(sector)
         policy[sector] = item
-    # A Heavy-DCA watch sector must not contaminate a clean specialty in the same wallet.  If a clean
-    # sector exists, execute/evaluate only that clean sector and leave the Heavy-DCA sector isolated for
-    # observation.  Only wallets whose sole economically usable evidence is the pressure-tested sector
-    # are admitted as Challenger-only.
-    clean_allowed = [sector for sector in allowed if sector not in structural_watch]
-    if clean_allowed:
-        for sector in structural_watch:
-            item = policy[sector]
-            policy[sector] = {
-                **item,
-                "allow": False,
-                "watch": True,
-                "status": "heavy_dca_sector_isolated",
-                "reason": "单次Heavy-DCA板块已隔离；钱包仅按其他干净专精板块评估",
-                "coreBlocked": False,
-            }
-        allowed = clean_allowed
-        core_blocked = False
-    else:
-        core_blocked = bool(structural_watch)
+    # A one-off Heavy-DCA episode is already executed through bounded smart-add spacing, add-count and
+    # coin-cap rules in the pressure replay. Passing that exact replay is sufficient structural proof,
+    # including for a genuine Mix wallet whose other specialty is independently qualified.
+    core_blocked = False
     policy["allowed"] = allowed
+    policy["watch"] = [sector for sector in evidence_watch if sector not in allowed]
     policy["structuralWatch"] = structural_watch
     policy["coreBlocked"] = core_blocked
     if structural_policy.get("source"):
@@ -464,11 +463,16 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         sector for sector in SECTORS
         if isinstance(policy.get(sector), dict) and policy[sector].get("allow")
     }
-    if not allowed or not copy_json:
+    watched = {
+        sector for sector in policy.get("watch", ())
+        if sector in SECTORS and isinstance(policy.get(sector), dict)
+    }
+    evidence_sectors = allowed or watched
+    if not evidence_sectors or not copy_json:
         return dict(metrics)
 
     out = dict(metrics)
-    primary = _aggregate_window(copy_json, allowed, 30)
+    primary = _aggregate_window(copy_json, evidence_sectors, 30)
     if primary:
         out["copy_bt_net_pnl"] = primary["copy_net_pnl"]
         out["copy_bt_closed_n"] = primary["closed_n"]
@@ -482,10 +486,11 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         (14, "copy_bt_14d_net_pnl", "copy_bt_14d_closed_n"),
         (7, "copy_bt_7d_net_pnl", "copy_bt_7d_closed_n"),
     ):
-        agg = _aggregate_window(copy_json, allowed, days)
+        agg = _aggregate_window(copy_json, evidence_sectors, days)
         if agg:
             out[net_key] = agg["copy_net_pnl"]
             out[n_key] = agg["closed_n"]
             out[f"copy_bt_{days}d_unrealized_pnl"] = agg["unrealized_pnl"]
     out["allowed_sectors"] = sorted(allowed)
+    out["evidence_sectors"] = sorted(evidence_sectors)
     return out

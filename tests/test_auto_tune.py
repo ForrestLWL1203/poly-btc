@@ -96,6 +96,35 @@ class AutoTuneTests(unittest.TestCase):
         self.assertNotIn("open_rate_below_floor", model["reasons"])
         self.assertNotIn("capacity_fit_below_floor", model["reasons"])
 
+    def test_positive_holdout_is_not_double_counted_after_two_fold_wins(self):
+        policy = auto_tune.load_copy_policy()
+        folds = [
+            {
+                "baselineNet": 100.0, "challengerNet": 120.0,
+                "baselineOpenRate": .90, "challengerOpenRate": .90,
+                "baselineCapacityFit": .95, "challengerCapacityFit": .95,
+            },
+            {
+                "baselineNet": 100.0, "challengerNet": 120.0,
+                "baselineOpenRate": .90, "challengerOpenRate": .90,
+                "baselineCapacityFit": .95, "challengerCapacityFit": .95,
+            },
+            {
+                "baselineNet": 100.0, "challengerNet": 95.0,
+                "baselineOpenRate": .90, "challengerOpenRate": .90,
+                "baselineCapacityFit": .95, "challengerCapacityFit": .95,
+            },
+        ]
+        model = auto_tune._model_validation({
+            "folds": folds,
+            "foldWins": 2,
+            "holdout": folds[-1],
+            "stressNet": 90.0,
+        }, policy)
+
+        self.assertTrue(model["eligible"])
+        self.assertNotIn("holdout_not_profitable", model["reasons"])
+
     def test_margin_candidates_obey_four_add_ceiling_in_all_tiers(self):
         follow = {
             "MARGIN_EQUITY_PCT": 1.0,
@@ -123,6 +152,11 @@ class AutoTuneTests(unittest.TestCase):
         for candidate in candidates:
             for key, ceiling in ceilings.items():
                 self.assertLessEqual(candidate["params"][key], ceiling)
+
+        cold_start = auto_tune.capacity_margin_candidates(base, follow)
+        stable_values = {round(row["params"]["STABLE_MARGIN_PCT"], 8) for row in cold_start}
+        self.assertIn(round(ceilings["STABLE_MARGIN_PCT"] * 0.75, 8), stable_values)
+        self.assertIn(round(ceilings["STABLE_MARGIN_PCT"], 8), stable_values)
 
     def test_manual_margin_equity_pct_is_not_an_auto_tune_axis(self):
         self.assertNotIn("MARGIN_EQUITY_PCT", auto_tune.TUNE_KEYS)
@@ -197,8 +231,10 @@ class AutoTuneTests(unittest.TestCase):
         self.assertTrue(result["eligible_to_apply"])
         self.assertGreater(result["proposal"]["HIGH_MARGIN_PCT"], base_high)
         self.assertGreater(result["proposal"]["STABLE_MARGIN_PCT"], base_stable)
-        self.assertEqual(len(result["margin_rounds"]), 2)
-        self.assertTrue(all(row["changed"] for row in result["margin_rounds"]))
+        # The absolute capacity grid may combine both profitable tier moves before coordinate polish; the
+        # bounded local rounds then only need to confirm that surface instead of rediscovering it one axis
+        # at a time.
+        self.assertGreaterEqual(len(result["margin_rounds"]), 1)
 
     def test_generation_bound_tune_skips_if_generation_changes_before_apply(self):
         db = self._db()
@@ -243,6 +279,9 @@ class AutoTuneTests(unittest.TestCase):
                 patch.object(auto_tune, "choose_margin_candidate", side_effect=lambda rows, _base: rows[0]), \
                 patch.object(auto_tune, "add_candidates_from_axes", return_value=[]), \
                 patch.object(auto_tune, "_walk_forward_validation", return_value={}), \
+                patch.object(auto_tune, "_model_validation", return_value={
+                    "eligible": True, "reasons": [], "relativeGain": .2,
+                }), \
                 patch.object(auto_tune, "_proposal_apply_eligibility", side_effect=generation_changes):
             result = auto_tune.maybe_tune_margins(
                 db, source="test", mode="apply", expected_generation="g1",

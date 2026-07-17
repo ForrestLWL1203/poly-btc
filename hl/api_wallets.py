@@ -58,7 +58,6 @@ def _selection_reason_text(row, *, now_ms=None):
         "portfolio_robustness_not_improved": "稳健性复核未优于当前组合",
         "portfolio_not_selected": "组合候补：加入后共享账户没有稳健增益",
         "portfolio_negative_incremental_net": "组合候补：移除后共享账户扣费净收益更高",
-        "temporal_admission_watch": "稳健观察：当前合格，但24/48小时历史截面未达到2/3准入线",
         "core_eligible": "组合候补：个人资格合格，本轮组合未选中",
         "core_eligible_strong": "组合候补：强证据合格，本轮组合未选中",
         "challenger_return_watch": "收益观察：达到候选线，尚未达到Core收益线",

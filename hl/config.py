@@ -87,6 +87,10 @@ CHALLENGER_MIN_COPY_RETURN_7D = 0.03
 CORE_MIN_COPY_RETURN_30D = 0.10
 CORE_MIN_COPY_RETURN_7D = 0.05
 CORE_STRONG_COPY_RETURN_30D = 0.20
+# Internal-only cold-start probe. Wallets between 5% and the public 10% Challenger line may participate in
+# parameter search when every sample/edge/execution condition is already strong. They remain hidden unless
+# the winning sealed surface lifts them above the real 10% qualification line.
+CORE_TUNE_PROBE_MIN_RETURN_30D = 0.05
 CORE_STRONG_MIN_CLOSED_30D = 20
 CORE_STRONG_MIN_EVIDENCE_DAYS = 10
 CORE_RECENT_WARNING_LOSS_RATIO = 0.10
@@ -496,6 +500,10 @@ CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
 # the entire portfolio to ultra-low leverage merely to reach zero proxy liquidations. Candidate selection
 # requires preserved conservative profit and targets a 20% reduction from the effective path baseline.
 AUTO_TUNE_MARGIN_FACTORS = (0.85, 1.0, 1.15)
+# Cold-start databases do not have a learned margin surface to perturb.  Probe a few absolute points as a
+# fraction of each tier's four-add-safe ceiling so the bounded tuner can rediscover materially larger sizing
+# (for example 5-7% stable margin) without restoring a large three-dimensional Cartesian grid.
+AUTO_TUNE_MARGIN_CEILING_FRACTIONS = (0.50, 0.75, 1.00)
 AUTO_TUNE_LEV_CAP_SETS = (
     (35, 12, 4), (32, 12, 4), (30, 11, 4), (30, 10, 4),
     (28, 10, 4), (25, 10, 4), (25, 8, 4),
@@ -516,11 +524,6 @@ AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
 AUTO_TUNE_FINALIST_LIMIT = 6  # 粗网格只让少量Pareto候选进入昂贵的非重叠折叠验证
 AUTO_TUNE_ADD_FINALISTS = 3
 
-# 新钱包必须在当前/24h前/48h前三个无未来数据截面中至少两个仍达到个人 Core 线；老 Core
-# 不靠该门槛续命，当前不合格仍即时退出。组合形成后允许删除最多两个实际拖累共享账户净收益的成员。
-CORE_ENTRY_TEMPORAL_OFFSETS_H = (0, 24, 48)
-CORE_ENTRY_TEMPORAL_MIN_PASSES = 2
-CORE_ENTRY_TEMPORAL_LOOKBACK_DAYS = 2
 CORE_PREFIX_EXHAUSTIVE_MAX_N = 8  # small quality pools tune every 1..N prefix; larger pools use binary search
 # Backward elimination stops naturally when every remaining wallet has positive conditional economics.
 # The cap only bounds a pathological run; it is not a stability quota or a promise to retain weak wallets.
@@ -539,8 +542,8 @@ MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
 # target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. The extra 7d is
-# replay warm-up and the final 2d supports no-future entry snapshots; reported/scored windows remain 30/14/7d.
-PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS + CORE_ENTRY_TEMPORAL_LOOKBACK_DAYS
+# replay warm-up; reported/scored windows remain 30/14/7d.
+PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 
 # INCREMENTAL scan (2026-07-01): the daily re-scan fetches only the fills SINCE our per-candidate cursor
 # (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling

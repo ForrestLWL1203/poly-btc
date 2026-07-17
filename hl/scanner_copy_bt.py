@@ -427,7 +427,9 @@ def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_polic
             if isinstance(policy.get(sector), dict)
         }
         metrics["copy_bt_evidence_status"] = (
-            "thin" if statuses and statuses.issubset({"thin_evidence", ""}) else "economically_disqualified"
+            "thin"
+            if policy.get("watch") or (statuses and statuses.issubset({"thin_evidence", ""}))
+            else "economically_disqualified"
         )
         return True, "copy_backtest_challenger_only"
     return apply_copy_bt_gate(metrics, result, p)

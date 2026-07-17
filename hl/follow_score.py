@@ -136,8 +136,9 @@ def evaluate_follow_eligibility(
         }
     policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
     allowed = set(policy_json.get("allowed") or ())
+    watched = set(policy_json.get("watch") or ())
     structural_core_blocked = bool(policy_json.get("coreBlocked"))
-    if "allowed" in policy_json and not allowed:
+    if "allowed" in policy_json and not allowed and not watched:
         return {
             "eligible": False,
             "coreEligible": False,

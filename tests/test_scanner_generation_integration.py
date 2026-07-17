@@ -91,6 +91,33 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "status": "challenger_sample_watch",
             },
         }))
+        self.assertTrue(scanner._formation_tune_candidate({
+            "formation_probe": True,
+            "follow_qualification": {
+                "eligible": False, "coreEligible": False,
+                "status": "copy_value_below_challenger_floor",
+            },
+        }))
+
+    def test_parameter_probe_breaks_low_seeded_margin_circularity_without_lowering_public_floor(self):
+        row = {
+            "reason": "copy_value_below_challenger_floor",
+            "copy_bt_net_pnl": 750.0,
+            "copy_bt_unrealized_pnl": 0.0,
+            "copy_bt_7d_net_pnl": 450.0,
+            "copy_bt_7d_unrealized_pnl": 0.0,
+            "copy_bt_closed_n": 20,
+            "copy_bt_7d_closed_n": 5,
+            "copy_evidence_days": 10,
+            "copy_expected_return": .05,
+            "actionable_open_rate": .90,
+            "capacity_fit": .90,
+            "copy_bt_valuation_status": "complete",
+            "sector_policy_json": json.dumps({"allowed": ["crypto"]}),
+        }
+
+        self.assertTrue(scanner._is_parameter_return_probe(row, 1.0))
+        self.assertFalse(scanner._is_parameter_return_probe({**row, "copy_bt_net_pnl": 499.0}, 1.0))
 
     def test_formation_ranking_uses_effective_surface_replay_not_scan_time_score(self):
         rows = [
@@ -244,8 +271,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES('g1','published',1,1,1,'now')"
             )
             db.execute(
-                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
-                "VALUES('g1','0xaaa','core',1,'now')"
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at,sector_policy_json) "
+                "VALUES('g1','0xaaa','core',1,'now',?)",
+                (json.dumps({"allowed": ["crypto"]}),),
             )
             db.execute(
                 "INSERT INTO profile(addr,status,copy_bt_net_pnl,copy_bt_closed_n) "
@@ -259,8 +287,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 7: {"copy_net_pnl": 90, "closed_n": 3},
             }
             sectors = {"crypto": windows, "stock": {}}
-            with patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"time": 1}]), \
-                    patch.object(scanner, "_copy_bt_results", return_value=windows), \
+            with patch.object(scanner, "_copy_bt_cached_fills", return_value=[
+                        {"time": 1, "coin": "BTC"}, {"time": 2, "coin": "xyz:AAPL"},
+                    ]), \
+                    patch.object(scanner, "_copy_bt_results", return_value=windows) as replay_results, \
                     patch.object(scanner, "_sector_copy_bt_results", return_value=sectors), \
                     patch.object(scanner, "_copy_bt_overrides", return_value={"MID_MARGIN_PCT": 0.05}), \
                     patch.object(scanner, "_copy_bt_sigmas", return_value={}), \
@@ -279,6 +309,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(replay[3])
             self.assertEqual(replay[4], "later")
             self.assertEqual(profile, (100, 7))
+            self.assertEqual([row["coin"] for row in replay_results.call_args.args[1]], ["BTC"])
 
     def test_final_parameter_qualification_overrides_scan_time_core_signal(self):
         with tempfile.TemporaryDirectory() as td:
