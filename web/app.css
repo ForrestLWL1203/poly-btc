@@ -211,6 +211,8 @@ tr.detail-row > td { padding: 0 !important; background: rgba(255, 255, 255, .015
 .strip-item span { font-size: 10px; color: var(--t3); text-transform: uppercase; letter-spacing: .5px; }
 .strip-item b { max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono);
   font-size: 16px; line-height: 1.2; font-weight: 600; color: var(--t1); white-space: nowrap; }
+.strip-item b.up { color: var(--green-l); }
+.strip-item b.down { color: var(--red-l); }
 .strip-item.strip-radar { gap: 2px; }
 .strip-radar-title { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 .strip-radar-title .dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; }
