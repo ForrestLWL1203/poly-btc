@@ -71,6 +71,26 @@ def profit_structure_metrics(positions: list[dict], *, total_net: float, fee_dra
     loss_n = len(losses)
     avg_win = gross_profit / win_n if win_n else 0.0
     avg_loss = gross_loss / loss_n if loss_n else 0.0
+    top3 = wins[:3]
+    # Do not confuse concentration with gambling.  Remove the largest three positive endpoints and inspect
+    # the remaining body directly: Wallet A stays profitable/win-heavy; Wallet B exposes its many ordinary
+    # losing bets.  ``total_net`` remains authoritative for dollars so fees and marked open PnL stay aligned.
+    body = list(pnls)
+    for winner in top3:
+        body.remove(winner)
+    body_wins = [value for value in body if value > 0.0]
+    body_losses = [-value for value in body if value < 0.0]
+    body_gross_profit = sum(body_wins)
+    body_gross_loss = sum(body_losses)
+    body_avg_win = body_gross_profit / len(body_wins) if body_wins else 0.0
+    body_avg_loss = body_gross_loss / len(body_losses) if body_losses else 0.0
+    body_sorted = sorted(body)
+    body_mid = len(body_sorted) // 2
+    body_median = (
+        0.0 if not body_sorted else
+        body_sorted[body_mid] if len(body_sorted) % 2 else
+        (body_sorted[body_mid - 1] + body_sorted[body_mid]) / 2.0
+    )
     return {
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
@@ -82,11 +102,27 @@ def profit_structure_metrics(positions: list[dict], *, total_net: float, fee_dra
         ),
         "positive_episode_n": win_n,
         "negative_episode_n": loss_n,
-        "top_positive_pnls": wins[:3],
+        "top_positive_pnls": top3,
         "top1_profit_share": wins[0] / gross_profit if gross_profit > 0.0 else 0.0,
         "top3_profit_share": sum(wins[:3]) / gross_profit if gross_profit > 0.0 else 0.0,
         "net_after_top1": float(total_net) - sum(wins[:1]),
         "net_after_top2": float(total_net) - sum(wins[:2]),
+        "body_after_top3_n": len(body),
+        "body_after_top3_wins": len(body_wins),
+        "body_after_top3_losses": len(body_losses),
+        "body_after_top3_win_rate": len(body_wins) / len(body) if body else 0.0,
+        "body_after_top3_net_pnl": float(total_net) - sum(top3),
+        "body_after_top3_gross_profit": body_gross_profit,
+        "body_after_top3_gross_loss": body_gross_loss,
+        "body_after_top3_profit_factor": (
+            body_gross_profit / body_gross_loss
+            if body_gross_loss > 0.0 else (999.0 if body_gross_profit > 0.0 else 0.0)
+        ),
+        "body_after_top3_payoff_ratio": (
+            body_avg_win / body_avg_loss
+            if body_avg_loss > 0.0 else (999.0 if body_avg_win > 0.0 else 0.0)
+        ),
+        "body_after_top3_median_pnl": body_median,
         # An exact 1.5x replay is still run for portfolio finalists.  At the individual-evidence layer this
         # same-path value is the deterministic extra half-fee stress and avoids doubling profile CPU work.
         "cost_stress_net_pnl": float(total_net) - 0.5 * max(0.0, float(fee_drag)),

@@ -80,6 +80,19 @@ COPY_MIN_TAIL_RETURN_30D = 0.05
 COPY_MAX_TOP1_PROFIT_SHARE = 0.50
 COPY_MAX_TOP3_PROFIT_SHARE = 0.80
 COPY_CONCENTRATION_MIN_POSITIVE_EPISODES = 5
+# Profit concentration is a warning, not a verdict.  Remove the three largest winners and judge the
+# remaining episode body: a repeatable wallet may keep a few outsized wins, while a lottery-like wallet
+# whose ordinary trades mostly lose is rejected.
+COPY_CONCENTRATION_BODY_MIN_EPISODES = 5
+COPY_CONCENTRATION_BODY_MIN_WIN_RATE = 0.60
+COPY_CONCENTRATION_BODY_MIN_PROFIT_FACTOR = 1.00
+# A very strong wallet may clear Core with three or four recent closes, but only when the 30d body is already
+# broad and the recent sample itself is clean.  This is deliberately narrower than lowering the global 7d=5
+# evidence floor.
+CORE_STRONG_SPARSE_MIN_CLOSED_30D = 10
+CORE_STRONG_SPARSE_MIN_EVIDENCE_DAYS = 7
+CORE_STRONG_SPARSE_MIN_CLOSED_7D = 3
+CORE_STRONG_SPARSE_MIN_WIN_RATE_7D = 0.75
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70

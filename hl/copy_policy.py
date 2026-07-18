@@ -38,6 +38,13 @@ class CopyPolicy:
     max_top1_profit_share: float
     max_top3_profit_share: float
     concentration_min_positive_episodes: int
+    concentration_body_min_episodes: int
+    concentration_body_min_win_rate: float
+    concentration_body_min_profit_factor: float
+    strong_sparse_min_closed_30d: int
+    strong_sparse_min_evidence_days: int
+    strong_sparse_min_closed_7d: int
+    strong_sparse_min_win_rate_7d: float
     min_actionable_open_rate: float
     min_capacity_fit: float
     min_marginal_gain: float
@@ -95,6 +102,27 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         max_top3_profit_share=float(_value(values, "COPY_MAX_TOP3_PROFIT_SHARE", 0.80)),
         concentration_min_positive_episodes=int(_value(
             values, "COPY_CONCENTRATION_MIN_POSITIVE_EPISODES", 5,
+        )),
+        concentration_body_min_episodes=int(_value(
+            values, "COPY_CONCENTRATION_BODY_MIN_EPISODES", 5,
+        )),
+        concentration_body_min_win_rate=float(_value(
+            values, "COPY_CONCENTRATION_BODY_MIN_WIN_RATE", 0.60,
+        )),
+        concentration_body_min_profit_factor=float(_value(
+            values, "COPY_CONCENTRATION_BODY_MIN_PROFIT_FACTOR", 1.00,
+        )),
+        strong_sparse_min_closed_30d=int(_value(
+            values, "CORE_STRONG_SPARSE_MIN_CLOSED_30D", 10,
+        )),
+        strong_sparse_min_evidence_days=int(_value(
+            values, "CORE_STRONG_SPARSE_MIN_EVIDENCE_DAYS", 7,
+        )),
+        strong_sparse_min_closed_7d=int(_value(
+            values, "CORE_STRONG_SPARSE_MIN_CLOSED_7D", 3,
+        )),
+        strong_sparse_min_win_rate_7d=float(_value(
+            values, "CORE_STRONG_SPARSE_MIN_WIN_RATE_7D", 0.75,
         )),
         min_actionable_open_rate=float(_value(values, "SELECTION_MIN_ACTIONABLE_RATE", 0.70)),
         min_capacity_fit=float(_value(values, "SELECTION_MIN_CAPACITY_FIT", 0.75)),

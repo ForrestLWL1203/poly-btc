@@ -40,6 +40,26 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
         self.assertEqual(result["evidence_status"], "invalid")
         self.assertNotIn("error", result)
 
+    def test_replay_context_forwards_canonical_price_path(self):
+        now = 30 * 86_400_000
+        fill = {
+            "time": now - 1, "tid": 1, "coin": "BTC", "side": "B",
+            "sz": "1", "px": "100", "startPosition": "0",
+        }
+        p = self._params()
+        p.copy_bt_price_path = [{"coin": "BTC", "time": now - 1, "low": 90, "high": 101}]
+        p.copy_bt_price_path_meta = {"coverage": 1.0}
+        replay = {
+            "copy_net_pnl": 1.0, "closed_n": 1, "open_n": 0,
+            "target_open_events": 1, "opened_n": 1,
+        }
+
+        with patch.object(scanner_copy_bt, "run_backtest", return_value=replay) as run:
+            scanner_copy_bt.copy_bt_result("0xabc", [fill], now, p)
+
+        self.assertEqual(run.call_args.kwargs["price_path"], p.copy_bt_price_path)
+        self.assertEqual(run.call_args.kwargs["price_path_meta"], p.copy_bt_price_path_meta)
+
     def test_historical_cutoff_never_sees_future_cached_fills(self):
         now = 30 * 86_400_000
         fill = {

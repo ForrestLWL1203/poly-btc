@@ -216,6 +216,11 @@ def evaluate_follow_eligibility(
     positive_episodes = int(_num(metrics.get("copy_bt_positive_episode_n")))
     top1_share = _num(metrics.get("copy_bt_top1_profit_share"))
     top3_share = _num(metrics.get("copy_bt_top3_profit_share"))
+    body_n = int(_num(metrics.get("copy_bt_body_after_top3_n")))
+    body_win_rate = _num(metrics.get("copy_bt_body_after_top3_win_rate"))
+    body_net = _num(metrics.get("copy_bt_body_after_top3_net_pnl"))
+    body_profit_factor = _num(metrics.get("copy_bt_body_after_top3_profit_factor"))
+    body_median = _num(metrics.get("copy_bt_body_after_top3_median_pnl"))
     concentration_sampled = positive_episodes >= policy.concentration_min_positive_episodes
     concentration_warning = bool(
         concentration_sampled
@@ -223,6 +228,14 @@ def evaluate_follow_eligibility(
             top1_share > policy.max_top1_profit_share
             or top3_share > policy.max_top3_profit_share
         )
+    )
+    concentration_body_sampled = body_n >= policy.concentration_body_min_episodes
+    concentration_body_strong = bool(
+        concentration_body_sampled
+        and body_win_rate >= policy.concentration_body_min_win_rate
+        and body_net > 0.0
+        and body_profit_factor >= policy.concentration_body_min_profit_factor
+        and body_median > 0.0
     )
     if structure_sampled and profit_factor is not None and _num(profit_factor) < policy.min_profit_factor:
         return {
@@ -261,13 +274,27 @@ def evaluate_follow_eligibility(
             "costStressNetPnl": _num(cost_stress),
             "reasons": ["1.5倍手续费/滑点压力后严格Copy不盈利"],
         }
+    if concentration_warning and concentration_body_sampled and not concentration_body_strong:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_profit_concentration_body_weak",
+            "role": "rejected",
+            "profitConcentrationWarning": True,
+            "bodyAfterTop3": {
+                "episodes": body_n, "winRate": body_win_rate,
+                "netPnl": body_net, "profitFactor": body_profit_factor,
+                "medianPnl": body_median,
+            },
+            "reasons": [
+                "利润集中且移除前三大盈利后，剩余交易主体不是稳定盈利结构"
+            ],
+        }
     concentration_exception = bool(
         concentration_warning
-        and pnl30 >= strong_floor
-        and strong_samples
-        and c7 >= min_closed7
+        and concentration_body_strong
         and tail30 is not None and _num(tail30) >= tail_floor
-        and tail7 is not None and _num(tail7) > 0.0
+        and (c7 < min_closed7 or (tail7 is not None and _num(tail7) > 0.0))
         and cost_stress is not None and _num(cost_stress) > 0.0
     )
     weekly_economics_ok = pnl7 >= weekly_core_floor
@@ -293,13 +320,24 @@ def evaluate_follow_eligibility(
                 f"保证金归一化预期收益低于候选观察线{challenger_edge_floor * 100:.1f}%"
             ],
         }
-    # Five closed 7d episodes is the operator-defined recent-evidence floor.  Once the 30d/day/7d sample
-    # floors are met, bootstrap LCB and positive-probability remain continuous ranking diagnostics only;
-    # they must not override large, fee-paid strict-Copy dollars with a second hidden confidence gate.
-    # Strong 30d economics no longer waive the same five-episode recent floor.
+    # Five recent closes remains the normal evidence floor.  A deliberately narrow strong-sparse route admits
+    # three/four recent closes only when 30d economics, independent days, the recent win rate, and the
+    # post-Top3 body are all already strong.  This recovers a 12/14 wallet without letting a three-trade
+    # windfall redefine Core.
+    recent_win_rate = _num(metrics.get("copy_bt_7d_win_rate"))
+    sparse_recent_strong = bool(
+        policy.strong_sparse_min_closed_7d <= c7 < min_closed7
+        and c30 >= policy.strong_sparse_min_closed_30d
+        and evidence_days >= policy.strong_sparse_min_evidence_days
+        and recent_win_rate >= policy.strong_sparse_min_win_rate_7d
+        and pnl30 >= strong_floor
+        and weekly_economics_ok
+        and tail7 is not None and _num(tail7) > 0.0
+        and concentration_body_strong
+    )
     strong_samples = bool(strong_samples and c7 >= min_closed7)
     strong_entry = (
-        pnl30 >= strong_floor and strong_samples and not recent_warning
+        pnl30 >= strong_floor and (strong_samples or sparse_recent_strong) and not recent_warning
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     standard_entry = (
@@ -314,8 +352,9 @@ def evaluate_follow_eligibility(
             "eligible": True,
             "coreEligible": True,
             "strongEntry": bool(strong_entry),
+            "sparseRecentEntry": bool(sparse_recent_strong),
             "status": (
-                "core_eligible_profit_concentrated"
+                "core_eligible_profit_concentrated_body_strong"
                 if concentration_warning else
                 ("core_eligible_strong" if strong_entry else "core_eligible")
             ),
@@ -324,9 +363,15 @@ def evaluate_follow_eligibility(
             "executionScore": execution,
             "recentLossRatio": recent_loss_ratio,
             "profitConcentrationWarning": concentration_warning,
+            "bodyAfterTop3": {
+                "episodes": body_n, "winRate": body_win_rate,
+                "netPnl": body_net, "profitFactor": body_profit_factor,
+                "medianPnl": body_median,
+            },
             "reasons": [
                 "个人严格Copy证据达到Core准入线"
-                + ("，利润集中但强证据与去极值/成本压力已通过" if concentration_warning else "")
+                + ("，利润集中但其余交易主体仍稳定盈利" if concentration_warning else "")
+                + ("，近期3–4笔强证据路径通过" if sparse_recent_strong else "")
             ],
         }
 
@@ -346,6 +391,11 @@ def evaluate_follow_eligibility(
         )
     elif pnl30 < core_floor:
         status, reason = "challenger_return_watch", "30天Copy收益达到候选线但未达到Core线"
+    elif concentration_warning and not concentration_body_sampled:
+        status, reason = (
+            "challenger_profit_concentration_sample",
+            "利润集中，移除前三大盈利后的剩余样本不足，暂留观察",
+        )
     elif c30 < min_closed30 or evidence_days < min_evidence_days or c7 < min_closed7:
         status, reason = "challenger_sample_watch", "Copy样本或独立证据尚不足"
     elif concentration_warning:
@@ -368,6 +418,11 @@ def evaluate_follow_eligibility(
         "executionScore": execution,
         "recentLossRatio": recent_loss_ratio,
         "profitConcentrationWarning": concentration_warning,
+        "bodyAfterTop3": {
+            "episodes": body_n, "winRate": body_win_rate,
+            "netPnl": body_net, "profitFactor": body_profit_factor,
+            "medianPnl": body_median,
+        },
         "reasons": [reason],
     }
 
@@ -501,6 +556,16 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "top1ProfitShare": metrics.get("copy_bt_top1_profit_share"),
         "top3ProfitShare": metrics.get("copy_bt_top3_profit_share"),
         "costStressNetPnl": metrics.get("copy_bt_cost_stress_net_pnl"),
+        "bodyAfterTop3": {
+            "episodes": metrics.get("copy_bt_body_after_top3_n"),
+            "wins": metrics.get("copy_bt_body_after_top3_wins"),
+            "losses": metrics.get("copy_bt_body_after_top3_losses"),
+            "winRate": metrics.get("copy_bt_body_after_top3_win_rate"),
+            "netPnl": metrics.get("copy_bt_body_after_top3_net_pnl"),
+            "profitFactor": metrics.get("copy_bt_body_after_top3_profit_factor"),
+            "payoffRatio": metrics.get("copy_bt_body_after_top3_payoff_ratio"),
+            "medianPnl": metrics.get("copy_bt_body_after_top3_median_pnl"),
+        },
         "addMetrics": {
             "version": metrics.get("copy_bt_add_metrics_version"),
             "outcomeCounts": metrics.get("copy_bt_add_outcome_counts"),

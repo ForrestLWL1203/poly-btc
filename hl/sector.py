@@ -96,6 +96,11 @@ def _compact_result(result: Mapping) -> dict:
         "effective_add_fidelity", "gross_profit", "gross_loss", "profit_factor",
         "payoff_ratio", "positive_episode_n", "negative_episode_n", "top_positive_pnls",
         "top1_profit_share", "top3_profit_share", "net_after_top1", "net_after_top2",
+        "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
+        "body_after_top3_win_rate", "body_after_top3_net_pnl",
+        "body_after_top3_gross_profit", "body_after_top3_gross_loss",
+        "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
+        "body_after_top3_median_pnl",
         "cost_stress_net_pnl", "initial_margin_equity",
     )
     return {k: result.get(k) for k in keys if k in result}
@@ -236,11 +241,20 @@ def assess_recent_copy_loss(
     }
 
 
-def compact_sector_results(sector_results: Mapping) -> dict:
+def compact_sector_results(sector_results: Mapping, joint_results: Mapping | None = None) -> dict:
     out = {}
     for sector in SECTORS:
         windows = sector_results.get(sector) or {}
         out[sector] = {str(days): _compact_result(result) for days, result in windows.items() if result}
+    if joint_results:
+        if "copy_net_pnl" in joint_results:
+            out["joint"] = {str(config.COPY_BT_DAYS): _compact_result(joint_results)}
+        else:
+            out["joint"] = {
+                str(days): _compact_result(result)
+                for days, result in joint_results.items()
+                if isinstance(result, Mapping) and result
+            }
     return out
 
 
@@ -575,6 +589,21 @@ def _aggregate_window(copy_json: Mapping, allowed: set[str], days: int) -> dict 
     return total
 
 
+def _evidence_window(copy_json: Mapping, evidence_sectors: set[str], days: int) -> dict | None:
+    """Return one canonical account replay for the selected sector policy.
+
+    A single-sector wallet can use that sector's exact replay.  A genuine Mix wallet must use the joint
+    replay because summing two independently funded $10k accounts inflates PnL, capacity and sample metrics.
+    Legacy payloads without ``joint`` leave the caller's already-joint base fields untouched; independently
+    funded sector accounts are never summed as a migration fallback.
+    """
+    if len(evidence_sectors) == 1:
+        sector = next(iter(evidence_sectors))
+        return _window_result(copy_json.get(sector) or {}, days) or None
+    joint = _window_result(copy_json.get("joint") or {}, days)
+    return joint or None
+
+
 def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
     policy = parse_json_obj(metrics.get("sector_policy_json"))
     copy_json = parse_json_obj(metrics.get("sector_copy_json"))
@@ -591,20 +620,29 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         return dict(metrics)
 
     out = dict(metrics)
-    primary = _aggregate_window(copy_json, evidence_sectors, 30)
+    primary = _evidence_window(copy_json, evidence_sectors, 30)
     if primary:
         out["copy_bt_net_pnl"] = primary["copy_net_pnl"]
         out["copy_bt_closed_n"] = primary["closed_n"]
-        out["copy_bt_win_rate"] = (primary["wins"] / primary["closed_n"]) if primary["closed_n"] else 0.0
-        out["copy_bt_open_fill_rate"] = primary["open_fill_rate"]
-        out["copy_bt_liquidations"] = primary["liquidations"]
-        out["copy_bt_fee_drag"] = primary["fee_drag"]
-        out["copy_bt_unrealized_pnl"] = primary["unrealized_pnl"]
-        out["copy_bt_valuation_status"] = primary["valuation_status"]
+        closed_n = _int(primary.get("closed_n"))
+        out["copy_bt_win_rate"] = _int(primary.get("wins")) / closed_n if closed_n else 0.0
+        target_open = _int(primary.get("target_open_events"))
+        out["copy_bt_open_fill_rate"] = primary.get("open_fill_rate")
+        if out["copy_bt_open_fill_rate"] is None and target_open:
+            out["copy_bt_open_fill_rate"] = _int(primary.get("opened_n")) / target_open
+        out["copy_bt_liquidations"] = _int(primary.get("liquidations"))
+        out["copy_bt_fee_drag"] = _num(primary.get("fee_drag"))
+        out["copy_bt_unrealized_pnl"] = _num(primary.get("unrealized_pnl"))
+        out["copy_bt_valuation_status"] = primary.get("valuation_status") or "complete"
         for key in (
             "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
             "positive_episode_n", "negative_episode_n",
             "top1_profit_share", "top3_profit_share", "net_after_top1", "net_after_top2",
+            "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
+            "body_after_top3_win_rate", "body_after_top3_net_pnl",
+            "body_after_top3_gross_profit", "body_after_top3_gross_loss",
+            "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
+            "body_after_top3_median_pnl",
             "cost_stress_net_pnl", "add_metrics_version", "add_outcome_counts",
             "raw_add_order_follow_rate", "noise_merged_adds", "blocked_adds",
             "actionable_add_capture_rate", "entry_gap_pct_weighted", "entry_gap_pct_p90",
@@ -618,11 +656,15 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         (14, "copy_bt_14d_net_pnl", "copy_bt_14d_closed_n"),
         (7, "copy_bt_7d_net_pnl", "copy_bt_7d_closed_n"),
     ):
-        agg = _aggregate_window(copy_json, evidence_sectors, days)
+        agg = _evidence_window(copy_json, evidence_sectors, days)
         if agg:
             out[net_key] = agg["copy_net_pnl"]
             out[n_key] = agg["closed_n"]
-            out[f"copy_bt_{days}d_unrealized_pnl"] = agg["unrealized_pnl"]
+            out[f"copy_bt_{days}d_win_rate"] = (
+                _int(agg.get("wins")) / _int(agg.get("closed_n"))
+                if _int(agg.get("closed_n")) else 0.0
+            )
+            out[f"copy_bt_{days}d_unrealized_pnl"] = _num(agg.get("unrealized_pnl"))
             for key in (
                 "profit_factor", "net_after_top1", "net_after_top2",
                 "top1_profit_share", "top3_profit_share", "cost_stress_net_pnl",

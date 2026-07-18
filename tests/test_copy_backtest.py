@@ -1,6 +1,6 @@
 import unittest
 
-from hl.copy_backtest import run_backtest
+from hl.copy_backtest import profit_structure_metrics, run_backtest
 
 
 def fill(t, coin, side, sz, start, px, oid, crossed=True):
@@ -24,6 +24,24 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_profit_body_after_top3_distinguishes_repeatable_from_lottery_wallet(self):
+        wallet_a = [1000, 800, 600, 40, 35, 30, 25, 20, 15, -10]
+        wallet_b = [1000, 800, 600, 10, -10, -15, -20, -25, -30, -35]
+
+        def metrics(values):
+            positions = [{"status": "closed", "net_pnl": value} for value in values]
+            return profit_structure_metrics(positions, total_net=sum(values), fee_drag=0)
+
+        good = metrics(wallet_a)
+        bad = metrics(wallet_b)
+
+        self.assertAlmostEqual(good["body_after_top3_win_rate"], 6 / 7)
+        self.assertGreater(good["body_after_top3_net_pnl"], 0)
+        self.assertGreater(good["body_after_top3_median_pnl"], 0)
+        self.assertAlmostEqual(bad["body_after_top3_win_rate"], 1 / 7)
+        self.assertLess(bad["body_after_top3_net_pnl"], 0)
+        self.assertLess(bad["body_after_top3_median_pnl"], 0)
+
     def test_manual_margin_equity_budget_scales_replay_open_and_pnl(self):
         fills = [
             fill(1, "BTC", "B", 100, 0, 100.0, 1),

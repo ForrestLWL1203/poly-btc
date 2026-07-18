@@ -97,6 +97,8 @@ def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None):
             sigmas=getattr(p, "copy_bt_sigmas", None) or {},
             overrides=getattr(p, "copy_bt_overrides", None) or {},
             market_ctx=getattr(p, "copy_bt_market_ctx", None) or {},
+            price_path=getattr(p, "copy_bt_price_path", None),
+            price_path_meta=getattr(p, "copy_bt_price_path_meta", None) or {},
             valuation_marks=(
                 valuation_marks
                 if valuation_marks is not None
@@ -236,6 +238,11 @@ def record_primary_copy_bt(metrics, result):
         "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
         "positive_episode_n", "negative_episode_n", "top1_profit_share",
         "top3_profit_share", "net_after_top1", "net_after_top2", "cost_stress_net_pnl",
+        "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
+        "body_after_top3_win_rate", "body_after_top3_net_pnl",
+        "body_after_top3_gross_profit", "body_after_top3_gross_loss",
+        "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
+        "body_after_top3_median_pnl",
         "add_metrics_version", "add_outcome_counts", "raw_add_order_follow_rate",
         "noise_merged_adds", "blocked_adds", "actionable_add_capture_rate",
         "entry_gap_pct_weighted", "entry_gap_pct_p90", "entry_gap_sigma_weighted",
@@ -287,6 +294,7 @@ def record_recent_copy_bt(metrics, days, result):
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
         metrics["copy_bt_7d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
+        metrics["copy_bt_7d_win_rate"] = result.get("copy_win_rate")
     prefix = f"copy_bt_{int(days)}d_"
     for key in (
         "profit_factor", "payoff_ratio", "top1_profit_share", "top3_profit_share",
@@ -431,7 +439,7 @@ def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_polic
     loses. The observer later enforces the resulting sector policy per fill.
     """
     record_copy_bt_windows(metrics, result, p)
-    compact = compact_sector_results(sector_results or {})
+    compact = compact_sector_results(sector_results or {}, joint_results=result)
     policy = evaluate_sector_policy(
         sector_results or {},
         min_net=float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0),

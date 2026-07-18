@@ -299,6 +299,24 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(adjusted["copy_bt_14d_closed_n"], 6)
         self.assertEqual(adjusted["copy_bt_7d_closed_n"], 5)
 
+    def test_mix_wallet_uses_joint_account_replay_instead_of_summing_two_accounts(self):
+        metrics = {
+            "sector_policy_json": json.dumps({
+                "crypto": {"allow": True}, "stock": {"allow": True},
+            }),
+            "sector_copy_json": json.dumps({
+                "crypto": {"30": bt(3000, 10)},
+                "stock": {"30": bt(4000, 12)},
+                "joint": {"30": bt(5100, 18, wins=14)},
+            }),
+        }
+
+        adjusted = sector.apply_allowed_sector_copy_metrics(metrics)
+
+        self.assertEqual(adjusted["copy_bt_net_pnl"], 5100)
+        self.assertEqual(adjusted["copy_bt_closed_n"], 18)
+        self.assertAlmostEqual(adjusted["copy_bt_win_rate"], 14 / 18)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,6 +63,7 @@ def validate_final_membership(
     cost_stress_net: float,
     baseline: PrefixEvaluation | None = None,
     baseline_folds: list[PrefixEvaluation] | None = None,
+    membership_changed: bool = False,
     replacing_qualified_core: bool = False,
     initial_margin_equity: float = 10_000.0,
     min_relative_utility_gain: float = 0.05,
@@ -98,7 +99,7 @@ def validate_final_membership(
 
     baseline_folds = list(baseline_folds or [])
     fold_deltas = []
-    compare_folds = replacing_qualified_core or baseline is None
+    compare_folds = membership_changed or replacing_qualified_core or baseline is None
     if compare_folds and len(candidate_folds) == len(baseline_folds) == 3:
         fold_deltas = [
             candidate_fold.net_pnl - baseline_fold.net_pnl
@@ -110,6 +111,13 @@ def validate_final_membership(
             reasons.append("membership_latest_fold_degraded")
     elif compare_folds:
         reasons.append("membership_baseline_folds_unavailable")
+
+    if membership_changed and baseline is not None and not replacing_qualified_core:
+        # Adding a wallet is not a replacement of a still-qualified Core member.  It must improve funded
+        # dollars and independent windows, but does not owe the 5% utility / 2%-of-equity hurdle designed
+        # to prevent churn from swapping healthy incumbents.
+        if candidate.net_pnl - baseline.net_pnl + 1e-9 < float(config.CORE_LOO_MIN_NET_GAIN):
+            reasons.append("membership_addition_no_positive_marginal_net")
 
     if replacing_qualified_core and baseline is not None:
         utility_floor = baseline.utility + abs(baseline.utility) * max(0.0, min_relative_utility_gain)

@@ -132,26 +132,34 @@ Every public economic line is a percentage of the canonical replay's recorded `i
 back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$500` dollar threshold. Current
 default classification is:
 
-- 30/14/7 closed-sample floors are 7/5/5, with at least five independent evidence days for normal Core;
+- 30/14/7 closed-sample floors are 7/5/5, with at least five independent evidence days for normal Core. A
+  narrow strong-sparse route permits three or four 7-day closes only with at least ten 30-day closes, seven
+  evidence days, a 20% 30-day return, a 5% recent return, at least 75% recent win rate, positive recent
+  post-Top1 PnL, and a strong post-Top3 trade body;
 - Challenger needs 30-day strict Copy return at least 10%; once 7-day evidence reaches five closes, 7-day
   total return must be at least 3%;
 - normal Core needs 30-day return at least 10%, 7-day return at least 5%, 30-day seven closes, 7-day five
   closes, five evidence days, complete open-position valuation, and no recent warning;
-- strong Core uses a 20% 30-day line with at least 20 closes and ten evidence days, but it does **not** waive
-  the same five-close 7-day floor, execution, capacity, valuation, structure, or recent-risk checks;
+- strong Core normally uses a 20% 30-day line with at least 20 closes and ten evidence days. Only the narrow
+  strong-sparse route described above may use three or four recent closes; neither path waives execution,
+  capacity, valuation, structure, or recent-risk checks;
 - actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;
 - expected normalized margin return has a 2% Core line. A narrow default 1.5–2% miss may remain Challenger
   only when strict Copy totals, recent economics and samples are already strong; materially thinner or negative
   edge is rejected;
 - LCB and positive-profit probability are continuous ranking diagnostics after the sample floor, not a second
   hidden Core veto.
-- a sampled allowed sector needs raw payoff ratio at least 0.60. Sample-complete strict Copy needs profit
+
+Profit concentration is a warning, not a standalone verdict. The replay removes the three largest positive
+endpoints and measures the remaining trade body. A concentrated wallet may enter Core when that body has at
+least five episodes, at least 60% wins, positive net and median PnL, and PF at least 1.0, while the normal
+post-Top2, recent post-Top1 and cost-stress lines also pass. A sampled concentrated wallet whose remaining body
+is mostly losing is rejected; an insufficient body remains Challenger observation. Public replay dollars always
+include the large winners—the removal is qualification stress only, never a subtraction from displayed PnL.
+A sampled allowed sector needs raw payoff ratio at least 0.60. Sample-complete strict Copy needs profit
   factor at least 1.30, 30-day net after removing its two largest winners at least 5% of
   `initial_margin_equity`, positive seven-day net after removing its largest winner, and positive 1.5x-cost
-  stress net;
-- once there are at least five winning episodes, a largest-winner share above 50% or top-three share above
-  80% blocks normal Core. Only strong evidence whose de-extremed and cost-stressed economics still pass may
-  enter Core with an explicit profit-concentration warning; otherwise it is Challenger or rejected.
+  stress net.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Serious recent
 collapse rejects the wallet/sector: sustained sampled 14-day and 7-day losses, a sampled negative 7-day loss at
@@ -203,7 +211,8 @@ minimum, or auto-tuned value. Production automatic formation is:
 2. Jointly search wallet count and a complete portfolio parameter surface. Pools of at most eight evaluate every
    count; larger pools use `search_quality_prefix` with the bounded `N → N/2 → boundary` search plus
    neighbours and the full prefix.
-3. Re-run every candidate's canonical individual replay under the winning parameters and one valuation snapshot.
+3. Re-run every candidate's canonical individual replay under the winning parameters, the same refined intratrade
+   price path used by shared replay, and one valuation snapshot.
    Anyone no longer Core-eligible is removed before shared-account membership.
 4. With that fixed surface, `search_quality_membership` evaluates every subset for pools of at most eight.
    Larger pools start from the winning prefix and run bounded add/swap closure so one congested wallet cannot
@@ -219,6 +228,10 @@ minimum, or auto-tuned value. Production automatic formation is:
 7. Repeatedly apply strict leave-one-out elimination only when removing a member raises funded net PnL by at
    least `$1` and the smaller set already passed the same membership robustness checks, then publish that
    current-evidence result immediately.
+
+A pure addition to a still-qualified Core is not an incumbent replacement: it needs positive funded marginal
+net plus the fold/latest/stress safeguards, but not the 5% utility and 2%-of-equity anti-churn hurdle. Those larger
+hurdles apply only when a candidate set removes or replaces a still-qualified old Core member.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
 per-coin limits. A high-scoring wallet can remain Challenger when it adds no funded-account value; a lower raw

@@ -1425,7 +1425,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         copy_bt_days=int(config.COPY_BT_DAYS),
         copy_bt_sigmas=dict(sigmas if sigmas is not None else _copy_bt_sigmas(db)),
         copy_bt_market_ctx=dict(market_ctx if market_ctx is not None else _copy_bt_market_ctx(db)),
-        copy_bt_overrides=dict(follow),
+        copy_bt_overrides={**dict(follow), "AMBIGUOUS_PATH_MODE": "liquidate"},
         copy_bt_valuation_marks=dict(valuation_marks or {}),
         scan_generation=generation_id,
         margin_equity_pct=follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT),
@@ -1449,6 +1449,19 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     evidence_fills = [
         fill for fill in fills if classify_coin(fill.get("coin")) in evidence_sectors
     ]
+    # Formation has already prefetched the bounded candidate path cache.  Individual qualification must
+    # consume that same canonical intratrade path as the shared account; otherwise a wallet can display
+    # +$4k/70% in the profile while the exact portfolio replay sees four liquidations and a net loss.
+    from . import price_path
+    path_start = int(now_ms) - (
+        int(config.COPY_BT_DAYS) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+    ) * 86_400_000
+    replay_ctx.copy_bt_price_path = price_path.load_refined(
+        db, evidence_fills, path_start, int(now_ms),
+    )
+    replay_ctx.copy_bt_price_path_meta = price_path.coverage(
+        db, evidence_fills, path_start, int(now_ms),
+    )
     results = _copy_bt_results(
         addr, evidence_fills, int(now_ms), replay_ctx,
         valuation_marks=replay_ctx.copy_bt_valuation_marks,
@@ -1940,10 +1953,16 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         all_strong = bool(key) and all(
             (effective_qualifications.get(addr) or {}).get("strongEntry") for addr in key
         )
-        replacing = bool(previous_qualified and set(key) != set(previous_qualified))
+        membership_changed = bool(previous_qualified and set(key) != set(previous_qualified))
+        # Only removing/replacing an otherwise qualified incumbent pays the anti-churn replacement hurdle.
+        # A pure addition is judged by positive marginal net plus the same fold/holdout/stress safeguards.
+        replacing = bool(
+            previous_qualified and not set(previous_qualified).issubset(set(key))
+        )
         check = core_formation.validate_final_membership(
             value, folds, cost_stress_net=cost_stress,
             baseline=baseline_eval, baseline_folds=baseline_folds,
+            membership_changed=membership_changed,
             replacing_qualified_core=replacing,
             initial_margin_equity=initial_margin_equity,
             min_relative_utility_gain=float(config.SELECTION_MIN_RELATIVE_GAIN),
@@ -3186,7 +3205,7 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
 
     now_ms = int(time.time() * 1000)
     stamp = replayed_at or now_iso()
-    overrides = _copy_bt_overrides(db)
+    overrides = {**_copy_bt_overrides(db), "AMBIGUOUS_PATH_MODE": "liquidate"}
     replay_hash = hashlib.sha256(
         json.dumps(overrides, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()[:16]
@@ -3212,6 +3231,16 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
             [fill for fill in fills if classify_coin(fill.get("coin")) in evidence_sectors]
             if evidence_sectors else fills
         )
+        from . import price_path
+        path_start = now_ms - (
+            int(config.COPY_BT_DAYS) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+        ) * 86_400_000
+        replay_ctx.copy_bt_price_path = price_path.load_refined(
+            db, evidence_fills, path_start, now_ms,
+        )
+        replay_ctx.copy_bt_price_path_meta = price_path.coverage(
+            db, evidence_fills, path_start, now_ms,
+        )
         windows = _copy_bt_results(addr, evidence_fills, now_ms, replay_ctx)
         sectors = _sector_copy_bt_results(addr, evidence_fills, now_ms, replay_ctx)
         primary = (windows.get(30) or windows.get(max(windows))) if windows else {}
@@ -3229,7 +3258,7 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
             int(recent14.get("closed_n") or 0),
             recent7.get("copy_net_pnl"), recent7.get("unrealized_pnl"),
             int(recent7.get("closed_n") or 0),
-            json.dumps(compact_sector_results(sectors), sort_keys=True),
+            json.dumps(compact_sector_results(sectors, joint_results=windows), sort_keys=True),
             replay_hash, stamp, generation_id, addr,
         ))
     db.executemany(

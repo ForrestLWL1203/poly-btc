@@ -277,7 +277,7 @@ class FollowScoreTests(unittest.TestCase):
             low_pf, low_tail, recent_tail, cost_stress,
         )))
 
-    def test_profit_concentration_needs_strong_tail_and_cost_evidence_for_core(self):
+    def test_profit_concentration_uses_remaining_body_not_top_share_alone(self):
         concentrated = dict(
             copy_bt_positive_episode_n=8,
             copy_bt_top1_profit_share=0.60,
@@ -286,21 +286,69 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_net_after_top2=800.0,
             copy_bt_7d_net_after_top1=100.0,
             copy_bt_cost_stress_net_pnl=1200.0,
+            copy_bt_body_after_top3_n=10,
+            copy_bt_body_after_top3_wins=6,
+            copy_bt_body_after_top3_losses=4,
+            copy_bt_body_after_top3_win_rate=0.60,
+            copy_bt_body_after_top3_net_pnl=390.0,
+            copy_bt_body_after_top3_profit_factor=2.1,
+            copy_bt_body_after_top3_median_pnl=25.0,
         )
         ordinary = evaluate_follow_eligibility(evidence(**concentrated))
-        strong = evaluate_follow_eligibility(evidence(
+        lottery_metrics = {
             **concentrated,
-            copy_bt_net_pnl=2600.0,
-            copy_bt_closed_n=25,
-            copy_evidence_days=12,
-        ))
+            "copy_bt_body_after_top3_wins": 1,
+            "copy_bt_body_after_top3_losses": 6,
+            "copy_bt_body_after_top3_win_rate": 1 / 7,
+            "copy_bt_body_after_top3_net_pnl": -500.0,
+            "copy_bt_body_after_top3_profit_factor": 0.1,
+            "copy_bt_body_after_top3_median_pnl": -20.0,
+        }
+        lottery = evaluate_follow_eligibility(evidence(**lottery_metrics))
 
         self.assertTrue(ordinary["eligible"])
-        self.assertFalse(ordinary["coreEligible"])
-        self.assertEqual(ordinary["status"], "challenger_profit_concentration")
-        self.assertTrue(strong["coreEligible"])
-        self.assertEqual(strong["status"], "core_eligible_profit_concentrated")
-        self.assertTrue(strong["profitConcentrationWarning"])
+        self.assertTrue(ordinary["coreEligible"])
+        self.assertEqual(ordinary["status"], "core_eligible_profit_concentrated_body_strong")
+        self.assertFalse(lottery["eligible"])
+        self.assertEqual(lottery["status"], "copy_profit_concentration_body_weak")
+
+    def test_very_strong_clean_wallet_can_use_narrow_three_close_recent_path(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=7155.0,
+            copy_bt_closed_n=14,
+            copy_bt_7d_net_pnl=3528.0,
+            copy_bt_7d_closed_n=3,
+            copy_bt_7d_win_rate=1.0,
+            copy_bt_7d_net_after_top1=620.0,
+            copy_evidence_days=9,
+            copy_bt_body_after_top3_n=11,
+            copy_bt_body_after_top3_wins=9,
+            copy_bt_body_after_top3_losses=2,
+            copy_bt_body_after_top3_win_rate=9 / 11,
+            copy_bt_body_after_top3_net_pnl=1393.0,
+            copy_bt_body_after_top3_profit_factor=9.08,
+            copy_bt_body_after_top3_median_pnl=67.0,
+        ))
+
+        self.assertTrue(result["coreEligible"])
+        self.assertTrue(result["strongEntry"])
+        self.assertTrue(result["sparseRecentEntry"])
+
+    def test_three_close_recent_windfall_without_strong_body_stays_challenger(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_bt_net_pnl=5000.0, copy_bt_closed_n=12,
+            copy_bt_7d_net_pnl=2500.0, copy_bt_7d_closed_n=3,
+            copy_bt_7d_win_rate=1.0, copy_bt_7d_net_after_top1=200.0,
+            copy_evidence_days=8,
+            copy_bt_body_after_top3_n=9,
+            copy_bt_body_after_top3_win_rate=0.33,
+            copy_bt_body_after_top3_net_pnl=-100.0,
+            copy_bt_body_after_top3_profit_factor=0.8,
+            copy_bt_body_after_top3_median_pnl=-5.0,
+        ))
+
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_sample_watch")
 
     def test_heavy_dca_pressure_pass_remains_challenger_even_with_core_economics(self):
         result = evaluate_follow_eligibility(evidence(

@@ -123,6 +123,8 @@ export function WalletDrawer({ address, onClose }) {
                     <div className="wallet-risk"><span>去最大一笔</span><b className={cls(profitStructure.netAfterTop1)}>{profitStructure.netAfterTop1 != null ? fSign(profitStructure.netAfterTop1, 0) : "—"}</b></div>
                     <div className="wallet-risk"><span>去最大两笔</span><b className={cls(profitStructure.netAfterTop2)}>{profitStructure.netAfterTop2 != null ? fSign(profitStructure.netAfterTop2, 0) : "—"}</b></div>
                     <div className="wallet-risk"><span>最大 / 前三盈利贡献</span><b>{profitStructure.top1ProfitSharePct != null ? `${fNum(profitStructure.top1ProfitSharePct, 0)}% / ${fNum(profitStructure.top3ProfitSharePct, 0)}%` : "—"}</b></div>
+                    <div className="wallet-risk"><span>去前三后主体</span><b>{profitStructure.bodyAfterTop3?.episodes != null ? `${profitStructure.bodyAfterTop3.wins || 0}胜 / ${profitStructure.bodyAfterTop3.losses || 0}负 · ${fSign(profitStructure.bodyAfterTop3.netPnl || 0, 0)}` : "—"}</b></div>
+                    <div className="wallet-risk"><span>主体胜率 / PF</span><b>{profitStructure.bodyAfterTop3?.winRate != null ? `${fNum(profitStructure.bodyAfterTop3.winRate * 100, 0)}% / ${fNum(profitStructure.bodyAfterTop3.profitFactor, 2)}` : "—"}</b></div>
                     <div className="wallet-risk"><span>1.5× 成本压力</span><b className={cls(profitStructure.costStressNetPnl)}>{profitStructure.costStressNetPnl != null ? fSign(profitStructure.costStressNetPnl, 0) : "—"}</b></div>
                   </div>
                 </DecisionCard>

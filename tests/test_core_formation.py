@@ -40,6 +40,26 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertTrue(result["eligible"])
         self.assertEqual(result["foldWins"], 3)
 
+    def test_pure_addition_needs_positive_net_and_folds_but_not_replacement_hurdle(self):
+        baseline = value(2, 1000)
+        # Only +$10: deliberately below the replacement 2%-of-equity hurdle, but still a real addition.
+        candidate = value(3, 1010)
+        base_folds = [value(2, 100), value(2, 100), value(2, 100)]
+        good_folds = [value(3, 110), value(3, 105), value(3, 102)]
+
+        result = validate_final_membership(
+            candidate, good_folds, cost_stress_net=100,
+            baseline=baseline, baseline_folds=base_folds,
+            membership_changed=True, replacing_qualified_core=False,
+            initial_margin_equity=10_000,
+            tail_after_top1=700, tail_after_top2=600,
+            top_wallet_normal_net=50, top_wallet_stress_net=25,
+        )
+
+        self.assertTrue(result["eligible"])
+        self.assertNotIn("membership_utility_gain_below_5pct", result["reasons"])
+        self.assertNotIn("membership_net_gain_below_2pct_equity", result["reasons"])
+
     def test_final_membership_rejects_single_wallet_dependency_unless_all_strong(self):
         candidate = value(2, 1000)
         folds = [value(2, 100), value(2, 100), value(2, 100)]
