@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from . import (auto_tune, config, core_formation, follow_score, generation, metrics, offline_core_optimizer,
                params, pipeline_audit, rest, selection, storage, strategy_revision)
-from .copy_backtest import run_backtest, slice_backtest_result
+from .copy_backtest import ADD_METRICS_VERSION, run_backtest, slice_backtest_result
 from .fills import build_episodes
 from .copy_data import (
     is_copyable_coin,
@@ -84,6 +84,14 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
             continue
         current["perp_frac"] = 1.0
         ok, reason = metrics.gates_structural(current, p)
+        raw_payoff = float(current.get("payoff_ratio") or 0.0)
+        raw_closed = int(current.get("n_trades") or 0)
+        if (
+            ok
+            and raw_closed >= load_copy_policy().min_closed_30d
+            and raw_payoff < load_copy_policy().min_raw_payoff_ratio
+        ):
+            ok, reason = False, "weak_payoff_structure"
         complete = [episode for episode in episodes if episode.get("open_complete", True)]
         heavy_limit = int(getattr(p, "max_single_adds", config.MAX_SINGLE_ADDS_PER_EP))
         heavy_count = sum(1 for episode in complete if int(episode.get("n_adds") or 0) > heavy_limit)
@@ -102,6 +110,8 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
                 "heavyEpisodeCount": heavy_count,
                 "maxAdds": int(current.get("max_adds_per_ep") or 0),
                 "medianAdds": int(current.get("median_adds_per_ep") or 0),
+                "rawPayoffRatio": raw_payoff,
+                "rawClosed": raw_closed,
             }
         else:
             out[sector] = {
@@ -112,6 +122,8 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
                 "maxAdds": int(current.get("max_adds_per_ep") or 0),
                 "medianAdds": int(current.get("median_adds_per_ep") or 0),
                 "maxConcurrent": int(current.get("max_concurrent") or 0),
+                "rawPayoffRatio": raw_payoff,
+                "rawClosed": raw_closed,
             }
     out["allowed"] = [sector for sector in SECTORS if (out.get(sector) or {}).get("allow")]
     return out
@@ -1130,6 +1142,7 @@ def _quality_first_core_transition(
     controls,
     desired_order,
     strict_evaluate,
+    robust_allowed_memberships=None,
 ):
     """Publish the current strict result without entry/exit hysteresis.
 
@@ -1176,6 +1189,10 @@ def _quality_first_core_transition(
     max_removals = max(0, int(getattr(config, "CORE_LOO_MAX_REMOVALS", 2) or 0))
     min_net_gain = float(getattr(config, "CORE_LOO_MIN_NET_GAIN", 1.0) or 0.0)
     removed_by_loo = []
+    robust_allowed = {
+        tuple(sorted((addr or "").lower() for addr in membership if addr))
+        for membership in (robust_allowed_memberships or ())
+    }
     while len(published) > 1 and len(removed_by_loo) < max_removals:
         base = strict_evaluate(tuple(sorted(published)))
         trials = []
@@ -1188,6 +1205,10 @@ def _quality_first_core_transition(
                 and f(without.stress_net_pnl) > 0.0
                 and f(without.actionable_open_rate) >= load_copy_policy().min_actionable_open_rate
                 and f(without.capacity_fit) >= load_copy_policy().min_capacity_fit
+                and (
+                    not robust_allowed
+                    or tuple(sorted(published - {addr})) in robust_allowed
+                )
             )
             if feasible and net_gain >= min_net_gain:
                 utility_gain = f(without.risk_adjusted_utility) - f(base.risk_adjusted_utility)
@@ -1315,8 +1336,8 @@ def _is_parameter_return_probe(row, margin_equity_pct: float) -> bool:
     qualification_equity = max(
         1.0, float(config.INITIAL_BALANCE) * max(0.0, min(1.0, float(margin_equity_pct))),
     )
-    pnl30 = f(scoped.get("copy_bt_net_pnl")) + f(scoped.get("copy_bt_unrealized_pnl"))
-    pnl7 = f(scoped.get("copy_bt_7d_net_pnl")) + f(scoped.get("copy_bt_7d_unrealized_pnl"))
+    pnl30 = f(scoped.get("copy_bt_net_pnl"))
+    pnl7 = f(scoped.get("copy_bt_7d_net_pnl"))
     try:
         sector_policy = json.loads(row.get("sector_policy_json") or "{}")
     except (TypeError, ValueError):
@@ -1432,6 +1453,19 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         addr, evidence_fills, int(now_ms), replay_ctx,
         valuation_marks=replay_ctx.copy_bt_valuation_marks,
     )
+    replay_versions = {
+        str(result.get("add_metrics_version") or "")
+        for result in results.values() if result and result.get("has_evidence")
+    }
+    if replay_versions and replay_versions != {ADD_METRICS_VERSION}:
+        return {
+            "metrics": {}, "score": 0.0,
+            "qualification": {
+                "eligible": False, "coreEligible": False,
+                "status": "add_metrics_version_mismatch", "role": "quarantine",
+                "deferred": True, "reasons": ["最终参数回放混用了不同版加仓指标"],
+            },
+        }
     effective = {"sector_policy_json": row.get("sector_policy_json")}
     _apply_copy_bt_gate(effective, results, replay_ctx)
     effective.update(_open_flow_metrics(evidence_fills, int(now_ms)))
@@ -1740,6 +1774,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     shared_meta = price_path.coverage(db, all_fills, path_start, now_ms)
 
     membership_eval_cache = {}
+    membership_replay_cache = {}
 
     def evaluate_members(addrs):
         key = tuple(sorted(dict.fromkeys(addrs)))
@@ -1776,6 +1811,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
         )
         membership_eval_cache[key] = value
+        membership_replay_cache[key] = (windows, stressed)
         return value
 
     def evaluate(count):
@@ -1793,6 +1829,184 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     )
     chosen = membership_search.metrics
     chosen_addrs = tuple(membership_search.selected)
+
+    # Membership selection now receives its own independent-regime validation. Parameter candidates have
+    # already passed the tuner's walk-forward check, but that says nothing about swapping wallet owners on
+    # the winning surface. Only a bounded set of strict finalists pays this additional CPU cost.
+    fold_cache = {}
+
+    def fold_replays(addrs):
+        key = tuple(sorted(dict.fromkeys(addrs)))
+        if key in fold_cache:
+            return fold_cache[key]
+        if not key:
+            zero = core_formation.PrefixEvaluation(
+                count=0, net_pnl=0.0, stress_net_pnl=0.0, max_drawdown=0.0,
+                actionable_open_rate=1.0, capacity_fit=1.0, liquidations=0,
+                params=tuned_params,
+                payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
+            )
+            fold_cache[key] = ([zero, zero, zero], 0.0)
+            return fold_cache[key]
+        filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
+        all_rows = list(filtered.get(max(filtered)) or [])
+        warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86_400_000
+        folds = []
+        for older, newer in ((30, 20), (20, 10), (10, 0)):
+            lo = now_ms - older * 86_400_000
+            hi = now_ms - newer * 86_400_000 if newer else now_ms + 1
+            rows = [
+                row for row in all_rows
+                if lo - warmup_ms <= int(row.get("time") or 0) < hi
+            ]
+            replay_path = [
+                row for row in shared_path
+                if int(row.get("close_time") or row.get("time") or 0) >= lo - warmup_ms
+                and int(row.get("open_time") or row.get("time") or 0) < hi
+            ]
+            warm = run_backtest(
+                "portfolio", rows, sigmas=sigmas,
+                overrides={**fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
+                market_ctx=market_ctx, price_path=replay_path, price_path_meta=shared_meta,
+            )
+            result = slice_backtest_result(warm, lo, window_days=10)
+            open_rate = result.get("actionable_open_rate", result.get("open_fill_rate"))
+            capacity = result.get("capacity_open_fit")
+            folds.append(core_formation.PrefixEvaluation(
+                count=len(key), net_pnl=f(result.get("copy_net_pnl")),
+                stress_net_pnl=f(result.get("copy_net_pnl")),
+                max_drawdown=f(result.get("max_drawdown")),
+                actionable_open_rate=1.0 if open_rate is None else f(open_rate),
+                capacity_fit=1.0 if capacity is None else f(capacity),
+                liquidations=int(result.get("liquidations") or 0), params=tuned_params,
+                payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
+            ))
+        holdout_start = now_ms - 10 * 86_400_000
+        holdout_rows = [
+            row for row in all_rows
+            if int(row.get("time") or 0) >= holdout_start - warmup_ms
+        ]
+        holdout_path = [
+            row for row in shared_path
+            if int(row.get("close_time") or row.get("time") or 0) >= holdout_start - warmup_ms
+        ]
+        stress_warm = run_backtest(
+            "portfolio", holdout_rows, sigmas=sigmas,
+            overrides={
+                **fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate", "REPLAY_COST_MULT": 1.5,
+            },
+            market_ctx=market_ctx, price_path=holdout_path, price_path_meta=shared_meta,
+        )
+        stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
+        fold_cache[key] = (folds, f(stress.get("copy_net_pnl")))
+        return fold_cache[key]
+
+    current_core = tuple(selection.published_core_addrs(db) or ())
+    previous_qualified = tuple(
+        addr for addr in current_core
+        if addr in set(ordered) and (effective_qualifications.get(addr) or {}).get("coreEligible")
+    )
+    baseline_eval = evaluate_members(previous_qualified) if previous_qualified else None
+    baseline_folds, _baseline_cost_stress = fold_replays(previous_qualified)
+    initial_margin_equity = (
+        float(config.INITIAL_BALANCE)
+        * f(fixed_follow.get("MARGIN_EQUITY_PCT") or config.MARGIN_EQUITY_PCT)
+    )
+    robust_cache = {}
+
+    def validate_members(addrs):
+        key = tuple(sorted(dict.fromkeys(addrs)))
+        if key in robust_cache:
+            return robust_cache[key]
+        value = evaluate_members(key)
+        folds, cost_stress = fold_replays(key)
+        windows, stressed = membership_replay_cache[key]
+        primary = windows.get(30) or windows.get(max(windows)) or {}
+        contributions = {}
+        for position in list(primary.get("positions") or ()) + list(primary.get("open_positions") or ()):
+            addr = (position.get("addr") or "").lower()
+            pnl = f(position.get("net_pnl"))
+            if position.get("status") == "open":
+                pnl += f(position.get("unrealized_pnl"))
+            contributions[addr] = contributions.get(addr, 0.0) + pnl
+        top_wallet = max(contributions, key=contributions.get) if contributions else None
+        without_top = tuple(addr for addr in key if addr != top_wallet)
+        if without_top:
+            without_value = evaluate_members(without_top)
+            top_normal = without_value.net_pnl
+            top_stress = without_value.stress_net_pnl
+        else:
+            top_normal = top_stress = 0.0
+        all_strong = bool(key) and all(
+            (effective_qualifications.get(addr) or {}).get("strongEntry") for addr in key
+        )
+        replacing = bool(previous_qualified and set(key) != set(previous_qualified))
+        check = core_formation.validate_final_membership(
+            value, folds, cost_stress_net=cost_stress,
+            baseline=baseline_eval, baseline_folds=baseline_folds,
+            replacing_qualified_core=replacing,
+            initial_margin_equity=initial_margin_equity,
+            min_relative_utility_gain=float(config.SELECTION_MIN_RELATIVE_GAIN),
+            min_net_return_gain=float(getattr(config, "CORE_REPLACEMENT_MIN_NET_RETURN", 0.02)),
+            tail_after_top1=primary.get("net_after_top1"),
+            tail_after_top2=primary.get("net_after_top2"),
+            min_tail_return=float(load_copy_policy().min_tail_return_30d),
+            top_wallet_normal_net=top_normal,
+            top_wallet_stress_net=top_stress,
+            all_members_strong=all_strong,
+        )
+        check.update({
+            "addrs": list(key), "netPnl": value.net_pnl, "utility": value.utility,
+            "costStressNetPnl": cost_stress, "topWallet": top_wallet,
+            "topWalletRemovalNetPnl": top_normal,
+            "topWalletRemovalStressNetPnl": top_stress,
+            "tailAfterTop1": primary.get("net_after_top1"),
+            "tailAfterTop2": primary.get("net_after_top2"),
+            "profitConcentration": primary.get("pnl_concentration") or {},
+        })
+        robust_cache[key] = check
+        return check
+
+    finalist_limit = max(1, int(getattr(config, "CORE_SEARCH_ROBUST_FINALISTS", 12) or 12))
+    finalist_pool = {
+        key: value for key, value in membership_eval_cache.items()
+        if key and value.feasible
+    }
+    # A bounded add/swap search can return a winner which was not retained in the generic replay cache's
+    # highest-utility slice.  Include it in the same ordering, but never give it artificial priority over a
+    # better robust finalist merely because it was the search algorithm's terminal node.
+    chosen_key = tuple(sorted(chosen_addrs))
+    finalist_pool[chosen_key] = chosen
+    finalist_states = sorted(
+        finalist_pool.items(),
+        key=lambda item: (
+            item[1].utility, item[1].net_pnl, item[1].stress_net_pnl, -len(item[0]), item[0],
+        ),
+        reverse=True,
+    )[:finalist_limit]
+    if chosen_key not in {key for key, _value in finalist_states}:
+        finalist_states.append((chosen_key, chosen))
+    robust_audit = []
+    robust_winner = None
+    for key, value in finalist_states:
+        check = validate_members(key)
+        robust_audit.append(check)
+        if check.get("eligible"):
+            robust_winner = (key, value, check)
+            break
+    if robust_winner is None:
+        raise RuntimeError("no_robust_quality_membership")
+    chosen_addrs, chosen, robust_check = robust_winner
+    # Pre-validate any strict LOO result. Publication may remove a negative incremental member only when
+    # the resulting set has passed these same membership stress rules.
+    robust_allowed = {tuple(sorted(chosen_addrs))}
+    for outgoing in chosen_addrs:
+        smaller = tuple(addr for addr in chosen_addrs if addr != outgoing)
+        if smaller:
+            check = validate_members(smaller)
+            robust_audit.append(check)
+            if check.get("eligible"):
+                robust_allowed.add(tuple(sorted(smaller)))
     evaluations = tuple({
         "count": value.count, "netPnl": value.net_pnl,
         "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
@@ -1827,6 +2041,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "membershipAlgorithm": membership_search.algorithm,
             "membershipEvaluated": membership_search.evaluated,
             "membershipSelected": list(chosen_addrs),
+            "membershipRobustAudit": robust_audit,
+            "robustAllowedMemberships": [list(key) for key in sorted(robust_allowed)],
+            "singleWalletDependencyWarning": bool(
+                robust_check.get("singleWalletDependencyWarning")
+            ),
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": (
                 int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
@@ -2022,6 +2241,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         controls=controls,
         desired_order=desired,
         strict_evaluate=strict_evaluate,
+        robust_allowed_memberships=(formation_meta or {}).get("robustAllowedMemberships") or (),
     )
     selected_set = set(transition["selected"])
     core_rank = {addr: rank for rank, addr in enumerate(transition["selected"], 1)}
@@ -2086,7 +2306,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 selection_rank=core_rank.get(addr) if role == selection.CORE else rank,
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
-                model_version="selection-quality-prefix-current-loo-v3",
+                model_version="selection-quality-profit-add-v2-robust-v1",
                 policy_version=copy_policy.version,
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
@@ -2444,7 +2664,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     return value
 
                 constraints = selection.SelectionConstraints(
-                    min_relative_lcb_improvement=0.0,
+                    min_relative_lcb_improvement=float(config.SELECTION_MIN_RELATIVE_GAIN),
                     min_actionable_open_rate=copy_policy.min_actionable_open_rate,
                     min_capacity_fit=copy_policy.min_capacity_fit,
                     max_drawdown_worsening=1.0,
@@ -2457,6 +2677,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     max_capacity_fit_drop=float(getattr(
                         config, "CORE_SEARCH_MAX_CAPACITY_FIT_DROP", .05,
                     )),
+                    min_absolute_net_gain=(
+                        float(config.INITIAL_BALANCE)
+                        * f(follow.get("MARGIN_EQUITY_PCT") or config.MARGIN_EQUITY_PCT)
+                        * float(getattr(config, "CORE_REPLACEMENT_MIN_NET_RETURN", .02))
+                    ),
                 )
                 search_budget_s = float(getattr(
                     config, "CORE_SEARCH_TIME_BUDGET_SEC", 600,

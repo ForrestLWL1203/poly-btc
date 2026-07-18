@@ -60,6 +60,7 @@ def _selection_reason_text(row):
         "portfolio_negative_incremental_net": "组合候补：移除后共享账户扣费净收益更高",
         "core_eligible": "组合候补：个人资格合格，本轮组合未选中",
         "core_eligible_strong": "组合候补：强证据合格，本轮组合未选中",
+        "core_eligible_profit_concentrated": "利润集中：强证据与压力回放已通过",
         "challenger_return_watch": "收益观察：达到候选线，尚未达到Core收益线",
         "challenger_sample_watch": "样本观察：Copy样本或独立证据尚不足",
         "challenger_confidence_watch": "置信观察：LCB或盈利概率尚未达到Core线",
@@ -68,6 +69,13 @@ def _selection_reason_text(row):
         "challenger_recent_decline": "近期衰退：回撤未达到硬淘汰线，继续观察",
         "challenger_weekly_return_watch": "近期收益不足：7日Copy总收益未达到Core百分比线",
         "challenger_open_valuation_pending": "开放仓位估值待确认：暂不进入Core",
+        "challenger_profit_concentration": "利润集中：去极值收益尚可，暂留候选观察",
+        "copy_profit_structure_weak": "盈利结构不足：严格Copy盈亏因子未达标",
+        "copy_tail_profit_weak": "盈利结构不足：移除最大两笔盈利后收益过薄",
+        "copy_recent_tail_weak": "盈利结构不足：近期收益依赖单一盈利回合",
+        "copy_cost_stress_weak": "盈利结构不足：1.5倍成本压力后不盈利",
+        "weak_payoff_structure": "盈利结构不足：原始允许板块盈亏比过低",
+        "add_metrics_version_mismatch": "回放指标版本不一致，已进入数据隔离",
         "copy_value_below_challenger_floor": "30日Copy总收益低于候选百分比线",
         "copy_recent_value_below_challenger_floor": "7日Copy总收益低于候选百分比线",
         "recent_copy_collapse": "近期严格Copy收益严重恶化",
@@ -181,6 +189,22 @@ def _score_breakdown(row):
         "evidenceDays": detail.get("evidenceDays"),
         "riskScore": score100(detail.get("riskScore")) if detail.get("riskScore") is not None else None,
         "executionScore": score100(detail.get("executionScore")) if detail.get("executionScore") is not None else None,
+        "profitStructure": {
+            "profitFactor": detail.get("profitFactor"),
+            "payoffRatio": detail.get("payoffRatio"),
+            "netAfterTop1": detail.get("netAfterTop1"),
+            "netAfterTop2": detail.get("netAfterTop2"),
+            "top1ProfitSharePct": (
+                round(float(detail.get("top1ProfitShare")) * 100, 1)
+                if detail.get("top1ProfitShare") is not None else None
+            ),
+            "top3ProfitSharePct": (
+                round(float(detail.get("top3ProfitShare")) * 100, 1)
+                if detail.get("top3ProfitShare") is not None else None
+            ),
+            "costStressNetPnl": detail.get("costStressNetPnl"),
+        },
+        "addMetrics": detail.get("addMetrics") or {},
         "sectorPolicy": _sector_policy(row),
         "reasons": detail.get("reasons") or [],
     }

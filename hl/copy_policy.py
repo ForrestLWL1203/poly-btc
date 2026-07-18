@@ -32,6 +32,12 @@ class CopyPolicy:
     strong_min_evidence_days: int
     recent_warning_loss_ratio: float
     recent_hard_loss_ratio: float
+    min_raw_payoff_ratio: float
+    min_profit_factor: float
+    min_tail_return_30d: float
+    max_top1_profit_share: float
+    max_top3_profit_share: float
+    concentration_min_positive_episodes: int
     min_actionable_open_rate: float
     min_capacity_fit: float
     min_marginal_gain: float
@@ -82,8 +88,16 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         strong_min_evidence_days=int(_value(values, "CORE_STRONG_MIN_EVIDENCE_DAYS", 10)),
         recent_warning_loss_ratio=float(_value(values, "CORE_RECENT_WARNING_LOSS_RATIO", 0.10)),
         recent_hard_loss_ratio=float(_value(values, "CORE_RECENT_HARD_LOSS_RATIO", 0.25)),
+        min_raw_payoff_ratio=float(_value(values, "COPY_MIN_RAW_PAYOFF_RATIO", 0.60)),
+        min_profit_factor=float(_value(values, "COPY_MIN_PROFIT_FACTOR", 1.30)),
+        min_tail_return_30d=float(_value(values, "COPY_MIN_TAIL_RETURN_30D", 0.05)),
+        max_top1_profit_share=float(_value(values, "COPY_MAX_TOP1_PROFIT_SHARE", 0.50)),
+        max_top3_profit_share=float(_value(values, "COPY_MAX_TOP3_PROFIT_SHARE", 0.80)),
+        concentration_min_positive_episodes=int(_value(
+            values, "COPY_CONCENTRATION_MIN_POSITIVE_EPISODES", 5,
+        )),
         min_actionable_open_rate=float(_value(values, "SELECTION_MIN_ACTIONABLE_RATE", 0.70)),
-        min_capacity_fit=float(_value(values, "SELECTION_MIN_CAPACITY_FIT", 0.85)),
+        min_capacity_fit=float(_value(values, "SELECTION_MIN_CAPACITY_FIT", 0.75)),
         min_marginal_gain=float(_value(values, "SELECTION_MIN_RELATIVE_GAIN", 0.05)),
         max_drawdown_worsening=float(_value(values, "SELECTION_MAX_DD_WORSEN", 0.01)),
         tune_min_relative_gain=float(_value(values, "AUTO_TUNE_MIN_RELATIVE_GAIN", 0.05)),

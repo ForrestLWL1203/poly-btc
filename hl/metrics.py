@@ -256,9 +256,9 @@ def score(m: dict) -> float:
     if _pfeq and _pfeq > 0 and m.get("copy_bt_net_pnl") is not None:
         _rp = [
             (config.ROI_W_WEEK,
-             (g("copy_bt_7d_net_pnl") + g("copy_bt_7d_unrealized_pnl")) / _pfeq),
+             g("copy_bt_7d_net_pnl") / _pfeq),
             (config.ROI_W_MON,
-             (g("copy_bt_net_pnl") + g("copy_bt_unrealized_pnl")) / _pfeq),
+             g("copy_bt_net_pnl") / _pfeq),
         ]
     else:
         # Structural-only defensive path: these values were already built from the scoped fill set.

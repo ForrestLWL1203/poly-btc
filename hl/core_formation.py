@@ -56,6 +56,92 @@ class MembershipSearchResult:
     algorithm: str
 
 
+def validate_final_membership(
+    candidate: PrefixEvaluation,
+    candidate_folds: list[PrefixEvaluation],
+    *,
+    cost_stress_net: float,
+    baseline: PrefixEvaluation | None = None,
+    baseline_folds: list[PrefixEvaluation] | None = None,
+    replacing_qualified_core: bool = False,
+    initial_margin_equity: float = 10_000.0,
+    min_relative_utility_gain: float = 0.05,
+    min_net_return_gain: float = 0.02,
+    tail_after_top1: float | None = None,
+    tail_after_top2: float | None = None,
+    min_tail_return: float = 0.05,
+    top_wallet_normal_net: float | None = None,
+    top_wallet_stress_net: float | None = None,
+    all_members_strong: bool = False,
+) -> dict:
+    """Final, expensive membership guard shared by production formation and tests.
+
+    Parameter tuning already validates its chosen surface.  This separate check validates the *wallet set*
+    on three disjoint regimes, cost stress, tail concentration and dominant-wallet removal.  It deliberately
+    has no clock or multi-generation hysteresis: a currently unqualified old member is outside the baseline.
+    """
+    reasons = []
+    if len(candidate_folds) != 3:
+        reasons.append("membership_folds_unavailable")
+    else:
+        if any(
+            fold.actionable_open_rate < 0.70
+            or fold.capacity_fit < float(config.SELECTION_MIN_CAPACITY_FIT)
+            or fold.max_drawdown >= 1.0
+            for fold in candidate_folds
+        ):
+            reasons.append("membership_fold_infeasible")
+        if candidate_folds[-1].net_pnl <= 0.0:
+            reasons.append("membership_latest_fold_not_profitable")
+    if candidate.net_pnl <= 0.0 or candidate.stress_net_pnl <= 0.0 or cost_stress_net <= 0.0:
+        reasons.append("membership_cost_stress_not_profitable")
+
+    baseline_folds = list(baseline_folds or [])
+    fold_deltas = []
+    compare_folds = replacing_qualified_core or baseline is None
+    if compare_folds and len(candidate_folds) == len(baseline_folds) == 3:
+        fold_deltas = [
+            candidate_fold.net_pnl - baseline_fold.net_pnl
+            for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds)
+        ]
+        if sum(delta > 0.0 for delta in fold_deltas) < 2:
+            reasons.append("membership_fewer_than_two_fold_wins")
+        if fold_deltas[-1] < 0.0:
+            reasons.append("membership_latest_fold_degraded")
+    elif compare_folds:
+        reasons.append("membership_baseline_folds_unavailable")
+
+    if replacing_qualified_core and baseline is not None:
+        utility_floor = baseline.utility + abs(baseline.utility) * max(0.0, min_relative_utility_gain)
+        if candidate.utility + 1e-9 < utility_floor:
+            reasons.append("membership_utility_gain_below_5pct")
+        absolute_net_floor = max(0.0, initial_margin_equity) * max(0.0, min_net_return_gain)
+        if candidate.net_pnl - baseline.net_pnl + 1e-9 < absolute_net_floor:
+            reasons.append("membership_net_gain_below_2pct_equity")
+
+    tail_floor = max(0.0, initial_margin_equity) * max(0.0, min_tail_return)
+    if tail_after_top1 is None or tail_after_top2 is None:
+        reasons.append("membership_tail_metrics_missing")
+    elif tail_after_top1 < tail_floor or tail_after_top2 < tail_floor:
+        reasons.append("membership_tail_profit_weak")
+
+    dependency_warning = False
+    if top_wallet_normal_net is None or top_wallet_stress_net is None:
+        reasons.append("membership_top_wallet_stress_missing")
+    elif top_wallet_normal_net <= 0.0 or top_wallet_stress_net <= 0.0:
+        if all_members_strong:
+            dependency_warning = True
+        else:
+            reasons.append("membership_single_wallet_dependency")
+    return {
+        "eligible": not reasons,
+        "reasons": reasons,
+        "foldWins": sum(delta > 0.0 for delta in fold_deltas),
+        "foldDeltas": fold_deltas,
+        "singleWalletDependencyWarning": dependency_warning,
+    }
+
+
 def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_below: int = 8):
     """Find a feasible quality subset without letting one congested wallet block every later wallet.
 

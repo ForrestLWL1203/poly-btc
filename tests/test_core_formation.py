@@ -2,6 +2,7 @@ import unittest
 
 from hl.core_formation import (
     PrefixEvaluation, retains_reference, search_quality_membership, search_quality_prefix,
+    validate_final_membership,
 )
 
 
@@ -22,6 +23,44 @@ def value(count, utility, *, feasible=True, liquidations=0, capacity_fit=.95):
 
 
 class QualityPrefixSearchTests(unittest.TestCase):
+    def test_final_membership_requires_two_fold_wins_latest_profit_and_replacement_hurdle(self):
+        baseline = value(2, 1000)
+        candidate = value(3, 1300)
+        base_folds = [value(2, 100), value(2, 100), value(2, 100)]
+        good_folds = [value(3, 120), value(3, 120), value(3, 110)]
+
+        result = validate_final_membership(
+            candidate, good_folds, cost_stress_net=100,
+            baseline=baseline, baseline_folds=base_folds,
+            replacing_qualified_core=True, initial_margin_equity=10_000,
+            tail_after_top1=700, tail_after_top2=600,
+            top_wallet_normal_net=50, top_wallet_stress_net=25,
+        )
+
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["foldWins"], 3)
+
+    def test_final_membership_rejects_single_wallet_dependency_unless_all_strong(self):
+        candidate = value(2, 1000)
+        folds = [value(2, 100), value(2, 100), value(2, 100)]
+        rejected = validate_final_membership(
+            candidate, folds, cost_stress_net=100,
+            baseline=None, baseline_folds=[value(0, 0)] * 3,
+            tail_after_top1=700, tail_after_top2=600,
+            top_wallet_normal_net=-1, top_wallet_stress_net=-1,
+        )
+        warned = validate_final_membership(
+            candidate, folds, cost_stress_net=100,
+            baseline=None, baseline_folds=[value(0, 0)] * 3,
+            tail_after_top1=700, tail_after_top2=600,
+            top_wallet_normal_net=-1, top_wallet_stress_net=-1,
+            all_members_strong=True,
+        )
+
+        self.assertFalse(rejected["eligible"])
+        self.assertIn("membership_single_wallet_dependency", rejected["reasons"])
+        self.assertTrue(warned["eligible"])
+        self.assertTrue(warned["singleWalletDependencyWarning"])
     def test_binary_search_follows_16_8_12_direction_and_checks_neighbours(self):
         calls = []
 

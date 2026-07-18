@@ -12,6 +12,7 @@ import math
 from typing import Mapping
 
 from . import config
+from .copy_backtest import ADD_BLOCKED_OUTCOMES, ADD_METRICS_VERSION, ADD_OUTCOMES
 from .copy_data import is_copyable_coin
 from .copy_policy import load_copy_policy
 
@@ -83,7 +84,19 @@ def _compact_result(result: Mapping) -> dict:
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "valuation_status",
         "valuation_coverage", "closed_n", "wins", "liquidations", "fee_drag",
         "target_open_events", "opened_n", "open_fill_rate", "capacity_open_fit",
-        "target_adds", "followed_adds", "missed_adds",
+        "target_adds", "followed_adds", "missed_adds", "missed_add_rate",
+        "path_completion_rate", "behavior_replication_rate", "behavior_replication_v2",
+        "add_metrics_version", "add_outcome_counts", "raw_add_order_follow_rate",
+        "noise_merged_adds", "blocked_adds", "actionable_add_orders",
+        "actionable_add_capture_rate", "true_blocked_add_rate", "add_episode_count",
+        "entry_gap_sigma_weighted", "entry_gap_sigma_p90", "entry_gap_pct_weighted",
+        "entry_gap_pct_p90", "entry_gap_sigma_samples", "entry_gap_pct_samples",
+        "entry_gap_weight", "entry_gap_sigma_weighted_sum", "entry_gap_pct_weighted_sum",
+        "entry_alignment", "add_execution", "add_fidelity", "add_fidelity_applied",
+        "effective_add_fidelity", "gross_profit", "gross_loss", "profit_factor",
+        "payoff_ratio", "positive_episode_n", "negative_episode_n", "top_positive_pnls",
+        "top1_profit_share", "top3_profit_share", "net_after_top1", "net_after_top2",
+        "cost_stress_net_pnl", "initial_margin_equity",
     )
     return {k: result.get(k) for k in keys if k in result}
 
@@ -432,7 +445,22 @@ def _aggregate_window(copy_json: Mapping, allowed: set[str], days: int) -> dict 
         "fee_drag": 0.0,
         "unrealized_pnl": 0.0,
         "valuation_status": "complete",
+        "gross_profit": 0.0,
+        "gross_loss": 0.0,
+        "positive_episode_n": 0,
+        "negative_episode_n": 0,
+        "cost_stress_net_pnl": 0.0,
+        "initial_margin_equity": 0.0,
+        "path_completion_weighted": 0.0,
+        "entry_gap_weight": 0.0,
+        "entry_gap_sigma_weighted_sum": 0.0,
+        "entry_gap_pct_weighted_sum": 0.0,
+        "add_episode_count": 0,
     }
+    add_counts = {key: 0 for key in ADD_OUTCOMES}
+    top_positive_pnls = []
+    sigma_samples = []
+    pct_samples = []
     seen = False
     for sector in allowed:
         result = _window_result(copy_json.get(sector) or {}, days)
@@ -447,12 +475,103 @@ def _aggregate_window(copy_json: Mapping, allowed: set[str], days: int) -> dict 
         total["liquidations"] += _int(result.get("liquidations"))
         total["fee_drag"] += _num(result.get("fee_drag"))
         total["unrealized_pnl"] += _num(result.get("unrealized_pnl"))
+        total["gross_profit"] += _num(result.get("gross_profit"))
+        total["gross_loss"] += _num(result.get("gross_loss"))
+        total["positive_episode_n"] += _int(result.get("positive_episode_n"))
+        total["negative_episode_n"] += _int(result.get("negative_episode_n"))
+        total["cost_stress_net_pnl"] += _num(result.get("cost_stress_net_pnl"))
+        total["initial_margin_equity"] = max(
+            total["initial_margin_equity"], _num(result.get("initial_margin_equity"))
+        )
+        total["path_completion_weighted"] += (
+            _num(result.get("path_completion_rate"), 1.0) * max(0, _int(result.get("closed_n")))
+        )
+        for key in ADD_OUTCOMES:
+            add_counts[key] += _int((result.get("add_outcome_counts") or {}).get(key))
+        total["add_episode_count"] += _int(result.get("add_episode_count"))
+        total["entry_gap_weight"] += _num(result.get("entry_gap_weight"))
+        total["entry_gap_sigma_weighted_sum"] += _num(result.get("entry_gap_sigma_weighted_sum"))
+        total["entry_gap_pct_weighted_sum"] += _num(result.get("entry_gap_pct_weighted_sum"))
+        top_positive_pnls.extend(_num(value) for value in (result.get("top_positive_pnls") or []))
+        sigma_samples.extend(_num(value) for value in (result.get("entry_gap_sigma_samples") or []))
+        pct_samples.extend(_num(value) for value in (result.get("entry_gap_pct_samples") or []))
         if str(result.get("valuation_status") or "complete") != "complete":
             total["valuation_status"] = "missing_marks"
     if not seen:
         return None
     target_open = total["target_open_events"]
     total["open_fill_rate"] = (total["opened_n"] / target_open) if target_open else None
+    total["actionable_open_rate"] = total["open_fill_rate"] if target_open else 1.0
+    total_closed = total["closed_n"]
+    total["path_completion_rate"] = (
+        total.pop("path_completion_weighted") / total_closed if total_closed else 1.0
+    )
+    gross_profit = total["gross_profit"]
+    gross_loss = total["gross_loss"]
+    avg_win = gross_profit / total["positive_episode_n"] if total["positive_episode_n"] else 0.0
+    avg_loss = gross_loss / total["negative_episode_n"] if total["negative_episode_n"] else 0.0
+    top_positive_pnls.sort(reverse=True)
+    total.update({
+        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0),
+        "payoff_ratio": avg_win / avg_loss if avg_loss > 0 else (999.0 if avg_win > 0 else 0.0),
+        "top_positive_pnls": top_positive_pnls[:3],
+        "top1_profit_share": top_positive_pnls[0] / gross_profit if gross_profit > 0 and top_positive_pnls else 0.0,
+        "top3_profit_share": sum(top_positive_pnls[:3]) / gross_profit if gross_profit > 0 else 0.0,
+        "net_after_top1": total["copy_net_pnl"] - sum(top_positive_pnls[:1]),
+        "net_after_top2": total["copy_net_pnl"] - sum(top_positive_pnls[:2]),
+    })
+    target_adds = sum(add_counts.values())
+    followed = add_counts["followed"]
+    noise = add_counts["noise_merged"]
+    blocked = sum(add_counts[key] for key in ADD_BLOCKED_OUTCOMES)
+    actionable_adds = followed + blocked
+    entry_weight = total["entry_gap_weight"]
+    weighted_sigma = total["entry_gap_sigma_weighted_sum"] / entry_weight if entry_weight else 0.0
+    weighted_pct = total["entry_gap_pct_weighted_sum"] / entry_weight if entry_weight else 0.0
+
+    def percentile(values, quantile):
+        rows = sorted(values)
+        if not rows:
+            return 0.0
+        return rows[max(0, min(len(rows) - 1, int(math.ceil(len(rows) * quantile)) - 1))]
+
+    p90_sigma = percentile(sigma_samples, 0.90)
+    p90_pct = percentile(pct_samples, 0.90)
+    alignment = max(0.0, min(1.0, 1.0 - 0.5 * weighted_sigma - 0.5 * p90_sigma))
+    execution = 1.0 - (blocked / actionable_adds if actionable_adds else 0.0)
+    fidelity = 0.8 * alignment + 0.2 * execution
+    applied = total["add_episode_count"] >= 5
+    total.update({
+        "add_metrics_version": ADD_METRICS_VERSION,
+        "add_outcome_counts": add_counts,
+        "target_adds": target_adds,
+        "followed_adds": followed,
+        "missed_adds": max(0, target_adds - followed),
+        "missed_add_rate": (target_adds - followed) / target_adds if target_adds else 0.0,
+        "raw_add_order_follow_rate": followed / target_adds if target_adds else 1.0,
+        "noise_merged_adds": noise,
+        "blocked_adds": blocked,
+        "actionable_add_orders": actionable_adds,
+        "actionable_add_capture_rate": followed / actionable_adds if actionable_adds else 1.0,
+        "true_blocked_add_rate": blocked / actionable_adds if actionable_adds else 0.0,
+        "entry_gap_sigma_weighted": weighted_sigma,
+        "entry_gap_sigma_p90": p90_sigma,
+        "entry_gap_pct_weighted": weighted_pct,
+        "entry_gap_pct_p90": p90_pct,
+        "entry_gap_sigma_samples": sigma_samples,
+        "entry_gap_pct_samples": pct_samples,
+        "entry_alignment": alignment,
+        "add_execution": execution,
+        "add_fidelity": fidelity,
+        "add_fidelity_applied": applied,
+        "effective_add_fidelity": fidelity if applied else 1.0,
+    })
+    behavior_v2 = max(
+        0.0,
+        min(1.0, total["actionable_open_rate"] * total["path_completion_rate"] * total["effective_add_fidelity"]),
+    )
+    total["behavior_replication_rate"] = behavior_v2
+    total["behavior_replication_v2"] = behavior_v2
     return total
 
 
@@ -482,6 +601,19 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         out["copy_bt_fee_drag"] = primary["fee_drag"]
         out["copy_bt_unrealized_pnl"] = primary["unrealized_pnl"]
         out["copy_bt_valuation_status"] = primary["valuation_status"]
+        for key in (
+            "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
+            "positive_episode_n", "negative_episode_n",
+            "top1_profit_share", "top3_profit_share", "net_after_top1", "net_after_top2",
+            "cost_stress_net_pnl", "add_metrics_version", "add_outcome_counts",
+            "raw_add_order_follow_rate", "noise_merged_adds", "blocked_adds",
+            "actionable_add_capture_rate", "entry_gap_pct_weighted", "entry_gap_pct_p90",
+            "entry_gap_sigma_weighted", "entry_gap_sigma_p90", "entry_alignment",
+            "add_execution", "add_fidelity", "add_fidelity_applied",
+            "behavior_replication_v2", "behavior_replication_rate",
+        ):
+            if key in primary:
+                out[f"copy_bt_{key}"] = primary[key]
     for days, net_key, n_key in (
         (14, "copy_bt_14d_net_pnl", "copy_bt_14d_closed_n"),
         (7, "copy_bt_7d_net_pnl", "copy_bt_7d_closed_n"),
@@ -491,6 +623,11 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             out[net_key] = agg["copy_net_pnl"]
             out[n_key] = agg["closed_n"]
             out[f"copy_bt_{days}d_unrealized_pnl"] = agg["unrealized_pnl"]
+            for key in (
+                "profit_factor", "net_after_top1", "net_after_top2",
+                "top1_profit_share", "top3_profit_share", "cost_stress_net_pnl",
+            ):
+                out[f"copy_bt_{days}d_{key}"] = agg.get(key)
     out["allowed_sectors"] = sorted(allowed)
     out["evidence_sectors"] = sorted(evidence_sectors)
     return out

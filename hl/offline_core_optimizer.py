@@ -178,7 +178,7 @@ def robust_improvement(
         required = abs(base_total) * max(0.0, f(min_total_gain_ratio))
         if sum(deltas) + 1e-12 < required:
             reasons.append("fold_total_gain_below_floor")
-        if deltas[-1] <= 0:
+        if deltas[-1] < 0:
             reasons.append("holdout_not_better")
     cost_gain = _net(trial_cost_stress) - _net(base_cost_stress)
     if _net(trial_cost_stress) <= 0 or cost_gain <= 0:

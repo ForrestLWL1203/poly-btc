@@ -145,6 +145,13 @@ default classification is:
   edge is rejected;
 - LCB and positive-profit probability are continuous ranking diagnostics after the sample floor, not a second
   hidden Core veto.
+- a sampled allowed sector needs raw payoff ratio at least 0.60. Sample-complete strict Copy needs profit
+  factor at least 1.30, 30-day net after removing its two largest winners at least 5% of
+  `initial_margin_equity`, positive seven-day net after removing its largest winner, and positive 1.5x-cost
+  stress net;
+- once there are at least five winning episodes, a largest-winner share above 50% or top-three share above
+  80% blocks normal Core. Only strong evidence whose de-extremed and cost-stressed economics still pass may
+  enter Core with an explicit profit-concentration warning; otherwise it is Challenger or rejected.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Serious recent
 collapse rejects the wallet/sector: sustained sampled 14-day and 7-day losses, a sampled negative 7-day loss at
@@ -167,6 +174,14 @@ loss includes liquidation is still a hard recent failure, and Heavy-DCA pressure
 plus bounded recent/liquidation penalties. The sample-confidence factor saturates at the actual qualification
 floors. Scores order qualified candidates; neither raw score nor `MIN_FOLLOW_SCORE` is a production membership
 gate after an explicit selection exists.
+
+Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
+`noise_merged`, `hard_cap_blocked`, `coin_cap_blocked`, `cash_blocked`, `min_margin_blocked`, or
+`liquidity_blocked`; a later actionable fill slice may atomically replace an earlier noise classification for
+the same order id. `noise_merged` is intentional denoising and never a miss penalty. Raw add-order follow rate
+is audit-only. Ranking uses target/copy entry-VWAP divergence normalized by coin sigma plus genuinely blocked
+actionable adds; with fewer than five add episodes this component remains audit-only. Legacy `missed_add_rate`
+is retained only for backward-readable audit and must not feed qualification, selection, or tuning.
 
 ### 5. Core/Challenger lifecycle
 
@@ -193,10 +208,17 @@ minimum, or auto-tuned value. Production automatic formation is:
 4. With that fixed surface, `search_quality_membership` evaluates every subset for pools of at most eight.
    Larger pools start from the winning prefix and run bounded add/swap closure so one congested wallet cannot
    block stronger wallets behind it.
-5. Require positive normal and 1.5x-cost-stress net PnL, solvency, at least 70% actionable opens and at least
-   75% capacity fit. Liquidation count is not independently double-charged as a veto.
-6. Repeatedly apply strict leave-one-out elimination only when removing a member raises funded net PnL by at
-   least `$1` and leaves the remaining portfolio feasible, then publish that current-evidence result immediately.
+5. Validate bounded final membership candidates on three non-overlapping ten-day folds, a profitable latest
+   fold, 1.5x-cost stress, solvency, at least 70% actionable opens and at least 75% capacity fit. A replacement
+   of still-qualified old Core also needs at least two improving folds, a non-degrading latest fold, at least
+   5% risk-adjusted utility gain and net gain of 2% of `initial_margin_equity`. Current qualification or recent
+   risk failure still removes immediately without that replacement hurdle.
+6. Stress the final set after removing its largest one and two winning trades and after removing its largest
+   contributing wallet. Normal and 1.5x-cost net must remain positive; only an all-strong-evidence set may
+   publish with an explicit single-wallet-dependency warning. Persist wallet/coin/day/side concentration.
+7. Repeatedly apply strict leave-one-out elimination only when removing a member raises funded net PnL by at
+   least `$1` and the smaller set already passed the same membership robustness checks, then publish that
+   current-evidence result immediately.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
 per-coin limits. A high-scoring wallet can remain Challenger when it adds no funded-account value; a lower raw

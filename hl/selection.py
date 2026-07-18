@@ -290,6 +290,7 @@ class SelectionConstraints:
     max_targets: int = 40
     max_actionable_open_rate_drop: float = 0.05
     max_capacity_fit_drop: float = 0.05
+    min_absolute_net_gain: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -317,8 +318,13 @@ def portfolio_economic_rejection_reason(base: PortfolioMetrics, trial: Portfolio
     )
     if trial_net <= 0 or trial_net <= base_net:
         return "portfolio_no_profit_improvement"
-    if trial_utility <= base_utility:
+    relative_utility_floor = base_utility + abs(base_utility) * max(
+        0.0, c.min_relative_lcb_improvement,
+    )
+    if trial_utility + 1e-12 < relative_utility_floor:
         return "portfolio_risk_adjusted_gain_low"
+    if trial_net - base_net + 1e-12 < max(0.0, c.min_absolute_net_gain):
+        return "portfolio_absolute_net_gain_low"
     if trial.actionable_open_rate < c.min_actionable_open_rate:
         return "portfolio_open_rate_low"
     if (base_net > 0 and trial.actionable_open_rate + c.max_actionable_open_rate_drop

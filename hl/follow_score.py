@@ -75,13 +75,12 @@ def evaluate_follow_eligibility(
     evidence_days = int(_num(metrics.get("copy_evidence_days")))
     recent14 = metrics.get("copy_recent_return_14d")
     recent7 = metrics.get("copy_recent_return_7d")
-    # Admission is based on the money the copy account has actually made at the replay endpoint, not only
-    # on already-closed episodes.  Otherwise a wallet can bank a small realized profit, carry a larger open
-    # loss, and still look Core-profitable.  Window-specific unrealized PnL comes from the same canonical
-    # replay and valuation snapshot as its realized result.
-    pnl30 = _num(metrics.get("copy_bt_net_pnl")) + _num(metrics.get("copy_bt_unrealized_pnl"))
-    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl")) + _num(metrics.get("copy_bt_14d_unrealized_pnl"))
-    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl")) + _num(metrics.get("copy_bt_7d_unrealized_pnl"))
+    # Canonical ``copy_net_pnl`` is already the realized+marked endpoint.  ``unrealized_pnl`` is retained
+    # only to split the public display into 已平/持仓; adding it again here double-counts every open winner or
+    # loser and can flip qualification at the boundary.
+    pnl30 = _num(metrics.get("copy_bt_net_pnl"))
+    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
+    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
     initial_balance = max(1.0, float(getattr(config, "INITIAL_BALANCE", 10_000.0)))
     if margin_equity_pct is None:
         margin_equity_pct = metrics.get("margin_equity_pct", config.MARGIN_EQUITY_PCT)
@@ -209,6 +208,68 @@ def evaluate_follow_eligibility(
         or (c14 >= min_closed14 and pnl14 <= 0.0)
     )
     strong_samples = c30 >= policy.strong_min_closed_30d and evidence_days >= policy.strong_min_evidence_days
+    structure_sampled = c30 >= min_closed30
+    profit_factor = metrics.get("copy_bt_profit_factor")
+    tail30 = metrics.get("copy_bt_net_after_top2")
+    tail7 = metrics.get("copy_bt_7d_net_after_top1")
+    cost_stress = metrics.get("copy_bt_cost_stress_net_pnl")
+    positive_episodes = int(_num(metrics.get("copy_bt_positive_episode_n")))
+    top1_share = _num(metrics.get("copy_bt_top1_profit_share"))
+    top3_share = _num(metrics.get("copy_bt_top3_profit_share"))
+    concentration_sampled = positive_episodes >= policy.concentration_min_positive_episodes
+    concentration_warning = bool(
+        concentration_sampled
+        and (
+            top1_share > policy.max_top1_profit_share
+            or top3_share > policy.max_top3_profit_share
+        )
+    )
+    if structure_sampled and profit_factor is not None and _num(profit_factor) < policy.min_profit_factor:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_profit_structure_weak",
+            "role": "rejected",
+            "profitFactor": _num(profit_factor),
+            "reasons": [f"扣费后严格Copy PF低于{policy.min_profit_factor:.2f}"],
+        }
+    tail_floor = qualification_equity * policy.min_tail_return_30d
+    if structure_sampled and tail30 is not None and _num(tail30) < tail_floor:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_tail_profit_weak",
+            "role": "rejected",
+            "tail30NetPnl": _num(tail30),
+            "reasons": [f"30天移除最大两笔盈利后低于{policy.min_tail_return_30d * 100:.0f}%收益线"],
+        }
+    if c7 >= min_closed7 and tail7 is not None and _num(tail7) <= 0.0:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_recent_tail_weak",
+            "role": "rejected",
+            "tail7NetPnl": _num(tail7),
+            "reasons": ["7天移除最大一笔盈利后不再为正"],
+        }
+    if structure_sampled and cost_stress is not None and _num(cost_stress) <= 0.0:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_cost_stress_weak",
+            "role": "rejected",
+            "costStressNetPnl": _num(cost_stress),
+            "reasons": ["1.5倍手续费/滑点压力后严格Copy不盈利"],
+        }
+    concentration_exception = bool(
+        concentration_warning
+        and pnl30 >= strong_floor
+        and strong_samples
+        and c7 >= min_closed7
+        and tail30 is not None and _num(tail30) >= tail_floor
+        and tail7 is not None and _num(tail7) > 0.0
+        and cost_stress is not None and _num(cost_stress) > 0.0
+    )
     weekly_economics_ok = pnl7 >= weekly_core_floor
     # A narrow miss of the 2% normalized edge line may remain visible as Challenger when the strict Copy
     # account result, recent economics, samples and win probability are all strong.  Materially thin or
@@ -246,17 +307,27 @@ def evaluate_follow_eligibility(
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
     core_eligible = bool(strong_entry or standard_entry)
+    if concentration_warning and not concentration_exception:
+        core_eligible = False
     if core_eligible and not structural_core_blocked:
         return {
             "eligible": True,
             "coreEligible": True,
             "strongEntry": bool(strong_entry),
-            "status": "core_eligible_strong" if strong_entry else "core_eligible",
+            "status": (
+                "core_eligible_profit_concentrated"
+                if concentration_warning else
+                ("core_eligible_strong" if strong_entry else "core_eligible")
+            ),
             "role": "core_eligible",
             "returnLcb": return_lcb,
             "executionScore": execution,
             "recentLossRatio": recent_loss_ratio,
-            "reasons": ["个人严格Copy证据达到Core准入线"],
+            "profitConcentrationWarning": concentration_warning,
+            "reasons": [
+                "个人严格Copy证据达到Core准入线"
+                + ("，利润集中但强证据与去极值/成本压力已通过" if concentration_warning else "")
+            ],
         }
 
     if structural_core_blocked:
@@ -277,6 +348,8 @@ def evaluate_follow_eligibility(
         status, reason = "challenger_return_watch", "30天Copy收益达到候选线但未达到Core线"
     elif c30 < min_closed30 or evidence_days < min_evidence_days or c7 < min_closed7:
         status, reason = "challenger_sample_watch", "Copy样本或独立证据尚不足"
+    elif concentration_warning:
+        status, reason = "challenger_profit_concentration", "利润集中度偏高，暂不进入Core"
     elif pnl7 < weekly_core_floor:
         status, reason = (
             "challenger_weekly_return_watch",
@@ -294,6 +367,7 @@ def evaluate_follow_eligibility(
         "returnLcb": return_lcb,
         "executionScore": execution,
         "recentLossRatio": recent_loss_ratio,
+        "profitConcentrationWarning": concentration_warning,
         "reasons": [reason],
     }
 
@@ -326,6 +400,10 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
             + _num(metrics.get("capacity_fit"), 0.0)
         ) / 2.0
     execution = _clamp(_num(execution))
+    if metrics.get("copy_bt_add_fidelity_applied"):
+        # V2 add fidelity is continuous ranking evidence only. Noise-merged fragments are excluded inside
+        # the metric; only capacity/liquidity blocks and entry-path divergence can lower this component.
+        execution = _clamp((execution + _num(metrics.get("copy_bt_add_fidelity"), 1.0)) / 2.0)
     evidence_days = int(_num(metrics.get("copy_evidence_days")))
     policy = load_copy_policy()
     # Qualification already defines seven 30d closes and five independent days as sufficient evidence.
@@ -343,9 +421,9 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         + 0.15 * risk + 0.15 * execution
     )
     shrunk_copy = 0.5 + confidence * (copy_score - 0.5)
-    pnl30 = _num(metrics.get("copy_bt_net_pnl")) + _num(metrics.get("copy_bt_unrealized_pnl"))
-    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl")) + _num(metrics.get("copy_bt_14d_unrealized_pnl"))
-    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl")) + _num(metrics.get("copy_bt_7d_unrealized_pnl"))
+    pnl30 = _num(metrics.get("copy_bt_net_pnl"))
+    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
+    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
     margin_equity_pct = _clamp(_num(metrics.get("margin_equity_pct"), config.MARGIN_EQUITY_PCT))
     economic_equity = max(
         1.0,
@@ -416,6 +494,23 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "evidenceDays": evidence_days,
         "riskScore": risk,
         "executionScore": execution,
+        "profitFactor": metrics.get("copy_bt_profit_factor"),
+        "payoffRatio": metrics.get("copy_bt_payoff_ratio"),
+        "netAfterTop1": metrics.get("copy_bt_net_after_top1"),
+        "netAfterTop2": metrics.get("copy_bt_net_after_top2"),
+        "top1ProfitShare": metrics.get("copy_bt_top1_profit_share"),
+        "top3ProfitShare": metrics.get("copy_bt_top3_profit_share"),
+        "costStressNetPnl": metrics.get("copy_bt_cost_stress_net_pnl"),
+        "addMetrics": {
+            "version": metrics.get("copy_bt_add_metrics_version"),
+            "outcomeCounts": metrics.get("copy_bt_add_outcome_counts"),
+            "rawAddOrderFollowRate": metrics.get("copy_bt_raw_add_order_follow_rate"),
+            "actionableAddCaptureRate": metrics.get("copy_bt_actionable_add_capture_rate"),
+            "entryGapPctWeighted": metrics.get("copy_bt_entry_gap_pct_weighted"),
+            "entryGapPctP90": metrics.get("copy_bt_entry_gap_pct_p90"),
+            "addFidelity": metrics.get("copy_bt_add_fidelity"),
+            "behaviorReplicationV2": metrics.get("copy_bt_behavior_replication_v2"),
+        },
         "openFillRate": metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")),
         "liquidations": liqs,
         "liquidationRate": liquidation_rate,

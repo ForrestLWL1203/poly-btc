@@ -104,6 +104,10 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["wins"], 0)
         self.assertEqual(result["missed_adds"], 1)
         self.assertEqual(result["followed_adds"], 0)
+        self.assertEqual(result["add_outcome_counts"]["noise_merged"], 1)
+        self.assertEqual(result["blocked_adds"], 0)
+        self.assertEqual(result["actionable_add_capture_rate"], 1.0)
+        self.assertEqual(result["behavior_replication_rate"], 1.0)
         self.assertGreater(result["add_dependency"], 0.9)
         self.assertGreater(result["fee_drag"], 0)
         self.assertLess(result["copy_net_pnl"], 0)
@@ -172,7 +176,36 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["target_adds"], 1)
         self.assertEqual(result["followed_adds"], 1)
         self.assertEqual(result["missed_adds"], 0)
+        self.assertEqual(result["add_outcome_counts"]["followed"], 1)
+        self.assertEqual(result["add_outcome_counts"]["noise_merged"], 0)
         self.assertGreater(result["copy_net_pnl"], 0)
+
+    def test_true_add_cap_block_is_not_classified_as_noise(self):
+        fills = [
+            fill(1, "ZEC", "B", 10, 0, 100.0, 1),
+            fill(2, "ZEC", "B", 10, 10, 98.0, 2),
+            fill(3, "ZEC", "A", 20, 20, 101.0, 3),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"ZEC": 0.10}, overrides={
+            "ADD_MAX_HARD": 0,
+        })
+
+        self.assertEqual(result["add_outcome_counts"]["hard_cap_blocked"], 1)
+        self.assertEqual(result["add_outcome_counts"]["noise_merged"], 0)
+        self.assertEqual(result["actionable_add_capture_rate"], 0.0)
+
+    def test_fewer_than_five_add_episodes_keeps_fidelity_audit_only(self):
+        fills = [
+            fill(1, "ZEC", "B", 10, 0, 100.0, 1),
+            fill(2, "ZEC", "B", 10, 10, 98.0, 2),
+            fill(3, "ZEC", "A", 20, 20, 101.0, 3),
+        ]
+        result = run_backtest("0xabc", fills, sigmas={"ZEC": 0.10})
+
+        self.assertFalse(result["add_fidelity_applied"])
+        self.assertEqual(result["effective_add_fidelity"], 1.0)
+        self.assertGreaterEqual(result["entry_gap_pct_weighted"], 0.0)
 
     def test_portfolio_replay_keeps_same_coin_wallet_positions_separate(self):
         fills = [

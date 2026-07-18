@@ -21,6 +21,143 @@ from .fill_transition import classify_fill_transition
 from .util import f
 
 
+ADD_OUTCOMES = (
+    "followed",
+    "noise_merged",
+    "hard_cap_blocked",
+    "coin_cap_blocked",
+    "cash_blocked",
+    "min_margin_blocked",
+    "liquidity_blocked",
+)
+ADD_BLOCKED_OUTCOMES = tuple(
+    outcome for outcome in ADD_OUTCOMES
+    if outcome not in {"followed", "noise_merged"}
+)
+ADD_METRICS_VERSION = "add_metrics_v2"
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _percentile(values: list[float], quantile: float) -> float:
+    rows = sorted(float(value) for value in values)
+    if not rows:
+        return 0.0
+    index = max(0, min(len(rows) - 1, int(math.ceil(len(rows) * quantile)) - 1))
+    return rows[index]
+
+
+def _endpoint_pnl(position: dict) -> float:
+    return f(position.get("net_pnl")) + (
+        f(position.get("unrealized_pnl")) if position.get("status") == "open" else 0.0
+    )
+
+
+def profit_structure_metrics(positions: list[dict], *, total_net: float, fee_drag: float) -> dict:
+    """Return fee-paid distribution diagnostics for one replay endpoint.
+
+    Open positions participate at their canonical marked endpoint.  This keeps qualification aligned with
+    the same realized+unrealized dollars used by the public 30/14/7 return lines instead of letting a large
+    open winner/loss disappear from concentration and tail tests.
+    """
+    pnls = [_endpoint_pnl(position) for position in positions]
+    wins = sorted((value for value in pnls if value > 0.0), reverse=True)
+    losses = [-value for value in pnls if value < 0.0]
+    gross_profit = sum(wins)
+    gross_loss = sum(losses)
+    win_n = len(wins)
+    loss_n = len(losses)
+    avg_win = gross_profit / win_n if win_n else 0.0
+    avg_loss = gross_loss / loss_n if loss_n else 0.0
+    return {
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "profit_factor": (
+            gross_profit / gross_loss if gross_loss > 0.0 else (999.0 if gross_profit > 0.0 else 0.0)
+        ),
+        "payoff_ratio": (
+            avg_win / avg_loss if avg_loss > 0.0 else (999.0 if avg_win > 0.0 else 0.0)
+        ),
+        "positive_episode_n": win_n,
+        "negative_episode_n": loss_n,
+        "top_positive_pnls": wins[:3],
+        "top1_profit_share": wins[0] / gross_profit if gross_profit > 0.0 else 0.0,
+        "top3_profit_share": sum(wins[:3]) / gross_profit if gross_profit > 0.0 else 0.0,
+        "net_after_top1": float(total_net) - sum(wins[:1]),
+        "net_after_top2": float(total_net) - sum(wins[:2]),
+        # An exact 1.5x replay is still run for portfolio finalists.  At the individual-evidence layer this
+        # same-path value is the deterministic extra half-fee stress and avoids doubling profile CPU work.
+        "cost_stress_net_pnl": float(total_net) - 0.5 * max(0.0, float(fee_drag)),
+    }
+
+
+def add_fidelity_metrics(positions: list[dict], outcome_counts: dict | None = None) -> dict:
+    counts = Counter({key: int((outcome_counts or {}).get(key) or 0) for key in ADD_OUTCOMES})
+    target_orders = sum(counts.values())
+    followed = counts["followed"]
+    noise = counts["noise_merged"]
+    blocked = sum(counts[key] for key in ADD_BLOCKED_OUTCOMES)
+    actionable = followed + blocked
+    add_positions = [
+        position for position in positions
+        if int(position.get("target_adds") or 0) > 0
+        and position.get("entry_gap_sigma") is not None
+    ]
+    gaps = [max(0.0, f(position.get("entry_gap_sigma"))) for position in add_positions]
+    pct_gaps = [max(0.0, f(position.get("entry_gap_pct"))) for position in add_positions]
+    weights = [max(0.0, f(position.get("margin"))) for position in add_positions]
+    total_weight = sum(weights)
+    weighted_gap = (
+        sum(gap * weight for gap, weight in zip(gaps, weights)) / total_weight
+        if total_weight > 0.0 else (sum(gaps) / len(gaps) if gaps else 0.0)
+    )
+    p90_gap = _percentile(gaps, 0.90)
+    weighted_pct_gap = (
+        sum(gap * weight for gap, weight in zip(pct_gaps, weights)) / total_weight
+        if total_weight > 0.0 else (sum(pct_gaps) / len(pct_gaps) if pct_gaps else 0.0)
+    )
+    p90_pct_gap = _percentile(pct_gaps, 0.90)
+    entry_alignment = _clamp01(1.0 - 0.5 * weighted_gap - 0.5 * p90_gap)
+    add_execution = 1.0 - (blocked / actionable if actionable else 0.0)
+    add_fidelity = 0.80 * entry_alignment + 0.20 * add_execution
+    applied = len(add_positions) >= 5
+    return {
+        "add_metrics_version": ADD_METRICS_VERSION,
+        "add_outcome_counts": {key: counts[key] for key in ADD_OUTCOMES},
+        "target_adds": target_orders,
+        "followed_adds": followed,
+        "missed_adds": max(0, target_orders - followed),
+        "missed_add_rate": (target_orders - followed) / target_orders if target_orders else 0.0,
+        "raw_add_order_follow_rate": followed / target_orders if target_orders else 1.0,
+        "noise_merged_adds": noise,
+        "blocked_adds": blocked,
+        "actionable_add_orders": actionable,
+        "actionable_add_capture_rate": followed / actionable if actionable else 1.0,
+        "true_blocked_add_rate": blocked / actionable if actionable else 0.0,
+        "add_episode_count": len(add_positions),
+        "entry_gap_sigma_weighted": weighted_gap,
+        "entry_gap_sigma_p90": p90_gap,
+        "entry_gap_pct_weighted": weighted_pct_gap,
+        "entry_gap_pct_p90": p90_pct_gap,
+        "entry_gap_sigma_samples": gaps,
+        "entry_gap_pct_samples": pct_gaps,
+        "entry_gap_weight": total_weight,
+        "entry_gap_sigma_weighted_sum": sum(
+            gap * weight for gap, weight in zip(gaps, weights)
+        ),
+        "entry_gap_pct_weighted_sum": sum(
+            gap * weight for gap, weight in zip(pct_gaps, weights)
+        ),
+        "entry_alignment": entry_alignment,
+        "add_execution": add_execution,
+        "add_fidelity": add_fidelity,
+        "add_fidelity_applied": applied,
+        "effective_add_fidelity": add_fidelity if applied else 1.0,
+    }
+
+
 def _row_time(row: dict) -> int:
     for key in ("time", "T", "t"):
         val = row.get(key)
@@ -99,6 +236,7 @@ class Backtest:
         self.followed_adds = 0
         self.missed_adds = 0
         self.target_adds = 0
+        self.add_outcome_counts = Counter()
         self.fee_drag = 0.0
         self.gross_pnl = 0.0
         self.stable_sigma_max = overrides.get("STABLE_SIGMA_MAX", config.STABLE_SIGMA_MAX)
@@ -456,19 +594,50 @@ class Backtest:
             "add_orders": {},
             "observed_add_oids": set(),
             "missed_add_oids": set(),
+            "add_order_outcomes": {},
+            "add_outcome_counts": Counter(),
             "reduce_anchor": None,
         }
         self.opened_n += 1
         self.copy_peak_concurrent = max(self.copy_peak_concurrent, len(self.open))
         self._sample_deploy(t)
 
-    def _observe_add(self, ep, oid=None):
-        # Count one missed target add ORDER, not every exchange fill slice.
-        if oid is None or oid not in ep["missed_add_oids"]:
+    def _record_add_outcome(self, ep, oid, outcome):
+        """Assign one final outcome to a distinct target add order.
+
+        A same-oid order can first look like noise and become actionable after later fill slices move its
+        aggregate VWAP.  Reclassification decrements the old bucket before incrementing the new one, so an
+        order is never simultaneously counted as both ignored and followed.
+        """
+        if outcome not in ADD_OUTCOMES:
+            raise ValueError(f"unknown add outcome: {outcome}")
+        outcomes = ep.setdefault("add_order_outcomes", {})
+        prior = outcomes.get(oid) if oid is not None else None
+        if prior == outcome:
+            return outcome == "followed"
+        if prior:
+            ep["add_outcome_counts"][prior] -= 1
+            self.add_outcome_counts[prior] -= 1
+            if prior == "followed":
+                ep["followed_adds"] = max(0, ep["followed_adds"] - 1)
+                self.followed_adds = max(0, self.followed_adds - 1)
+            else:
+                ep["missed_adds"] = max(0, ep["missed_adds"] - 1)
+                self.missed_adds = max(0, self.missed_adds - 1)
+        if oid is not None:
+            outcomes[oid] = outcome
+        ep["add_outcome_counts"][outcome] += 1
+        self.add_outcome_counts[outcome] += 1
+        if outcome == "followed":
+            ep["followed_adds"] += 1
+            self.followed_adds += 1
+        else:
             ep["missed_adds"] += 1
             self.missed_adds += 1
-            if oid is not None:
-                ep["missed_add_oids"].add(oid)
+        return outcome == "followed"
+
+    def _observe_add(self, ep, oid=None, reason="noise_merged"):
+        self._record_add_outcome(ep, oid, reason)
         return False
 
     def _apply_add(self, addr, coin, px, signed, pos1, oid, t=None):
@@ -507,12 +676,15 @@ class Backtest:
         tier = self.tier(sigma, coin)
         is_buy = ep["side"] == "long"
         risk_equity = self.risk_equity()
+        risk_available = self.risk_available()
         existing = sum(
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
             for (addr, c), p in self.open.items()
             if c == coin and p["side"] == ep["side"]
         )
         coin_room = max(0.0, self.coin_cap_pct(tier) * risk_equity - existing)
+        if self.liquidity_block_reason(coin):
+            return self._observe_add(ep, oid, "liquidity_blocked")
         if self.add_strategy == "smart":
             last = ep.get("last_target_add_px") or ep["master_open_px"]
             adv = (((last - decision_px) if is_buy else (decision_px - last)) / last) if last else 0.0
@@ -527,31 +699,45 @@ class Backtest:
                 elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_threshold:
                     pass
                 else:
-                    return self._observe_add(ep, oid)
+                    return self._observe_add(ep, oid, "noise_merged")
                 if ep["add_count"] >= self.add_max_hard:
-                    return self._observe_add(ep, oid)
+                    return self._observe_add(ep, oid, "hard_cap_blocked")
             ratio = target_order_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
             followed_margin = order["followed_margin"] if order else 0.0
+            desired_remaining = max(
+                0.0,
+                min(max(0.0, ratio) * ep["first_margin"], ep["first_margin"]) - followed_margin,
+            )
             add_margin = smart_add_order_margin(
                 first_margin=ep["first_margin"],
                 target_ratio=ratio,
                 followed_margin=followed_margin,
                 coin_room=coin_room,
-                risk_available=self.risk_available(),
+                risk_available=risk_available,
             )
             if add_margin < self.min_open_margin_pct * risk_equity * self.margin_equity_pct:
-                return False if already_counted else self._observe_add(ep, oid)
+                if already_counted:
+                    return False
+                eps = 1e-12
+                if coin_room + eps < desired_remaining and coin_room <= risk_available + eps:
+                    reason = "coin_cap_blocked"
+                elif risk_available + eps < desired_remaining and risk_available < coin_room - eps:
+                    reason = "cash_blocked"
+                else:
+                    reason = "min_margin_blocked"
+                return self._observe_add(ep, oid, reason)
         else:
             max_adds = self.tier_max_adds[tier]
             if ep["add_count"] >= max_adds:
-                return self._observe_add(ep, oid)
+                return self._observe_add(ep, oid, "hard_cap_blocked")
             add_margin = max(0.0, min(
                 ep["first_margin"] * self.add_frac,
                 coin_room,
-                self.risk_available(),
+                risk_available,
             ))
             if add_margin <= 0:
-                return self._observe_add(ep, oid)
+                reason = "coin_cap_blocked" if coin_room <= risk_available else "cash_blocked"
+                return self._observe_add(ep, oid, reason)
 
         add_size = (add_margin * ep["leverage"] / px) if px else 0.0
         new_size = ep["rem_size"] + add_size
@@ -568,8 +754,7 @@ class Backtest:
         first_copy_for_order = not (order and order["counted"])
         if first_copy_for_order:
             ep["add_count"] += 1
-            ep["followed_adds"] += 1
-            self.followed_adds += 1
+            self._record_add_outcome(ep, oid, "followed")
         ep["last_target_add_px"] = decision_px
         ep["reduce_anchor"] = None
         fee = abs(add_size * px) * config.TAKER_FEE * self.replay_cost_mult
@@ -580,13 +765,6 @@ class Backtest:
         if order is not None:
             order["followed_margin"] += add_margin
             order["counted"] = True
-        # A later slice of a previously rejected order can make the order
-        # actionable.  In that case it is followed, not both missed and
-        # followed, at order granularity.
-        if oid is not None and oid in ep["missed_add_oids"]:
-            ep["missed_add_oids"].remove(oid)
-            ep["missed_adds"] = max(0, ep["missed_adds"] - 1)
-            self.missed_adds = max(0, self.missed_adds - 1)
         self._sample_deploy(t)
         return True
 
@@ -705,7 +883,10 @@ class Backtest:
             open_positions.append(summarize_position(
                 ep, mark_px=mark_px, unrealized_pnl=position_unreal,
                 valuation_complete=mark_valid,
+                sigma=self.sigma(coin),
             ))
+        closed_positions = [summarize_position(p, sigma=self.sigma(p.get("coin"))) for p in self.closed]
+        all_positions = closed_positions + open_positions
         closed_net = sum(p["realized_net"] for p in self.closed)
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
         liquidations = sum(1 for p in self.closed if p.get("status") == "liquidated")
@@ -742,12 +923,29 @@ class Backtest:
         deploy_values = [value for _, value in self.deploy_samples]
         peak_deploy_pct = max(deploy_values, default=0.0)
         avg_deploy_pct = (sum(deploy_values) / len(deploy_values)) if deploy_values else 0.0
+        add_metrics = add_fidelity_metrics(all_positions, self.add_outcome_counts)
+        profit_metrics = profit_structure_metrics(
+            all_positions,
+            total_net=equity_pnl,
+            fee_drag=self.fee_drag,
+        )
+        open_rate = self.opened_n / self.target_open_events if self.target_open_events else 1.0
+        behavior_v2 = _clamp01(
+            open_rate
+            * (f(add_metrics.get("effective_add_fidelity")) if add_metrics.get("effective_add_fidelity") is not None else 1.0)
+            * path_completion_rate
+        )
+        behavior_legacy = _clamp01(
+            open_rate
+            * (1.0 - (self.missed_adds / self.target_adds if self.target_adds else 0.0))
+            * path_completion_rate
+        )
 
         def concentration(key):
             buckets = {}
             total_abs = 0.0
-            for position in self.closed:
-                value = f(position.get("realized_net"))
+            for position in all_positions:
+                value = _endpoint_pnl(position)
                 bucket = key(position)
                 buckets[bucket] = buckets.get(bucket, 0.0) + value
                 total_abs += abs(value)
@@ -769,7 +967,7 @@ class Backtest:
             fallback_reasons.append("missing_price_path")
         if leverage_coverage < 1.0:
             fallback_reasons.append("missing_master_leverage")
-        return {
+        result = {
             "addr": self.addr,
             "closed_n": len(self.closed),
             "open_n": len(self.open),
@@ -794,10 +992,6 @@ class Backtest:
             "target_open_events": self.target_open_events,
             "opened_n": self.opened_n,
             "open_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
-            "target_adds": self.target_adds,
-            "followed_adds": self.followed_adds,
-            "missed_adds": self.missed_adds,
-            "missed_add_rate": self.missed_adds / self.target_adds if self.target_adds else 0.0,
             "add_dependency": add_notl / initial_notl if initial_notl else 0.0,
             "target_peak_concurrent": self.target_peak_concurrent,
             "copy_peak_concurrent": self.copy_peak_concurrent,
@@ -805,11 +999,9 @@ class Backtest:
             "capacity_open_fit": self.opened_n / (self.opened_n + capacity_skips) if (self.opened_n + capacity_skips) else 1.0,
             "actionable_open_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
             "execution_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
-            "behavior_replication_rate": (
-                (self.opened_n / self.target_open_events if self.target_open_events else 1.0)
-                * (1.0 - (self.missed_adds / self.target_adds if self.target_adds else 0.0))
-                * path_completion_rate
-            ),
+            "behavior_replication_rate": behavior_v2,
+            "behavior_replication_v2": behavior_v2,
+            "behavior_replication_rate_legacy": behavior_legacy,
             "equity_curve": curve,
             "max_drawdown": max_drawdown,
             "worst_day": min(daily_values, default=0.0),
@@ -841,12 +1033,15 @@ class Backtest:
             "model_coverage": min(leverage_coverage, maintenance_coverage, price_path_coverage),
             "fallback_reasons": fallback_reasons,
             "skip_reasons": dict(self.skip_reasons),
-            "positions": [summarize_position(p) for p in self.closed],
+            "positions": closed_positions,
             "open_positions": open_positions,
         }
+        result.update(add_metrics)
+        result.update(profit_metrics)
+        return result
 
 
-def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_complete=None):
+def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_complete=None, sigma=None):
     out = {
         "addr": p.get("addr"),
         "coin": p["coin"],
@@ -865,6 +1060,10 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
         "target_adds": p["target_adds"],
         "followed_adds": p["followed_adds"],
         "missed_adds": p["missed_adds"],
+        "add_outcome_counts": {
+            key: int((p.get("add_outcome_counts") or {}).get(key) or 0)
+            for key in ADD_OUTCOMES
+        },
         "entry_px": p["entry_px"],
         "master_avg_px": p["master_open_px"],
         "master_leverage": p.get("master_leverage"),
@@ -872,6 +1071,16 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
         "margin": p["margin"],
         "remaining_size": p.get("rem_size"),
     }
+    if p.get("target_adds"):
+        entry_px = f(p.get("entry_px"))
+        master_px = f(p.get("master_open_px"))
+        if entry_px > 0.0 and master_px > 0.0:
+            log_gap = abs(math.log(entry_px / master_px))
+            out["entry_gap_pct"] = abs(entry_px / master_px - 1.0)
+            out["entry_gap_sigma"] = log_gap / max(
+                1e-9,
+                f(sigma) if sigma is not None else config.VOL_FALLBACK_SIGMA,
+            )
     if mark_px is not None:
         out["mark_px"] = mark_px
     if unrealized_pnl is not None:
@@ -919,7 +1128,18 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     natural_closes = max(0, len(positions) - liquidations)
     path_completion_rate = natural_closes / len(positions) if positions else 1.0
     open_rate = f(out.get("actionable_open_rate")) if out.get("actionable_open_rate") is not None else 1.0
-    add_capture = 1.0 - (f(out.get("missed_add_rate")) if out.get("missed_add_rate") is not None else 0.0)
+    add_metrics = add_fidelity_metrics(
+        positions + open_positions,
+        out.get("add_outcome_counts"),
+    )
+    behavior_v2 = _clamp01(
+        open_rate
+        * (f(add_metrics.get("effective_add_fidelity")) if add_metrics.get("effective_add_fidelity") is not None else 1.0)
+        * path_completion_rate
+    )
+    legacy_capture = 1.0 - (
+        f(out.get("missed_add_rate")) if out.get("missed_add_rate") is not None else 0.0
+    )
 
     equity = float(config.INITIAL_BALANCE)
     peak = equity
@@ -941,8 +1161,8 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     def concentration(key):
         buckets = {}
         total_abs = 0.0
-        for position in positions:
-            pnl = f(position.get("net_pnl"))
+        for position in positions + open_positions:
+            pnl = _endpoint_pnl(position)
             bucket = key(position)
             buckets[bucket] = buckets.get(bucket, 0.0) + pnl
             total_abs += abs(pnl)
@@ -960,7 +1180,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "natural_closes": natural_closes,
         "path_completion_rate": path_completion_rate,
         "liquidation_rate": liquidations / len(positions) if positions else 0.0,
-        "behavior_replication_rate": max(0.0, min(1.0, open_rate * add_capture * path_completion_rate)),
+        "behavior_replication_rate": behavior_v2,
+        "behavior_replication_v2": behavior_v2,
+        "behavior_replication_rate_legacy": _clamp01(
+            open_rate * legacy_capture * path_completion_rate
+        ),
         "ambiguous_liquidations": len(ambiguous_ranges),
         "ambiguous_path_ranges": ambiguous_ranges,
         "copy_win_rate": wins / len(positions) if positions else 0.0,
@@ -987,4 +1211,10 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "_window_days": int(window_days) if window_days is not None else None,
         "_warmup_applied": True,
     })
+    out.update(add_metrics)
+    out.update(profit_structure_metrics(
+        positions + open_positions,
+        total_net=closed_net + open_unrealized,
+        fee_drag=fees,
+    ))
     return out

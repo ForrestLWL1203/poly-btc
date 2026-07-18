@@ -168,10 +168,30 @@ def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
         for key in (
             "target_open_events", "opened_n", "open_fill_rate", "actionable_open_rate",
             "execution_fill_rate", "capacity_open_fit", "target_adds", "followed_adds",
-            "missed_adds", "missed_add_rate", "skip_reasons",
+            "missed_adds", "missed_add_rate", "skip_reasons", "add_metrics_version",
+            "add_outcome_counts", "raw_add_order_follow_rate", "noise_merged_adds",
+            "blocked_adds", "actionable_add_orders", "actionable_add_capture_rate",
+            "true_blocked_add_rate", "add_episode_count", "entry_gap_sigma_weighted",
+            "entry_gap_sigma_p90", "entry_gap_pct_weighted", "entry_gap_pct_p90",
+            "entry_gap_sigma_samples", "entry_gap_pct_samples", "entry_gap_weight",
+            "entry_gap_sigma_weighted_sum", "entry_gap_pct_weighted_sum",
+            "entry_alignment", "add_execution", "add_fidelity", "add_fidelity_applied",
+            "effective_add_fidelity",
         ):
             if key in direct:
                 sliced[key] = direct[key]
+        open_rate = float(sliced.get("actionable_open_rate") or 0.0)
+        if sliced.get("actionable_open_rate") is None:
+            open_rate = 1.0
+        path_rate = float(sliced.get("path_completion_rate") or 0.0)
+        if sliced.get("path_completion_rate") is None:
+            path_rate = 1.0
+        add_fidelity = float(sliced.get("effective_add_fidelity") or 0.0)
+        if sliced.get("effective_add_fidelity") is None:
+            add_fidelity = 1.0
+        behavior_v2 = max(0.0, min(1.0, open_rate * path_rate * add_fidelity))
+        sliced["behavior_replication_rate"] = behavior_v2
+        sliced["behavior_replication_v2"] = behavior_v2
         sliced["valid"] = bool(direct.get("valid", True))
         sliced["data_status"] = direct.get("data_status", "valid")
         sliced["has_evidence"] = bool(
@@ -212,6 +232,18 @@ def record_primary_copy_bt(metrics, result):
         copy_bt_data_status=result.get("data_status", "valid"),
         copy_bt_evidence_status=result.get("evidence_status", "observed"),
     )
+    for key in (
+        "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
+        "positive_episode_n", "negative_episode_n", "top1_profit_share",
+        "top3_profit_share", "net_after_top1", "net_after_top2", "cost_stress_net_pnl",
+        "add_metrics_version", "add_outcome_counts", "raw_add_order_follow_rate",
+        "noise_merged_adds", "blocked_adds", "actionable_add_capture_rate",
+        "entry_gap_pct_weighted", "entry_gap_pct_p90", "entry_gap_sigma_weighted",
+        "entry_gap_sigma_p90", "entry_alignment", "add_execution", "add_fidelity",
+        "add_fidelity_applied", "behavior_replication_v2", "behavior_replication_rate",
+    ):
+        if key in result:
+            metrics[f"copy_bt_{key}"] = result.get(key)
 
 
 def _result_has_evidence(result):
@@ -255,6 +287,13 @@ def record_recent_copy_bt(metrics, days, result):
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
         metrics["copy_bt_7d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
+    prefix = f"copy_bt_{int(days)}d_"
+    for key in (
+        "profit_factor", "payoff_ratio", "top1_profit_share", "top3_profit_share",
+        "net_after_top1", "net_after_top2", "cost_stress_net_pnl",
+    ):
+        if key in result:
+            metrics[prefix + key] = result.get(key)
 
 
 def record_copy_bt_windows(metrics, result, p):

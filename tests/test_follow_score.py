@@ -234,14 +234,14 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(standard["coreEligible"])
         self.assertFalse(strong["coreEligible"])
 
-    def test_profit_floors_use_total_realized_plus_open_pnl(self):
+    def test_profit_floors_do_not_double_count_open_pnl_already_in_endpoint_net(self):
         result = evaluate_follow_eligibility(evidence(
             copy_bt_net_pnl=1200, copy_bt_unrealized_pnl=-400,
             copy_bt_7d_net_pnl=600, copy_bt_7d_unrealized_pnl=-150,
         ))
 
-        self.assertFalse(result["eligible"])
-        self.assertEqual(result["status"], "copy_value_below_challenger_floor")
+        self.assertTrue(result["eligible"])
+        self.assertTrue(result["coreEligible"])
 
     def test_profit_percentages_scale_with_canonical_replay_capital(self):
         result = evaluate_follow_eligibility(evidence(
@@ -262,6 +262,45 @@ class FollowScoreTests(unittest.TestCase):
     def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])
+
+    def test_sampled_profit_factor_and_tail_failures_are_business_rejections(self):
+        low_pf = evaluate_follow_eligibility(evidence(copy_bt_profit_factor=1.29))
+        low_tail = evaluate_follow_eligibility(evidence(copy_bt_net_after_top2=499.0))
+        recent_tail = evaluate_follow_eligibility(evidence(copy_bt_7d_net_after_top1=0.0))
+        cost_stress = evaluate_follow_eligibility(evidence(copy_bt_cost_stress_net_pnl=-1.0))
+
+        self.assertEqual(low_pf["status"], "copy_profit_structure_weak")
+        self.assertEqual(low_tail["status"], "copy_tail_profit_weak")
+        self.assertEqual(recent_tail["status"], "copy_recent_tail_weak")
+        self.assertEqual(cost_stress["status"], "copy_cost_stress_weak")
+        self.assertTrue(all(result["role"] == "rejected" for result in (
+            low_pf, low_tail, recent_tail, cost_stress,
+        )))
+
+    def test_profit_concentration_needs_strong_tail_and_cost_evidence_for_core(self):
+        concentrated = dict(
+            copy_bt_positive_episode_n=8,
+            copy_bt_top1_profit_share=0.60,
+            copy_bt_top3_profit_share=0.85,
+            copy_bt_profit_factor=2.0,
+            copy_bt_net_after_top2=800.0,
+            copy_bt_7d_net_after_top1=100.0,
+            copy_bt_cost_stress_net_pnl=1200.0,
+        )
+        ordinary = evaluate_follow_eligibility(evidence(**concentrated))
+        strong = evaluate_follow_eligibility(evidence(
+            **concentrated,
+            copy_bt_net_pnl=2600.0,
+            copy_bt_closed_n=25,
+            copy_evidence_days=12,
+        ))
+
+        self.assertTrue(ordinary["eligible"])
+        self.assertFalse(ordinary["coreEligible"])
+        self.assertEqual(ordinary["status"], "challenger_profit_concentration")
+        self.assertTrue(strong["coreEligible"])
+        self.assertEqual(strong["status"], "core_eligible_profit_concentrated")
+        self.assertTrue(strong["profitConcentrationWarning"])
 
     def test_heavy_dca_pressure_pass_remains_challenger_even_with_core_economics(self):
         result = evaluate_follow_eligibility(evidence(

@@ -51,6 +51,9 @@ export function WalletDrawer({ address, onClose }) {
     ? d.forwardWinRatePct - d.scoredWinRatePct
     : null;
   const scoreBreakdown = (d && d.scoreBreakdown) || {};
+  const profitStructure = scoreBreakdown.profitStructure || {};
+  const addMetrics = scoreBreakdown.addMetrics || {};
+  const addReasons = addMetrics.outcomeCounts || {};
   const copyRows = copyWindowRows(scoreBreakdown);
   const copy30 = copyRows.find(([label]) => label === "30 天");
   const roleView = !d ? null : d.role === "core"
@@ -111,6 +114,32 @@ export function WalletDrawer({ address, onClose }) {
                   </div>
                 ) : <p>暂无可用 copy 回测窗口，先按历史评分和实盘记录观察。</p>}
               </DecisionCard>
+
+              {profitStructure.profitFactor != null && (
+                <DecisionCard title="盈利结构" tone={profitStructure.profitFactor >= 1.3 ? "good" : "warn"}>
+                  <div className="wallet-risk-list">
+                    <div className="wallet-risk"><span>严格 Copy PF</span><b>{fNum(profitStructure.profitFactor, 2)}</b></div>
+                    <div className="wallet-risk"><span>原始板块盈亏比</span><b>{profitStructure.payoffRatio != null ? fNum(profitStructure.payoffRatio, 2) : "—"}</b></div>
+                    <div className="wallet-risk"><span>去最大一笔</span><b className={cls(profitStructure.netAfterTop1)}>{profitStructure.netAfterTop1 != null ? fSign(profitStructure.netAfterTop1, 0) : "—"}</b></div>
+                    <div className="wallet-risk"><span>去最大两笔</span><b className={cls(profitStructure.netAfterTop2)}>{profitStructure.netAfterTop2 != null ? fSign(profitStructure.netAfterTop2, 0) : "—"}</b></div>
+                    <div className="wallet-risk"><span>最大 / 前三盈利贡献</span><b>{profitStructure.top1ProfitSharePct != null ? `${fNum(profitStructure.top1ProfitSharePct, 0)}% / ${fNum(profitStructure.top3ProfitSharePct, 0)}%` : "—"}</b></div>
+                    <div className="wallet-risk"><span>1.5× 成本压力</span><b className={cls(profitStructure.costStressNetPnl)}>{profitStructure.costStressNetPnl != null ? fSign(profitStructure.costStressNetPnl, 0) : "—"}</b></div>
+                  </div>
+                </DecisionCard>
+              )}
+
+              {addMetrics.version && (
+                <DecisionCard title="加仓复制 V2" tone={(addMetrics.addFidelity || 1) >= 0.8 ? "good" : "warn"}>
+                  <div className="wallet-risk-list">
+                    <div className="wallet-risk"><span>原始订单跟随</span><b>{addMetrics.rawAddOrderFollowRate != null ? fNum(addMetrics.rawAddOrderFollowRate * 100, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>主动合并</span><b>{addReasons.noise_merged || 0}</b></div>
+                    <div className="wallet-risk"><span>次数上限 / 单币容量</span><b>{addReasons.hard_cap_blocked || 0} / {addReasons.coin_cap_blocked || 0}</b></div>
+                    <div className="wallet-risk"><span>账户资金 / 最小保证金</span><b>{addReasons.cash_blocked || 0} / {addReasons.min_margin_blocked || 0}</b></div>
+                    <div className="wallet-risk"><span>可执行加仓捕获</span><b>{addMetrics.actionableAddCaptureRate != null ? fNum(addMetrics.actionableAddCaptureRate * 100, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>最终均价偏差</span><b>{addMetrics.entryGapPctWeighted != null ? fNum(addMetrics.entryGapPctWeighted * 100, 3) + "%" : "—"}</b></div>
+                  </div>
+                </DecisionCard>
+              )}
 
               {riskItems.length > 0 && (
                 <DecisionCard title="需要留意" tone={losing ? "danger" : "warn"}>
