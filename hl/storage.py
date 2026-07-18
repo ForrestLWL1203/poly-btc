@@ -8,8 +8,7 @@ One db file (data/hl.db), layered by concern:
                 UI-facing, rebuilt each scan)
   control     : target_controls (operator settings: enabled/pinned/note — survive scans)
   diagnostics : scan_runs (one row per scan: counts + duration, for ops/UI history)
-  observation : live_fills (raw behaviour), episodes_live (observed round-trips),
-                paper_legs (simulated copy outcomes per latency)
+  execution   : live_fills, copy_account, copy_position and copy_action
 """
 import sqlite3
 import re
@@ -103,22 +102,15 @@ CREATE TABLE IF NOT EXISTS profile (
     taker_frac_notl  REAL,
     median_hold_s    REAL,
     win_rate         REAL,
-    avg_win          REAL DEFAULT 0,      -- 平均赢单 ($)
-    avg_loss         REAL DEFAULT 0,      -- 平均亏单 ($, 正值)
-    payoff_ratio     REAL DEFAULT 0,      -- 盈亏比 avg_win/avg_loss (<1 = 大亏小赚; 无亏封顶 999)
+    payoff_ratio     REAL DEFAULT 0,      -- 平均盈利回合 / 平均亏损回合（无亏封顶 999）
     win_pt           REAL DEFAULT 0,      -- 赢单每笔中位名义收益% (审计指标; 不再作为 raw score 乘法降分)
     max_concurrent   INTEGER DEFAULT 0,   -- 峰值同时持仓数 (>阈值 = 组合客,我们装不下 → too_many_concurrent)
     net_pnl          REAL,
     roi_equity       REAL,
-    roi_notional     REAL,
     total_notl       REAL,
     acct_value       REAL,
     perp_frac        REAL,
-    gross_pnl        REAL,
-    total_fee        REAL,
-    n_coins          INTEGER,
     top_coin         TEXT,
-    long_frac        REAL,
     max_drawdown     REAL,
     avg_notional     REAL,
     age_days         REAL,
@@ -154,15 +146,12 @@ CREATE TABLE IF NOT EXISTS profile (
     net_14d          REAL,                -- v6: realized net over last 14d
     net_30d          REAL,                -- v6: realized net over last 30d (gate: >0 = not cooling off)
     net_life         REAL,                -- v6: realized net over FULL history (gate: >0 = long-term profitable)
-    life_trades      INTEGER DEFAULT 0,   -- v6: total closed round-trips in full history (evidence depth)
     pf_week_pnl      REAL,                -- v7 portfolio (NET of fees, deposit-adjusted): 7d account PnL
     pf_week_vlm      REAL,                -- v7: 7d traded volume ($)
     pf_mon_pnl       REAL,                -- v7: 30d account PnL (net)
     pf_mon_vlm       REAL,                -- v7: 30d traded volume ($)
     pf_equity        REAL,                -- v7: current account value (portfolio, combined perp+spot+vault)
-    pf_max_dd        REAL,                -- v7: max drawdown from the account-value curve (fraction)
     pf_turnover      REAL,                -- v7: 7d vlm / equity — frequency proxy (trend traders <~50x, bots >>100x)
-    pf_edge_bps      REAL,                -- v7: 7d net PnL / vlm ×1e4 — profit per $ traded vs our ~9bp taker cost
     copy_bt_net_pnl  REAL,                -- copy replay net PnL under current observer rules (fees included)
     copy_bt_win_rate REAL,                -- copy replay closed-position win rate
     copy_bt_closed_n INTEGER DEFAULT 0,   -- copy replay closed positions
@@ -185,17 +174,10 @@ CREATE TABLE IF NOT EXISTS profile (
     evidence_status TEXT,                 -- qualified / thin / missing / invalid
     last_copyable_open_ms INTEGER,
     open_events_7d INTEGER DEFAULT 0,
-    open_events_14d INTEGER DEFAULT 0,
     open_events_30d INTEGER DEFAULT 0,
     actionable_open_events_7d INTEGER DEFAULT 0,
-    actionable_open_events_14d INTEGER DEFAULT 0,
     actionable_open_events_30d INTEGER DEFAULT 0,
-    open_days_7d INTEGER DEFAULT 0,
-    open_days_14d INTEGER DEFAULT 0,
     open_days_30d INTEGER DEFAULT 0,
-    avg_open_interval_h REAL,
-    median_open_interval_h REAL,
-    open_probability_24h REAL,
     open_probability_48h REAL,
     open_position_count INTEGER DEFAULT 0,
     material_open_count INTEGER DEFAULT 0,
@@ -294,11 +276,6 @@ CREATE TABLE IF NOT EXISTS wallet_registry (
     data_error_count           INTEGER NOT NULL DEFAULT 0,
     consecutive_qualified      INTEGER NOT NULL DEFAULT 0,
     consecutive_bad            INTEGER NOT NULL DEFAULT 0,
-    core_nomination_streak     INTEGER NOT NULL DEFAULT 0,
-    core_omission_streak       INTEGER NOT NULL DEFAULT 0,
-    core_nomination_started_at TEXT,
-    core_omission_started_at   TEXT,
-    last_core_signal_generation TEXT,
     core_entries               INTEGER NOT NULL DEFAULT 0,
     core_exits                 INTEGER NOT NULL DEFAULT 0,
     recovery_count             INTEGER NOT NULL DEFAULT 0,
@@ -382,9 +359,8 @@ CREATE TABLE IF NOT EXISTS active_strategy_revision (
     updated_at TEXT NOT NULL
 );
 
--- Follow-status history: last time each wallet was AT/ABOVE the follow line. Updated each scan/regate
--- for the currently-followed set; a wallet that drops below the line keeps its old timestamp, so the UI
--- can show "was followed, recently dropped". A recovered wallet climbing back re-stamps and leaves the list.
+-- Explicit Core-membership history. A wallet that leaves Core keeps its last membership timestamp so the
+-- Dashboard can explain recent drops; a later return updates the current generation without losing first-seen history.
 CREATE TABLE IF NOT EXISTS follow_history (
     addr                TEXT PRIMARY KEY,
     first_followed_at   TEXT,
@@ -424,12 +400,12 @@ CREATE TABLE IF NOT EXISTS scan_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
 
--- Decision audit for the discovery -> profile -> watchlist -> follow-line pipeline.
+-- Decision audit for the generation-bound discovery and selection pipeline.
 -- One scan/regate stamp can produce:
---   profile     rows per profiled wallet (status/reason/raw score/copy-BT summary)
---   watchlist   rows per ranked active wallet (followed/below-line/disabled)
---   follow_line one row with the automatic line choice summary
---   auto_tune   one row with the post-scan sizing/add tuning summary
+--   profile           rows per profiled wallet (status/reason/raw score/copy-BT summary)
+--   selection         rows per published Core/Challenger/exit-only wallet
+--   selection_summary one atomic membership summary
+--   tuner_finalize    one synchronous formation/replay summary
 CREATE TABLE IF NOT EXISTS pipeline_audit (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     stamp         TEXT,
@@ -454,23 +430,21 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_audit_addr_id ON pipeline_audit(addr, id
 
 PROFILE_COLS = (
     "addr,status,reason,score,n_fills,n_trades,window_days,trades_per_day,taker_frac_notl,"
-    "median_hold_s,win_rate,avg_win,avg_loss,payoff_ratio,win_pt,max_concurrent,net_pnl,roi_equity,roi_notional,total_notl,acct_value,perp_frac,"
-    "gross_pnl,total_fee,n_coins,top_coin,long_frac,max_drawdown,avg_notional,age_days,"
+    "median_hold_s,win_rate,payoff_ratio,win_pt,max_concurrent,net_pnl,roi_equity,total_notl,acct_value,perp_frac,"
+    "top_coin,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
     "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
-    "net_7d,net_14d,net_30d,net_life,life_trades,"
-    "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_max_dd,pf_turnover,pf_edge_bps,"
+    "net_7d,net_14d,net_30d,net_life,"
+    "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_turnover,"
     "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,copy_bt_liquidations,copy_bt_fee_drag,"
     "copy_bt_unrealized_pnl,copy_bt_valuation_status,copy_bt_14d_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,"
     "copy_bt_7d_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,"
     "sector_copy_json,sector_policy_json,"
     "profile_generation,evaluated_at,data_status,evidence_status,last_copyable_open_ms,"
-    "open_events_7d,open_events_14d,open_events_30d,"
-    "actionable_open_events_7d,actionable_open_events_14d,actionable_open_events_30d,"
-    "open_days_7d,open_days_14d,open_days_30d,avg_open_interval_h,median_open_interval_h,"
-    "open_probability_24h,open_probability_48h,open_position_count,material_open_count,"
+    "open_events_7d,open_events_30d,actionable_open_events_7d,actionable_open_events_30d,"
+    "open_days_30d,open_probability_48h,open_position_count,material_open_count,"
     "raw_quality_score,copy_expected_return,copy_return_lcb,copy_return_volatility,"
     "copy_positive_probability,copy_evidence_days,copy_recent_return_14d,copy_recent_return_7d,"
     "copy_risk_score,execution_score,"
@@ -638,7 +612,7 @@ CREATE TABLE IF NOT EXISTS scan_progress (
     candidates_scanned INTEGER DEFAULT 0,
     candidates_total   INTEGER DEFAULT 0,
     eta_sec            INTEGER,
-    manual             INTEGER DEFAULT 0,  -- 1 = dashboard-triggered (lock UI); 0 = 24h auto (silent bg)
+    manual             INTEGER DEFAULT 0,  -- 1 = dashboard-triggered (lock UI); 0 = scheduled background scan
     updated_at         TEXT
 );
 
@@ -708,8 +682,7 @@ CREATE TABLE IF NOT EXISTS params (
     updated_at    TEXT
 );
 
--- Auto-tuner audit/state. State stores the operator's manual baseline separately from the
--- last auto-applied value, so daily tuning never compounds on yesterday's tuned result.
+-- Auto-tuner durable state and run audit (active proposal, rollback and effective replay snapshots).
 CREATE TABLE IF NOT EXISTS auto_tune_state (
     key        TEXT PRIMARY KEY,
     value      TEXT,
@@ -963,16 +936,13 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN net_14d REAL",
     "ALTER TABLE profile ADD COLUMN net_30d REAL",
     "ALTER TABLE profile ADD COLUMN net_life REAL",
-    "ALTER TABLE profile ADD COLUMN life_trades INTEGER DEFAULT 0",
     # v7 portfolio net-of-fees metrics (authoritative account-level perf; leaderboard is gross + lagging).
     "ALTER TABLE profile ADD COLUMN pf_week_pnl REAL",
     "ALTER TABLE profile ADD COLUMN pf_week_vlm REAL",
     "ALTER TABLE profile ADD COLUMN pf_mon_pnl REAL",
     "ALTER TABLE profile ADD COLUMN pf_mon_vlm REAL",
     "ALTER TABLE profile ADD COLUMN pf_equity REAL",
-    "ALTER TABLE profile ADD COLUMN pf_max_dd REAL",
     "ALTER TABLE profile ADD COLUMN pf_turnover REAL",
-    "ALTER TABLE profile ADD COLUMN pf_edge_bps REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_net_pnl REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_win_rate REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_closed_n INTEGER DEFAULT 0",
@@ -987,9 +957,7 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN sector_policy_json TEXT",
     "ALTER TABLE watchlist ADD COLUMN sector_copy_json TEXT",
     "ALTER TABLE watchlist ADD COLUMN sector_policy_json TEXT",
-    # 盈亏比 (avg_win/avg_loss) + 平均赢/亏 — 大亏小赚 & 低胜率真趋势客的判据
-    "ALTER TABLE profile ADD COLUMN avg_win REAL DEFAULT 0",
-    "ALTER TABLE profile ADD COLUMN avg_loss REAL DEFAULT 0",
+    # 盈亏比与并发/单笔盈利幅度审计字段。
     "ALTER TABLE profile ADD COLUMN payoff_ratio REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
     "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% (审计指标)
@@ -1007,7 +975,7 @@ _MIGRATIONS = (
     "ALTER TABLE coin_vol ADD COLUMN market_ctx_updated_at TEXT",
     "ALTER TABLE coin_vol ADD COLUMN max_leverage REAL",
     "ALTER TABLE coin_vol ADD COLUMN margin_meta_updated_at TEXT",
-    # vNext generation/freshness/evidence and actionable-open flow.
+    # Generation/freshness/evidence and actionable-open flow.
     "ALTER TABLE leaderboard ADD COLUMN generation TEXT",
     "ALTER TABLE profile ADD COLUMN profile_generation TEXT",
     "ALTER TABLE profile ADD COLUMN evaluated_at TEXT",
@@ -1015,17 +983,10 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN evidence_status TEXT",
     "ALTER TABLE profile ADD COLUMN last_copyable_open_ms INTEGER",
     "ALTER TABLE profile ADD COLUMN open_events_7d INTEGER DEFAULT 0",
-    "ALTER TABLE profile ADD COLUMN open_events_14d INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN open_events_30d INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN actionable_open_events_7d INTEGER DEFAULT 0",
-    "ALTER TABLE profile ADD COLUMN actionable_open_events_14d INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN actionable_open_events_30d INTEGER DEFAULT 0",
-    "ALTER TABLE profile ADD COLUMN open_days_7d INTEGER DEFAULT 0",
-    "ALTER TABLE profile ADD COLUMN open_days_14d INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN open_days_30d INTEGER DEFAULT 0",
-    "ALTER TABLE profile ADD COLUMN avg_open_interval_h REAL",
-    "ALTER TABLE profile ADD COLUMN median_open_interval_h REAL",
-    "ALTER TABLE profile ADD COLUMN open_probability_24h REAL",
     "ALTER TABLE profile ADD COLUMN open_probability_48h REAL",
     "ALTER TABLE profile ADD COLUMN open_position_count INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN material_open_count INTEGER DEFAULT 0",
@@ -1081,13 +1042,6 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN acct_value REAL",
     "ALTER TABLE follow_selection ADD COLUMN sector_policy_json TEXT",
     "ALTER TABLE episode ADD COLUMN open_complete INTEGER NOT NULL DEFAULT 1",
-    # Desired portfolio membership is evidence, not immediate authority.  These streaks let the scanner
-    # publish a stable Core while still recomputing the ideal strict-replay portfolio every generation.
-    "ALTER TABLE wallet_registry ADD COLUMN core_nomination_streak INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE wallet_registry ADD COLUMN core_omission_streak INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE wallet_registry ADD COLUMN core_nomination_started_at TEXT",
-    "ALTER TABLE wallet_registry ADD COLUMN core_omission_started_at TEXT",
-    "ALTER TABLE wallet_registry ADD COLUMN last_core_signal_generation TEXT",
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_position ADD COLUMN peak_size REAL",
@@ -1120,6 +1074,7 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
     try:
         _apply_migrations(db)
         _retire_maker_shadow(db)
+        _retire_obsolete_selection_state(db)
         _migrate_episode_seq(db)
         db.commit()
     except Exception:
@@ -1179,6 +1134,44 @@ def _retire_maker_shadow(db: sqlite3.Connection) -> None:
         copy_action_columns = {row[1] for row in db.execute("PRAGMA table_info(copy_action)").fetchall()}
         if "maker" in copy_action_columns:
             db.execute("ALTER TABLE copy_action DROP COLUMN maker")
+
+
+def _retire_obsolete_selection_state(db: sqlite3.Connection) -> None:
+    """Remove state and write-only profile columns retired by the current selection model."""
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "wallet_registry" in tables:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(wallet_registry)").fetchall()}
+        for column in (
+            "core_nomination_streak",
+            "core_omission_streak",
+            "core_nomination_started_at",
+            "core_omission_started_at",
+            "last_core_signal_generation",
+        ):
+            if column in columns:
+                db.execute(f"ALTER TABLE wallet_registry DROP COLUMN {column}")
+    if "profile" in tables:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(profile)").fetchall()}
+        for column in (
+            "avg_win", "avg_loss", "roi_notional", "gross_pnl", "total_fee", "n_coins",
+            "long_frac", "life_trades", "pf_max_dd", "pf_edge_bps", "open_events_14d",
+            "actionable_open_events_14d", "open_days_7d", "open_days_14d",
+            "avg_open_interval_h", "median_open_interval_h", "open_probability_24h",
+        ):
+            if column in columns:
+                db.execute(f"ALTER TABLE profile DROP COLUMN {column}")
+    if "params" in tables:
+        db.execute(
+            "DELETE FROM params WHERE key IN ('MIN_FOLLOW_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT')"
+        )
+    if "auto_tune_state" in tables:
+        db.execute(
+            "DELETE FROM auto_tune_state WHERE key IN "
+            "('margin_base','margin_last_auto','tune_base','tune_last_auto',"
+            "'add_base','add_last_auto','follow_line_last_choice','async_tuner_lease')"
+        )
 
 
 def _migrate_episode_seq(db: sqlite3.Connection) -> None:

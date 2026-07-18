@@ -20,10 +20,8 @@ RISK_RADAR_RETENTION_DAYS = 2
 # 48 hours at the normal 15-minute cadence.  Old unreferenced market judgements no longer affect a live
 # decision; assessments referenced by Shadow order evidence remain available for outcome settlement/audit.
 RISK_RADAR_MAX_ASSESSMENTS = RISK_RADAR_RETENTION_DAYS * 24 * 4
-RISK_RADAR_WARN_SCORE = 65
 RISK_RADAR_BLOCK_SCORE = 75
 RISK_RADAR_EXTREME_SCORE = 90
-RISK_RADAR_MIN_CONFIDENCE = 35
 # DeepSeek V4-Pro official CNY list price per 1M tokens (2026-07-15).  Runway uses actual usage fields and
 # the latest balance; cache-unknown input is deliberately costed at the conservative cache-miss rate.
 DEEPSEEK_V4_PRO_INPUT_CACHE_HIT_CNY_PER_M = 0.025
@@ -43,22 +41,10 @@ SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running —
 #                             slow --scan-interval only while the observer is live; idle → this. ~15min sweep.
 #                             The scanner overrides this to --scan-interval in its own process.
 
-# HL WS hard limits (per IP, official): the binding one is unique users.
-MAX_WS_USERS = 10           # max unique users across user-specific subscriptions (WS only)
-
 # Copy engine: SIGNAL via REST poll (per-wallet userFills — REST has no 10-user cap, so we can
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MIN_FOLLOW_SCORE = 0.70     # follow watchlist wallets with score >= this. v10 (2026-07-03): baked in from the
-#                             operator-tuned DB value (~22 followed on the current distribution). UI-tunable.
-#                             v5 (2026-06-30): score is now
-#                             native [0,1] (display ×100); 0.55 = display 55 → ~36 followable on the current
-#                             smooth distribution (top≈77), comfortably above the 20+ floor. The smooth blend
-#                             makes this a real quality cut (not a cliff). UI-tunable (0–100 ruler).
-#                             v5 (2026-06-29): 1.2→0.85 — recalibrated for the new harvest box + de-bugged
-#                             score; 0.85 yields ~30 CLEAN wallets (0 小赚大亏/扛单, win median 87%)
-
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
 # Every complete generation starts from the highest-quality individually Core-ready wallets.  Portfolio
 # tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
@@ -71,14 +57,7 @@ CORE_PREFIX_ABS_UTILITY_SLACK = 50.0
 CORE_PREFIX_ABS_NET_SLACK = 100.0
 CORE_PREFIX_ABS_STRESS_SLACK = 100.0
 CORE_PREFIX_MAX_DD_WORSEN = 0.01
-# vNext publishes an explicit Core/Challenger selection.  The legacy score-line path remains as a
-# migration fallback until the first successful selection generation is published.
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
-CORE_ENTRY_CONFIRM_GENERATIONS = 3
-CORE_ENTRY_MIN_CHALLENGER_H = 48.0
-CORE_ENTRY_MAX_OPEN_AGE_H = 24.0
-CORE_KEEP_MAX_OPEN_AGE_H = 72.0
-CORE_ENTRY_MIN_OOS_CLOSED = 7
 CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
 # Individual Copy economics are classified before the shared-account selector.  Challenger is a
 # real observation tier, not a dumping ground for economically worthless wallets.
@@ -95,23 +74,11 @@ CORE_STRONG_MIN_CLOSED_30D = 20
 CORE_STRONG_MIN_EVIDENCE_DAYS = 10
 CORE_RECENT_WARNING_LOSS_RATIO = 0.10
 CORE_RECENT_HARD_LOSS_RATIO = 0.25
-CORE_SOFT_CONFIRM_GENERATIONS = 3
-CORE_SOFT_MIN_WEAK_H = 48.0
-CORE_MAX_SOFT_MEMBERSHIP_CHANGES = 1
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means too many fundable opens were skipped
 SELECTION_MAX_DD_WORSEN = 0.01
-# Legacy selector knobs retained for offline comparison tests only.
-CORE_SEARCH_SEED_TARGET = 6
-CORE_SEARCH_BEAM_WIDTH = 4
-CORE_SEARCH_SWAP_PASSES = 1
-CORE_SEARCH_MAX_REPLACE_OUT = 2
 CORE_SEARCH_TIME_BUDGET_SEC = 0    # 0 = no wall-clock cutoff; the finite search graph remains bounded.
-CORE_SEARCH_MIN_MARGINAL_GAIN_RATIO = 0.01
-CORE_SEARCH_STRICT_ORDER_WIDTH = 2
-CORE_SEARCH_STRICT_CHALLENGER_LIMIT = 4
-CORE_SEARCH_STRICT_EXPANSION_PASSES = 1
 # Production multi-start search: fast discovery -> strict finalists -> repeated
 # add/remove/swap/pair-add closure -> non-overlapping fold/cost-stress gate.
 CORE_SEARCH_VALIDATION_FINALISTS = 12
@@ -121,29 +88,6 @@ CORE_SEARCH_PAIR_ADD_LIMIT = 4
 CORE_SEARCH_ROBUST_FINALISTS = 12
 CORE_SEARCH_MAX_OPEN_RATE_DROP = 0.05  # Reject an addition that materially reduces executable opens.
 CORE_SEARCH_MAX_CAPACITY_FIT_DROP = 0.05  # Reject material shared-balance contention before the floor.
-# Post-scan follow-line adaptation. The watchlist is ranked by copy-follow score (raw profile score blended
-# with copy-backtest evidence); after each scan/regate we move MIN_FOLLOW_SCORE to the Nth copyable wallet,
-# with a floor so weak active tails do not get followed just because the pool is small.
-AUTO_FOLLOW_LINE_ENABLE = True
-AUTO_FOLLOW_MIN_N = 7          # below this, prefer enough flow unless quality is below the hard score floor
-AUTO_FOLLOW_TARGET_N = 16      # capacity cap when quality is flat (funding/API/attention budget)
-AUTO_FOLLOW_MAX_N = 20         # absolute auto-line cap; MAX_TARGETS remains the hard observer cap
-AUTO_FOLLOW_MIN_SCORE = 0.60   # never follow below this copy-follow quality floor
-AUTO_FOLLOW_CLIFF_GAP = 0.045  # clear score drop between adjacent ranks = quality cliff; cut before it
-AUTO_FOLLOW_PORTFOLIO_ENABLE = True   # before final line, replay top-N prefixes as one shared copy account
-AUTO_FOLLOW_PORTFOLIO_MIN_OPEN_FIT = 0.70
-AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN = 250.0
-AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN = 0.08
-AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_ABS = 250.0  # expanding top-N may not sacrifice this much 14d/7d copy PnL
-AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_REL = 0.25   # or this fraction of the prior prefix's recent PnL
-AUTO_FOLLOW_MIN_COPY_PNL_PER_CLOSED = 15.0  # 10k paper account: per-closed-copy net edge below this is too thin
-AUTO_FOLLOW_KEEP_BONUS = 0.020    # hysteresis: previous followed wallet gets +2 display points if still eligible
-AUTO_FOLLOW_KEEP_MIN_SCORE = 0.60 # never stabilize a wallet below the hard quality floor
-# (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — evidence is enforced once at profile time by the
-#  scanner EVIDENCE gate (EVIDENCE_MIN_DAYS / EVIDENCE_MIN_TRADES); no separate follow-time re-check needed)
-#                             A 100%-win-on-3-trades wallet scores low (evidence multiplier) but still clears
-#                             the line; this floor keeps it OUT of the follow set until it has real history.
-#                             It stays on the watchlist (observed) — promoted automatically once it qualifies.
 OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
@@ -337,30 +281,6 @@ HARVEST_PNL_VOL_MIN = 0.001         # 7d pnl/volume FLOOR (0.1%) — below = raz
 HARVEST_PNL_VOL_MAX = 0.08          # 7d pnl/volume CEILING (8%) — above = profit too big for the volume
 #                                     = NOT from trading (deposit/spot/airdrop ghost); real traders 0.2-4%
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
-# RETIRED (leaderboard ROI contaminated; daily turnover doesn't separate MMs from our high-churn keeps):
-HARVEST_MON_ROI_MIN = 0.0           # was 0.15 — return magnitude is now a SCORE input, not a gate
-HARVEST_MON_ROI_MAX = 1e9           # was 3.0
-HARVEST_WEEK_ROI_MIN = 0.0          # was 0.02
-HARVEST_MAX_TURNOVER = 1e9          # was 10.0 — volume ceiling + pnl/vol band handle MMs instead
-
-# v3 score shape (interpretable, UI-tunable — NOT arbitrary quality cutoffs). The watchlist is
-# top-N by SCORE = Quality(RAR × day-consistency) × Survival × Health(current-underwater depth).
-SCORE_K = 5.0          # daily-stats confidence: w = active_days/(active_days+K). Low-freq → lean overall ROI
-SCORE_GAMMA = 2.0      # day-consistency strictness: consistency = pos_day_ratio^(w·GAMMA). Higher = stricter
-UW_TOL = 0.02          # ignore current open underwater below this (fresh/small dips fine)
-UW_REF = 0.10          # open-underwater treated as fully dangerous (Health snap → 0 here). Decoupled
-#                        from MAX_LEV (the copy cap) on purpose — this is a scoring-shape param.
-# EVIDENCE handling (paired with the now-soft activity gate). Relaxing `irregular` admits genuine
-# low-freq swing/trend traders, but a 3-trade +100% wallet must NOT rank like a proven one. So the
-# score discounts thin evidence AT THE SOURCE instead of via a hard gate: shrink roi toward 0 by
-# sample size, and cap the risk-adjusted ratio so no wallet rides one lucky low-drawdown streak to an
-# unbounded score. Low-evidence wallets then sit BELOW the follow line (observed by the scanner, not
-# yet copied) and climb as round-trips accumulate across re-scans — graduation with no tier machinery.
-SCORE_SHRINK_K = 10.0  # roi trusted as roi×n/(n+K) for n closed round-trips: a wallet needs ~K trades
-#                        for its return to be half-believed (n=10→×0.5, n=3→×0.23, n=100→×0.91)
-SCORE_RAR_CAP = 3.0    # ceiling on risk-adjusted return (roi_eff/(dd+0.05)) — tiny observed drawdown at
-#                        low sample is not real safety, so one extreme ratio can't dominate the score
-
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
 # that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);
 # the temp hard gates (loss_pain/hold_skew/profit_conc) are FOLDED IN as smooth factors, not vetoes:
@@ -381,18 +301,13 @@ SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤�
 SCORE_ROI_SCALE   = 0.35  # roiS = 1 − exp(−roi_adj/此):综合ROI 分布~0.05–1.5,此值让有效区拉得开(0.3→0.58,0.5→0.76,1.0→0.94)
 # ROI 支柱口径 = HL 官方 return-on-capital(净利/本金,已按出入金调整、含杠杆资本效率),取代旧的 net/名义
 # (net/名义 ≡ 真实收益率 ÷ 杠杆,把杠杆红利除没了,系统性埋没大体量 BTC 波段客)。
-# copy 只跟【最近表现】→ 只用近期两窗口(周+月),全期(all_roi)权重=0 不计入(新号/小本金复利虚高、与"跟最近"无关):
+# copy 只跟【最近表现】→ 只用近期两窗口(周+月):
 ROI_W_WEEK = 0.40         # 近期(7d)权重 —— 最近状态(copy 关注点)
 ROI_W_MON  = 0.60         # 月度(30d)权重 —— 主锚(窗口固定、噪音适中)
-ROI_W_ALL  = 0.00         # 全期 = 0:不看长期战绩(对跟单无意义,且会爆表带飞)
 ROI_CLIP_LO = -0.5        # 各窗口 ROI 先 clip 到 [此, 上]:压离群 + 防单窗口幸运带飞
 ROI_CLIP_HI = 1.0         # +100% 单窗口封顶:>100% 一律视为"优秀",避免单个月/周暴涨独撑排名(需周+月都好)
 SCORE_EV_TRADES = 20      # 活跃度:达此回合数 = 满分
 SCORE_EV_DAYS   = 10      # 活跃度:达此活跃天数 = 满分
-# 反噬/双胞胎守卫 —— 最惨单笔 ÷ 净利润 = |worst_loss_pct|/roi_equity。抓"n笔小赚+1笔大亏吞掉所有收益"的高胜率欺骗手;
-# 用户的良性例(5赢@5%+1亏@7.5% → 7.5/17.5=0.43)在 FREE 内、不罚。
-SCORE_FRAG_FREE = 0.5     # 最惨单笔 ≤ 净利润此比例 → 不罚
-SCORE_FRAG_SPAN = 1.0     # 超出 FREE 后再涨此幅 → 守卫降到下限(frag≥1.5≈被压到底)
 # 深度抗单/爆仓守卫 —— 按【显著仓位深度】不按绝对亏损金额(大户金额天然大,对我们无意义):
 # open_underwater 由 scanner 先过滤 dust 仓(仓位名义额/账户权益低于下方阈值),再取最深逆向;
 # 总账面压力仍看 open_loss_frac。这样不会让几十刀小仓把一个 copy 回测很强的钱包踢出 active。
@@ -407,28 +322,9 @@ SCORE_MANUF_WIN_FLOOR = 0.95   # 胜率超过此才疑似(95% 以下完全不罚
 SCORE_MANUF_LOSS_REF  = 0.03   # 最惨实现亏损 ≥ 此(真在止损)→ 不罚;趋近 0(从不兑现亏损)→ 满罚
 SCORE_MANUF_PEN       = 0.5    # 满罚强度(评分 ×(1−此))
 
-# LOSS-DISCIPLINE demote ("扛单降权"). Measures NOT cutting losses DIRECTLY — never via win rate. The
-# score multiplies by 1/(1+K·disc), where disc = 5×(current losing-bag burden: depth×count×duration) +
-# 1×(historical forced liquidations). A clean fast-cutter (no open loss, never liquidated) is untouched
-# however high its win rate; a wallet sitting on several deep bags for days, or that's been force-closed,
-# is demoted. SOFT: sinks the worst toward/below the follow line, never zeroes a profitable wallet. 0 =
-# off. Code-calibrated for now; keep out of the operator settings page unless we add evidence UI.
-DISP_PENALTY_K = 0.6   # demote strength (0 = disabled; higher = harsher). score *= 1/(1+K·disc)
-# REALIZED-asymmetry sub-term of disc — catches "小赚大亏 / 不及时止损" (the twins, #17, RESOLV) by the
-# tail directly: |worst realized loss| vs the median win. v5 (2026-06-29): the OLD win-rate gate
-# (defer = 1-loss_rate/LOSS_RATE_REF) is REMOVED — it zeroed this penalty for any wallet with win<85%,
-# so a 60%-win churner with a 4× tail loss sailed through. loss_pain now bites at ANY win rate; a clean
-# fast-cutter (small symmetric losses) has loss_pain≤TAIL_FREE → still untouched.
-TAIL_FREE     = 1.5    # worst loss up to this × median win is fine; beyond = asymmetric (小赚大亏)
-ASYM_W        = 1.5    # weight of the asymmetry term inside disc (0.8→1.5: 小赚大亏 sinks below the line)
-LOSS_RATE_REF = 0.15   # (retired — the asym win-rate gate is gone; kept only so stale refs don't break)
+# Large samples with no realized loss are flagged as possible loss deferral for profile diagnostics.
 PAIN_MIN_TRADES = 15   # ≥ this many closed trades with ZERO realized losses = extreme deferrer
 PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet over a large sample
-# HOLD-SKEW sub-term of disc — 扛单 by DURATION: median losing-hold / median winning-hold. >1 = holds
-# losers longer than winners (disposition effect). Only EXTREME skew is penalized (the dangerous combo is
-# high skew WITH a big tail loss, already caught by loss_pain); moderate skew on small losses is benign.
-HOLD_SKEW_FREE = 3.0   # skew up to 3× is tolerated (holding small losers a bit longer ≠ blow-up risk)
-HOLD_SKEW_W    = 0.5   # weight of the (hold_skew - FREE) term inside disc
 
 # Retired discipline hard-gates. Kept only so old scan namespaces / stale DB refs don't break.
 # Do NOT use these as active vetoes: loss_pain / hold_skew can be high on wallets that are still
@@ -436,12 +332,6 @@ HOLD_SKEW_W    = 0.5   # weight of the (hold_skew - FREE) term inside disc
 GATE_LOSS_PAIN_MAX   = 1.0
 GATE_HOLD_SKEW_MAX   = 1.5
 GATE_PROFIT_CONC_MAX = 0.8
-GATE_REQUIRE_LIFETIME_NET = True   # reject if full-history realized net ≤ 0 (长期净亏). Skipped if the
-#                                    net_life field is absent (old profiles) so regate is safe pre-rescan.
-GATE_REQUIRE_30D_NET      = True   # reject if 30d realized net ≤ 0 (近一月在走下坡). Same absent-skip.
-GATE_REQUIRE_WINDOW_NET   = True   # reject if the current scoring window's copyable-perp realized net ≤ 0.
-#                                    Portfolio/leaderboard pnl can include account effects we do not copy;
-#                                    the profile window is the actual recent contract leg we can observe.
 # v7 PORTFOLIO copyability gates (from HL portfolio: net-of-fees, deposit-adjusted; only when pf data present).
 PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >this = HFT bot (unreplicable at our latency +
 #                                  fee-drag we can't outrun). Full-pop dist: p75=39x (trend), p90=126x (bots).
@@ -451,7 +341,6 @@ PORTFOLIO_MIN_EDGE_BPS = 10.0     # 边际硬底线 = 30d 净利/成交量 ×1e4
 # (MIN_PAYOFF removed v10 — small_win_big_loss hard gate gone; 盈亏比 is now the g_payoff factor in score, ref = SCORE_PAYOFF_REF)
 WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
 WINDFALL_WIN_MAX = 0.60  # (亏损尚未覆盖,ROI 此刻还正)→ reject。真·高胜率的集中不算(它靠稳定胜率不靠一把)。
-GATE_REQUIRE_WEEK_EDGE_POS = True  # 近一周 edge 转负(且有真实成交量)→ reject:月度光环掩盖近期反转,当下在亏。
 # === v10: quality magnitude lives in score() as smooth ranking factors. Qualification is decided by the
 # structural/data/evidence/strict-Copy economic gates below; raw profile score must never veto a wallet that
 # passes those authoritative checks. ===
@@ -471,16 +360,12 @@ COPY_MIN_EXPECTED_MARGIN_RETURN = 0.02  # 回放扣成本后、向零收缩的�
 COPY_MIN_RETURN_LCB = 0.0              # Bootstrap悲观参考线；只用于风险展示/评分，不作Core硬拒绝
 COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
-SECTOR_COPY_MIN_CLOSED_30D = 7   # 板块级 copy 能力样本门槛: crypto/stock 分别判断
-SECTOR_COPY_MIN_CLOSED_14D = 5
-SECTOR_COPY_MIN_CLOSED_7D = 5
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled
 # risk boundaries.
 AUTO_TUNE_MARGIN_ENABLE = True
-# `AUTO_TUNE_MARGIN_ENABLE` is retained for compatibility.  Mode is authoritative for vNext:
-# shadow computes and audits proposals but never writes live execution parameters.
+# The enable flag is the operator master switch; mode controls whether enabled runs only audit or apply.
 AUTO_TUNE_MODE = "apply"              # Paper product default: off | shadow | apply
 AUTO_TUNE_APPLY_MIN_SHADOW_DAYS = 0    # Paper validates by OOS/holdout/stress;真钱环境改回14
 AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED = 0 # Paper cold-start may apply;真钱环境改回100
@@ -504,10 +389,6 @@ AUTO_TUNE_MARGIN_FACTORS = (0.85, 1.0, 1.15)
 # fraction of each tier's four-add-safe ceiling so the bounded tuner can rediscover materially larger sizing
 # (for example 5-7% stable margin) without restoring a large three-dimensional Cartesian grid.
 AUTO_TUNE_MARGIN_CEILING_FRACTIONS = (0.50, 0.75, 1.00)
-AUTO_TUNE_LEV_CAP_SETS = (
-    (35, 12, 4), (32, 12, 4), (30, 11, 4), (30, 10, 4),
-    (28, 10, 4), (25, 10, 4), (25, 8, 4),
-)
 AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9, 8, 6)
 AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25, 20)
 AUTO_TUNE_COORD_HIGH_LEV_CAPS = (6, 4, 3)
@@ -549,14 +430,11 @@ PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 # (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling
 # the whole 30d for every candidate every day (re-fetching 29 unchanged days = wasted API/time). Fills are
 # cached in candidate_fills. A NEW candidate (no cache) still does one full-window fetch; a delta that hits
-# the page cap falls back to a full fetch (self-heal). A periodic FULL re-sync (every FULL_RESYNC_DAYS)
-# re-fetches everyone's window to heal any gap from a transient error (fills are append-only, so a gap can
-# only be MISSING fills — a full re-fetch re-adds them). The live open-position snapshot is unaffected
-# (still one cheap clearinghouse call per surviving candidate — that's current state, not history).
+# the page cap falls back to a full fetch. The seven-shard refresh below heals the full candidate set over
+# one week without creating one large weekly API spike. The live open-position snapshot is unaffected.
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
-FULL_RESYNC_DAYS = 7        # force a full-window re-fetch for all candidates at least this often (self-heal)
 DAILY_RECHECK_TOP_N = 80    # daily incremental scans also re-profile this many current top-ranked old candidates
-# vNext daily discovery budget.  Core/held/challenger wallets are outside the discovery cap; the
+# Daily discovery budget. Core/held/challenger wallets are outside the discovery cap; the
 # remaining budget is split new / near-miss / fair exploration and finalized before the wall-clock limit.
 DAILY_SCAN_TIME_BUDGET_MIN = 60
 CORE_REFRESH_DEADLINE_MIN = 15
@@ -565,18 +443,8 @@ DAILY_PROFILE_BUDGET = 300
 CANDIDATE_MAX_RECHECK_DAYS = 7
 FULL_REFRESH_SHARDS = 7
 RANDOM_EXPLORATION_RATIO = 0.20
-TUNER_MEMORY_LIMIT_MB = 512
 LEADERBOARD_MIN_ROW_RATIO = 0.85
 LEADERBOARD_MIN_COMPLETE_RATIO = 0.99
-
-# TREND-trader inclusion: a winning OPEN position worth ≥ this fraction of the wallet's account = a real
-# trend hold, so the wallet is kept even if low-frequency (exempt from the `irregular` activity floor).
-TREND_OPEN_MIN = 0.05
-
-# Unrealized gains are return NOT yet locked (can reverse) → count this fraction of a wallet's winning
-# open position as RISK in the score denominator, so an unproven unrealized pump can't top the board
-# over wallets that actually realized the same return. Trend traders stay included, just ranked behind.
-UNREAL_RISK_W = 0.5
 
 # SPOT-HEDGE exclusion: if more than this fraction of a wallet's perp-short notional is offset by a spot
 # long of the same token, it's hedging spot (market-neutral), not trading directionally — reject. Its
@@ -584,9 +452,7 @@ UNREAL_RISK_W = 0.5
 HEDGE_MAX_FRAC = 0.5
 
 # paper-copy simulation
-LATENCIES = [0.5, 2.0, 5.0]  # (legacy) latency bands — schema columns; REST signal has one
-TAKER_FEE = 0.00045          # detection latency, so all three resolve to the same live-book price
+TAKER_FEE = 0.00045
 NOTIONAL = 1000.0            # fixed paper notional per copied trade ($)
-BOOK_HIST_S = max(LATENCIES) + 3  # (legacy) bbo history depth — REST mode prices off current bbo only
 
 DEFAULT_DB = "data/hl.db"

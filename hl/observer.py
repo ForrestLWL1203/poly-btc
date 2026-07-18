@@ -10,13 +10,9 @@ Two decoupled data planes, by design:
     coins). Every copy is priced as an honest taker catch-up off the LIVE book at detection:
     buy→best ask, sell→best bid. (No user subscriptions on this WS, so no 10-user concern.)
 
-A PARTIAL-AWARE copy state machine persists every master action (open/add/reduce/close) to
-copy_action with full detail + our mirrored fill; each copied position lives in copy_position
-(open→closed) and is reloaded on restart. Sizing: fixed NOTIONAL per position at the master's
-open; no scale-in add; proportional scale-out. Leverage is irrelevant to PnL (notional × move).
-
-The legacy 0.5/2/5s latency bands collapse to a single live-book price in REST mode (the columns
-are kept for schema/report compatibility, all three carry the same value).
+A partial-aware state machine persists every target open/add/reduce/close and our mirrored fill.
+Open copies reload after restart. New exposure is equity- and volatility-tier-sized, smart adds are
+price-spaced and capped, and target reductions are mirrored by percentage with profitable-tail protection.
 """
 import asyncio
 import json
@@ -96,14 +92,12 @@ class Observer:
     def acct_lock(self):
         return self.taker.acct_lock
 
-    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, min_score: float = None,
-                 add_frac: float = None):
+    def __init__(self, db, addrs: list, seed_coins: dict, top_n: int = None, add_frac: float = None):
         self.db = db
         self.addrs = addrs
         self.seed_coins = seed_coins
         self.strategy_revision_id = None
         self.top_n = top_n or config.MAX_TARGETS    # hard cap on followed wallets (REST-rate ceiling)
-        self.min_score = 0.0  # retired score-line compatibility field; Core selection owns membership
         # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap. Margin uses the adaptive strategy
         # equity base; real risk equity and available cash enforce coin/deployment caps.
         self.add_frac = config.ADD_FRAC if add_frac is None else add_frac  # each ADD = first-open margin × this
@@ -562,7 +556,7 @@ class Observer:
     # -- watchlist sync (the copy engine tracks rolling discovery) -----------
     def _reload_targets(self, init=False, target_snapshot=None):
         if target_snapshot is None:
-            addrs, seed = load_targets(self.db, self.top_n, self.min_score)
+            addrs, seed = load_targets(self.db, self.top_n)
             target_acct = {a: v for a, v in                 # conviction denominator (target's account)
                            self.db.execute("SELECT addr, acct_value FROM watchlist").fetchall()}
             target_sector_policy = {
@@ -1834,12 +1828,11 @@ class Observer:
 
 
 # ------------------------------------------------------------------------- loaders
-def load_targets(db, n: int, min_score: float = 0.0):
+def load_targets(db, n: int):
     """Load only the explicit published Core.
 
     Before the first successful Selection publication there are deliberately no new-entry targets. Wallets
     with existing copies are still re-added EXIT-ONLY by ``_reload_targets`` for safe position management.
-    ``min_score`` remains in the signature only for CLI compatibility and is intentionally ignored.
     """
     explicit = selection.published_core_addrs(db, n)
     addrs = explicit or []

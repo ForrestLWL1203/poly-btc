@@ -5,8 +5,8 @@ export const SCAN_STAGES = [
   [["fetch_history"], "拉取历史 & 算指标"],
   [["score_filter"], "评分 · 网格/扛单过滤"],
   [["rebuild_watchlist", "prepare_selection_candidates"], "重建被跟名单"],
-  [["prefetch_selection_paths", "portfolio_tune", "selection_search", "auto_tune"], "组合回测调参"],
-  [["persist"], "写库 & 校验"],
+  [["prefetch_selection_paths", "portfolio_tune", "selection_search"], "组合回测调参"],
+  [["materialize_replay", "persist"], "写库 & 校验"],
 ];
 
 export const scanStageLabel = (stage) => {
@@ -23,7 +23,7 @@ const POST_PROFILE_PROGRESS = {
   prefetch_selection_paths: 86,
   portfolio_tune: 89,
   selection_search: 91,
-  auto_tune: 96,
+  materialize_replay: 96,
   persist: 99,
 };
 

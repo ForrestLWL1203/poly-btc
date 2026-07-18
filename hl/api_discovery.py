@@ -320,8 +320,8 @@ def _latest_pipeline_key(db, qs):
             return stamp, source
         row = q1(db,
             "SELECT source FROM pipeline_audit "
-            "WHERE stamp=? AND stage IN (?,?,?) ORDER BY id DESC LIMIT 1",
-            (stamp, "follow_line", "auto_tune", "selection_summary"),
+            "WHERE stamp=? AND stage IN (?,?) ORDER BY id DESC LIMIT 1",
+            (stamp, "tuner_finalize", "selection_summary"),
         )
         if not row:
             row = q1(db,
@@ -332,8 +332,8 @@ def _latest_pipeline_key(db, qs):
     if source:
         row = q1(db,
             "SELECT stamp,source FROM pipeline_audit "
-            "WHERE source=? AND stage IN (?,?,?) ORDER BY id DESC LIMIT 1",
-            (source, "follow_line", "auto_tune", "selection_summary"),
+            "WHERE source=? AND stage IN (?,?) ORDER BY id DESC LIMIT 1",
+            (source, "tuner_finalize", "selection_summary"),
         )
         if not row:
             row = q1(db,
@@ -343,8 +343,8 @@ def _latest_pipeline_key(db, qs):
         return (_col(row, "stamp", 0), _col(row, "source", 1)) if row else (None, source)
     row = q1(db,
         "SELECT stamp,source FROM pipeline_audit "
-        "WHERE stage IN (?,?,?) ORDER BY id DESC LIMIT 1",
-        ("follow_line", "auto_tune", "selection_summary"),
+        "WHERE stage IN (?,?) ORDER BY id DESC LIMIT 1",
+        ("tuner_finalize", "selection_summary"),
     )
     if not row:
         row = q1(db, "SELECT stamp,source FROM pipeline_audit ORDER BY id DESC LIMIT 1")
@@ -373,7 +373,7 @@ def ep_pipeline_summary(db, qs):
     """Compact latest pipeline audit into the Discovery page's operator summary."""
     stamp, source = _latest_pipeline_key(db, qs)
     if not stamp:
-        return {"stamp": None, "source": None, "profile": {}, "watchlist": {},
+        return {"stamp": None, "source": None, "profile": {},
                 "autoTune": None, "workset": None, "prune": None}
     base = [stamp] + ([source] if source else [])
     src_where = " AND source=?" if source else ""
@@ -391,12 +391,6 @@ def ep_pipeline_summary(db, qs):
         tuple(base),
     )
 
-    watch_rows = qall(db,
-        "SELECT status,COUNT(*) n FROM pipeline_audit "
-        f"WHERE stamp=?{src_where} AND stage='watchlist' GROUP BY status",
-        tuple(base),
-    )
-    watch_counts = {(_col(r, "status", 0) or "unknown"): _col(r, "n", 1) for r in watch_rows}
     selection_rows = qall(db,
         "SELECT status,COUNT(*) n FROM pipeline_audit "
         f"WHERE stamp=?{src_where} AND stage='selection' GROUP BY status",
@@ -445,7 +439,7 @@ def ep_pipeline_summary(db, qs):
 
     tune_row = q1(db,
         "SELECT status,reason,payload_json FROM pipeline_audit "
-        f"WHERE stamp=?{src_where} AND stage='auto_tune' ORDER BY id DESC LIMIT 1",
+        f"WHERE stamp=?{src_where} AND stage='tuner_finalize' ORDER BY id DESC LIMIT 1",
         tuple(base),
     )
     tune_payload = _payload(tune_row)
@@ -454,21 +448,8 @@ def ep_pipeline_summary(db, qs):
         auto_tune = {
             "status": _col(tune_row, "status", 0),
             "reason": _col(tune_row, "reason", 1),
-            "applied": bool(tune_payload.get("applied")),
-            "appliedSizing": bool(tune_payload.get("appliedSizing")),
-            "appliedAdd": bool(tune_payload.get("appliedAdd")),
-            "mode": tune_payload.get("mode"),
-            "shadow": bool(tune_payload.get("shadow")),
-            "eligibleToApply": bool(tune_payload.get("eligibleToApply")),
-            "validation": tune_payload.get("validation") or {},
-            "proposal": tune_payload.get("proposal") or {},
-            "rollback": tune_payload.get("rollback"),
-            "followedN": tune_payload.get("followedN"),
-            "selectedMult": tune_payload.get("selectedMult"),
-            "candidateCount": tune_payload.get("candidateCount"),
-            "addCandidateCount": tune_payload.get("addCandidateCount"),
-            "params": tune_payload.get("params") or {},
-            "addParams": tune_payload.get("addParams") or {},
+            "portfolioReplay": tune_payload.get("portfolioReplay"),
+            "selectionReplay": tune_payload.get("selectionReplay"),
         }
 
     prune_row = q1(db,
@@ -489,12 +470,6 @@ def ep_pipeline_summary(db, qs):
             "retired": status_counts.get("retired", 0),
             "reasonCounts": [{"status": _col(r, "status", 0), "reason": _col(r, "reason", 1), "count": _col(r, "n", 2)}
                              for r in reason_rows],
-        },
-        "watchlist": {
-            "total": sum(watch_counts.values()),
-            "followed": watch_counts.get("followed", 0),
-            "belowLine": watch_counts.get("below_line", 0),
-            "disabled": watch_counts.get("disabled", 0),
         },
         "selection": {
             "generation": selection_summary.get("generation"),

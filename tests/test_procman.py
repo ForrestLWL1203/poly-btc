@@ -9,13 +9,6 @@ from hl import procman, storage
 
 
 class ProcmanTests(unittest.TestCase):
-    def test_never_scanned_db_does_not_look_overdue(self):
-        with tempfile.TemporaryDirectory() as td:
-            db_path = str(Path(td) / "hl.db")
-            db = storage.connect(db_path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
-            db.close()
-
-            self.assertIsNone(procman.hours_since_last_scan(db_path))
 
     def test_dashboard_startup_status_ticker_does_not_start_scan(self):
         with tempfile.TemporaryDirectory() as td:

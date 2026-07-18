@@ -203,69 +203,6 @@ def create_revision(
     }
 
 
-def reactivate_revision(
-    db,
-    revision: str,
-    *,
-    source: str,
-    expected_active_revision: Optional[str] = None,
-    enqueue_reload: bool = True,
-    restore_mutable_params: bool = True,
-    restore_param_keys=None,
-    expected_mutable_params=None,
-    stamp: Optional[str] = None,
-) -> dict:
-    """Fail closed to a previously complete immutable strategy bundle.
-
-    If a membership seal fails after mutable parameters changed, this restores
-    the prior bundle and parameter snapshot atomically.
-    """
-    target = load_revision(db, revision)
-    if not target:
-        raise RuntimeError("strategy_revision_not_found")
-    current = active_revision_id(db)
-    if expected_active_revision is not None and current != expected_active_revision:
-        raise RuntimeError("strategy_revision_changed")
-    stamp = stamp or now_iso()
-    if current and current != revision:
-        db.execute(
-            "UPDATE strategy_revision SET status='superseded',superseded_at=? WHERE revision=?",
-            (stamp, current),
-        )
-    db.execute(
-        "UPDATE strategy_revision SET status='active',activated_at=?,superseded_at=NULL WHERE revision=?",
-        (stamp, revision),
-    )
-    db.execute(
-        "INSERT INTO active_strategy_revision (id,revision,updated_at) VALUES (1,?,?) "
-        "ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at",
-        (revision, stamp),
-    )
-    restored_params = (
-        params.restore_follow_snapshot(
-            db, target.get("params") or {}, keys=restore_param_keys,
-            expected_current=expected_mutable_params, stamp=stamp,
-        )
-        if restore_mutable_params else 0
-    )
-    if enqueue_reload:
-        db.execute(
-            "INSERT INTO commands (type,payload_json,owner,status,created_at) "
-            "VALUES ('reload_params',?,?,'pending',?)",
-            (_json({
-                "by": "strategy_revision", "revision": revision,
-                "source": source, "reason": "selection_consistency_rollback",
-            }), source, stamp),
-        )
-    return {
-        "revision": revision,
-        "selectionGeneration": target.get("selectionGeneration"),
-        "source": source,
-        "restoredFrom": current,
-        "restoredParams": restored_params,
-    }
-
-
 def materialize_current(
     db,
     *,

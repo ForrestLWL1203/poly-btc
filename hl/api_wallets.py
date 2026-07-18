@@ -30,7 +30,7 @@ def _json_obj(raw):
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _selection_reason_text(row, *, now_ms=None):
+def _selection_reason_text(row):
     """Translate internal selection states into one operator-facing explanation."""
     reason = str(_col(row, "selection_reason") or "").strip().lower()
     exit_pending = reason.endswith(":exit_pending")
@@ -104,12 +104,6 @@ def _selection_reason_text(row, *, now_ms=None):
     closed_7d = int(_col(row, "copy_bt_7d_closed_n") or 0)
     if closed_7d < policy.min_closed_7d:
         return f"近7日有效Copy仅{closed_7d}笔（门槛{policy.min_closed_7d}笔）"
-    last_open_ms = int(_col(row, "last_copyable_open_ms") or 0)
-    if not last_open_ms:
-        return "近期没有可跟随的新开仓"
-    now_ms = int(now_ms or time.time() * 1000)
-    if now_ms - last_open_ms > policy.entry_max_open_age_h * 3_600_000:
-        return f"最近{int(policy.entry_max_open_age_h)}小时没有新开仓"
     positive_probability = float(_col(row, "copy_positive_probability") or 0.0)
     if positive_probability < policy.entry_positive_probability:
         return "历史盈利稳定性不足"
@@ -216,13 +210,6 @@ def _published_selection_generation(db):
     return _col(row, "generation") if row else None
 
 
-def _ms_epoch(value):
-    try:
-        return float(value) / 1000.0 if value else None
-    except (TypeError, ValueError):
-        return None
-
-
 def _portfolio_replay_summary(db, generation):
     try:
         row = q1(db, "SELECT value FROM auto_tune_state WHERE key='effective_portfolio_replay'")
@@ -299,7 +286,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
         "p.sector_policy_json,p.data_status,"
-        "p.last_copyable_open_ms,p.open_events_7d,p.actionable_open_events_7d,"
+        "p.open_events_7d,p.actionable_open_events_7d,"
         "p.copy_positive_probability,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
         "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.fwd_net,0) AS fwd_net "
@@ -314,7 +301,6 @@ def _ep_selected_wallets(db, generation, role, page, size):
         (generation, role, size, page * size, cutoff7d),
     )
     out = []
-    request_now_ms = int(time.time() * 1000)
     for i, r in enumerate(rows):
         display_metrics = apply_allowed_sector_copy_metrics(dict(r))
         published_score = _col(r, "selection_follow_score")
@@ -327,7 +313,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
-            "selectionReasonText": _selection_reason_text(r, now_ms=request_now_ms),
+            "selectionReasonText": _selection_reason_text(r),
             "marketType": _col(r, "market_type") or "crypto",
             "score": score100(published_score) if published_score is not None else None,
             # The list describes the strategy we can actually copy, not the target's raw account win rate.
@@ -471,7 +457,7 @@ def ep_wallet_detail(db, addr, qs=None):
             "p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,"
             "p.copy_positive_probability,p.copy_evidence_days,p.copy_recent_return_14d,"
             "p.copy_recent_return_7d,p.copy_risk_score,p.execution_score,p.actionable_open_rate,"
-            "p.capacity_fit,p.open_probability_48h,p.last_copyable_open_ms,"
+            "p.capacity_fit,p.open_probability_48h,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
             "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"

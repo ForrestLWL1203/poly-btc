@@ -68,21 +68,27 @@ class GenerationFoundationTests(unittest.TestCase):
 
             self.assertTrue({
                 "profile_generation", "data_status", "evidence_status", "last_copyable_open_ms",
-                "open_events_7d", "actionable_open_events_30d", "open_days_14d",
+                "open_events_7d", "actionable_open_events_30d", "open_days_30d",
                 "open_position_count", "material_open_count", "raw_quality_score",
                 "copy_positive_probability", "selection_marginal_utility", "model_coverage",
                 "oos_cvar95", "capacity_fit",
             }.issubset(profile_cols))
+            self.assertFalse({
+                "avg_win", "avg_loss", "roi_notional", "gross_pnl", "total_fee", "n_coins",
+                "long_frac", "life_trades", "pf_max_dd", "pf_edge_bps", "open_events_14d",
+                "actionable_open_events_14d", "open_days_7d", "open_days_14d",
+                "avg_open_interval_h", "median_open_interval_h", "open_probability_24h",
+            } & profile_cols)
             self.assertTrue({
                 "generation", "profile_generation", "evaluated_at", "data_status", "evidence_status",
             }.issubset(watchlist_cols))
             self.assertTrue({
                 "generation", "mode", "status", "proposal_json", "validation_json", "rollback_reason",
             }.issubset(tune_cols))
-            self.assertTrue({
+            self.assertFalse({
                 "core_nomination_streak", "core_omission_streak", "core_nomination_started_at",
                 "core_omission_started_at", "last_core_signal_generation",
-            }.issubset(registry_cols))
+            } & registry_cols)
             self.assertTrue({
                 "scan_generation", "leaderboard_staging", "wallet_registry", "follow_selection",
             }.issubset(tables))
@@ -107,8 +113,12 @@ class GenerationFoundationTests(unittest.TestCase):
                 first = generation.begin_generation(
                     db, generation="g1", started_at="2026-07-11T00:00:00Z"
                 )
-                validation = generation.stage_and_validate_leaderboard(
-                    db, first, first_rows, previous_count=0, fetched_at="2026-07-11T00:01:00Z"
+                validation = generation.validate_leaderboard_rows(first_rows, previous_count=0)
+                generation.stage_leaderboard_rows(
+                    db, first, first_rows, fetched_at="2026-07-11T00:01:00Z"
+                )
+                generation.record_leaderboard_validation(
+                    db, first, validation, fetched_at="2026-07-11T00:01:00Z"
                 )
                 self.assertTrue(validation.valid)
                 generation.mark_generation_ready(
@@ -126,7 +136,9 @@ class GenerationFoundationTests(unittest.TestCase):
                 second = generation.begin_generation(
                     db, generation="g2", started_at="2026-07-12T00:00:00Z"
                 )
-                validation = generation.stage_and_validate_leaderboard(db, second, short_rows)
+                validation = generation.validate_leaderboard_rows(short_rows, previous_count=100)
+                generation.stage_leaderboard_rows(db, second, short_rows)
+                generation.record_leaderboard_validation(db, second, validation)
                 self.assertFalse(validation.valid)
                 with self.assertRaises(ValueError):
                     generation.mark_generation_ready(
@@ -157,15 +169,13 @@ class GenerationFoundationTests(unittest.TestCase):
             with db:
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xABC", generation="g1", seen_at="2026-07-11T00:00:00Z",
-                    state="core", last_actionable_open_ms=100, core_nominated=True,
+                    state="core", last_actionable_open_ms=100,
                 )
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xabc", generation="g1", seen_at="2026-07-11T00:01:00Z", state="core",
-                    core_nominated=False,
                 )
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xabc", generation="g2", seen_at="2026-07-12T00:00:00Z", state="challenger",
-                    core_nominated=False,
                 )
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xabc", generation="g3", seen_at="2026-07-13T00:00:00Z",
@@ -173,16 +183,74 @@ class GenerationFoundationTests(unittest.TestCase):
                 )
                 scanner_lifecycle.upsert_wallet_registry(
                     db, "0xabc", generation="g4", seen_at="2026-07-14T00:00:00Z",
-                    state="core", last_actionable_open_ms=90, core_nominated=True,
+                    state="core", last_actionable_open_ms=90,
                 )
 
             row = db.execute(
                 "SELECT state,current_role,consecutive_qualified,data_error_count,core_entries,core_exits,"
-                "recovery_count,last_valid_generation,last_actionable_open_ms,core_nomination_streak,"
-                "core_omission_streak,last_core_signal_generation "
+                "recovery_count,last_valid_generation,last_actionable_open_ms "
                 "FROM wallet_registry WHERE addr='0xabc'"
             ).fetchone()
-            self.assertEqual(row, ("core", "core", 3, 1, 2, 1, 1, "g4", 100, 1, 0, "g4"))
+            self.assertEqual(row, ("core", "core", 3, 1, 2, 1, 1, "g4", 100))
+
+    def test_connect_retires_obsolete_selection_columns_and_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "hl.db"
+            db = self.open_db(path)
+            for column, definition in (
+                ("core_nomination_streak", "INTEGER NOT NULL DEFAULT 0"),
+                ("core_omission_streak", "INTEGER NOT NULL DEFAULT 0"),
+                ("core_nomination_started_at", "TEXT"),
+                ("core_omission_started_at", "TEXT"),
+                ("last_core_signal_generation", "TEXT"),
+            ):
+                db.execute(f"ALTER TABLE wallet_registry ADD COLUMN {column} {definition}")
+            for column, definition in (
+                ("avg_win", "REAL"), ("avg_loss", "REAL"), ("roi_notional", "REAL"),
+                ("gross_pnl", "REAL"), ("total_fee", "REAL"), ("n_coins", "INTEGER"),
+                ("long_frac", "REAL"), ("life_trades", "INTEGER"), ("pf_max_dd", "REAL"),
+                ("pf_edge_bps", "REAL"), ("open_events_14d", "INTEGER"),
+                ("actionable_open_events_14d", "INTEGER"), ("open_days_7d", "INTEGER"),
+                ("open_days_14d", "INTEGER"), ("avg_open_interval_h", "REAL"),
+                ("median_open_interval_h", "REAL"), ("open_probability_24h", "REAL"),
+            ):
+                db.execute(f"ALTER TABLE profile ADD COLUMN {column} {definition}")
+            db.executemany(
+                "INSERT OR REPLACE INTO params "
+                "(key,value,category,level,type,effect,default_value) VALUES (?,?,'follow','green','float','immediate',?)",
+                [(key, "1", "1") for key in ("MIN_FOLLOW_SCORE", "COPY_STOP_ENABLE", "STOP_MARGIN_PCT")],
+            )
+            db.executemany(
+                "INSERT OR REPLACE INTO auto_tune_state (key,value,updated_at) VALUES (?, '{}', 'old')",
+                [(key,) for key in (
+                    "margin_base", "margin_last_auto", "tune_base", "tune_last_auto",
+                    "add_base", "add_last_auto", "follow_line_last_choice",
+                )],
+            )
+            db.commit()
+            db.close()
+
+            migrated = self.open_db(path)
+            registry_cols = {row[1] for row in migrated.execute("PRAGMA table_info(wallet_registry)")}
+            profile_cols = {row[1] for row in migrated.execute("PRAGMA table_info(profile)")}
+            self.assertFalse({
+                "core_nomination_streak", "core_omission_streak", "core_nomination_started_at",
+                "core_omission_started_at", "last_core_signal_generation",
+            } & registry_cols)
+            self.assertFalse({
+                "avg_win", "avg_loss", "roi_notional", "gross_pnl", "total_fee", "n_coins",
+                "long_frac", "life_trades", "pf_max_dd", "pf_edge_bps", "open_events_14d",
+                "actionable_open_events_14d", "open_days_7d", "open_days_14d",
+                "avg_open_interval_h", "median_open_interval_h", "open_probability_24h",
+            } & profile_cols)
+            self.assertEqual(migrated.execute(
+                "SELECT COUNT(*) FROM params WHERE key IN ('MIN_FOLLOW_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT')"
+            ).fetchone()[0], 0)
+            self.assertEqual(migrated.execute(
+                "SELECT COUNT(*) FROM auto_tune_state WHERE key IN "
+                "('margin_base','margin_last_auto','tune_base','tune_last_auto',"
+                "'add_base','add_last_auto','follow_line_last_choice')"
+            ).fetchone()[0], 0)
 
     def test_scheduler_preserves_priority_and_applies_time_capacity(self):
         candidates = [f"0xc{i}" for i in range(30)]

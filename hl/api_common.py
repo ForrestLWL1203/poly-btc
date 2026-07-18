@@ -21,13 +21,6 @@ def recent_roi_pct(week_roi, mon_roi):
     return (sum(wt * v for wt, v in parts if v is not None) / w * 100.0) if w else 0.0
 
 
-def score_from100(disp):
-    """UI 0-100 -> native [0,1] before writing MIN_FOLLOW_SCORE."""
-    if disp is None:
-        return None
-    return disp / 100.0
-
-
 def q1(db, sql, args=(), default=None):
     """First row, or default. Tolerates a missing table in an unmigrated DB."""
     try:

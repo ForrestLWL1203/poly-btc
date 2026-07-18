@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hl import api, api_commands, scanner, storage
+from hl import api, api_commands, scanner
 from launcher import server as launcher_server
 from launcher.core import services
 from launcher.core.model import DeployConfig
@@ -80,15 +80,6 @@ class ReviewFixTests(unittest.TestCase):
         finally:
             os.remove(path)
 
-    def test_incomplete_full_run_does_not_advance_full_resync_marker(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
-            scanner._record_run(db, "2026-01-01T00:00:00Z", 0, 2, 1, 0, 0, 0, 0, 0,
-                                full=True, failed=1, complete=False)
-            self.assertTrue(scanner._due_for_full_resync(db))
-            row = db.execute("SELECT profiled,failed,complete FROM scan_runs").fetchone()
-            self.assertEqual((1, 1, 0), tuple(row))
-            db.close()
 
     def test_dashboard_refuses_missing_password(self):
         with patch.dict(os.environ, {"DASH_PASSWORD": ""}, clear=False), \

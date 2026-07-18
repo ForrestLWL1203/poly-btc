@@ -17,7 +17,7 @@ const dataWarning = (status) => {
   return null;
 };
 
-export function Wallets({ confirm, toast }) {
+export function Wallets({ confirm }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
@@ -33,7 +33,7 @@ export function Wallets({ confirm, toast }) {
   const toggle = (w) => {
     const next = !w.enabled;
     const act = () => api.cmd("wallet_toggle", { address: w.address, enabled: next })
-      .then(() => { toast((next ? "启用" : "停用") + " " + short(w.address)); setTimeout(reload, 1800); });
+      .then(() => { setTimeout(reload, 1800); });
     if (next) act(); else confirm({ title: "停用钱包", danger: true, ok: "停用",
       body: `停用后不再对 ${short(w.address)} 开新仓,存量持仓继续跟到平仓。`, onConfirm: act });
   };

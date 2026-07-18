@@ -40,7 +40,6 @@ function Dashboard({ onLogout }) {
   const [scanStopping, setScanStopping] = useState(false);
   const [scanStopError, setScanStopError] = useState(null);
   const mobileNavRef = useRef(null);
-  const toast = () => {};   // 右上角 tooltip 已废弃 — 各动作改用整页/按钮内联 loading 反馈
 
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
   const stopRescan = useCallback(async () => {
@@ -186,9 +185,9 @@ function Dashboard({ onLogout }) {
         )}
 
         {page === "overview" && <Overview ov={ov} />}
-        {page === "positions" && <Positions confirm={setConfirmCfg} toast={toast} streamOpen={livePositions} />}
+        {page === "positions" && <Positions confirm={setConfirmCfg} streamOpen={livePositions} />}
         {page === "history" && <History />}
-        {page === "wallets" && <Wallets confirm={setConfirmCfg} toast={toast} />}
+        {page === "wallets" && <Wallets confirm={setConfirmCfg} />}
         {page === "risk" && <RiskRadar />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings confirm={setConfirmCfg} />}
@@ -215,7 +214,7 @@ function Dashboard({ onLogout }) {
       </nav>
 
       {scanning && <ScanMask status={scanStatus} onStop={stopRescan} stopping={scanStopping}
-        stopError={scanStopError} />}{/* scanning = MANUAL scan only; 24h auto runs silent */}
+        stopError={scanStopError} />}{/* Manual scans lock the page; scheduled scans stay non-blocking. */}
       {obsPending && <ObsMask label={obsPending.label} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
     </div>

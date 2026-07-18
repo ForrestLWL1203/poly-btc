@@ -87,9 +87,6 @@ PARAM_SPEC = [
         "windfall判定·胜率上限", "配合上条:高集中度+胜率低于此=一波流;真高胜率的集中不算(靠稳定胜率不靠一把)"),
 
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
-    # Hidden migration compatibility only; production membership and UI use published Core exclusively.
-    ("MIN_FOLLOW_SCORE",     "follow",  "hidden", "float",   "rescan", config.MIN_FOLLOW_SCORE,
-        "旧版评分线", "已停用；仅保留迁移兼容"),
     ("FOLLOW_SELECTION_MODE", "follow", "hidden", "text", "immediate", config.FOLLOW_SELECTION_MODE,
         "跟单集合模式", "auto使用已发布Core集合;manual保留人工集合"),
     ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
@@ -154,9 +151,9 @@ PARAM_SPEC = [
     ("HIGH_MIN_NOTIONAL",    "follow",  "yellow", "usd",     "immediate", config.HIGH_MIN_NOTIONAL,
         "剧烈档·最低名义额", "剧烈档(meme/野币)单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)"),
     # 分档最多加仓 —— 仅老模式(SMART_ADD 关)生效; 智能加仓走 σ波动闸+ADD_MAX_HARD. v10: 藏,避免占版面
-    ("STABLE_MAX_ADDS",      "follow",  "hidden", "int",     "immediate", config.STABLE_MAX_ADDS, "稳定档·最多加仓(legacy)", ""),
-    ("MID_MAX_ADDS",         "follow",  "hidden", "int",     "immediate", config.MID_MAX_ADDS, "中档·最多加仓(legacy)", ""),
-    ("HIGH_MAX_ADDS",        "follow",  "hidden", "int",     "immediate", config.HIGH_MAX_ADDS, "剧烈档·最多加仓(legacy)", ""),
+    ("STABLE_MAX_ADDS",      "follow",  "hidden", "int",     "immediate", config.STABLE_MAX_ADDS, "稳定档·硬上限加仓", ""),
+    ("MID_MAX_ADDS",         "follow",  "hidden", "int",     "immediate", config.MID_MAX_ADDS, "中档·硬上限加仓", ""),
+    ("HIGH_MAX_ADDS",        "follow",  "hidden", "int",     "immediate", config.HIGH_MAX_ADDS, "剧烈档·硬上限加仓", ""),
     ("ADD_FRAC",             "follow",  "yellow", "pct",     "immediate", config.ADD_FRAC * 100,
         "每次加仓比例", "每次加仓额 = 首开保证金 × 此%(50=首开一半)。BTC首开3%+3次加仓 → 满仓7.5%,不是叠成12%"),
     # ── 加仓策略引擎(B 逆向加仓)—— SMART_ADD 开=智能动态,关=老分档硬cap ──
@@ -302,9 +299,8 @@ def get_all(db):
 
 
 # ── engine-side reads: convert the UI-facing stored value back to engine units ──
-# pct/nullable are stored as UI percent (0.5 == 0.5%) -> engine wants the fraction (÷100). Everything
-# else is stored in engine units already (incl MIN_FOLLOW_SCORE, stored NATIVE; the API does the 0–100
-# display conversion only at its boundary). So the rule is purely type-based.
+# pct/nullable are stored as UI percent (0.5 == 0.5%) -> engine wants the fraction (÷100).
+# Everything else is stored in engine units already, so the rule is purely type-based.
 def _engine_val(spec, raw):
     ptype = spec[3]
     v = parse(raw, ptype)
@@ -334,40 +330,6 @@ def load_category(db, category):
 
 def load_follow(db):
     return load_category(db, "follow")
-
-
-def restore_follow_snapshot(db, values, *, keys=None, expected_current=None, stamp=None):
-    """Restore an engine-unit follow snapshot without committing.
-
-    Used only by the immutable strategy fail-closed path.  Percent/nullable
-    values are converted back to the UI-facing units stored in ``params``.
-    """
-    stamp = stamp or now_iso()
-    allowed = set(keys) if keys is not None else None
-    current = load_follow(db) if expected_current else {}
-    restored = 0
-    for spec in PARAM_SPEC:
-        key, category, _level, ptype = spec[:4]
-        if (category != "follow" or ptype == "display" or key not in values
-                or (allowed is not None and key not in allowed)):
-            continue
-        if key in (expected_current or {}):
-            actual = current.get(key)
-            expected = expected_current[key]
-            if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
-                if abs(float(actual) - float(expected)) > 1e-12:
-                    continue
-            elif actual != expected:
-                continue
-        value = values[key]
-        if value is not None and ptype in ("pct", "nullable"):
-            value = float(value) * 100.0
-        cur = db.execute(
-            "UPDATE params SET value=?,updated_at=? WHERE key=?",
-            (_to_text(value), stamp, key),
-        )
-        restored += int(cur.rowcount or 0)
-    return restored
 
 
 # DB scanner-param key -> the scan args-namespace attribute the scanner/metrics actually read.

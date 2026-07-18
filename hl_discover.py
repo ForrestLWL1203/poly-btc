@@ -140,8 +140,8 @@ def _serve_observer_cmds(db):
 
 
 def _serve_rescan(db):
-    """Always-on scan executor: runs a full stop-the-world scan when the dashboard queues a `rescan`
-    command OR when AUTO_SCAN_EVERY_H has elapsed since the last completed scan. SINGLE executor (never
+    """Always-on scan executor: runs a scan when the dashboard queues a `rescan`
+    command or the configured automatic cadence is due. A single executor (never
     two scans at once) -> the observer's HL rate budget is never double-hit. No systemd timeout ->
     a ~2h slow scan can't be killed mid-run. scanner.scan() writes progress/status + absorbs any rescan
     queued during the scan (no redundant back-to-back run)."""
@@ -149,7 +149,7 @@ def _serve_rescan(db):
     #                                                  (~25-wallet fill-poll) leaves free, ~1.7× faster than
     #                                                  10s. If the observer starts logging 429/rate errors,
     #                                                  bump back up — the observer is still the priority.
-    print("scan daemon: on-demand rescans + 24h auto-schedule + observer lifecycle ...", flush=True)
+    print("scan daemon: on-demand + scheduled scans; observer command bridge ready", flush=True)
     while True:
         try:
             _serve_observer_cmds(db)                 # process-level start/stop of the observer (supervisor role)
@@ -245,8 +245,8 @@ def main() -> int:
     s.add_argument("--no-harvest", action="store_true")
     s.add_argument("--full", dest="full_scan", action="store_true",
                    help="force a FULL 30d re-fetch for every candidate (else INCREMENTAL: only delta fills "
-                        "since each candidate's cursor, merged onto the cached window). A full re-sync also "
-                        "runs automatically every FULL_RESYNC_DAYS to self-heal any gap")
+                        "since each candidate's cursor, merged onto the cached window). Normal automatic "
+                        "self-healing uses the configured rolling refresh shards")
 
     w = sub.add_parser("watchlist", help="show our curated tiny leaderboard")
     w.add_argument("--top", type=int, default=40)

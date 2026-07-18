@@ -2,8 +2,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
-
 from hl import api_discovery, params, pipeline_audit, scanner, storage
 
 
@@ -124,7 +122,7 @@ class PipelineAuditTests(unittest.TestCase):
         )
         db.commit()
 
-        scanner.refresh_watchlist(db, "2026-07-07T00:00:00Z", source="scan")
+        scanner.refresh_watchlist(db, "2026-07-07T00:00:00Z")
 
         stages = self._dict_rows(db.execute(
             "SELECT stage,status,reason,addr,rank,payload_json FROM pipeline_audit "
@@ -273,18 +271,14 @@ class PipelineAuditTests(unittest.TestCase):
             status="ok", reason="published_core",
             payload={"generation": "g1", "action": "add", "core": 2, "challenger": 1},
         )
-        pipeline_audit.record_auto_tune_result(db, "2026-07-07T00:00:00Z", "scan", {
-            "status": "ok",
-            "applied": True,
-            "applied_sizing": True,
-            "applied_add": False,
-            "followed_n": 2,
-            "selected_mult": 1.2,
-            "params": {"MID_MARGIN_PCT": 0.04},
-            "add_params": {"ADD_GAP_K": 0.08},
-            "candidates": [{"score": 1}],
-            "add_candidates": [],
-        })
+        pipeline_audit._insert_event(
+            db, stamp="2026-07-07T00:00:00Z", source="scan", stage="tuner_finalize",
+            status="complete", reason="synchronous_quality_prefix_formation",
+            payload={
+                "portfolioReplay": {"status": "ok", "netPnl": 1200},
+                "selectionReplay": {"status": "ok", "refreshed": 3},
+            },
+        )
         pipeline_audit.record_prune_summary(db, "2026-07-07T00:00:00Z", "scan", {
             "stale_profiles": 2,
             "profiles": 2,
@@ -305,9 +299,9 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertNotIn("followLine", res)
         self.assertEqual(res["selection"]["core"], 2)
         self.assertEqual(res["selection"]["challenger"], 1)
-        self.assertTrue(res["autoTune"]["applied"])
-        self.assertTrue(res["autoTune"]["appliedSizing"])
-        self.assertFalse(res["autoTune"]["appliedAdd"])
+        self.assertEqual(res["autoTune"]["status"], "complete")
+        self.assertEqual(res["autoTune"]["portfolioReplay"]["netPnl"], 1200)
+        self.assertEqual(res["autoTune"]["selectionReplay"]["refreshed"], 3)
         self.assertEqual(res["workset"]["profiled"], 12)
         self.assertEqual(res["workset"]["new"], 4)
         self.assertEqual(res["workset"]["topRecheck"], 5)
@@ -347,11 +341,11 @@ class PipelineAuditTests(unittest.TestCase):
         db = self._db()
         self._insert_profiles(db)
         pipeline_audit.record_profile_snapshot(db, "2026-07-07T00:00:00Z", "scan", ["0xaaa"])
-        pipeline_audit.record_follow_line_choice(db, "2026-07-07T00:00:00Z", "scan", {
-            "status": "ok",
-            "reason": "portfolio_topn",
-            "line": 0.735,
-        })
+        pipeline_audit._insert_event(
+            db, stamp="2026-07-07T00:00:00Z", source="scan", stage="selection_summary",
+            status="ok", reason="published_core",
+            payload={"generation": "g1", "action": "keep", "core": 1, "challenger": 0},
+        )
         db.commit()
 
         res = api_discovery.ep_pipeline_summary(GuardedDb(db), {})

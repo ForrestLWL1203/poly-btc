@@ -8,7 +8,6 @@ under our own sizing/add/stop rules.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Mapping
 
 from . import config
@@ -36,12 +35,6 @@ def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
     return any(metrics.get(k) is not None for k in (
         "copy_expected_return", "copy_return_lcb", "copy_positive_probability",
     )) and c30 > 0
-
-
-@dataclass(frozen=True)
-class FollowScore:
-    score: float
-    detail: dict
 
 
 def evaluate_follow_eligibility(
@@ -428,52 +421,4 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "liquidationRate": liquidation_rate,
         "feeDrag": metrics.get("copy_bt_fee_drag"),
         "reasons": reasons,
-    }
-
-
-def choose_follow_line(
-    ranked: list[Mapping],
-    *,
-    min_score: float = 0.60,
-    min_n: int = 7,
-    target_n: int = 16,
-    max_n: int = 20,
-    cliff_gap: float = 0.045,
-) -> dict:
-    """Pick the automatic follow threshold from already-ranked wallets.
-
-    Quality decides first: if there is a visible score cliff, cut before the
-    cliff. If quality is flat, there is no honest score boundary, so the line is
-    set by capacity (`target_n`). Wallets below `min_score` are never included.
-    """
-    rows = [r for r in ranked if _num(r.get("follow_score", r.get("score"))) >= min_score]
-    if not rows:
-        return {"line": float(min_score), "count": 0, "reason": "no_wallet_above_floor"}
-
-    def inclusive_line(score: float) -> float:
-        score = _num(score)
-        return max(float(min_score), score - 1e-9 if score > min_score else score)
-
-    available = len(rows)
-    min_n = max(1, min(int(min_n), available))
-    max_n = max(min_n, min(int(max_n), available))
-    target_n = max(min_n, min(int(target_n), max_n))
-
-    for n in range(min_n, max_n):
-        prev_score = _num(rows[n - 1].get("follow_score", rows[n - 1].get("score")))
-        next_score = _num(rows[n].get("follow_score", rows[n].get("score")))
-        if prev_score - next_score >= cliff_gap:
-            return {
-                "line": inclusive_line(prev_score),
-                "count": n,
-                "reason": "quality_cliff",
-                "gap": prev_score - next_score,
-            }
-
-    chosen_score = _num(rows[target_n - 1].get("follow_score", rows[target_n - 1].get("score")))
-    return {
-        "line": inclusive_line(chosen_score),
-        "count": target_n,
-        "reason": "capacity_cap",
-        "gap": 0.0,
     }

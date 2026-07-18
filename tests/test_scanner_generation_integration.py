@@ -142,10 +142,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual([row["addr"] for row in ranked], ["0xstrong", "0xold"])
         self.assertEqual(ranked[0]["follow_score"], .90)
 
-    def test_selection_consistency_reuses_validated_params_without_retuning(self):
-        source = inspect.getsource(scanner.tune_published_generation)
-
-        self.assertIn("retune_formation=False", source)
 
     def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
         source = inspect.getsource(scanner._build_explicit_selection)
@@ -354,69 +350,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 ("0xaaa", "challenger", "challenger_weekly_return_watch"),
             ])
 
-    def test_generation_tune_seals_applied_params_with_membership_before_replay(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            db.execute(
-                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
-                "VALUES('g1','published',1,1,1,'now')"
-            )
-            db.commit()
-            tuned = {
-                "status": "ok", "applied": True,
-                "strategyRevision": "temporary", "parentStrategyRevision": "previous",
-            }
-            with patch.object(scanner, "_maybe_auto_tune_margins", return_value=tuned), \
-                    patch.object(scanner, "repair_published_selection", return_value={
-                        "status": "repaired", "generation": "g1", "core": 10,
-                    }) as repair, \
-                    patch.object(scanner.strategy_revision, "active_revision_id",
-                                 return_value="sealed"), \
-                    patch.object(scanner.auto_tune, "store_effective_portfolio_replay",
-                                 return_value={"status": "ok"}) as portfolio_replay, \
-                    patch.object(scanner, "refresh_selection_copy_replay",
-                                 return_value={"status": "ok"}) as selection_replay:
-                result = scanner.tune_published_generation(db, "g1")
-
-            self.assertEqual(result["selectionConsistency"]["status"], "repaired")
-            self.assertEqual(result["sealedStrategyRevision"], "sealed")
-            self.assertTrue(repair.call_args.kwargs["replace_existing"])
-            self.assertFalse(repair.call_args.kwargs["launch_tuner"])
-            portfolio_replay.assert_called_once()
-            selection_replay.assert_called_once()
-
-    def test_generation_tune_rolls_back_when_membership_seal_fails(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            db.execute(
-                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
-                "VALUES('g1','published',1,1,1,'now')"
-            )
-            db.commit()
-            tuned = {
-                "status": "ok", "applied": True,
-                "strategyRevision": "temporary", "parentStrategyRevision": "previous",
-            }
-            with patch.object(scanner, "_maybe_auto_tune_margins", return_value=tuned), \
-                    patch.object(scanner, "repair_published_selection",
-                                 side_effect=RuntimeError("strict replay failed")), \
-                    patch.object(scanner.strategy_revision, "reactivate_revision",
-                                 return_value={"revision": "previous"}) as rollback, \
-                    patch.object(scanner.auto_tune, "store_effective_portfolio_replay") as replay:
-                result = scanner.tune_published_generation(db, "g1")
-
-            self.assertEqual(result["status"], "error")
-            self.assertEqual(result["reason"], "selection_consistency_failed")
-            self.assertFalse(result["effectiveApplied"])
-            rollback.assert_called_once_with(
-                db, "previous", source="tune_selection_consistency",
-                expected_active_revision="previous", enqueue_reload=True,
-                restore_param_keys=(
-                    *scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS,
-                ),
-                expected_mutable_params={},
-            )
-            replay.assert_not_called()
 
     def test_warmup_backfill_targets_only_wallets_with_copy_evidence(self):
         with tempfile.TemporaryDirectory() as td:
@@ -462,7 +395,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[]), \
-                    patch.object(scanner, "_launch_async_tuner") as launch, \
                     patch.object(scanner, "_prune_discovery_cache") as prune:
                 scanner.scan(db, scan_args())
 
@@ -475,7 +407,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(current, "old")
             self.assertEqual(failed, ("failed", 0))
             self.assertEqual(db.execute("SELECT addr FROM leaderboard").fetchone()[0], "0xold")
-            launch.assert_not_called()
             prune.assert_not_called()
 
     def test_complete_scan_publishes_generation_and_explicit_challenger(self):
@@ -519,7 +450,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "now_iso", side_effect=scan_time), \
                     patch.object(scanner.generation, "now_iso", return_value="2026-01-01T00:01:00Z"), \
-                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}) as launch, \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
 
@@ -535,7 +465,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertGreater(current[3], current[4])
             self.assertIsNone(selection_row)
             self.assertEqual(db.execute("SELECT DISTINCT generation FROM leaderboard").fetchone()[0], current[0])
-            launch.assert_not_called()
 
     def test_complete_profiles_remain_resumable_when_portfolio_formation_fails(self):
         with tempfile.TemporaryDirectory() as td:
@@ -665,7 +594,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_windows), \
-                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
 
@@ -677,29 +605,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row, ("0xaaa", "core"))
             registry = db.execute(
-                "SELECT core_nomination_streak FROM wallet_registry WHERE addr='0xaaa'"
+                "SELECT state,current_role FROM wallet_registry WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(registry, (1,))
+            self.assertEqual(registry, ("core", "core"))
 
-    def test_systemd_scan_launches_tuner_in_independent_transient_unit(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            completed = SimpleNamespace(returncode=0, stderr="")
-
-            with patch.dict(scanner.os.environ, {"INVOCATION_ID": "scan-service"}), \
-                    patch.object(scanner.shutil, "which", return_value="/usr/bin/systemd-run"), \
-                    patch.object(scanner.subprocess, "run", return_value=completed) as run:
-                result = scanner._launch_async_tuner(db, "generation-1", "2026-01-02T00:00:00Z")
-
-            command = run.call_args.args[0]
-            self.assertEqual(result["status"], "launched")
-            self.assertTrue(result["unit"].startswith("hl-tune-"))
-            self.assertIn("--property=MemoryMax=512M", command)
-            self.assertIn("optimize", command)
-            self.assertNotIn("tune", command)
-            self.assertIn("--generation", command)
-            self.assertIn("generation-1", command)
 
     def test_repair_empty_published_selection_uses_cached_generation_and_launches_tuner(self):
         with tempfile.TemporaryDirectory() as td:
@@ -737,8 +646,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 action="bootstrap", added=("0xaaa",),
             )
 
-            with patch.object(scanner, "_build_explicit_selection", return_value=([core_row], marginal)) as build, \
-                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}) as launch:
+            with patch.object(scanner, "_build_explicit_selection", return_value=([core_row], marginal)) as build:
                 result = scanner.repair_published_selection(db, "g1", "2026-01-03")
 
             self.assertEqual(result["status"], "repaired")
@@ -752,7 +660,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             build.assert_called_once()
             self.assertTrue(build.call_args.kwargs["force_cold_bootstrap"])
             self.assertEqual(result["tuner"]["status"], "complete")
-            launch.assert_not_called()
 
     def test_repair_existing_selection_refreshes_watchlist_before_rebuild(self):
         with tempfile.TemporaryDirectory() as td:
@@ -791,8 +698,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 self.assertFalse(kwargs["force_cold_bootstrap"])
                 return [core_row], None
 
-            with patch.object(scanner, "_build_explicit_selection", side_effect=build), \
-                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}):
+            with patch.object(scanner, "_build_explicit_selection", side_effect=build):
                 result = scanner.repair_published_selection(
                     db, "g1", "2026-01-03", replace_existing=True,
                 )
@@ -826,18 +732,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.commit()
 
-            def decide(evidences, _policy):
-                evidence = list(evidences)
-                self.assertEqual(evidence[0].current_role, "challenger")
-                self.assertEqual(evidence[0].consecutive_complete_good, 0)
-                return [scanner.selection.LifecycleDecision(
-                    "0xaaa", "challenger", "challenger", "challenger_evidence",
-                )]
-
-            with patch.object(scanner.selection, "decide_lifecycles", side_effect=decide):
-                rows, marginal = scanner._build_explicit_selection(
-                    db, "g1", "2026-01-03", 1000, force_cold_bootstrap=True,
-                )
+            rows, marginal = scanner._build_explicit_selection(
+                db, "g1", "2026-01-03", 1000, force_cold_bootstrap=True,
+            )
 
             self.assertIsNone(marginal)
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
@@ -1156,7 +1053,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row("0xauto")]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
-                    patch.object(scanner, "_launch_async_tuner", return_value={"status": "launched"}), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
 

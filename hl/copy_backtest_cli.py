@@ -132,18 +132,8 @@ def run_wallet(db, addr: str, days: int = 30, start_ms: int | None = None) -> di
     return result
 
 
-def _param_float(db, key, default):
-    try:
-        row = db.execute("SELECT value FROM params WHERE key=?", (key,)).fetchone()
-        return float(row[0]) if row and row[0] is not None else default
-    except (sqlite3.Error, TypeError, ValueError):
-        return default
-
-
-def followed_wallets(db, limit: int, min_score: float | None = None) -> list[str]:
-    # Once an explicit generation exists it is the only production membership
-    # truth, including an intentionally empty Core.  The legacy score line is
-    # allowed only for databases predating generation-based selection.
+def followed_wallets(db, limit: int) -> list[str]:
+    """Return enabled Core wallets from the current published generation."""
     try:
         generation = db.execute(
             "SELECT generation FROM scan_generation "
@@ -164,17 +154,7 @@ def followed_wallets(db, limit: int, min_score: float | None = None) -> list[str
             ]
     except sqlite3.Error:
         pass
-    line = config.MIN_FOLLOW_SCORE if min_score is None else min_score
-    if min_score is None:
-        line = _param_float(db, "MIN_FOLLOW_SCORE", line)
-    return [
-        r[0]
-        for r in db.execute(
-            "SELECT w.addr FROM watchlist w LEFT JOIN target_controls c ON c.addr=w.addr "
-            "WHERE COALESCE(c.enabled,1)=1 AND w.score>=? ORDER BY w.rank LIMIT ?",
-            (line, int(limit)),
-        ).fetchall()
-    ]
+    return []
 
 
 def compact_row(r: dict) -> dict:
@@ -248,9 +228,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Replay cached Hyperliquid fills through the copy engine rules.")
     ap.add_argument("--db", default="data/hl.db")
     ap.add_argument("--addr", action="append", default=[], help="wallet address; repeatable")
-    ap.add_argument("--followed", action="store_true", help="run enabled watchlist wallets above the follow line")
+    ap.add_argument("--followed", action="store_true", help="run enabled wallets in the published Core")
     ap.add_argument("--limit", type=int, default=config.MAX_TARGETS)
-    ap.add_argument("--min-score", type=float, default=None, help="native score line, e.g. 0.66")
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--positions", type=int, default=0, help="also print top N high-add-dependency positions")
     ap.add_argument("--json", action="store_true")
@@ -259,7 +238,7 @@ def main(argv=None):
     db = sqlite3.connect(args.db)
     addrs = [(a or "").lower() for a in args.addr]
     if args.followed or not addrs:
-        addrs.extend(a for a in followed_wallets(db, args.limit, args.min_score) if a not in addrs)
+        addrs.extend(a for a in followed_wallets(db, args.limit) if a not in addrs)
     rows = [run_wallet(db, a, days=args.days) for a in addrs]
     rows.sort(key=lambda r: (r.get("copy_net_pnl") or 0.0))
     if args.json:

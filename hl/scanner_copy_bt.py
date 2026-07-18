@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 
 from . import config, params
 from .copy_backtest import run_backtest, slice_backtest_result

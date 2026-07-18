@@ -32,8 +32,6 @@ class CopyPolicy:
     strong_min_evidence_days: int
     recent_warning_loss_ratio: float
     recent_hard_loss_ratio: float
-    entry_max_open_age_h: float
-    keep_max_open_age_h: float
     min_actionable_open_rate: float
     min_capacity_fit: float
     min_marginal_gain: float
@@ -84,8 +82,6 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         strong_min_evidence_days=int(_value(values, "CORE_STRONG_MIN_EVIDENCE_DAYS", 10)),
         recent_warning_loss_ratio=float(_value(values, "CORE_RECENT_WARNING_LOSS_RATIO", 0.10)),
         recent_hard_loss_ratio=float(_value(values, "CORE_RECENT_HARD_LOSS_RATIO", 0.25)),
-        entry_max_open_age_h=float(_value(values, "CORE_ENTRY_MAX_OPEN_AGE_H", 24.0)),
-        keep_max_open_age_h=float(_value(values, "CORE_KEEP_MAX_OPEN_AGE_H", 72.0)),
         min_actionable_open_rate=float(_value(values, "SELECTION_MIN_ACTIONABLE_RATE", 0.70)),
         min_capacity_fit=float(_value(values, "SELECTION_MIN_CAPACITY_FIT", 0.85)),
         min_marginal_gain=float(_value(values, "SELECTION_MIN_RELATIVE_GAIN", 0.05)),

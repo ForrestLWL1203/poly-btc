@@ -186,25 +186,6 @@ def _scan_progress_scanning(db_path):
         return False
 
 
-def hours_since_last_scan(db_path):
-    """Hours since the last COMPLETED scan, or None when no scan has completed yet.
-
-    The "never scanned" case must not look overdue. First-run discovery is intentionally manual so
-    launcher/local deployments do not start a silent incremental scan before the operator clicks
-    full collection.
-    """
-    try:
-        c = _db(db_path)
-        r = c.execute("SELECT MAX(finished_at) FROM scan_runs").fetchone()
-        c.close()
-        if not r or not r[0]:
-            return None
-        last = datetime.strptime(r[0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - last).total_seconds() / 3600.0
-    except (sqlite3.Error, ValueError):
-        return 0.0
-
-
 # ── domain API (called by the dashboard) — SYSTEMD on the VPS, DETACHED-SPAWN locally ────────
 # On the production VPS the dashboard runs as root and drives real systemd units (hl-observe
 # Restart=always + boot-start, hl-scan.timer daily) — OS-supervised, no in-process SPOF. On a box
@@ -353,10 +334,6 @@ def reconcile(db_path):
         pid = _read_pid(db_path, OBSERVER)
         if pid:
             _clear_pid(db_path, OBSERVER)        # one-time cleanup of the pre-systemd naked pidfile
-
-
-def auto_scan_tick(db_path):
-    return   # no dashboard auto-scan; VPS daily scans are hl-scan.timer, local scans are manual
 
 
 def start_auto_scan_ticker(db_path, interval=60.0, stop_event=None):

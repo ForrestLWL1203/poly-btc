@@ -40,14 +40,6 @@ class CopyEvidence:
     recent_return_7d: float | None
 
 
-@dataclass(frozen=True)
-class PortfolioPnlEvidence:
-    net_pnl: float
-    pnl_lcb: float
-    positive_probability: float
-    evidence_days: int
-
-
 def _episode_rows(positions: Iterable[Mapping]) -> list[tuple[int, float]]:
     rows = []
     for position in positions or ():
@@ -126,46 +118,4 @@ def summarize_copy_evidence(
         evidence_days=len(blocks),
         recent_return_14d=_recent_mean(rows, now_ms, 14),
         recent_return_7d=_recent_mean(rows, now_ms, 7),
-    )
-
-
-def summarize_portfolio_pnl(
-    positions: Iterable[Mapping],
-    *,
-    seed: str = "",
-    prior_days: int = 3,
-    bootstrap_draws: int = 800,
-    lower_quantile: float = 0.05,
-) -> PortfolioPnlEvidence:
-    """Daily-block bootstrap for shared-account portfolio PnL.
-
-    This keeps dollar PnL where it belongs: portfolio capital allocation.  It
-    is deliberately separate from per-wallet ranking, which uses normalized
-    return.  Correlated closes on the same day remain one resampling block.
-    """
-    days: dict[int, float] = {}
-    net = 0.0
-    for position in positions or ():
-        closed_at = int(_finite(position.get("closed_at")))
-        if closed_at <= 0:
-            continue
-        pnl = _finite(position.get("net_pnl"))
-        net += pnl
-        days[closed_at // DAY_MS] = days.get(closed_at // DAY_MS, 0.0) + pnl
-    observed = [days[day] for day in sorted(days)]
-    if not observed:
-        return PortfolioPnlEvidence(0.0, 0.0, 0.0, 0)
-    population = observed + [0.0] * max(0, int(prior_days))
-    digest = hashlib.sha256(("portfolio:" + str(seed)).encode("utf-8")).digest()
-    rng = random.Random(int.from_bytes(digest[:8], "big"))
-    draws = []
-    for _ in range(max(100, int(bootstrap_draws))):
-        draws.append(sum(population[rng.randrange(len(population))] for _ in range(len(population))))
-    draws.sort()
-    index = min(len(draws) - 1, max(0, int(math.floor(lower_quantile * (len(draws) - 1)))))
-    return PortfolioPnlEvidence(
-        net_pnl=net,
-        pnl_lcb=draws[index],
-        positive_probability=sum(1 for value in draws if value > 0.0) / len(draws),
-        evidence_days=len(observed),
     )

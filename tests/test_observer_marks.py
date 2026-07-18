@@ -878,7 +878,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            obs = Observer(db, [], {}, top_n=10, min_score=0.5)
+            obs = Observer(db, [], {}, top_n=10)
 
             obs._reload_targets(init=True)
 

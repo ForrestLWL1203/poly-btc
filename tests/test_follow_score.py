@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from hl.follow_score import choose_follow_line, compute_follow_score, evaluate_follow_eligibility
+from hl.follow_score import compute_follow_score, evaluate_follow_eligibility
 
 
 def evidence(**overrides):
@@ -393,13 +393,6 @@ class FollowScoreTests(unittest.TestCase):
         ))
         self.assertLess(degraded, baseline)
         self.assertTrue(any("归一化收益为负" in reason for reason in detail["reasons"]))
-
-    def test_choose_follow_line_remains_migration_fallback(self):
-        ranked = [{"follow_score": s} for s in (0.90, 0.86, 0.83, 0.80, 0.70, 0.68)]
-        choice = choose_follow_line(ranked, min_score=0.50, min_n=3, target_n=5, max_n=6, cliff_gap=0.08)
-        self.assertEqual(choice["reason"], "quality_cliff")
-        self.assertEqual(choice["count"], 4)
-
 
 if __name__ == "__main__":
     unittest.main()

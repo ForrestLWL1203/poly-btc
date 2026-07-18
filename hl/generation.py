@@ -1,8 +1,7 @@
 """Atomic scanner-generation staging, validation and publication helpers.
 
-The legacy scanner writes discovery tables directly.  vNext callers stage a leaderboard snapshot and all
-generation-scoped selections first, then publish them in one SQLite transaction.  Helpers deliberately do
-not commit: callers can include profile/selection writes in the same ``with db:`` block.
+Callers stage a leaderboard snapshot and all generation-scoped selections first, then publish them in one
+SQLite transaction. Helpers deliberately do not commit so profile and selection writes can share it.
 """
 
 from __future__ import annotations
@@ -274,22 +273,6 @@ def record_leaderboard_validation(
     )
     if cur.rowcount == 0:
         raise KeyError(f"unknown generation: {generation}")
-
-
-def stage_and_validate_leaderboard(
-    db: sqlite3.Connection,
-    generation: str,
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    previous_count: int | None = None,
-    fetched_at: str | None = None,
-) -> LeaderboardValidation:
-    rows = list(rows)
-    previous_count = previous_published_row_count(db) if previous_count is None else int(previous_count)
-    validation = validate_leaderboard_rows(rows, previous_count=previous_count)
-    stage_leaderboard_rows(db, generation, rows, fetched_at=fetched_at)
-    record_leaderboard_validation(db, generation, validation, fetched_at=fetched_at)
-    return validation
 
 
 def record_workset(

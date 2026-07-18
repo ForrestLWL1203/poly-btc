@@ -3,7 +3,6 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from hl import scanner, selection, storage
 from hl.observer import Observer, load_targets
@@ -43,7 +42,7 @@ class SelectionTests(unittest.TestCase):
         db.execute("INSERT INTO episode (addr,coin,open_ms,seq) VALUES ('0xcore','BTC',1,0)")
         db.commit()
 
-        addrs, seeds = load_targets(db, 10, 0.90)
+        addrs, seeds = load_targets(db, 10)
 
         self.assertEqual(addrs, ["0xcore"])
         self.assertEqual(seeds, {"0xcore": {"BTC"}})
@@ -53,7 +52,7 @@ class SelectionTests(unittest.TestCase):
         db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xlegacy',.99,'now')")
         self._published(db)
 
-        addrs, _ = load_targets(db, 10, 0.5)
+        addrs, _ = load_targets(db, 10)
 
         self.assertEqual(addrs, [])
         self.assertEqual(selection.published_core_addrs(db), [])
@@ -63,7 +62,7 @@ class SelectionTests(unittest.TestCase):
         db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0xlegacy',.8,'now')")
         db.commit()
 
-        addrs, _ = load_targets(db, 10, 0.7)
+        addrs, _ = load_targets(db, 10)
 
         self.assertEqual(addrs, [])
         self.assertIsNone(selection.latest_published_generation(db))
@@ -122,54 +121,6 @@ class SelectionTests(unittest.TestCase):
             data_status="valid", evidence_status="qualified", model_version="m1", policy_version="p1",
         )])
 
-    def test_lifecycle_entry_keep_and_confirmed_soft_exit(self):
-        day = 24 * 60 * 60 * 1000
-        now = 100 * day
-        entry = selection.decide_lifecycle(selection.LifecycleEvidence(
-            addr="0xA", now_ms=now, consecutive_complete_good=2,
-            last_actionable_open_ms=now - day, oos_closed_n=7,
-            positive_probability=.70, challenger_since_ms=now - day,
-        ))
-        self.assertEqual(entry.role, selection.CORE)
-
-        pending = selection.decide_lifecycle(selection.LifecycleEvidence(
-            addr="0xB", now_ms=now, current_role="core", soft_bad=True,
-            consecutive_soft_bad=1, last_actionable_open_ms=now,
-        ))
-        self.assertEqual(pending.role, selection.CORE)
-
-        exited = selection.decide_lifecycle(selection.LifecycleEvidence(
-            addr="0xB", now_ms=now, current_role="core", soft_bad=True,
-            consecutive_soft_bad=2, last_actionable_open_ms=now, has_open_copy=True,
-        ))
-        self.assertEqual(exited.role, selection.EXIT_ONLY)
-
-    def test_hard_exits_immediate_and_soft_changes_are_limited(self):
-        now = 10 * 24 * 60 * 60 * 1000
-        rows = [
-            selection.LifecycleEvidence("0xhard", now, current_role="core", hard_exit=True),
-            selection.LifecycleEvidence("0xsoft1", now, current_role="core", soft_bad=True,
-                                                consecutive_soft_bad=2, last_actionable_open_ms=now),
-            selection.LifecycleEvidence("0xsoft2", now, current_role="core", soft_bad=True,
-                                                consecutive_soft_bad=2, last_actionable_open_ms=now),
-        ]
-
-        decisions = {d.addr: d for d in selection.decide_lifecycles(rows)}
-
-        self.assertEqual(decisions["0xhard"].role, selection.REJECTED)
-        self.assertEqual(decisions["0xsoft1"].role, selection.CHALLENGER)
-        self.assertEqual(decisions["0xsoft2"].role, selection.CORE)
-        self.assertEqual(decisions["0xsoft2"].reason, "soft_change_budget")
-
-    @staticmethod
-    def _transition_policy():
-        return SimpleNamespace(
-            entry_max_open_age_h=24.0,
-            keep_max_open_age_h=72.0,
-            min_closed_7d=7,
-            entry_positive_probability=.70,
-        )
-
     @staticmethod
     def _transition_metrics(net):
         return selection.PortfolioMetrics(
@@ -177,92 +128,6 @@ class SelectionTests(unittest.TestCase):
             net_pnl=net, stress_net_pnl=net, drawdown_dollars=10,
             risk_adjusted_utility=net,
         )
-
-    def test_stable_core_requires_three_nominations_and_48_hours(self):
-        day = 86_400_000
-        now = 3 * day
-        profile = {
-            "addr": "0xnew", "status": "active", "profile_generation": "g3",
-            "data_status": "valid", "last_copyable_open_ms": now,
-            "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
-            "follow_score": .9,
-        }
-        registry = {"0xnew": {
-            "core_nomination_streak": 2,
-            "core_nomination_started_at": "1970-01-02T00:00:00Z",
-            "last_core_signal_generation": "g2",
-        }}
-
-        def evaluate(addrs):
-            return self._transition_metrics(100 if addrs else 0)
-
-        result = scanner._stable_core_transition(
-            [profile], generation_id="g3", stamp="1970-01-04T00:00:00Z", now_ms=now,
-            previous_roles={}, registry=registry, controls={}, held=set(),
-            desired_order=("0xnew",), strict_evaluate=evaluate,
-            validate_fold=lambda addrs, *_args: evaluate(addrs),
-            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
-        )
-
-        self.assertEqual(result["selected"], ("0xnew",))
-        self.assertEqual(result["reasons"]["0xnew"], "core_promoted_after_confirmation")
-        self.assertEqual(result["signals"]["0xnew"]["state"].nomination_streak, 3)
-
-    def test_stable_core_keeps_temporary_weakness_and_resets_on_recovery(self):
-        day = 86_400_000
-        now = 3 * day
-        base = {
-            "addr": "0xcore", "status": "active", "profile_generation": "g3",
-            "data_status": "valid", "last_copyable_open_ms": now,
-            "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
-            "follow_score": .8,
-        }
-        evaluate = lambda addrs: self._transition_metrics(100 if addrs else 0)
-        common = dict(
-            generation_id="g3", stamp="1970-01-04T00:00:00Z", now_ms=now,
-            previous_roles={"0xcore": "core"}, controls={}, held=set(),
-            strict_evaluate=evaluate, validate_fold=lambda addrs, *_args: evaluate(addrs),
-            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
-        )
-
-        pending = scanner._stable_core_transition(
-            [base], registry={}, desired_order=(), **common,
-        )
-        recovered = scanner._stable_core_transition(
-            [base], registry={"0xcore": {
-                "core_omission_streak": 2,
-                "core_omission_started_at": "1970-01-02T00:00:00Z",
-                "last_core_signal_generation": "g2",
-            }}, desired_order=("0xcore",), **common,
-        )
-
-        self.assertEqual(pending["selected"], ("0xcore",))
-        self.assertEqual(pending["reasons"]["0xcore"], "core_weak_pending_1_of_3")
-        self.assertEqual(recovered["selected"], ("0xcore",))
-        self.assertEqual(recovered["reasons"]["0xcore"], "core_desired_keep")
-        self.assertEqual(recovered["signals"]["0xcore"]["state"].omission_streak, 0)
-
-    def test_stable_core_inactivity_exits_without_performance_grace(self):
-        hour = 3_600_000
-        now = 100 * hour
-        profile = {
-            "addr": "0xidle", "status": "active", "profile_generation": "g2",
-            "data_status": "valid", "last_copyable_open_ms": now - 73 * hour,
-            "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
-            "follow_score": .8,
-        }
-        evaluate = lambda addrs: self._transition_metrics(100 if addrs else 0)
-
-        result = scanner._stable_core_transition(
-            [profile], generation_id="g2", stamp="1970-01-05T04:00:00Z", now_ms=now,
-            previous_roles={"0xidle": "core"}, registry={}, controls={}, held=set(),
-            desired_order=("0xidle",), strict_evaluate=evaluate,
-            validate_fold=lambda addrs, *_args: evaluate(addrs),
-            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
-        )
-
-        self.assertEqual(result["selected"], ())
-        self.assertEqual(result["reasons"]["0xidle"], "core_inactive_72h")
 
     def test_quality_first_transition_removes_only_actual_shared_account_drag(self):
         profiles = [
@@ -275,7 +140,7 @@ class SelectionTests(unittest.TestCase):
 
         def run(nets):
             return scanner._quality_first_core_transition(
-                profiles, generation_id="g2", previous_roles={}, controls={}, held=set(),
+                profiles, generation_id="g2", previous_roles={}, controls={},
                 desired_order=("0xa", "0xb"),
                 strict_evaluate=lambda addrs: self._transition_metrics(nets[tuple(sorted(addrs))]),
             )
@@ -313,7 +178,7 @@ class SelectionTests(unittest.TestCase):
         }
 
         result = scanner._quality_first_core_transition(
-            profiles, generation_id="g2", previous_roles={}, controls={}, held=set(),
+            profiles, generation_id="g2", previous_roles={}, controls={},
             desired_order=("0xa", "0xb"),
             strict_evaluate=lambda addrs: metrics[tuple(sorted(addrs))],
         )
@@ -321,44 +186,6 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["selected"], ("0xa",))
         self.assertEqual(result["looRemoved"], ("0xb",))
         self.assertEqual(result["reasons"]["0xb"], "portfolio_negative_incremental_net")
-
-    def test_stable_core_replaces_only_confirmed_weak_wallet(self):
-        day = 86_400_000
-        now = 3 * day
-        profiles = [
-            {"addr": addr, "status": "active", "profile_generation": "g3",
-             "data_status": "valid", "last_copyable_open_ms": now,
-             "copy_bt_7d_closed_n": 9, "copy_positive_probability": .8,
-             "follow_score": score}
-            for addr, score in (("0xa", .7), ("0xb", .8), ("0xc", .9))
-        ]
-        nets = {
-            (): 0, ("0xa",): 10, ("0xb",): 90, ("0xc",): 50,
-            ("0xa", "0xb"): 100, ("0xa", "0xc"): 60,
-            ("0xb", "0xc"): 130, ("0xa", "0xb", "0xc"): 102,
-        }
-        evaluate = lambda addrs: self._transition_metrics(nets[tuple(sorted(addrs))])
-        registry = {
-            "0xa": {"core_omission_streak": 2,
-                     "core_omission_started_at": "1970-01-02T00:00:00Z",
-                     "last_core_signal_generation": "g2"},
-            "0xc": {"core_nomination_streak": 2,
-                     "core_nomination_started_at": "1970-01-02T00:00:00Z",
-                     "last_core_signal_generation": "g2"},
-        }
-
-        result = scanner._stable_core_transition(
-            profiles, generation_id="g3", stamp="1970-01-04T00:00:00Z", now_ms=now,
-            previous_roles={"0xa": "core", "0xb": "core"}, registry=registry,
-            controls={}, held=set(), desired_order=("0xb", "0xc"),
-            strict_evaluate=evaluate, validate_fold=lambda addrs, *_args: evaluate(addrs),
-            constraints=selection.SelectionConstraints(), copy_policy=self._transition_policy(),
-        )
-
-        self.assertEqual(set(result["selected"]), {"0xb", "0xc"})
-        self.assertEqual(result["softAction"]["action"], "replace")
-        self.assertEqual(result["reasons"]["0xa"], "core_replaced_after_confirmation")
-        self.assertEqual(result["reasons"]["0xc"], "core_promoted_after_confirmation")
 
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,
@@ -369,296 +196,6 @@ class SelectionTests(unittest.TestCase):
             max_drawdown=dd, peak_deploy_pct=deploy, cost_drag_ratio=cost,
         )
 
-    def test_marginal_selector_can_choose_one_or_keep_empty(self):
-        metrics = {
-            (): self._metrics(0, stress=0),
-            ("0xbad",): self._metrics(20, cost=.40),
-            ("0xgood",): self._metrics(10),
-        }
-        result = selection.select_marginal_core(
-            [], ["0xbad", "0xgood"], lambda addrs: metrics[addrs],
-        )
-        self.assertEqual(result.selected, ("0xgood",))
-        self.assertEqual(result.action, "add")
-
-        empty = selection.select_marginal_core([], [], lambda _: self._metrics(0, stress=0))
-        self.assertEqual(empty.selected, ())
-
-    def test_marginal_selector_replacement_requires_all_constraints(self):
-        values = {
-            ("0xold",): self._metrics(100),
-            ("0xnew",): self._metrics(106),
-            ("0xrisky",): self._metrics(150, dd=.12),
-        }
-        result = selection.select_marginal_core(
-            ["0xold"], ["0xnew", "0xrisky"], lambda addrs: values[addrs],
-            selection.SelectionConstraints(max_targets=1),
-        )
-        self.assertEqual(result.selected, ("0xnew",))
-        self.assertEqual(result.removed, ("0xold",))
-
-    def test_cold_bootstrap_adds_every_positive_marginal_wallet(self):
-        values = {
-            (): self._metrics(0, stress=0, dd=0, deploy=0, cost=0, latency=0),
-            ("0xa",): self._metrics(10, dd=.005),
-            ("0xb",): self._metrics(8, dd=.004),
-            ("0xbad",): self._metrics(50, cost=.40),
-            ("0xa", "0xb"): self._metrics(20, dd=.008),
-            ("0xa", "0xbad"): self._metrics(60, cost=.40),
-            ("0xb", "0xbad"): self._metrics(58, cost=.40),
-            ("0xa", "0xb", "0xbad"): self._metrics(70, cost=.40),
-        }
-
-        result = selection.select_bootstrap_core(
-            ["0xbad", "0xb", "0xa"], lambda addrs: values[addrs],
-        )
-
-        self.assertEqual(result.selected, ("0xa", "0xb"))
-        self.assertEqual(result.added, ("0xa", "0xb"))
-        self.assertEqual(result.action, "bootstrap")
-
-    def test_ranked_economic_selector_prices_liquidation_through_pnl_and_drawdown(self):
-        def economic(net, dd, liqs=0):
-            drawdown_dollars = dd * 10_000
-            return selection.PortfolioMetrics(
-                net, net, liqs, .9, .9, dd, .6, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=drawdown_dollars,
-                risk_adjusted_utility=net - drawdown_dollars,
-            )
-
-        values = {
-            (): economic(0, 0),
-            ("0xprofitable",): economic(3_000, .10, liqs=2),
-            ("0xrisky",): economic(2_000, .25, liqs=1),
-            ("0xprofitable", "0xrisky"): economic(3_500, .25, liqs=3),
-        }
-        result = selection.select_ranked_positive_core(
-            ["0xprofitable", "0xrisky"], lambda addrs: values[addrs],
-        )
-
-        self.assertEqual(result.selected, ("0xprofitable",))
-        self.assertEqual(result.metrics.liquidations, 2)
-        self.assertEqual(
-            selection.portfolio_economic_rejection_reason(
-                values[("0xprofitable",)], values[("0xprofitable", "0xrisky")],
-                selection.SelectionConstraints(),
-            ),
-            "portfolio_risk_adjusted_gain_low",
-        )
-
-    def test_ranked_selector_can_replace_two_lower_quality_wallets(self):
-        def economic(net, dd=.05):
-            drawdown_dollars = dd * 10_000
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .9, dd, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=drawdown_dollars,
-                risk_adjusted_utility=net - drawdown_dollars,
-            )
-
-        values = {
-            ("0xlow1", "0xlow2"): economic(100),
-            ("0xhigh", "0xlow1"): economic(104),
-            ("0xhigh", "0xlow2"): economic(103),
-            ("0xhigh",): economic(130),
-        }
-        result = selection.select_ranked_positive_core(
-            ["0xhigh"],
-            lambda addrs: values[addrs],
-            selection.SelectionConstraints(max_targets=2),
-            initial_core=["0xlow1", "0xlow2"],
-            score_by_addr={"0xhigh": .90, "0xlow1": .60, "0xlow2": .50},
-            individual_net_by_addr={"0xhigh": 30, "0xlow1": 10, "0xlow2": 20},
-            max_replace_out=2,
-        )
-
-        self.assertEqual(result.selected, ("0xhigh",))
-        self.assertEqual(result.removed, ("0xlow1", "0xlow2"))
-        self.assertEqual(result.action, "rebalance")
-
-    def test_ranked_selector_does_not_replace_higher_profit_incumbent(self):
-        def economic(net):
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .9, 0, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        values = {("0xold",): economic(100)}
-        result = selection.select_ranked_positive_core(
-            ["0xnew"],
-            lambda addrs: values[addrs],
-            selection.SelectionConstraints(max_targets=1),
-            initial_core=["0xold"],
-            score_by_addr={"0xnew": .90, "0xold": .50},
-            individual_net_by_addr={"0xnew": 10, "0xold": 20},
-        )
-
-        self.assertEqual(result.selected, ("0xold",))
-        self.assertEqual(result.evaluated, 1)
-
-    def test_ranked_quality_upgrade_still_requires_portfolio_gain(self):
-        def economic(net):
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .9, 0, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        values = {
-            ("0xold",): economic(100),
-            ("0xnew",): economic(80),
-        }
-        result = selection.select_ranked_positive_core(
-            ["0xnew"],
-            lambda addrs: values[addrs],
-            selection.SelectionConstraints(max_targets=1),
-            initial_core=["0xold"],
-            score_by_addr={"0xnew": .90, "0xold": .50},
-            individual_net_by_addr={"0xnew": 30, "0xold": 20},
-        )
-
-        self.assertEqual(result.selected, ("0xold",))
-        self.assertEqual(result.removed, ())
-
-    def test_smart_core_search_builds_seed_then_stops_on_zero_marginal(self):
-        nets = {
-            (): 0,
-            ("0xa",): 10, ("0xb",): 9, ("0xc",): 8, ("0xd",): 7,
-            ("0xa", "0xb"): 12, ("0xa", "0xc"): 25, ("0xa", "0xd"): 11,
-            ("0xb", "0xc"): 13, ("0xb", "0xd"): 10, ("0xc", "0xd"): 9,
-            ("0xa", "0xb", "0xc"): 26,
-            ("0xa", "0xb", "0xd"): 13,
-            ("0xa", "0xc", "0xd"): 30,
-            ("0xb", "0xc", "0xd"): 14,
-            ("0xa", "0xb", "0xc", "0xd"): 30,
-        }
-
-        def evaluate(addrs):
-            net = nets[addrs]
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        result = selection.search_smart_core(
-            ["0xa", "0xb", "0xc", "0xd"], evaluate,
-            selection.SelectionConstraints(max_targets=4),
-            seed_target=2, beam_width=2, swap_passes=1, max_replace_out=2,
-        )
-
-        self.assertEqual(result.selected, ("0xa", "0xc", "0xd"))
-        self.assertEqual(result.metrics.net_pnl, 30)
-        self.assertEqual(result.search_meta["selectedCount"], 3)
-        self.assertEqual(result.search_meta["stopReason"], "no_positive_expansion_marginal")
-
-    def test_smart_core_seed_target_is_not_a_minimum_quota(self):
-        def evaluate(addrs):
-            net = 10 if addrs == ("0xa",) else 9 if addrs else 0
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        result = selection.search_smart_core(
-            ["0xa", "0xb"], evaluate,
-            selection.SelectionConstraints(max_targets=2),
-            seed_target=2, beam_width=1, max_replace_out=1,
-        )
-
-        self.assertEqual(result.selected, ("0xa",))
-        self.assertEqual(result.search_meta["stopReason"], "no_positive_seed_marginal")
-
-    def test_smart_core_validates_final_sizes_with_effective_params(self):
-        neutral = {
-            (): 0, ("0xa",): 10, ("0xb",): 9,
-            ("0xa", "0xb"): 20,
-        }
-        effective = {(): 0, ("0xa",): 30, ("0xb",): 15, ("0xa", "0xb"): 25}
-
-        def metrics(net):
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        result = selection.search_smart_core(
-            ["0xa", "0xb"],
-            lambda addrs: metrics(neutral[addrs]),
-            selection.SelectionConstraints(max_targets=2),
-            seed_target=1,
-            beam_width=2,
-            max_replace_out=1,
-            validation_evaluator=lambda addrs: metrics(effective[addrs]),
-        )
-
-        self.assertEqual(result.selected, ("0xa",))
-        self.assertEqual(result.search_meta["neutralSelectedCount"], 2)
-        self.assertEqual(result.search_meta["selectedCount"], 1)
-
-    def test_smart_core_stops_when_post_seed_gain_is_below_ratio(self):
-        nets = {
-            (): 0, ("0xa",): 10, ("0xb",): 9, ("0xc",): 8,
-            ("0xa", "0xb"): 15, ("0xa", "0xc"): 25, ("0xb", "0xc"): 14,
-            ("0xa", "0xb", "0xc"): 30,
-        }
-
-        def evaluate(addrs):
-            net = nets[addrs]
-            return selection.PortfolioMetrics(
-                net, net, 0, .9, .95, .05, .7, .1,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        result = selection.search_smart_core(
-            ["0xa", "0xb", "0xc"], evaluate,
-            selection.SelectionConstraints(max_targets=3),
-            seed_target=2, beam_width=2, max_replace_out=1,
-            min_marginal_gain_ratio=.25,
-        )
-
-        self.assertEqual(result.selected, ("0xa", "0xc"))
-        self.assertEqual(result.search_meta["stopReason"], "expansion_marginal_gain_below_floor")
-        self.assertAlmostEqual(result.search_meta["stoppedMarginal"]["ratio"], .20)
-
-    def test_strict_replay_orders_wallets_by_incremental_value_and_stops_after_anchor(self):
-        candidates = ("0xa", "0xb", "0xc")
-
-        def neutral(addrs):
-            net = sum({"0xa": 10, "0xb": 9, "0xc": 8}[addr] for addr in addrs)
-            return selection.PortfolioMetrics(
-                net, net, 0, .92, .94, .03, .70, .05,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        strict_nets = {
-            (): 0, ("0xa",): 10, ("0xb",): 30, ("0xc",): 20,
-            ("0xa", "0xb"): 35, ("0xa", "0xc"): 40,
-            ("0xb", "0xc"): 55, ("0xa", "0xb", "0xc"): 60,
-        }
-
-        def strict(addrs):
-            net = strict_nets[tuple(sorted(addrs))]
-            return selection.PortfolioMetrics(
-                net, net, 0, .92, .94, .03, .70, .05,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        result = selection.search_smart_core(
-            candidates, neutral, selection.SelectionConstraints(max_targets=3),
-            seed_target=2, beam_width=3, max_replace_out=1,
-            min_marginal_gain_ratio=.20, validation_evaluator=strict,
-        )
-
-        self.assertEqual(result.selected, ("0xb", "0xc"))
-        self.assertEqual(result.metrics.net_pnl, 55)
-        self.assertEqual(result.search_meta["contributionOrder"], ("0xb", "0xc"))
-        self.assertEqual(result.search_meta["stopReason"], "strict_expansion_stopped")
 
     def test_portfolio_economics_rejects_material_coverage_drop(self):
         base = selection.PortfolioMetrics(
@@ -679,36 +216,6 @@ class SelectionTests(unittest.TestCase):
 
         self.assertEqual(reason, "portfolio_open_rate_drop")
 
-    def test_strict_expansion_reconsiders_wallet_pruned_from_fast_finalists(self):
-        neutral_nets = {
-            (): 0, ("0xa",): 20, ("0xb",): 10, ("0xc",): 1,
-            ("0xa", "0xb"): 30, ("0xa", "0xc"): 21,
-            ("0xb", "0xc"): 11, ("0xa", "0xb", "0xc"): 31,
-        }
-        strict_nets = {
-            (): 0, ("0xa",): 20, ("0xb",): 10, ("0xc",): 25,
-            ("0xa", "0xb"): 25, ("0xa", "0xc"): 50,
-            ("0xb", "0xc"): 30, ("0xa", "0xb", "0xc"): 55,
-        }
-
-        def metrics(net):
-            return selection.PortfolioMetrics(
-                net, net, 0, .92, .94, .03, .70, .05,
-                net_pnl=net, stress_net_pnl=net, drawdown_dollars=0,
-                risk_adjusted_utility=net,
-            )
-
-        result = selection.search_smart_core(
-            ["0xa", "0xb", "0xc"],
-            lambda addrs: metrics(neutral_nets[addrs]),
-            selection.SelectionConstraints(max_targets=3),
-            seed_target=1, beam_width=1, max_replace_out=1,
-            min_marginal_gain_ratio=.50,
-            validation_evaluator=lambda addrs: metrics(strict_nets[addrs]),
-        )
-
-        self.assertEqual(result.selected, ("0xa", "0xc"))
-        self.assertNotIn("0xb", result.selected)
 
     def test_portfolio_metrics_accept_missing_optional_replay_fields(self):
         day = 86_400_000

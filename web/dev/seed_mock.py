@@ -243,9 +243,9 @@ db.execute("INSERT INTO pipeline_audit "
             '{"generation":"mock-2026-07-11","action":"keep","core":3,"challenger":3,"exitOnly":0}', ago(120)))
 db.execute("INSERT INTO pipeline_audit "
            "(stamp,source,stage,status,reason,payload_json,created_at) VALUES (?,?,?,?,?,?,?)",
-           (ago(120), "scan", "auto_tune", "ok", "unchanged",
-            '{"status":"ok","mode":"shadow","shadow":true,"eligibleToApply":false,"followedN":3,'
-            '"validation":{"reasons":["shadow_days_insufficient","forward_closed_insufficient"]}}', ago(60)))
+           (ago(120), "scan", "tuner_finalize", "complete", "synchronous_quality_prefix_formation",
+            '{"portfolioReplay":{"status":"ok"},"selectionReplay":{"status":"ok","refreshed":6}}',
+            ago(60)))
 
 db.commit(); db.close()
 print("seeded mock:", DB)

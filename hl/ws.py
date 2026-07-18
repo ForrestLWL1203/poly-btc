@@ -15,9 +15,5 @@ def sub_msg(subscription: dict) -> str:
     return json.dumps({"method": "subscribe", "subscription": subscription})
 
 
-def user_fills(addr: str) -> dict:
-    return {"type": "userFills", "user": addr}
-
-
 def bbo(coin: str) -> dict:
     return {"type": "bbo", "coin": coin}

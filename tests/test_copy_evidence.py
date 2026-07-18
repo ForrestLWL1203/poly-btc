@@ -1,6 +1,6 @@
 import unittest
 
-from hl.copy_evidence import summarize_copy_evidence, summarize_portfolio_pnl
+from hl.copy_evidence import summarize_copy_evidence
 
 
 DAY = 86_400_000
@@ -37,13 +37,6 @@ class CopyEvidenceTests(unittest.TestCase):
         result = summarize_copy_evidence(positions([0.05] * 20), seed="steady")
         self.assertGreater(result.positive_probability, 0.90)
         self.assertGreater(result.return_lcb, 0.0)
-
-    def test_portfolio_pnl_is_blocked_by_day(self):
-        result = summarize_portfolio_pnl([
-            {"closed_at": (i + 1) * DAY, "net_pnl": 100.0} for i in range(12)
-        ], seed="portfolio")
-        self.assertEqual(result.evidence_days, 12)
-        self.assertGreater(result.pnl_lcb, 0.0)
 
 
 if __name__ == "__main__":

@@ -120,42 +120,12 @@ def user_fills_by_time(addr: str, start_ms: int, aggregate: bool = True):
                  "aggregateByTime": aggregate})
 
 
-def user_fills_latest(addr: str, aggregate: bool = True):
-    """Most recent ~2000 fills (1 call) — for the cheap pre-screen. Aggregated so the 2000-cap
-    covers many more trades (recency check isn't fooled by one heavily-sliced order)."""
-    return post({"type": "userFills", "user": addr, "aggregateByTime": aggregate})
-
-
 def portfolio(addr: str):
     """HL portfolio: per-window account-value & PnL time series + volume. This is the AUTHORITATIVE
     account-level performance — NET of fees, deposit-adjusted, and (verified) matches on-chain fills to
     the dollar; the leaderboard is a lagging, gross approximation. Returns the raw list of
     [period, {accountValueHistory, pnlHistory, vlm}] (day/week/month/allTime + perp* variants) or None."""
     return post_soft({"type": "portfolio", "user": addr})
-
-
-def parse_portfolio(pf, window="week"):
-    """Distil a portfolio() response for one window into the scoring metrics. NET-of-fees pnl,
-    turnover (vlm/equity → frequency proxy) and edge_bps (pnl/vlm → profit-per-$-traded, compare to our
-    ~9bp round-trip taker cost). Equity/drawdown use the COMBINED (perp+spot+vault) accountValueHistory —
-    the perp-only series is broken (dips to 0 → bogus 100% drawdown). None if the window is absent."""
-    if not pf:
-        return None
-    seg = dict(pf).get(window) or {}
-    vlm = float(seg.get("vlm") or 0.0)
-    ph = seg.get("pnlHistory") or []
-    pnl = float(ph[-1][1]) if ph else 0.0
-    avh = seg.get("accountValueHistory") or []
-    equity = float(avh[-1][1]) if avh else 0.0
-    peak, mdd = None, 0.0
-    for _, v in avh:
-        v = float(v)
-        peak = v if peak is None or v > peak else peak
-        if peak and peak > 0:
-            mdd = max(mdd, (peak - v) / peak)
-    return {"pnl": pnl, "vlm": vlm, "equity": equity, "max_drawdown": mdd,
-            "turnover": (vlm / equity) if equity > 0 else 0.0,
-            "edge_bps": (pnl / vlm * 1e4) if vlm > 0 else 0.0}
 
 
 def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
@@ -177,7 +147,6 @@ def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
         if sleep:
             time.sleep(sleep)
     return out, True
-
 
 
 def clearinghouse_state(addr: str, dex: str = None):

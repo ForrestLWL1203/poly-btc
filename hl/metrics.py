@@ -85,7 +85,7 @@ def window_nets(eps_full: list, now_ms: int) -> dict:
         cut = now_ms - days * DAY_MS
         return sum(e["net_pnl"] for e in eps_full if e.get("close_ms", 0) >= cut)
     return {"net_7d": net(7), "net_14d": net(14), "net_30d": net(30),
-            "net_life": sum(e["net_pnl"] for e in eps_full), "life_trades": len(eps_full)}
+            "net_life": sum(e["net_pnl"] for e in eps_full)}
 
 
 def _hold_skew(eps: list) -> float:
@@ -142,13 +142,10 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         "taker_frac_notl": (taker_notl / tot_notl) if tot_notl else 0.0,
         "median_hold_s": holds[len(holds) // 2],
         "win_rate": sum(1 for e in eps if e["net_pnl"] > 0) / len(eps),
-        "avg_win": _avg_win, "avg_loss": _avg_loss, "payoff_ratio": _payoff,
+        "payoff_ratio": _payoff,
         "win_pt": _win_pt, "max_concurrent": _max_concurrent,
-        "net_pnl": cum, "gross_pnl": sum(e["net_pnl"] + e["fee"] for e in eps),
-        "roi_notional": (cum / total_notl) if total_notl else 0.0, "total_notl": total_notl,
-        "total_fee": sum(e["fee"] for e in eps), "n_coins": len(coins),
+        "net_pnl": cum, "total_notl": total_notl,
         "top_coin": max(coins.items(), key=lambda kv: kv[1])[0],
-        "long_frac": sum(1 for e in eps if e["side"] == "long") / len(eps),
         "max_drawdown": max_drawdown(curve), "avg_notional": total_notl / len(eps),
         "last_fill_ms": fills[-1]["time"], "hold_skew": _hold_skew(eps),
         # GRID/DCA signature: distinct scale-in ORDERS per round-trip. A directional swing trader adds

@@ -10,10 +10,9 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-import math
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterable
 
 from . import config, params, selection, strategy_revision
@@ -118,69 +117,12 @@ def _same_values(a: dict, b: dict, keys: tuple[str, ...], eps: float = 1e-9) -> 
         return False
 
 
-def _same_margins(a: dict, b: dict, eps: float = 1e-9) -> bool:
-    return _same_values(a, b, MARGIN_KEYS, eps)
-
-
 def _same_tune_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
     return _same_values(a, b, TUNE_KEYS, eps)
 
 
 def _same_add_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
     return _same_values(a, b, ADD_TUNE_KEYS, eps)
-
-
-def store_margin_state(db, base: dict, last_auto: dict) -> None:
-    """Persist manual baseline and last auto-applied margins in engine units."""
-    _state_set(db, "margin_base", {k: float(base[k]) for k in MARGIN_KEYS})
-    _state_set(db, "margin_last_auto", {k: float(last_auto[k]) for k in MARGIN_KEYS})
-    db.commit()
-
-
-def resolve_margin_baseline(db, current: dict) -> tuple[dict, bool]:
-    """Return the manual baseline for tuning and whether current params reset it.
-
-    If current values still equal the last auto-applied values, keep tuning around
-    the stored manual baseline. If an operator changed any margin manually, treat
-    the new current values as the new baseline to avoid compounding.
-    """
-    current = {k: float(current[k]) for k in MARGIN_KEYS}
-    base = _json_load(_state_get(db, "margin_base"), None)
-    last = _json_load(_state_get(db, "margin_last_auto"), None)
-    if not base or not last or not _same_margins(current, last):
-        return current, True
-    return {k: float(base[k]) for k in MARGIN_KEYS}, False
-
-
-def store_tune_state(db, base: dict, last_auto: dict) -> None:
-    """Persist manual baseline and last auto-applied sizing surface in engine units."""
-    _state_set(db, "tune_base", {k: float(base[k]) for k in TUNE_KEYS})
-    _state_set(db, "tune_last_auto", {k: float(last_auto[k]) for k in TUNE_KEYS})
-    db.commit()
-
-
-def resolve_tune_baseline(db, current: dict) -> tuple[dict, bool]:
-    current = {k: float(current[k]) for k in TUNE_KEYS}
-    base = _json_load(_state_get(db, "tune_base"), None)
-    last = _json_load(_state_get(db, "tune_last_auto"), None)
-    if not base or not last or not _same_tune_values(current, last):
-        return current, True
-    return {k: float(base[k]) for k in TUNE_KEYS}, False
-
-
-def store_add_state(db, base: dict, last_auto: dict) -> None:
-    _state_set(db, "add_base", {k: float(base[k]) for k in ADD_TUNE_KEYS})
-    _state_set(db, "add_last_auto", {k: float(last_auto[k]) for k in ADD_TUNE_KEYS})
-    db.commit()
-
-
-def resolve_add_baseline(db, current: dict) -> tuple[dict, bool]:
-    current = {k: float(current[k]) for k in ADD_TUNE_KEYS}
-    base = _json_load(_state_get(db, "add_base"), None)
-    last = _json_load(_state_get(db, "add_last_auto"), None)
-    if not base or not last or not _same_add_values(current, last):
-        return current, True
-    return {k: float(base[k]) for k in ADD_TUNE_KEYS}, False
 
 
 def _capacity_skips(result: dict) -> int:
@@ -324,34 +266,6 @@ def _candidate_admission_rank_key(candidate: dict, baseline: dict) -> tuple:
         min_open,
         *_candidate_rank_key(candidate, baseline),
     )
-
-
-def _portfolio_line_score(candidate: dict) -> float:
-    windows = candidate.get("windows") or {}
-    return (
-        _result_pnl(windows.get(14, {}))
-        + 0.50 * _result_pnl(windows.get(7, {}))
-        + 0.25 * _result_pnl(windows.get(30, {}))
-    )
-
-
-def _inclusive_follow_line(score: float, min_score: float) -> float:
-    score = float(score or 0.0)
-    return max(float(min_score), score - 1e-9 if score > min_score else score)
-
-
-def _compact_follow_line_candidate(candidate: dict) -> dict:
-    return {
-        "n": candidate.get("n"),
-        "line": candidate.get("line"),
-        "score_floor": candidate.get("score_floor"),
-        "addrs": candidate.get("addrs") or [],
-        "score": _portfolio_line_score(candidate),
-        "windows": {
-            str(days): _compact_backtest(result)
-            for days, result in (candidate.get("windows") or {}).items()
-        },
-    }
 
 
 def choose_margin_candidate(candidates: list[dict], baseline: dict) -> dict:
@@ -509,198 +423,6 @@ def _filter_window_fills_by_addr(window_fills: dict[int, list[dict]], addrs: Ite
     }
 
 
-def _follow_line_candidate_valid(candidate: dict) -> bool:
-    windows = candidate.get("windows") or {}
-    primary = windows.get(14) or (windows.get(max(windows)) if windows else None)
-    if not primary:
-        return False
-    min_open_fit = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MIN_OPEN_FIT", 0.70))
-    if _capacity_fit(primary) < min_open_fit:
-        return False
-    for days, result in windows.items():
-        if not _enough_sample(result, int(days)):
-            return False
-        if _result_pnl(result) <= 0:
-            return False
-    return True
-
-
-def _recent_pnl_cliff(prev: dict, cur: dict) -> bool:
-    prev_windows = prev.get("windows") or {}
-    cur_windows = cur.get("windows") or {}
-    min_abs = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_ABS", 250.0))
-    min_rel = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MAX_RECENT_DROP_REL", 0.25))
-    for days in (14, 7):
-        prev_pnl = _result_pnl(prev_windows.get(days, {}))
-        cur_pnl = _result_pnl(cur_windows.get(days, {}))
-        drop = prev_pnl - cur_pnl
-        if drop <= 0:
-            continue
-        hurdle = max(min_abs, abs(prev_pnl) * min_rel)
-        if drop >= hurdle:
-            return True
-    return False
-
-
-def _cap_before_recent_cliff(candidates: list[dict]) -> tuple[list[dict], dict | None]:
-    ordered = sorted(candidates, key=lambda c: int(c.get("n") or 0))
-    kept = []
-    for c in ordered:
-        if kept and _recent_pnl_cliff(kept[-1], c):
-            return kept, c
-        kept.append(c)
-    return kept, None
-
-
-def _follow_line_candidate_key(candidate: dict, target_n: int) -> tuple:
-    windows = candidate.get("windows") or {}
-    primary = windows.get(14) or {}
-    return (
-        _portfolio_line_score(candidate),
-        _result_pnl(windows.get(14, {})),
-        _result_pnl(windows.get(7, {})),
-        _result_pnl(windows.get(30, {})),
-        -int(primary.get("liquidations") or 0),
-        _capacity_fit(primary),
-        -abs(int(candidate.get("n") or 0) - int(target_n)),
-    )
-
-
-def _meaningfully_better(candidate: dict, reference: dict) -> bool:
-    gain = _portfolio_line_score(candidate) - _portfolio_line_score(reference)
-    min_abs = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MIN_ABS_GAIN", 250.0))
-    min_rel = float(getattr(config, "AUTO_FOLLOW_PORTFOLIO_MIN_REL_GAIN", 0.08))
-    hurdle = max(min_abs, abs(_portfolio_line_score(reference)) * min_rel)
-    return gain >= hurdle
-
-
-def choose_follow_line_by_portfolio(db, ranked: list[dict], follow: dict | None = None,
-                                    stamp: str | None = None) -> dict:
-    """Choose MIN_FOLLOW_SCORE by replaying ranked top-N prefixes as one shared copy account.
-
-    This is intentionally a narrow selector: it tunes only the wallet-count boundary using
-    current follow params. Sizing/add grids still run afterwards on the selected final set.
-    If cached fills are too large/missing, or no prefix has enough positive evidence, caller
-    should fall back to the score-cliff/capacity heuristic.
-    """
-    if not getattr(config, "AUTO_FOLLOW_PORTFOLIO_ENABLE", True):
-        return {"status": "disabled", "reason": "portfolio_selector_disabled"}
-
-    min_score = float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60))
-    rows = [
-        r for r in ranked
-        if float(r.get("follow_score", r.get("score")) or 0.0) >= min_score
-        and (r.get("follow_eligibility") or {}).get("eligible", True)
-        and bool(r.get("operator_enabled", r.get("enabled", True)))
-    ]
-    if not rows:
-        return {"status": "fallback", "reason": "no_wallet_above_floor"}
-
-    available = len(rows)
-    min_n = max(1, min(int(getattr(config, "AUTO_FOLLOW_MIN_N", 7)), available))
-    max_n = max(min_n, min(int(getattr(config, "AUTO_FOLLOW_MAX_N", 20)), int(config.MAX_TARGETS), available))
-    target_n = max(min_n, min(int(getattr(config, "AUTO_FOLLOW_TARGET_N", 16)), max_n))
-    max_addrs = [(r.get("addr") or "").lower() for r in rows[:max_n] if r.get("addr")]
-    if not max_addrs:
-        return {"status": "fallback", "reason": "no_candidate_addrs"}
-
-    now_ms = int(time.time() * 1000)
-    window_fills = _portfolio_window_fills(db, max_addrs, now_ms)
-    if window_fills is None:
-        return {"status": "fallback", "reason": "fill_cache_guard"}
-    if not any(window_fills.values()):
-        return {"status": "fallback", "reason": "no_cached_fills"}
-
-    follow = dict(follow or params.load_follow(db))
-    if "SMART_ADD" in follow:
-        follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
-    sigmas = _load_sigmas(db)
-    candidates = []
-    for n in range(min_n, max_n + 1):
-        addrs = max_addrs[:n]
-        fills_by_window = _filter_window_fills_by_addr(window_fills, addrs)
-        windows = _candidate_windows(db, addrs, sigmas, follow, now_ms, window_fills=fills_by_window)
-        candidates.append({
-            "n": n,
-            "line": _inclusive_follow_line(rows[n - 1].get("follow_score", rows[n - 1].get("score")), min_score),
-            "addrs": addrs,
-            "score_floor": float(rows[n - 1].get("follow_score", rows[n - 1].get("score")) or min_score),
-            "windows": windows,
-        })
-
-    valid = [c for c in candidates if _follow_line_candidate_valid(c)]
-    if not valid:
-        return {
-            "status": "fallback",
-            "reason": "no_valid_portfolio_prefix",
-            "candidates": [_compact_follow_line_candidate(c) for c in candidates],
-        }
-    uncapped_valid = valid
-    uncapped_reference = next((c for c in uncapped_valid if int(c["n"]) == target_n), None)
-    if uncapped_reference is None:
-        uncapped_reference = min(uncapped_valid, key=lambda c: abs(int(c["n"]) - target_n))
-    uncapped_best = max(uncapped_valid, key=lambda c: _follow_line_candidate_key(c, target_n))
-
-    valid, cliff_candidate = _cap_before_recent_cliff(uncapped_valid)
-    if not valid:
-        return {
-            "status": "fallback",
-            "reason": "no_valid_portfolio_prefix",
-            "candidates": [_compact_follow_line_candidate(c) for c in candidates],
-        }
-    if cliff_candidate is not None and uncapped_best in valid and _meaningfully_better(uncapped_best, uncapped_reference):
-        selected = uncapped_best
-        reference = uncapped_reference
-        best = uncapped_best
-        reason = "portfolio_topn"
-    else:
-        reference = next((c for c in valid if int(c["n"]) == target_n), None)
-        if reference is None:
-            reference = min(valid, key=lambda c: abs(int(c["n"]) - target_n))
-        best = max(valid, key=lambda c: _follow_line_candidate_key(c, target_n))
-        use_best = best is not reference and _meaningfully_better(best, reference)
-        selected = best if use_best else reference
-        reason = "portfolio_topn" if use_best else "portfolio_flat_capacity"
-        if cliff_candidate is not None and not use_best and int(selected["n"]) == int(valid[-1]["n"]):
-            reason = "portfolio_recent_cliff"
-    result = {
-        "status": "ok",
-        "reason": reason,
-        "line": float(selected["line"]),
-        "count": int(selected["n"]),
-        "target_n": int(target_n),
-        "min_n": int(min_n),
-        "max_n": int(max_n),
-        "selected": _compact_follow_line_candidate(selected),
-        "reference": _compact_follow_line_candidate(reference),
-        "best": _compact_follow_line_candidate(best),
-        "recent_cliff_blocked": _compact_follow_line_candidate(cliff_candidate) if cliff_candidate else None,
-        "candidates": [_compact_follow_line_candidate(c) for c in candidates],
-    }
-    _state_set(db, "follow_line_last_choice", {**result, "stamp": stamp or now_iso()})
-    return result
-
-
-def build_tune_candidate(base: dict, margin_mult: float, lev_caps: tuple[float, float, float],
-                         deploy_full_pct: float) -> dict:
-    margins = {k: float(base[k]) * float(margin_mult) for k in MARGIN_KEYS}
-    lev_caps_map = {k: float(v) for k, v in zip(LEV_KEYS, lev_caps)}
-    params_ = {
-        **margins,
-        **lev_caps_map,
-        "DEPLOY_FULL_PCT": float(deploy_full_pct),
-    }
-    return {
-        "mult": float(margin_mult),
-        "margins": margins,
-        "lev_caps": lev_caps_map,
-        "deploy_full_pct": float(deploy_full_pct),
-        "params": params_,
-        "windows": {},
-        "score": None,
-    }
-
-
 def build_add_candidate(base: dict, gap_k: float, shrink_g: float, max_hard: int,
                         pos_gap_k: float | None = None) -> dict:
     params_ = {
@@ -732,47 +454,6 @@ def _unique_values(values, current=None):
         if all(abs(fval - x) > 1e-9 for x in out):
             out.append(fval)
     return out
-
-
-def _unique_lev_sets(values, current=None):
-    out = []
-    raw = list(values or [])
-    if current is not None:
-        raw.append(current)
-    for item in raw:
-        try:
-            vals = tuple(float(x) for x in item)
-        except (TypeError, ValueError):
-            continue
-        if len(vals) != 3:
-            continue
-        if vals not in out:
-            out.append(vals)
-    return out
-
-
-def tune_candidates_from_axes(base: dict, follow: dict | None = None) -> list[dict]:
-    margin_mults = _unique_values(getattr(
-        config, "AUTO_TUNE_MARGIN_FACTORS",
-        getattr(config, "AUTO_TUNE_MARGIN_MULTS", (0.8, 1.0, 1.2, 1.4, 1.6)),
-    ), 1.0)
-    lev_sets = _unique_lev_sets(
-        getattr(config, "AUTO_TUNE_LEV_CAP_SETS", ((20, 8, 4), (25, 10, 4), (30, 12, 4), (35, 12, 5))),
-        tuple(float(base[k]) for k in LEV_KEYS),
-    )
-    deploy_fulls = _unique_values(
-        getattr(config, "AUTO_TUNE_DEPLOY_FULL_PCTS", (0.30, 0.40, 0.50)),
-        float(base["DEPLOY_FULL_PCT"]),
-    )
-    candidates = [
-        build_tune_candidate(base, mult, levs, deploy)
-        for mult, levs, deploy in itertools.product(margin_mults, lev_sets, deploy_fulls)
-    ]
-    if follow is not None:
-        for candidate in candidates:
-            candidate["params"] = enforce_margin_add_capacity(candidate["params"], follow)
-            candidate["margins"] = {key: candidate["params"][key] for key in MARGIN_KEYS}
-    return candidates
 
 
 def _candidate_from_params(params_: dict, *, axis: str) -> dict:
@@ -984,13 +665,6 @@ def follow_overrides_for_add_candidate(follow: dict, candidate: dict) -> dict:
     out["ADD_GAP_SHRINK_G"] = float(params_["ADD_GAP_SHRINK_G"])
     out["ADD_MAX_HARD"] = int(params_["ADD_MAX_HARD"])
     return out
-
-
-def follow_overrides_for_margin_candidate(follow: dict, margins: dict) -> dict:
-    candidate = {"params": {**{k: margins[k] for k in MARGIN_KEYS},
-                            **{k: follow.get(k, getattr(config, k)) for k in LEV_KEYS},
-                            "DEPLOY_FULL_PCT": follow.get("DEPLOY_FULL_PCT", config.DEPLOY_FULL_PCT)}}
-    return follow_overrides_for_tune_candidate(follow, candidate)
 
 
 def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
@@ -1207,12 +881,6 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
         ).items()
     }
     return out
-
-
-def _write_margin_params(db, margins: dict) -> None:
-    stamp = now_iso()
-    for key in MARGIN_KEYS:
-        db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (str(float(margins[key]) * 100.0), stamp, key))
 
 
 def _write_tune_params(db, vals: dict) -> None:
@@ -1670,18 +1338,6 @@ def bind_active_tune_rollback_core(db, addrs) -> bool:
     return True
 
 
-def resolve_active_tune_rollback(db, reason: str) -> bool:
-    """Close a pending forward check when its parameter apply was rolled back."""
-    state = _json_load(_state_get(db, "active_tune_rollback"), {}) or {}
-    if not state or state.get("resolved"):
-        return False
-    state.update(
-        resolved=True, rolledBack=True, rollbackReason=reason, rollbackAt=now_iso(),
-    )
-    _state_set(db, "active_tune_rollback", state)
-    return True
-
-
 def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_run: bool = False,
                        mode: str | None = None, follow_values: dict | None = None,
                        data_complete: bool = True, expected_generation: str | None = None,
@@ -1793,7 +1449,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # by the dashboard. A historical manual baseline can be useful for rollback bookkeeping, but using it as
     # the candidate comparator silently discards the entire neighbourhood above that old leverage surface.
     base = enforce_margin_add_capacity(current, follow)
-    baseline_reset = False
     sigmas = _load_sigmas(db)
     now_ms = int(time.time() * 1000)
     window_fills = _portfolio_window_fills(db, addrs, now_ms)
@@ -1954,7 +1609,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     current_add = {k: float(follow[k]) for k in ADD_TUNE_KEYS}
     add_base = dict(current_add)
-    add_baseline_reset = False
     add_candidates = []
     add_baseline = None
     selected_add = None
@@ -2185,11 +1839,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             )
         else:
             _enqueue_reload(db, source)
-    if not effective_shadow:
-        store_tune_state(db, base, selected_params)
-        if follow_for_add.get("SMART_ADD", True):
-            store_add_state(db, add_base, selected_add_params)
-
     result = {
         "status": "ok",
         "mode": mode,
@@ -2197,8 +1846,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "applied": applied,
         "applied_sizing": applied_sizing,
         "applied_add": applied_add,
-        "baseline_reset": baseline_reset,
-        "add_baseline_reset": add_baseline_reset,
         "followed_n": len(addrs),
         "selected_mult": None,
         "margins": selected_margins,

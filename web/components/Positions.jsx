@@ -13,7 +13,7 @@ import { OpenPositionsTable } from "./positions/OpenPositionsTable.jsx";
 
 const { useState, useEffect, useCallback } = React;
 
-export function Positions({ confirm, toast, streamOpen }) {
+export function Positions({ confirm, streamOpen }) {
   const [closing, setClosing] = useState({});
   const [closingAll, setClosingAll] = useState(false);
   const [blacklist, setBlacklist] = useState([]);
@@ -71,10 +71,7 @@ export function Positions({ confirm, toast, streamOpen }) {
         setClosing(Object.fromEntries(ids.map(pid => [pid, true])));
         try {
           await api.cmd("close_all", {});
-          if (toast) toast(`已提交一键平仓 · ${count} 笔`);
-        } catch (_e) {
-          if (toast) toast("一键平仓提交失败");
-        }
+        } catch (_e) {}
         await new Promise(r => setTimeout(r, 2500));
         load();
         setClosing({});

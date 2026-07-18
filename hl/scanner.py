@@ -9,13 +9,8 @@ import hashlib
 import json
 import math
 import os
-import shutil
-import statistics
-import subprocess
-import sys
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 from . import (auto_tune, config, core_formation, follow_score, generation, metrics, offline_core_optimizer,
@@ -47,7 +42,6 @@ from .scanner_copy_bt import (
     sector_copy_bt_results as _sector_copy_bt_results,
 )
 from .scanner_lifecycle import (
-    next_core_signal_state,
     prune_discovery_cache as _prune_discovery_cache,
     schedule_profile_workset,
     upsert_wallet_registry,
@@ -282,25 +276,6 @@ def repair_missing_episode_rows(db, addrs) -> int:
     if repaired:
         db.commit()
     return repaired
-
-
-def _due_for_full_resync(db):
-    """True if no FULL re-sync in the last FULL_RESYNC_DAYS (fresh db / missing col → True). A full re-sync
-    re-fetches everyone's window to heal any incremental gap (append-only fills → gap can only be missing)."""
-    try:
-        r = db.execute(
-            "SELECT MAX(finished_at) FROM scan_runs WHERE full=1 AND COALESCE(complete,1)=1"
-        ).fetchone()
-    except Exception:  # noqa: BLE001 — `full` column not yet added (old db)
-        return True
-    if not r or not r[0]:
-        return True
-    try:
-        from datetime import datetime, timezone
-        last = datetime.fromisoformat(str(r[0]).replace("Z", "+00:00"))
-        return (datetime.now(timezone.utc) - last).total_seconds() / 86400 >= config.FULL_RESYNC_DAYS
-    except Exception:  # noqa: BLE001
-        return True
 
 
 def _copy_bt_cached_fills(db, addr, now_ms, p):
@@ -597,21 +572,15 @@ def _open_flow_metrics(fills: list, now_ms: int) -> dict:
         vals = [ts for ts in opens if ts >= cutoff]
         return len(vals), len({ts // int(_DAY_MS) for ts in vals})
 
-    c7, d7 = window(7)
-    c14, d14 = window(14)
+    c7, _ = window(7)
     c30, d30 = window(30)
-    intervals_h = [(b - a) / 3_600_000 for a, b in zip(opens, opens[1:]) if b > a]
     rate_day = c30 / 30.0
     return {
         "last_copyable_open_ms": opens[-1] if opens else 0,
-        "open_events_7d": c7, "open_events_14d": c14, "open_events_30d": c30,
+        "open_events_7d": c7, "open_events_30d": c30,
         # Refined later by the canonical replay once policy/liquidity/capacity skips are known.
-        "actionable_open_events_7d": c7, "actionable_open_events_14d": c14,
-        "actionable_open_events_30d": c30,
-        "open_days_7d": d7, "open_days_14d": d14, "open_days_30d": d30,
-        "avg_open_interval_h": (sum(intervals_h) / len(intervals_h)) if intervals_h else None,
-        "median_open_interval_h": statistics.median(intervals_h) if intervals_h else None,
-        "open_probability_24h": 1.0 - math.exp(-rate_day),
+        "actionable_open_events_7d": c7, "actionable_open_events_30d": c30,
+        "open_days_30d": d30,
         "open_probability_48h": 1.0 - math.exp(-2.0 * rate_day),
     }
 
@@ -902,9 +871,8 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     m = metrics.compute_metrics(perp, eps, now_ms, p.days)
     if m is None:
         m = {"n_fills": len(perp), "n_trades": 0, "window_days": 0, "trades_per_day": 0,
-             "taker_frac_notl": 0, "median_hold_s": 0, "win_rate": 0, "net_pnl": 0, "gross_pnl": 0,
-             "roi_notional": 0, "total_notl": 0, "total_fee": 0, "n_coins": 0, "top_coin": None,
-             "long_frac": 0, "max_drawdown": 0, "avg_notional": 0, "hold_skew": 0,
+             "taker_frac_notl": 0, "median_hold_s": 0, "win_rate": 0, "net_pnl": 0,
+             "total_notl": 0, "top_coin": None, "max_drawdown": 0, "avg_notional": 0, "hold_skew": 0,
              "last_fill_ms": perp[-1]["time"] if perp else 0, "active_days": 0, "activity_ratio": 0,
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
              "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0,
@@ -994,7 +962,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         m["pf_equity"] = acct_value or snap.get("account_value")
         m["pf_week_pnl"] = m["pf_week_vlm"] = None
         m["pf_mon_pnl"] = m["pf_mon_vlm"] = None
-        m["pf_max_dd"] = m["pf_turnover"] = m["pf_edge_bps"] = None
+        m["pf_turnover"] = None
         ok, reason = metrics.gates_state(m, now_ms, p)
         if (
             not ok
@@ -1080,17 +1048,12 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
 
 
 # ------------------------------------------------------------------ curated outputs
-def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_line=True,
-                      update_follow_history=True, leaderboard_generation=None, commit=True) -> int:
+def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) -> int:
     """Rebuild OUR tiny leaderboard (watchlist) from active profiles. Derived view —
     profile stays the source of truth; operator settings in target_controls survive.
-
-    ``update_follow_line`` and ``update_follow_history`` are retained for call compatibility only.  Explicit
-    published Core owns production membership and its history is written after atomic Selection publication.
     """
     if commit:
         params.seed_params(db)
-    prev_followed = set(selection.published_core_addrs(db) or [])
     margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     db.execute("DELETE FROM watchlist")
     leaderboard_join = (
@@ -1126,23 +1089,8 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
         eligibility = follow_score.evaluate_follow_eligibility(
             r, margin_equity_pct=margin_equity_pct,
         )
-        base_score = float(score or 0.0)
-        stability = {
-            "previouslyFollowed": (r["addr"] or "").lower() in prev_followed,
-            "baseFollowScore": base_score,
-            "bonus": 0.0,
-            "status": "new_or_unfollowed",
-        }
         if not eligibility.get("eligible"):
-            floor = float(getattr(config, "AUTO_FOLLOW_MIN_SCORE", 0.60))
-            score = min(score, max(0.0, floor - 1e-9))
             detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
-            stability["status"] = "ineligible" if stability["previouslyFollowed"] else "new_or_unfollowed"
-        elif stability["previouslyFollowed"]:
-            # Membership stability is expressed by lifecycle entry/keep confirmation, never by silently
-            # inflating the displayed score.
-            stability["status"] = "previously_followed"
-        detail["stability"] = stability
         r["follow_detail"] = detail
         r["follow_eligibility"] = eligibility
         r["follow_score"] = score
@@ -1174,302 +1122,12 @@ def refresh_watchlist(db, stamp, source: str = "watchlist", *, update_follow_lin
     return len(rows)
 
 
-_HARD_EXIT_REASONS = {
-    "spot_dominant", "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
-    "too_many_concurrent", "no_copyable_perp_fills", "spot_hedge", "blowup_loss",
-}
-
-
-def _iso_ms(value):
-    if not value:
-        return None
-    try:
-        from datetime import datetime
-        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
-    except (TypeError, ValueError):
-        return None
-
-
-def _stable_core_transition(
-    profiles,
-    *,
-    generation_id,
-    stamp,
-    now_ms,
-    previous_roles,
-    registry,
-    controls,
-    held,
-    desired_order,
-    strict_evaluate,
-    validate_fold,
-    constraints,
-    copy_policy,
-):
-    """Turn the strict optimizer's desired subset into a deliberately slow-moving published Core.
-
-    Daily replay remains free to discover a very different ideal subset.  Promotion/demotion evidence is
-    persistent, while a single bounded add/remove/replacement is portfolio-validated before publication.
-    Structural exits and 72-hour inactivity are safety/activity decisions and therefore bypass the soft-change
-    budget.
-    """
-    rows = {(row.get("addr") or "").lower(): row for row in profiles}
-    desired_order = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
-    desired = set(desired_order)
-    previous_core = {
-        (addr or "").lower() for addr, role in previous_roles.items()
-        if role == selection.CORE
-    }
-    published = set(previous_core)
-    reasons = {}
-    signals = {}
-    hard_removed = set()
-    inactive_removed = set()
-    confirmed_weak = []
-    promotable = []
-    entry_confirmations = max(1, int(getattr(config, "CORE_ENTRY_CONFIRM_GENERATIONS", 3)))
-    soft_confirmations = max(1, int(getattr(config, "CORE_SOFT_CONFIRM_GENERATIONS", 3)))
-    entry_observation_ms = int(
-        float(getattr(config, "CORE_ENTRY_MIN_CHALLENGER_H", 48.0)) * 3_600_000
-    )
-    soft_observation_ms = int(
-        float(getattr(config, "CORE_SOFT_MIN_WEAK_H", 48.0)) * 3_600_000
-    )
-    entry_fresh_ms = int(float(copy_policy.entry_max_open_age_h) * 3_600_000)
-    keep_fresh_ms = int(float(copy_policy.keep_max_open_age_h) * 3_600_000)
-
-    for addr, row in rows.items():
-        prior = registry.get(addr, {})
-        was_core = addr in previous_core
-        enabled = controls.get(addr, True)
-        refreshed = row.get("profile_generation") == generation_id
-        data_status = row.get("data_status") or "valid"
-        signal_valid = refreshed and data_status in {"valid", "rejected"}
-        active = row.get("status") in {"active", "qualified"} and enabled
-        nominated = active and addr in desired
-        signal = next_core_signal_state(
-            prior,
-            generation=generation_id,
-            stamp=stamp,
-            nominated=nominated,
-            previous_core=was_core,
-            valid=signal_valid,
-        )
-        signals[addr] = {"state": signal, "nominated": nominated, "valid": signal_valid}
-        last_open_ms = row.get("last_copyable_open_ms")
-        last_open_age = None if last_open_ms is None else max(0, now_ms - int(last_open_ms))
-        hard_exit = (not enabled) or (
-            signal_valid and row.get("reason") in _HARD_EXIT_REASONS
-        )
-        inactive = (
-            was_core and signal_valid and not hard_exit
-            and (last_open_age is None or last_open_age > keep_fresh_ms)
-        )
-
-        if was_core:
-            if hard_exit:
-                published.discard(addr)
-                hard_removed.add(addr)
-                reasons[addr] = row.get("reason") or "core_hard_exit"
-            elif inactive:
-                published.discard(addr)
-                inactive_removed.add(addr)
-                reasons[addr] = "core_inactive_72h"
-            elif not signal_valid:
-                reasons[addr] = "core_data_deferred_keep"
-            elif nominated:
-                reasons[addr] = "core_desired_keep"
-            else:
-                weak_age = (
-                    0 if signal.omission_started_at is None
-                    else max(0, now_ms - int(_iso_ms(signal.omission_started_at) or now_ms))
-                )
-                if signal.omission_streak >= soft_confirmations and weak_age >= soft_observation_ms:
-                    confirmed_weak.append(addr)
-                    reasons[addr] = "core_weak_confirmed"
-                else:
-                    reasons[addr] = (
-                        f"core_weak_pending_{signal.omission_streak}_of_{soft_confirmations}"
-                    )
-            continue
-
-        if not signal_valid or not nominated:
-            reasons.setdefault(addr, "challenger_not_nominated")
-            continue
-        nomination_age = (
-            0 if signal.nomination_started_at is None
-            else max(0, now_ms - int(_iso_ms(signal.nomination_started_at) or now_ms))
-        )
-        samples = int(row.get("copy_bt_7d_closed_n") or row.get("copy_bt_closed_n") or 0)
-        probability = f(row.get("copy_positive_probability"))
-        entry_ready = (
-            signal.nomination_streak >= entry_confirmations
-            and nomination_age >= entry_observation_ms
-            and last_open_age is not None and last_open_age <= entry_fresh_ms
-            and samples >= max(
-                int(copy_policy.min_closed_7d),
-                int(getattr(config, "CORE_ENTRY_MIN_OOS_CLOSED", 7)),
-            )
-            and probability >= f(copy_policy.entry_positive_probability)
-        )
-        if entry_ready:
-            promotable.append(addr)
-            reasons[addr] = "promotion_portfolio_check"
-        else:
-            reasons[addr] = (
-                f"promotion_pending_{signal.nomination_streak}_of_{entry_confirmations}"
-            )
-
-    # A previously published Core missing from this generation's profile set is retained fail-closed.
-    for addr in previous_core - set(rows):
-        reasons[addr] = "core_profile_missing_keep"
-
-    gain_floor = max(0.0, float(getattr(config, "SELECTION_MIN_RELATIVE_GAIN", .05)))
-
-    def metrics_utility(metrics):
-        return f(
-            metrics.risk_adjusted_utility
-            if metrics.risk_adjusted_utility is not None else metrics.net_lcb
-        )
-
-    comparison_cache = {}
-
-    def robust_change(before, after):
-        before, after = tuple(sorted(before)), tuple(sorted(after))
-        key = (before, after)
-        if key in comparison_cache:
-            return comparison_cache[key]
-        base = strict_evaluate(before)
-        trial = strict_evaluate(after)
-        base_folds = [validate_fold(before, older, newer, 1.0)
-                      for older, newer in ((30, 20), (20, 10), (10, 0))]
-        trial_folds = [validate_fold(after, older, newer, 1.0)
-                       for older, newer in ((30, 20), (20, 10), (10, 0))]
-        comparison = offline_core_optimizer.robust_improvement(
-            base, trial, base_folds, trial_folds,
-            validate_fold(before, 10, 0, 1.5),
-            validate_fold(after, 10, 0, 1.5),
-            constraints,
-            min_total_gain_ratio=gain_floor,
-        )
-        base_utility = metrics_utility(base)
-        trial_utility = metrics_utility(trial)
-        utility_floor = abs(base_utility) * gain_floor
-        eligible = (
-            comparison.eligible
-            and trial_utility > base_utility
-            and trial_utility - base_utility + 1e-12 >= utility_floor
-        )
-        result = (eligible, trial_utility - base_utility, comparison)
-        comparison_cache[key] = result
-        return result
-
-    # Strict leave-one-out contribution defines "weakest" inside the actual current account.
-    def weak_order(addresses):
-        addresses = tuple(sorted(addresses))
-        if not addresses:
-            return []
-        base_utility = metrics_utility(strict_evaluate(addresses))
-        return sorted(
-            addresses,
-            key=lambda addr: (
-                base_utility - metrics_utility(strict_evaluate(
-                    tuple(item for item in addresses if item != addr)
-                )),
-                f(rows.get(addr, {}).get("follow_score")),
-                addr,
-            ),
-        )
-
-    desired_rank = {addr: rank for rank, addr in enumerate(desired_order)}
-    promotable.sort(key=lambda addr: (
-        desired_rank.get(addr, 999999),
-        -f(rows.get(addr, {}).get("follow_score")),
-        addr,
-    ))
-    confirmed_weak = [addr for addr in weak_order(published) if addr in set(confirmed_weak)]
-    max_soft_changes = max(0, int(getattr(config, "CORE_MAX_SOFT_MEMBERSHIP_CHANGES", 1)))
-    soft_action = None
-
-    if max_soft_changes > 0:
-        add_trials = []
-        replacement_trials = []
-        removal_trials = []
-        for incoming in promotable:
-            if len(published) < int(constraints.max_targets):
-                after = set(published) | {incoming}
-                eligible, gain, comparison = robust_change(published, after)
-                if eligible:
-                    add_trials.append((gain, "add", incoming, None, after, comparison))
-            for outgoing in confirmed_weak[:1]:
-                after = (set(published) - {outgoing}) | {incoming}
-                eligible, gain, comparison = robust_change(published, after)
-                if eligible:
-                    replacement_trials.append((gain, "replace", incoming, outgoing, after, comparison))
-        for outgoing in confirmed_weak[:1]:
-            after = set(published) - {outgoing}
-            if not after:
-                continue
-            eligible, gain, comparison = robust_change(published, after)
-            if eligible:
-                removal_trials.append((gain, "remove", None, outgoing, after, comparison))
-        # Prefer profitable expansion.  Replacement exists for the exact case where funding contention
-        # makes direct addition unattractive; removal is the last resort after persistent weakness.
-        trials = add_trials or replacement_trials or removal_trials
-        if trials:
-            gain, action, incoming, outgoing, after, comparison = max(
-                trials,
-                key=lambda item: (item[0], 1 if item[1] == "add" else 0, item[1], item[2] or ""),
-            )
-            published = set(after)
-            soft_action = {
-                "action": action, "incoming": incoming, "outgoing": outgoing,
-                "utilityGain": gain, "foldWins": comparison.fold_wins,
-            }
-            if incoming:
-                reasons[incoming] = "core_promoted_after_confirmation"
-            if outgoing:
-                reasons[outgoing] = "core_replaced_after_confirmation" if incoming else "core_removed_after_confirmation"
-
-    for addr in promotable:
-        if addr not in published and reasons.get(addr) == "promotion_portfolio_check":
-            reasons[addr] = "promotion_waiting_portfolio_gain"
-    for addr in confirmed_weak:
-        if addr in published and reasons.get(addr) == "core_weak_confirmed":
-            reasons[addr] = "core_retained_portfolio_value"
-
-    final_metrics = strict_evaluate(tuple(sorted(published)))
-    final_utility = metrics_utility(final_metrics)
-    contribution_rows = []
-    for addr in published:
-        without = tuple(sorted(published - {addr}))
-        contribution_rows.append((
-            final_utility - metrics_utility(strict_evaluate(without)),
-            -desired_rank.get(addr, 999999), addr,
-        ))
-    contribution_rows.sort(reverse=True)
-    final_order = tuple(item[-1] for item in contribution_rows)
-    utilities = {item[-1]: item[0] for item in contribution_rows}
-    return {
-        "selected": final_order,
-        "reasons": reasons,
-        "signals": signals,
-        "utilities": utilities,
-        "softAction": soft_action,
-        "hardRemoved": tuple(sorted(hard_removed)),
-        "inactiveRemoved": tuple(sorted(inactive_removed)),
-        "desired": desired_order,
-        "metrics": final_metrics,
-    }
-
-
 def _quality_first_core_transition(
     profiles,
     *,
     generation_id,
     previous_roles,
     controls,
-    held,
     desired_order,
     strict_evaluate,
 ):
@@ -1485,9 +1143,7 @@ def _quality_first_core_transition(
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
     selected = []
     reasons = {}
-    signals = {}
     hard_removed = set()
-    inactive_removed = set()
     for addr, row in rows.items():
         refreshed = row.get("profile_generation") == generation_id
         data_valid = refreshed and (row.get("data_status") or "valid") == "valid"
@@ -1499,7 +1155,6 @@ def _quality_first_core_transition(
             and data_valid and enabled
         )
         nominated = core_ok and addr in desired
-        signals[addr] = {"nominated": nominated, "valid": data_valid}
         if nominated:
             selected.append(addr)
             reasons[addr] = (
@@ -1566,11 +1221,8 @@ def _quality_first_core_transition(
     return {
         "selected": final_order,
         "reasons": reasons,
-        "signals": signals,
         "utilities": {row[-1]: row[0] for row in contribution_rows},
-        "softAction": None,
         "hardRemoved": tuple(sorted(hard_removed)),
-        "inactiveRemoved": tuple(sorted(inactive_removed)),
         "desired": desired,
         "metrics": final_metrics,
         "looRemoved": tuple(removed_by_loo),
@@ -2218,16 +1870,6 @@ def _apply_formation_params(db, formation, stamp) -> bool:
             "newParams": proposal,
             "resolved": False,
         })
-    auto_tune.store_tune_state(
-        db,
-        {key: old[key] for key in auto_tune.TUNE_KEYS},
-        {key: f(proposal[key]) for key in auto_tune.TUNE_KEYS},
-    )
-    auto_tune.store_add_state(
-        db,
-        {key: old[key] for key in auto_tune.ADD_TUNE_KEYS},
-        {key: f(proposal[key]) for key in auto_tune.ADD_TUNE_KEYS},
-    )
     return changed
 
 
@@ -2299,7 +1941,7 @@ def _prefetch_selection_paths(db, candidates, now_ms) -> dict:
 
 
 def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles,
-                                   previous_roles, controls, registry, held,
+                                   previous_roles, controls, held,
                                    desired_order, formation_meta,
                                    effective_qualifications=None, effective_scores=None):
     """Materialize the jointly tuned, skip-aware quality membership selected during formation."""
@@ -2378,7 +2020,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         generation_id=generation_id,
         previous_roles=previous_roles,
         controls=controls,
-        held=held,
         desired_order=desired,
         strict_evaluate=strict_evaluate,
     )
@@ -2402,7 +2043,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         },
     )
     transition_reasons = transition.get("reasons") or {}
-    transition_signals = transition.get("signals") or {}
     rows = []
     for rank, row in enumerate(profiles, 1):
         addr = (row.get("addr") or "").lower()
@@ -2460,9 +2100,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             role=role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY} else None,
             data_status=selection_data_status, reason=reason,
             last_actionable_open_ms=row.get("last_copyable_open_ms"),
-            core_nominated=(transition_signals.get(addr) or {}).get("nominated"),
-            core_signal_valid=(transition_signals.get(addr) or {}).get("valid", False),
-            core_signal_previous_core=(previous_roles.get(addr) == selection.CORE),
         )
         db.execute(
             "UPDATE profile SET selection_marginal_utility=? WHERE addr=?",
@@ -2505,23 +2142,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         (addr or "").lower(): bool(enabled)
         for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
     }
-    registry = {}
-    for row in db.execute(
-        "SELECT addr,state,current_role,first_qualified_at,consecutive_qualified,consecutive_bad,"
-        "core_nomination_streak,core_omission_streak,core_nomination_started_at,"
-        "core_omission_started_at,last_core_signal_generation "
-        "FROM wallet_registry"
-    ).fetchall():
-        registry[(row[0] or "").lower()] = {
-            "state": row[1], "role": row[2], "first_qualified_at": row[3],
-            "good": int(row[4] or 0), "bad": int(row[5] or 0),
-            "core_nomination_streak": int(row[6] or 0),
-            "core_omission_streak": int(row[7] or 0),
-            "core_nomination_started_at": row[8],
-            "core_omission_started_at": row[9],
-            "last_core_signal_generation": row[10],
-        }
-
     cur = db.execute(
         "SELECT p.addr,p.status,p.reason,p.score,p.profile_generation,p.data_status,p.evidence_status,p.last_copyable_open_ms,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
@@ -2565,7 +2185,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         return _build_forced_prefix_selection(
             db, generation_id, stamp, now_ms,
             profiles=profiles, previous_roles=previous_roles, controls=controls,
-            registry=registry, held=held, desired_order=tuple(forced_core_order),
+            held=held, desired_order=tuple(forced_core_order),
             formation_meta=dict(formation_meta or {}),
             effective_qualifications=effective_qualifications,
             effective_scores=effective_scores,
@@ -3097,7 +2717,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 generation_id=generation_id,
                 previous_roles=previous_roles,
                 controls=controls,
-                held=held,
                 desired_order=desired_marginal.selected,
                 strict_evaluate=effective_evaluate,
             )
@@ -3114,9 +2733,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 "desiredSelectedCount": len(transition["desired"]),
                 "publishedSelectedCount": len(transition["selected"]),
                 "desiredOrder": transition["desired"],
-                "softAction": transition["softAction"],
                 "hardExitCount": len(transition["hardRemoved"]),
-                "inactiveExitCount": len(transition["inactiveRemoved"]),
                 "membershipPolicy": "quality-first-v1",
             })
             marginal = selection.MarginalSelectionResult(
@@ -3124,8 +2741,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 baseline=effective_evaluate(tuple(sorted(previous_core_set))),
                 metrics=transition["metrics"],
                 action=(
-                    (transition["softAction"] or {}).get("action")
-                    or ("hard_or_inactive_exit" if previous_core_set - selected_set else "keep")
+                    "membership_change" if previous_core_set != selected_set else "keep"
                 ),
                 added=tuple(sorted(selected_set - previous_core_set)),
                 removed=tuple(sorted(previous_core_set - selected_set)),
@@ -3138,9 +2754,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 source="scan",
                 stage="selection_membership_transition",
                 status="ok",
-                reason=(transition["softAction"] or {}).get("action") or (
+                reason=(
                     "quality_first_change"
-                    if transition["hardRemoved"] or transition["inactiveRemoved"]
+                    if transition["hardRemoved"]
                     else "quality_first_publish"
                 ),
                 payload={
@@ -3152,16 +2768,10 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     "addedCount": len(selected_set - previous_core_set),
                     "removedCount": len(previous_core_set - selected_set),
                     "hardExitCount": len(transition["hardRemoved"]),
-                    "inactiveExitCount": len(transition["inactiveRemoved"]),
-                    "softAction": transition["softAction"],
-                    "entryConfirmations": 1,
-                    "softConfirmations": 1,
-                    "keepMaxOpenAgeH": float(copy_policy.keep_max_open_age_h),
                 },
             )
 
         transition_reasons = (transition or {}).get("reasons", {})
-        transition_signals = (transition or {}).get("signals", {})
         rows = []
         for row in profiles:
             addr = (row["addr"] or "").lower()
@@ -3173,7 +2783,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             active = row.get("status") in {"active", "qualified"}
             qualification = row.get("follow_qualification") or {}
             candidate_ok = active and bool(qualification.get("eligible"))
-            previous_role = previous_roles.get(addr) or registry.get(addr, {}).get("role")
             if addr in selected_set and enabled:
                 role = selection.CORE
                 reason = transition_reasons.get(addr) or (
@@ -3255,9 +2864,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 data_status=selection_data_status,
                 reason=reason,
                 last_actionable_open_ms=row.get("last_copyable_open_ms"),
-                core_nominated=(transition_signals.get(addr) or {}).get("nominated"),
-                core_signal_valid=(transition_signals.get(addr) or {}).get("valid", False),
-                core_signal_previous_core=(previous_roles.get(addr) == selection.CORE),
             )
             db.execute(
                 "UPDATE profile SET selection_marginal_utility=? WHERE addr=?",
@@ -3333,62 +2939,6 @@ def _record_explicit_follow_history(db, selection_rows, stamp, previous_core, ge
         ) for addr in sorted(current_core)],
     )
     return current_core
-
-
-def _maybe_auto_tune_margins(db, source: str, stamp: str, *, allow_apply: bool = True,
-                             data_complete: bool = True, expected_generation=None) -> dict:
-    try:
-        mode = str(params.get(db, "AUTO_TUNE_MODE", getattr(config, "AUTO_TUNE_MODE", "shadow")) or "shadow").lower()
-        dry_run = (not allow_apply) or mode != "apply"
-        if mode == "off":
-            res = {"status": "disabled", "reason": "auto_tune_mode_off", "applied": False, "mode": mode}
-        else:
-            try:
-                res = auto_tune.maybe_tune_margins(
-                    db, source=source, stamp=stamp, dry_run=dry_run, mode=mode,
-                    data_complete=data_complete, expected_generation=expected_generation,
-                )
-            except TypeError as exc:
-                # Test doubles and rolling-deploy workers may still expose the legacy signature.
-                if "unexpected keyword" not in str(exc):
-                    raise
-                res = auto_tune.maybe_tune_margins(db, source=source, stamp=stamp)
-            res.setdefault("mode", mode)
-    except Exception as exc:  # noqa: BLE001 — auto tuning must never abort discovery
-        res = {
-            "status": "error",
-            "reason": "auto_tune_exception",
-            "error": str(exc),
-            "applied": False,
-        }
-        pipeline_audit.record_auto_tune_result(db, stamp, source, res)
-        db.commit()
-        print(f"auto-tune margin: skipped after {source}: {exc}", flush=True)
-        return res
-    if res.get("status") != "ok":
-        pipeline_audit.record_auto_tune_result(db, stamp, source, res)
-        db.commit()
-        print(f"auto-tune margin: {res.get('status')}", flush=True)
-        return res
-    pipeline_audit.record_auto_tune_result(db, stamp, source, res)
-    db.commit()
-    margins = res.get("margins") or {}
-    lev_caps = res.get("lev_caps") or {}
-    add_params = res.get("add_params") or {}
-    print(
-        "auto-tune margin: "
-        f"mult={res.get('selected_mult')} applied={bool(res.get('applied'))} "
-        f"followed={res.get('followed_n')} "
-        f"stable={margins.get('STABLE_MARGIN_PCT', 0) * 100:.2f}% "
-        f"mid={margins.get('MID_MARGIN_PCT', 0) * 100:.2f}% "
-        f"high={margins.get('HIGH_MARGIN_PCT', 0) * 100:.2f}% "
-        f"lev={tuple(lev_caps.get(k) for k in ('STABLE_LEV_CAP', 'MID_LEV_CAP', 'HIGH_LEV_CAP'))} "
-        f"full={(res.get('deploy_full_pct') or 0) * 100:.0f}% "
-        f"add=k{add_params.get('ADD_GAP_K')} g{add_params.get('ADD_GAP_SHRINK_G')} "
-        f"hard{add_params.get('ADD_MAX_HARD')}",
-        flush=True,
-    )
-    return res
 
 
 def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -> dict:
@@ -3473,220 +3023,8 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
     }
 
 
-def tune_published_generation(db, generation_id, stamp=None, source="scan"):
-    """Run one generation-bound tuner proposal with a DB lease.
-
-    This entrypoint is intentionally separate from ``scan`` so tuning cannot delay atomic list publication.
-    """
-    current = selection.latest_published_generation(db)
-    if current != generation_id:
-        return {"status": "skipped", "reason": "generation_not_current", "applied": False}
-    stamp = stamp or now_iso()
-    now_s = time.time()
-    row = db.execute("SELECT value FROM auto_tune_state WHERE key='async_tuner_lease'").fetchone()
-    try:
-        lease = json.loads(row[0]) if row and row[0] else {}
-    except (TypeError, ValueError):
-        lease = {}
-    lease_pid = int(lease.get("pid") or 0)
-    lease_alive = False
-    if lease_pid and lease_pid != os.getpid():
-        try:
-            os.kill(lease_pid, 0)
-            lease_alive = True
-        except ProcessLookupError:
-            lease_alive = False
-        except PermissionError:
-            lease_alive = True
-    if f(lease.get("expiresAt")) > now_s and lease_pid != os.getpid() and lease_alive:
-        return {"status": "skipped", "reason": "tuner_already_running", "applied": False}
-    db.execute(
-        "INSERT INTO auto_tune_state (key,value,updated_at) VALUES ('async_tuner_lease',?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-        (json.dumps({"pid": os.getpid(), "generation": generation_id, "expiresAt": now_s + 7200}), stamp),
-    )
-    db.commit()
-    try:
-        result = _maybe_auto_tune_margins(
-            db, source, stamp, allow_apply=True, data_complete=True,
-            expected_generation=generation_id,
-        )
-        current_after_tune = selection.latest_published_generation(db)
-        if current_after_tune != generation_id:
-            skipped_replay = {
-                "status": "skipped",
-                "reason": "generation_not_current_after_tune",
-                "expectedGeneration": generation_id,
-                "currentGeneration": current_after_tune,
-            }
-            result["portfolioReplay"] = dict(skipped_replay)
-            result["selectionReplay"] = dict(skipped_replay)
-            return result
-        if result.get("applied"):
-            temporary_revision = result.get("strategyRevision")
-            parent_revision = result.get("parentStrategyRevision")
-            try:
-                consistency = repair_published_selection(
-                    db, generation_id, stamp=now_iso(),
-                    replace_existing=True, launch_tuner=False, retune_formation=False,
-                )
-                if consistency.get("status") != "repaired":
-                    raise RuntimeError(
-                        "selection_consistency_not_repaired:"
-                        + str(consistency.get("reason") or consistency.get("status"))
-                    )
-                result["selectionConsistency"] = consistency
-                result["sealedStrategyRevision"] = strategy_revision.active_revision_id(db)
-                auto_tune.bind_active_tune_rollback_core(
-                    db, selection.published_core_addrs(db) or [],
-                )
-                if temporary_revision:
-                    db.execute(
-                        "UPDATE strategy_revision SET status='superseded',superseded_at=? "
-                        "WHERE revision=? AND status='staged'",
-                        (now_iso(), temporary_revision),
-                    )
-                    db.commit()
-            except Exception as exc:  # noqa: BLE001 - restore the last complete bundle before returning
-                db.rollback()
-                rollback = None
-                rollback_error = None
-                if parent_revision:
-                    try:
-                        rollback = strategy_revision.reactivate_revision(
-                            db, parent_revision,
-                            source="tune_selection_consistency",
-                            expected_active_revision=parent_revision,
-                            enqueue_reload=True,
-                            restore_param_keys=(
-                                *auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS,
-                            ),
-                            expected_mutable_params=result.get("proposal") or {},
-                        )
-                        auto_tune.resolve_active_tune_rollback(
-                            db, "selection_consistency_failed",
-                        )
-                        db.commit()
-                    except Exception as rollback_exc:  # noqa: BLE001
-                        db.rollback()
-                        rollback_error = str(rollback_exc)[:300]
-                result.update({
-                    "status": "error",
-                    "reason": "selection_consistency_failed",
-                    "effectiveApplied": False,
-                    "selectionConsistency": {
-                        "status": "error", "error": str(exc)[:300],
-                        "rollback": rollback, "rollbackError": rollback_error,
-                    },
-                })
-                pipeline_audit._insert_event(
-                    db,
-                    stamp=now_iso(), source="tune_selection_consistency",
-                    stage="selection_consistency", status="error",
-                    reason="selection_consistency_failed",
-                    payload={
-                        "generation": generation_id,
-                        "temporaryRevision": temporary_revision,
-                        "parentRevision": parent_revision,
-                        "error": str(exc)[:300],
-                        "rollback": rollback,
-                        "rollbackError": rollback_error,
-                    },
-                )
-                db.commit()
-                return result
-        try:
-            result["portfolioReplay"] = auto_tune.store_effective_portfolio_replay(
-                db, generation_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - dashboard summary must not invalidate tuning
-            result["portfolioReplay"] = {"status": "error", "error": str(exc)[:300]}
-        try:
-            result["selectionReplay"] = refresh_selection_copy_replay(
-                db, generation_id, replayed_at=now_iso()
-            )
-        except Exception as exc:  # noqa: BLE001 - display replay must never invalidate a tune run
-            result["selectionReplay"] = {"status": "error", "error": str(exc)[:300]}
-        return result
-    finally:
-        db.execute(
-            "UPDATE auto_tune_state SET value=?,updated_at=? WHERE key='async_tuner_lease'",
-            (json.dumps({"pid": os.getpid(), "generation": generation_id, "expiresAt": 0}), now_iso()),
-        )
-        db.commit()
-
-
-def _launch_async_tuner(db, generation_id, stamp):
-    mode = str(params.get(db, "AUTO_TUNE_MODE", getattr(config, "AUTO_TUNE_MODE", "shadow")) or "shadow").lower()
-    if mode == "off":
-        return {"status": "disabled", "reason": "auto_tune_mode_off"}
-    db_row = db.execute("PRAGMA database_list").fetchone()
-    db_path = db_row[2] if db_row and len(db_row) > 2 else None
-    if not db_path or db_path == ":memory:":
-        return {"status": "skipped", "reason": "async_tuner_requires_file_db"}
-    script = str(Path(__file__).resolve().parent.parent / "hl_discover.py")
-    limit_mb = int(getattr(config, "TUNER_MEMORY_LIMIT_MB", 512))
-
-    def _limit_memory():
-        try:
-            import resource
-            limit = max(128, limit_mb) * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        except Exception:  # noqa: BLE001 - platform may not expose RLIMIT_AS
-            pass
-
-    try:
-        systemd_run = shutil.which("systemd-run")
-        if os.environ.get("INVOCATION_ID") and systemd_run:
-            unit = "hl-tune-" + hashlib.sha256(str(generation_id).encode()).hexdigest()[:12]
-            completed = subprocess.run(
-                [
-                    systemd_run,
-                    "--quiet",
-                    "--no-block",
-                    "--collect",
-                    f"--unit={unit}",
-                    f"--property=MemoryMax={limit_mb}M",
-                    f"--working-directory={Path(script).resolve().parent}",
-                    sys.executable,
-                    script,
-                    "--db",
-                    str(Path(db_path).resolve()),
-                    "optimize",
-                    "--generation",
-                    generation_id,
-                    "--stamp",
-                    stamp,
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=15,
-            )
-            if completed.returncode:
-                raise RuntimeError((completed.stderr or "systemd-run failed").strip()[:200])
-            return {
-                "status": "launched", "unit": unit, "generation": generation_id,
-                "memoryLimitMb": limit_mb,
-            }
-        proc = subprocess.Popen(
-            [sys.executable, script, "--db", db_path, "optimize", "--generation", generation_id,
-             "--stamp", stamp],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-            preexec_fn=_limit_memory if os.name == "posix" else None,
-        )
-        return {"status": "launched", "pid": proc.pid, "generation": generation_id, "memoryLimitMb": limit_mb}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "error", "reason": "tuner_launch_failed", "error": str(exc)[:200]}
-
-
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
-                               launch_tuner=True, retune_formation=True):
+                               retune_formation=True):
     """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
     This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
@@ -3721,9 +3059,6 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     refresh_watchlist(
         db,
         stamp,
-        source="selection_repair_prefetch",
-        update_follow_line=False,
-        update_follow_history=False,
         leaderboard_generation=generation_id,
         commit=False,
     )
@@ -3736,9 +3071,6 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     refresh_watchlist(
         db,
         stamp,
-        source="selection_repair",
-        update_follow_line=False,
-        update_follow_history=False,
         leaderboard_generation=generation_id,
         commit=False,
     )
@@ -3807,7 +3139,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         selection_replay = refresh_selection_copy_replay(db, generation_id, replayed_at=now_iso())
     except Exception as exc:  # noqa: BLE001
         selection_replay = {"status": "error", "error": str(exc)[:300]}
-    launch = {
+    tune_summary = {
         "status": "complete", "reason": "synchronous_quality_prefix_formation",
         "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
     }
@@ -3815,10 +3147,10 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         db,
         stamp=stamp,
         source="selection_repair",
-        stage="tuner_launch",
-        status=launch.get("status"),
-        reason=launch.get("reason") or "generation_bound_async",
-        payload=launch,
+        stage="tuner_finalize",
+        status=tune_summary.get("status"),
+        reason=tune_summary.get("reason"),
+        payload=tune_summary,
     )
     db.commit()
     return {
@@ -3827,7 +3159,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         "core": len(current_core),
         "challenger": sum(1 for row in rows if row.role == selection.CHALLENGER),
         "selectionAction": marginal.action if marginal else "keep",
-        "tuner": launch,
+        "tuner": tune_summary,
     }
 
 
@@ -3836,7 +3168,7 @@ def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
     generation_id = generation_id or selection.latest_published_generation(db)
     stamp = stamp or now_iso()
     selection_result = repair_published_selection(
-        db, generation_id, stamp=stamp, replace_existing=True, launch_tuner=False,
+        db, generation_id, stamp=stamp, replace_existing=True,
     )
     return {
         "status": "ok" if selection_result.get("status") == "repaired" else selection_result.get("status"),
@@ -3844,28 +3176,6 @@ def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
         "selection": selection_result,
         "tune": selection_result.get("tuner"),
     }
-
-
-def refresh_watchlist_and_auto_tune(db, stamp: str, source: str = "scan", before_auto_tune=None,
-                                    *, auto_tune_enabled: bool = True, allow_tune_apply: bool = True) -> int:
-    """Rebuild the derived watchlist, then evaluate an execution-parameter proposal.
-
-    vNext deliberately does *not* regate every stored profile after an applied proposal: most daily
-    profiles were not network-refreshed, so replaying them with fresh execution params could promote or
-    retire wallets from stale portfolio/open-position state.  A later complete generation publishes the
-    new evidence atomically; shadow proposals never mutate live parameters.
-    """
-    n_active = refresh_watchlist(db, stamp, source=source)
-    if before_auto_tune:
-        before_auto_tune()
-        db.commit()
-    if auto_tune_enabled:
-        _maybe_auto_tune_margins(db, source, stamp, allow_apply=allow_tune_apply)
-    else:
-        skipped = {"status": "skipped", "reason": "scan_incomplete", "applied": False, "mode": "shadow"}
-        pipeline_audit.record_auto_tune_result(db, stamp, source, skipped)
-        db.commit()
-    return n_active
 
 
 def _active_profile_addrs(db):
@@ -3885,13 +3195,7 @@ def ensure_watchlist_current(db, stamp=None) -> int:
         return len(current)
     # Repair is a pure derived-view rebuild.  Re-running gates against stale live-position/portfolio
     # snapshots could reactivate or retire wallets without a fresh network generation.
-    return refresh_watchlist(
-        db,
-        stamp or now_iso(),
-        source="repair",
-        update_follow_line=selection.latest_published_generation(db) is None,
-        update_follow_history=selection.latest_published_generation(db) is None,
-    )
+    return refresh_watchlist(db, stamp or now_iso())
 
 
 def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rejected, n_active,
@@ -3911,8 +3215,7 @@ def _regate_profile_status(old_status, old_reason, ok, *, complete_cached_snapsh
     return old_status
 
 
-def regate(db, p, *, stamp=None, source: str = "regate",
-           auto_tune_enabled: bool = False, quiet: bool = False) -> int:
+def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) -> int:
     """Re-apply gates() + score() on ALREADY-STORED profile metrics (no network, no re-fetch) and
     rebuild the watchlist. Thresholds (win/roiEq/dd/tpd/hold/...) can be tuned in seconds without a
     full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
@@ -4136,19 +3439,8 @@ def regate(db, p, *, stamp=None, source: str = "regate",
         # calculation, so the operator count always matches the rebuilt watchlist source of truth.
         n_active += 1 if status == "active" else 0
     db.commit()
-    def _record_regate_profile_audit():
-        pipeline_audit.record_profile_snapshot(db, stamp, source)
-
-    if auto_tune_enabled:
-        n = refresh_watchlist_and_auto_tune(
-            db,
-            stamp,
-            source=source,
-            before_auto_tune=_record_regate_profile_audit,
-        )
-    else:
-        _record_regate_profile_audit()
-        n = refresh_watchlist(db, stamp, source=source)
+    pipeline_audit.record_profile_snapshot(db, stamp, source)
+    n = refresh_watchlist(db, stamp)
     if not quiet:
         print(f"regate: {n_active} active / {len(rows)} profiles  ->  watchlist {n}")
     return n
@@ -4201,8 +3493,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
         candidates_scanned=profile_total, candidates_total=profile_total,
     )
     refresh_watchlist(
-        db, stamp, source="resume_finalize_preview", update_follow_line=False,
-        update_follow_history=False, leaderboard_generation=generation_id, commit=False,
+        db, stamp, leaderboard_generation=generation_id, commit=False,
     )
     preview = _selection_prefetch_candidates(
         db, limit=int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N)),
@@ -4216,8 +3507,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     publication_stamp = now_iso()
     try:
         refresh_watchlist(
-            db, publication_stamp, source="resume_finalize",
-            update_follow_line=False, update_follow_history=False,
+            db, publication_stamp,
             leaderboard_generation=generation_id, commit=False,
         )
         _apply_formation_params(db, formation, publication_stamp)
@@ -4419,7 +3709,7 @@ def scan(db, p) -> None:
             "SELECT addr FROM follow_selection WHERE generation=? AND role='challenger' AND enabled=1",
             (current_selection_generation,),
         ).fetchall()]
-    # vNext adds seven warm-up days to Copy replay.  Only wallets that already produced Copy evidence
+    # Copy replay adds seven warm-up days. Only wallets that already produced Copy evidence
     # need the one-time 37-day backfill; front-funnel structural rejects remain incremental.
     warmup_backfill_addrs = _copy_warmup_backfill_addrs(
         db, now_ms - config.PROFILE_FETCH_DAYS * 86400_000,
@@ -4631,7 +3921,7 @@ def scan(db, p) -> None:
                 )
                 db.commit()
                 refresh_watchlist(
-                    db, stamp, source="scan", update_follow_line=False, update_follow_history=False,
+                    db, stamp,
                     leaderboard_generation=generation_id, commit=False,
                 )
                 preview_candidates = _selection_prefetch_candidates(db)
@@ -4661,9 +3951,6 @@ def scan(db, p) -> None:
             refresh_watchlist(
                 db,
                 selection_stamp,
-                source="scan",
-                update_follow_line=False,
-                update_follow_history=False,
                 leaderboard_generation=generation_id,
                 commit=False,
             )
@@ -4834,7 +4121,7 @@ def scan(db, p) -> None:
         db.commit()
 
     if published:
-        _set_scan_progress(db, stage="auto_tune", candidates_scanned=len(workset))
+        _set_scan_progress(db, stage="materialize_replay", candidates_scanned=len(workset))
         try:
             portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
         except Exception as exc:  # noqa: BLE001 - published strategy remains authoritative
@@ -4845,7 +4132,7 @@ def scan(db, p) -> None:
             )
         except Exception as exc:  # noqa: BLE001
             selection_replay = {"status": "error", "error": str(exc)[:300]}
-        launch = {
+        tune_summary = {
             "status": "complete", "reason": "synchronous_quality_prefix_formation",
             "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
         }
@@ -4853,10 +4140,10 @@ def scan(db, p) -> None:
             db,
             stamp=stamp,
             source="scan",
-            stage="tuner_launch",
-            status=launch.get("status"),
-            reason=launch.get("reason"),
-            payload=launch,
+            stage="tuner_finalize",
+            status=tune_summary.get("status"),
+            reason=tune_summary.get("reason"),
+            payload=tune_summary,
         )
         db.commit()
     _set_scan_progress(db, stage="persist")

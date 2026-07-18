@@ -162,8 +162,7 @@ def _score_dist(db):
 
 def ep_params(db, include_score_dist=False):
     data = params_mod.get_all(db)
-    # Explicit published Core is the only production target truth.  Existing databases may retain the
-    # retired score-line row for migration compatibility, but it must never reappear in the operator UI.
+    # Ignore retired keys sent by an older Dashboard during a rolling deploy.
     for category in list(data):
         if isinstance(data.get(category), list):
             data[category] = [pr for pr in data[category] if pr.get("key") not in REMOVED_PARAMS]
