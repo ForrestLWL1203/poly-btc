@@ -136,6 +136,13 @@ body {
 /* compact size modifier for in-table gradient buttons (e.g. 平仓 = .btn .btn-stop .btn-sm) */
 .btn-sm { padding: 2px 8px; font-size: 10.5px; border-radius: 7px; gap: 3px; box-shadow: 0 2px 6px rgba(226, 82, 74, .22); }
 .btn-sm svg { width: 11px; height: 11px; }
+/* Shared compact icon action for operator-owned favourites/locks. */
+.btn-star { width: 27px; height: 27px; padding: 0; justify-content: center; gap: 0; border-radius: 8px;
+  border-color: transparent; background: transparent; color: var(--t4); font-family: var(--sans);
+  font-size: 20px; font-weight: 500; line-height: 1; box-shadow: none; }
+.btn-star:hover { color: var(--amber); background: rgba(255,178,122,.08); }
+.btn-star.on { color: #f4bd4a; background: rgba(244,189,74,.10); text-shadow: 0 0 12px rgba(244,189,74,.34); }
+.btn-star.on:hover { background: rgba(244,189,74,.16); }
 .positions-title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .coin-ban-btn { position: relative; display: inline-flex; align-items: center; justify-content: center;
   width: 16px; height: 16px; margin-left: 6px; padding: 0; border: 0; background: transparent;
@@ -398,6 +405,7 @@ th.sortable:hover .sort-ind { opacity: .85; }
   font-size: 8.5px; font-weight: 700; line-height: 1; box-shadow: 0 0 0 1px rgba(0,0,0,.16); }
 .rankbadge { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 20px;
   border-radius: 6px; background: rgba(255,255,255,.06); color: var(--t2); font-size: 11px; padding: 0 6px; }
+.wallet-rank-cell { display: inline-flex; align-items: center; gap: 5px; min-width: 54px; }
 .row-off { opacity: .5; }
 
 /* wallet copy evidence */

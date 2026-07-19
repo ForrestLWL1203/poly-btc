@@ -1196,6 +1196,7 @@ def _quality_first_core_transition(
     desired_order,
     strict_evaluate,
     robust_allowed_memberships=None,
+    pinned_order=(),
 ):
     """Publish the current strict result without entry/exit hysteresis.
 
@@ -1207,6 +1208,8 @@ def _quality_first_core_transition(
         (addr or "").lower() for addr, role in previous_roles.items() if role == selection.CORE
     }
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
+    pinned = tuple(dict.fromkeys((addr or "").lower() for addr in pinned_order if addr))
+    pinned_set = set(pinned)
     selected = []
     reasons = {}
     hard_removed = set()
@@ -1220,11 +1223,13 @@ def _quality_first_core_transition(
             and bool(qualification.get("coreEligible"))
             and data_valid and enabled
         )
-        nominated = core_ok and addr in desired
+        nominated = data_valid and enabled and (addr in pinned_set or (core_ok and addr in desired))
         if nominated:
             selected.append(addr)
             reasons[addr] = (
-                "core_strong_evidence" if qualification.get("strongEntry") else "core_quality_selected"
+                "operator_starred_core" if addr in pinned_set
+                else "core_strong_evidence" if qualification.get("strongEntry")
+                else "core_quality_selected"
             )
         elif addr in previous_core:
             hard_removed.add(addr)
@@ -1250,6 +1255,8 @@ def _quality_first_core_transition(
         base = strict_evaluate(tuple(sorted(published)))
         trials = []
         for addr in published:
+            if addr in pinned_set:
+                continue
             without = strict_evaluate(tuple(sorted(published - {addr})))
             net_gain = f(without.net_pnl) - f(base.net_pnl)
             stress_gain = f(without.stress_net_pnl) - f(base.stress_net_pnl)
@@ -1291,7 +1298,10 @@ def _quality_first_core_transition(
         )
         contribution_rows.append((base_utility - without_utility, -desired_rank.get(addr, 999999), addr))
     contribution_rows.sort(reverse=True)
-    final_order = tuple(row[-1] for row in contribution_rows)
+    contribution_order = tuple(row[-1] for row in contribution_rows)
+    final_order = tuple(addr for addr in pinned if addr in published) + tuple(
+        addr for addr in contribution_order if addr not in pinned_set
+    )
     return {
         "selected": final_order,
         "reasons": reasons,
@@ -1434,12 +1444,27 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
         (addr or "").lower(): bool(enabled)
         for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
     }
+    pinned_order = tuple(
+        item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
+    )
+    pinned = set(pinned_order)
+    previous_selection = {
+        row.addr: row for row in selection.current_selection_rows(db)
+    }
     rows = []
     margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     for raw in cur.fetchall():
         row = dict(zip(names, raw))
         addr = (row.get("addr") or "").lower()
         row["addr"] = addr
+        if addr in pinned:
+            try:
+                current_policy = json.loads(row.get("sector_policy_json") or "{}")
+            except (TypeError, ValueError):
+                current_policy = {}
+            prior = previous_selection.get(addr)
+            if not current_policy.get("allowed") and prior and prior.sector_policy_json:
+                row["sector_policy_json"] = prior.sector_policy_json
         row["margin_equity_pct"] = margin_equity_pct
         row["follow_score"] = follow_score.compute_follow_score(row)[0]
         row["follow_qualification"] = follow_score.evaluate_follow_eligibility({
@@ -1455,13 +1480,22 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
         )
         probe = bool(not core_only and _is_parameter_return_probe(row, margin_equity_pct))
         if (
-            (qualified or probe)
+            (qualified or probe or addr in pinned)
             and (row.get("data_status") or "valid") == "valid"
             and controls.get(addr, True)
         ):
             row["formation_probe"] = probe
             rows.append(row)
-    rows.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
+    present = {row["addr"] for row in rows}
+    missing_pinned = [addr for addr in pinned_order if addr not in present]
+    if missing_pinned:
+        raise RuntimeError(f"pinned_core_profile_unavailable:{len(missing_pinned)}")
+    pin_rank = {addr: rank for rank, addr in enumerate(pinned_order)}
+    rows.sort(key=lambda row: (
+        0 if row["addr"] in pinned else 1,
+        pin_rank.get(row["addr"], 999999),
+        -(row.get("follow_score") or 0.0), row.get("addr") or "",
+    ))
     return rows
 
 
@@ -1646,7 +1680,8 @@ def _formation_tune_candidate(row) -> bool:
 
 
 def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, follow,
-                                           valuation_marks, sigmas, market_ctx) -> list[dict]:
+                                           valuation_marks, sigmas, market_ctx,
+                                           required_order=()) -> list[dict]:
     """Re-rank the bounded quality pool under the exact active parameter surface.
 
     Profile Copy columns are immutable scan-time evidence and may have been produced before the latest
@@ -1655,26 +1690,36 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
     same marks, market metadata and follow snapshot for every wallet.
     """
     ranked = []
+    required_order = tuple(dict.fromkeys((addr or "").lower() for addr in required_order if addr))
+    required = set(required_order)
     for row in rows:
         effective = _effective_follow_replay(
             db, row, now_ms, generation_id=generation_id, follow=follow,
             valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
         )
         qualification = dict(effective.get("qualification") or {})
+        addr = (row.get("addr") or "").lower()
         if qualification.get("deferred") or qualification.get("role") == "quarantine":
+            if addr in required:
+                raise RuntimeError(f"pinned_core_replay_invalid:{addr}")
             continue
         parameter_probe = bool(
             row.get("formation_probe")
             and qualification.get("status") == "copy_value_below_challenger_floor"
         )
-        if not qualification.get("eligible") and not parameter_probe:
+        if not qualification.get("eligible") and not parameter_probe and addr not in required:
             continue
         ranked.append({
             **row,
             "follow_score": f(effective.get("score")),
             "follow_qualification": qualification,
         })
-    ranked.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
+    required_rank = {addr: rank for rank, addr in enumerate(required_order)}
+    ranked.sort(key=lambda row: (
+        0 if row.get("addr") in required else 1,
+        required_rank.get(row.get("addr"), 999999),
+        -(row.get("follow_score") or 0.0), row.get("addr") or "",
+    ))
     return ranked
 
 
@@ -1700,18 +1745,26 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     sigmas = auto_tune._load_sigmas(db, generation_id)
     market_ctx = auto_tune._load_market_ctx(db, generation_id)
     valuation_marks = _current_copy_valuation_marks()
+    pinned_order = tuple(
+        item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
+    )
+    pinned = set(pinned_order)
     surface_ranked = _rank_formation_candidates_for_surface(
         db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
         valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+        required_order=pinned_order,
     )
-    upper = max(1, min(
+    upper = max(1, len(pinned_order), min(
         int(config.MAX_TARGETS),
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
     ))
     # Tune against every quality wallet whose economics can improve under a different sizing surface.
     # Individual qualification is recomputed once under the winning surface; portfolio folds/holdout/stress
     # are the only stability checks and no second time-based admission gate may override them.
-    tune_ranked = [row for row in surface_ranked if _formation_tune_candidate(row)][:upper]
+    tune_ranked = [
+        row for row in surface_ranked
+        if row.get("addr") in pinned or _formation_tune_candidate(row)
+    ][:upper]
     if not tune_ranked:
         return {
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
@@ -1756,6 +1809,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             len(tune_ordered), tune_evaluate, retention_kwargs=retention,
             tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
             exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
+            min_count=max(1, len(pinned_order)),
         )
         tuned_params = dict(tune_search.selected.params or {})
         chosen_run = tune_runs.get(int(tune_search.selected.count)) or {}
@@ -1789,17 +1843,21 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
         effective_qualifications[addr] = qualification
         effective_scores[addr] = f(effective.get("score"))
-        passed = bool(qualification.get("coreEligible"))
+        passed = bool(qualification.get("coreEligible") or addr in pinned)
         admission_audit.append({
             "addr": addr,
             "passed": passed,
             "status": qualification.get("status") or "unknown",
+            "operatorStarred": addr in pinned,
         })
         if passed:
             effective_ranked.append(row)
         else:
             qualification_rejected.append(addr)
+    pin_rank = {addr: rank for rank, addr in enumerate(pinned_order)}
     effective_ranked.sort(key=lambda row: (
+        0 if row["addr"] in pinned else 1,
+        pin_rank.get(row["addr"], 999999),
         -effective_scores.get(row["addr"], 0.0), row["addr"],
     ))
     ordered = tuple(row["addr"] for row in effective_ranked[:upper])
@@ -1887,10 +1945,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
+        min_count=max(1, len(pinned_order)),
     )
     membership_search = core_formation.search_quality_membership(
         ordered, evaluate_members,
         initial=ordered[:prefix_search.selected.count],
+        required=pinned_order,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
     )
     chosen = membership_search.metrics
@@ -1970,7 +2030,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     current_core = tuple(selection.published_core_addrs(db) or ())
     previous_qualified = tuple(
         addr for addr in current_core
-        if addr in set(ordered) and (effective_qualifications.get(addr) or {}).get("coreEligible")
+        if addr in set(ordered) and (
+            (effective_qualifications.get(addr) or {}).get("coreEligible") or addr in pinned
+        )
     )
     baseline_eval = evaluate_members(previous_qualified) if previous_qualified else None
     baseline_folds, _baseline_cost_stress = fold_replays(previous_qualified)
@@ -2042,7 +2104,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     finalist_limit = max(1, int(getattr(config, "CORE_SEARCH_ROBUST_FINALISTS", 12) or 12))
     finalist_pool = {
         key: value for key, value in membership_eval_cache.items()
-        if key and value.feasible
+        if key and value.feasible and pinned.issubset(key)
     }
     # A bounded add/swap search can return a winner which was not retained in the generic replay cache's
     # highest-utility slice.  Include it in the same ordering, but never give it artificial priority over a
@@ -2073,6 +2135,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     # the resulting set has passed these same membership stress rules.
     robust_allowed = {tuple(sorted(chosen_addrs))}
     for outgoing in chosen_addrs:
+        if outgoing in pinned:
+            continue
         smaller = tuple(addr for addr in chosen_addrs if addr != outgoing)
         if smaller:
             check = validate_members(smaller)
@@ -2118,6 +2182,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "singleWalletDependencyWarning": bool(
                 robust_check.get("singleWalletDependencyWarning")
             ),
+            "operatorStarred": list(pinned_order),
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": (
                 int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
@@ -2239,6 +2304,11 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     """Materialize the jointly tuned, skip-aware quality membership selected during formation."""
     copy_policy = load_copy_policy()
     by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
+    pinned_controls = selection.pinned_core_controls(db)
+    pinned_all_order = tuple(item["addr"] for item in pinned_controls)
+    pinned_all = set(pinned_all_order)
+    pinned_enabled_order = tuple(item["addr"] for item in pinned_controls if item["enabled"])
+    pinned_enabled = set(pinned_enabled_order)
     for addr, qualification in dict(effective_qualifications or {}).items():
         addr = (addr or "").lower()
         if addr in by_addr:
@@ -2256,12 +2326,21 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
+    missing_required = [addr for addr in pinned_enabled_order if addr not in desired]
+    if missing_required:
+        raise RuntimeError(f"quality_prefix_missing_pinned_wallets:{len(missing_required)}")
     invalid = [
         addr for addr in desired
         if addr not in by_addr
         or by_addr[addr].get("profile_generation") != generation_id
-        or by_addr[addr].get("status") not in {"active", "qualified"}
-        or not (by_addr[addr].get("follow_qualification") or {}).get("coreEligible")
+        or (
+            addr not in pinned_enabled
+            and by_addr[addr].get("status") not in {"active", "qualified"}
+        )
+        or (
+            addr not in pinned_enabled
+            and not (by_addr[addr].get("follow_qualification") or {}).get("coreEligible")
+        )
         or (by_addr[addr].get("data_status") or "valid") != "valid"
         or not controls.get(addr, True)
     ]
@@ -2315,16 +2394,21 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         desired_order=desired,
         strict_evaluate=strict_evaluate,
         robust_allowed_memberships=(formation_meta or {}).get("robustAllowedMemberships") or (),
+        pinned_order=pinned_enabled_order,
     )
-    selected_set = set(transition["selected"])
-    core_rank = {addr: rank for rank, addr in enumerate(transition["selected"], 1)}
+    selected_enabled_set = set(transition["selected"])
+    core_order = pinned_all_order + tuple(
+        addr for addr in transition["selected"] if addr not in pinned_all
+    )
+    selected_set = set(core_order)
+    core_rank = {addr: rank for rank, addr in enumerate(core_order, 1)}
     previous_core = {addr for addr, role in previous_roles.items() if role == selection.CORE}
     marginal = selection.MarginalSelectionResult(
         selected=transition["selected"],
         baseline=strict_evaluate(tuple(sorted(previous_core & set(by_addr)))),
         metrics=transition["metrics"],
         action="quality_prefix_rebuild",
-        added=tuple(sorted(selected_set - previous_core)),
+        added=tuple(sorted(selected_enabled_set - previous_core)),
         removed=tuple(sorted(previous_core - selected_set)),
         evaluated=len(eval_cache),
         search_meta={
@@ -2347,8 +2431,13 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         qualification = row.get("follow_qualification") or {}
         candidate_ok = active and bool(qualification.get("eligible"))
         include = True
-        if addr in selected_set and enabled:
-            role, reason = selection.CORE, transition_reasons.get(addr, "core_quality_selected")
+        if addr in selected_set and (enabled or addr in pinned_all):
+            role = selection.CORE
+            reason = (
+                "operator_starred_core" if enabled and addr in pinned_all
+                else "operator_starred_disabled" if addr in pinned_all
+                else transition_reasons.get(addr, "core_quality_selected")
+            )
         elif addr in held and data_status != "valid":
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         elif data_status != "valid":
@@ -2455,8 +2544,19 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         for addr, score in db.execute("SELECT addr,score FROM watchlist").fetchall()
     }
     margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    pinned_addrs = {
+        item["addr"] for item in selection.pinned_core_controls(db)
+    }
     for row in profiles:
         addr = (row.get("addr") or "").lower()
+        if addr in pinned_addrs:
+            try:
+                current_policy = json.loads(row.get("sector_policy_json") or "{}")
+            except (TypeError, ValueError):
+                current_policy = {}
+            prior = previous_selection.get(addr)
+            if not current_policy.get("allowed") and prior and prior.sector_policy_json:
+                row["sector_policy_json"] = prior.sector_policy_json
         row["follow_score"] = (
             f(watch_scores[addr]) if addr in watch_scores
             else follow_score.compute_follow_score(row)[0]
@@ -3010,13 +3110,17 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         if marginal is not None and evaluate is not None:
             desired_marginal = marginal
             effective_evaluate = validate if validate_price_path else evaluate
+            pinned_order = tuple(
+                item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
+            )
             transition = _quality_first_core_transition(
                 profiles,
                 generation_id=generation_id,
                 previous_roles=previous_roles,
                 controls=controls,
-                desired_order=desired_marginal.selected,
+                desired_order=(*pinned_order, *desired_marginal.selected),
                 strict_evaluate=effective_evaluate,
+                pinned_order=pinned_order,
             )
             selected_set = set(transition["selected"])
             core_rank = {

@@ -409,6 +409,7 @@ CREATE TABLE IF NOT EXISTS target_controls (
     addr        TEXT PRIMARY KEY,
     enabled     INTEGER DEFAULT 1,   -- observe/copy this target?
     pinned      INTEGER DEFAULT 0,
+    pinned_at   TEXT,                -- operator Core lock order; cleared when unstarred
     note        TEXT,
     updated_at  TEXT
 );
@@ -1091,6 +1092,7 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_valuation_status TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_unrealized_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_unrealized_pnl REAL",
+    "ALTER TABLE target_controls ADD COLUMN pinned_at TEXT",
 )
 
 

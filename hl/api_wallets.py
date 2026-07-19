@@ -88,6 +88,8 @@ def _selection_reason_text(row):
         "deferred_data_error": "本轮数据异常，暂不跟随",
         "below_follow_line": "评分未达到跟单线",
         "operator_disabled": "已被手动停用",
+        "operator_starred_core": "已由用户星标锁定在跟单列表",
+        "operator_starred_disabled": "已星标锁定，但当前被手动停用",
         "exit_only_open_position": "仅管理已有持仓",
         "above_follow_line": "达到跟单线",
         "actionable_open_stale": "近期没有可跟随的新开仓",
@@ -267,7 +269,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         db,
         "WITH page_selected AS ("
         "  SELECT fs.addr,fs.role AS selection_role,fs.reason AS selection_reason,fs.utility,"
-        "         fs.selection_rank,"
+        "         fs.selection_rank,COALESCE(tc.pinned,0) AS pinned,tc.pinned_at,"
         "         fs.follow_score AS selection_follow_score,"
         "         CASE WHEN fs.follow_score IS NOT NULL THEN fs.follow_score "
         "              WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility "
@@ -284,7 +286,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
         "  LEFT JOIN follow_history sfh ON sfh.addr=fs.addr "
         "  WHERE fs.generation=? AND fs.role=? "
-        "  ORDER BY CASE WHEN fs.role='core' THEN COALESCE(fs.selection_rank,999999) ELSE 0 END,"
+        "  ORDER BY CASE WHEN fs.role='core' THEN COALESCE(tc.pinned,0) ELSE 0 END DESC,"
+        "      CASE WHEN fs.role='core' AND COALESCE(tc.pinned,0)=1 THEN tc.pinned_at END,"
+        "      CASE WHEN fs.role='core' THEN COALESCE(fs.selection_rank,999999) ELSE 0 END,"
         "      CASE WHEN fs.role='core' THEN fs.utility END DESC,"
         "      COALESCE(fs.follow_score,"
         "      CASE WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility END,"
@@ -302,6 +306,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
         ") "
         "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
+        "s.pinned,s.pinned_at,"
         "s.selection_follow_score,s.legacy_follow_score,"
         "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
@@ -323,7 +328,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "LEFT JOIN follow_history fh ON fh.addr=s.addr "
         "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=s.addr "
-        "ORDER BY CASE WHEN s.selection_role='core' THEN COALESCE(s.selection_rank,999999) ELSE 0 END,"
+        "ORDER BY CASE WHEN s.selection_role='core' THEN COALESCE(s.pinned,0) ELSE 0 END DESC,"
+        "CASE WHEN s.selection_role='core' AND COALESCE(s.pinned,0)=1 THEN s.pinned_at END,"
+        "CASE WHEN s.selection_role='core' THEN COALESCE(s.selection_rank,999999) ELSE 0 END,"
         "CASE WHEN s.selection_role='core' THEN s.utility END DESC,"
         "COALESCE(s.selection_follow_score,s.legacy_follow_score,-1) DESC,s.addr",
         (generation, role, size, page * size, cutoff7d),
@@ -350,6 +357,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "mainCoin": _col(r, "top_coin"),
             "followCount": _col(r, "follow_count") or 0,
             "enabled": bool(_col(r, "enabled", True)),
+            "starred": bool(_col(r, "pinned", False)),
+            "starredAt": _col(r, "pinned_at"),
             "closed7d": closed7d,
             "openEvents7d": (
                 _col(r, "open_events_7d")

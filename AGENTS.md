@@ -240,6 +240,15 @@ minimum, or auto-tuned value. Production automatic formation is:
    least `$1` and the smaller set already passed the same membership robustness checks, then publish that
    current-evidence result immediately.
 
+An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag is
+an explicit manual Core lock: enabled starred wallets are required members in count search, parameter tuning,
+membership search and LOO, occupy the user Core maximum, and are ordered before automatic members by
+`pinned_at`. Business score or qualification changes do not demote them. A true replay/cache/market-snapshot or
+strategy-integrity failure still fails the generation closed and retains the prior complete strategy; it must not
+silently clear the star or publish corrupt execution context. Disabling a starred wallet keeps its list lock but
+removes it from the immutable execution target set until re-enabled. Removing the star returns it to normal
+automatic selection on the next generation.
+
 A pure addition to a still-qualified Core is not an incumbent replacement: it needs positive funded marginal
 net plus the fold/latest/stress safeguards, but not the 5% utility and 2%-of-equity anti-churn hurdle. Those larger
 hurdles apply only when a candidate set removes or replaces a still-qualified old Core member.

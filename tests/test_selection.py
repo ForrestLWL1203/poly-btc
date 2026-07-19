@@ -187,6 +187,35 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["looRemoved"], ("0xb",))
         self.assertEqual(result["reasons"]["0xb"], "portfolio_negative_incremental_net")
 
+    def test_starred_core_ignores_business_gate_and_cannot_be_removed_by_loo(self):
+        profiles = [
+            {
+                "addr": "0xstar", "status": "rejected", "profile_generation": "g2",
+                "data_status": "valid",
+                "follow_qualification": {"coreEligible": False, "status": "recent_copy_loss"},
+            },
+            {
+                "addr": "0xgood", "status": "active", "profile_generation": "g2",
+                "data_status": "valid", "follow_qualification": {"coreEligible": True},
+            },
+        ]
+        metrics = {
+            (): 0,
+            ("0xgood",): 200,
+            ("0xstar",): 20,
+            ("0xgood", "0xstar"): 150,
+        }
+
+        result = scanner._quality_first_core_transition(
+            profiles, generation_id="g2", previous_roles={"0xstar": "core"}, controls={},
+            desired_order=("0xstar", "0xgood"), pinned_order=("0xstar",),
+            strict_evaluate=lambda addrs: self._transition_metrics(metrics[tuple(sorted(addrs))]),
+        )
+
+        self.assertEqual(result["selected"], ("0xstar", "0xgood"))
+        self.assertEqual(result["reasons"]["0xstar"], "operator_starred_core")
+        self.assertNotIn("0xstar", result["looRemoved"])
+
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,
                  deploy=.7, cost=.10, latency=None):

@@ -69,6 +69,32 @@ def latest_published_generation(db) -> Optional[str]:
     return str(row[0]) if row else None
 
 
+def pinned_core_controls(db, *, enabled_only: bool = False) -> list[dict]:
+    """Return durable operator Core locks in their user-defined order.
+
+    ``pinned_at`` is the authoritative order.  Address ordering is a deterministic rolling-migration
+    fallback for databases whose old pin rows predate the timestamp column.
+    """
+    if not _table_exists(db, "target_controls"):
+        return []
+    cols = _columns(db, "target_controls")
+    if not {"addr", "pinned"}.issubset(cols):
+        return []
+    enabled = "COALESCE(enabled,1)" if "enabled" in cols else "1"
+    pinned_at = "pinned_at" if "pinned_at" in cols else "NULL"
+    where = "COALESCE(pinned,0)=1"
+    if enabled_only:
+        where += f" AND {enabled}=1"
+    rows = db.execute(
+        f"SELECT lower(addr),{enabled},{pinned_at} FROM target_controls WHERE {where} "
+        f"ORDER BY CASE WHEN {pinned_at} IS NULL THEN 1 ELSE 0 END,{pinned_at},lower(addr),addr"
+    ).fetchall()
+    return [
+        {"addr": (row[0] or "").strip().lower(), "enabled": bool(row[1]), "pinnedAt": row[2]}
+        for row in rows if (row[0] or "").strip()
+    ]
+
+
 def published_core_addrs(db, limit: Optional[int] = None) -> Optional[list]:
     """Load enabled Core addresses from the current published generation.
 

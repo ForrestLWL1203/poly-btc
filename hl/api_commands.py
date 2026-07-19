@@ -9,7 +9,7 @@ from .api_common import q1
 from .util import now_iso
 
 
-ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
+ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle", "wallet_star",
                     "observer_start", "observer_stop", "rescan", "scan_stop",
                     "patch_params", "reload_params", "risk_radar_start", "risk_radar_stop",
                     "set_provider_credential", "delete_provider_credential", "test_provider_connection"}
@@ -19,7 +19,16 @@ PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan", "scan_stop"}
 def validate_command_payload(ctype, payload):
     """Reject plaintext/oversized credential payloads before they can enter the command table."""
     payload = payload or {}
-    if ctype in {"risk_radar_start", "risk_radar_stop"}:
+    if ctype in {"wallet_toggle", "wallet_star"}:
+        expected_flag = "enabled" if ctype == "wallet_toggle" else "starred"
+        if set(payload) != {"address", expected_flag}:
+            raise ValueError(f"{ctype} requires address and {expected_flag}")
+        address = payload.get("address")
+        if not isinstance(address, str) or not address.strip() or len(address) > 128:
+            raise ValueError("invalid wallet address")
+        if not isinstance(payload.get(expected_flag), bool):
+            raise ValueError(f"{expected_flag} must be boolean")
+    elif ctype in {"risk_radar_start", "risk_radar_stop"}:
         if payload:
             raise ValueError("risk radar control payload must be empty")
     elif ctype in {"delete_provider_credential", "test_provider_connection"}:

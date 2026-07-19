@@ -107,6 +107,28 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(len(active["targets"]), 1)
         self.assertEqual(strategy_revision.resolved_targets(db, active), [])
 
+    def test_wallet_star_command_persists_original_order_timestamp(self):
+        db = self._db()
+        observer = Observer(db, [], {})
+
+        first = observer._cmd_wallet_star("0xAAA", True)
+        second = observer._cmd_wallet_star("0xaaa", True)
+        row = db.execute(
+            "SELECT pinned,pinned_at FROM target_controls WHERE addr='0xaaa'"
+        ).fetchone()
+
+        self.assertTrue(first["starred"])
+        self.assertTrue(second["starred"])
+        self.assertEqual(row["pinned"], 1)
+        self.assertEqual(row["pinned_at"], first["starredAt"])
+
+        observer._cmd_wallet_star("0xaaa", False)
+        row = db.execute(
+            "SELECT pinned,pinned_at FROM target_controls WHERE addr='0xaaa'"
+        ).fetchone()
+        self.assertEqual(row["pinned"], 0)
+        self.assertIsNone(row["pinned_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

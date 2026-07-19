@@ -21,6 +21,7 @@ export function Wallets({ confirm }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
+  const [starPending, setStarPending] = useState({});
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
   const { data, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   const explicit = !!(data && data.selectionMode);
@@ -36,6 +37,21 @@ export function Wallets({ confirm }) {
       .then(() => { setTimeout(reload, 1800); });
     if (next) act(); else confirm({ title: "停用钱包", danger: true, ok: "停用",
       body: `停用后不再对 ${short(w.address)} 开新仓,存量持仓继续跟到平仓。`, onConfirm: act });
+  };
+
+  const toggleStar = async (w) => {
+    if (starPending[w.address]) return;
+    setStarPending(pending => ({ ...pending, [w.address]: true }));
+    try {
+      await api.cmdAndWait("wallet_star", { address: w.address, starred: !w.starred });
+      await reload();
+    } finally {
+      setStarPending(pending => {
+        const next = { ...pending };
+        delete next[w.address];
+        return next;
+      });
+    }
   };
 
   return (
@@ -77,7 +93,18 @@ export function Wallets({ confirm }) {
                 return (
                   <tr key={w.address} className={w.enabled ? "" : "row-off"}
                     style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
-                    <td><span className="rankbadge">{w.followPos}</span></td>
+                    <td><div className="wallet-rank-cell">
+                      {tab === "followed" && <button type="button"
+                        className={"btn btn-star" + (w.starred ? " on" : "")}
+                        aria-label={w.starred ? "取消星标" : "设为星标钱包"}
+                        aria-pressed={!!w.starred}
+                        title={w.starred ? "已锁定在跟单列表；点击取消星标" : "星标后锁定在跟单列表并置顶"}
+                        disabled={!!starPending[w.address]}
+                        onClick={(e) => { e.stopPropagation(); toggleStar(w); }}>
+                        {w.starred ? "★" : "☆"}
+                      </button>}
+                      <span className="rankbadge">{w.followPos}</span>
+                    </div></td>
                     <td className="addr">
                       <span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span>
                       {warning && <span className={"tint " + warning[1]} style={{ marginLeft: 6 }} title="本轮画像数据不完整">{warning[0]}</span>}

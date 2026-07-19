@@ -502,6 +502,41 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(res["score"], 89.0)
         self.assertEqual(res["scoreBreakdown"]["rawScore"], 65.0)
 
+    def test_starred_core_wallets_sort_first_by_star_time(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02')"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,utility,follow_score,selection_rank,selected_at) "
+                "VALUES ('g1',?,'core',1,?,?,?,'2026-01-02')",
+                [
+                    ("0xnormal", 99, .99, 1),
+                    ("0xlate", 20, .80, 2),
+                    ("0xearly", 10, .70, 3),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO target_controls(addr,enabled,pinned,pinned_at,updated_at) "
+                "VALUES (?,1,1,?,'now')",
+                [("0xlate", "2026-01-02T00:00:00Z"), ("0xearly", "2026-01-01T00:00:00Z")],
+            )
+            db.commit()
+
+            result = api_wallets.ep_wallets(db, {"tab": ["followed"], "size": ["10"]})
+
+        self.assertEqual(
+            [row["address"] for row in result["wallets"]],
+            ["0xearly", "0xlate", "0xnormal"],
+        )
+        self.assertEqual([row["starred"] for row in result["wallets"]], [True, True, False])
+
 
 if __name__ == "__main__":
     unittest.main()

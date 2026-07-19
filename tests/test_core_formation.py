@@ -119,6 +119,19 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertEqual(sorted(calls), list(range(1, 8)))
         self.assertEqual(result.selected.count, 5)
 
+    def test_prefix_search_never_evaluates_below_required_starred_count(self):
+        calls = []
+        result = search_quality_prefix(
+            7,
+            lambda count: calls.append(count) or value(count, 1000 - count),
+            tie_tolerance=0,
+            exhaustive_below=8,
+            min_count=3,
+        )
+
+        self.assertEqual(sorted(calls), list(range(3, 8)))
+        self.assertEqual(result.selected.count, 3)
+
     def test_inferior_full_prefix_cannot_force_the_sixteenth_wallet_into_core(self):
         # Production-shaped regression: removing the quality-tail wallet improves normal PnL, stressed PnL,
         # and risk-adjusted utility.  The old implementation nevertheless forced 16 because 15 had a little
@@ -197,6 +210,27 @@ class QualityPrefixSearchTests(unittest.TestCase):
 
         self.assertEqual(result.selected, ("0xa", "0xc"))
         self.assertEqual(result.algorithm, "exhaustive_subset")
+
+    def test_required_starred_wallet_survives_membership_search(self):
+        candidates = ("0xstar", "0xbest", "0xtail")
+        utilities = {
+            ("0xbest",): 5000,
+            ("0xbest", "0xstar"): 4500,
+            ("0xstar",): 1000,
+            ("0xstar", "0xtail"): 1100,
+            ("0xbest", "0xstar", "0xtail"): 4400,
+        }
+
+        def evaluate(addrs):
+            key = tuple(sorted(addrs))
+            return value(len(key), utilities.get(key, 100))
+
+        result = search_quality_membership(
+            candidates, evaluate, required=("0xstar",), exhaustive_below=8,
+        )
+
+        self.assertIn("0xstar", result.selected)
+        self.assertEqual(set(result.selected), {"0xstar", "0xbest"})
 
 
 if __name__ == "__main__":

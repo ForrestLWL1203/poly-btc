@@ -150,7 +150,7 @@ def validate_final_membership(
     }
 
 
-def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_below: int = 8):
+def search_quality_membership(candidates, evaluate, *, initial=(), required=(), exhaustive_below: int = 8):
     """Find a feasible quality subset without letting one congested wallet block every later wallet.
 
     Small Core-ready pools are exhaustively evaluated.  Larger pools start from the count search's winning
@@ -160,6 +160,9 @@ def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_be
     ordered = tuple(dict.fromkeys(str(addr).lower() for addr in candidates if addr))
     if not ordered:
         raise ValueError("candidates must not be empty")
+    required_set = {str(addr).lower() for addr in required if addr}
+    if not required_set.issubset(set(ordered)):
+        raise ValueError("required wallets must be present in candidates")
     cache = {}
 
     def get(addrs):
@@ -177,8 +180,10 @@ def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_be
 
     if len(ordered) <= max(1, int(exhaustive_below)):
         states = []
-        for count in range(1, len(ordered) + 1):
+        for count in range(max(1, len(required_set)), len(ordered) + 1):
             for addrs in itertools.combinations(ordered, count):
+                if not required_set.issubset(addrs):
+                    continue
                 value = get(addrs)
                 if value.feasible:
                     states.append((tuple(sorted(addrs)), value))
@@ -187,11 +192,17 @@ def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_be
         selected, metrics = max(states, key=rank)
         return MembershipSearchResult(selected, metrics, len(cache), "exhaustive_subset")
 
-    selected = tuple(sorted(dict.fromkeys(initial)))
+    selected = tuple(sorted(set(dict.fromkeys(initial)) | required_set))
     current = get(selected) if selected else None
     if current is None or not current.feasible:
-        singles = [((addr,), get((addr,))) for addr in ordered]
-        feasible = [item for item in singles if item[1].feasible]
+        base = tuple(sorted(required_set))
+        seeds = []
+        if base:
+            seeds.append(base)
+            seeds.extend(tuple(sorted((*base, addr))) for addr in ordered if addr not in required_set)
+        else:
+            seeds.extend((addr,) for addr in ordered)
+        feasible = [(seed, get(seed)) for seed in seeds if get(seed).feasible]
         if not feasible:
             raise RuntimeError("no_feasible_quality_membership")
         selected, current = max(feasible, key=rank)
@@ -206,6 +217,8 @@ def search_quality_membership(candidates, evaluate, *, initial=(), exhaustive_be
             if value.feasible and value.utility > current.utility:
                 trials.append((addrs, value))
             for outgoing in selected:
+                if outgoing in required_set:
+                    continue
                 swapped = tuple(sorted((selected_set - {outgoing}) | {incoming}))
                 value = get(swapped)
                 if value.feasible and value.utility > current.utility:
@@ -258,7 +271,8 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
 def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEvaluation], *,
                           retention_kwargs: Mapping[str, float] | None = None,
                           tie_tolerance: float = .02,
-                          exhaustive_below: int = 0) -> PrefixSearchResult:
+                          exhaustive_below: int = 0,
+                          min_count: int = 1) -> PrefixSearchResult:
     """Evaluate quality prefixes and return the best safe economic state.
 
     Small pools are cheap enough to search exhaustively.  Larger pools use the original bounded binary
@@ -268,10 +282,13 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     initial_count = int(initial_count)
     if initial_count < 1:
         raise ValueError("initial_count must be positive")
+    min_count = int(min_count)
+    if min_count < 1 or min_count > initial_count:
+        raise ValueError("min_count must be between one and initial_count")
     cache: dict[int, PrefixEvaluation] = {}
 
     def get(count: int) -> PrefixEvaluation:
-        count = max(1, min(initial_count, int(count)))
+        count = max(min_count, min(initial_count, int(count)))
         if count not in cache:
             value = evaluate(count)
             if int(value.count) != count:
@@ -281,9 +298,9 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
 
     reference = get(initial_count)
     retain_args = dict(retention_kwargs or {})
-    lo, hi = 1, initial_count
+    lo, hi = min_count, initial_count
     if initial_count <= max(0, int(exhaustive_below)):
-        for count in range(1, initial_count + 1):
+        for count in range(min_count, initial_count + 1):
             get(count)
         if reference.feasible:
             retained = [
@@ -306,7 +323,7 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
         # Capital contention can make the full high-quality set infeasible.  Feasibility is monotone in
         # the useful direction: removing a low-quality suffix releases capacity.  Find the largest feasible
         # prefix, then compare its neighbours.  This is the same 16 -> 8 -> 12 search direction.
-        first = get(1)
+        first = get(min_count)
         if not first.feasible:
             raise RuntimeError("no_feasible_quality_prefix")
         while lo < hi:
@@ -317,7 +334,7 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
                 hi = mid - 1
         boundary = lo
     for count in {boundary - 1, boundary, boundary + 1, initial_count}:
-        if 1 <= count <= initial_count:
+        if min_count <= count <= initial_count:
             get(count)
     feasible = [value for value in cache.values() if value.feasible]
     if not feasible:

@@ -37,9 +37,13 @@ def params_snapshot(db, values: Optional[dict] = None) -> tuple[dict, str]:
 def target_snapshot(db, generation: str) -> list[dict]:
     """Capture immutable Core execution context for one explicit selection generation."""
     rows = db.execute(
-        "SELECT lower(addr) FROM follow_selection WHERE generation=? "
-        "AND lower(role)='core' AND COALESCE(enabled,1)=1 "
-        "ORDER BY COALESCE(utility,-1e999) DESC,lower(addr),addr",
+        "SELECT lower(fs.addr) FROM follow_selection fs "
+        "LEFT JOIN target_controls tc ON tc.addr=fs.addr WHERE fs.generation=? "
+        "AND lower(fs.role)='core' AND COALESCE(fs.enabled,1)=1 "
+        "ORDER BY COALESCE(tc.pinned,0) DESC,"
+        "CASE WHEN COALESCE(tc.pinned,0)=1 THEN tc.pinned_at END,"
+        "COALESCE(fs.selection_rank,999999),COALESCE(fs.utility,-1e999) DESC,"
+        "lower(fs.addr),fs.addr",
         (generation,),
     ).fetchall()
     addrs = []

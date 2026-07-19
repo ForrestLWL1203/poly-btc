@@ -912,7 +912,7 @@ class Observer:
         """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
         toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
-        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle", "reload_params",
+        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle", "wallet_star", "reload_params",
                  "risk_radar_start", "risk_radar_stop", "set_provider_credential",
                  "delete_provider_credential", "test_provider_connection")
         last_hb = 0.0
@@ -960,6 +960,8 @@ class Observer:
             return await self._cmd_close_all()
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
+        if ctype == "wallet_star":
+            return self._cmd_wallet_star(payload["address"], bool(payload["starred"]))
         if ctype == "risk_radar_start":
             return await self.risk_radar.set_mode(True)
         if ctype == "risk_radar_stop":
@@ -1064,6 +1066,46 @@ class Observer:
         self.db.commit()
         self._reload_strategy()
         return {"address": addr, "enabled": bool(enabled)}
+
+    def _cmd_wallet_star(self, addr, starred):
+        """Persist an operator-owned Core lock without mutating the published generation.
+
+        Star creation is intentionally limited to a wallet already present in the current Core.  The next
+        scanner formation consumes this durable control as a required member; removing a star merely hands
+        the wallet back to normal automatic selection on the following generation.
+        """
+        addr = (addr or "").strip().lower()
+        if not addr:
+            raise ValueError("wallet address is required")
+        if starred:
+            generation = selection.latest_published_generation(self.db)
+            row = self.db.execute(
+                "SELECT 1 FROM follow_selection WHERE generation=? AND lower(addr)=? "
+                "AND lower(role)='core' LIMIT 1",
+                (generation, addr),
+            ).fetchone() if generation else None
+            if not row:
+                raise ValueError("only a current Core wallet can be starred")
+        ts = now_iso()
+        cur = self.db.execute(
+            "UPDATE target_controls SET pinned=?,"
+            "pinned_at=CASE WHEN ?=1 AND COALESCE(pinned,0)=0 THEN ? "
+            "               WHEN ?=0 THEN NULL ELSE pinned_at END,updated_at=? WHERE lower(addr)=?",
+            (1 if starred else 0, 1 if starred else 0, ts, 1 if starred else 0, ts, addr),
+        )
+        if cur.rowcount == 0:
+            self.db.execute(
+                "INSERT INTO target_controls (addr,enabled,pinned,pinned_at,updated_at) VALUES (?,?,?,?,?)",
+                (addr, 1, 1 if starred else 0, ts if starred else None, ts),
+            )
+        self.db.commit()
+        row = self.db.execute(
+            "SELECT pinned_at FROM target_controls WHERE lower(addr)=?", (addr,)
+        ).fetchone()
+        return {
+            "address": addr, "starred": bool(starred),
+            "starredAt": row[0] if row and starred else None,
+        }
 
     # -- SIGNAL: continuous REST poll of the whole watchlist -----------------
     async def poll_loop(self):
