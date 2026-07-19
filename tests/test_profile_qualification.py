@@ -67,6 +67,68 @@ class ProfileQualificationTests(unittest.TestCase):
             (True, "ok"),
         )
 
+    def test_open_mirrored_swing_position_bypasses_only_inactivity(self):
+        row = qualified(
+            last_copyable_open_ms=NOW - 72 * 3_600_000,
+            material_open_count=2,
+            open_unrealized=500,
+        )
+        scanner._attach_open_copy_activity_context(row, "0xaaa", {"0xaaa": 80})
+        self.assertEqual(
+            scanner._profile_copy_qualification(row, NOW, self.params),
+            (True, "ok"),
+        )
+
+    def test_open_target_without_our_mirrored_position_does_not_bypass_inactivity(self):
+        row = qualified(
+            last_copyable_open_ms=NOW - 72 * 3_600_000,
+            material_open_count=2,
+            open_unrealized=500,
+        )
+        scanner._attach_open_copy_activity_context(row, "0xaaa", {"0xbbb": 80})
+        self.assertEqual(
+            scanner._profile_copy_qualification(row, NOW, self.params),
+            (False, "inactive_copyable_open"),
+        )
+
+    def test_open_copy_bypass_cannot_override_recent_collapse(self):
+        row = qualified(
+            last_copyable_open_ms=NOW - 72 * 3_600_000,
+            material_open_count=1,
+            open_unrealized=500,
+            copy_bt_14d_net_pnl=-50,
+            copy_bt_7d_net_pnl=-220,
+        )
+        scanner._attach_open_copy_activity_context(row, "0xaaa", {"0xaaa": 80})
+        self.assertEqual(
+            scanner._profile_copy_qualification(row, NOW, self.params),
+            (False, "recent_copy_collapse"),
+        )
+
+    def test_carried_target_loss_does_not_bypass_inactivity(self):
+        row = qualified(
+            last_copyable_open_ms=NOW - 72 * 3_600_000,
+            material_open_count=1,
+            open_unrealized=-500,
+        )
+        scanner._attach_open_copy_activity_context(row, "0xaaa", {"0xaaa": 80})
+        self.assertEqual(
+            scanner._profile_copy_qualification(row, NOW, self.params),
+            (False, "inactive_copyable_open"),
+        )
+
+    def test_carried_copy_loss_does_not_bypass_inactivity(self):
+        row = qualified(
+            last_copyable_open_ms=NOW - 72 * 3_600_000,
+            material_open_count=1,
+            open_unrealized=500,
+        )
+        scanner._attach_open_copy_activity_context(row, "0xaaa", {"0xaaa": -80})
+        self.assertEqual(
+            scanner._profile_copy_qualification(row, NOW, self.params),
+            (False, "inactive_copyable_open"),
+        )
+
     def test_raw_quality_score_is_ranking_only_not_a_qualification_veto(self):
         row = qualified()
         with patch.object(scanner.metrics, "score", return_value=0.581):

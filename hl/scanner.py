@@ -691,8 +691,35 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
     last_open = int(m.get("last_copyable_open_ms") or 0)
     max_age_ms = int(getattr(p, "inactive_days", config.INACTIVE_DAYS) * 86_400_000)
     if not last_open or now_ms - last_open > max_age_ms:
+        # A mirrored swing episode that is still open is not an inactive wallet.  The target has no
+        # reason to emit another flat->open event while it is deliberately carrying the position, and
+        # demoting it here would make long-hold winners churn out of Core for precisely following their
+        # strategy.  This flag is attached only when the fresh target snapshot still has a material open
+        # position, the target's open book is net-profitable, AND our forward-only copy book is also
+        # net-profitable for the same wallet. A carried loser must never earn an activity exemption.
+        # Economics, recent-loss, structure, valuation and data-integrity gates above remain authoritative.
+        if m.get("open_copy_activity_bypass"):
+            return True, "ok" if copy_gate_enabled else "copy_gate_disabled"
         return False, "inactive_copyable_open"
     return True, "ok" if copy_gate_enabled else "copy_gate_disabled"
+
+
+def _attach_open_copy_activity_context(m, addr: str, open_copy_pnl_by_addr) -> bool:
+    """Attach the narrow inactivity bypass for a target/copy episode that remains net-profitable."""
+    addr = str(addr or "").lower()
+    copy_pnl = {
+        str(key or "").lower(): f(value)
+        for key, value in dict(open_copy_pnl_by_addr or {}).items()
+    }.get(addr)
+    active = bool(
+        int(m.get("material_open_count") or 0) > 0
+        and f(m.get("open_unrealized")) > 0.0
+        and copy_pnl is not None
+        and copy_pnl > 0.0
+    )
+    m["open_copy_activity_bypass"] = active
+    m["open_copy_activity_pnl"] = copy_pnl
+    return active
 
 
 def _finalize_profile_qualification(m, ok: bool, reason: str) -> tuple[bool, str, float]:
@@ -1077,6 +1104,9 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         if m.get("data_status") == "deferred_data_error":
             return _defer_profile(db, addr, prior, stamp, "copy_replay_unavailable")
         if ok:
+            _attach_open_copy_activity_context(
+                m, addr, getattr(p, "open_copy_pnl_by_addr", {}),
+            )
             ok, reason = _profile_copy_qualification(m, now_ms, p)
     m["times_active"] += 1 if ok else 0
 
@@ -3683,6 +3713,13 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         getattr(p, "copy_bt_valuation_marks", None) or _current_copy_valuation_marks()
     )
     p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    open_copy_pnl_by_addr = {
+        str(row[0] or "").lower(): f(row[1])
+        for row in db.execute(
+            "SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM copy_position "
+            "WHERE status='open' GROUP BY addr"
+        ).fetchall()
+    }
     row_scope = ""
     row_args = ()
     if published_generation:
@@ -3706,7 +3743,8 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
         "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json "
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+        "p.open_position_count,p.material_open_count "
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr" + row_scope,
         row_args,
     ).fetchall()
@@ -3749,7 +3787,8 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
          wkroi, moroi, alroi, pf_turn, pf_mpnl, pf_mvlm, pf_wpnl, pf_eq, pay, pf_wvlm,
          copy_net, copy_wr, copy_closed, copy_open_fill_rate, copy_liqs, copy_fee,
          copy_unreal, copy_valuation, copy14_net, copy14_unreal, copy14_closed,
-         copy7_net, copy7_unreal, copy7_closed, sector_copy_json, sector_policy_json) = r
+         copy7_net, copy7_unreal, copy7_closed, sector_copy_json, sector_policy_json,
+         open_position_count, material_open_count) = r
         m = {"n_trades": n_tr or 0, "n_fills": n_fills or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
              "acct_value": acct or 0.0, "age_days": age, "times_active": ta or 0,
@@ -3784,7 +3823,9 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              "copy_bt_14d_closed_n": copy14_closed,
              "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_unrealized_pnl": copy7_unreal,
              "copy_bt_7d_closed_n": copy7_closed,
-             "sector_copy_json": sector_copy_json, "sector_policy_json": sector_policy_json}
+             "sector_copy_json": sector_copy_json, "sector_policy_json": sector_policy_json,
+             "open_position_count": open_position_count or 0,
+             "material_open_count": material_open_count or 0}
         # realized loss-asymmetry from the STORED episodes (no network) — works even for profiles scanned
         # before loss_pain existed, so a regate alone re-ranks 小赚大亏 wallets without a full re-scan.
         m["loss_pain"] = metrics.loss_pain(_pnl.get(addr, ()))
@@ -3848,6 +3889,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
                 and m.get("evidence_status") not in {"missing", "invalid"}
             ):
                 m["evidence_status"] = "economically_disqualified"
+            _attach_open_copy_activity_context(m, addr, open_copy_pnl_by_addr)
             ok, reason = _profile_copy_qualification(m, now, p)
         ok, reason, score = _finalize_profile_qualification(m, ok, reason)
         # Only policy-only outcomes removed by this release may be safely reactivated from the current
@@ -4185,9 +4227,17 @@ def scan(db, p) -> None:
     warmup_backfill_addrs = _copy_warmup_backfill_addrs(
         db, now_ms - config.PROFILE_FETCH_DAYS * 86400_000,
     )
-    position_addrs = sorted({(addr or "").lower() for (addr,) in db.execute(
-        "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
-    ).fetchall()})
+    open_copy_pnl_by_addr = {
+        str(addr or "").lower(): f(unrealized)
+        for addr, unrealized in db.execute(
+            "SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM copy_position "
+            "WHERE status='open' GROUP BY addr"
+        ).fetchall()
+    }
+    position_addrs = sorted(open_copy_pnl_by_addr)
+    # Freeze the open-copy PnL surface for the generation. Worker threads use it only to distinguish a
+    # profitable carried mirrored episode from a dormant/losing wallet; it never bypasses economic/risk gates.
+    p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
     cand_set = set(cand)
     off_list_qualified = [addr for addr in qualified_addrs if addr not in cand_set]
     near_threshold = [r[0] for r in db.execute(

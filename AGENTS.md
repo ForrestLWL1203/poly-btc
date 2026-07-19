@@ -249,6 +249,13 @@ silently clear the star or publish corrupt execution context. Disabling a starre
 removes it from the immutable execution target set until re-enabled. Removing the star returns it to normal
 automatic selection on the next generation.
 
+A wallet is not considered inactive merely because it has emitted no new flat-to-open event within 48 hours
+only when the target still has a material, net-profitable open book and our forward-only copy book for that
+wallet is also still open and net-profitable. A carried losing target or losing copy never receives this bypass.
+This narrow long-hold activity exception does not waive current strict-Copy economics, recent-loss, structure,
+valuation, market-snapshot, or data-integrity gates; once the mirrored episode closes or turns net-negative, the
+normal activity clock applies again.
+
 A pure addition to a still-qualified Core is not an incumbent replacement: it needs positive funded marginal
 net plus the fold/latest/stress safeguards, but not the 5% utility and 2%-of-equity anti-churn hurdle. Those larger
 hurdles apply only when a candidate set removes or replaces a still-qualified old Core member.
