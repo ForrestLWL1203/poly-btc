@@ -697,7 +697,7 @@ class Observer:
             needs_market_ctx = (not row) or row[0] is None or row[1] is None
         # A coin_vol placeholder with NULL sigma is not warm.  This is common for builder/stock markets whose
         # market-context row was staged before candle volatility was collected; refresh it immediately instead
-        # of sizing the first order with VOL_FALLBACK_SIGMA (which incorrectly forces the high-vol tier).
+        # of sizing the first order with a temporary fallback (currently neutral 7% / mid tier).
         if not self.vol.get(coin) or needs_market_ctx:
             self.vol[coin] = await asyncio.to_thread(volatility.refresh, self.db, coin)
 

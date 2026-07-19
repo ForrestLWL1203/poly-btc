@@ -73,6 +73,39 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_generation_current
 CREATE INDEX IF NOT EXISTS idx_scan_generation_status_published
     ON scan_generation(status, published_at DESC, id DESC);
 
+-- Immutable market inputs used by one scanner generation.  The Observer intentionally continues to use
+-- the latest ``coin_vol`` cache; qualification, portfolio formation and tuning must instead read these
+-- frozen rows so a long scan cannot mix volatility/liquidity regimes.
+CREATE TABLE IF NOT EXISTS generation_market_manifest (
+    generation       TEXT PRIMARY KEY,
+    asof_ms          INTEGER NOT NULL,
+    context_hash     TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'building',
+    snapshot_hash    TEXT,
+    created_at       TEXT NOT NULL,
+    sealed_at        TEXT
+);
+CREATE TABLE IF NOT EXISTS generation_market_snapshot (
+    generation       TEXT NOT NULL,
+    coin             TEXT NOT NULL,
+    asof_ms          INTEGER NOT NULL,
+    sigma            REAL NOT NULL,
+    sigma_fast       REAL,
+    sigma_slow       REAL,
+    sigma_n          INTEGER NOT NULL DEFAULT 0,
+    sigma_source     TEXT NOT NULL,
+    day_ntl_vlm      REAL,
+    open_interest    REAL,
+    mark_px          REAL,
+    oi_notional      REAL,
+    max_leverage     REAL,
+    context_at       TEXT NOT NULL,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (generation, coin)
+);
+CREATE INDEX IF NOT EXISTS idx_generation_market_snapshot_generation
+    ON generation_market_snapshot(generation, coin);
+
 CREATE TABLE IF NOT EXISTS leaderboard_staging (
     generation    TEXT NOT NULL,
     addr          TEXT NOT NULL,

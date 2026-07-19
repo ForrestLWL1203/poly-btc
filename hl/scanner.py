@@ -13,8 +13,8 @@ import threading
 import time
 from types import SimpleNamespace
 
-from . import (auto_tune, config, core_formation, follow_score, generation, metrics, offline_core_optimizer,
-               params, pipeline_audit, rest, selection, storage, strategy_revision)
+from . import (auto_tune, config, core_formation, follow_score, generation, generation_market, metrics,
+               offline_core_optimizer, params, pipeline_audit, rest, selection, storage, strategy_revision)
 from .copy_backtest import ADD_METRICS_VERSION, run_backtest, slice_backtest_result
 from .fills import build_episodes
 from .copy_data import (
@@ -983,12 +983,64 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         ):
             ok, reason = True, "ok"
     if ok:
+        try:
+            resolver = getattr(p, "generation_market_resolver", None)
+            if resolver is None:
+                if getattr(p, "scan_generation", None):
+                    raise generation_market.MarketSnapshotError(
+                        "generation_market_resolver_missing"
+                    )
+                # Compatibility for explicitly offline/unit replay callers that do not publish a generation.
+                replay_sigmas = getattr(p, "copy_bt_sigmas", None) or {}
+                replay_market_ctx = getattr(p, "copy_bt_market_ctx", None) or {}
+                replay_fills = perp_full
+            else:
+                replay_sigmas, replay_market_ctx, replay_fills = {}, {}, []
+                sector_market_errors = {}
+                for sector in SECTORS:
+                    if not (sector_structure.get(sector) or {}).get("allow"):
+                        continue
+                    sector_fills = [
+                        x for x in perp_full if classify_coin(x.get("coin")) == sector
+                    ]
+                    try:
+                        sector_sigmas, sector_ctx = resolver.ensure(
+                            {x.get("coin") for x in sector_fills if x.get("coin")}
+                        )
+                    except generation_market.MarketSnapshotError as exc:
+                        sector_market_errors[sector] = str(exc)
+                        continue
+                    replay_sigmas.update(sector_sigmas)
+                    replay_market_ctx.update(sector_ctx)
+                    replay_fills.extend(sector_fills)
+                if sector_market_errors:
+                    # Market transport/integrity failures are sector-local.  They cannot silently default,
+                    # but an independent healthy specialty may still qualify under the product's isolation
+                    # invariant. If every structurally viable sector failed, defer the wallet as a true error.
+                    for sector, error in sector_market_errors.items():
+                        sector_structure[sector] = {
+                            **(sector_structure.get(sector) or {}),
+                            "allow": False, "status": "market_data_error",
+                            "reason": f"本轮板块市场数据失败：{error}", "dataError": error,
+                        }
+                    sector_structure["allowed"] = [
+                        sector for sector in SECTORS
+                        if (sector_structure.get(sector) or {}).get("allow")
+                    ]
+                    if not replay_fills:
+                        raise generation_market.MarketSnapshotError(
+                            next(iter(sector_market_errors.values()))
+                        )
+        except generation_market.MarketSnapshotError as exc:
+            return _defer_profile(db, addr, prior, stamp, str(exc))
         valuation_marks = snap.get("mark_prices") or {}
         copy_results = _copy_bt_results(
-            addr, perp_full, now_ms, p, valuation_marks=valuation_marks,
+            addr, replay_fills, now_ms, p, valuation_marks=valuation_marks,
+            sigmas=replay_sigmas, market_ctx=replay_market_ctx,
         )
         sector_results = _sector_copy_bt_results(
-            addr, perp_full, now_ms, p, valuation_marks=valuation_marks,
+            addr, replay_fills, now_ms, p, valuation_marks=valuation_marks,
+            sigmas=replay_sigmas, market_ctx=replay_market_ctx,
         )
         ok, reason = _apply_sector_copy_bt_gate(
             m, copy_results, sector_results, p,
@@ -1006,12 +1058,13 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         allowed_sectors = set(sector_policy.get("allowed") or [])
         evidence_sectors = allowed_sectors or set(sector_policy.get("watch") or [])
         evidence_results = copy_results
-        evidence_fills = perp_full
+        evidence_fills = replay_fills
         if evidence_sectors and evidence_sectors != {"crypto", "stock"}:
-            allowed_fills = [x for x in perp_full if classify_coin(x.get("coin")) in evidence_sectors]
+            allowed_fills = [x for x in replay_fills if classify_coin(x.get("coin")) in evidence_sectors]
             evidence_fills = allowed_fills
             evidence_results = _copy_bt_results(
                 addr, allowed_fills, now_ms, p, valuation_marks=valuation_marks,
+                sigmas=replay_sigmas, market_ctx=replay_market_ctx,
             )
         m.update(_open_flow_metrics(evidence_fills, now_ms))
         _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now_ms)
@@ -1644,8 +1697,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     base_follow = params.load_follow(db)
     if "SMART_ADD" in base_follow:
         base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
-    sigmas = auto_tune._load_sigmas(db)
-    market_ctx = auto_tune._load_market_ctx(db)
+    sigmas = auto_tune._load_sigmas(db, generation_id)
+    market_ctx = auto_tune._load_market_ctx(db, generation_id)
     valuation_marks = _current_copy_valuation_marks()
     surface_ranked = _rank_formation_candidates_for_surface(
         db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
@@ -1686,7 +1739,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 db, source="core_formation", stamp=f"{stamp}:k{count}",
                 dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
                 addrs_override=list(tune_ordered[:count]), record_run=False,
-                formation_admission=True,
+                formation_admission=True, market_generation=generation_id,
             )
             if result.get("status") != "ok":
                 raise RuntimeError(
@@ -2152,7 +2205,7 @@ def _portfolio_replay_input_diagnostics(db, addrs, now_ms, window_fills=None) ->
     }
 
 
-def _prefetch_selection_paths(db, candidates, now_ms) -> dict:
+def _prefetch_selection_paths(db, candidates, now_ms, generation_id) -> dict:
     """Incrementally prepare the bounded candidate path cache without profile/fill refetch."""
     candidates = list(dict.fromkeys((addr or "").lower() for addr in candidates if addr))
     if not candidates:
@@ -2166,8 +2219,9 @@ def _prefetch_selection_paths(db, candidates, now_ms) -> dict:
         follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
     rows, meta = auto_tune.prepare_refined_price_path(
         db, fills, path_start, int(now_ms),
-        sigmas=auto_tune._load_sigmas(db), overrides=follow,
-        market_ctx=auto_tune._load_market_ctx(db),
+        sigmas=auto_tune._load_sigmas(db, generation_id), overrides=follow,
+        market_ctx=auto_tune._load_market_ctx(db, generation_id),
+        immutable_market_ctx=True,
     )
     return {
         "candidates": len(candidates),
@@ -2222,8 +2276,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         follow = params.load_follow(db)
         if "SMART_ADD" in follow:
             follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
-        sigmas = auto_tune._load_sigmas(db)
-        market_ctx = auto_tune._load_market_ctx(db)
+        sigmas = auto_tune._load_sigmas(db, generation_id)
+        market_ctx = auto_tune._load_market_ctx(db, generation_id)
         from . import price_path
         all_fills = list(window_fills.get(max(window_fills)) or [])
         path_start = int(now_ms) - (
@@ -2491,8 +2545,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     neutral_follow["ADD_STRATEGY"] = (
                         "smart" if neutral_follow["SMART_ADD"] else "hardcap"
                     )
-                sigmas = auto_tune._load_sigmas(db)
-                market_ctx = auto_tune._load_market_ctx(db)
+                sigmas = auto_tune._load_sigmas(db, generation_id)
+                market_ctx = auto_tune._load_market_ctx(db, generation_id)
                 eval_cache = {}
                 validation_cache = {}
                 fold_validation_cache = {}
@@ -3185,6 +3239,28 @@ def _record_explicit_follow_history(db, selection_rows, stamp, previous_core, ge
     return current_core
 
 
+def _selection_market_snapshot_validation(db, generation_id, rows, now_ms) -> dict:
+    core_rows = [row for row in rows if row.role == selection.CORE and row.enabled]
+    core_addrs = [row.addr for row in core_rows]
+    coins = set()
+    if core_addrs:
+        start_ms = int(now_ms) - int(config.PROFILE_FETCH_DAYS) * 86_400_000
+        allowed = {}
+        for row in core_rows:
+            try:
+                policy = json.loads(row.sector_policy_json or "{}")
+            except (TypeError, ValueError):
+                policy = {}
+            allowed[(row.addr or "").lower()] = set(policy.get("allowed") or ())
+        coins = {
+            fill.get("coin")
+            for fill in load_copyable_fills(db, core_addrs, start_ms)
+            if fill.get("coin")
+            and classify_coin(fill.get("coin")) in allowed.get(fill.get("user"), set())
+        }
+    return generation_market.validate_coins(db, generation_id, coins)
+
+
 def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -> dict:
     """Refresh dashboard Copy PnL with the currently effective follow parameters.
 
@@ -3195,6 +3271,11 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
     current = selection.latest_published_generation(db)
     if not generation_id or current != generation_id:
         return {"status": "skipped", "reason": "generation_not_current", "generation": generation_id}
+    if not generation_market.has_snapshot(db, generation_id):
+        return {
+            "status": "skipped", "reason": "market_snapshot_missing_rescan_required",
+            "generation": generation_id,
+        }
     rows = db.execute(
         "SELECT addr,sector_policy_json FROM follow_selection WHERE generation=? "
         "AND role IN ('core','challenger') ORDER BY addr",
@@ -3209,10 +3290,11 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
     replay_hash = hashlib.sha256(
         json.dumps(overrides, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()[:16]
+    replay_sigmas, replay_market_ctx = generation_market.load(db, generation_id)
     replay_ctx = SimpleNamespace(
         copy_bt_days=int(config.COPY_BT_DAYS),
-        copy_bt_sigmas=_copy_bt_sigmas(db),
-        copy_bt_market_ctx=_copy_bt_market_ctx(db),
+        copy_bt_sigmas=replay_sigmas,
+        copy_bt_market_ctx=replay_market_ctx,
         copy_bt_overrides=overrides,
         copy_bt_valuation_marks=_current_copy_valuation_marks(),
         scan_generation=generation_id,
@@ -3318,7 +3400,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     )
     prefetch_candidates = _selection_prefetch_candidates(db)
     db.rollback()
-    _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms)
+    _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms, generation_id)
     formation = form_quality_prefix(
         db, generation_id, stamp, repair_now_ms, retune=retune_formation,
     )
@@ -3339,6 +3421,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     )
     previous_core = set(existing_core)
     selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
+    market_validation = _selection_market_snapshot_validation(
+        db, generation_id, rows, repair_now_ms,
+    )
     current_core = _record_explicit_follow_history(db, rows, stamp, previous_core, generation_id)
     active_strategy = strategy_revision.create_revision(
         db,
@@ -3347,7 +3432,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
         parent_revision=expected_strategy_revision,
         expected_active_revision=expected_strategy_revision,
-        stamp=stamp,
+        validation={"marketSnapshot": market_validation}, stamp=stamp,
     )
     for row in rows:
         pipeline_audit._insert_event(
@@ -3475,14 +3560,25 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     full re-sweep — the expensive part (fetching fills, building episodes) is already done."""
     now = int(time.time() * 1000)
     stamp = stamp or now_iso()
-    p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
-    p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
+    published_generation = selection.latest_published_generation(db)
+    if published_generation and not generation_market.has_snapshot(db, published_generation):
+        raise RuntimeError(f"market_snapshot_missing_rescan_required:{published_generation}")
+    snapshot_sigmas, snapshot_ctx = (
+        generation_market.load(db, published_generation) if published_generation else ({}, {})
+    )
+    if published_generation:
+        # Even an empty sealed map is authoritative. Falling back to mutable ``coin_vol`` here would let a
+        # later Observer refresh silently change a published generation's qualification result.
+        p.copy_bt_sigmas = snapshot_sigmas
+        p.copy_bt_market_ctx = snapshot_ctx
+    else:
+        p.copy_bt_sigmas = getattr(p, "copy_bt_sigmas", None) or _copy_bt_sigmas(db)
+        p.copy_bt_market_ctx = getattr(p, "copy_bt_market_ctx", None) or _copy_bt_market_ctx(db)
     p.copy_bt_overrides = getattr(p, "copy_bt_overrides", None) or _copy_bt_overrides(db)
     p.copy_bt_valuation_marks = (
         getattr(p, "copy_bt_valuation_marks", None) or _current_copy_valuation_marks()
     )
     p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
-    published_generation = selection.latest_published_generation(db)
     row_scope = ""
     row_args = ()
     if published_generation:
@@ -3755,7 +3851,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     db.rollback()
     if preview:
         _set_scan_progress(db, stage="prefetch_selection_paths")
-        _prefetch_selection_paths(db, preview, now_ms)
+        _prefetch_selection_paths(db, preview, now_ms, generation_id)
     formation = form_quality_prefix(db, generation_id, stamp, now_ms)
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
@@ -3790,13 +3886,18 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
             profile_complete=True, ready_at=publication_stamp,
         )
         selection.replace_selection_rows(db, generation_id, rows, selected_at=publication_stamp)
+        market_validation = _selection_market_snapshot_validation(
+            db, generation_id, rows, now_ms,
+        )
         generation.publish_generation(db, generation_id, published_at=publication_stamp)
         current_core = _record_explicit_follow_history(
             db, rows, publication_stamp, previous_core, generation_id,
         )
         active_strategy = strategy_revision.create_revision(
             db, generation_id, source="resume_finalize", reason="quality_prefix_formation",
-            validation=formation.get("search") or {}, stamp=publication_stamp,
+            validation={
+                **(formation.get("search") or {}), "marketSnapshot": market_validation,
+            }, stamp=publication_stamp,
         )
         for item in rows:
             pipeline_audit._insert_event(
@@ -3863,7 +3964,12 @@ def scan(db, p) -> None:
     started, t0 = now_iso(), time.time()
     stamp = now_iso()
     start_ms = now_ms - p.days * 86400_000
-    if selection.latest_published_generation(db) is None:
+    cold_start = selection.latest_published_generation(db) is None
+    if cold_start:
+        # Empty databases have no trustworthy prior leaderboard/profile boundary.  A dashboard command whose
+        # checkbox says "incremental" is therefore upgraded to the one valid first-generation operation.
+        p.full_scan = True
+        p.no_harvest = False
         ensure_watchlist_current(db, stamp)
 
     # dashboard: advertise we're scanning + consume any operator-queued rescan command
@@ -3889,7 +3995,7 @@ def scan(db, p) -> None:
             db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT {default}"); db.commit()
         except Exception:  # noqa: BLE001 — column already exists
             pass
-    run_full = bool(getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
+    run_full = bool(cold_start or getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
     # A complete/full operator sweep is a fresh specialization decision.  Prior sector policy may help an
     # incremental scan confirm repeated deterioration, but must never decide whether a cold/full scan gets
     # to evaluate the current generation's Crypto/stock evidence.
@@ -3898,7 +4004,7 @@ def scan(db, p) -> None:
         db,
         source="scan",
         started_at=started,
-        workset_mode="all" if run_full else "priority",
+        workset_mode="cold_full" if cold_start else ("all" if run_full else "priority"),
         fill_mode="full_refetch" if run_full else "mixed",
     )
     p.scan_generation = generation_id
@@ -3906,8 +4012,10 @@ def scan(db, p) -> None:
     _set_scanner_proc(db, "scanning", {"phase": "harvest"})
     _set_scan_progress(db, state="scanning", started_at=started, stage="scan_leaderboard",
                        candidates_scanned=0, candidates_total=0, manual=1 if manual else 0)
-    p.copy_bt_sigmas = _copy_bt_sigmas(db)
-    p.copy_bt_market_ctx = _copy_bt_market_ctx(db)
+    # Production profile replay resolves its generation snapshot explicitly after executable fills and sector
+    # structure are known.  Do not seed it from Observer's mutable live cache.
+    p.copy_bt_sigmas = {}
+    p.copy_bt_market_ctx = {}
     p.copy_bt_overrides = _copy_bt_overrides(db)
     p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     rest.reset_request_stats()
@@ -3920,6 +4028,11 @@ def scan(db, p) -> None:
         if not universe:
             raise RuntimeError("copyable_universe_unavailable")
         p.copyable_universe = frozenset(universe)
+        p.generation_market_resolver = generation_market.Resolver(
+            db, generation_id, now_ms, p.copyable_universe,
+            generation_market.fetch_context_snapshot(p.copyable_universe),
+            db_lock=_db_lock,
+        )
         if not p.no_harvest:
             print("harvest leaderboard -> staging ...", flush=True)
             n_cand = harvest(db, p, generation_id=generation_id)
@@ -4018,6 +4131,10 @@ def scan(db, p) -> None:
         exploration_seed=generation_id,
         full_scan=run_full,
     )
+    if cold_start:
+        workset_info["mode"] = "cold_full"
+        workset_info["workset_mode"] = "cold_full"
+        workset_info["full_scan"] = True
     migration_backfill = set(warmup_backfill_addrs) & set(workset_info["workset"])
     if migration_backfill:
         refresh = workset_info["refresh"]
@@ -4136,6 +4253,14 @@ def scan(db, p) -> None:
 
     profile_done_at = time.time()
     complete = failed == 0
+    market_snapshot_audit = {}
+    if complete:
+        try:
+            market_snapshot_audit = generation_market.seal(db, generation_id)
+        except Exception as exc:  # fail closed before any replay/formation can read a mutable surface
+            complete = False
+            failed += 1
+            print(f"generation market snapshot seal failed: {exc}", flush=True)
     scope_audit = {"audited": 0, "invalid": 0, "scope": ["crypto", "stock"]}
     if complete:
         try:
@@ -4185,7 +4310,7 @@ def scan(db, p) -> None:
                         db, stage="prefetch_selection_paths",
                         candidates_scanned=len(workset), candidates_total=len(workset),
                     )
-                    _prefetch_selection_paths(db, preview_candidates, now_ms)
+                    _prefetch_selection_paths(db, preview_candidates, now_ms, generation_id)
             except Exception as exc:  # noqa: BLE001 - final pass safely retains prior Core without coverage
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
@@ -4238,6 +4363,9 @@ def scan(db, p) -> None:
             selection.replace_selection_rows(
                 db, generation_id, selection_rows, selected_at=publication_stamp,
             )
+            market_validation = _selection_market_snapshot_validation(
+                db, generation_id, selection_rows, now_ms,
+            )
             for row in selection_rows:
                 pipeline_audit._insert_event(
                     db,
@@ -4285,7 +4413,10 @@ def scan(db, p) -> None:
                 source="scanner",
                 reason=("manual_selection_preserved" if selection_mode == "manual"
                         else "quality_prefix_formation"),
-                validation=(formation or {}).get("search") or {},
+                validation={
+                    **((formation or {}).get("search") or {}),
+                    "marketSnapshot": market_validation,
+                },
                 stamp=publication_stamp,
             )
             pipeline_audit._insert_event(
@@ -4327,6 +4458,8 @@ def scan(db, p) -> None:
                 "marketScopeHash": hashlib.sha256(
                     "\n".join(sorted(universe)).encode("utf-8")
                 ).hexdigest(),
+                "marketSnapshot": market_validation,
+                "marketSnapshotProfiled": market_snapshot_audit,
                 **rest.request_stats(),
             }
             db.execute(

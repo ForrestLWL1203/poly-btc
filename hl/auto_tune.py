@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from typing import Iterable
 
-from . import config, params, selection, strategy_revision
+from . import config, generation_market, params, selection, strategy_revision
 from .copy_backtest import run_backtest, slice_backtest_result
 from . import price_path
 from .copy_data import load_copyable_fills
@@ -60,9 +60,21 @@ def enforce_margin_add_capacity(values: dict, follow: dict) -> dict:
 
 
 def prepare_refined_price_path(db, fills: list[dict], start_ms: int, end_ms: int,
-                               *, sigmas: dict, overrides: dict, market_ctx: dict) -> tuple[list[dict], dict]:
+                               *, sigmas: dict, overrides: dict, market_ctx: dict,
+                               immutable_market_ctx: bool = False) -> tuple[list[dict], dict]:
     """Fetch the 15m baseline, then refine only liquidation-ambiguous markets and recent ranges."""
-    margin_meta = price_path.refresh_margin_metadata(db, fills)
+    # A generation snapshot already carries immutable maintenance metadata.  Refresh only genuinely missing
+    # rows; otherwise a current exchange response would silently mutate the replay surface mid-generation.
+    missing_meta_coins = {
+        row.get("coin") for row in fills
+        if row.get("coin") and not (market_ctx.get(row.get("coin")) or {}).get("max_leverage")
+    }
+    if immutable_market_ctx and missing_meta_coins:
+        missing = ",".join(sorted(missing_meta_coins)[:12])
+        raise RuntimeError(f"generation_market_max_leverage_missing:{missing}")
+    margin_meta = price_path.refresh_margin_metadata(
+        db, [row for row in fills if row.get("coin") in missing_meta_coins],
+    ) if missing_meta_coins else {}
     for coin, max_leverage in margin_meta.items():
         market_ctx.setdefault(coin, {})["max_leverage"] = max_leverage
     price_path.ensure(db, fills, start_ms, end_ms)
@@ -305,14 +317,24 @@ def _diverse_sizing_candidates(candidates: list[dict], baseline: dict, limit: in
     return selected
 
 
-def _load_sigmas(db) -> dict:
+def _load_sigmas(db, generation_id: str | None = None) -> dict:
+    if generation_id:
+        if not generation_market.has_snapshot(db, generation_id):
+            raise RuntimeError(f"market_snapshot_missing_rescan_required:{generation_id}")
+        sigmas, _ = generation_market.load(db, generation_id)
+        return sigmas
     try:
         return {coin: sigma for coin, sigma in db.execute("SELECT coin,sigma FROM coin_vol WHERE sigma IS NOT NULL")}
     except sqlite3.Error:
         return {}
 
 
-def _load_market_ctx(db) -> dict:
+def _load_market_ctx(db, generation_id: str | None = None) -> dict:
+    if generation_id:
+        if not generation_market.has_snapshot(db, generation_id):
+            raise RuntimeError(f"market_snapshot_missing_rescan_required:{generation_id}")
+        sigmas, market_ctx = generation_market.load(db, generation_id)
+        return market_ctx
     try:
         rows = db.execute(
             "SELECT coin,day_ntl_vlm,oi_notional,max_leverage FROM coin_vol "
@@ -746,19 +768,20 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
     all_fills = list(window_fills.get(max(window_fills)) or [])
     path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
-    sigmas = _load_sigmas(db)
-    market_ctx = _load_market_ctx(db)
+    sigmas = _load_sigmas(db, generation_id)
+    market_ctx = _load_market_ctx(db, generation_id)
     path_rows, path_meta = prepare_refined_price_path(
         db, all_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
-        market_ctx=market_ctx,
+        market_ctx=market_ctx, immutable_market_ctx=True,
     )
     windows = _candidate_windows(
         db, addrs, sigmas, follow, now_ms, window_fills=window_fills,
-        path_rows=path_rows, path_meta=path_meta,
+        market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
     )
     worst_windows = _candidate_windows(
         db, addrs, sigmas, {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
-        window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        window_fills=window_fills, market_ctx=market_ctx,
+        path_rows=path_rows, path_meta=path_meta,
     )
     params_hash = hashlib.sha256(
         json.dumps(follow, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
@@ -842,7 +865,7 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                             sigmas: dict | None = None, now_ms: int | None = None,
                             window_fills: dict[int, list[dict]] | None = None,
                             path_rows: list[dict] | None = None, path_meta: dict | None = None,
-                            primary_only: bool = False) -> dict:
+                            primary_only: bool = False, market_ctx: dict | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     overrides = {**follow_overrides_for_tune_candidate(follow, candidate),
                  "AMBIGUOUS_PATH_MODE": "liquidate"}
@@ -859,7 +882,7 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     if primary_only:
         result = evaluate_portfolio_window(
             db, addrs, sigmas, overrides, now_ms, window_fills={30: list((window_fills or {}).get(30) or [])},
-            days=30, path_rows=path_rows, path_meta=path_meta,
+            days=30, market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
         )
         out["windows"] = {30: _compact_backtest(result)}
     else:
@@ -867,7 +890,7 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
             days: _compact_backtest(result)
             for days, result in _candidate_windows(
                 db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
-                path_rows=path_rows, path_meta=path_meta,
+                market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
             ).items()
         }
     return out
@@ -876,7 +899,8 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
 def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                            sigmas: dict | None = None, now_ms: int | None = None,
                            window_fills: dict[int, list[dict]] | None = None,
-                           path_rows: list[dict] | None = None, path_meta: dict | None = None) -> dict:
+                           path_rows: list[dict] | None = None, path_meta: dict | None = None,
+                           market_ctx: dict | None = None) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     overrides = {**follow_overrides_for_add_candidate(follow, candidate),
                  "AMBIGUOUS_PATH_MODE": "liquidate"}
@@ -889,7 +913,7 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
         days: _compact_backtest(result)
         for days, result in _candidate_windows(
             db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
-            path_rows=path_rows, path_meta=path_meta,
+            market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
         ).items()
     }
     return out
@@ -1290,9 +1314,16 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
         return {"status": "pending", "reason": "rollback_no_forward_fills"}
     old_params = dict(state.get("oldParams") or {})
     current_params = {key: follow.get(key) for key in TUNE_KEYS + ADD_TUNE_KEYS if follow.get(key) is not None}
-    sigmas = _load_sigmas(db)
-    champion = run_backtest("portfolio", fills, sigmas=sigmas, overrides={**follow, **old_params})
-    applied = run_backtest("portfolio", fills, sigmas=sigmas, overrides={**follow, **current_params})
+    sigmas = _load_sigmas(db, expected_generation)
+    market_ctx = _load_market_ctx(db, expected_generation)
+    champion = run_backtest(
+        "portfolio", fills, sigmas=sigmas, market_ctx=market_ctx,
+        overrides={**follow, **old_params},
+    )
+    applied = run_backtest(
+        "portfolio", fills, sigmas=sigmas, market_ctx=market_ctx,
+        overrides={**follow, **current_params},
+    )
     old_net = float(champion.get("copy_net_pnl") or 0.0)
     new_net = float(applied.get("copy_net_pnl") or 0.0)
     utility_drop = old_net - new_net
@@ -1324,13 +1355,17 @@ def _maybe_rollback_applied(db, follow: dict, now_ms: int,
         rollback_revision = None
         if expected_generation:
             parent = strategy_revision.load_active(db)
+            market_validation = generation_market.summary(db, expected_generation)
             rollback_revision = strategy_revision.create_revision(
                 db,
                 expected_generation,
                 source="auto_tune_rollback",
                 parent_revision=expected_strategy_revision,
                 targets=(parent or {}).get("targets"),
-                validation={"rollbackReason": reason, "oldNet": old_net, "newNet": new_net},
+                validation={
+                    "rollbackReason": reason, "oldNet": old_net, "newNet": new_net,
+                    "marketSnapshot": market_validation,
+                },
                 reason=reason,
                 expected_active_revision=expected_strategy_revision,
             )
@@ -1366,7 +1401,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                        mode: str | None = None, follow_values: dict | None = None,
                        data_complete: bool = True, expected_generation: str | None = None,
                        addrs_override: list[str] | tuple[str, ...] | None = None,
-                       record_run: bool = True, formation_admission: bool = False) -> dict:
+                       record_run: bool = True, formation_admission: bool = False,
+                       market_generation: str | None = None) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     ephemeral = addrs_override is not None
     if ephemeral and expected_generation:
@@ -1473,7 +1509,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # by the dashboard. A historical manual baseline can be useful for rollback bookkeeping, but using it as
     # the candidate comparator silently discards the entire neighbourhood above that old leverage surface.
     base = enforce_margin_add_capacity(current, follow)
-    sigmas = _load_sigmas(db)
+    market_generation = market_generation or expected_generation
+    sigmas = _load_sigmas(db, market_generation)
     now_ms = int(time.time() * 1000)
     window_fills = _portfolio_window_fills(db, addrs, now_ms)
     if window_fills is None:
@@ -1504,10 +1541,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         return result
     path_fills = list(window_fills.get(max(window_fills)) or [])
     path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
-    market_ctx = _load_market_ctx(db)
+    market_ctx = _load_market_ctx(db, market_generation)
     path_rows, path_meta = prepare_refined_price_path(
         db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
-        market_ctx=market_ctx,
+        market_ctx=market_ctx, immutable_market_ctx=bool(market_generation),
     )
     # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
@@ -1518,7 +1555,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         axis_quick.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            primary_only=True,
+            primary_only=True, market_ctx=market_ctx,
         ))
     quick_baseline = next(
         (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
@@ -1538,7 +1575,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combo_quick.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            primary_only=True,
+            primary_only=True, market_ctx=market_ctx,
         ))
     joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
@@ -1556,7 +1593,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             db, addrs, follow,
             _candidate_from_params(candidate.get("params") or base, axis="joint_finalist"),
             sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
-            path_rows=path_rows, path_meta=path_meta,
+            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
         ))
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
@@ -1575,6 +1612,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         margin_candidates.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            market_ctx=market_ctx,
         ))
     if formation_admission:
         for candidate in global_margin_candidates(joint_params, follow):
@@ -1582,6 +1620,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             margin_candidates.append(evaluate_tune_candidate(
                 db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
                 window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+                market_ctx=market_ctx,
             ))
     selected_margin_seed = choose_margin_candidate(
         [selected_joint, *margin_candidates], baseline,
@@ -1595,6 +1634,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             round_candidates.append(evaluate_tune_candidate(
                 db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
                 window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+                market_ctx=market_ctx,
             ))
         if not round_candidates:
             break
@@ -1622,6 +1662,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         deploy_polish.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            market_ctx=market_ctx,
         ))
     selected = choose_margin_candidate(
         joint_candidates + margin_candidates + deploy_polish + [baseline], baseline,
@@ -1643,6 +1684,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             add_candidates.append(evaluate_add_candidate(
                 db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms,
                 window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+                market_ctx=market_ctx,
             ))
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
                             add_candidates[0] if add_candidates else None)
@@ -1845,13 +1887,14 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     if not effective_shadow and applied:
         if expected_generation:
             parent_bundle = strategy_revision.load_active(db)
+            market_validation = generation_market.summary(db, expected_generation)
             applied_revision = strategy_revision.create_revision(
                 db,
                 expected_generation,
                 source="auto_tune",
                 parent_revision=expected_strategy_revision,
                 targets=(parent_bundle or {}).get("targets"),
-                validation=apply_validation,
+                validation={**apply_validation, "marketSnapshot": market_validation},
                 reason="validated_portfolio_tune",
                 expected_active_revision=expected_strategy_revision,
                 # The generation-bound caller seals the new parameters together

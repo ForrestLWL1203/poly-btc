@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import threading
 
-from hl import config, params, procman, scanner, storage
+from hl import config, paper_reset, params, procman, scanner, storage
 from hl.util import now_iso
 
 
@@ -104,6 +104,13 @@ def _hours_since_last_full_scan(db):
 
 def _configure_scan_cadence(db, ns, *, manual: bool):
     """Daily automatic runs reuse Leaderboard; every seventh day is a true full refresh."""
+    published = db.execute(
+        "SELECT 1 FROM scan_generation WHERE status='published' AND is_current=1 LIMIT 1"
+    ).fetchone()
+    if not published:
+        ns.full_scan = True
+        ns.no_harvest = False
+        return "cold_full"
     if manual or getattr(ns, "full_scan", False):
         return "manual" if manual else "explicit_full"
     weekly_full = _hours_since_last_full_scan(db) >= AUTO_FULL_SCAN_EVERY_H
@@ -274,6 +281,10 @@ def main() -> int:
     fg = sub.add_parser("finalize-profiled", help="finish a cached profiled generation without wallet refetch")
     fg.add_argument("--generation")
     fg.add_argument("--stamp")
+    reset = sub.add_parser("reset-paper", help="clear discovery/Paper state while preserving operator params")
+    reset.add_argument("--factory-params", action="store_true",
+                       help="also restore all params to code defaults")
+    reset.add_argument("--yes", action="store_true", help="required destructive-operation confirmation")
 
     args = ap.parse_args()
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
@@ -328,6 +339,13 @@ def main() -> int:
         result = scanner.finalize_profiled_generation(
             db, generation_id=args.generation, stamp=args.stamp,
         )
+        print(json.dumps(result, sort_keys=True, default=str))
+    elif args.cmd == "reset-paper":
+        if not args.yes:
+            raise RuntimeError("reset-paper requires --yes")
+        if procman.observer_running(args.db) or procman.scan_running(args.db):
+            raise RuntimeError("stop Observer and Scanner before reset-paper")
+        result = paper_reset.reset(db, factory_params=bool(args.factory_params))
         print(json.dumps(result, sort_keys=True, default=str))
     db.close()
     return 0

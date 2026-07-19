@@ -98,9 +98,10 @@ def smart_add_order_margin(
 
 def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
                    coin: str | None = None) -> str:
-    # BTC is the only market eligible for the stable tier. Calm ETH, altcoins and stock/builder perps must
-    # still start at mid risk; otherwise a low recent range silently grants them BTC-sized leverage.
-    if str(coin or "").upper() == "BTC" and sigma <= stable_sigma_max:
+    # Product policy: BTC always uses the stable tier.  Its real sigma is still collected for smart-add
+    # spacing and audit, but it never migrates to mid/high sizing.  Every non-BTC market starts at mid and
+    # can only move upward to high; low-vol altcoins/stocks never inherit BTC-sized risk.
+    if str(coin or "").upper() == "BTC":
         return "stable"
     return "high" if sigma >= high_sigma_min else "mid"
 

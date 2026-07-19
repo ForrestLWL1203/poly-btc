@@ -63,7 +63,8 @@ def copy_bt_min_closed_for_days(p, days):
     return explicit
 
 
-def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None):
+def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None,
+                   sigmas=None, market_ctx=None):
     days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
     start_ms = now_ms - days * 86400_000
     replay_fills = [
@@ -94,9 +95,11 @@ def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None):
         result = run_backtest(
             addr,
             replay_fills,
-            sigmas=getattr(p, "copy_bt_sigmas", None) or {},
+            sigmas=(sigmas if sigmas is not None else getattr(p, "copy_bt_sigmas", None)) or {},
             overrides=getattr(p, "copy_bt_overrides", None) or {},
-            market_ctx=getattr(p, "copy_bt_market_ctx", None) or {},
+            market_ctx=(
+                market_ctx if market_ctx is not None else getattr(p, "copy_bt_market_ctx", None)
+            ) or {},
             price_path=getattr(p, "copy_bt_price_path", None),
             price_path_meta=getattr(p, "copy_bt_price_path_meta", None) or {},
             valuation_marks=(
@@ -144,13 +147,14 @@ def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None):
         }
 
 
-def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
+def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None,
+                    sigmas=None, market_ctx=None):
     days_list = copy_bt_window_days(p)
     primary_days = max(days_list)
     warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
     warm = copy_bt_result(
         addr, fills, now_ms, p, days=primary_days + warmup_days,
-        valuation_marks=valuation_marks,
+        valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
     )
     if warm.get("valid") is False:
         return {days: dict(warm, _window_days=days) for days in days_list}
@@ -159,6 +163,7 @@ def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
     for days in days_list:
         direct = copy_bt_result(
             addr, fills, now_ms, p, days=days, valuation_marks=valuation_marks,
+            sigmas=sigmas, market_ctx=market_ctx,
         )
         sliced = slice_backtest_result(
             warm,
@@ -206,11 +211,12 @@ def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
     return out
 
 
-def sector_copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None):
+def sector_copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None,
+                           sigmas=None, market_ctx=None):
     return {
         sector: copy_bt_results(
             addr, filter_fills(fills, sector), now_ms, p,
-            valuation_marks=valuation_marks,
+            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
         )
         for sector in SECTORS
     }

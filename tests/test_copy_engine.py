@@ -218,7 +218,10 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "ETH"), "mid")
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "XRP"), "mid")
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "xyz:GOLD"), "mid")
-        self.assertEqual(tier_for_sigma(0.12, 0.05, 0.10, "BTC"), "high")
+        self.assertEqual(tier_for_sigma(0.07, 0.05, 0.10, "BTC"), "stable")
+        self.assertEqual(tier_for_sigma(0.20, 0.05, 0.10, "BTC"), "stable")
+        self.assertEqual(tier_for_sigma(0.07, 0.05, 0.09, "ETH"), "mid")
+        self.assertEqual(tier_for_sigma(0.10, 0.05, 0.09, "ETH"), "high")
 
     def test_profit_tail_uses_percentages_and_asset_liquidation_risk(self):
         decision = profit_tail_close_decision(

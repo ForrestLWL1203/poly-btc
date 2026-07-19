@@ -6,6 +6,8 @@ asymmetric on purpose: de-risk FAST when recent vol rises above the baseline, re
 once calm is sustained into the long window). σ lives in the coin_vol TABLE (one row/coin), refreshed
 periodically off the signal hot path; the sizing code just reads the latest value.
 """
+import time
+
 from . import config, rest
 from .util import f, now_iso
 
@@ -23,23 +25,41 @@ def _daily_range(candles: list):
     return sum(rs) / len(rs)
 
 
-def compute(coin: str):
-    """Fetch daily candles and return (sigma_used, sigma_fast, sigma_slow, n) or None. σ = mean daily
-    high-low range. sigma_used = max(fast, slow): catches a fresh vol regime fast, holds the baseline slowly."""
-    cs = rest.candle_snapshot(coin, "1d", config.VOL_SLOW_DAYS)
-    if not isinstance(cs, list) or len(cs) < config.VOL_MIN_SAMPLES + 1:
-        return None
+def compute_at(coin: str, asof_ms: int) -> dict:
+    """Fetch one as-of volatility sample while distinguishing transport failure from a young market.
+
+    Scanner qualification treats those outcomes differently: an API failure is a real data error, while a
+    successful response with too little closed history may use the neutral 7% product default.  ``asof_ms``
+    is fixed at generation start so a scan crossing UTC midnight cannot mix candle regimes.
+    """
+    start_ms = int(asof_ms) - (int(config.VOL_SLOW_DAYS) + 2) * 86_400_000
+    cs = rest.candle_snapshot_range(coin, "1d", start_ms, int(asof_ms))
+    if cs is None:
+        return {"status": "request_failed", "sigma": None, "fast": None, "slow": None, "n": 0}
+    if not isinstance(cs, list):
+        return {"status": "request_failed", "sigma": None, "fast": None, "slow": None, "n": 0}
     cs = sorted(cs, key=lambda c: c.get("t", 0))
-    # DROP the last candle — candle_snapshot uses endTime=now, so it's TODAY still forming. Its range grows
-    # through the day and would drift σ intraday (open at 5%, an hour later 8%). Use only CLOSED daily
-    # candles → σ is stable within a day, steps only when a day closes. (min-samples check above guarantees
-    # ≥6 here, so ≥5 remain — enough for _daily_range.)
-    cs = cs[:-1]
+    with_close_time = [c for c in cs if c.get("T") is not None]
+    if with_close_time:
+        cs = [c for c in cs if int(c.get("T") or 0) <= int(asof_ms)]
+    elif cs:
+        # Compatibility with fixtures/older API payloads lacking ``T``: the last daily candle is forming.
+        cs = cs[:-1]
+    if len(cs) < int(config.VOL_MIN_SAMPLES):
+        return {"status": "insufficient_history", "sigma": None, "fast": None, "slow": None, "n": len(cs)}
     slow = _daily_range(cs)
     if slow is None:
-        return None
+        return {"status": "insufficient_history", "sigma": None, "fast": None, "slow": None, "n": len(cs)}
     fast = _daily_range(cs[-config.VOL_FAST_DAYS:]) or slow
-    return max(fast, slow), fast, slow, len(cs)
+    return {"status": "real", "sigma": max(fast, slow), "fast": fast, "slow": slow, "n": len(cs)}
+
+
+def compute(coin: str):
+    """Compatibility wrapper returning the historical tuple/None API."""
+    sample = compute_at(coin, int(time.time() * 1000))
+    if sample["status"] != "real":
+        return None
+    return sample["sigma"], sample["fast"], sample["slow"], sample["n"]
 
 
 def _market_fields(asset_ctx):
@@ -90,7 +110,7 @@ def load_all(db) -> dict:
     """Read the whole coin_vol table into {coin: sigma} for an in-memory read-cache at startup."""
     # Scanner/market-context refreshes may legitimately create a row before any candle-derived sigma exists.
     # Such a placeholder is not a warm volatility value: keeping ``coin: None`` in the cache makes Observer's
-    # lazy loader believe the market was already fetched and silently routes it through the 10% fallback tier.
+    # lazy loader believe the market was already fetched and silently routes it through the 7% fallback tier.
     return {
         r[0]: r[1]
         for r in db.execute(

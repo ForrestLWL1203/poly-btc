@@ -2,11 +2,11 @@ export const PARAM_META = {
   // follow
   STABLE_MARGIN_MIN_PCT: { name: "稳定档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
   STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "2–10", up: "低频期每单更重", dn: "加仓余量更多" },
-  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "σ≤4%的杠杆封顶(绝对上限)", range: "15–20", up: "放开高杠杆", dn: "压低杠杆" },
+  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定稳定档的杠杆封顶(仍受目标/交易所上限约束)", range: "15–28", up: "放开高杠杆", dn: "压低杠杆" },
   STABLE_MIN_NOTIONAL: { name: "稳定档·最低名义额", desc: "BTC/大饼单笔名义额低于此(封顶到主力后)就不开,太小没意义", range: "$3k–8k", up: "过滤更多小单", dn: "连很小的也跟" },
   MID_MARGIN_MIN_PCT: { name: "中档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
   MID_MARGIN_PCT: { name: "中档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "2–6", up: "低频期每单更重", dn: "加仓余量更多" },
-  MID_LEV_CAP: { name: "中档·杠杆上限", desc: "σ 5–9%的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
+  MID_LEV_CAP: { name: "中档·杠杆上限", desc: "非BTC且σ低于9%时的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MIN_NOTIONAL: { name: "中档·最低名义额", desc: "ETH/SOL等单笔名义额低于此就不开", range: "$2k–5k", up: "过滤更多小单", dn: "连很小的也跟" },
   HIGH_MARGIN_MIN_PCT: { name: "剧烈档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "0.5–2", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
   HIGH_MARGIN_PCT: { name: "剧烈档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "1–4", up: "低频期每单更重", dn: "加仓余量更多" },
@@ -58,7 +58,7 @@ export const TIER_GROUPS = [
   {
     key: "stable",
     label: "稳定档",
-    sub: "σ ≤ 5% · BTC 及更稳的(含低波动股票如GOLD)",
+    sub: "BTC 固定档 · 真实 σ 只用于加仓间距与审计",
     tint: "tint-green",
     min: "STABLE_MARGIN_MIN_PCT",
     max: "STABLE_MARGIN_PCT",
@@ -69,7 +69,7 @@ export const TIER_GROUPS = [
   {
     key: "mid",
     label: "中档",
-    sub: "σ 5–9% · ETH / SOL / HYPE 等主流",
+    sub: "非 BTC 且 σ < 9% · 缺历史时暂按 7%",
     tint: "tint-amber",
     min: "MID_MARGIN_MIN_PCT",
     max: "MID_MARGIN_PCT",

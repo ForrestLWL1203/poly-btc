@@ -245,6 +245,8 @@ class AutoTuneTests(unittest.TestCase):
             "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-01')"
         )
         db.commit()
+        auto_tune.generation_market.Resolver(db, "g1", 1, set(), {})
+        auto_tune.generation_market.seal(db, "g1")
         before = dict(db.execute("SELECT key,value FROM params").fetchall())
 
         def candidate_axis(base, *_args):

@@ -144,6 +144,28 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["followed_adds"], 1)
         self.assertGreater(result["copy_net_pnl"], 0)
 
+    def test_btc_sigma_changes_add_spacing_but_never_changes_stable_open_tier(self):
+        fills = [
+            fill(1, "BTC", "B", 10, 0, 100.0, 1),
+            fill(2, "BTC", "B", 10, 10, 99.0, 2),
+            fill(3, "BTC", "A", 20, 20, 101.0, 3),
+        ]
+        overrides = {
+            "STABLE_MARGIN_PCT": .04, "STABLE_MARGIN_MIN_PCT": .04,
+            "STABLE_LEV_CAP": 21.0, "STABLE_MIN_NOTIONAL": 0.0,
+            "MID_LEV_CAP": 8.0, "HIGH_LEV_CAP": 4.0,
+            "ADD_GAP_K": .10, "ADD_GAP_SHRINK_G": 1.0,
+            "MIN_OPEN_MARGIN_PCT": .0001,
+        }
+        calm = run_backtest("0xabc", fills, sigmas={"BTC": .05}, overrides=overrides)
+        volatile = run_backtest("0xabc", fills, sigmas={"BTC": .20}, overrides=overrides)
+
+        self.assertEqual(calm["positions"][0]["leverage"], 21.0)
+        self.assertEqual(volatile["positions"][0]["leverage"], 21.0)
+        self.assertEqual(calm["followed_adds"], 1)
+        self.assertEqual(volatile["followed_adds"], 0)
+        self.assertEqual(volatile["add_outcome_counts"]["noise_merged"], 1)
+
     def test_large_target_add_is_capped_to_one_first_margin_in_replay(self):
         fills = [
             fill(1, "BTC", "B", 100, 0, 100.0, 20),

@@ -144,9 +144,9 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 # v8 SIZING (2026-06-30). Three VOLATILITY TIERS (by daily σ = high-low range, see volatility.py); each
 # tier has its own margin% + leverage cap; WITHIN a tier, leverage scales continuously with σ. σ classifies
 # AND fine-tunes — no coin lists. Anchored to AVAILABLE (self-throttles as positions fill). Tier by σ:
-#   stable  BTC only, and only while σ ≤ STABLE_SIGMA_MAX → big
-#   mid     every non-BTC market starts here while σ < HIGH_SIGMA_MIN
-#   high    any market with σ ≥ HIGH_SIGMA_MIN → small
+#   stable  BTC always → fixed product tier (real σ still drives smart-add spacing)
+#   mid     every non-BTC market while σ < HIGH_SIGMA_MIN
+#   high    every non-BTC market with σ ≥ HIGH_SIGMA_MIN → small
 #   margin   = SIZING_EQUITY × <tier>_MARGIN_PCT. Profits compound from current realized equity; below the
 #              initial strategy allocation a bounded sqrt curve slows shrinkage. Real risk equity still owns
 #              coin/deploy caps, and free cash remains the final hard backstop.
@@ -154,7 +154,7 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV; the caller
 #              further caps to the master's own leverage and the stock cap. σ still selects the tier.
 #   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
-STABLE_SIGMA_MAX = 0.05     # BTC-specific stable ceiling. Non-BTC never enters stable even below this σ.
+STABLE_SIGMA_MAX = 0.05     # compatibility/audit only: BTC is always stable-tier; non-BTC never enters stable.
 HIGH_SIGMA_MIN   = 0.09     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
 STABLE_MARGIN_MIN_PCT = 0.020  # first-open margin lower bound once portfolio deployment gets crowded
 MID_MARGIN_MIN_PCT    = 0.020
@@ -255,7 +255,7 @@ VOL_REFRESH_S = 43200       # re-fetch each tracked coin's σ at most this often
 #                             daily candles (today's forming candle is dropped) → it can only STEP when a day
 #                             closes, so refreshing more than a couple times a day is pure wasted REST budget.
 #                             (A newly-seen coin still gets its σ fetched immediately via _ensure_vol.)
-VOL_FALLBACK_SIGMA = 0.10   # σ when candles unavailable (new/illiquid coin) → low lev, small notional
+VOL_FALLBACK_SIGMA = 0.07   # neutral MID-tier σ when a valid market has too little closed-candle history.
 VOL_PREWARM_TOP = 30        # at startup, warm σ for the top-N by 24h volume in crypto + EACH builder dex
 
 # PERIODIC orphan reconcile: forward-only polling normally catches a master's close in real time, but a

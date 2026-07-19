@@ -67,8 +67,8 @@ export function FollowSettingsPanel({
         value={vals[BLACKLIST_KEY]} dirty={!!dirty[BLACKLIST_KEY]} disabled={!editableParam(blacklistParam)}
         onCommit={v2 => onChange(BLACKLIST_KEY, v2)} />}
       <div className="psec-h psec-h-row">
-        <div className="psec-title-block">保证金与杠杆 · 按波动率 σ 分档
-          <span>杠杆 = σ 所在档位的上限(σ 定档),这里设各档的单笔保证金% 与杠杆上限</span></div>
+        <div className="psec-title-block">保证金与杠杆 · BTC固定稳定档，其余按波动率 σ 分档
+          <span>BTC始终使用稳定档；其余市场由 σ 进入中档/剧烈档，这里设各档的单笔保证金% 与杠杆上限</span></div>
         {autoTuneParam && <div className={"psec-switch" + (dirty[AUTO_TUNE_KEY] ? " dirty" : "")} title={autoTuneParam.desc}>
           <span>自动调保证金</span>
           <div className={"toggle " + (vals[AUTO_TUNE_KEY] ? "on" : "")}

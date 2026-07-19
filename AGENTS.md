@@ -53,6 +53,7 @@ local notes, then verify any assumption against the current code and database sc
 | Generation staging/publication | `hl/generation.py`, `hl/selection.py`, `hl/strategy_revision.py` |
 | Profile metrics/gates | `hl/metrics.py`, `hl/scanner_copy_bt.py`, `hl/follow_score.py`, `hl/copy_policy.py` |
 | Cached fills/replay inputs | `hl/fills.py`, `hl/copy_data.py`, `hl/copy_evidence.py` |
+| Generation market snapshot | `hl/generation_market.py`, `hl/volatility.py` |
 | Sector specialization | `hl/sector.py`, `hl/copy_data.py` |
 | Canonical copy replay | `hl/copy_backtest.py`, `hl/copy_engine.py`, `hl/fill_transition.py` |
 | Core formation/tuning | `hl/core_formation.py`, `hl/selection.py`, `hl/auto_tune.py`, `hl/sizing.py` |
@@ -61,6 +62,7 @@ local notes, then verify any assumption against the current code and database sc
 | Dashboard frontend | `web/app.jsx`, `web/components/*`, `web/app.css`, compiled `web/app.js` |
 | Launcher/process control | `launcher/launcher.py`, `launcher/server.py`, `launcher/core/*`, `launcher/web/*` |
 | Shared schema/migrations | `hl/storage.py` |
+| Safe Paper reset | `hl/paper_reset.py`, `hl_discover.py reset-paper` |
 | Tunable values | `hl/config.py`, `hl/params.py`, SQLite `params` table |
 
 ## Discovery and selection pipeline
@@ -97,6 +99,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   tolerated only at the coarse-harvest layer.
 - A fresh candidate profile fetch covers `PROFILE_FETCH_DAYS` (currently 37 days: 30-day scoring window plus
   seven warm-up days). Reported copy evidence remains 30/14/7 days.
+- With no published generation, every scan request is forcibly upgraded to `cold_full`: it harvests a new
+  Leaderboard, profiles the complete candidate workset with 37-day history, and rebuilds sector specialization.
+  A failed first generation remains cold on the next attempt; the Dashboard's incremental checkbox cannot
+  create a partial first generation.
 - `candidate_fills` is the cache. Daily work normally fetches only the delta after each wallet cursor and
   merges it into the 37-day window. A page-cap/cache-gap/revision problem or the seven-day self-heal schedule
   triggers a full refetch for the affected shard/candidate.
@@ -122,6 +128,11 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   an execution snapshot without an explicit allowed sector fails closed.
 - Full/cold generation output therefore forms specialization every time. Do not restore whole-wallet portfolio
   PnL/volume/drawdown as a substitute for scoped fills and canonical Copy economics.
+- Scanner economics use a sealed generation market snapshot, never the Observer's mutable `coin_vol`. After a
+  wallet's executable fills are known and before its first strict Copy replay, its actual coins are resolved once
+  per generation: closed-candle sigma as of generation start plus the generation's bulk Crypto/`xyz` context,
+  max leverage and Crypto liquidity. An API failure defers affected wallets as a true data error; a valid market
+  with fewer than five closed daily candles uses the explicit 7% `insufficient_history_default`.
 
 ### 4. Quality gates and scores
 
@@ -268,6 +279,10 @@ Current Paper defaults deliberately allow the full closed loop:
 - live-money deployments should use conservative shadow/coverage/forward thresholds instead.
 
 Tuning must use only the same complete generation's cached fills, sector policies, marks and follow snapshot.
+The generation market snapshot is immutable after profiling and its content hash is recorded in every scanner,
+formation and auto-tune strategy revision. Profile replay, shared replay and tuning must all load that generation's
+snapshot. A missing legacy snapshot blocks `regate`, `optimize`, selection repair and replay rematerialization until
+a new scan succeeds; an already-published legacy strategy may continue executing unchanged.
 Changing `MARGIN_EQUITY_PCT` during a run invalidates that run's finalization instead of allowing stale results to
 overwrite the new operator policy. Any pre-publication formation/path/tuner/snapshot-consistency failure rolls
 back the new membership and parameters, leaving the prior published generation and immutable strategy active.
@@ -292,8 +307,10 @@ the current published generation.
 - Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
   through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
   remain hard execution boundaries.
-- Only BTC may enter the stable tier when its volatility is low. Non-BTC Crypto and transparent `xyz:*` markets
-  start at mid and become high-volatility by sigma; `xyz:*` additionally obeys the hard stock leverage ceiling.
+- BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
+  spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
+  high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). `xyz:*` additionally obeys the hard
+  stock leverage ceiling.
 - `MARGIN_EQUITY_PCT` is a manual-only sizing base (default 100%, UI range 10–100%). It scales each new
   position's drawdown-adjusted equity base without freezing the remainder; real cash, per-coin caps and total
   deployment still use full risk equity. Auto-tune and Core-count selection must not modify this value.
@@ -357,6 +374,8 @@ python3 hl_discover.py --db data/hl.db optimize
 python3 hl_discover.py --db data/hl.db finalize-profiled --generation GENERATION_ID
 python3 hl_discover.py --db data/hl.db repair-watchlist
 python3 hl_discover.py --db data/hl.db watchlist --top 40
+python3 hl_discover.py --db data/hl.db reset-paper --yes
+# Add --factory-params only when operator settings should also return to code defaults.
 
 # Observer
 python3 hl_observe.py --db data/hl.db observe
@@ -371,11 +390,16 @@ python3 web/dev/mock_consumer.py data/hl_mock.db
 DASH_PASSWORD=mock123 python3 hl_dashboard.py --db data/hl_mock.db --static web --host 127.0.0.1 --port 8810
 ```
 
-`scan --full` means a true profile fill refetch. A Dashboard manual rescan is not automatically a full
-refetch unless its command payload requests `full=true`, the CLI uses `--full`, or the completed scan records
-`full=1`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
+`scan --full` means a true profile fill refetch. Except for the forced first-generation `cold_full`, a Dashboard
+manual rescan is not automatically a full refetch unless its command payload requests `full=true`, the CLI uses
+`--full`, or the completed scan records `full=1`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
 and jointly tunes the current published generation without wallet fill refetch; `finalize-profiled` retries an
 already-complete but unpublished generation after a finalization failure.
+
+`reset-paper --yes` is the supported from-zero reset. Stop Observer and Scanner first. It clears discovery,
+cache, selection, strategy, replay and Paper trading state, preserves operator `params` and encrypted provider
+credentials, and recreates the `$10,000` Paper account. `--factory-params` is the explicit restore-defaults variant;
+deleting the database file is also a factory reset, not a settings-preserving reset.
 
 Before Python changes:
 

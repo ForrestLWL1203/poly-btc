@@ -223,6 +223,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 
+    def seal_market(self, db, generation):
+        scanner.generation_market.Resolver(db, generation, 1, set(), {})
+        return scanner.generation_market.seal(db, generation)
+
     def test_finalize_profiled_generation_reuses_cache_without_wallet_fetch(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -246,6 +250,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES('rescan','acked','start','start')"
             )
             db.commit()
+            self.seal_market(db, "cached-g")
 
             with patch.object(scanner.rest, "post", side_effect=AssertionError("wallet fetch forbidden")):
                 result = scanner.finalize_profiled_generation(db, "cached-g", stamp="finish")
@@ -276,6 +281,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES('0xaaa','active',100,7)"
             )
             db.commit()
+            self.seal_market(db, "g1")
             windows = {
                 30: {"copy_net_pnl": 250, "copy_win_rate": 0.75, "closed_n": 8,
                      "opened_n": 9, "target_open_events": 10, "liquidations": 0, "fee_drag": 12},
@@ -394,6 +400,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             db.commit()
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[]), \
                     patch.object(scanner, "_prune_discovery_cache") as prune:
                 scanner.scan(db, scan_args())
@@ -446,6 +453,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 return "active", "ok", row, False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "now_iso", side_effect=scan_time), \
@@ -488,6 +496,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 return "active", "ok", row, False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "form_quality_prefix", side_effect=RuntimeError("tune failed")), \
@@ -588,6 +597,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                            "selectedCount": 1},
             }
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "form_quality_prefix", return_value=formation), \
@@ -634,6 +644,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES ('g1','0xaaa','challenger',1,'2026-01-02')"
             )
             db.commit()
+            self.seal_market(db, "g1")
             core_row = scanner.selection.SelectionRow(
                 "0xaaa", "core", reason="core_entry", data_status="valid", evidence_status="qualified",
                 acct_value=10000,
@@ -686,6 +697,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES('g1','0xaaa','core',1,'2026-01-02')"
             )
             db.commit()
+            self.seal_market(db, "g1")
             core_row = scanner.selection.SelectionRow(
                 "0xaaa", "core", reason="core_keep", acct_value=10000,
                 sector_policy_json='{"allowed":["crypto"],"crypto":{"allow":true}}',
@@ -818,6 +830,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                      '{"allowed":["crypto"],"crypto":{"allow":true}}'),
                 )
             db.commit()
+            self.seal_market(db, "g1")
             marginal = scanner.selection.MarginalSelectionResult(
                 selected=("0xnew",),
                 baseline=scanner.selection.PortfolioMetrics(0, 0, 0, 1, 1, 0, 0, 0),
@@ -903,6 +916,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES(1,'0xaaa',0.65,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
             )
             db.commit()
+            self.seal_market(db, "g1")
             baseline = scanner.selection.PortfolioMetrics(
                 0, 0, 0, 1, 1, 0, 0, 0, net_pnl=0, drawdown_dollars=0,
                 risk_adjusted_utility=0,
@@ -984,6 +998,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "VALUES('0xold','BTC','long','open','now')"
             )
             db.commit()
+            self.seal_market(db, "g1")
             baseline = scanner.selection.PortfolioMetrics(
                 100, 100, 0, .95, .95, .01, .5, .05,
                 net_pnl=100, stress_net_pnl=100, drawdown_dollars=10,
@@ -1051,6 +1066,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 return "active", "ok", row, False
 
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
+                    patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row("0xauto")]), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):

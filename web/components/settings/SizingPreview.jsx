@@ -4,11 +4,11 @@ export function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
   const [deploy, setDeploy] = React.useState(20);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
-  const stMax = n("STABLE_SIGMA_MAX", 4), hiMin = n("HIGH_SIGMA_MIN", 9);
+  const hiMin = n("HIGH_SIGMA_MIN", 9);
   const MINL = Math.max(1, n("MIN_LEV", 1));
   const marginEquityPct = Math.max(10, Math.min(100, n("MARGIN_EQUITY_PCT", 100)));
   const marginEquity = bal * marginEquityPct / 100;
-  const tier = s => s <= stMax ? "stable" : (s >= hiMin ? "high" : "mid");
+  const tier = (sym, s) => sym === "BTC" ? "stable" : (s >= hiMin ? "high" : "mid");
   const TM = { stable: ["STABLE_MARGIN_MIN_PCT", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"],
     mid: ["MID_MARGIN_MIN_PCT", "MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_MIN_PCT", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
   const TC = { stable: "STABLE_COIN_CAP_PCT", mid: "MID_COIN_CAP_PCT", high: "HIGH_COIN_CAP_PCT" };
@@ -25,8 +25,8 @@ export function SizingPreview({ vals }) {
     if (d >= lock || lock <= full) return lo;
     return lo + (hi - lo) * (lock - d) / (lock - full);
   };
-  const calc = s0 => {
-    const s = Math.max(0.1, s0), t = tier(s);
+  const calc = (sym, s0) => {
+    const s = Math.max(0.1, s0), t = tier(sym, s);
     const mPct = marginPct(t), levCap = n(TM[t][2], dft[TM[t][2]]);
     const lev = Math.max(MINL, Math.floor(levCap));
     const coinCap = bal * n(TC[t], t === "stable" ? 30 : (t === "mid" ? 22 : 15)) / 100;
@@ -50,7 +50,7 @@ export function SizingPreview({ vals }) {
         <div className="sz-hdr">币种</div><div className="sz-hdr sz-num">σ</div>
         <div className="sz-hdr sz-num">杠杆</div><div className="sz-hdr sz-num">保证金 / 名义 · 第4次余量</div>
         {COINS.map(([sym, sig]) => {
-          const r = calc(sig);
+          const r = calc(sym, sig);
           return (
             <div className="sz-row" key={sym}>
               <div className="sz-cell sz-coin"><span className="sz-dot" style={{ color: DOT[r.t] }} />{sym}</div>

@@ -902,6 +902,8 @@ class ScannerWatchlistTests(unittest.TestCase):
                 _profile_row("0xstale", "active", 0.8, profile_generation="g-old"),
             )
             db.commit()
+            scanner.generation_market.Resolver(db, "g-current", 1, set(), {})
+            scanner.generation_market.seal(db, "g-current")
             p = SimpleNamespace()
 
             with (
