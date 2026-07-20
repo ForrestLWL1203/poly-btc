@@ -12,9 +12,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
         self.assertEqual(config.HARVEST_MIN_ACCT, 30_000.0)
         self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
-                          config.HARVEST_ALL_ROI_MIN), (0.25, 0.50, 0.50))
+                          config.HARVEST_ALL_ROI_MIN), (0.15, 0.30, 0.30))
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
-                          config.HARVEST_ALL_PNL_MIN), (5_000.0, 15_000.0, 20_000.0))
+                          config.HARVEST_ALL_PNL_MIN), (2_000.0, 8_000.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.80)
         self.assertFalse(hasattr(config, "HARVEST_WEEK_VLM_MAX"))
         self.assertFalse(hasattr(config, "HARVEST_PNL_VOL_MIN"))
@@ -27,8 +27,12 @@ class ScannerSettingsParamTests(unittest.TestCase):
             scanner = params.load_category(db, "scanner")
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
-            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.25)
-            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.50)
+            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.15)
+            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.30)
+            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.30)
+            self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 2_000.0)
+            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 8_000.0)
+            self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_PERP_PNL_SHARE_MIN"], 0.80)
             self.assertEqual(scanner["inactive_days"], 2)
             self.assertNotIn("COPY_STOP_ENABLE", follow)
@@ -93,6 +97,45 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(row["level"], "blue")
             self.assertEqual(row["type"], "int")
             self.assertEqual(row["effect"], "rescan")
+
+    def test_seed_params_migrates_previous_approved_harvest_defaults_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            old = {
+                "HARVEST_WEEK_ROI_MIN": "25",
+                "HARVEST_MONTH_ROI_MIN": "45",
+                "HARVEST_ALL_ROI_MIN": "50",
+                "HARVEST_WEEK_PNL_MIN": "5000",
+                "HARVEST_MONTH_PNL_MIN": "15000",
+                "HARVEST_ALL_PNL_MIN": "20000",
+            }
+            for key, value in old.items():
+                db.execute("UPDATE params SET value=?,default_value=? WHERE key=?", (value, value, key))
+            db.execute("UPDATE params SET value='12' WHERE key='HARVEST_PERP_PNL_SHARE_MIN'")
+            db.commit()
+
+            params.seed_params(db)
+
+            values = dict(db.execute(
+                "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
+            ).fetchall())
+            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 15.0)
+            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 30.0)
+            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 30.0)
+            self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 2_000.0)
+            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 8_000.0)
+            self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)
+            self.assertEqual(float(values["HARVEST_PERP_PNL_SHARE_MIN"]), 12.0)
+
+            # After this migration has installed the new default metadata, an operator may still
+            # intentionally choose a former value without it being rewritten on every restart.
+            db.execute("UPDATE params SET value='45' WHERE key='HARVEST_MONTH_ROI_MIN'")
+            db.commit()
+            params.seed_params(db)
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='HARVEST_MONTH_ROI_MIN'"
+            ).fetchone()[0]), 45.0)
 
     def test_seed_params_removes_obsolete_raw_score_gate(self):
         with tempfile.TemporaryDirectory() as td:

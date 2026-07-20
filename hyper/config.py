@@ -291,12 +291,12 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # leverage makes PnL/volume incomparable across otherwise identical contract traders.
 HARVEST_MIN_ACCT = 30_000.0
 HARVEST_WEEK_VLM_MIN = 300_000.0
-HARVEST_WEEK_ROI_MIN = 0.25
-HARVEST_MONTH_ROI_MIN = 0.50
-HARVEST_ALL_ROI_MIN = 0.50
-HARVEST_WEEK_PNL_MIN = 5_000.0
-HARVEST_MONTH_PNL_MIN = 15_000.0
-HARVEST_ALL_PNL_MIN = 20_000.0
+HARVEST_WEEK_ROI_MIN = 0.15
+HARVEST_MONTH_ROI_MIN = 0.30
+HARVEST_ALL_ROI_MIN = 0.30
+HARVEST_WEEK_PNL_MIN = 2_000.0
+HARVEST_MONTH_PNL_MIN = 8_000.0
+HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.80
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline

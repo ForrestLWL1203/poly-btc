@@ -43,34 +43,34 @@ class PerpPrefilterTests(unittest.TestCase):
     def test_leveraged_volume_does_not_affect_leaderboard_decision(self):
         def row(volume):
             return {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
-                ("week", {"pnl": 5000, "roi": 0.25, "vlm": volume}),
-                ("month", {"pnl": 15000, "roi": 0.50, "vlm": volume * 2}),
-                ("allTime", {"pnl": 20000, "roi": 0.50, "vlm": volume * 3}),
+                ("week", {"pnl": 2000, "roi": 0.15, "vlm": volume}),
+                ("month", {"pnl": 8000, "roi": 0.30, "vlm": volume * 2}),
+                ("allTime", {"pnl": 0, "roi": 0.30, "vlm": volume * 3}),
             ]}
         class P:
             min_acct = 30000
             week_vlm_min = 300000
-            week_roi_min = 0.25
-            month_roi_min = 0.50
-            all_roi_min = 0.50
-            week_pnl_min = 5000
-            month_pnl_min = 15000
-            all_pnl_min = 20000
+            week_roi_min = 0.15
+            month_roi_min = 0.30
+            all_roi_min = 0.30
+            week_pnl_min = 2000
+            month_pnl_min = 8000
+            all_pnl_min = 0
         low = scanner._prepare_leaderboard_rows([row(300000)], P(), "now")[0]
         high = scanner._prepare_leaderboard_rows([row(300000000)], P(), "now")[0]
         self.assertEqual((low["is_candidate"], high["is_candidate"]), (1, 1))
 
     def test_each_official_roi_and_absolute_pnl_floor_is_hard(self):
         base = {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
-            ("week", {"pnl": 5000, "roi": 0.25, "vlm": 300000}),
-            ("month", {"pnl": 15000, "roi": 0.50, "vlm": 600000}),
-            ("allTime", {"pnl": 20000, "roi": 0.50, "vlm": 900000}),
+            ("week", {"pnl": 2000, "roi": 0.15, "vlm": 300000}),
+            ("month", {"pnl": 8000, "roi": 0.30, "vlm": 600000}),
+            ("allTime", {"pnl": 0, "roi": 0.30, "vlm": 900000}),
         ]}
         class P:
             min_acct = 30000
             week_vlm_min = 300000
-            week_roi_min, month_roi_min, all_roi_min = 0.25, 0.50, 0.50
-            week_pnl_min, month_pnl_min, all_pnl_min = 5000, 15000, 20000
+            week_roi_min, month_roi_min, all_roi_min = 0.15, 0.30, 0.30
+            week_pnl_min, month_pnl_min, all_pnl_min = 2000, 8000, 0
         self.assertEqual(scanner._prepare_leaderboard_rows([base], P(), "now")[0]["is_candidate"], 1)
         for window_name, field in (("week", "roi"), ("month", "roi"), ("allTime", "roi"),
                                    ("week", "pnl"), ("month", "pnl"), ("allTime", "pnl")):

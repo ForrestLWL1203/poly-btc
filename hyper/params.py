@@ -26,17 +26,17 @@ PARAM_SPEC = [
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
     ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
-        "官方近7日 ROI 下限", "直接读取 Leaderboard 官方 ROI；不使用成交量或余额作收益率分母"),
+        "官方近7日 ROI 下限", "默认15%；直接读取 Leaderboard 官方 ROI，不使用成交量或余额作收益率分母"),
     ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
-        "官方近30日 ROI 下限", "过滤一个月表现平平或只靠单周行情的钱包"),
+        "官方近30日 ROI 下限", "默认30%；过滤一个月表现平平或只靠单周行情的钱包"),
     ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
-        "官方历史 ROI 下限", "要求长期官方 ROI 同样达到高强度门槛"),
+        "官方历史 ROI 下限", "默认30%；排除长期表现明显偏弱的钱包"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
-        "近7日绝对 PnL 下限", "排除极小本金或资金流造成的虚高 ROI"),
+        "近7日绝对 PnL 下限", "默认$2,000；排除极小本金或资金流造成的虚高 ROI"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
-        "近30日绝对 PnL 下限", "官方账户总 PnL 必须达到此金额"),
+        "近30日绝对 PnL 下限", "默认$8,000；官方账户近期总 PnL 必须达到此金额"),
     ("HARVEST_ALL_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_ALL_PNL_MIN,
-        "历史绝对 PnL 下限", "官方历史账户总 PnL 必须达到此金额"),
+        "历史绝对 PnL 下限", "默认$0；只要求历史不亏损，主要关注近期表现"),
     ("HARVEST_PERP_PNL_SHARE_MIN", "scanner", "yellow", "pct", "rescan",
         config.HARVEST_PERP_PNL_SHARE_MIN * 100, "Perp 盈利占比下限",
         "Portfolio 三个窗口中 Perp PnL 均须至少占账户总 PnL 此比例"),
@@ -208,6 +208,16 @@ PARAM_SPEC = [
 
 _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 
+# Known predecessor defaults that are policy-migrated on deploy. Values are stored in UI units.
+_HARVEST_PREVIOUS_DEFAULTS = {
+    "HARVEST_WEEK_ROI_MIN": ("25", "25.0"),
+    "HARVEST_MONTH_ROI_MIN": ("45", "45.0", "50", "50.0"),
+    "HARVEST_ALL_ROI_MIN": ("50", "50.0"),
+    "HARVEST_WEEK_PNL_MIN": ("5000", "5000.0"),
+    "HARVEST_MONTH_PNL_MIN": ("15000", "15000.0"),
+    "HARVEST_ALL_PNL_MIN": ("20000", "20000.0"),
+}
+
 
 def _to_text(v):
     """Serialize a value for the TEXT `value` column. None -> NULL; bool -> 'true'/'false'."""
@@ -259,6 +269,17 @@ def seed_params(db):
             db.execute(
                 "UPDATE params SET value=? WHERE key=? AND value IN ('10000','10000.0')",
                 (dv, key),
+            )
+        # Approved ROI-policy migration. Move only the two previously approved default surfaces
+        # (25/50/50 + 5k/15k/20k and the accepted shadow surface 15/45/50 + 2k/8k/0)
+        # to the new production default. Unrelated operator custom values remain untouched.
+        old_values = _HARVEST_PREVIOUS_DEFAULTS.get(key)
+        if old_values:
+            marks = ",".join("?" for _ in old_values)
+            db.execute(
+                f"UPDATE params SET value=? WHERE key=? AND value IN ({marks}) "
+                f"AND default_value IN ({marks})",
+                (dv, key, *old_values, *old_values),
             )
         db.execute(
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "

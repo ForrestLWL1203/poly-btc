@@ -864,7 +864,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                          "opened_n": 10, "target_open_events": 10, "liquidations": 0, "fee_drag": 7.0},
                     14: {"copy_net_pnl": 600.0, "copy_win_rate": 0.67, "closed_n": 6, "wins": 4,
                          "opened_n": 6, "target_open_events": 6, "liquidations": 0, "fee_drag": 4.0},
-                    7: {"copy_net_pnl": 240.0, "copy_win_rate": 0.6, "closed_n": 5, "wins": 3,
+                    7: {"copy_net_pnl": 500.0, "copy_win_rate": 0.6, "closed_n": 5, "wins": 3,
                         "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
                 },
                 "stock": {
