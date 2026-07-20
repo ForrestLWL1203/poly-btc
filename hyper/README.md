@@ -56,14 +56,19 @@ Profiles are not re-downloaded from zero on every daily run.
 - New candidates get a full configured profile window.
 - Existing candidates use `candidate_fills` cursors and fetch only new fills, merging them into the 37-day
   cache.
-- Full refetch self-healing runs on a seven-day cadence, divided into seven rolling shards. Page-cap, cursor,
-  or cache-gap anomalies can force an individual full refetch.
+- The seven rolling shards control when cached candidates are re-evaluated; they do not trigger history
+  re-downloads. Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full
+  37-day source window. Page-cap or cache-integrity failures quarantine and repair the affected wallet.
+- If the normal daily shard finds no newly Core-eligible wallet, the scanner can immediately evaluate the
+  next shard from cached data (one extra shard by default) before final formation.
 - Core and held wallets receive priority refresh. The normal daily budget is 60 minutes with a 15-minute Core
   deadline and a 15-minute finalization reserve; low-priority candidates can be deferred.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
   cannot prune, publish, or tune.
 
-Automatic cadence is one daily incremental run and one weekly full leaderboard/profile refresh. The Dashboard
+Automatic cadence is one daily incremental run and one weekly full candidate-universe refresh. Previously
+known wallets remain incremental during that full evaluation; only genuinely new/incomplete wallets bootstrap
+37 days. The Dashboard
 rescan button queues a manual run; changing scanner settings only persists params and does not start a scan.
 
 ## Copy replay and automatic tuning

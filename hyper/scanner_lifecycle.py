@@ -178,6 +178,31 @@ def refresh_shard_for_day(day: date | str | None = None, shard_count: int = 7) -
     return value.toordinal() % int(shard_count)
 
 
+def subsequent_refresh_shard_batches(
+    candidates: Iterable[str], used_addrs: Iterable[str], *, current_shard: int,
+    shard_count: int = 7, max_shards: int = 1,
+) -> list[dict]:
+    """Return bounded later shard batches in candidate order, excluding work already scheduled."""
+    shard_count = int(shard_count)
+    if shard_count <= 0:
+        raise ValueError("shard_count must be positive")
+    used = {str(addr).strip().lower() for addr in used_addrs if str(addr).strip()}
+    ordered = dedupe_preserve(
+        str(addr).strip().lower() for addr in candidates if str(addr).strip()
+    )
+    batches = []
+    for offset in range(1, min(max(0, int(max_shards)), shard_count - 1) + 1):
+        shard = (int(current_shard) + offset) % shard_count
+        batch = [
+            addr for addr in ordered
+            if addr not in used and stable_refresh_shard(addr, shard_count) == shard
+        ]
+        used.update(batch)
+        if batch:
+            batches.append({"shard": shard, "workset": batch})
+    return batches
+
+
 @dataclass(frozen=True)
 class ScanTimeBudget:
     started_monotonic: float
@@ -247,6 +272,7 @@ def schedule_profile_workset(
     near_threshold_addrs: Iterable[str] = (),
     recovery_addrs: Iterable[str] = (),
     exploration_addrs: Iterable[str] | None = None,
+    full_refetch_addrs: Iterable[str] = (),
     limit: int = 300,
     budget: ScanTimeBudget | None = None,
     estimated_profile_s: float = 0.0,
@@ -259,10 +285,11 @@ def schedule_profile_workset(
     """Build an auditable generation workset.
 
     Position/Core/qualified/Challenger/off-list-qualified wallets are mandatory and never dropped for a
-    discovery budget.  One-time warm-up backfills are the first ordinary lane and therefore consume the
-    configured daily candidate budget instead of masquerading as Challenger priority.  The selected daily
-    refresh shard comes next; remaining capacity is divided new/recovery/exploration 40/40/20.  Time awareness
-    converts the remaining discovery window into a conservative wallet capacity estimate.
+    discovery budget. One-time warm-up backfills are the first ordinary lane and therefore consume the
+    configured daily candidate budget instead of masquerading as Challenger priority. The selected daily
+    evaluation shard comes next; remaining capacity is divided new/recovery/exploration 40/40/20. Evaluation
+    rotation never implies a source-history re-download: ``full_refetch_addrs`` explicitly identifies only
+    new or incomplete caches.
     """
     candidates = dedupe_preserve(str(addr).strip().lower() for addr in candidates if str(addr).strip())
     candidate_set = set(candidates)
@@ -341,19 +368,26 @@ def schedule_profile_workset(
     workset = dedupe_preserve(priority + discovery)
     workset_set = set(workset)
     # The profile/reporting window is 30 days, but replay needs seven earlier warm-up days so positions opened
-    # before the reporting boundary and closed inside it are reconstructed correctly.  The daily shard does a
-    # rolling 37-day self-heal; other wallets remain cursor-based delta fetches.
-    full_refetch = workset if full_scan else [
-        addr for addr in workset
-        if addr in candidate_set and stable_refresh_shard(addr, shard_count) == refresh_shard
-    ]
+    # before the reporting boundary and closed inside it are reconstructed correctly. The 37-day source fetch
+    # is a one-time cache bootstrap/repair, while every later evaluation remains cursor-based and incremental.
+    # Candidate rotation and source-history repair are separate decisions. A wallet with a confirmed
+    # PROFILE_FETCH_DAYS coverage marker stays cursor/delta-only forever; re-evaluating its daily shard must
+    # not download the same 37-day history again. Callers explicitly nominate only new/incomplete caches.
+    full_refetch_set = {
+        str(addr).strip().lower() for addr in full_refetch_addrs if str(addr).strip()
+    }
+    full_refetch = [addr for addr in workset if addr in full_refetch_set]
     delta = [addr for addr in workset if addr not in set(full_refetch)]
+    fill_mode = (
+        "full_refetch" if full_refetch and not delta
+        else ("mixed" if full_refetch else "delta")
+    )
     all_eligible = set(candidates) | priority_set
     return {
         "workset": workset,
         "mode": "all" if full_scan else "priority+rotation+discovery",
         "workset_mode": "all" if full_scan else "priority",
-        "fill_mode": "full_refetch" if full_scan else "mixed",
+        "fill_mode": fill_mode,
         "full_scan": bool(full_scan),
         "counts": {
             "priority": len(priority),
@@ -420,6 +454,10 @@ def _prune_discovery_cache_once(db):
     before_episode = db.total_changes
     db.execute("DELETE FROM episode WHERE addr IN (SELECT addr FROM prune_discovery_addrs)")
     n_episode = db.total_changes - before_episode
+    cutoff_ms = int((time.time() - config.PROFILE_FETCH_DAYS * 86_400) * 1000)
+    before_fills = db.total_changes
+    db.execute("DELETE FROM candidate_fills WHERE time<?", (cutoff_ms,))
+    n_expired_fills = db.total_changes - before_fills
     before_fills = db.total_changes
     db.execute(
         "DELETE FROM candidate_fills WHERE addr NOT IN "
@@ -427,6 +465,13 @@ def _prune_discovery_cache_once(db):
         " UNION SELECT addr FROM profile WHERE status='active')"
     )
     n_fills = db.total_changes - before_fills
+    before_cache_state = db.total_changes
+    db.execute(
+        "DELETE FROM fill_cache_state WHERE addr NOT IN "
+        "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
+        " UNION SELECT addr FROM profile WHERE status='active')"
+    )
+    n_cache_state = db.total_changes - before_cache_state
     before_profiles = db.total_changes
     db.execute("DELETE FROM profile WHERE addr IN (SELECT addr FROM prune_discovery_addrs)")
     n_profiles = db.total_changes - before_profiles
@@ -444,7 +489,9 @@ def _prune_discovery_cache_once(db):
     return {
         "stale_profiles": int(n_stale or 0),
         "episodes": int(n_episode or 0),
+        "expired_fills": int(n_expired_fills or 0),
         "fills": int(n_fills or 0),
+        "cache_state": int(n_cache_state or 0),
         "profiles": int(n_profiles or 0),
         "leaderboard": int(n_leaderboard or 0),
     }

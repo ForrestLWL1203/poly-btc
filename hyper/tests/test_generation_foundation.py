@@ -311,6 +311,7 @@ class GenerationFoundationTests(unittest.TestCase):
             profiled_addrs=profiled,
             near_threshold_addrs=recovery,
             exploration_addrs=explore,
+            full_refetch_addrs=[new[0]],
             limit=rotation_n + 10,
             shard_count=7,
             refresh_shard=refresh_shard,
@@ -321,14 +322,76 @@ class GenerationFoundationTests(unittest.TestCase):
         self.assertEqual(result["counts"]["new"], 4)
         self.assertEqual(result["counts"]["recovery"], 4)
         self.assertEqual(result["counts"]["exploration"], 2)
+        self.assertEqual(
+            result["refresh"]["full_refetch"],
+            [new[0]] if new[0] in result["workset"] else [],
+        )
         self.assertTrue(all(
-            scanner_lifecycle.stable_refresh_shard(addr, 7) == refresh_shard
-            for addr in result["refresh"]["full_refetch"]
+            addr not in result["refresh"]["full_refetch"]
+            for addr in result["workset"] if addr != new[0]
         ))
         self.assertEqual(
             scanner_lifecycle.stable_refresh_shard("0xabc", 7),
             scanner_lifecycle.stable_refresh_shard("0xABC", 7),
         )
+
+    def test_complete_cache_evaluation_shard_stays_delta_only(self):
+        candidates = [f"0xwallet{i}" for i in range(40)]
+        refresh_shard = 2
+        result = scanner_lifecycle.schedule_profile_workset(
+            candidates,
+            profiled_addrs=candidates,
+            limit=len(candidates),
+            shard_count=7,
+            refresh_shard=refresh_shard,
+            full_refetch_addrs=[],
+        )
+
+        self.assertTrue(any(
+            scanner_lifecycle.stable_refresh_shard(addr, 7) == refresh_shard
+            for addr in result["workset"]
+        ))
+        self.assertEqual(result["refresh"]["full_refetch"], [])
+        self.assertEqual(result["refresh"]["delta"], result["workset"])
+
+    def test_weekly_full_evaluation_does_not_refetch_complete_wallets(self):
+        candidates = ["0xknown1", "0xknown2", "0xnew"]
+        result = scanner_lifecycle.schedule_profile_workset(
+            candidates,
+            profiled_addrs=candidates[:2],
+            full_refetch_addrs=["0xnew"],
+            limit=len(candidates),
+            full_scan=True,
+        )
+
+        self.assertEqual(result["workset"], candidates)
+        self.assertEqual(result["refresh"]["full_refetch"], ["0xnew"])
+        self.assertEqual(result["refresh"]["delta"], candidates[:2])
+        self.assertEqual(result["fill_mode"], "mixed")
+
+    def test_subsequent_refresh_shard_batch_excludes_used_and_preserves_order(self):
+        candidates = [f"0xwallet{i}" for i in range(100)]
+        current = 4
+        next_shard = (current + 1) % 7
+        already_used = next(
+            addr for addr in candidates
+            if scanner_lifecycle.stable_refresh_shard(addr, 7) == next_shard
+        )
+
+        batches = scanner_lifecycle.subsequent_refresh_shard_batches(
+            candidates,
+            [already_used],
+            current_shard=current,
+            shard_count=7,
+            max_shards=1,
+        )
+
+        expected = [
+            addr for addr in candidates
+            if addr != already_used
+            and scanner_lifecycle.stable_refresh_shard(addr, 7) == next_shard
+        ]
+        self.assertEqual(batches, [{"shard": next_shard, "workset": expected}])
 
 
 if __name__ == "__main__":

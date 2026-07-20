@@ -106,21 +106,27 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 - A fresh candidate profile fetch covers `PROFILE_FETCH_DAYS` (currently 37 days: 30-day scoring window plus
   seven warm-up days). Reported copy evidence remains 30/14/7 days.
 - With no published generation, every scan request is forcibly upgraded to `cold_full`: it harvests a new
-  Leaderboard, profiles the complete candidate workset with 37-day history, and rebuilds sector specialization.
+  Leaderboard, profiles the complete candidate workset, bootstraps each new wallet's 37-day history, and
+  rebuilds sector specialization.
   A failed first generation remains cold on the next attempt; the Dashboard's incremental checkbox cannot
   create a partial first generation.
-- `candidate_fills` is the cache. Daily work normally fetches only the delta after each wallet cursor and
-  merges it into the 37-day window. A page-cap/cache-gap/revision problem or the seven-day self-heal schedule
-  triggers a full refetch for the affected shard/candidate.
+- `candidate_fills` is the cache. Once `fill_cache_state` proves that the 37-day source window was completely
+  fetched, all later daily and weekly evaluations fetch only the delta after that wallet's source cursor,
+  merge it into the rolling window, and prune rows older than 37 days. Do not infer source completeness from
+  the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
+  missing/incomplete/capped caches perform a full 37-day bootstrap or repair.
 - Daily discovery is count-bounded at 300 ordinary profiles by default. Open-position owners, Core, qualified,
   Challenger, and off-list qualified wallets are mandatory and outside that ordinary budget. Warm-up backfills
-  and the due refresh shard come first; remaining discovery capacity is split new/recovery/fair-exploration
-  40/40/20. The 60-minute daily target, 15-minute Core-refresh target and 15-minute finalization reserve are
+  and the due evaluation shard come first; remaining discovery capacity is split new/recovery/fair-exploration
+  40/40/20. When the normal batch yields no new individually Core-eligible wallet, the next stable shard is
+  evaluated incrementally in the same generation (`DISCOVERY_MAX_EXTRA_SHARDS=1` by default). The 60-minute
+  daily target, 15-minute Core-refresh target and 15-minute finalization reserve are
   audit SLOs, not wall-clock truncation: an Observer-safe REST pace must not permanently starve the rotating
   tail. Workset and fill modes are recorded separately (`priority`, `rotation`, `all`; `delta`, `full_refetch`,
   or `mixed`).
-- The seven-shard rolling refresh avoids a single weekly API spike. `FULL_REFRESH_SHARDS=7` and
-  `CANDIDATE_MAX_RECHECK_DAYS=7` are the relevant defaults.
+- Seven stable shards bound daily evaluation work without coupling evaluation to source refetch.
+  `FULL_REFRESH_SHARDS=7`, `DISCOVERY_MAX_EXTRA_SHARDS=1`, and `CANDIDATE_MAX_RECHECK_DAYS=7` are the relevant
+  defaults.
 
 ### 3. Market-sector specialization
 
@@ -412,9 +418,10 @@ python3 dashboard/web/dev/mock_consumer.py data/hl_mock.db
 DASH_PASSWORD=mock123 python3 -m dashboard.server --db data/hl_mock.db --static dashboard/web --host 127.0.0.1 --port 8810
 ```
 
-`scan --full` means a true profile fill refetch. Except for the forced first-generation `cold_full`, a Dashboard
-manual rescan is not automatically a full refetch unless its command payload requests `full=true`, the CLI uses
-`--full`, or the completed scan records `full=1`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
+`scan --full` means a full candidate-universe harvest and evaluation. It does not re-download a complete
+wallet cache; only new or incomplete wallets fetch the 37-day bootstrap window. Except for the forced
+first-generation `cold_full`, a Dashboard manual rescan is incremental unless its command payload requests
+`full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
 and jointly tunes the current published generation without wallet fill refetch; `finalize-profiled` retries an
 already-complete but unpublished generation after a finalization failure.
 

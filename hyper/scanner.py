@@ -44,6 +44,7 @@ from .scanner_copy_bt import (
 from .scanner_lifecycle import (
     prune_discovery_cache as _prune_discovery_cache,
     schedule_profile_workset,
+    subsequent_refresh_shard_batches,
     upsert_wallet_registry,
 )
 from .util import f, now_iso
@@ -248,6 +249,34 @@ def _copy_warmup_backfill_addrs(db, desired_start_ms):
         "AND (s.coverage_start_ms IS NULL OR s.coverage_start_ms>?) ORDER BY p.addr",
         (int(desired_start_ms),),
     ).fetchall()]
+
+
+def _incomplete_fill_cache_addrs(db, addrs, desired_start_ms):
+    """Return wallets without a confirmed complete rolling-window source snapshot."""
+    owners = sorted({str(addr or "").lower() for addr in addrs if addr})
+    if not owners:
+        return []
+    complete = set()
+    for offset in range(0, len(owners), 400):
+        batch = owners[offset:offset + 400]
+        marks = ",".join("?" for _ in batch)
+        complete.update(
+            (addr or "").lower() for (addr,) in db.execute(
+                f"SELECT addr FROM fill_cache_state WHERE lower(addr) IN ({marks}) "
+                "AND coverage_start_ms<=?",
+                (*batch, int(desired_start_ms)),
+            ).fetchall()
+        )
+    return [addr for addr in owners if addr not in complete]
+
+
+def _new_individual_core_candidates(db, generation_id, previous_core):
+    """Current-generation wallets that newly clear the individual Core gate before shared formation."""
+    previous = {str(addr or "").lower() for addr in previous_core or ()}
+    return [
+        row["addr"] for row in _quality_core_profiles(db, generation_id, core_only=True)
+        if row["addr"] not in previous
+    ]
 
 
 def _replace_episode_rows(db, addr: str, eps: list) -> None:
@@ -1132,7 +1161,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     with _db_lock:
         _store_cached_fills(
             db, addr, new_fills, window_start,
-            coverage_complete=bool(fetched_full_window and not hit_cap), coverage_end=now_ms,
+            # A delta fetch is only attempted from an already-complete cache. A successful response
+            # therefore preserves that proof and advances its source cursor even when it contains no
+            # in-scope fills. This avoids repeatedly downloading the same quiet/excluded-market interval.
+            coverage_complete=not hit_cap, coverage_end=now_ms,
             universe=universe,
         )   # persist the delta + prune the window
         _replace_episode_rows(db, addr, eps)
@@ -4267,6 +4299,13 @@ def scan(db, p) -> None:
         # for audit/alerting; dropping the tail at that boundary would permanently starve rotating seeds
         # whenever Observer-safe REST pacing makes a wallet require several spaced requests.
         time_budget = None
+    desired_cache_start_ms = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
+    full_refetch_due = set(_incomplete_fill_cache_addrs(
+        db,
+        set(cand) | set(position_addrs) | set(core_addrs) | set(qualified_addrs)
+        | set(challenger_addrs) | set(off_list_qualified),
+        desired_cache_start_ms,
+    )) | set(warmup_backfill_addrs)
     workset_info = schedule_profile_workset(
         cand,
         qualified_addrs=qualified_addrs,
@@ -4278,6 +4317,7 @@ def scan(db, p) -> None:
         profiled_addrs=profiled,
         near_threshold_addrs=near_threshold,
         exploration_addrs=cand,
+        full_refetch_addrs=full_refetch_due,
         limit=scheduler_limit,
         budget=time_budget,
         estimated_profile_s=estimated_profile_s,
@@ -4290,16 +4330,19 @@ def scan(db, p) -> None:
         workset_info["workset_mode"] = "cold_full"
         workset_info["full_scan"] = True
     migration_backfill = set(warmup_backfill_addrs) & set(workset_info["workset"])
-    if migration_backfill:
-        refresh = workset_info["refresh"]
-        # On the migration scan, "all" still means all profiles are reevaluated; it no longer means
-        # wasting a 37-day network refetch on structural rejects that never reached Copy replay.
-        if run_full:
-            refresh["full_refetch"] = sorted(migration_backfill)
-        else:
-            refresh["full_refetch"] = sorted(set(refresh["full_refetch"]) | migration_backfill)
-        workset_info["fill_mode"] = "mixed"
+    refresh = workset_info["refresh"]
+    workset_info["fill_mode"] = (
+        "full_refetch" if refresh["full_refetch"] and not refresh["delta"]
+        else ("mixed" if refresh["full_refetch"] else "delta")
+    )
     pipeline_audit.record_workset_summary(db, stamp, "scan", workset_info)
+    workset_metrics = {
+        "estimatedProfileSec": estimated_profile_s,
+        "warmupBackfillDue": len(warmup_backfill_addrs),
+        "warmupBackfillScheduled": len(migration_backfill),
+        "marginEquityPct": float(p.margin_equity_pct),
+        "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct),
+    }
     generation.record_workset(
         db,
         generation_id,
@@ -4308,14 +4351,12 @@ def scan(db, p) -> None:
         full_refresh_shard=workset_info["refresh"]["shard_index"],
         workset_n=len(workset_info["workset"]),
         deferred_n=workset_info["counts"]["deferred"],
-        metrics={"estimatedProfileSec": estimated_profile_s,
-                 "warmupBackfillDue": len(warmup_backfill_addrs),
-                 "warmupBackfillScheduled": len(migration_backfill),
-                 "marginEquityPct": float(p.margin_equity_pct),
-                 "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct)},
+        metrics=workset_metrics,
     )
     db.commit()
     workset, mode = workset_info["workset"], workset_info["mode"]
+    initial_workset_n = len(workset)
+    all_eligible_addrs = set(cand) | set(workset[:workset_info["counts"]["priority"]])
     off_qualified_n = len([a for a in qualified_addrs if a not in cand_set])
     full_refetch = set(workset_info["refresh"]["full_refetch"])
     priority_addrs = set(workset[:workset_info["counts"]["priority"]])
@@ -4350,60 +4391,131 @@ def scan(db, p) -> None:
 
     done = 0
     priority_done_at = time.time() if not priority_addrs else None
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        pending = {}
-        next_index = 0
+    def _profile_batch(batch):
+        nonlocal done, priority_done_at, added, retired, rejected, kept, failed
+        nonlocal profiled_ok, deferred_profiles, valid_profiles
+        if not batch:
+            return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            pending = {}
+            next_index = 0
 
-        def submit_available():
-            nonlocal next_index
-            while next_index < len(workset) and len(pending) < workers:
-                addr = workset[next_index]
-                next_index += 1
-                pending[ex.submit(_work, addr)] = addr
+            def submit_available():
+                nonlocal next_index
+                while next_index < len(batch) and len(pending) < workers:
+                    addr = batch[next_index]
+                    next_index += 1
+                    pending[ex.submit(_work, addr)] = addr
 
-        submit_available()
-        while pending:
-            completed, _ = concurrent.futures.wait(
-                tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED,
-            )
-            for fut in completed:
-                expected_addr = pending.pop(fut)
-                done += 1
-                priority_addrs.discard(expected_addr)
-                if not priority_addrs and priority_done_at is None:
-                    priority_done_at = time.time()
-                try:
-                    addr, prior, (status, reason, m, hit_cap) = fut.result()
-                except Exception as exc:  # noqa: BLE001
-                    failed += 1
-                    print(f"  [{done}/{len(workset)}] FAIL: {exc}")
-                    continue
-                profiled_ok += 1
-                profiled_addrs.append(addr)
-                data_status = m.get("data_status")
-                if data_status == "deferred_data_error":
-                    deferred_profiles += 1
-                elif data_status == "rejected":
-                    rejected += 1
-                else:
-                    valid_profiles += 1
-                if data_status == "deferred_data_error":
-                    pass
-                elif status == "active":          # storage spelling; semantically a qualified candidate
-                    if (prior or {}).get("status") == "active":
-                        kept += 1
-                    else:
-                        added += 1
-                elif status == "retired":
-                    retired += 1
-                elif data_status != "rejected":
-                    rejected += 1
-                _set_scan_progress(db, stage="score_filter", candidates_scanned=done)
-                if done % 10 == 0:
-                    _set_scanner_proc(
-                        db, "scanning", {"stage": "score_filter", "scanned": done, "total": len(workset)},
-                    )
             submit_available()
+            while pending:
+                completed, _ = concurrent.futures.wait(
+                    tuple(pending), return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for fut in completed:
+                    expected_addr = pending.pop(fut)
+                    done += 1
+                    priority_addrs.discard(expected_addr)
+                    if not priority_addrs and priority_done_at is None:
+                        priority_done_at = time.time()
+                    try:
+                        addr, prior, (status, reason, m, hit_cap) = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        print(f"  [{done}/{len(workset)}] FAIL: {exc}")
+                        continue
+                    profiled_ok += 1
+                    profiled_addrs.append(addr)
+                    data_status = m.get("data_status")
+                    if data_status == "deferred_data_error":
+                        deferred_profiles += 1
+                    elif data_status == "rejected":
+                        rejected += 1
+                    else:
+                        valid_profiles += 1
+                    if data_status == "deferred_data_error":
+                        pass
+                    elif status == "active":
+                        if (prior or {}).get("status") == "active":
+                            kept += 1
+                        else:
+                            added += 1
+                    elif status == "retired":
+                        retired += 1
+                    elif data_status != "rejected":
+                        rejected += 1
+                    _set_scan_progress(
+                        db, stage="score_filter", candidates_scanned=done,
+                        candidates_total=len(workset),
+                    )
+                    if done % 10 == 0:
+                        _set_scanner_proc(
+                            db, "scanning",
+                            {"stage": "score_filter", "scanned": done, "total": len(workset)},
+                        )
+                submit_available()
+
+    _profile_batch(list(workset))
+
+    # Core exits are checked every day while the rotating candidate tail would otherwise wait up to a week.
+    # When the normal batch produces no *new* individually Core-eligible wallet, consume the next stable
+    # shard immediately. This expands evidence only; final individual/path/portfolio gates remain unchanged.
+    extra_shards = []
+    max_extra_shards = int(getattr(
+        p, "discovery_max_extra_shards", config.DISCOVERY_MAX_EXTRA_SHARDS,
+    ) or 0)
+    if not run_full and not failed and max_extra_shards > 0:
+        shard_count = int(getattr(p, "full_refresh_shards", config.FULL_REFRESH_SHARDS))
+        batches = subsequent_refresh_shard_batches(
+            cand, workset,
+            current_shard=workset_info["refresh"]["shard_index"],
+            shard_count=shard_count,
+            max_shards=max_extra_shards,
+        )
+        for extension in batches:
+            if _new_individual_core_candidates(db, generation_id, core_addrs):
+                break
+            batch = extension["workset"]
+            if not batch:
+                continue
+            workset.extend(batch)
+            extra_shards.append(extension["shard"])
+            full_refetch.update(addr for addr in batch if addr in full_refetch_due)
+            _set_scan_progress(
+                db, stage="extend_discovery_shard", candidates_scanned=done,
+                candidates_total=len(workset),
+            )
+            print(
+                f"scan: no new individual Core candidate; extending delta evaluation with shard "
+                f"{extension['shard']} ({len(batch)} wallets)",
+                flush=True,
+            )
+            _profile_batch(batch)
+
+    if extra_shards:
+        workset_set = set(workset)
+        workset_info["workset"] = list(workset)
+        workset_info["counts"]["workset"] = len(workset)
+        workset_info["counts"]["deferred"] = max(0, len(all_eligible_addrs - workset_set))
+        workset_info["counts"]["extra_rotation"] = len(workset) - initial_workset_n
+        workset_info["counts"]["extra_shards"] = len(extra_shards)
+        workset_info["refresh"]["full_refetch"] = sorted(full_refetch)
+        workset_info["refresh"]["delta"] = [addr for addr in workset if addr not in full_refetch]
+        workset_info["fill_mode"] = (
+            "full_refetch" if full_refetch and not workset_info["refresh"]["delta"]
+            else ("mixed" if full_refetch else "delta")
+        )
+        extra_profiles = len(workset) - initial_workset_n
+        workset_metrics.update(extraShards=extra_shards, extraProfiles=extra_profiles)
+        pipeline_audit.record_workset_summary(db, stamp, "scan_extension", workset_info)
+        generation.record_workset(
+            db, generation_id,
+            workset_mode=workset_info["workset_mode"], fill_mode=workset_info["fill_mode"],
+            full_refresh_shard=workset_info["refresh"]["shard_index"],
+            workset_n=len(workset), deferred_n=workset_info["counts"]["deferred"],
+            metrics=workset_metrics,
+        )
+        db.commit()
 
     profile_done_at = time.time()
     complete = failed == 0

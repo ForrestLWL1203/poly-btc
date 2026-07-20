@@ -47,7 +47,7 @@ WantedBy=multi-user.target
 
 def scan_service(app_dir, py, db, days=14, scan_interval=8):
     return f"""[Unit]
-Description=Hyperliquid copy-trade daily incremental / weekly full scanner
+Description=Hyperliquid copy-trade incremental scanner / weekly candidate refresh
 After=network-online.target
 Wants=network-online.target
 
@@ -63,7 +63,7 @@ ExecStopPost={py} -m hyper.cli.discover --db {db} repair-watchlist
 
 def scan_timer(on_calendar="*-*-* 04:00:00"):
     return f"""[Unit]
-Description=Run HL scanner daily (incremental; weekly full refresh selected by scanner)
+Description=Run HL scanner daily (incremental; weekly candidate refresh selected by scanner)
 
 [Timer]
 OnCalendar={on_calendar}

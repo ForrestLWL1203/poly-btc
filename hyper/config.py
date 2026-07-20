@@ -449,9 +449,10 @@ PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 # INCREMENTAL scan (2026-07-01): the daily re-scan fetches only the fills SINCE our per-candidate cursor
 # (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling
 # the whole 30d for every candidate every day (re-fetching 29 unchanged days = wasted API/time). Fills are
-# cached in candidate_fills. A NEW candidate (no cache) still does one full-window fetch; a delta that hits
-# the page cap falls back to a full fetch. The seven-shard refresh below heals the full candidate set over
-# one week without creating one large weekly API spike. The live open-position snapshot is unaffected.
+# cached in candidate_fills. A NEW/incomplete candidate still does one full-window fetch; a delta that hits
+# the page cap falls back to a full fetch. A confirmed complete cache is never periodically re-downloaded:
+# daily shard rotation refreshes its delta and re-scores the cached rolling window. The live open-position
+# snapshot is unaffected.
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
 DAILY_RECHECK_TOP_N = 80    # daily incremental scans also re-profile this many current top-ranked old candidates
 # Daily discovery budget. Core/held/challenger wallets are outside the discovery cap; the
@@ -463,6 +464,7 @@ DAILY_PROFILE_BUDGET = 300
 CANDIDATE_MAX_RECHECK_DAYS = 7
 FULL_REFRESH_SHARDS = 7
 RANDOM_EXPLORATION_RATIO = 0.20
+DISCOVERY_MAX_EXTRA_SHARDS = 1  # if the normal batch finds no new individual Core candidate, scan next shard
 LEADERBOARD_MIN_ROW_RATIO = 0.85
 LEADERBOARD_MIN_COMPLETE_RATIO = 0.99
 

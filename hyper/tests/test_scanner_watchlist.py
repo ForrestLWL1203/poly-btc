@@ -241,6 +241,46 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertFalse(fetched_full)
             db.close()
 
+    def test_successful_delta_persistence_advances_complete_source_cursor(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) "
+                "VALUES ('0xaaa',1000,9000,'2026-07-16T00:00:00Z')"
+            )
+            with scanner._db_lock:
+                scanner._store_cached_fills(
+                    db, "0xaaa", [], 2_000,
+                    coverage_complete=True, coverage_end=12_000, universe={"BTC"},
+                )
+                db.commit()
+
+            coverage = db.execute(
+                "SELECT coverage_start_ms,coverage_end_ms FROM fill_cache_state WHERE addr='0xaaa'"
+            ).fetchone()
+            self.assertEqual(tuple(coverage), (1_000, 12_000))
+            db.close()
+
+    def test_cache_completeness_uses_source_coverage_not_earliest_fill(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                ("0xquiet", 1, 9_000, json.dumps({"tid": 1, "time": 9_000, "coin": "BTC"})),
+            )
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) "
+                "VALUES ('0xquiet',1000,10000,'2026-07-20T00:00:00Z')"
+            )
+            db.commit()
+
+            incomplete = scanner._incomplete_fill_cache_addrs(
+                db, ["0xquiet", "0xmissing"], desired_start_ms=2_000,
+            )
+
+            self.assertEqual(incomplete, ["0xmissing"])
+            db.close()
+
     def test_current_generation_sector_structure_is_independent_of_prior_policy(self):
         p = SimpleNamespace(days=14, max_single_adds=30, grid_max_adds=10)
         fills = [{"coin": "BTC"}, {"coin": "xyz:IBM"}]
@@ -452,12 +492,24 @@ class ScannerWatchlistTests(unittest.TestCase):
                     ("0xactive", 0, "2026-07-01T00:00:00Z", 0.3, 0.3),
                 ],
             )
+            recent_ms = int(time.time() * 1000)
+            expired_ms = recent_ms - (scanner.config.PROFILE_FETCH_DAYS + 1) * 86_400_000
             db.executemany(
                 "INSERT INTO candidate_fills (addr,tid,time,fill_json) VALUES (?,?,?,?)",
                 [
-                    ("0xgone", 1, 1, "{}"),
-                    ("0xcand", 2, 1, "{}"),
-                    ("0xactive", 3, 1, "{}"),
+                    ("0xgone", 1, recent_ms, "{}"),
+                    ("0xcand", 2, recent_ms, "{}"),
+                    ("0xactive", 3, recent_ms, "{}"),
+                    ("0xcand", 4, expired_ms, "{}"),
+                ],
+            )
+            db.executemany(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) "
+                "VALUES (?,?,?,?)",
+                [
+                    ("0xgone", expired_ms, recent_ms, "2026-07-20T00:00:00Z"),
+                    ("0xcand", expired_ms, recent_ms, "2026-07-20T00:00:00Z"),
+                    ("0xactive", expired_ms, recent_ms, "2026-07-20T00:00:00Z"),
                 ],
             )
             db.executemany(
@@ -476,6 +528,10 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xgone'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM episode WHERE addr='0xgone'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills WHERE addr='0xgone'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM fill_cache_state WHERE addr='0xgone'").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills WHERE addr='0xcand'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM fill_cache_state WHERE addr='0xcand'").fetchone()[0], 1)
+            self.assertGreaterEqual(counts["expired_fills"], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xcand'").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xactive'").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM leaderboard WHERE addr='0xgone'").fetchone()[0], 0)

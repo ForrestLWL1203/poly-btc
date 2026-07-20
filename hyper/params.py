@@ -44,9 +44,11 @@ PARAM_SPEC = [
     ("CANDIDATE_MAX_RECHECK_DAYS", "scanner", "hidden", "int", "rescan", config.CANDIDATE_MAX_RECHECK_DAYS,
         "候选最长复核间隔", ""),
     ("FULL_REFRESH_SHARDS", "scanner", "hidden", "int", "rescan", config.FULL_REFRESH_SHARDS,
-        "完整重拉分片数", ""),
+        "候选轮转分片数", ""),
     ("RANDOM_EXPLORATION_RATIO", "scanner", "hidden", "pct", "rescan", config.RANDOM_EXPLORATION_RATIO * 100,
         "随机探索比例", ""),
+    ("DISCOVERY_MAX_EXTRA_SHARDS", "scanner", "hidden", "int", "rescan", config.DISCOVERY_MAX_EXTRA_SHARDS,
+        "无新Core时追加分片", ""),
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
         "初始跟单上限", "每轮先取质量最优且达到Core硬标准的钱包（不足则全取），整体调参后只从质量末尾做前缀缩减"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
@@ -356,6 +358,7 @@ SCANNER_ARG_MAP = {
     "CANDIDATE_MAX_RECHECK_DAYS": "candidate_max_recheck_days",
     "FULL_REFRESH_SHARDS": "full_refresh_shards",
     "RANDOM_EXPLORATION_RATIO": "random_exploration_ratio",
+    "DISCOVERY_MAX_EXTRA_SHARDS": "discovery_max_extra_shards",
 }
 
 
