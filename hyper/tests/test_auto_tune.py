@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hyper import auto_tune, params, storage
+from hyper import params, storage
+from hyper.selection import auto_tune
 
 
 class AutoTuneTests(unittest.TestCase):

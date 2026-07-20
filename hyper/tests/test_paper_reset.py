@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hyper import config, paper_reset, params, storage
+from hyper import config, params, storage
+from hyper.ops import paper_reset
 
 
 class PaperResetTests(unittest.TestCase):

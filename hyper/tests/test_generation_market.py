@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hyper import generation_market, scanner, storage
+from hyper import storage
+from hyper.discovery import scanner
+from hyper.market import generation_market
 
 
 def context(max_leverage=20, *, volume="1000000", oi="100", mark="50000"):

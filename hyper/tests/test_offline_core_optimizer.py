@@ -1,7 +1,7 @@
 import unittest
 
-from hyper import offline_core_optimizer as optimizer
-from hyper import selection
+from hyper.selection import offline_core_optimizer as optimizer
+from hyper.selection import state as selection
 
 
 def metrics(net, *, utility=None, stress=None, deploy=.5, open_rate=.9, capacity=.95):

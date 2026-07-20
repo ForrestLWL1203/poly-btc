@@ -4,7 +4,7 @@ import json
 import time
 
 from hyper import config
-from hyper.credentials import public_wrap_key
+from hyper.ops.credentials import public_wrap_key
 from hyper.util import f
 from .common import iso_epoch, qall, q1
 

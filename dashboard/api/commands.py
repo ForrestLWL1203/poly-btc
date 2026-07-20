@@ -4,7 +4,7 @@ import json
 import sqlite3
 import base64
 
-from hyper import procman
+from hyper.ops import procman
 from hyper.util import now_iso
 from .common import q1
 

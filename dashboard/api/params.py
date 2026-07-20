@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 from hyper import config, params as params_mod
-from hyper.coin_filter import format_coin_blacklist
+from hyper.market.coin_filter import format_coin_blacklist
 from hyper.util import now_iso
 from .common import score100
 

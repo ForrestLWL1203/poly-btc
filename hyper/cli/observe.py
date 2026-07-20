@@ -7,7 +7,9 @@
 import argparse
 import asyncio
 
-from hyper import config, observer, params, selection, storage
+from hyper import config, params, storage
+from hyper.execution import observer
+from hyper.selection import state as selection
 
 
 def main() -> int:

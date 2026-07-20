@@ -12,8 +12,8 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from hyper import storage
-from hyper.credentials import CredentialStore, decrypt_envelope, public_wrap_key
-from hyper.risk_radar import RiskRadar, candle_features, orderbook_features, validate_model_output
+from hyper.execution.risk_radar import RiskRadar, candle_features, orderbook_features, validate_model_output
+from hyper.ops.credentials import CredentialStore, decrypt_envelope, public_wrap_key
 
 
 class RiskRadarTests(unittest.TestCase):
@@ -51,7 +51,7 @@ class RiskRadarTests(unittest.TestCase):
     def test_invalid_replacement_keeps_previous_credential(self):
         store = CredentialStore(self.db)
         store.save_envelope("deepseek", self._envelope("sk-working"))
-        with patch("hyper.risk_radar.DeepSeekClient.balance", side_effect=RuntimeError("auth failed")):
+        with patch("hyper.execution.risk_radar.DeepSeekClient.balance", side_effect=RuntimeError("auth failed")):
             with self.assertRaises(RuntimeError):
                 asyncio.run(self.radar.install_credential(self._envelope("sk-invalid")))
         self.assertEqual(store.secret("deepseek"), "sk-working")
@@ -71,9 +71,9 @@ class RiskRadarTests(unittest.TestCase):
                      "evidence": ["trend"], "invalidating_conditions": ["reversal"]},
                     {"choices": []}, 10, {"prompt_tokens": 1000, "completion_tokens": 100})
 
-        with patch("hyper.risk_radar.DeepSeekClient.assess", assess), patch("hyper.risk_radar.now_ms", return_value=1_800_000):
+        with patch("hyper.execution.risk_radar.DeepSeekClient.assess", assess), patch("hyper.execution.risk_radar.now_ms", return_value=1_800_000):
             asyncio.run(self.radar.assess_once())
-        with patch("hyper.risk_radar.DeepSeekClient.assess", assess), patch("hyper.risk_radar.now_ms", return_value=2_700_000):
+        with patch("hyper.execution.risk_radar.DeepSeekClient.assess", assess), patch("hyper.execution.risk_radar.now_ms", return_value=2_700_000):
             asyncio.run(self.radar.assess_once())
 
         rows = self.db.execute(
@@ -108,8 +108,8 @@ class RiskRadarTests(unittest.TestCase):
         async def run_both():
             return await asyncio.gather(self.radar.assess_once(), self.radar.assess_once())
 
-        with patch("hyper.risk_radar.DeepSeekClient.assess", assess), patch(
-                "hyper.risk_radar.now_ms", return_value=1_800_000):
+        with patch("hyper.execution.risk_radar.DeepSeekClient.assess", assess), patch(
+                "hyper.execution.risk_radar.now_ms", return_value=1_800_000):
             asyncio.run(run_both())
 
         self.assertEqual(len(calls), 1)
@@ -232,7 +232,7 @@ class RiskRadarTests(unittest.TestCase):
             )
         self.db.commit()
 
-        with patch("hyper.risk_radar.config.RISK_RADAR_MAX_ASSESSMENTS", 3):
+        with patch("hyper.execution.risk_radar.config.RISK_RADAR_MAX_ASSESSMENTS", 3):
             self.radar.prune()
 
         self.assertEqual([r[0] for r in self.db.execute(

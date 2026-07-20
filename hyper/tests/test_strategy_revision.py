@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hyper import params, storage, strategy_revision
-from hyper.observer import Observer
+from hyper import params, storage
+from hyper.execution.observer import Observer
+from hyper.selection import strategy_revision
 
 
 class StrategyRevisionTests(unittest.TestCase):

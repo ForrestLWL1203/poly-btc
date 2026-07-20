@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from dashboard.api import discovery as api_discovery
-from hyper import params, pipeline_audit, scanner, storage
+from hyper import params, storage
+from hyper.discovery import pipeline_audit, scanner
 
 
 def _profile_row(addr, status, score, **overrides):

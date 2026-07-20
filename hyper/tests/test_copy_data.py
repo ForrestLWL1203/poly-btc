@@ -2,7 +2,7 @@ import json
 import sqlite3
 import unittest
 
-from hyper.copy_data import load_copyable_fills, normalize_copyable_fills, out_of_scope_fills
+from hyper.copy.copy_data import load_copyable_fills, normalize_copyable_fills, out_of_scope_fills
 
 
 class CopyDataTests(unittest.TestCase):

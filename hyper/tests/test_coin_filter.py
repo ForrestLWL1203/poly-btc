@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.coin_filter import coin_is_blacklisted, coin_is_blocked, is_korean_stock, parse_coin_blacklist
+from hyper.market.coin_filter import coin_is_blacklisted, coin_is_blocked, is_korean_stock, parse_coin_blacklist
 
 
 class CoinFilterTests(unittest.TestCase):

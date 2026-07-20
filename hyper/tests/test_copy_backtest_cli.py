@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from hyper import params
-from hyper.copy_backtest_cli import followed_wallets, position_rows, run_wallet
+from hyper.copy.copy_backtest_cli import followed_wallets, position_rows, run_wallet
 
 
 class CopyBacktestCliTests(unittest.TestCase):

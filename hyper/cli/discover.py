@@ -15,7 +15,9 @@ from types import SimpleNamespace
 
 import threading
 
-from hyper import config, paper_reset, params, procman, scanner, storage
+from hyper import config, params, storage
+from hyper.discovery import scanner
+from hyper.ops import paper_reset, procman
 from hyper.util import now_iso
 
 

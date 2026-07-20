@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.copy_policy import load_copy_policy
+from hyper.copy.copy_policy import load_copy_policy
 
 
 class CopyPolicyTests(unittest.TestCase):

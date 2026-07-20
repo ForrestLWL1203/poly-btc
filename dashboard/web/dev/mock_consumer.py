@@ -9,7 +9,8 @@ per profiled wallet, consume rescan commands, and write scan_progress.
 import asyncio, json, os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from hyper import storage, observer
+from hyper import storage
+from hyper.execution import observer
 from hyper.util import now_iso
 
 DB = sys.argv[1] if len(sys.argv) > 1 else "data/hl_mock.db"

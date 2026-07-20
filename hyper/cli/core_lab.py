@@ -16,9 +16,12 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from hyper import auto_tune, config, offline_core_optimizer, params, price_path, scanner, selection
-from hyper.copy_backtest import run_backtest, slice_backtest_result
-from hyper.copy_policy import load_copy_policy
+from hyper import config, params
+from hyper.copy.copy_backtest import run_backtest, slice_backtest_result
+from hyper.copy.copy_policy import load_copy_policy
+from hyper.discovery import scanner
+from hyper.market import price_path
+from hyper.selection import auto_tune, offline_core_optimizer, state as selection
 from hyper.util import f
 
 

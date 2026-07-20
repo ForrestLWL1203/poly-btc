@@ -28,7 +28,7 @@ For any Hyperliquid change, including the current Dashboard's Hyperliquid projec
 Run from the repository root:
 
 ```bash
-python3 -m py_compile hyper/*.py hyper/cli/*.py dashboard/*.py dashboard/api/*.py hyper/launcher/*.py hyper/launcher/core/*.py
+python3 -m compileall -q hyper dashboard
 python3 -m unittest discover -s hyper/tests
 dashboard/web/build.sh
 hyper/launcher/web/build.sh

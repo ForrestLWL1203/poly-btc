@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.copy_backtest import profit_structure_metrics, run_backtest
+from hyper.copy.copy_backtest import profit_structure_metrics, run_backtest
 
 
 def fill(t, coin, side, sz, start, px, oid, crossed=True):

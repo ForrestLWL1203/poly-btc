@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from hyper import config, storage, volatility
-from hyper.observer import Observer
+from hyper import config, storage
+from hyper.execution.observer import Observer
+from hyper.market import volatility
 from hyper.util import now_ms
 
 
@@ -70,7 +71,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             obs = Observer(db, [], {})
             obs.vol["xyz:SP500"] = None
 
-            with patch("hyper.observer.volatility.refresh", return_value=0.0095) as refresh:
+            with patch("hyper.execution.observer.volatility.refresh", return_value=0.0095) as refresh:
                 await obs._ensure_vol("xyz:SP500")
 
             refresh.assert_called_once_with(db, "xyz:SP500")
@@ -180,7 +181,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             obs.bbo["xyz:IBM"] = (220.0, 221.0)
             obs.bbo_ms["xyz:IBM"] = now_ms() - config.EXECUTION_QUOTE_MAX_AGE_MS - 1
 
-            with patch("hyper.observer.rest.realtime_book_top", return_value=(222.0, 223.0)) as fetch:
+            with patch("hyper.execution.observer.rest.realtime_book_top", return_value=(222.0, 223.0)) as fetch:
                 px = await obs._execution_px("xyz:IBM", True, 224.0)
 
             self.assertEqual(px, 223.0)

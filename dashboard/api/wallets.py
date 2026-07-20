@@ -3,9 +3,9 @@
 import json
 import time
 
-from hyper import follow_score
-from hyper.copy_policy import load_copy_policy
-from hyper.sector import apply_allowed_sector_copy_metrics
+from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy.sector import apply_allowed_sector_copy_metrics
+from hyper.selection import follow_score
 from .common import iso_epoch, q1, qall, recent_roi_pct, score100
 
 NEW_WATCHLIST_WINDOW_SEC = 12 * 3600

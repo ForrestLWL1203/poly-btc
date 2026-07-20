@@ -27,7 +27,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from hyper import procman
+from hyper.ops import procman
 from hyper.util import now_iso
 from .overview import ep_overview
 from .positions import ep_positions

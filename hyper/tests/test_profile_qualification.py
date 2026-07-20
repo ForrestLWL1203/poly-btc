@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hyper import scanner
+from hyper.discovery import scanner
 
 
 NOW = 2_000_000_000_000

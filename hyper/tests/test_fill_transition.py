@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.fill_transition import classify_fill_transition
+from hyper.copy.fill_transition import classify_fill_transition
 
 
 class FillTransitionTests(unittest.TestCase):

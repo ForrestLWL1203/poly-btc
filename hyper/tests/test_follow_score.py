@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from hyper.follow_score import compute_follow_score, evaluate_follow_eligibility
+from hyper.selection.follow_score import compute_follow_score, evaluate_follow_eligibility
 
 
 def evidence(**overrides):

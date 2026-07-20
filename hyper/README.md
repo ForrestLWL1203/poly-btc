@@ -7,6 +7,23 @@ The product is designed for a small funded account: the objective is not to foll
 of wallets, but to follow a compact set of active, copyable, positive-edge wallets whose combined replay still
 uses capital efficiently.
 
+## Package layout
+
+```text
+hyper/
+├── discovery/  candidate harvesting, profiling, generation publication, audit
+├── copy/       fill normalization, canonical replay, copy policy, position transitions
+├── selection/  wallet scoring, Core formation, optimization, strategy revisions
+├── market/     Hyperliquid REST/WS, market universe, price paths, volatility
+├── execution/  forward-only Observer and risk assessment
+├── ops/        process control, credentials, Paper reset
+├── cli/        stable command-line entry points
+├── launcher/   local/VPS deployment tooling
+└── config.py, params.py, storage.py, util.py  shared foundations
+```
+
+New business code belongs in one of these responsibility packages rather than directly under `hyper/`.
+
 ## What the system does
 
 The current runtime turns the public Hyperliquid leaderboard into a live, paper-traded Core through this flow:
@@ -102,10 +119,12 @@ persisted `params` values before enabling any live execution.
 
 | Area | Entry points |
 |---|---|
-| Scanner/discovery | `hyper/cli/discover.py`, `hyper/scanner.py`, `hyper/metrics.py`, `hyper/fills.py` |
-| Generation/selection | `hyper/generation.py`, `hyper/selection.py`, `hyper/follow_score.py` |
-| Replay/tuning | `hyper/copy_backtest.py`, `hyper/copy_engine.py`, `hyper/auto_tune.py` |
-| Observer/paper copy | `hyper/cli/observe.py`, `hyper/observer.py` |
+| Scanner/discovery | `hyper/cli/discover.py`, `hyper/discovery/scanner.py`, `hyper/discovery/metrics.py` |
+| Generation/selection | `hyper/discovery/generation.py`, `hyper/selection/state.py`, `hyper/selection/follow_score.py` |
+| Replay/tuning | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/selection/auto_tune.py` |
+| Market data | `hyper/market/rest.py`, `hyper/market/ws.py`, `hyper/market/price_path.py` |
+| Observer/paper copy | `hyper/cli/observe.py`, `hyper/execution/observer.py` |
+| Runtime operations | `hyper/ops/procman.py`, `hyper/ops/credentials.py`, `hyper/ops/paper_reset.py` |
 | Dashboard API | `dashboard/server.py`, `dashboard/api/*` |
 | Dashboard frontend | `dashboard/web/app.jsx`, `dashboard/web/components/*`, compiled `dashboard/web/app.js` |
 | Launcher/ops | `hyper/launcher/launcher.py`, `hyper/launcher/server.py`, `hyper/launcher/core/*`, `hyper/launcher/web/*` |
@@ -169,7 +188,7 @@ The React frontends are precompiled and do not bundle React themselves:
 ```bash
 dashboard/web/build.sh
 hyper/launcher/web/build.sh
-python3 -m py_compile hyper/*.py hyper/cli/*.py dashboard/*.py dashboard/api/*.py hyper/launcher/*.py hyper/launcher/core/*.py
+python3 -m compileall -q hyper dashboard
 python3 -m unittest discover -s hyper/tests
 ```
 

@@ -8,7 +8,7 @@ import math, os, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from hyper import storage, params
-from hyper.credentials import ensure_instance_keypair
+from hyper.ops.credentials import ensure_instance_keypair
 from hyper.util import now_iso, now_ms
 
 DB = sys.argv[1] if len(sys.argv) > 1 else "data/hl_mock.db"

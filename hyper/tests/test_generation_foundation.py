@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hyper import generation, scanner_lifecycle, storage
+from hyper import storage
+from hyper.discovery import generation, scanner_lifecycle
 
 
 def leaderboard_row(addr, *, complete=True, candidate=True):

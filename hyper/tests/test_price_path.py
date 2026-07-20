@@ -3,8 +3,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from hyper import price_path, storage
-from hyper.copy_backtest import run_backtest
+from hyper import storage
+from hyper.copy.copy_backtest import run_backtest
+from hyper.market import price_path
 
 
 class PricePathTest(unittest.TestCase):
@@ -29,8 +30,8 @@ class PricePathTest(unittest.TestCase):
                   "startPosition": "0", "px": "100"}]
         candles = [{"t": now - 900_000, "T": now - 1, "o": "100", "h": "102",
                     "l": "98", "c": "101"}]
-        with mock.patch("hyper.price_path.time.time", return_value=now / 1000), mock.patch(
-            "hyper.price_path.rest.candle_snapshot_range", return_value=candles,
+        with mock.patch("hyper.market.price_path.time.time", return_value=now / 1000), mock.patch(
+            "hyper.market.price_path.rest.candle_snapshot_range", return_value=candles,
         ):
             result = price_path.ensure(self.db, fills, now - 86_400_000, now)
         self.assertEqual(1, result["fetched"])
@@ -54,8 +55,8 @@ class PricePathTest(unittest.TestCase):
         now = 4_000_000_000_000
         fills = [{"coin": "OLD", "time": now - 60_000, "side": "B", "sz": "10",
                   "startPosition": "0", "px": "10"}]
-        with mock.patch("hyper.price_path.time.time", return_value=now / 1000), mock.patch(
-            "hyper.price_path.rest.candle_snapshot_range", return_value=None,
+        with mock.patch("hyper.market.price_path.time.time", return_value=now / 1000), mock.patch(
+            "hyper.market.price_path.rest.candle_snapshot_range", return_value=None,
         ) as fetch:
             first = price_path.ensure(self.db, fills, now - 86_400_000, now)
             second = price_path.ensure(self.db, fills, now - 86_400_000, now)
@@ -77,8 +78,8 @@ class PricePathTest(unittest.TestCase):
             return [{"t": now - 900_000, "T": now - 1, "o": "100", "h": "102",
                      "l": "98", "c": "101"}]
 
-        with mock.patch("hyper.price_path.time.time", return_value=now / 1000), mock.patch(
-            "hyper.price_path.rest.candle_snapshot_range", side_effect=fetch,
+        with mock.patch("hyper.market.price_path.time.time", return_value=now / 1000), mock.patch(
+            "hyper.market.price_path.rest.candle_snapshot_range", side_effect=fetch,
         ):
             result = price_path.ensure(self.db, fills, now - 86_400_000, now)
 

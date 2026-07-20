@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from hyper import storage
-from hyper.fills import build_episodes
-from hyper.scanner import _episode_rows
+from hyper.copy.fills import build_episodes
+from hyper.discovery.scanner import _episode_rows
 
 
 class EpisodeConsistencyTests(unittest.TestCase):

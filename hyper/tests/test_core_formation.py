@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.core_formation import (
+from hyper.selection.core_formation import (
     PrefixEvaluation, retains_reference, search_quality_membership, search_quality_prefix,
     validate_final_membership,
 )

@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hyper import params, scanner, storage
+from hyper import params, storage
+from hyper.discovery import scanner
 
 
 def leaderboard_row(addr="0xaaa"):
@@ -875,9 +876,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: fills}), \
                     patch.object(scanner.auto_tune, "evaluate_portfolio_window", side_effect=evaluate), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_window), \
-                    patch("hyper.price_path.coins_for_fills", return_value=["BTC"]), \
-                    patch("hyper.price_path.load_refined", return_value=[{"coin": "BTC", "time": 1000}]), \
-                    patch("hyper.price_path.coverage", return_value={
+                    patch("hyper.market.price_path.coins_for_fills", return_value=["BTC"]), \
+                    patch("hyper.market.price_path.load_refined", return_value=[{"coin": "BTC", "time": 1000}]), \
+                    patch("hyper.market.price_path.coverage", return_value={
                         "coverage": .90, "expected": 100, "observed": 90,
                         "missingCoins": ["BTC"],
                     }):

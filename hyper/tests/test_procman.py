@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hyper import procman, storage
+from hyper import storage
+from hyper.ops import procman
 
 
 class ProcmanTests(unittest.TestCase):

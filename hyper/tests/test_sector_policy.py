@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from hyper import sector
+from hyper.copy import sector
 
 
 def bt(net, closed, wins=None, target_open=None, opened=None):

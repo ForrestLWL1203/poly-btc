@@ -1,9 +1,9 @@
 import unittest
 from dataclasses import replace
 
-from hyper.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
+from hyper.copy.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
                             smart_add_order_margin)
-from hyper.sizing import sizing_equity_for_drawdown
+from hyper.copy.sizing import sizing_equity_for_drawdown
 
 
 class CopyEngineTests(unittest.TestCase):
@@ -212,7 +212,7 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(plan.leverage, 12.0)
 
     def test_only_btc_is_eligible_for_stable_tier(self):
-        from hyper.copy_engine import tier_for_sigma
+        from hyper.copy.copy_engine import tier_for_sigma
 
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "BTC"), "stable")
         self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "ETH"), "mid")

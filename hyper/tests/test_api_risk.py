@@ -6,7 +6,7 @@ from pathlib import Path
 from hyper import storage
 from dashboard.api.positions import ep_positions
 from dashboard.api.risk import ep_connections, ep_credential_wrap_key, ep_risk_intents, ep_risk_radar, ep_risk_thresholds
-from hyper.risk_radar import RiskRadar
+from hyper.execution.risk_radar import RiskRadar
 
 
 class RiskApiTests(unittest.TestCase):

@@ -17,6 +17,9 @@ local notes, then verify any assumption against the current code and database sc
 Repository boundaries:
 
 - `hyper/` owns Hyperliquid business logic, CLI entry points, tests, docs, and its deployment launcher.
+- Keep new business modules inside the owning responsibility package: `discovery/`, `copy/`, `selection/`,
+  `market/`, `execution/`, or `ops/`. The `hyper/` root is reserved for shared `config`, `params`, `storage`,
+  and `util` primitives; do not add new flat business modules there.
 - `dashboard/` owns the shared Dashboard server/API and frontend. It may present multiple products later.
 - Future product implementations belong in their own top-level package, for example `polymarket/`.
 
@@ -55,20 +58,20 @@ Repository boundaries:
 
 | Concern | Primary files |
 |---|---|
-| CLI discovery | `hyper/cli/discover.py`, `hyper/scanner.py` |
-| Generation staging/publication | `hyper/generation.py`, `hyper/selection.py`, `hyper/strategy_revision.py` |
-| Profile metrics/gates | `hyper/metrics.py`, `hyper/scanner_copy_bt.py`, `hyper/follow_score.py`, `hyper/copy_policy.py` |
-| Cached fills/replay inputs | `hyper/fills.py`, `hyper/copy_data.py`, `hyper/copy_evidence.py` |
-| Generation market snapshot | `hyper/generation_market.py`, `hyper/volatility.py` |
-| Sector specialization | `hyper/sector.py`, `hyper/copy_data.py` |
-| Canonical copy replay | `hyper/copy_backtest.py`, `hyper/copy_engine.py`, `hyper/fill_transition.py` |
-| Core formation/tuning | `hyper/core_formation.py`, `hyper/selection.py`, `hyper/auto_tune.py`, `hyper/sizing.py` |
-| Observer/paper execution | `hyper/cli/observe.py`, `hyper/observer.py`, `hyper/rest.py`, `hyper/ws.py` |
+| CLI discovery | `hyper/cli/discover.py`, `hyper/discovery/scanner.py` |
+| Generation staging/publication | `hyper/discovery/generation.py`, `hyper/selection/state.py`, `hyper/selection/strategy_revision.py` |
+| Profile metrics/gates | `hyper/discovery/metrics.py`, `hyper/discovery/scanner_copy_bt.py`, `hyper/selection/follow_score.py` |
+| Cached fills/replay inputs | `hyper/copy/fills.py`, `hyper/copy/copy_data.py`, `hyper/copy/copy_evidence.py` |
+| Generation market snapshot | `hyper/market/generation_market.py`, `hyper/market/volatility.py` |
+| Sector specialization | `hyper/copy/sector.py`, `hyper/copy/copy_data.py` |
+| Canonical copy replay | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/copy/fill_transition.py` |
+| Core formation/tuning | `hyper/selection/core_formation.py`, `hyper/selection/auto_tune.py`, `hyper/copy/sizing.py` |
+| Observer/paper execution | `hyper/cli/observe.py`, `hyper/execution/observer.py`, `hyper/market/rest.py`, `hyper/market/ws.py` |
 | Dashboard API | `dashboard/server.py`, `dashboard/api/*` |
 | Dashboard frontend | `dashboard/web/app.jsx`, `dashboard/web/components/*`, `dashboard/web/app.css`, compiled `dashboard/web/app.js` |
 | Launcher/process control | `hyper/launcher/launcher.py`, `hyper/launcher/server.py`, `hyper/launcher/core/*`, `hyper/launcher/web/*` |
 | Shared schema/migrations | `hyper/storage.py` |
-| Safe Paper reset | `hyper/paper_reset.py`, `hyper/cli/discover.py reset-paper` |
+| Safe Paper reset | `hyper/ops/paper_reset.py`, `hyper/cli/discover.py reset-paper` |
 | Tunable values | `hyper/config.py`, `hyper/params.py`, SQLite `params` table |
 
 ## Discovery and selection pipeline
@@ -99,7 +102,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 - Leaderboard harvesting is a zero-per-wallet API coarse filter. Its portfolio windows are not an executable
   market-quality verdict and may contain activity outside this product's scope. The current weekly turnover
   box is controlled by scanner params, not hardcoded in the UI.
-- Deep profiling uses one immutable executable universe for the generation. `hyper/copy_data.py` normalizes symbols
+- Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
   tolerated only at the coarse-harvest layer.
@@ -433,7 +436,7 @@ deleting the database file is also a factory reset, not a settings-preserving re
 Before Python changes:
 
 ```bash
-python3 -m py_compile hyper/*.py hyper/cli/*.py dashboard/*.py dashboard/api/*.py hyper/launcher/*.py hyper/launcher/core/*.py
+python3 -m compileall -q hyper dashboard
 python3 -m unittest discover -s hyper/tests
 ```
 

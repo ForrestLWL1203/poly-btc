@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from hyper import metrics
+from hyper.discovery import metrics
 
 
 def gate_params(**overrides):

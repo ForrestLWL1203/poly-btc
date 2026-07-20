@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from dashboard import api
 from dashboard.api import commands as api_commands
-from hyper import scanner
+from hyper.discovery import scanner
 from hyper.launcher import server as launcher_server
 from hyper.launcher.core import services
 from hyper.launcher.core.model import DeployConfig

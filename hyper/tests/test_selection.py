@@ -4,8 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hyper import scanner, selection, storage
-from hyper.observer import Observer, load_targets
+from hyper import storage
+from hyper.discovery import scanner
+from hyper.execution.observer import Observer, load_targets
+from hyper.selection import state as selection
 
 
 class SelectionTests(unittest.TestCase):

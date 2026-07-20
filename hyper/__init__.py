@@ -1,8 +1,9 @@
-"""hl — Hyperliquid copy-trade toolkit.
+"""Hyperliquid copy-trade product package.
 
-Layered so the execution leg can be added without churning discovery/observation:
-  config, util, rest, ws, fills, metrics, storage   — leaf infra (no business logic)
-  scanner                                            — discovery (leaderboard -> watchlist)
-  observer, paper                                    — live WS observation + paper-copy sim
-Entry points: ``hyper.cli.discover`` (scanner), ``hyper.cli.observe`` (observer).
+Business modules are grouped by responsibility under ``discovery``, ``copy``,
+``selection``, ``market``, ``execution``, and ``ops``. Shared configuration,
+parameters, storage, and utility primitives remain at the package root.
+
+Entry points: ``hyper.cli.discover`` (scanner) and ``hyper.cli.observe``
+(Observer).
 """

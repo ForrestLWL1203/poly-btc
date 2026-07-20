@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hyper import scanner_copy_bt
+from hyper.discovery import scanner_copy_bt
 
 
 class ScannerCopyBacktestSafetyTests(unittest.TestCase):

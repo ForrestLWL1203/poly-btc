@@ -6,7 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from hyper import params, scanner, scanner_copy_bt, scanner_lifecycle, storage
+from hyper import params, storage
+from hyper.discovery import scanner, scanner_copy_bt, scanner_lifecycle
 
 
 def _profile_row(addr, status, score, **overrides):

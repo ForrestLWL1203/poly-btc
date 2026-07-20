@@ -3,7 +3,8 @@
 import json
 import time
 
-from hyper import config, strategy_revision
+from hyper import config
+from hyper.selection import strategy_revision
 from .common import iso_epoch, q1, qall
 from .discovery import followed_count, scanner_status
 

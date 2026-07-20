@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.copy_evidence import summarize_copy_evidence
+from hyper.copy.copy_evidence import summarize_copy_evidence
 
 
 DAY = 86_400_000
