@@ -23,12 +23,17 @@ class SystemdServices:
     def __init__(self, ex, cfg):
         self.ex, self.cfg = ex, cfg
 
-    def install(self, emit):
+    def sync_units(self, emit=None):
+        """Refresh unit definitions without changing which optional workers are running."""
+        emit = emit or (lambda _message: None)
         for path, text in templates.render_all(self.cfg).items():
             if "/systemd/" in path:
                 self.ex.put_text(path, text)
                 emit(f"写入 {path}")
         self.ex.run("systemctl daemon-reload", on_line=emit)
+
+    def install(self, emit):
+        self.sync_units(emit)
         emit("启用 + 启动 dashboard(常开)…")
         self.ex.run("systemctl enable --now hl-dashboard.service", on_line=emit)
         emit("启用 scan 定时器(每日 04:00)…")
@@ -58,6 +63,10 @@ class LocalServices:
     def install(self, emit):
         emit("本地无 systemd — 直接后台启动 dashboard 进程…")
         self.start("dashboard", emit)
+
+    def sync_units(self, emit=None):
+        """Local processes have no persisted service definitions to refresh."""
+        return None
 
     def start(self, unit, emit=None):
         if unit != "dashboard":                    # observe/scan 走 dashboard 内的 procman(本地 spawn)

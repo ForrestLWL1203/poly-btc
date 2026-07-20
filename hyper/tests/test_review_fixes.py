@@ -16,7 +16,7 @@ from dashboard import api
 from dashboard.api import commands as api_commands
 from hyper.discovery import scanner
 from hyper.launcher import server as launcher_server
-from hyper.launcher.core import services
+from hyper.launcher.core import ops, services
 from hyper.launcher.core.model import DeployConfig
 from hyper.launcher.core.ssh import SSHExecutor
 
@@ -150,6 +150,29 @@ class ReviewFixTests(unittest.TestCase):
         services.SystemdServices(ex, DeployConfig(dash_password="x")).install(lambda _line: None)
         self.assertIn("systemctl disable hl-observe.service", ex.commands)
         self.assertNotIn("systemctl enable hl-observe.service", ex.commands)
+
+    def test_code_update_syncs_units_before_restarting_services(self):
+        events = []
+
+        class FakeExecutor:
+            def run(self, _command):
+                return type("R", (), {"ok": True, "out": "8de54e0 refactor"})()
+            def close(self):
+                events.append("close")
+
+        class FakeServices:
+            def status(self):
+                return {"observe": "active"}
+            def sync_units(self):
+                events.append("sync_units")
+            def restart(self, unit):
+                events.append(f"restart:{unit}")
+
+        with patch.object(ops, "_conn", return_value=(FakeExecutor(), FakeServices())):
+            result = ops.update(DeployConfig(mode="vps"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events[:3], ["sync_units", "restart:dashboard", "restart:observe"])
 
     def test_ssh_unknown_host_requires_matching_fingerprint_before_pinning(self):
         class SSHError(Exception):

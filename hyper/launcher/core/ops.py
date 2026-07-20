@@ -52,8 +52,7 @@ def logs(cfg, unit, lines=120):
 
 
 def update(cfg):
-    """Pull latest code + restart. On the VPS: hard-reset to origin (deploy is the source of truth);
-    restart the dashboard, and the observer too if it was live (so copying picks up new code)."""
+    """Pull code, refresh runtime definitions, then restart only previously running workers."""
     ex, svc = _conn(cfg)
     try:
         out = []
@@ -63,7 +62,12 @@ def update(cfg):
         else:
             r = ex.run(f"cd {_q(cfg.app_dir)} && git pull -q --ff-only && git log -1 --format='%h %s'")
         out.append(r.out.strip())
+        if not r.ok:
+            return {"ok": False, "detail": "\n".join(out)}
         observing = svc.status().get("observe") in ("active", "running")
+        svc.sync_units()
+        if cfg.mode == "vps":
+            out.append("systemd units 已同步")
         svc.restart("dashboard")
         out.append("dashboard 已重启")
         if observing:
