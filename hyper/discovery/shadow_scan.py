@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import tempfile
 import time
@@ -19,6 +20,25 @@ from . import scanner
 
 def _mask(addr: str) -> str:
     return "wallet_" + hashlib.sha256(str(addr or "").lower().encode()).hexdigest()[:12]
+
+
+_WALLET_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def _redact_wallets(value):
+    """Recursively replace wallet addresses, including addresses nested in metrics diagnostics."""
+    if isinstance(value, dict):
+        return {
+            _redact_wallets(key) if isinstance(key, str) else key: _redact_wallets(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_wallets(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_wallets(item) for item in value)
+    if isinstance(value, str):
+        return _WALLET_RE.sub(lambda match: _mask(match.group(0)), value)
+    return value
 
 
 def _source_control_state(db: sqlite3.Connection) -> dict:
@@ -92,7 +112,7 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
         "AND created_at>=? ORDER BY id DESC LIMIT 1", (generation_started_at,),
     ).fetchone()
     stamp = audit_row[0] if audit_row else generation_started_at
-    metrics = json.loads(metrics_json or "{}")
+    metrics = _redact_wallets(json.loads(metrics_json or "{}"))
     funnel = {
         "leaderboard": db.execute(
             "SELECT COUNT(*) FROM leaderboard_staging WHERE generation=?", (generation_id,)

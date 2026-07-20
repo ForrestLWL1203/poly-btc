@@ -33,10 +33,18 @@ class ShadowScanTests(unittest.TestCase):
 
             def fake_scan(db, _args):
                 stamp = "2026-07-20T00:00:00Z"
+                raw_addr = "0x1111111111111111111111111111111111111111"
                 db.execute(
                     "INSERT INTO scan_generation(generation,source,status,started_at,published_at,complete,"
                     "is_current,metrics_json) VALUES ('shadow-g','scan','published',?,?,1,1,?)",
-                    (stamp, stamp, json.dumps({"officialRoiPassed": 0, "perpPrefilterPassed": 0})),
+                    (stamp, stamp, json.dumps({
+                        "officialRoiPassed": 0,
+                        "perpPrefilterPassed": 0,
+                        "selectionSearch": {
+                            "selected": [raw_addr],
+                            raw_addr: {"detail": f"candidate={raw_addr}"},
+                        },
+                    })),
                 )
                 db.commit()
 
@@ -51,6 +59,9 @@ class ShadowScanTests(unittest.TestCase):
             self.assertEqual(os.stat(report_path).st_mode & 0o777, 0o600)
             self.assertTrue(created)
             self.assertTrue(all(not Path(path).exists() for path in created))
+            report_text = Path(report_path).read_text(encoding="utf-8")
+            self.assertNotIn("0x1111111111111111111111111111111111111111", report_text)
+            self.assertIn(shadow_scan._mask("0x1111111111111111111111111111111111111111"), report_text)
 
 
 if __name__ == "__main__":
