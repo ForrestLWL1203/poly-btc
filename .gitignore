@@ -11,12 +11,12 @@ data/
 *.db-wal
 *.db-shm
 
-# dashboard runtime vendor libs: React/ReactDOM are required by committed web/index.html.
-# Keep Babel ignored because production uses precompiled web/app.js.
-web/vendor/*
-!web/vendor/
-!web/vendor/react-18.3.1.production.min.js
-!web/vendor/react-dom-18.3.1.production.min.js
+# dashboard runtime vendor libs: React/ReactDOM are required by committed dashboard/web/index.html.
+# Keep Babel ignored because production uses precompiled dashboard/web/app.js.
+dashboard/web/vendor/*
+!dashboard/web/vendor/
+!dashboard/web/vendor/react-18.3.1.production.min.js
+!dashboard/web/vendor/react-dom-18.3.1.production.min.js
 
 # python
 __pycache__/
@@ -27,7 +27,7 @@ venv/
 .mypy_cache/
 
 # private strategy notes — remove this line if you want it public
-doc/
+hyper/docs/
 btc5min-handoff.md
 monitor-plan.md
 findings.md

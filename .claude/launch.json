@@ -4,14 +4,14 @@
     {
       "name": "dashboard",
       "runtimeExecutable": "env",
-      "runtimeArgs": ["DASH_PASSWORD=mock123", "python3", "hl_dashboard.py",
-                      "--db", "data/hl_mock.db", "--static", "web", "--host", "127.0.0.1", "--port", "8810"],
+      "runtimeArgs": ["DASH_PASSWORD=mock123", "python3", "-m", "dashboard.server",
+                      "--db", "data/hl_mock.db", "--static", "dashboard/web", "--host", "127.0.0.1", "--port", "8810"],
       "port": 8810
     },
     {
       "name": "launcher",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["launcher/launcher.py", "--port", "8799", "--no-browser"],
+      "runtimeArgs": ["-m", "hyper.launcher.launcher", "--port", "8799", "--no-browser"],
       "port": 8799
     }
   ]
