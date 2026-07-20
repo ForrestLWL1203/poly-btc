@@ -127,9 +127,12 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 ### 3. Market-sector specialization
 
 - Crypto and stock/index/commodity evidence are evaluated independently. A complete/cold scan rebuilds each
-  wallet's `sector_policy_json` from the current generation; an incremental scan may carry prior evidence only
-  to confirm repeated recent deterioration.
-- A wallet may be Crypto-only, Stock-only, or genuine Mix. If both sectors independently pass, both are copied.
+  wallet's `sector_policy_json` from the current generation; an incremental scan may carry prior evidence for
+  audit continuity only, never to preserve a current-generation weak sector's live permission.
+- A wallet may be Crypto-only, Stock-only, or genuine Mix. Each side independently applies the same Core
+  30/14/7 sample, 30d/7d percentage-return, profit-structure, cost-pressure, execution, and capacity rules.
+  If both sides pass, both are copied. If either side weakens, that side is removed from live permission in
+  the same generation (observation-only); the other side cannot mask it and prior policy grants no grace.
   Failure in one sector must not contaminate an otherwise copyable sector.
 - A profitable sector with too few closed samples is `watch` evidence for Challenger ranking, not live-trading
   permission. Observer, individual replay, shared replay and Dashboard metrics use the same allowed/watch policy;

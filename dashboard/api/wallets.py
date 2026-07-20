@@ -137,6 +137,21 @@ def _sector_policy(row):
     return policy
 
 
+def _market_type_from_sector_policy(row):
+    """Render the immutable live permission, not the wallet's legacy raw specialty label."""
+    policy = _sector_policy(row)
+    if policy:
+        sectors = list(policy.get("allowed") or policy.get("watch") or ())
+        sector_set = {str(value) for value in sectors}
+        if {"crypto", "stock"}.issubset(sector_set):
+            return "mixed"
+        if "crypto" in sector_set:
+            return "crypto"
+        if "stock" in sector_set:
+            return "stock"
+    return _col(row, "market_type") or "crypto"
+
+
 def _score_breakdown(row):
     _score, detail = follow_score.compute_follow_score({
         "score": _col(row, "raw_score", _col(row, "profile_score", _col(row, "score"))),
@@ -281,6 +296,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.replay_copy_bt_7d_net_pnl,"
         "         fs.replay_copy_bt_7d_unrealized_pnl,"
         "         fs.replay_copy_bt_7d_closed_n,fs.replay_sector_copy_json,"
+        "         fs.sector_policy_json AS selection_sector_policy_json,"
         "         fs.replayed_at "
         "  FROM follow_selection fs "
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
@@ -318,13 +334,18 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
-        "p.sector_policy_json,p.data_status,"
+        "COALESCE(json_extract(ast.value,'$.sectorPolicy'),"
+        "s.selection_sector_policy_json,p.sector_policy_json) AS sector_policy_json,p.data_status,"
         "p.open_events_7d,p.actionable_open_events_7d,"
         "p.copy_positive_probability,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
         "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.fwd_net,0) AS fwd_net "
         "FROM page_selected s LEFT JOIN watchlist w ON w.addr=s.addr "
         "LEFT JOIN target_controls tc ON tc.addr=s.addr LEFT JOIN profile p ON p.addr=s.addr "
+        "LEFT JOIN active_strategy_revision ar ON ar.id=1 "
+        "LEFT JOIN strategy_revision sr ON sr.revision=ar.revision "
+        "LEFT JOIN json_each(sr.targets_json) ast "
+        "ON lower(json_extract(ast.value,'$.addr'))=lower(s.addr) "
         "LEFT JOIN follow_history fh ON fh.addr=s.addr "
         "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=s.addr "
@@ -349,7 +370,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
             "selectionReasonText": _selection_reason_text(r),
-            "marketType": _col(r, "market_type") or "crypto",
+            "marketType": _market_type_from_sector_policy(r),
             "score": score100(published_score) if published_score is not None else None,
             # The list describes the strategy we can actually copy, not the target's raw account win rate.
             # A missing immutable replay/profile value is unknown and must never be rendered as 0%.

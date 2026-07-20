@@ -79,6 +79,145 @@ def _window_result(windows: Mapping, days: int) -> dict:
     return dict(windows.get(days) or windows.get(str(days)) or {})
 
 
+def _qualification_equity(windows: Mapping) -> float:
+    """Return the immutable replay sizing basis used by this sector."""
+    for days in (30, 14, 7):
+        value = _num(_window_result(windows, days).get("initial_margin_equity"))
+        if value > 0:
+            return value
+    return max(
+        1.0,
+        float(getattr(config, "INITIAL_BALANCE", 10_000.0))
+        * max(0.0, min(1.0, float(getattr(config, "MARGIN_EQUITY_PCT", 1.0)))),
+    )
+
+
+def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
+    """Apply live-sector economics independently from wallet-level aggregation.
+
+    A Mix wallet receives two permissions, not one blended permission. Strong Crypto evidence therefore
+    cannot mask weak Stock evidence (or vice versa). Optional fields are checked whenever the canonical
+    replay provides them; legacy rows without those fields still have to pass every sample/return floor.
+    """
+    policy = load_copy_policy()
+    results = {days: _window_result(windows, days) for days in (30, 14, 7)}
+    closed = {days: _int(results[days].get("closed_n")) for days in results}
+    pnl = {days: _num(results[days].get("copy_net_pnl")) for days in results}
+    enough = {days: closed[days] >= policy.min_closed(days) for days in results}
+    equity = _qualification_equity(windows)
+    return30 = pnl[30] / equity
+    return14 = pnl[14] / equity
+    return7 = pnl[7] / equity
+    base = {
+        "closed": {str(days): closed[days] for days in (30, 14, 7)},
+        "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
+        "returns": {"30": return30, "14": return14, "7": return7},
+        "qualificationEquity": equity,
+    }
+
+    if not all(enough.values()):
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_sample_watch",
+            "reason": "板块未独立达到30/14/7日实跟样本线",
+            "watch": bool(closed[30] > 0 and pnl[30] > min_net),
+        }
+    if pnl[14] <= min_net:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_recent_weak",
+            "reason": "板块14天严格Copy不盈利，已移出实跟权限",
+            "watch": bool(pnl[30] > min_net),
+        }
+    if return30 < policy.core_min_return_30d:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_return_weak",
+            "reason": (
+                f"板块30天严格Copy收益率{return30 * 100:.1f}%低于"
+                f"{policy.core_min_return_30d * 100:.0f}%实跟线"
+            ),
+            "watch": bool(pnl[30] > min_net),
+        }
+    if return7 < policy.core_min_return_7d:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_recent_weak",
+            "reason": (
+                f"板块7天严格Copy收益率{return7 * 100:.1f}%低于"
+                f"{policy.core_min_return_7d * 100:.0f}%实跟线，已立即移出实跟权限"
+            ),
+            "watch": True,
+        }
+
+    primary = results[30]
+    recent = results[7]
+    checks = (
+        (
+            primary.get("valuation_status") is not None
+            and str(primary.get("valuation_status") or "").strip().lower() != "complete",
+            "sector_valuation_pending",
+            "板块持仓末端估值不完整",
+        ),
+        (
+            primary.get("profit_factor") is not None
+            and _num(primary.get("profit_factor")) < policy.min_profit_factor,
+            "sector_profit_structure_weak",
+            f"板块严格Copy PF低于{policy.min_profit_factor:.2f}",
+        ),
+        (
+            primary.get("net_after_top2") is not None
+            and _num(primary.get("net_after_top2")) < equity * policy.min_tail_return_30d,
+            "sector_tail_profit_weak",
+            "板块30天移除最大两笔盈利后未达到尾部收益线",
+        ),
+        (
+            recent.get("net_after_top1") is not None
+            and _num(recent.get("net_after_top1")) <= min_net,
+            "sector_recent_tail_weak",
+            "板块7天收益依赖单一盈利回合",
+        ),
+        (
+            primary.get("cost_stress_net_pnl") is not None
+            and _num(primary.get("cost_stress_net_pnl")) <= min_net,
+            "sector_cost_stress_weak",
+            "板块1.5倍成本压力后不盈利",
+        ),
+        (
+            primary.get("open_fill_rate") is not None
+            and _num(primary.get("open_fill_rate")) < policy.min_actionable_open_rate,
+            "sector_execution_weak",
+            f"板块开仓跟随率低于{policy.min_actionable_open_rate * 100:.0f}%",
+        ),
+        (
+            primary.get("capacity_open_fit") is not None
+            and _num(primary.get("capacity_open_fit")) < policy.min_capacity_fit,
+            "sector_capacity_weak",
+            f"板块资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%",
+        ),
+    )
+    for failed, status, reason in checks:
+        if failed:
+            return {
+                **base,
+                "allow": False,
+                "status": status,
+                "reason": reason,
+                "watch": True,
+            }
+    return {
+        **base,
+        "allow": True,
+        "status": "allowed",
+        "reason": "板块独立达到Core实跟标准",
+        "watch": False,
+    }
+
+
 def _compact_result(result: Mapping) -> dict:
     keys = (
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "valuation_status",
@@ -265,6 +404,8 @@ def evaluate_sector_policy(
     structural_policy=None,
 ) -> dict:
     min_net = float(config.COPY_BT_MIN_NET_PNL if min_net is None else min_net)
+    # Kept in the signature for old replay callers. Current-generation sector weakness is immediate and
+    # never inherits a live permission or grace period from the previous policy.
     previous_policy = parse_json_obj(previous_policy)
     structural_policy = parse_json_obj(structural_policy)
     policy = {}
@@ -273,101 +414,21 @@ def evaluate_sector_policy(
     structural_watch = []
     for sector in SECTORS:
         windows = sector_results.get(sector) or {}
-        enough = {}
-        pnl = {}
-        closed = {}
-        for days in (30, 14, 7):
-            result = _window_result(windows, days)
-            closed[days] = _int(result.get("closed_n"))
-            pnl[days] = _num(result.get("copy_net_pnl"))
-            enough[days] = closed[days] >= _min_closed_for_days(days)
-
+        economic = _sector_economic_gate(windows, min_net=min_net)
+        closed = {days: _int((economic.get("closed") or {}).get(str(days))) for days in (30, 14, 7)}
+        pnl = {days: _num((economic.get("pnl") or {}).get(str(days))) for days in (30, 14, 7)}
         recent_assessment = assess_recent_copy_loss(windows, min_net=min_net)
-        previous_item = previous_policy.get(sector) if isinstance(previous_policy.get(sector), dict) else {}
-        previous_recent = previous_item.get("recent") if isinstance(previous_item.get("recent"), dict) else {}
-        previous_streak = _int(previous_recent.get("streak"))
-        same_evidence = (
-            bool(recent_assessment.get("evidenceKey"))
-            and recent_assessment.get("evidenceKey") == previous_recent.get("evidenceKey")
-        )
-        if recent_assessment.get("classification") == "significant_loss":
-            streak = previous_streak if same_evidence else previous_streak + 1
-            recent_assessment["streak"] = max(1, streak)
-        else:
-            recent_assessment["streak"] = 0
-
+        recent_assessment["streak"] = 0
+        item = {**economic, "recent": recent_assessment}
         item_base = {
-            "closed": {str(k): closed[k] for k in (30, 14, 7)},
-            "pnl": {str(k): pnl[k] for k in (30, 14, 7)},
+            "closed": item.get("closed") or {},
+            "pnl": item.get("pnl") or {},
+            "returns": item.get("returns") or {},
+            "qualificationEquity": item.get("qualificationEquity"),
             "recent": recent_assessment,
         }
-        enough_days = [days for days in (30, 14, 7) if enough[days]]
-        if not enough_days:
-            item = {
-                **item_base,
-                "allow": False,
-                "status": "thin_evidence",
-                "reason": "板块copy样本不足",
-            }
-        elif enough[14] and pnl[14] <= min_net:
-            item = {
-                **item_base,
-                "allow": False,
-                "status": "recent_loss",
-                "reason": "板块14天copy亏损",
-            }
-        elif enough[7] and pnl[7] <= min_net and recent_assessment.get("hard"):
-            is_liquidation = recent_assessment.get("classification") == "liquidation"
-            has_grace = (
-                not is_liquidation
-                and bool(previous_item.get("allow"))
-                and recent_assessment.get("streak", 1) < 2
-                and ((enough[14] and pnl[14] > min_net) or (enough[30] and pnl[30] > min_net))
-            )
-            item = {
-                **item_base,
-                "allow": bool(has_grace),
-                "status": "recent_degradation_watch" if has_grace else "recent_loss",
-                "reason": (
-                    "板块近期显著恶化，保留一轮复核"
-                    if has_grace else
-                    ("板块近期copy出现爆仓" if is_liquidation else "板块近期copy显著恶化")
-                ),
-            }
-            if has_grace:
-                allowed.append(sector)
-        elif enough[7] and pnl[7] <= min_net and (
-            (enough[14] and pnl[14] > min_net) or (enough[30] and pnl[30] > min_net)
-        ):
-            item = {
-                **item_base,
-                "allow": True,
-                "status": "recent_soft_loss",
-                "reason": "板块7天浅亏，仍在自身历史波动范围",
-            }
+        if item.get("allow"):
             allowed.append(sector)
-        elif enough[30] and pnl[30] <= min_net:
-            item = {
-                **item_base,
-                "allow": False,
-                "status": "primary_loss",
-                "reason": "板块30天copy亏损",
-            }
-        elif (enough[14] and pnl[14] > min_net) or (enough[30] and pnl[30] > min_net):
-            item = {
-                **item_base,
-                "allow": True,
-                "status": "allowed",
-                "reason": "板块copy回测盈利",
-            }
-            allowed.append(sector)
-        else:
-            item = {
-                **item_base,
-                "allow": False,
-                "status": "thin_evidence",
-                "reason": "板块copy正收益证据不足",
-            }
         structural = structural_policy.get(sector)
         structural = structural if isinstance(structural, dict) else {}
         if structural and not structural.get("allow"):
@@ -380,7 +441,7 @@ def evaluate_sector_policy(
             }
             if sector in allowed:
                 allowed.remove(sector)
-        elif structural.get("watch"):
+        elif structural.get("watch") and item.get("allow"):
             primary = _window_result(windows, 30)
             pressure_ok = bool(
                 item.get("allow")
@@ -419,20 +480,14 @@ def evaluate_sector_policy(
                 }
                 if sector in allowed:
                     allowed.remove(sector)
+        elif structural.get("watch"):
+            # Heavy-DCA pressure validation cannot resurrect a sector that failed current economics.
+            item["structural"] = structural
         elif structural:
             item["structural"] = structural
-        # A profitable sector with too few closed samples is useful Challenger evidence, not a live-trading
-        # permission.  Keep it on a separate watch list so scoring can apply the same percentage economics
-        # while Observer remains fail-closed until the normal 30/14/7 sample floors are met.
-        if (
-            not item.get("allow")
-            and item.get("status") == "thin_evidence"
-            and closed[30] > 0
-            and pnl[30] > min_net
-            and (not structural or structural.get("allow"))
-        ):
-            item["watch"] = True
-            item["reason"] = "板块严格Copy盈利但样本不足，进入样本观察"
+        # Weak/thin sectors can remain observation evidence, but never live permissions. Wallet scoring
+        # consumes ``allowed`` first, so a strong side cannot aggregate the wallet's weak side.
+        if not item.get("allow") and item.get("watch") and (not structural or structural.get("allow")):
             evidence_watch.append(sector)
         policy[sector] = item
     # A one-off Heavy-DCA episode is already executed through bounded smart-add spacing, add-count and

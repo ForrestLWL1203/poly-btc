@@ -145,6 +145,53 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
         self.assertEqual(res["wallets"][0]["closed7d"], 8)
 
+    def test_followed_market_label_uses_immutable_active_sector_permission(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO watchlist (rank,addr,score,market_type,updated_at) "
+                "VALUES (1,'0xaaa',0.9,'crypto','now')"
+            )
+            db.execute(
+                "INSERT INTO profile (addr,status,score,sector_policy_json) VALUES ('0xaaa','active',0.9,?)",
+                (json.dumps({"allowed": ["crypto"]}),),
+            )
+            self._publish_selection(db, ["0xaaa"])
+            db.execute(
+                "UPDATE follow_selection SET sector_policy_json=? "
+                "WHERE generation='g-current' AND addr='0xaaa'",
+                (json.dumps({
+                    "allowed": ["crypto", "stock"],
+                    "crypto": {"allow": True},
+                    "stock": {"allow": True},
+                }),),
+            )
+            db.execute(
+                "INSERT INTO strategy_revision "
+                "(revision,selection_generation,source,status,params_json,params_hash,targets_json,"
+                "validation_json,created_at,activated_at) VALUES "
+                "('strategy-current','g-current','test','active','{}','hash',?,'{}','now','now')",
+                (json.dumps([{
+                    "addr": "0xaaa",
+                    "sectorPolicy": {
+                        "allowed": ["crypto"],
+                        "crypto": {"allow": True},
+                        "stock": {"allow": False},
+                    },
+                }]),),
+            )
+            db.execute(
+                "INSERT INTO active_strategy_revision(id,revision,updated_at) "
+                "VALUES (1,'strategy-current','now')"
+            )
+            db.commit()
+
+            wallet = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})["wallets"][0]
+
+        self.assertEqual(wallet["marketType"], "crypto")
+
     def test_followed_wallet_marks_recent_first_follow_as_new(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
