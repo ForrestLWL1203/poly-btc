@@ -93,6 +93,15 @@ Before production rollout, operators can run the same pipeline against an online
 python3 -m hyper.cli.discover --db /path/to/production.db shadow-scan --report /private/report.json
 ```
 
+One-off acceptance scans can override only the ROI/PnL harvest surface without changing production params:
+
+```bash
+python3 -m hyper.cli.discover --db /path/to/production.db shadow-scan \
+  --report /private/report.json \
+  --week-roi-min-pct 15 --month-roi-min-pct 45 --all-roi-min-pct 50 \
+  --week-pnl-min 2000 --month-pnl-min 8000 --all-pnl-min 0
+```
+
 The source database is opened read-only, all mutations stay in a mode-0600 temporary database, and the temporary
 database is removed after a redacted JSON report is written.
 

@@ -18,6 +18,15 @@ from hyper.market import rest
 from . import scanner
 
 
+_REPORT_PARAM_KEYS = (
+    "HARVEST_MIN_ACCT", "HARVEST_WEEK_VLM_MIN",
+    "HARVEST_WEEK_ROI_MIN", "HARVEST_MONTH_ROI_MIN", "HARVEST_ALL_ROI_MIN",
+    "HARVEST_WEEK_PNL_MIN", "HARVEST_MONTH_PNL_MIN", "HARVEST_ALL_PNL_MIN",
+    "HARVEST_PERP_PNL_SHARE_MIN",
+)
+_SHADOW_OVERRIDE_KEYS = frozenset(_REPORT_PARAM_KEYS[2:8])
+
+
 def _mask(addr: str) -> str:
     return "wallet_" + hashlib.sha256(str(addr or "").lower().encode()).hexdigest()[:12]
 
@@ -113,6 +122,7 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
     ).fetchone()
     stamp = audit_row[0] if audit_row else generation_started_at
     metrics = _redact_wallets(json.loads(metrics_json or "{}"))
+    scanner_params = params.load_category(db, "scanner")
     funnel = {
         "leaderboard": db.execute(
             "SELECT COUNT(*) FROM leaderboard_staging WHERE generation=?", (generation_id,)
@@ -195,6 +205,9 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
             "coreFound": roles.get("core", 0),
             "note": "Zero Core is valid when every candidate fails an existing Copy or portfolio gate.",
         },
+        "scanParameters": {
+            key: scanner_params.get(key) for key in _REPORT_PARAM_KEYS
+        },
         "funnel": funnel,
         "roles": {"core": roles.get("core", 0), "challenger": roles.get("challenger", 0),
                   "exitOnly": roles.get("exit_only", 0)},
@@ -210,7 +223,7 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
     }
 
 
-def run(source_db: str, report_path: str, scan_args) -> dict:
+def run(source_db: str, report_path: str, scan_args, *, param_overrides=None) -> dict:
     """Back up source online, scan only the private temporary DB, then destroy it."""
     source = _read_only(source_db)
     source_before = _source_control_state(source)
@@ -226,6 +239,15 @@ def run(source_db: str, report_path: str, scan_args) -> dict:
         source.close()
         shadow = storage.connect(temp_path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
         params.seed_params(shadow)
+        overrides = dict(param_overrides or {})
+        unknown = sorted(set(overrides) - _SHADOW_OVERRIDE_KEYS)
+        if unknown:
+            raise ValueError("unsupported shadow parameter overrides: " + ",".join(unknown))
+        for key, value in overrides.items():
+            shadow.execute(
+                "UPDATE params SET value=?,updated_at=? WHERE key=?",
+                (str(float(value)), started, key),
+            )
         shadow.execute("DELETE FROM commands WHERE status IN ('pending','acked')")
         shadow.commit()
         scan_args.full_scan = True

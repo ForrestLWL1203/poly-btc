@@ -23,6 +23,7 @@ class ShadowScanTests(unittest.TestCase):
             source.close()
             before = Path(source_path).read_bytes()
             created = []
+            seen_args = []
             real_mkstemp = tempfile.mkstemp
 
             def tracked_mkstemp(*args, **kwargs):
@@ -32,6 +33,7 @@ class ShadowScanTests(unittest.TestCase):
                 return result
 
             def fake_scan(db, _args):
+                seen_args.append(_args)
                 stamp = "2026-07-20T00:00:00Z"
                 raw_addr = "0x1111111111111111111111111111111111111111"
                 db.execute(
@@ -51,10 +53,29 @@ class ShadowScanTests(unittest.TestCase):
             args = SimpleNamespace(full_scan=True, no_harvest=False)
             with patch.object(shadow_scan.tempfile, "mkstemp", side_effect=tracked_mkstemp), \
                  patch.object(shadow_scan.scanner, "scan", side_effect=fake_scan):
-                report = shadow_scan.run(source_path, report_path, args)
+                report = shadow_scan.run(
+                    source_path, report_path, args,
+                    param_overrides={
+                        "HARVEST_WEEK_ROI_MIN": 15,
+                        "HARVEST_MONTH_ROI_MIN": 45,
+                        "HARVEST_ALL_ROI_MIN": 50,
+                        "HARVEST_WEEK_PNL_MIN": 2000,
+                        "HARVEST_MONTH_PNL_MIN": 8000,
+                        "HARVEST_ALL_PNL_MIN": 0,
+                    },
+                )
 
             self.assertEqual(Path(source_path).read_bytes(), before)
             self.assertTrue(report["sourceUnchanged"])
+            self.assertEqual(report["scanParameters"]["HARVEST_WEEK_ROI_MIN"], 0.15)
+            self.assertEqual(report["scanParameters"]["HARVEST_MONTH_ROI_MIN"], 0.45)
+            self.assertEqual(report["scanParameters"]["HARVEST_ALL_ROI_MIN"], 0.50)
+            self.assertEqual(report["scanParameters"]["HARVEST_WEEK_PNL_MIN"], 2000)
+            self.assertEqual(report["scanParameters"]["HARVEST_MONTH_PNL_MIN"], 8000)
+            self.assertEqual(report["scanParameters"]["HARVEST_ALL_PNL_MIN"], 0)
+            self.assertEqual(seen_args[0].week_roi_min, 0.15)
+            self.assertEqual(seen_args[0].month_roi_min, 0.45)
+            self.assertEqual(seen_args[0].all_roi_min, 0.50)
             self.assertTrue(Path(report_path).exists())
             self.assertEqual(os.stat(report_path).st_mode & 0o777, 0o600)
             self.assertTrue(created)

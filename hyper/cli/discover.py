@@ -270,13 +270,31 @@ def main() -> int:
     shadow.add_argument("--scan-interval", type=float, default=10.0)
     shadow.add_argument("--max-pages", type=int, default=5)
     shadow.add_argument("--workers", type=int, default=4)
+    shadow.add_argument("--week-roi-min-pct", type=float)
+    shadow.add_argument("--month-roi-min-pct", type=float)
+    shadow.add_argument("--all-roi-min-pct", type=float)
+    shadow.add_argument("--week-pnl-min", type=float)
+    shadow.add_argument("--month-pnl-min", type=float)
+    shadow.add_argument("--all-pnl-min", type=float)
 
     args = ap.parse_args()
     if args.cmd == "shadow-scan":
         ns = _scan_ns()
         ns.scan_interval, ns.max_pages, ns.workers = args.scan_interval, args.max_pages, args.workers
         config.MIN_POST_INTERVAL = args.scan_interval
-        result = shadow_scan.run(args.db, args.report, ns)
+        overrides = {
+            key: value for key, value in {
+                "HARVEST_WEEK_ROI_MIN": args.week_roi_min_pct,
+                "HARVEST_MONTH_ROI_MIN": args.month_roi_min_pct,
+                "HARVEST_ALL_ROI_MIN": args.all_roi_min_pct,
+                "HARVEST_WEEK_PNL_MIN": args.week_pnl_min,
+                "HARVEST_MONTH_PNL_MIN": args.month_pnl_min,
+                "HARVEST_ALL_PNL_MIN": args.all_pnl_min,
+            }.items() if value is not None
+        }
+        if any(float(value) < 0 for value in overrides.values()):
+            ap.error("shadow scan ROI/PnL overrides must be non-negative")
+        result = shadow_scan.run(args.db, args.report, ns, param_overrides=overrides)
         print(json.dumps({"status": result["generation"]["status"], "report": args.report,
                           "funnel": result["funnel"], "roles": result["roles"]}, sort_keys=True))
         return 0
