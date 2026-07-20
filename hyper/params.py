@@ -25,10 +25,21 @@ PARAM_SPEC = [
         "钱包最低资金", "账户资金 ≥ 此才纳入(过滤噪音小号)"),
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
-    ("HARVEST_WEEK_VLM_MAX", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MAX,
-        "周成交量上限", "近7天成交额 ≤ 此(超过=做市/高频机器人,跟不上)"),
-    ("HARVEST_PNL_VOL_MAX",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MAX * 100,
-        "盈利/成交量上限(防幽灵号)", ""),   # v10: 藏 —— 冷门幽灵号预筛,和已 hidden 的下限对齐
+    ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
+        "官方近7日 ROI 下限", "直接读取 Leaderboard 官方 ROI；不使用成交量或余额作收益率分母"),
+    ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
+        "官方近30日 ROI 下限", "过滤一个月表现平平或只靠单周行情的钱包"),
+    ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
+        "官方历史 ROI 下限", "要求长期官方 ROI 同样达到高强度门槛"),
+    ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
+        "近7日绝对 PnL 下限", "排除极小本金或资金流造成的虚高 ROI"),
+    ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
+        "近30日绝对 PnL 下限", "官方账户总 PnL 必须达到此金额"),
+    ("HARVEST_ALL_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_ALL_PNL_MIN,
+        "历史绝对 PnL 下限", "官方历史账户总 PnL 必须达到此金额"),
+    ("HARVEST_PERP_PNL_SHARE_MIN", "scanner", "yellow", "pct", "rescan",
+        config.HARVEST_PERP_PNL_SHARE_MIN * 100, "Perp 盈利占比下限",
+        "Portfolio 三个窗口中 Perp PnL 均须至少占账户总 PnL 此比例"),
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", config.INACTIVE_DAYS,
@@ -39,20 +50,9 @@ PARAM_SPEC = [
         "核心钱包刷新期限", ""),
     ("SCAN_FINALIZE_RESERVE_MIN", "scanner", "hidden", "int", "rescan", config.SCAN_FINALIZE_RESERVE_MIN,
         "扫描收尾预留时间", ""),
-    ("DAILY_PROFILE_BUDGET", "scanner", "hidden", "int", "rescan", config.DAILY_PROFILE_BUDGET,
-        "每日画像预算", ""),
-    ("CANDIDATE_MAX_RECHECK_DAYS", "scanner", "hidden", "int", "rescan", config.CANDIDATE_MAX_RECHECK_DAYS,
-        "候选最长复核间隔", ""),
-    ("FULL_REFRESH_SHARDS", "scanner", "hidden", "int", "rescan", config.FULL_REFRESH_SHARDS,
-        "候选轮转分片数", ""),
-    ("RANDOM_EXPLORATION_RATIO", "scanner", "hidden", "pct", "rescan", config.RANDOM_EXPLORATION_RATIO * 100,
-        "随机探索比例", ""),
-    ("DISCOVERY_MAX_EXTRA_SHARDS", "scanner", "hidden", "int", "rescan", config.DISCOVERY_MAX_EXTRA_SHARDS,
-        "无新Core时追加分片", ""),
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
         "初始跟单上限", "每轮先取质量最优且达到Core硬标准的钱包（不足则全取），整体调参后只从质量末尾做前缀缩减"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
-    ("HARVEST_PNL_VOL_MIN",  "scanner", "hidden", "pct",     "rescan", config.HARVEST_PNL_VOL_MIN * 100, "盈利/成交量下限(防薄利MM)", ""),
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
     ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
@@ -242,13 +242,24 @@ def seed_params(db):
     stamp = now_iso()
     # Retired policies: raw profile score is no longer a qualification veto, and copy execution no longer
     # supports a hard-threshold stop. Purge their old rows so stale databases cannot expose or restore them.
-    db.execute("DELETE FROM params WHERE key IN ('MIN_ACTIVE_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT')")
+    db.execute(
+        "DELETE FROM params WHERE key IN "
+        "('MIN_ACTIVE_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT','HARVEST_WEEK_VLM_MAX',"
+        "'HARVEST_PNL_VOL_MIN','HARVEST_PNL_VOL_MAX','DAILY_PROFILE_BUDGET',"
+        "'FULL_REFRESH_SHARDS','RANDOM_EXPLORATION_RATIO','DISCOVERY_MAX_EXTRA_SHARDS',"
+        "'CANDIDATE_MAX_RECHECK_DAYS')"
+    )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
         # Approved policy migration: the old hidden heavy-DCA threshold was 20.  This is a deliberate
         # strategy change, not a metadata-default refresh, so existing databases must move with the code.
         if key == "max_single_adds":
             db.execute("UPDATE params SET value=? WHERE key=? AND value='20'", (dv, key))
+        if key == "HARVEST_MIN_ACCT":
+            db.execute(
+                "UPDATE params SET value=? WHERE key=? AND value IN ('10000','10000.0')",
+                (dv, key),
+            )
         db.execute(
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
@@ -337,8 +348,11 @@ def load_follow(db):
 # DB scanner-param key -> the scan args-namespace attribute the scanner/metrics actually read.
 SCANNER_ARG_MAP = {
     "HARVEST_MIN_ACCT": "min_acct",
-    "HARVEST_WEEK_VLM_MIN": "week_vlm_min", "HARVEST_WEEK_VLM_MAX": "week_vlm_max",
-    "HARVEST_PNL_VOL_MIN": "pnl_vol_min", "HARVEST_PNL_VOL_MAX": "pnl_vol_max",
+    "HARVEST_WEEK_VLM_MIN": "week_vlm_min",
+    "HARVEST_WEEK_ROI_MIN": "week_roi_min", "HARVEST_MONTH_ROI_MIN": "month_roi_min",
+    "HARVEST_ALL_ROI_MIN": "all_roi_min", "HARVEST_WEEK_PNL_MIN": "week_pnl_min",
+    "HARVEST_MONTH_PNL_MIN": "month_pnl_min", "HARVEST_ALL_PNL_MIN": "all_pnl_min",
+    "HARVEST_PERP_PNL_SHARE_MIN": "perp_pnl_share_min",
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
     "min_activity": "min_activity", "grid_max_adds": "grid_max_adds",
     "max_single_adds": "max_single_adds",
@@ -354,11 +368,6 @@ SCANNER_ARG_MAP = {
     "DAILY_SCAN_TIME_BUDGET_MIN": "daily_scan_time_budget_min",
     "CORE_REFRESH_DEADLINE_MIN": "core_refresh_deadline_min",
     "SCAN_FINALIZE_RESERVE_MIN": "scan_finalize_reserve_min",
-    "DAILY_PROFILE_BUDGET": "daily_profile_budget",
-    "CANDIDATE_MAX_RECHECK_DAYS": "candidate_max_recheck_days",
-    "FULL_REFRESH_SHARDS": "full_refresh_shards",
-    "RANDOM_EXPLORATION_RATIO": "random_exploration_ratio",
-    "DISCOVERY_MAX_EXTRA_SHARDS": "discovery_max_extra_shards",
 }
 
 

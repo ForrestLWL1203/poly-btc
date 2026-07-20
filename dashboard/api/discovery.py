@@ -145,6 +145,8 @@ def ep_discovery(db):
             bins[idx] = row["n"]
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     return {"funnel": {"leaderboard": leaderboard, "candidates": candidates, "qualified": qualified,
+                        "officialRoi": (generation_out or {}).get("performance", {}).get("officialRoiPassed", candidates),
+                        "perpPrefilter": (generation_out or {}).get("performance", {}).get("perpPrefilterPassed", candidates),
                         "challenger": challenger, "core": core, "active": active, "watchlist": watchlist},
             "rejectReasons": reject_reasons,
             "scoreHistogram": {"bins": bins},

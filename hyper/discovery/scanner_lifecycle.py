@@ -178,31 +178,6 @@ def refresh_shard_for_day(day: date | str | None = None, shard_count: int = 7) -
     return value.toordinal() % int(shard_count)
 
 
-def subsequent_refresh_shard_batches(
-    candidates: Iterable[str], used_addrs: Iterable[str], *, current_shard: int,
-    shard_count: int = 7, max_shards: int = 1,
-) -> list[dict]:
-    """Return bounded later shard batches in candidate order, excluding work already scheduled."""
-    shard_count = int(shard_count)
-    if shard_count <= 0:
-        raise ValueError("shard_count must be positive")
-    used = {str(addr).strip().lower() for addr in used_addrs if str(addr).strip()}
-    ordered = dedupe_preserve(
-        str(addr).strip().lower() for addr in candidates if str(addr).strip()
-    )
-    batches = []
-    for offset in range(1, min(max(0, int(max_shards)), shard_count - 1) + 1):
-        shard = (int(current_shard) + offset) % shard_count
-        batch = [
-            addr for addr in ordered
-            if addr not in used and stable_refresh_shard(addr, shard_count) == shard
-        ]
-        used.update(batch)
-        if batch:
-            batches.append({"shard": shard, "workset": batch})
-    return batches
-
-
 @dataclass(frozen=True)
 class ScanTimeBudget:
     started_monotonic: float
@@ -304,6 +279,41 @@ def schedule_profile_workset(
     ]
     priority = dedupe_preserve(item for lane in priority_lanes for item in lane)
     priority_set = set(priority)
+    # Daily generations have one deterministic lane: every strict candidate plus the role/open-position
+    # safety set. There is no Top-N, rotation shard, recovery quota, exploration quota or deferred tail.
+    workset = dedupe_preserve(priority + candidates)
+    full_refetch_set = {
+        str(addr).strip().lower() for addr in full_refetch_addrs if str(addr).strip()
+    }
+    full_refetch = [addr for addr in workset if addr in full_refetch_set]
+    delta = [addr for addr in workset if addr not in full_refetch_set]
+    workset_set = set(workset)
+    return {
+        "workset": workset,
+        "mode": "all",
+        "workset_mode": "all",
+        "fill_mode": "full_refetch" if full_refetch and not delta else ("mixed" if full_refetch else "delta"),
+        "full_scan": True,
+        "counts": {
+            "priority": len(priority),
+            "position": sum(1 for addr in priority_lanes[0] if addr in workset_set),
+            "core": sum(1 for addr in priority_lanes[1] if addr in workset_set),
+            "qualified": sum(1 for addr in priority_lanes[2] if addr in workset_set),
+            "challenger": sum(1 for addr in priority_lanes[3] if addr in workset_set),
+            "off_list_qualified": sum(1 for addr in priority_lanes[4] if addr in workset_set),
+            "warmup_backfill": sum(1 for addr in warmup_backfill_addrs if addr in workset_set),
+            "rotation": 0, "new": 0, "recovery": 0, "exploration": 0,
+            "workset": len(workset), "deferred": 0,
+        },
+        "limit": None,
+        "time_capacity": None,
+        "refresh": {
+            "shard_count": 0, "shard_index": None,
+            "full_refetch": full_refetch, "delta": delta, "deferred_in_shard": 0,
+        },
+    }
+
+    # Legacy lane implementation remains below temporarily for migration readability; unreachable by design.
     profiled_set = {str(addr).strip().lower() for addr in profiled_addrs}
     refresh_shard = refresh_shard_for_day(shard_count=shard_count) if refresh_shard is None else int(refresh_shard)
     if not 0 <= refresh_shard < int(shard_count):
@@ -448,7 +458,11 @@ def _prune_discovery_cache_once(db):
         "INSERT OR IGNORE INTO prune_discovery_addrs(addr) "
         "SELECT p.addr FROM profile p "
         "WHERE COALESCE(p.status,'')!='active' "
-        "AND NOT EXISTS (SELECT 1 FROM leaderboard l WHERE l.addr=p.addr AND l.is_candidate=1)"
+        "AND NOT EXISTS (SELECT 1 FROM leaderboard l WHERE l.addr=p.addr AND l.is_candidate=1) "
+        "AND NOT EXISTS (SELECT 1 FROM copy_position cp WHERE cp.addr=p.addr AND cp.status='open') "
+        "AND NOT EXISTS (SELECT 1 FROM follow_selection fs JOIN scan_generation sg "
+        "ON sg.generation=fs.generation WHERE fs.addr=p.addr AND sg.is_current=1 "
+        "AND fs.role IN ('core','challenger','exit_only'))"
     )
     n_stale = db.execute("SELECT COUNT(*) FROM prune_discovery_addrs").fetchone()[0]
     before_episode = db.total_changes
@@ -462,14 +476,22 @@ def _prune_discovery_cache_once(db):
     db.execute(
         "DELETE FROM candidate_fills WHERE addr NOT IN "
         "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
-        " UNION SELECT addr FROM profile WHERE status='active')"
+        " UNION SELECT addr FROM profile WHERE status='active'"
+        " UNION SELECT addr FROM copy_position WHERE status='open'"
+        " UNION SELECT fs.addr FROM follow_selection fs JOIN scan_generation sg "
+        " ON sg.generation=fs.generation WHERE sg.is_current=1 "
+        " AND fs.role IN ('core','challenger','exit_only'))"
     )
     n_fills = db.total_changes - before_fills
     before_cache_state = db.total_changes
     db.execute(
         "DELETE FROM fill_cache_state WHERE addr NOT IN "
         "(SELECT addr FROM leaderboard WHERE is_candidate=1 "
-        " UNION SELECT addr FROM profile WHERE status='active')"
+        " UNION SELECT addr FROM profile WHERE status='active'"
+        " UNION SELECT addr FROM copy_position WHERE status='open'"
+        " UNION SELECT fs.addr FROM follow_selection fs JOIN scan_generation sg "
+        " ON sg.generation=fs.generation WHERE sg.is_current=1 "
+        " AND fs.role IN ('core','challenger','exit_only'))"
     )
     n_cache_state = db.total_changes - before_cache_state
     before_profiles = db.total_changes
@@ -539,9 +561,7 @@ def profile_workset_breakdown(candidates, active_addrs, profiled, full_scan, lim
     active_candidates = [a for a in candidates if a in active_set]
     new_candidates = [a for a in candidates if a not in profiled_set]
     active_new = dedupe_preserve(active_candidates + new_candidates)
-    daily_recheck_top = (
-        config.DAILY_RECHECK_TOP_N if daily_recheck_top is None else int(daily_recheck_top or 0)
-    )
+    daily_recheck_top = len(candidates) if daily_recheck_top is None else int(daily_recheck_top or 0)
     already = set(active_new)
     top_recheck = []
     if daily_recheck_top > 0:

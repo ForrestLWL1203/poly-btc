@@ -99,9 +99,9 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 ### 2. Candidate workset and profiles
 
-- Leaderboard harvesting is a zero-per-wallet API coarse filter. Its portfolio windows are not an executable
-  market-quality verdict and may contain activity outside this product's scope. The current weekly turnover
-  box is controlled by scanner params, not hardcoded in the UI.
+- Leaderboard harvesting uses official 7d/30d/all-time ROI, absolute PnL, account value and a weekly activity
+  floor. Nominal leveraged volume is never a profitability denominator and has no upper bound. Every survivor
+  must then pass the official Portfolio Perp PnL/share precheck before history profiling.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -111,25 +111,18 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 - With no published generation, every scan request is forcibly upgraded to `cold_full`: it harvests a new
   Leaderboard, profiles the complete candidate workset, bootstraps each new wallet's 37-day history, and
   rebuilds sector specialization.
-  A failed first generation remains cold on the next attempt; the Dashboard's incremental checkbox cannot
-  create a partial first generation.
+  A failed first generation remains cold on the next attempt.
 - `candidate_fills` is the cache. Once `fill_cache_state` proves that the 37-day source window was completely
-  fetched, all later daily and weekly evaluations fetch only the delta after that wallet's source cursor,
+  fetched, all later daily evaluations fetch only the delta after that wallet's source cursor,
   merge it into the rolling window, and prune rows older than 37 days. Do not infer source completeness from
   the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
-  missing/incomplete/capped caches perform a full 37-day bootstrap or repair.
-- Daily discovery is count-bounded at 300 ordinary profiles by default. Open-position owners, Core, qualified,
-  Challenger, and off-list qualified wallets are mandatory and outside that ordinary budget. Warm-up backfills
-  and the due evaluation shard come first; remaining discovery capacity is split new/recovery/fair-exploration
-  40/40/20. When the normal batch yields no new individually Core-eligible wallet, the next stable shard is
-  evaluated incrementally in the same generation (`DISCOVERY_MAX_EXTRA_SHARDS=1` by default). The 60-minute
-  daily target, 15-minute Core-refresh target and 15-minute finalization reserve are
-  audit SLOs, not wall-clock truncation: an Observer-safe REST pace must not permanently starve the rotating
-  tail. Workset and fill modes are recorded separately (`priority`, `rotation`, `all`; `delta`, `full_refetch`,
-  or `mixed`).
-- Seven stable shards bound daily evaluation work without coupling evaluation to source refetch.
-  `FULL_REFRESH_SHARDS=7`, `DISCOVERY_MAX_EXTRA_SHARDS=1`, and `CANDIDATE_MAX_RECHECK_DAYS=7` are the relevant
-  defaults.
+  missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
+  continuation cursor; it must not restart from the 37-day boundary on the next run.
+- Every daily generation refreshes the complete Leaderboard and evaluates every official-ROI + Perp-precheck
+  survivor. Core, Challenger and open-position owners are also evaluated for safe removal/exit. There is no
+  300-wallet budget, rotation/recovery/exploration allocation, deferred tail, seven-day shard or weekly full
+  refresh. Workset and fill transport remain separate: the workset is always `all`, while fills are `delta`,
+  `full_refetch`, or `mixed`.
 
 ### 3. Market-sector specialization
 

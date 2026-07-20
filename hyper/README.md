@@ -66,27 +66,35 @@ Wallet quality and funded-account membership are separate decisions.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
 
-## Daily and weekly collection
+## Daily complete candidate reevaluation
 
 Profiles are not re-downloaded from zero on every daily run.
 
 - New candidates get a full configured profile window.
 - Existing candidates use `candidate_fills` cursors and fetch only new fills, merging them into the 37-day
   cache.
-- The seven rolling shards control when cached candidates are re-evaluated; they do not trigger history
-  re-downloads. Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full
-  37-day source window. Page-cap or cache-integrity failures quarantine and repair the affected wallet.
-- If the normal daily shard finds no newly Core-eligible wallet, the scanner can immediately evaluate the
-  next shard from cached data (one extra shard by default) before final formation.
-- Core and held wallets receive priority refresh. The normal daily budget is 60 minutes with a 15-minute Core
-  deadline and a 15-minute finalization reserve; low-priority candidates can be deferred.
+- Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
+  window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
+- Leaderboard candidates first pass official 7d/30d/all-time ROI and absolute-PnL thresholds, then an official
+  Portfolio precheck requiring Perp PnL to meet the same dollar floors and contribute at least 80% in every
+  window. Missing Portfolio data is deferred and cannot open a new copy.
+- Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
+  is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
   cannot prune, publish, or tune.
 
-Automatic cadence is one daily incremental run and one weekly full candidate-universe refresh. Previously
-known wallets remain incremental during that full evaluation; only genuinely new/incomplete wallets bootstrap
-37 days. The Dashboard
-rescan button queues a manual run; changing scanner settings only persists params and does not start a scan.
+Automatic cadence is one complete candidate-universe reevaluation every day. Previously known wallets remain
+history-incremental; only genuinely new/incomplete wallets bootstrap 37 days. The Dashboard rescan button queues
+the same complete reevaluation; changing scanner settings only persists params and does not start a scan.
+
+Before production rollout, operators can run the same pipeline against an online SQLite backup:
+
+```bash
+python3 -m hyper.cli.discover --db /path/to/production.db shadow-scan --report /private/report.json
+```
+
+The source database is opened read-only, all mutations stay in a mode-0600 temporary database, and the temporary
+database is removed after a redacted JSON report is written.
 
 ## Copy replay and automatic tuning
 

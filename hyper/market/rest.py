@@ -131,22 +131,28 @@ def portfolio(addr: str):
 def fetch_window(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
     """All fills for addr since start_ms, paginated forward. Caps at max_pages
     (order-slicing can explode fill counts). Returns (fills, hit_cap)."""
-    out, seen, cur = [], set(), start_ms
+    out, hit_cap, _cursor = fetch_window_progress(addr, start_ms, max_pages, sleep=sleep)
+    return out, hit_cap
+
+
+def fetch_window_progress(addr: str, start_ms: int, max_pages: int, sleep: float = 0.0):
+    """Forward pagination with an explicit continuation cursor for resumable 37-day bootstrap."""
+    out, seen, cur = [], set(), int(start_ms)
     for _ in range(max_pages):
         page = user_fills_by_time(addr, cur)
         if not isinstance(page, list) or not page:
-            return out, False
+            return out, False, cur
         page.sort(key=lambda x: x["time"])
         for x in page:
             if x.get("tid") not in seen:
                 seen.add(x.get("tid"))
                 out.append(x)
         if len(page) < 2000:
-            return out, False
+            return out, False, int(page[-1]["time"]) + 1
         cur = page[-1]["time"] + 1
         if sleep:
             time.sleep(sleep)
-    return out, True
+    return out, True, cur
 
 
 def clearinghouse_state(addr: str, dex: str = None):

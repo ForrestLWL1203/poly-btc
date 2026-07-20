@@ -8,7 +8,9 @@ export function DiscoveryFunnel({ funnel, scoreHistogram, rejectReasons }) {
         <div className="funnel">
           <div className="funnel-stage"><div className="fn">{funnel.leaderboard ?? "—"}</div><div className="fl">Leaderboard</div></div>
           <div className="funnel-arrow">→</div>
-          <div className="funnel-stage"><div className="fn">{funnel.candidates}</div><div className="fl">候选 candidates</div></div>
+          <div className="funnel-stage"><div className="fn">{funnel.officialRoi ?? funnel.candidates}</div><div className="fl">官方 ROI</div></div>
+          <div className="funnel-arrow">→</div>
+          <div className="funnel-stage"><div className="fn">{funnel.perpPrefilter ?? funnel.candidates}</div><div className="fl">Perp 预检</div></div>
           <div className="funnel-arrow">→</div>
           <div className="funnel-stage"><div className="fn" style={{ color: "var(--blue-l)" }}>{funnel.qualified ?? funnel.active}</div><div className="fl">Qualified</div></div>
           <div className="funnel-arrow">→</div>

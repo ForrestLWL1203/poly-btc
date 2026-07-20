@@ -116,13 +116,13 @@ class ScannerWatchlistTests(unittest.TestCase):
             db.commit()
             fetched = [{"tid": 2, "time": 2_000, "coin": "BTC"}]
 
-            with patch.object(scanner.rest, "fetch_window", return_value=(fetched, False)) as fetch:
+            with patch.object(scanner.rest, "fetch_window_progress", return_value=(fetched, False, 2_001)) as fetch:
                 raw, hit_cap, new_fills, fetched_full = scanner._fetch_profile_fills(
                     db, "0xaaa", 1_000, SimpleNamespace(max_pages=5), full=False,
                 )
 
             fetch.assert_called_once_with("0xaaa", 1_000, 5)
-            self.assertEqual([row["tid"] for row in raw], [2])
+            self.assertEqual([row["tid"] for row in raw], [2, 1])
             self.assertEqual(raw[0]["user"], "0xaaa")
             self.assertFalse(hit_cap)
             self.assertEqual([row["tid"] for row in new_fills], [2])
@@ -176,7 +176,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 {"tid": 5, "time": 2_400, "coin": "vntl:OPENAI"},
                 {"tid": 6, "time": 2_500, "coin": "DELISTED"},
             ]
-            with patch.object(scanner.rest, "fetch_window", return_value=(fetched, False)):
+            with patch.object(scanner.rest, "fetch_window_progress", return_value=(fetched, False, 2_501)):
                 scoped, hit_cap, new_fills, fetched_full = scanner._fetch_profile_fills(
                     db, "0xaaa", 1_000, SimpleNamespace(max_pages=5), full=True,
                     universe={"BTC", "xyz:AAPL"},
@@ -202,6 +202,32 @@ class ScannerWatchlistTests(unittest.TestCase):
                 scanner._assert_scoped_fill_cache(db, ["0xaaa"], {"BTC", "xyz:AAPL"})["invalid"],
                 0,
             )
+            db.close()
+
+    def test_incomplete_history_resumes_from_saved_cursor(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            first = [{"tid": 1, "time": 2_000, "coin": "BTC"}]
+            with patch.object(
+                scanner.rest, "fetch_window_progress", return_value=(first, True, 2_001),
+            ):
+                _raw, hit_cap, _new, _full = scanner._fetch_profile_fills(
+                    db, "0xaaa", 1_000, SimpleNamespace(max_pages=1), full=True, universe={"BTC"},
+                )
+            self.assertTrue(hit_cap)
+            with scanner._db_lock:
+                scanner._store_cached_fills(db, "0xaaa", first, 1_000, coverage_complete=False,
+                                            coverage_end=2_000, universe={"BTC"})
+                db.commit()
+            with patch.object(
+                scanner.rest, "fetch_window_progress", return_value=([], False, 2_001),
+            ) as fetch:
+                raw, hit_cap, _new, _full = scanner._fetch_profile_fills(
+                    db, "0xaaa", 1_000, SimpleNamespace(max_pages=1), full=True, universe={"BTC"},
+                )
+            fetch.assert_called_once_with("0xaaa", 2_001, 1)
+            self.assertEqual([row["tid"] for row in raw], [1])
+            self.assertFalse(hit_cap)
             db.close()
 
     def test_generation_scope_audit_fails_closed_on_legacy_invalid_cache(self):
@@ -458,9 +484,12 @@ class ScannerWatchlistTests(unittest.TestCase):
             p = SimpleNamespace(
                 min_acct=10_000,
                 week_vlm_min=500_000,
-                week_vlm_max=100_000_000,
-                pnl_vol_min=0.001,
-                pnl_vol_max=0.08,
+                week_roi_min=0.05,
+                month_roi_min=0.10,
+                all_roi_min=0.10,
+                week_pnl_min=1_000,
+                month_pnl_min=2_000,
+                all_pnl_min=5_000,
             )
 
             with patch.object(scanner.rest, "get_leaderboard", return_value=[
@@ -537,6 +566,31 @@ class ScannerWatchlistTests(unittest.TestCase):
             self.assertEqual(db.execute("SELECT COUNT(*) FROM profile WHERE addr='0xactive'").fetchone()[0], 1)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM leaderboard WHERE addr='0xgone'").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM leaderboard WHERE addr='0xactive'").fetchone()[0], 1)
+
+    def test_prune_keeps_current_role_and_open_position_owners(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            cols = storage.PROFILE_COLS.split(",")
+            db.executemany(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [_profile_row("0xrole", "rejected", 0), _profile_row("0xopen", "rejected", 0),
+                 _profile_row("0xgone", "rejected", 0)],
+            )
+            db.execute(
+                "INSERT INTO scan_generation(generation,source,status,started_at,complete,is_current) "
+                "VALUES ('g','scan','published','now',1,1)"
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES ('g','0xrole','exit_only',0,'now')"
+            )
+            db.execute("INSERT INTO copy_position(addr,status) VALUES ('0xopen','open')")
+            db.commit()
+
+            scanner_lifecycle.prune_discovery_cache(db)
+
+            remaining = {row[0] for row in db.execute("SELECT addr FROM profile")}
+            self.assertEqual(remaining, {"0xrole", "0xopen"})
 
     def test_incremental_scan_workset_rechecks_current_top_ranked_rejected_tail(self):
         cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]

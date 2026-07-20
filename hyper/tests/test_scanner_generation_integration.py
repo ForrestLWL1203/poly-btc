@@ -16,11 +16,20 @@ def leaderboard_row(addr="0xaaa"):
         "accountValue": "100000",
         "windowPerformances": [
             ("day", {"pnl": "100", "roi": "0.001", "vlm": "1000000"}),
-            ("week", {"pnl": "300000", "roi": "0.10", "vlm": "30000000"}),
-            ("month", {"pnl": "500000", "roi": "0.20", "vlm": "90000000"}),
-            ("allTime", {"pnl": "900000", "roi": "0.30", "vlm": "180000000"}),
+            ("week", {"pnl": "300000", "roi": "0.30", "vlm": "30000000"}),
+            ("month", {"pnl": "500000", "roi": "0.60", "vlm": "90000000"}),
+            ("allTime", {"pnl": "900000", "roi": "0.90", "vlm": "180000000"}),
         ],
-    }
+}
+
+
+def portfolio_rows():
+    def window(pnl):
+        return {"pnlHistory": [[1, "0"], [2, str(pnl)]], "accountValueHistory": [[1, "1"], [2, "1"]]}
+    return [
+        ["week", window(300000)], ["month", window(500000)], ["allTime", window(900000)],
+        ["perpWeek", window(280000)], ["perpMonth", window(450000)], ["perpAllTime", window(800000)],
+    ]
 
 
 def scan_args():
@@ -456,6 +465,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
+                    patch.object(scanner.rest, "portfolio", return_value=portfolio_rows()), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "now_iso", side_effect=scan_time), \
                     patch.object(scanner.generation, "now_iso", return_value="2026-01-01T00:01:00Z"), \
@@ -499,6 +509,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
+                    patch.object(scanner.rest, "portfolio", return_value=portfolio_rows()), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "form_quality_prefix", side_effect=RuntimeError("tune failed")), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
@@ -600,6 +611,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
+                    patch.object(scanner.rest, "portfolio", return_value=portfolio_rows()), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "form_quality_prefix", return_value=formation), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
@@ -1029,7 +1041,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(by_addr["0xnew"], ("core", "core_strong_evidence"))
 
-    def test_manual_selection_mode_carries_operator_membership_into_new_generation(self):
+    def test_manual_selection_mode_cannot_bypass_current_hard_gate(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -1069,6 +1081,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             with patch.object(scanner.rest, "copyable_universe", return_value={"BTC"}), \
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row("0xauto")]), \
+                    patch.object(scanner.rest, "portfolio", return_value=portfolio_rows()), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
@@ -1083,7 +1096,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT reason,payload_json FROM pipeline_audit "
                 "WHERE stage='selection_summary' ORDER BY id DESC LIMIT 1"
             ).fetchone()
-            self.assertEqual(rows, [("0xoperator", "core", "operator_pick")])
+            self.assertEqual(rows, [])
             self.assertEqual(summary[0], "manual_selection_preserved")
             self.assertIn('"mode": "manual"', summary[1])
 

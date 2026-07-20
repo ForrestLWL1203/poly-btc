@@ -5,6 +5,7 @@ over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
 import concurrent.futures
+from dataclasses import replace
 import hashlib
 import json
 import math
@@ -40,7 +41,7 @@ from hyper.selection import (
     state as selection,
     strategy_revision,
 )
-from . import generation, metrics, pipeline_audit
+from . import generation, metrics, perp_prefilter, pipeline_audit
 from .scanner_copy_bt import (
     apply_copy_bt_gate as _apply_copy_bt_gate,
     apply_sector_copy_bt_gate as _apply_sector_copy_bt_gate,
@@ -53,7 +54,6 @@ from .scanner_copy_bt import (
 from .scanner_lifecycle import (
     prune_discovery_cache as _prune_discovery_cache,
     schedule_profile_workset,
-    subsequent_refresh_shard_batches,
     upsert_wallet_registry,
 )
 from hyper.util import f, now_iso
@@ -216,9 +216,11 @@ def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=Fals
     db.execute("DELETE FROM candidate_fills WHERE addr=? AND time<?", (addr, window_start))
     if coverage_complete:
         db.execute(
-            "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) VALUES (?,?,?,?) "
+            "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,backfill_start_ms,"
+            "backfill_cursor_ms,updated_at) VALUES (?,?,?,NULL,NULL,?) "
             "ON CONFLICT(addr) DO UPDATE SET coverage_start_ms=MIN(fill_cache_state.coverage_start_ms,excluded.coverage_start_ms),"
             "coverage_end_ms=MAX(COALESCE(fill_cache_state.coverage_end_ms,0),excluded.coverage_end_ms),"
+            "backfill_start_ms=NULL,backfill_cursor_ms=NULL,"
             "updated_at=excluded.updated_at",
             (addr, int(window_start), int(coverage_end or window_start), now_iso()),
         )
@@ -279,15 +281,6 @@ def _incomplete_fill_cache_addrs(db, addrs, desired_start_ms):
     return [addr for addr in owners if addr not in complete]
 
 
-def _new_individual_core_candidates(db, generation_id, previous_core):
-    """Current-generation wallets that newly clear the individual Core gate before shared formation."""
-    previous = {str(addr or "").lower() for addr in previous_core or ()}
-    return [
-        row["addr"] for row in _quality_core_profiles(db, generation_id, core_only=True)
-        if row["addr"] not in previous
-    ]
-
-
 def _replace_episode_rows(db, addr: str, eps: list) -> None:
     erows = _episode_rows(addr, eps)
     db.execute("DELETE FROM episode WHERE addr=?", (addr,))
@@ -345,11 +338,9 @@ def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
     independently from the last retained fill, so wallets trading only an
     excluded market do not cause the same payload to be downloaded forever.
     """
-    # A partial page-capped cache deliberately has no complete coverage marker.  Never advance from that
-    # partial tail as if it were authoritative: keep the wallet quarantined and force a bounded full-window
-    # heal on the next attempt.  This separates data integrity from business qualification.
     coverage = db.execute(
-        "SELECT coverage_start_ms,coverage_end_ms FROM fill_cache_state WHERE addr=?",
+        "SELECT coverage_start_ms,coverage_end_ms,backfill_start_ms,backfill_cursor_ms "
+        "FROM fill_cache_state WHERE addr=?",
         (addr,),
     ).fetchone()
     coverage_complete = bool(coverage and int(coverage[0] or 0) <= int(window_start))
@@ -372,10 +363,33 @@ def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
                     key=lambda x: x["time"],
                 )
                 return scoped_full, False, scoped_delta, False
-            # delta hit the cap → too many new fills to trust incrementally → full re-fetch (self-heal)
-    raw_full, hit_cap = rest.fetch_window(addr, window_start, p.max_pages)
-    scoped_full = normalize_copyable_fills(raw_full, addr=addr, universe=universe)
-    return scoped_full, hit_cap, scoped_full, True
+            # An unexpectedly capped delta becomes a resumable heal instead of repeatedly restarting.
+    cached = normalize_copyable_fills(
+        _load_cached_fills(db, addr, window_start), addr=addr, universe=universe,
+    )
+    resume_cursor = int(coverage[3] or 0) if coverage else 0
+    resume_start = int(coverage[2] or 0) if coverage else 0
+    if not resume_cursor or (resume_start and resume_start > window_start):
+        resume_cursor = int(window_start)
+        resume_start = int(window_start)
+    raw_delta, hit_cap, next_cursor = rest.fetch_window_progress(addr, resume_cursor, p.max_pages)
+    scoped_delta = normalize_copyable_fills(raw_delta, addr=addr, universe=universe)
+    merged = {x.get("tid"): x for x in cached}
+    merged.update({x.get("tid"): x for x in scoped_delta})
+    scoped_full = sorted(
+        (x for x in merged.values() if x["time"] >= window_start), key=lambda x: x["time"],
+    )
+    if hit_cap:
+        with _db_lock:
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,backfill_start_ms,backfill_cursor_ms,updated_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
+                "backfill_start_ms=excluded.backfill_start_ms,"
+                "backfill_cursor_ms=MAX(COALESCE(fill_cache_state.backfill_cursor_ms,0),excluded.backfill_cursor_ms),"
+                "updated_at=excluded.updated_at",
+                (addr, resume_start, int(next_cursor), now_iso()),
+            )
+    return scoped_full, hit_cap, scoped_delta, True
 
 
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
@@ -454,12 +468,19 @@ def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, act
 
 # -------------------------------------------------------------------------- harvest
 def _prepare_leaderboard_rows(rows, p, fetched_at):
-    """Attach the cheap harvest decision without mutating the live leaderboard."""
+    """Attach the official high-ROI harvest decision without mutating the live leaderboard."""
     min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
     vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
-    vlm_max = getattr(p, "week_vlm_max", config.HARVEST_WEEK_VLM_MAX)
-    pv_min = getattr(p, "pnl_vol_min", config.HARVEST_PNL_VOL_MIN)
-    pv_max = getattr(p, "pnl_vol_max", config.HARVEST_PNL_VOL_MAX)
+    roi_min = {
+        "week": getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN),
+        "month": getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
+        "all": getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
+    }
+    pnl_min = {
+        "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
+        "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
+        "all": getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
+    }
     prepared = []
     for original in rows or []:
         r = dict(original or {})
@@ -467,12 +488,15 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         wk, mo, al = w.get("week", {}), w.get("month", {}), w.get("allTime", {})
         acct = f(r.get("accountValue"))
         wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
-        ratio = wk_pnl / wk_vlm if wk_vlm > 0 else 0.0
+        month_pnl, all_pnl = f(mo.get("pnl")), f(al.get("pnl"))
+        week_roi, month_roi, all_roi = f(wk.get("roi")), f(mo.get("roi")), f(al.get("roi"))
         r["is_candidate"] = int(
             acct >= min_acct
-            and vlm_min <= wk_vlm <= vlm_max
-            and wk_pnl > 0 and f(mo.get("pnl")) > 0 and f(al.get("pnl")) > 0
-            and pv_min <= ratio <= pv_max
+            and wk_vlm >= vlm_min
+            and week_roi >= roi_min["week"] and month_roi >= roi_min["month"]
+            and all_roi >= roi_min["all"]
+            and wk_pnl >= pnl_min["week"] and month_pnl >= pnl_min["month"]
+            and all_pnl >= pnl_min["all"]
         )
         r["fetched_at"] = fetched_at
         mon_vlm = f(mo.get("vlm"))
@@ -482,25 +506,7 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
 
 
 def harvest(db, p, *, generation_id=None) -> int:
-    """STAGE-1 address-discovery box — leaderboard windows only, ZERO per-wallet API.
-
-    Hyperliquid exposes no sector-filtered public leaderboard.  These account-wide fields may therefore
-    choose which addresses are worth the expensive history call, but they are never a profile score or
-    Core/Challenger qualification input.  Every survivor is re-decided from scoped contract history.
-
-    Gate ONLY on what
-    the leaderboard can HONESTLY say; defer ALL profit JUDGMENT to the profile (real fills). Predicate:
-      • acct ≥ floor                         → real capital (we copy by %, not $).
-      • vlm_min ≤ 7d VOLUME ≤ vlm_max        → genuinely trading this week, but NOT a market-maker
-                                               (billion-$/wk bots sit above the ceiling).
-      • 7d & 30d & all-time PnL all > 0      → MULTI-WINDOW consistency: profitable across three
-                                               horizons, not a one-window fluke (cheap robustness).
-      • pv_min ≤ 7d pnl/volume ≤ pv_max      → profit is a PLAUSIBLE fraction of traded volume: below =
-                                               razor-thin MM, above = profit too big for the volume =
-                                               NOT trading (deposit/spot/airdrop ghost; real = 0.2-4%).
-    Leaderboard ROI/PnL MAGNITUDE is deliberately NOT a gate — it's contaminated (top-ROI wallets are
-    $0-volume HODLers/ghosts) and return magnitude belongs in the SCORE, not eligibility. Bots/grids are
-    INVISIBLE to leaderboard aggregates (proven), so the profile's grid/worst_loss gates handle them."""
+    """Leaderboard official ROI + absolute PnL screen; no leveraged-volume efficiency ratio."""
     rows = rest.get_leaderboard()
     now = now_iso()
     prepared = _prepare_leaderboard_rows(rows, p, now)
@@ -564,6 +570,81 @@ def _stage_existing_leaderboard(db, generation_id):
     if not validation.valid:
         raise RuntimeError("leaderboard_invalid:" + ",".join(validation.reasons))
     return sum(int(row.get("is_candidate") or 0) for row in rows)
+
+
+def _official_roi_audit(db, generation_id, stamp, p):
+    """Record the complete leaderboard decision surface for the generation."""
+    pipeline_audit._delete_stage(db, stamp, "scan", "official_roi")
+    rows = db.execute(
+        "SELECT addr,is_candidate,account_value,week_vlm,week_pnl,week_roi,mon_pnl,mon_roi,all_pnl,all_roi "
+        "FROM leaderboard_staging WHERE generation=? ORDER BY mon_roi DESC,addr",
+        (generation_id,),
+    ).fetchall()
+    names = ("addr", "is_candidate", "accountValue", "weekVlm", "weekPnl", "weekRoi",
+             "monthPnl", "monthRoi", "allPnl", "allRoi")
+    rejected_counts = {}
+    for rank, row in enumerate(rows, 1):
+        item = dict(zip(names, row))
+        passed = bool(item.pop("is_candidate"))
+        checks = {
+            "account_value_below_floor": f(item["accountValue"]) < getattr(p, "min_acct", config.HARVEST_MIN_ACCT),
+            "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
+            "week_roi_below_floor": f(item["weekRoi"]) < getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN),
+            "month_roi_below_floor": f(item["monthRoi"]) < getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
+            "all_roi_below_floor": f(item["allRoi"]) < getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
+            "week_pnl_below_floor": f(item["weekPnl"]) < getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
+            "month_pnl_below_floor": f(item["monthPnl"]) < getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
+            "all_pnl_below_floor": f(item["allPnl"]) < getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
+        }
+        failed_checks = [reason for reason, failed in checks.items() if failed]
+        item["failedChecks"] = failed_checks
+        addr = item.pop("addr")
+        reason = failed_checks[0] if failed_checks else "official_roi_below_floor"
+        if passed:
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="scan", stage="official_roi", addr=addr, rank=rank,
+                status="passed", reason="official_roi_passed", payload=item,
+            )
+        else:
+            rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
+    for reason, count in sorted(rejected_counts.items()):
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="scan", stage="official_roi", status="rejected",
+            reason=reason, payload={"count": count},
+        )
+    db.commit()
+
+
+def _run_perp_prefilter(db, addrs, p, stamp):
+    """Run the authoritative Portfolio precheck for ROI survivors before history collection."""
+    pipeline_audit._delete_stage(db, stamp, "scan", "perp_prefilter")
+    minima = {
+        "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
+        "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
+        "all": getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
+    }
+    share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
+    results = {}
+    for rank, addr in enumerate(addrs, 1):
+        try:
+            payload = rest.portfolio(addr)
+        except Exception as exc:  # noqa: BLE001
+            result = perp_prefilter.Result(
+                "deferred_data_error", f"portfolio_error:{type(exc).__name__}", {},
+            )
+        else:
+            result = perp_prefilter.evaluate(payload, pnl_minima=minima, share_min=share_min)
+        results[addr] = result
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="scan", stage="perp_prefilter", addr=addr, rank=rank,
+            status=result.status, reason=result.reason, payload=result.payload(),
+        )
+        if rank % 10 == 0:
+            db.commit()
+            _set_scan_progress(db, stage="perp_prefilter", candidates_scanned=rank,
+                               candidates_total=len(addrs))
+    db.commit()
+    return results
 
 
 # -------------------------------------------------------------------------- profile
@@ -802,6 +883,31 @@ def _defer_profile(db, addr, prior, stamp, reason):
         )
         db.commit()
     return "quarantine", reason, row, False
+
+
+def _reject_prefilter_profile(db, addr, prior, stamp, generation_id, reason):
+    """Publish a hard front-funnel failure so incumbents and pins cannot bypass it."""
+    row = dict(prior or {})
+    row.update(
+        addr=addr,
+        status="retired" if prior and prior.get("status") in {"active", "qualified"} else "rejected",
+        reason=str(reason or "prefilter_rejected")[:120],
+        score=0.0,
+        raw_quality_score=0.0,
+        data_status="valid",
+        evidence_status="ineligible",
+        profile_generation=generation_id,
+        evaluated_at=stamp,
+        times_seen=int((prior or {}).get("times_seen") or 0) + 1,
+    )
+    cols = storage.PROFILE_COLS.split(",")
+    with _db_lock:
+        db.execute(
+            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * len(cols))})",
+            [row.get(column) for column in cols],
+        )
+        db.commit()
+    return row["status"], row["reason"], row, False
 
 
 def _open_snapshot(addr, dexes, open_eps, now_ms, acct, *, universe):
@@ -4177,7 +4283,9 @@ def scan(db, p) -> None:
             db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} INTEGER DEFAULT {default}"); db.commit()
         except Exception:  # noqa: BLE001 — column already exists
             pass
-    run_full = bool(cold_start or getattr(p, "full_scan", False) or not config.INCREMENTAL_SCAN)
+    # Every generation reevaluates the complete current candidate set. ``full`` describes workset breadth,
+    # not history transport: complete caches still fetch deltas and only new/incomplete caches backfill 37d.
+    run_full = True
     # A complete/full operator sweep is a fresh specialization decision.  Prior sector policy may help an
     # incremental scan confirm repeated deterioration, but must never decide whether a cold/full scan gets
     # to evaluate the current generation's Crypto/stock evidence.
@@ -4201,6 +4309,7 @@ def scan(db, p) -> None:
     p.copy_bt_overrides = _copy_bt_overrides(db)
     p.margin_equity_pct = p.copy_bt_overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     rest.reset_request_stats()
+    harvest_started_at = time.time()
 
     try:
         # A full/cold sweep rebuilds specialization from the exchange's current executable market set.
@@ -4221,6 +4330,8 @@ def scan(db, p) -> None:
         else:
             n_cand = _stage_existing_leaderboard(db, generation_id)
         print(f"  generation {generation_id} · {n_cand} staged candidates", flush=True)
+        harvest_done_at = time.time()
+        harvest_api_stats = rest.request_stats()
     except Exception as exc:  # noqa: BLE001 - old published selection remains authoritative
         db.rollback()
         generation.fail_generation(db, generation_id, str(exc))
@@ -4239,11 +4350,23 @@ def scan(db, p) -> None:
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(
         getattr(p, "order", "mon_roi"), "mon_roi"
     )
-    cand = [r[0] for r in db.execute(
+    roi_cand = [r[0] for r in db.execute(
         f"SELECT addr FROM leaderboard_staging WHERE generation=? AND is_candidate=1 "
         f"ORDER BY {order} DESC",
         (generation_id,),
     ).fetchall()]
+    _official_roi_audit(db, generation_id, stamp, p)
+    prefilter_started_at = time.time()
+    _set_scan_progress(db, stage="perp_prefilter", candidates_scanned=0,
+                       candidates_total=len(roi_cand))
+    perp_results = _run_perp_prefilter(db, roi_cand, p, stamp)
+    prefilter_done_at = time.time()
+    prefilter_api_stats = rest.request_stats()
+    cand = [addr for addr in roi_cand if perp_results[addr].passed]
+    print(
+        f"  official ROI {len(roi_cand)} · Perp precheck passed {len(cand)} · "
+        f"deferred {sum(result.deferred for result in perp_results.values())}", flush=True,
+    )
     # ``profile.status='active'`` is the storage-compatible spelling for a wallet that passed the
     # per-wallet quality/Copy gates.  It is a qualified pre-selection candidate, not a production role.
     qualified_addrs = [
@@ -4276,9 +4399,6 @@ def scan(db, p) -> None:
     p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
     cand_set = set(cand)
     off_list_qualified = [addr for addr in qualified_addrs if addr not in cand_set]
-    near_threshold = [r[0] for r in db.execute(
-        "SELECT addr FROM profile WHERE status!='active' ORDER BY score DESC,addr LIMIT 1000"
-    ).fetchall()]
     priority_n = len(set(position_addrs) | set(core_addrs) | set(qualified_addrs)
                      | set(challenger_addrs) | set(off_list_qualified))
     recent = db.execute(
@@ -4286,23 +4406,9 @@ def scan(db, p) -> None:
         "WHERE COALESCE(profiled,probed_new)>0 AND complete=1 ORDER BY id DESC LIMIT 1"
     ).fetchone()
     estimated_profile_s = max(1.0, min(120.0, (f(recent[0]) / int(recent[1])))) if recent else 12.0
-    daily_slo_min = float(
-        getattr(p, "daily_scan_time_budget_min", config.DAILY_SCAN_TIME_BUDGET_MIN)
-    )
-    finalize_reserve_min = float(
-        getattr(p, "scan_finalize_reserve_min", config.SCAN_FINALIZE_RESERVE_MIN)
-    )
-    if run_full:
-        scheduler_limit = max(priority_n, int(getattr(p, "limit", 0) or len(cand) + priority_n))
-        time_budget = None
-    else:
-        daily_cap = int(getattr(p, "daily_profile_budget", config.DAILY_PROFILE_BUDGET) or config.DAILY_PROFILE_BUDGET)
-        cli_cap = int(getattr(p, "limit", daily_cap) or daily_cap)
-        scheduler_limit = priority_n + min(daily_cap, cli_cap)
-        # Daily coverage is count-bounded, not wall-clock truncated.  The 60-minute setting is an SLO used
-        # for audit/alerting; dropping the tail at that boundary would permanently starve rotating seeds
-        # whenever Observer-safe REST pacing makes a wallet require several spaced requests.
-        time_budget = None
+    scheduler_limit = len(set(cand) | set(position_addrs) | set(core_addrs)
+                          | set(qualified_addrs) | set(challenger_addrs) | set(off_list_qualified))
+    time_budget = None
     desired_cache_start_ms = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
     full_refetch_due = set(_incomplete_fill_cache_addrs(
         db,
@@ -4319,15 +4425,12 @@ def scan(db, p) -> None:
         off_list_qualified_addrs=off_list_qualified,
         position_addrs=position_addrs,
         profiled_addrs=profiled,
-        near_threshold_addrs=near_threshold,
-        exploration_addrs=cand,
         full_refetch_addrs=full_refetch_due,
         limit=scheduler_limit,
         budget=time_budget,
         estimated_profile_s=estimated_profile_s,
-        shard_count=int(getattr(p, "full_refresh_shards", config.FULL_REFRESH_SHARDS)),
         exploration_seed=generation_id,
-        full_scan=run_full,
+        full_scan=True,
     )
     if cold_start:
         workset_info["mode"] = "cold_full"
@@ -4359,8 +4462,6 @@ def scan(db, p) -> None:
     )
     db.commit()
     workset, mode = workset_info["workset"], workset_info["mode"]
-    initial_workset_n = len(workset)
-    all_eligible_addrs = set(cand) | set(workset[:workset_info["counts"]["priority"]])
     off_qualified_n = len([a for a in qualified_addrs if a not in cand_set])
     full_refetch = set(workset_info["refresh"]["full_refetch"])
     priority_addrs = set(workset[:workset_info["counts"]["priority"]])
@@ -4388,6 +4489,17 @@ def scan(db, p) -> None:
 
     def _work(addr):
         prior = priors.get(addr)
+        gate = perp_results.get(addr)
+        if gate is None:
+            return addr, prior, _reject_prefilter_profile(
+                db, addr, prior, stamp, generation_id, "official_roi_below_floor",
+            )
+        if gate.deferred:
+            return addr, prior, _defer_profile(db, addr, prior, stamp, gate.reason)
+        if not gate.passed:
+            return addr, prior, _reject_prefilter_profile(
+                db, addr, prior, stamp, generation_id, gate.reason,
+            )
         return addr, prior, _profile_one(
             db, addr, start_ms, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
             force_full=addr in full_refetch,
@@ -4461,67 +4573,8 @@ def scan(db, p) -> None:
 
     _profile_batch(list(workset))
 
-    # Core exits are checked every day while the rotating candidate tail would otherwise wait up to a week.
-    # When the normal batch produces no *new* individually Core-eligible wallet, consume the next stable
-    # shard immediately. This expands evidence only; final individual/path/portfolio gates remain unchanged.
-    extra_shards = []
-    max_extra_shards = int(getattr(
-        p, "discovery_max_extra_shards", config.DISCOVERY_MAX_EXTRA_SHARDS,
-    ) or 0)
-    if not run_full and not failed and max_extra_shards > 0:
-        shard_count = int(getattr(p, "full_refresh_shards", config.FULL_REFRESH_SHARDS))
-        batches = subsequent_refresh_shard_batches(
-            cand, workset,
-            current_shard=workset_info["refresh"]["shard_index"],
-            shard_count=shard_count,
-            max_shards=max_extra_shards,
-        )
-        for extension in batches:
-            if _new_individual_core_candidates(db, generation_id, core_addrs):
-                break
-            batch = extension["workset"]
-            if not batch:
-                continue
-            workset.extend(batch)
-            extra_shards.append(extension["shard"])
-            full_refetch.update(addr for addr in batch if addr in full_refetch_due)
-            _set_scan_progress(
-                db, stage="extend_discovery_shard", candidates_scanned=done,
-                candidates_total=len(workset),
-            )
-            print(
-                f"scan: no new individual Core candidate; extending delta evaluation with shard "
-                f"{extension['shard']} ({len(batch)} wallets)",
-                flush=True,
-            )
-            _profile_batch(batch)
-
-    if extra_shards:
-        workset_set = set(workset)
-        workset_info["workset"] = list(workset)
-        workset_info["counts"]["workset"] = len(workset)
-        workset_info["counts"]["deferred"] = max(0, len(all_eligible_addrs - workset_set))
-        workset_info["counts"]["extra_rotation"] = len(workset) - initial_workset_n
-        workset_info["counts"]["extra_shards"] = len(extra_shards)
-        workset_info["refresh"]["full_refetch"] = sorted(full_refetch)
-        workset_info["refresh"]["delta"] = [addr for addr in workset if addr not in full_refetch]
-        workset_info["fill_mode"] = (
-            "full_refetch" if full_refetch and not workset_info["refresh"]["delta"]
-            else ("mixed" if full_refetch else "delta")
-        )
-        extra_profiles = len(workset) - initial_workset_n
-        workset_metrics.update(extraShards=extra_shards, extraProfiles=extra_profiles)
-        pipeline_audit.record_workset_summary(db, stamp, "scan_extension", workset_info)
-        generation.record_workset(
-            db, generation_id,
-            workset_mode=workset_info["workset_mode"], fill_mode=workset_info["fill_mode"],
-            full_refresh_shard=workset_info["refresh"]["shard_index"],
-            workset_n=len(workset), deferred_n=workset_info["counts"]["deferred"],
-            metrics=workset_metrics,
-        )
-        db.commit()
-
     profile_done_at = time.time()
+    profile_api_stats = rest.request_stats()
     complete = failed == 0
     market_snapshot_audit = {}
     if complete:
@@ -4604,7 +4657,29 @@ def scan(db, p) -> None:
                 commit=False,
             )
             if selection_mode == "manual":
-                selection_rows = selection.current_selection_rows(db)
+                held = {(addr or "").lower() for (addr,) in db.execute(
+                    "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+                ).fetchall()}
+                profile_gate = {
+                    (addr or "").lower(): (status, profile_generation, data_status)
+                    for addr, status, profile_generation, data_status in db.execute(
+                        "SELECT addr,status,profile_generation,COALESCE(data_status,'valid') FROM profile"
+                    ).fetchall()
+                }
+                selection_rows = []
+                for item in selection.current_selection_rows(db):
+                    status, profile_generation, data_status = profile_gate.get(
+                        item.addr.lower(), (None, None, None)
+                    )
+                    if status in {"active", "qualified"} and profile_generation == generation_id \
+                            and data_status == "valid":
+                        selection_rows.append(item)
+                    elif item.addr.lower() in held:
+                        selection_rows.append(replace(
+                            item, role=selection.EXIT_ONLY, enabled=False,
+                            reason="manual_target_failed_current_hard_gate:exit_only",
+                            data_status=data_status or "invalid",
+                        ))
                 marginal = None
             else:
                 _apply_formation_params(db, formation, selection_stamp)
@@ -4700,14 +4775,33 @@ def scan(db, p) -> None:
             )
             n_active = len(current_core)
             duration_s = time.time() - t0
-            profile_slo_s = max(0.0, daily_slo_min - finalize_reserve_min) * 60.0
             stage_metrics = {
                 "durationSec": round(duration_s, 3),
-                "dailySloSec": None if run_full else round(daily_slo_min * 60.0, 3),
-                "dailySloMet": None if run_full else duration_s <= daily_slo_min * 60.0,
-                "profileDurationSec": round(profile_done_at - t0, 3),
-                "profileSloSec": None if run_full else round(profile_slo_s, 3),
-                "profileSloMet": None if run_full else (profile_done_at - t0) <= profile_slo_s,
+                "leaderboardAndUniverseSec": round(harvest_done_at - harvest_started_at, 3),
+                "perpPrefilterSec": round(prefilter_done_at - prefilter_started_at, 3),
+                "dailySloSec": None,
+                "dailySloMet": None,
+                "profileDurationSec": round(profile_done_at - prefilter_done_at, 3),
+                "profileSloSec": None,
+                "profileSloMet": None,
+                "officialRoiPassed": len(roi_cand),
+                "perpPrefilterPassed": len(cand),
+                "perpPrefilterDeferred": sum(result.deferred for result in perp_results.values()),
+                "apiByStage": {
+                    "leaderboard": harvest_api_stats,
+                    "perpPrefilter": {
+                        key: int(prefilter_api_stats.get(key, 0)) - int(harvest_api_stats.get(key, 0))
+                        for key in prefilter_api_stats
+                    },
+                    "profile": {
+                        key: int(profile_api_stats.get(key, 0)) - int(prefilter_api_stats.get(key, 0))
+                        for key in profile_api_stats
+                    },
+                    "formation": {
+                        key: int(rest.request_stats().get(key, 0)) - int(profile_api_stats.get(key, 0))
+                        for key in profile_api_stats
+                    },
+                },
                 "coreRefreshSec": round((priority_done_at or time.time()) - t0, 3),
                 "coreDeadlineMet": ((priority_done_at or time.time()) - t0)
                 <= float(getattr(p, "core_refresh_deadline_min", config.CORE_REFRESH_DEADLINE_MIN)) * 60.0,

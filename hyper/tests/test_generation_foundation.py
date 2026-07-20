@@ -253,7 +253,7 @@ class GenerationFoundationTests(unittest.TestCase):
                 "'add_base','add_last_auto','follow_line_last_choice')"
             ).fetchone()[0], 0)
 
-    def test_scheduler_preserves_priority_and_applies_time_capacity(self):
+    def test_scheduler_preserves_priority_and_never_defers_candidate_tail(self):
         candidates = [f"0xc{i}" for i in range(30)]
         budget = scanner_lifecycle.ScanTimeBudget(100.0, total_s=60.0, finalize_reserve_s=10.0)
         result = scanner_lifecycle.schedule_profile_workset(
@@ -275,8 +275,9 @@ class GenerationFoundationTests(unittest.TestCase):
             "0xposition", "0xcore", "0xqualified", "0xchallenger", "0xoff",
         ])
         self.assertEqual(result["counts"]["priority"], 5)
-        self.assertEqual(result["time_capacity"], 5)
-        self.assertEqual(len(result["workset"]), 10)
+        self.assertIsNone(result["time_capacity"])
+        self.assertEqual(len(result["workset"]), 35)
+        self.assertEqual(result["counts"]["deferred"], 0)
 
     def test_scheduler_counts_warmup_as_ordinary_budget_not_challenger_priority(self):
         candidates = ["0xwarm1", "0xwarm2", "0xother1", "0xother2"]
@@ -295,9 +296,11 @@ class GenerationFoundationTests(unittest.TestCase):
         self.assertEqual(result["counts"]["qualified"], 2)
         self.assertEqual(result["counts"]["challenger"], 1)
         self.assertEqual(result["counts"]["warmup_backfill"], 2)
-        self.assertEqual(result["workset"], ["0xcore", "0xchallenger", "0xwarm1", "0xwarm2"])
+        self.assertEqual(result["workset"], [
+            "0xcore", "0xchallenger", "0xwarm1", "0xwarm2", "0xother1", "0xother2",
+        ])
 
-    def test_scheduler_uses_40_40_20_after_stable_refresh_lane(self):
+    def test_scheduler_has_no_rotation_recovery_or_exploration_lanes(self):
         new = [f"0xnew{i}" for i in range(30)]
         recovery = [f"0xrecover{i}" for i in range(30)]
         explore = [f"0xexplore{i}" for i in range(30)]
@@ -319,10 +322,12 @@ class GenerationFoundationTests(unittest.TestCase):
             exploration_seed="g1",
         )
 
-        self.assertEqual(result["counts"]["rotation"], rotation_n)
-        self.assertEqual(result["counts"]["new"], 4)
-        self.assertEqual(result["counts"]["recovery"], 4)
-        self.assertEqual(result["counts"]["exploration"], 2)
+        self.assertEqual(result["workset"], candidates)
+        self.assertEqual(result["counts"]["rotation"], 0)
+        self.assertEqual(result["counts"]["new"], 0)
+        self.assertEqual(result["counts"]["recovery"], 0)
+        self.assertEqual(result["counts"]["exploration"], 0)
+        self.assertEqual(result["counts"]["deferred"], 0)
         self.assertEqual(
             result["refresh"]["full_refetch"],
             [new[0]] if new[0] in result["workset"] else [],
@@ -336,7 +341,7 @@ class GenerationFoundationTests(unittest.TestCase):
             scanner_lifecycle.stable_refresh_shard("0xABC", 7),
         )
 
-    def test_complete_cache_evaluation_shard_stays_delta_only(self):
+    def test_complete_cache_daily_full_workset_stays_delta_only(self):
         candidates = [f"0xwallet{i}" for i in range(40)]
         refresh_shard = 2
         result = scanner_lifecycle.schedule_profile_workset(
@@ -355,7 +360,7 @@ class GenerationFoundationTests(unittest.TestCase):
         self.assertEqual(result["refresh"]["full_refetch"], [])
         self.assertEqual(result["refresh"]["delta"], result["workset"])
 
-    def test_weekly_full_evaluation_does_not_refetch_complete_wallets(self):
+    def test_daily_complete_evaluation_does_not_refetch_complete_wallets(self):
         candidates = ["0xknown1", "0xknown2", "0xnew"]
         result = scanner_lifecycle.schedule_profile_workset(
             candidates,
@@ -369,30 +374,6 @@ class GenerationFoundationTests(unittest.TestCase):
         self.assertEqual(result["refresh"]["full_refetch"], ["0xnew"])
         self.assertEqual(result["refresh"]["delta"], candidates[:2])
         self.assertEqual(result["fill_mode"], "mixed")
-
-    def test_subsequent_refresh_shard_batch_excludes_used_and_preserves_order(self):
-        candidates = [f"0xwallet{i}" for i in range(100)]
-        current = 4
-        next_shard = (current + 1) % 7
-        already_used = next(
-            addr for addr in candidates
-            if scanner_lifecycle.stable_refresh_shard(addr, 7) == next_shard
-        )
-
-        batches = scanner_lifecycle.subsequent_refresh_shard_batches(
-            candidates,
-            [already_used],
-            current_shard=current,
-            shard_count=7,
-            max_shards=1,
-        )
-
-        expected = [
-            addr for addr in candidates
-            if addr != already_used
-            and scanner_lifecycle.stable_refresh_shard(addr, 7) == next_shard
-        ]
-        self.assertEqual(batches, [{"shard": next_shard, "workset": expected}])
 
 
 if __name__ == "__main__":

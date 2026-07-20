@@ -285,21 +285,19 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # high-churn bots. (3) RETURN uses 30d magnitude + 7d magnitude TOGETHER: 30d alone can be one big early
 # day then dormant; requiring the 7d to ALSO be earning blocks that, while the 30d requirement stops a
 # single-week fluke. We copy by %/leverage so low-ROI wallets give us low returns (small capital).
-# STAGE-1 leaderboard BOX (v5, 2026-06-29). Gate ONLY on what the leaderboard can HONESTLY say —
-# real capital + genuine recent VOLUME + internal consistency. ROI/PnL MAGNITUDE is NOT a gate:
-# leaderboard ROI is contaminated (deposits/withdrawals/spot/airdrop), empirically the top-ROI wallets
-# are $0-volume HODLers/ghosts. The one field that can't be faked by holding is VOLUME. Profit
-# JUDGMENT is deferred to the profile (real fills). Thresholds calibrated against 20 followed anchors +
-# a clean-strength cohort (see memory hl-copytrade.md): the production discovery box is intentionally
-# limited to $0.3–30M weekly volume; pnl/vol and the later profile gates remove thin-edge churners.
-HARVEST_MIN_ACCT = 10000.0          # real-capital floor (5k→10k; <10k mostly noise, but our proven
-#                                     small-account %-traders sit at ~$11-20k so don't raise further)
-HARVEST_WEEK_VLM_MIN = 300_000.0     # 7d VOLUME floor — below this is too inactive for timely copy signals
-HARVEST_WEEK_VLM_MAX = 30_000_000.0  # 7d VOLUME ceiling — higher-volume accounts skew toward execution-heavy
-#                                      churn that a REST copy follower cannot reproduce reliably
-HARVEST_PNL_VOL_MIN = 0.001         # 7d pnl/volume FLOOR (0.1%) — below = razor-thin MM, not directional
-HARVEST_PNL_VOL_MAX = 0.08          # 7d pnl/volume CEILING (8%) — above = profit too big for the volume
-#                                     = NOT from trading (deposit/spot/airdrop ghost); real traders 0.2-4%
+# Stage-1 is deliberately demanding: the official leaderboard's deposit-adjusted ROI supplies return
+# quality, while absolute PnL prevents a tiny account/flow artefact from earning an expensive profile.
+# Nominal volume is used only as a recent-activity floor.  It is never a profitability denominator because
+# leverage makes PnL/volume incomparable across otherwise identical contract traders.
+HARVEST_MIN_ACCT = 30_000.0
+HARVEST_WEEK_VLM_MIN = 300_000.0
+HARVEST_WEEK_ROI_MIN = 0.25
+HARVEST_MONTH_ROI_MIN = 0.50
+HARVEST_ALL_ROI_MIN = 0.50
+HARVEST_WEEK_PNL_MIN = 5_000.0
+HARVEST_MONTH_PNL_MIN = 15_000.0
+HARVEST_ALL_PNL_MIN = 20_000.0
+HARVEST_PERP_PNL_SHARE_MIN = 0.80
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
 # that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);
@@ -454,17 +452,11 @@ PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 # daily shard rotation refreshes its delta and re-scores the cached rolling window. The live open-position
 # snapshot is unaffected.
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
-DAILY_RECHECK_TOP_N = 80    # daily incremental scans also re-profile this many current top-ranked old candidates
 # Daily discovery budget. Core/held/challenger wallets are outside the discovery cap; the
 # remaining budget is split new / near-miss / fair exploration and finalized before the wall-clock limit.
 DAILY_SCAN_TIME_BUDGET_MIN = 60
 CORE_REFRESH_DEADLINE_MIN = 15
 SCAN_FINALIZE_RESERVE_MIN = 15
-DAILY_PROFILE_BUDGET = 300
-CANDIDATE_MAX_RECHECK_DAYS = 7
-FULL_REFRESH_SHARDS = 7
-RANDOM_EXPLORATION_RATIO = 0.20
-DISCOVERY_MAX_EXTRA_SHARDS = 1  # if the normal batch finds no new individual Core candidate, scan next shard
 LEADERBOARD_MIN_ROW_RATIO = 0.85
 LEADERBOARD_MIN_COMPLETE_RATIO = 0.99
 

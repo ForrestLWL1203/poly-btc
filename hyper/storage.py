@@ -699,6 +699,8 @@ CREATE TABLE IF NOT EXISTS fill_cache_state (
     addr              TEXT PRIMARY KEY,
     coverage_start_ms INTEGER,
     coverage_end_ms   INTEGER,
+    backfill_start_ms INTEGER,
+    backfill_cursor_ms INTEGER,
     updated_at        TEXT
 );
 
@@ -1093,6 +1095,8 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_unrealized_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_unrealized_pnl REAL",
     "ALTER TABLE target_controls ADD COLUMN pinned_at TEXT",
+    "ALTER TABLE fill_cache_state ADD COLUMN backfill_start_ms INTEGER",
+    "ALTER TABLE fill_cache_state ADD COLUMN backfill_cursor_ms INTEGER",
 )
 
 

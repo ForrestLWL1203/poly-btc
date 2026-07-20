@@ -17,6 +17,7 @@ import threading
 
 from hyper import config, params, storage
 from hyper.discovery import scanner
+from hyper.discovery import shadow_scan
 from hyper.ops import paper_reset, procman
 from hyper.util import now_iso
 
@@ -66,7 +67,6 @@ def _start_adaptive_pace(db_path, slow_interval):
 
 
 AUTO_SCAN_EVERY_H = 24.0          # self-scheduled cadence (no systemd timer); reference = last scan_runs
-AUTO_FULL_SCAN_EVERY_H = 7 * 24.0 # Leaderboard + every strict candidate; intervening days are incremental
 
 
 def _scan_ns():
@@ -91,33 +91,16 @@ def _hours_since_last_scan(db):
         return 1e9
 
 
-def _hours_since_last_full_scan(db):
-    row = db.execute(
-        "SELECT MAX(finished_at) FROM scan_runs WHERE complete=1 AND full=1"
-    ).fetchone()
-    if not row or not row[0]:
-        return 1e9
-    try:
-        return (time.time() - calendar.timegm(time.strptime(row[0], "%Y-%m-%dT%H:%M:%SZ"))) / 3600.0
-    except (ValueError, TypeError):
-        return 1e9
-
-
 def _configure_scan_cadence(db, ns, *, manual: bool):
-    """Daily automatic runs reuse Leaderboard; every seventh day is a true full refresh."""
+    """Every run refreshes Leaderboard and reevaluates the complete strict candidate set."""
     published = db.execute(
         "SELECT 1 FROM scan_generation WHERE status='published' AND is_current=1 LIMIT 1"
     ).fetchone()
+    ns.full_scan = True
+    ns.no_harvest = False
     if not published:
-        ns.full_scan = True
-        ns.no_harvest = False
         return "cold_full"
-    if manual or getattr(ns, "full_scan", False):
-        return "manual" if manual else "explicit_full"
-    weekly_full = _hours_since_last_full_scan(db) >= AUTO_FULL_SCAN_EVERY_H
-    ns.full_scan = weekly_full
-    ns.no_harvest = not weekly_full
-    return "weekly_full" if weekly_full else "daily_incremental"
+    return "manual_complete" if manual else "daily_complete"
 
 
 def _serve_observer_cmds(db):
@@ -170,9 +153,7 @@ def _serve_rescan(db):
             if (pend or due) and not scanning:
                 ns = params.apply_scanner_params(db, _scan_ns())
                 cadence = _configure_scan_cadence(db, ns, manual=bool(pend))
-                why = f"command #{pend[0]}" if pend else (
-                    "auto weekly full" if cadence == "weekly_full" else "auto daily incremental"
-                )
+                why = f"command #{pend[0]}" if pend else "auto daily complete candidate reevaluation"
                 print(f"-> running scan [{why}]", flush=True)
                 scanner.scan(db, ns)                 # consumes pending rescan(s) + writes progress/status
         except Exception as exc:  # noqa: BLE001
@@ -225,18 +206,19 @@ def main() -> int:
                         help="when excluding HFT: min median hold time in MINUTES (below = HFT, rejected)")
 
     def add_harvest_args(pr):
-        # STAGE-1 leaderboard BOX (v5; 0 per-wallet API). Gate on HONEST fields only (capital + volume +
-        # consistency + plausible pnl/volume); profit magnitude judged in the profile. Defaults in config.
+        # Official ROI is the return-quality gate. Nominal contract volume is activity only and never a
+        # profitability denominator because leverage makes that ratio incomparable.
         pr.add_argument("--min-acct", type=float, default=config.HARVEST_MIN_ACCT,
                         help="real-capital floor (we copy by pct, not $)")
         pr.add_argument("--week-vlm-min", type=float, default=config.HARVEST_WEEK_VLM_MIN,
                         help="7d VOLUME floor — genuinely trading this week")
-        pr.add_argument("--week-vlm-max", type=float, default=config.HARVEST_WEEK_VLM_MAX,
-                        help="7d VOLUME ceiling — above = market-maker/HFT-bot, uncopyable")
-        pr.add_argument("--pnl-vol-min", type=float, default=config.HARVEST_PNL_VOL_MIN,
-                        help="7d pnl/volume floor — below = razor-thin MM, not directional")
-        pr.add_argument("--pnl-vol-max", type=float, default=config.HARVEST_PNL_VOL_MAX,
-                        help="7d pnl/volume ceiling — above = profit too big for volume = ghost (not trading)")
+        pr.add_argument("--week-roi-min", type=float, default=config.HARVEST_WEEK_ROI_MIN)
+        pr.add_argument("--month-roi-min", type=float, default=config.HARVEST_MONTH_ROI_MIN)
+        pr.add_argument("--all-roi-min", type=float, default=config.HARVEST_ALL_ROI_MIN)
+        pr.add_argument("--week-pnl-min", type=float, default=config.HARVEST_WEEK_PNL_MIN)
+        pr.add_argument("--month-pnl-min", type=float, default=config.HARVEST_MONTH_PNL_MIN)
+        pr.add_argument("--all-pnl-min", type=float, default=config.HARVEST_ALL_PNL_MIN)
+        pr.add_argument("--perp-pnl-share-min", type=float, default=config.HARVEST_PERP_PNL_SHARE_MIN)
 
     s = sub.add_parser("scan", help="full sweep: re-profile ALL candidates -> rebuild watchlist")
     s.add_argument("--days", type=int, default=14)
@@ -251,10 +233,7 @@ def main() -> int:
                         "rate limit with the always-on observer (8s = ~7.5/min, leaves ~67/min for copy)")
     add_gate_args(s)
     s.add_argument("--no-harvest", action="store_true")
-    s.add_argument("--full", dest="full_scan", action="store_true",
-                   help="force a FULL 30d re-fetch for every candidate (else INCREMENTAL: only delta fills "
-                        "since each candidate's cursor, merged onto the cached window). Normal automatic "
-                        "self-healing uses the configured rolling refresh shards")
+    s.add_argument("--full", dest="full_scan", action="store_true", help=argparse.SUPPRESS)
 
     w = sub.add_parser("watchlist", help="show our curated tiny leaderboard")
     w.add_argument("--top", type=int, default=40)
@@ -286,8 +265,21 @@ def main() -> int:
     reset.add_argument("--factory-params", action="store_true",
                        help="also restore all params to code defaults")
     reset.add_argument("--yes", action="store_true", help="required destructive-operation confirmation")
+    shadow = sub.add_parser("shadow-scan", help="isolated full discovery on an online SQLite backup")
+    shadow.add_argument("--report", required=True, help="0600 redacted JSON report path")
+    shadow.add_argument("--scan-interval", type=float, default=10.0)
+    shadow.add_argument("--max-pages", type=int, default=5)
+    shadow.add_argument("--workers", type=int, default=4)
 
     args = ap.parse_args()
+    if args.cmd == "shadow-scan":
+        ns = _scan_ns()
+        ns.scan_interval, ns.max_pages, ns.workers = args.scan_interval, args.max_pages, args.workers
+        config.MIN_POST_INTERVAL = args.scan_interval
+        result = shadow_scan.run(args.db, args.report, ns)
+        print(json.dumps({"status": result["generation"]["status"], "report": args.report,
+                          "funnel": result["funnel"], "roles": result["roles"]}, sort_keys=True))
+        return 0
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)  # +control-plane tables
     params.seed_params(db)                               # ensure UI-tunable params exist (idempotent)
     if args.cmd == "scan":

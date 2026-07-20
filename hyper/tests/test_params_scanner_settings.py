@@ -8,9 +8,16 @@ from hyper import config, params, storage
 
 
 class ScannerSettingsParamTests(unittest.TestCase):
-    def test_product_defaults_use_requested_volume_box_and_no_hard_stop_params(self):
+    def test_product_defaults_use_official_roi_and_absolute_pnl(self):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
-        self.assertEqual(config.HARVEST_WEEK_VLM_MAX, 30_000_000.0)
+        self.assertEqual(config.HARVEST_MIN_ACCT, 30_000.0)
+        self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
+                          config.HARVEST_ALL_ROI_MIN), (0.25, 0.50, 0.50))
+        self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
+                          config.HARVEST_ALL_PNL_MIN), (5_000.0, 15_000.0, 20_000.0))
+        self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.80)
+        self.assertFalse(hasattr(config, "HARVEST_WEEK_VLM_MAX"))
+        self.assertFalse(hasattr(config, "HARVEST_PNL_VOL_MIN"))
 
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
@@ -20,7 +27,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
             scanner = params.load_category(db, "scanner")
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
-            self.assertEqual(scanner["HARVEST_WEEK_VLM_MAX"], 30_000_000.0)
+            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.25)
+            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.50)
+            self.assertEqual(scanner["HARVEST_PERP_PNL_SHARE_MIN"], 0.80)
             self.assertEqual(scanner["inactive_days"], 2)
             self.assertNotIn("COPY_STOP_ENABLE", follow)
             self.assertNotIn("STOP_MARGIN_PCT", follow)
@@ -40,13 +49,14 @@ class ScannerSettingsParamTests(unittest.TestCase):
             scanner_keys = [p["key"] for p in scanner_params]
             levels = {p["key"]: p["level"] for p in scanner_params}
 
-            self.assertEqual(scanner_keys[:5], [
+            self.assertEqual(scanner_keys[:4], [
                 "HARVEST_MIN_ACCT",
                 "HARVEST_WEEK_VLM_MIN",
-                "HARVEST_WEEK_VLM_MAX",
-                "EXCLUDE_HFT",
-                "inactive_days",
+                "HARVEST_WEEK_ROI_MIN",
+                "HARVEST_MONTH_ROI_MIN",
             ])
+            self.assertNotIn("HARVEST_WEEK_VLM_MAX", scanner_keys)
+            self.assertNotIn("HARVEST_PNL_VOL_MIN", scanner_keys)
             self.assertIn("PORTFOLIO_MAX_TURNOVER", scanner_keys)
             self.assertIn("PORTFOLIO_MIN_EDGE_BPS", scanner_keys)
             self.assertIn("MAX_CONCURRENT_POS", scanner_keys)
