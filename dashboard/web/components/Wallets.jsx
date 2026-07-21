@@ -22,8 +22,9 @@ export function Wallets({ confirm }) {
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
   const [starPending, setStarPending] = useState({});
+  const [starError, setStarError] = useState(null);
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
-  const { data, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
+  const { data, setData, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
   const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
@@ -41,10 +42,17 @@ export function Wallets({ confirm }) {
 
   const toggleStar = async (w) => {
     if (starPending[w.address]) return;
+    setStarError(null);
     setStarPending(pending => ({ ...pending, [w.address]: true }));
     try {
-      await api.cmdAndWait("wallet_star", { address: w.address, starred: !w.starred });
+      const result = await api.cmdAndWait("wallet_star", { address: w.address, starred: !w.starred });
+      setData(current => current ? { ...current, wallets: (current.wallets || []).map(row =>
+        row.address === w.address
+          ? { ...row, starred: !!result.starred, starredAt: result.starredAt || null }
+          : row) } : current);
       await reload();
+    } catch (error) {
+      if (!error || error.message !== "unauth") setStarError("星标更新失败，请稍后重试");
     } finally {
       setStarPending(pending => {
         const next = { ...pending };
@@ -74,6 +82,7 @@ export function Wallets({ confirm }) {
           </div>
         </div>
       </div>
+      {starError && <div className="radar-alert" role="alert">{starError}</div>}
       <div className="tbl-wrap">
         {explicit ? (
           <table>
@@ -101,7 +110,7 @@ export function Wallets({ confirm }) {
                         title={w.starred ? "已锁定在跟单列表；点击取消星标" : "星标后锁定在跟单列表并置顶"}
                         disabled={!!starPending[w.address]}
                         onClick={(e) => { e.stopPropagation(); toggleStar(w); }}>
-                        {w.starred ? "★" : "☆"}
+                        {starPending[w.address] ? "…" : w.starred ? "★" : "☆"}
                       </button>}
                       <span className="rankbadge">{w.followPos}</span>
                     </div></td>

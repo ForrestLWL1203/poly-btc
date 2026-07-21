@@ -1,4 +1,21 @@
 const TOK_KEY = "hl_dash_token";
+export const AUTH_EXPIRED_EVENT = "hl-dashboard:auth-expired";
+
+const responseBody = async (response) => {
+  try { return await response.json(); }
+  catch (_e) { return {}; }
+};
+
+const requireOk = async (response, fallback) => {
+  const body = await responseBody(response);
+  if (response.status === 401) {
+    api.logout();
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+    throw new Error("unauth");
+  }
+  if (!response.ok) throw new Error(body.detail || body.error || fallback);
+  return body;
+};
 
 export const api = {
   token: localStorage.getItem(TOK_KEY) || null,
@@ -19,11 +36,7 @@ export const api = {
 
   async get(path) {
     const r = await fetch(path, { headers: { Authorization: "Bearer " + api.token } });
-    if (r.status === 401) {
-      api.logout();
-      throw new Error("unauth");
-    }
-    return (await r.json()).data;
+    return (await requireOk(r, "request_failed")).data;
   },
 
   async cmd(type, payload) {
@@ -32,7 +45,7 @@ export const api = {
       headers: { Authorization: "Bearer " + api.token },
       body: JSON.stringify({ type, payload }),
     });
-    return r.json();
+    return requireOk(r, "command_failed");
   },
 
   async cmdAndWait(type, payload, timeoutMs = 50000) {
@@ -54,8 +67,7 @@ export const api = {
       headers: { Authorization: "Bearer " + api.token },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error("param_patch_failed");
-    return (await r.json()).data;
+    return (await requireOk(r, "param_patch_failed")).data;
   },
 };
 

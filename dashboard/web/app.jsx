@@ -1,4 +1,4 @@
-import { api } from "./lib/api.js";
+import { api, AUTH_EXPIRED_EVENT } from "./lib/api.js";
 import { Confirm } from "./components/Confirm.jsx";
 import { Discovery, ScanMask, scanStageLabel } from "./components/Discovery.jsx";
 import { History } from "./components/History.jsx";
@@ -227,6 +227,15 @@ function App() {
   const [err, setErr] = useState(null);
   const [user, setUser] = useState("admin");
   const [pw, setPw] = useState("");          // empty by default (auto-login tries preview creds for local)
+
+  useEffect(() => {
+    const expired = () => {
+      setAuthed(false);
+      setErr("登录已失效，请重新登录");
+    };
+    window.addEventListener(AUTH_EXPIRED_EVENT, expired);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
+  }, []);
 
   // On mount: validate any existing token; if invalid/missing, auto-login (local preview creds only —
   // harmless on prod where the password differs). Survives a server restart that wiped in-memory tokens.
