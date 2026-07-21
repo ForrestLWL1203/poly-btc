@@ -365,7 +365,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
         closed7d = _col(r, "closed_7d") or 0
         if closed7d == 0 and (_col(r, "episode_total") or 0) == 0:
             closed7d = _col(r, "copy_bt_7d_closed_n") or 0
-        display_win_rate = _col(r, "copy_bt_win_rate")
+        display_win_rate = (
+            _col(display_metrics, "copy_bt_campaign_win_rate")
+            if _col(display_metrics, "copy_bt_campaign_closed_n") is not None
+            else _col(r, "copy_bt_win_rate")
+        )
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
@@ -375,6 +379,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
             # The list describes the strategy we can actually copy, not the target's raw account win rate.
             # A missing immutable replay/profile value is unknown and must never be rendered as 0%.
             "winRatePct": None if display_win_rate is None else display_win_rate * 100,
+            "campaignClosedN": _col(display_metrics, "copy_bt_campaign_closed_n"),
             "mainCoin": _col(r, "top_coin"),
             "followCount": _col(r, "follow_count") or 0,
             "enabled": bool(_col(r, "enabled", True)),

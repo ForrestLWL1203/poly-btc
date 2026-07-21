@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import sqlite3
 import tempfile
 import unittest
@@ -122,6 +123,57 @@ class SelectionTests(unittest.TestCase):
             "0xmanual", "core", enabled=False, reason="operator_pick", utility=12.5,
             data_status="valid", evidence_status="qualified", model_version="m1", policy_version="p1",
         )])
+
+    def test_core_normal_rebalance_is_weekly(self):
+        db = self._db()
+        self._published(db)
+        db.execute(
+            "UPDATE scan_generation SET published_at='2026-07-20T00:00:00Z' WHERE generation='g1'"
+        )
+        db.execute(
+            "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+            "VALUES ('g1','0xcore','core',1,'2026-07-20T00:00:00Z')"
+        )
+        db.commit()
+
+        one_day = calendar.timegm((2026, 7, 21, 0, 0, 0, 0, 0, 0)) * 1000
+        eight_days = calendar.timegm((2026, 7, 28, 0, 0, 0, 0, 0, 0)) * 1000
+
+        due1, age1 = scanner._core_rebalance_due(
+            db, ('0xcore',), now_ms=one_day, interval_days=7,
+        )
+        due8, age8 = scanner._core_rebalance_due(
+            db, ('0xcore',), now_ms=eight_days, interval_days=7,
+        )
+        self.assertFalse(due1)
+        self.assertAlmostEqual(age1, 1.0)
+        self.assertTrue(due8)
+        self.assertAlmostEqual(age8, 8.0)
+
+    def test_daily_publication_does_not_reset_core_rebalance_age(self):
+        db = self._db()
+        for day, generation_id in ((14, 'g1'), (18, 'g2'), (20, 'g3')):
+            stamp = f'2026-07-{day:02d}T00:00:00Z'
+            db.execute(
+                "INSERT INTO scan_generation"
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (generation_id, 'published', 1, 1, generation_id == 'g3', stamp, stamp),
+            )
+            db.execute(
+                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
+                "VALUES (?,?,?,?,?)",
+                (generation_id, '0xcore', 'core', 1, stamp),
+            )
+        db.commit()
+
+        now_ms = calendar.timegm((2026, 7, 21, 0, 0, 0, 0, 0, 0)) * 1000
+        due, age = scanner._core_rebalance_due(
+            db, ('0xcore',), now_ms=now_ms, interval_days=7,
+        )
+
+        self.assertTrue(due)
+        self.assertAlmostEqual(age, 7.0)
 
     @staticmethod
     def _transition_metrics(net):

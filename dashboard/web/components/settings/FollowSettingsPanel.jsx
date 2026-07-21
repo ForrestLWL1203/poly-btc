@@ -10,6 +10,7 @@ import {
 
 const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.min, g.max, g.lev, g.notl, g.cap]));
 const deployKeys = new Set(["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
+const walletSectorSideKey = "WALLET_SECTOR_SIDE_CAP_PCT";
 const marginEquityKey = "MARGIN_EQUITY_PCT";
 const tailEnableKey = "TAIL_CLOSE_ENABLE";
 const tailChildKeys = [
@@ -33,13 +34,14 @@ export function FollowSettingsPanel({
   const autoTuneParam = paramsByKey.get(AUTO_TUNE_KEY);
   const blacklistParam = paramsByKey.get(BLACKLIST_KEY);
   const marginEquityParam = paramsByKey.get(marginEquityKey);
+  const walletSectorSideParam = paramsByKey.get(walletSectorSideKey);
   const tailEnableParam = paramsByKey.get(tailEnableKey);
   const tailChildParams = tailChildKeys.map(key => paramsByKey.get(key)).filter(Boolean);
   const row = p => (
     <ParamRow key={p.key} param={p} value={vals[p.key]} dirty={dirty[p.key]}
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
-  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || tailKeys.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY || p.key === marginEquityKey));
+  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || tailKeys.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY || p.key === marginEquityKey || p.key === walletSectorSideKey));
 
   return (
     <React.Fragment>
@@ -83,6 +85,10 @@ export function FollowSettingsPanel({
         只缩小每笔新仓的保证金计算基数；未计入的权益仍是可用资金，不会被冻结。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
       </div>}
       <DeployRangeRow paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
+      {walletSectorSideParam && row(walletSectorSideParam)}
+      {walletSectorSideParam && <div className="param-inline-note">
+        按目标钱包 × Crypto/xyz板块 × 多/空方向分别计算有效保证金。单钱包与组合Copy回放同步使用该参数；存量超限仓位不会被强平，只会停止继续开仓和加仓。
+      </div>}
       {validationErrors.length > 0 && (
         <div className="param-errors">
           {validationErrors.map((e, i) => <div key={i}>{e}</div>)}

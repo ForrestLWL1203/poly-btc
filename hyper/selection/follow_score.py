@@ -200,6 +200,11 @@ def evaluate_follow_eligibility(
             "reasons": [f"资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%"],
         }
     closed_by_window = {30: c30, 14: c14, 7: c7}
+    campaign_by_window = {
+        30: int(_num(metrics.get("copy_bt_campaign_closed_n", c30))),
+        14: int(_num(metrics.get("copy_bt_14d_campaign_closed_n", c14))),
+        7: int(_num(metrics.get("copy_bt_7d_campaign_closed_n", c7))),
+    }
     win_rate_by_window = {
         30: _num(metrics.get("copy_bt_win_rate")),
         14: _num(metrics.get("copy_bt_14d_win_rate")),
@@ -207,17 +212,19 @@ def evaluate_follow_eligibility(
     }
     wins_by_window = {}
     for days in (30, 14, 7):
-        # Profile storage persists the canonical rate/count pair, while scoped sector JSON also carries the
-        # integer win count.  Derive from the public pair so both paths make the identical boundary decision.
-        wins_by_window[days] = int(round(win_rate_by_window[days] * closed_by_window[days]))
-        wins_by_window[days] = max(0, min(closed_by_window[days], wins_by_window[days]))
+        explicit_key = "copy_bt_campaign_wins" if days == 30 else f"copy_bt_{days}d_campaign_wins"
+        wins_by_window[days] = int(_num(
+            metrics.get(explicit_key), round(win_rate_by_window[days] * campaign_by_window[days])
+        ))
+        wins_by_window[days] = max(0, min(campaign_by_window[days], wins_by_window[days]))
     sampled_win_failures = [
         days for days in (30, 14, 7)
         if closed_by_window[days] >= policy.core_min_closed(days)
+        and campaign_by_window[days] >= policy.core_min_campaigns(days)
         and win_rate_by_window[days] < policy.core_min_win_rate(days)
     ]
     win_lcb30 = one_sided_wilson_lower_bound(
-        wins_by_window[30], c30, policy.core_win_rate_lcb_confidence,
+        wins_by_window[30], campaign_by_window[30], policy.core_win_rate_lcb_confidence,
     )
     if sampled_win_failures:
         labels = "/".join(f"{days}日" for days in sampled_win_failures)
@@ -230,7 +237,9 @@ def evaluate_follow_eligibility(
             "winRateLcb30": win_lcb30,
             "reasons": [f"允许板块{labels}严格Copy胜率低于实跟硬门槛"],
         }
-    if c30 >= policy.core_min_closed_30d and win_lcb30 < policy.core_min_win_rate_lcb_30d:
+    if (c30 >= policy.core_min_closed_30d
+            and campaign_by_window[30] >= policy.core_min_campaigns_30d
+            and win_lcb30 < policy.core_min_win_rate_lcb_30d):
         return {
             "eligible": False,
             "coreEligible": False,
@@ -245,6 +254,7 @@ def evaluate_follow_eligibility(
         }
     core_samples = all(
         closed_by_window[days] >= policy.core_min_closed(days)
+        and campaign_by_window[days] >= policy.core_min_campaigns(days)
         for days in (30, 14, 7)
     )
     standard_samples = bool(
@@ -262,6 +272,7 @@ def evaluate_follow_eligibility(
     structure_sampled = c30 >= min_closed30
     profit_factor = metrics.get("copy_bt_profit_factor")
     tail30 = metrics.get("copy_bt_net_after_top2")
+    campaign_tail30 = metrics.get("copy_bt_campaign_net_after_top2")
     tail7 = metrics.get("copy_bt_7d_net_after_top1")
     cost_stress = metrics.get("copy_bt_cost_stress_net_pnl")
     positive_episodes = int(_num(metrics.get("copy_bt_positive_episode_n")))
@@ -281,6 +292,14 @@ def evaluate_follow_eligibility(
     )
     final_liquidations = int(_num(metrics.get("copy_bt_liquidations")))
     liquidation_limit_exceeded = final_liquidations > policy.core_max_liquidations_30d
+    forward_liquidations = int(_num(metrics.get("forward_liquidations")))
+    forward_net_raw = metrics.get("forward_net_pnl")
+    forward_net_pnl = _num(forward_net_raw)
+    forward_loss_limit = float(config.INITIAL_BALANCE) * float(config.WALLET_FORWARD_LOSS_FREEZE_PCT)
+    forward_loss_exceeded = bool(
+        forward_net_raw is not None and forward_loss_limit > 0 and forward_net_pnl <= -forward_loss_limit
+    )
+    forward_risk_exceeded = forward_liquidations > 0 or forward_loss_exceeded
     concentration_sampled = positive_episodes >= policy.concentration_min_positive_episodes
     concentration_warning = bool(
         concentration_sampled
@@ -315,6 +334,16 @@ def evaluate_follow_eligibility(
             "role": "rejected",
             "tail30NetPnl": _num(tail30),
             "reasons": [f"30天移除最大两笔盈利后低于{policy.min_tail_return_30d * 100:.0f}%收益线"],
+        }
+    if (campaign_by_window[30] >= policy.core_min_campaigns_30d
+            and campaign_tail30 is not None and _num(campaign_tail30) <= 0.0):
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_campaign_tail_weak",
+            "role": "rejected",
+            "campaigns": campaign_by_window,
+            "reasons": ["合并相关篮子仓后，30天收益依赖最大的两个独立方向批次"],
         }
     if c7 >= min_closed7 and tail7 is not None and _num(tail7) <= 0.0:
         return {
@@ -395,7 +424,7 @@ def evaluate_follow_eligibility(
     core_eligible = bool(strong_entry or standard_entry)
     if concentration_warning and not concentration_exception:
         core_eligible = False
-    if recent_body_negative or liquidation_limit_exceeded:
+    if recent_body_negative or liquidation_limit_exceeded or forward_risk_exceeded:
         core_eligible = False
     if core_eligible and not structural_core_blocked:
         return {
@@ -425,7 +454,17 @@ def evaluate_follow_eligibility(
             ],
         }
 
-    if liquidation_limit_exceeded:
+    if forward_liquidations > 0:
+        status, reason = (
+            "challenger_forward_liquidation",
+            f"真实跟单近30日已发生{forward_liquidations}次爆仓，停止该钱包新开仓",
+        )
+    elif forward_loss_exceeded:
+        status, reason = (
+            "challenger_forward_loss_freeze",
+            f"真实跟单净亏{forward_net_pnl:+.0f}已触发单钱包亏损熔断",
+        )
+    elif liquidation_limit_exceeded:
         status, reason = (
             "challenger_liquidation_limit",
             f"最终参数30日严格回放爆仓{final_liquidations}次，超过Core上限"

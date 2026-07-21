@@ -25,7 +25,9 @@ import websockets
 from hyper import config
 from hyper.copy.copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
-                          smart_add_order_margin, smart_take_profit_decision, tier_for_sigma)
+                          smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
+                          margin_cap_room, total_effective_margin, wallet_margin,
+                          wallet_sector_side_margin, wallet_sector_side_margin_room)
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.copy.sector import parse_json_obj, policy_allows_coin
 from hyper.market import rest, volatility, ws
@@ -120,6 +122,11 @@ class Observer:
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
         self.deploy_full_pct = config.DEPLOY_FULL_PCT        # <= this deployed margin: use tier margin upper bound
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
+        self.max_total_margin_pct = config.MAX_TOTAL_MARGIN_PCT
+        self.wallet_margin_cap_pct = config.WALLET_MARGIN_CAP_PCT
+        self.wallet_sector_side_cap_pct = config.WALLET_SECTOR_SIDE_CAP_PCT
+        self.wallet_max_open_positions = config.WALLET_MAX_OPEN_POSITIONS
+        self.wallet_forward_loss_freeze_pct = config.WALLET_FORWARD_LOSS_FREEZE_PCT
         self.margin_equity_pct = config.MARGIN_EQUITY_PCT    # manual per-open sizing base; full cash remains available
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
         self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
@@ -287,7 +294,8 @@ class Observer:
         if not addr or not coin:
             return None
         row = self.db.execute(
-            "SELECT expires_at FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?)",
+            "SELECT expires_at FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?) "
+            "AND reason IN ('manual_close','manual_stop_loss')",
             (addr, coin),
         ).fetchone()
         if not row:
@@ -296,7 +304,8 @@ class Observer:
         if expires_at > now_iso():
             return expires_at
         self.db.execute(
-            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?)",
+            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?) "
+            "AND reason IN ('manual_close','manual_stop_loss')",
             (addr, coin),
         )
         self.db.commit()
@@ -304,7 +313,8 @@ class Observer:
 
     def _clear_manual_close_cooldown(self, addr: str, coin: str):
         self.db.execute(
-            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?)",
+            "DELETE FROM manual_close_cooldown WHERE addr=? AND lower(coin)=lower(?) "
+            "AND reason IN ('manual_close','manual_stop_loss')",
             ((addr or "").lower(), coin),
         )
         self.db.commit()
@@ -334,6 +344,85 @@ class Observer:
         )
         self.db.commit()
         return expires_at
+
+    def _liquidation_cooldown_until(self, addr: str, coin: str):
+        """Return active coin or wallet-wide liquidation freeze, expiring stale rows lazily."""
+        addr = (addr or "").lower()
+        if not addr or not coin:
+            return None
+        now = now_iso()
+        self.db.execute(
+            "DELETE FROM manual_close_cooldown WHERE addr=? AND coin IN (?, '*') "
+            "AND reason LIKE 'liquidation_%' AND expires_at<=?",
+            (addr, coin, now),
+        )
+        row = self.db.execute(
+            "SELECT MAX(expires_at) FROM manual_close_cooldown WHERE addr=? "
+            "AND (lower(coin)=lower(?) OR coin='*') AND reason LIKE 'liquidation_%' AND expires_at>?",
+            (addr, coin, now),
+        ).fetchone()
+        self.db.commit()
+        return row[0] if row and row[0] else None
+
+    def _add_liquidation_cooldown(self, addr: str, coin: str, pos_id: int, book=None):
+        """Freeze a liquidated source wallet; a repeat liquidation escalates from 24h to seven days."""
+        book = book or self.taker
+        if book is not self.taker:
+            return None
+        addr = (addr or "").lower()
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 30 * 86400))
+        row = self.db.execute(
+            f"SELECT COUNT(*) FROM {book.pos_table} WHERE lower(addr)=? AND was_liq=1 AND closed_at>=?",
+            (addr, cutoff),
+        ).fetchone()
+        repeat = int(row[0] or 0) >= 2
+        duration = (
+            config.REPEAT_LIQUIDATION_FREEZE_DAYS * 86400
+            if repeat else config.LIQUIDATION_REENTRY_COOLDOWN_HOURS * 3600
+        )
+        created_at = now_iso()
+        expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + duration))
+        for key_coin, reason in ((coin, "liquidation_reentry"), ("*", "liquidation_wallet_freeze")):
+            self.db.execute(
+                "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(addr,coin) DO UPDATE SET "
+                "pos_id=excluded.pos_id,reason=excluded.reason,created_at=excluded.created_at,"
+                "expires_at=MAX(manual_close_cooldown.expires_at,excluded.expires_at)",
+                (addr, key_coin, pos_id, reason, created_at, expires_at),
+            )
+        self.db.commit()
+        return expires_at
+
+    def _wallet_forward_pnl(self, addr: str, book=None) -> float:
+        book = book or self.taker
+        row = self.db.execute(
+            f"SELECT COALESCE(SUM(COALESCE(realized_pnl,0) + CASE WHEN status='open' "
+            f"THEN COALESCE(unrealized_pnl,0) ELSE 0 END),0) FROM {book.pos_table} WHERE lower(addr)=?",
+            ((addr or "").lower(),),
+        ).fetchone()
+        return float(row[0] or 0.0) if row else 0.0
+
+    def _wallet_risk_block_reason(self, addr: str, coin: str, book=None):
+        book = book or self.taker
+        if self._liquidation_cooldown_until(addr, coin):
+            return "liquidation_cooldown"
+        threshold = max(0.0, book.initial_balance * self.wallet_forward_loss_freeze_pct)
+        if threshold and self._wallet_forward_pnl(addr, book) <= -threshold:
+            return "wallet_forward_loss"
+        return None
+
+    def _new_exposure_block_reason(self, addr: str, coin: str, book=None):
+        book = book or self.taker
+        risk_reason = self._wallet_risk_block_reason(addr, coin, book)
+        if risk_reason:
+            return risk_reason
+        wallet_open_n = sum(
+            1 for position in book.open_ep.values()
+            if str(position.get("addr") or "").lower() == str(addr or "").lower()
+        )
+        if wallet_open_n >= self.wallet_max_open_positions:
+            return "wallet_position_cap"
+        return None
 
     # -- pricing off the live book -------------------------------------------
     def _fill_px(self, coin, is_buy, fallback):
@@ -392,6 +481,11 @@ class Observer:
             if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
             if f.get("DEPLOY_FULL_PCT") is not None: self.deploy_full_pct = f["DEPLOY_FULL_PCT"]
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
+            if f.get("MAX_TOTAL_MARGIN_PCT"): self.max_total_margin_pct = f["MAX_TOTAL_MARGIN_PCT"]
+            if f.get("WALLET_MARGIN_CAP_PCT") is not None: self.wallet_margin_cap_pct = f["WALLET_MARGIN_CAP_PCT"]
+            if f.get("WALLET_SECTOR_SIDE_CAP_PCT") is not None: self.wallet_sector_side_cap_pct = f["WALLET_SECTOR_SIDE_CAP_PCT"]
+            if f.get("WALLET_MAX_OPEN_POSITIONS") is not None: self.wallet_max_open_positions = int(f["WALLET_MAX_OPEN_POSITIONS"])
+            if f.get("WALLET_FORWARD_LOSS_FREEZE_PCT") is not None: self.wallet_forward_loss_freeze_pct = f["WALLET_FORWARD_LOSS_FREEZE_PCT"]
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
@@ -515,7 +609,8 @@ class Observer:
             ).fetchone()
             exact_last_target_add_px = f(last_followed_add[0]) if last_followed_add else mpx
             book.open_ep[(addr, coin)] = {
-                "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
+                "pos_id": pid, "addr": addr, "coin": coin,
+                "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
                 "master_current": abs(master_current if master_current is not None else (peak or 0.0)),
                 "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
@@ -1380,11 +1475,14 @@ class Observer:
         transition = classify_fill_transition(pos0, pos1)
         target_in_position = abs(pos1) >= config.FLAT
         cooldown_until = self._manual_close_cooldown_until(addr, coin) if target_in_position else None
+        risk_block = self._new_exposure_block_reason(addr, coin, book) if target_in_position else None
         ep = book.open_ep.get(key)
         if ep is None:
             if transition in ("open", "flip") and target_in_position:
                 if cooldown_until:
                     self._tally("skip_manual_cooldown", book)
+                elif risk_block:
+                    self._tally(f"skip_{risk_block}", book)
                 elif (addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                         and not self.paused           # dashboard pause = no new opens (existing keep to close)
                         and self._sector_allowed(addr, coin)):
@@ -1398,6 +1496,7 @@ class Observer:
                 pass                                    # target closed a position we never held — nothing to copy
             else:                                       # a fresh open we chose not to take → tally the reason
                 self._tally("skip_manual_cooldown" if cooldown_until else
+                            f"skip_{risk_block}" if risk_block else
                             "skip_paused" if self.paused else
                             "skip_heldoff" if addr in self.held_off else
                             "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
@@ -1428,6 +1527,10 @@ class Observer:
                             "skip_heldoff_add" if addr in self.held_off else
                             "skip_sector_add", book)
                 return
+            add_risk = self._wallet_risk_block_reason(addr, coin, book)
+            if add_risk:
+                self._tally(f"skip_{add_risk}_add", book)
+                return
             asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, oid, book))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
@@ -1443,10 +1546,18 @@ class Observer:
         if (addr in self.held_off or self.paused or not self._sector_allowed(addr, coin)
                 or self._manual_close_cooldown_until(addr, coin)):
             return
+        risk_block = self._new_exposure_block_reason(addr, coin, book)
+        if risk_block:
+            self._tally(f"skip_{risk_block}", book)
+            return
         self._open_position(addr, coin, t, master_px, pos1, oid, book, forced_entry_px=forced_px)
 
     def _open_position(self, addr, coin, t, px, pos1, oid, book=None, forced_entry_px=None):
         book = book or self.taker
+        risk_block = self._new_exposure_block_reason(addr, coin, book)
+        if risk_block:
+            self._tally(f"skip_{risk_block}", book)
+            return
         if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
             self._tally("skip_coin_blacklist", book)
             return
@@ -1460,7 +1571,8 @@ class Observer:
             "master_peak_sz,master_current_sz,opened_at,num_actions,open_lag_sec,strategy_revision_id) "
             "VALUES (?,?,?,'open',?,?,?,?,?,0,?,?)",
             (addr, coin, side, t, px, abs(pos1), abs(pos1), now_iso(), lag_sec, self.strategy_revision_id))
-        ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
+        ep = {"pos_id": cur.lastrowid, "addr": addr, "coin": coin,
+              "side": side, "sign": 1 if side == "long" else -1,
               "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1), "master_current": abs(pos1),
               "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
               "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
@@ -1528,6 +1640,22 @@ class Observer:
             existing_coin = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                 for (a2, c2), e in book.open_ep.items()   # EFFECTIVE margin (partial-close aware)
                                 if c2 == coin and e.get("side") == ep["side"] and e is not ep)
+            group_existing = wallet_sector_side_margin(
+                (e for e in book.open_ep.values() if e is not ep),
+                addr=addr, coin=coin, side=ep["side"],
+            )
+            group_room = wallet_sector_side_margin_room(
+                cap_pct=self.wallet_sector_side_cap_pct,
+                risk_equity=risk_equity,
+                existing_margin=group_existing,
+            )
+            source_room = margin_cap_room(
+                cap_pct=self.wallet_margin_cap_pct,
+                risk_equity=risk_equity,
+                existing_margin=wallet_margin(
+                    (e for e in book.open_ep.values() if e is not ep), addr=addr,
+                ),
+            )
             target_notl = abs(ep["master_peak"]) * master_px if master_px else 0.0
             master_notl = (m_mgn or 0.0) * (m_lev or 0.0) or target_notl
             margin_row = self.db.execute(
@@ -1546,6 +1674,8 @@ class Observer:
                 master_leverage=m_lev,
                 params=self._open_sizing_params(book),
                 maintenance_leverage=maintenance_leverage,
+                wallet_sector_side_room=group_room,
+                wallet_room=source_room,
             )
             if not plan.ok:
                 self._tally(f"skip_{plan.reason}", book)
@@ -1703,6 +1833,24 @@ class Observer:
                     existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
                                    for (a2, c2), e in book.open_ep.items()
                                    if c2 == coin and e.get("side") == ep["side"])   # incl THIS ep (its current margin)
+                    group_existing = wallet_sector_side_margin(
+                        book.open_ep.values(), addr=addr, coin=coin, side=ep["side"],
+                    )
+                    group_room = wallet_sector_side_margin_room(
+                        cap_pct=self.wallet_sector_side_cap_pct,
+                        risk_equity=risk_equity,
+                        existing_margin=group_existing,
+                    )
+                    source_room = margin_cap_room(
+                        cap_pct=self.wallet_margin_cap_pct,
+                        risk_equity=risk_equity,
+                        existing_margin=wallet_margin(book.open_ep.values(), addr=addr),
+                    )
+                    total_room = margin_cap_room(
+                        cap_pct=self.max_total_margin_pct,
+                        risk_equity=risk_equity,
+                        existing_margin=total_effective_margin(book.open_ep.values()),
+                    )
                     followed_margin = order["followed_margin"] if order else 0.0
                     add_margin = smart_add_order_margin(
                         first_margin=fm,
@@ -1710,8 +1858,17 @@ class Observer:
                         followed_margin=followed_margin,
                         coin_room=max(0.0, coin_cap - existing),
                         risk_available=self._risk_available(book),
+                        wallet_sector_side_room=group_room,
+                        wallet_room=source_room,
+                        total_margin_room=total_room,
                     )
                 if add_margin < self.min_open_margin_pct * risk_equity * self.margin_equity_pct:  # 预算用尽 / 太小
+                    if source_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
+                        self._tally("skip_wallet_add", book)
+                    elif total_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
+                        self._tally("skip_total_margin_add", book)
+                    elif group_room <= max(0.0, coin_cap - existing) + 1e-12:
+                        self._tally("skip_wallet_sector_side_add", book)
                     return _observe_only()
             else:                                     # hardcap: 分档次数上限 + 固定 ADD_FRAC(老逻辑)
                 if ep["add_count"] >= self.tier_max_adds.get(tier, 0):
@@ -1724,12 +1881,39 @@ class Observer:
                         for (a2, c2), e in book.open_ep.items()
                         if c2 == coin and e.get("side") == ep["side"]
                     )
+                    group_existing = wallet_sector_side_margin(
+                        book.open_ep.values(), addr=addr, coin=coin, side=ep["side"],
+                    )
+                    group_room = wallet_sector_side_margin_room(
+                        cap_pct=self.wallet_sector_side_cap_pct,
+                        risk_equity=risk_equity,
+                        existing_margin=group_existing,
+                    )
+                    source_room = margin_cap_room(
+                        cap_pct=self.wallet_margin_cap_pct,
+                        risk_equity=risk_equity,
+                        existing_margin=wallet_margin(book.open_ep.values(), addr=addr),
+                    )
+                    total_room = margin_cap_room(
+                        cap_pct=self.max_total_margin_pct,
+                        risk_equity=risk_equity,
+                        existing_margin=total_effective_margin(book.open_ep.values()),
+                    )
                     add_margin = max(0.0, min(
                         fm * self.add_frac,
                         coin_cap - existing,
                         self._risk_available(book),
+                        group_room,
+                        source_room,
+                        total_room,
                     ))
                 if add_margin <= 0:
+                    if source_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
+                        self._tally("skip_wallet_add", book)
+                    elif total_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
+                        self._tally("skip_total_margin_add", book)
+                    elif group_room <= max(0.0, coin_cap - existing) + 1e-12:
+                        self._tally("skip_wallet_sector_side_add", book)
                     return _observe_only(final=True)
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
@@ -1916,6 +2100,10 @@ class Observer:
             self._save_account(book)
             self.db.commit()
             if closing:
+                if liq:
+                    cooldown_until = self._add_liquidation_cooldown(addr, coin, ep["pos_id"], book)
+                    if cooldown_until:
+                        self._tally("liquidation_wallet_freeze", book)
                 if book is self.taker:
                     try:
                         self.risk_radar.resolve_intent(ep["pos_id"])

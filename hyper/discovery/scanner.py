@@ -4,6 +4,7 @@ harvest leaderboard -> coarse candidates -> profile work-set (actives + new + to
 over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
 Composes rest + fills + metrics + storage; holds no infra of its own.
 """
+import calendar
 import concurrent.futures
 from dataclasses import replace
 import hashlib
@@ -476,6 +477,9 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         "month": getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
         "all": getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
     }
+    roi_windows_min_pass = max(1, min(3, int(getattr(
+        p, "roi_windows_min_pass", config.HARVEST_ROI_WINDOWS_MIN_PASS,
+    ))))
     pnl_min = {
         "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
         "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
@@ -490,11 +494,15 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
         month_pnl, all_pnl = f(mo.get("pnl")), f(al.get("pnl"))
         week_roi, month_roi, all_roi = f(wk.get("roi")), f(mo.get("roi")), f(al.get("roi"))
+        roi_windows_passed = sum((
+            week_roi >= roi_min["week"],
+            month_roi >= roi_min["month"],
+            all_roi >= roi_min["all"],
+        ))
         r["is_candidate"] = int(
             acct >= min_acct
             and wk_vlm >= vlm_min
-            and week_roi >= roi_min["week"] and month_roi >= roi_min["month"]
-            and all_roi >= roi_min["all"]
+            and roi_windows_passed >= roi_windows_min_pass
             and wk_pnl >= pnl_min["week"] and month_pnl >= pnl_min["month"]
             and all_pnl >= pnl_min["all"]
         )
@@ -597,9 +605,21 @@ def _official_roi_audit(db, generation_id, stamp, p):
             "all_pnl_below_floor": f(item["allPnl"]) < getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
         }
         failed_checks = [reason for reason, failed in checks.items() if failed]
+        roi_windows_passed = 3 - sum(
+            1 for reason in ("week_roi_below_floor", "month_roi_below_floor", "all_roi_below_floor")
+            if checks[reason]
+        )
+        item["roiWindowsPassed"] = roi_windows_passed
+        item["roiWindowsRequired"] = max(1, min(3, int(getattr(
+            p, "roi_windows_min_pass", config.HARVEST_ROI_WINDOWS_MIN_PASS,
+        ))))
         item["failedChecks"] = failed_checks
         addr = item.pop("addr")
-        reason = failed_checks[0] if failed_checks else "official_roi_below_floor"
+        reason = (
+            "roi_windows_below_min_pass"
+            if roi_windows_passed < item["roiWindowsRequired"] else
+            failed_checks[0] if failed_checks else "official_roi_below_floor"
+        )
         if passed:
             pipeline_audit._insert_event(
                 db, stamp=stamp, source="scan", stage="official_roi", addr=addr, rank=rank,
@@ -1695,12 +1715,27 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
     previous_selection = {
         row.addr: row for row in selection.current_selection_rows(db)
     }
+    forward_risk = {
+        (addr or "").lower(): {
+            "forward_net_pnl": f(net_pnl),
+            "forward_liquidations": int(liquidations or 0),
+            "forward_closed_n": int(closed_n or 0),
+        }
+        for addr, net_pnl, liquidations, closed_n in db.execute(
+            "SELECT addr,COALESCE(SUM(COALESCE(realized_pnl,0)+CASE WHEN status='open' "
+            "THEN COALESCE(unrealized_pnl,0) ELSE 0 END),0),"
+            "SUM(CASE WHEN COALESCE(was_liq,0)=1 AND julianday(closed_at)>=julianday('now','-30 days') "
+            "THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM copy_position GROUP BY lower(addr)"
+        ).fetchall()
+    }
     rows = []
     margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     for raw in cur.fetchall():
         row = dict(zip(names, raw))
         addr = (row.get("addr") or "").lower()
         row["addr"] = addr
+        row.update(forward_risk.get(addr) or {})
         if addr in pinned:
             try:
                 current_policy = json.loads(row.get("sector_policy_json") or "{}")
@@ -1813,6 +1848,9 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     _apply_copy_bt_gate(effective, results, replay_ctx)
     effective.update(_open_flow_metrics(evidence_fills, int(now_ms)))
     _copy_profile_evidence(effective, results, replay_ctx, addr=addr, now_ms=int(now_ms))
+    for key in ("forward_net_pnl", "forward_liquidations", "forward_closed_n"):
+        if row.get(key) is not None:
+            effective[key] = row[key]
     qualification = follow_score.evaluate_follow_eligibility(
         {
             **effective,
@@ -1978,6 +2016,45 @@ def _core_prefix_retention() -> dict:
     }
 
 
+def _core_rebalance_due(db, current_core, *, now_ms: int, interval_days: int) -> tuple:
+    """Age the current membership, not the daily evidence snapshot.
+
+    Daily scans publish a fresh generation even when the Core set is unchanged.  Walking back through the
+    consecutive generations with the same membership keeps those evidence refreshes from resetting the weekly
+    rebalance clock.  Hard qualification failures still bypass this normal-cycle decision in formation.
+    """
+    rows = db.execute(
+        "SELECT sg.generation,sg.published_at,lower(fs.addr),lower(fs.role),COALESCE(fs.enabled,1) "
+        "FROM scan_generation sg LEFT JOIN follow_selection fs ON fs.generation=sg.generation "
+        "WHERE sg.status='published' AND sg.complete=1 "
+        "ORDER BY sg.published_at DESC,sg.id DESC,lower(fs.addr),fs.addr"
+    ).fetchall()
+    if not rows:
+        return True, None
+    snapshots = []
+    for generation_id, published_at, addr, role, enabled in rows:
+        if not snapshots or snapshots[-1][0] != generation_id:
+            snapshots.append([generation_id, published_at, set()])
+        if role == selection.CORE and enabled and addr:
+            snapshots[-1][2].add(addr)
+    wanted = {(addr or "").lower() for addr in (current_core or ()) if addr}
+    if not wanted or not snapshots or snapshots[0][2] != wanted:
+        return True, None
+    anchor = snapshots[0][1]
+    for _generation_id, published_at, members in snapshots[1:]:
+        if members != wanted:
+            break
+        anchor = published_at or anchor
+    if not anchor:
+        return True, None
+    try:
+        published_s = calendar.timegm(time.strptime(str(anchor), "%Y-%m-%dT%H:%M:%SZ"))
+        age_days = max(0.0, (float(now_ms) / 1000.0 - published_s) / 86400.0)
+    except (TypeError, ValueError, OverflowError):
+        return True, None
+    return age_days >= max(0, int(interval_days)), age_days
+
+
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -> dict:
     """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
     now_ms = int(now_ms or time.time() * 1000)
@@ -1992,6 +2069,17 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
     )
     pinned = set(pinned_order)
+    current_core = tuple(selection.published_core_addrs(db) or ())
+    target_min = max(1, int(params.get(db, "CORE_TARGET_MIN_N", config.CORE_TARGET_MIN_N) or 1))
+    rebalance_interval = max(1, int(params.get(
+        db, "CORE_REBALANCE_INTERVAL_DAYS", config.CORE_REBALANCE_INTERVAL_DAYS,
+    ) or 1))
+    rebalance_due, core_age_days = _core_rebalance_due(
+        db, current_core, now_ms=now_ms, interval_days=rebalance_interval,
+    )
+    # Daily scans still refresh evidence and can immediately remove a hard-risk failure. Parameter/membership
+    # optimization only runs weekly, except while the Core is below its minimum target and needs safe additions.
+    retune = bool(retune and (rebalance_due or len(current_core) < target_min))
     surface_ranked = _rank_formation_candidates_for_surface(
         db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
         valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
@@ -2106,9 +2194,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     )
     effective_pinned = set(effective_pinned_order)
     pin_rank = {addr: rank for rank, addr in enumerate(pinned_order)}
+    current_rank = {addr: rank for rank, addr in enumerate(current_core)}
     effective_ranked.sort(key=lambda row: (
         0 if row["addr"] in pinned else 1,
+        0 if row["addr"] in current_rank else 1,
         pin_rank.get(row["addr"], 999999),
+        current_rank.get(row["addr"], 999999),
         -effective_scores.get(row["addr"], 0.0), row["addr"],
     ))
     ordered = tuple(row["addr"] for row in effective_ranked[:upper])
@@ -2277,7 +2368,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         fold_cache[key] = (folds, f(stress.get("copy_net_pnl")))
         return fold_cache[key]
 
-    current_core = tuple(selection.published_core_addrs(db) or ())
     previous_qualified = tuple(
         addr for addr in current_core
         if addr in set(ordered) and (
@@ -2381,6 +2471,36 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     if robust_winner is None:
         raise RuntimeError("no_robust_quality_membership")
     chosen_addrs, chosen, robust_check = robust_winner
+    stability_applied = False
+    stable_additions = []
+    if not rebalance_due and previous_qualified:
+        # Between weekly rebalances, preserve every incumbent which still clears today's individual hard
+        # gates.  A liquidation/forward-loss/campaign failure is removed immediately, but it must not give
+        # the optimizer permission to churn the other sound incumbents during the same daily refresh.
+        stable = [addr for addr in current_core if addr in set(previous_qualified)]
+        hard_removed = [addr for addr in current_core if addr not in set(previous_qualified)]
+        if len(stable) < target_min:
+            for candidate in tuple(chosen_addrs) + tuple(ordered):
+                if candidate in stable:
+                    continue
+                trial = tuple(stable + [candidate])
+                if validate_members(trial).get("eligible"):
+                    stable.append(candidate)
+                    stable_additions.append(candidate)
+                if len(stable) >= min(target_min, upper):
+                    break
+        chosen_addrs = tuple(stable)
+        chosen = evaluate_members(chosen_addrs)
+        robust_check = {
+            "eligible": True,
+            "stableRetention": True,
+            "reason": (
+                "daily_hard_failures_removed" if hard_removed
+                else "weekly_rebalance_not_due"
+            ),
+            "hardRemoved": hard_removed,
+        }
+        stability_applied = True
     # Pre-validate any strict LOO result. Publication may remove a negative incremental member only when
     # the resulting set has passed these same membership stress rules.
     robust_allowed = {tuple(sorted(chosen_addrs))}
@@ -2432,6 +2552,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "singleWalletDependencyWarning": bool(
                 robust_check.get("singleWalletDependencyWarning")
             ),
+            "rebalanceDue": rebalance_due,
+            "coreAgeDays": core_age_days,
+            "rebalanceIntervalDays": rebalance_interval,
+            "targetMinCount": target_min,
+            "stableRetentionApplied": stability_applied,
+            "stableAdditions": stable_additions,
             "operatorStarred": list(pinned_order),
             "effectiveStarred": list(effective_pinned_order),
             "tunePoolCount": len(tune_ordered),
@@ -2787,6 +2913,20 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     )
     names = [desc[0] for desc in cur.description]
     profiles = [dict(zip(names, row)) for row in cur.fetchall()]
+    forward_risk = {
+        (addr or "").lower(): {
+            "forward_net_pnl": f(net_pnl),
+            "forward_liquidations": int(liquidations or 0),
+            "forward_closed_n": int(closed_n or 0),
+        }
+        for addr, net_pnl, liquidations, closed_n in db.execute(
+            "SELECT addr,COALESCE(SUM(COALESCE(realized_pnl,0)+CASE WHEN status='open' "
+            "THEN COALESCE(unrealized_pnl,0) ELSE 0 END),0),"
+            "SUM(CASE WHEN COALESCE(was_liq,0)=1 AND julianday(closed_at)>=julianday('now','-30 days') "
+            "THEN 1 ELSE 0 END),"
+            "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM copy_position GROUP BY lower(addr)"
+        ).fetchall()
+    }
     # watchlist.score is the published final Copy-follow score.  Selection must consume that exact value
     # rather than recomputing from a narrower row projection and creating an invisible second score line.
     watch_scores = {
@@ -2799,6 +2939,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     }
     for row in profiles:
         addr = (row.get("addr") or "").lower()
+        row.update(forward_risk.get(addr) or {})
         if addr in pinned_addrs:
             try:
                 current_policy = json.loads(row.get("sector_policy_json") or "{}")

@@ -60,7 +60,7 @@ class PerpPrefilterTests(unittest.TestCase):
         high = scanner._prepare_leaderboard_rows([row(300000000)], P(), "now")[0]
         self.assertEqual((low["is_candidate"], high["is_candidate"]), (1, 1))
 
-    def test_each_official_roi_and_absolute_pnl_floor_is_hard(self):
+    def test_two_of_three_official_roi_windows_and_all_absolute_pnl_floors(self):
         base = {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
             ("week", {"pnl": 2000, "roi": 0.15, "vlm": 300000}),
             ("month", {"pnl": 8000, "roi": 0.30, "vlm": 600000}),
@@ -71,11 +71,24 @@ class PerpPrefilterTests(unittest.TestCase):
             week_vlm_min = 300000
             week_roi_min, month_roi_min, all_roi_min = 0.15, 0.30, 0.30
             week_pnl_min, month_pnl_min, all_pnl_min = 2000, 8000, 0
+            roi_windows_min_pass = 2
         self.assertEqual(scanner._prepare_leaderboard_rows([base], P(), "now")[0]["is_candidate"], 1)
-        for window_name, field in (("week", "roi"), ("month", "roi"), ("allTime", "roi"),
-                                   ("week", "pnl"), ("month", "pnl"), ("allTime", "pnl")):
+        for window_name in ("week", "month", "allTime"):
             row = {**base, "windowPerformances": [
-                (name, {**values, field: float(values[field]) - 0.01})
+                (name, {**values, "roi": float(values["roi"]) - 0.01})
+                if name == window_name else (name, dict(values))
+                for name, values in base["windowPerformances"]
+            ]}
+            self.assertEqual(scanner._prepare_leaderboard_rows([row], P(), "now")[0]["is_candidate"], 1)
+        two_roi_misses = {**base, "windowPerformances": [
+            (name, {**values, "roi": float(values["roi"]) - 0.01})
+            if name in {"week", "month"} else (name, dict(values))
+            for name, values in base["windowPerformances"]
+        ]}
+        self.assertEqual(scanner._prepare_leaderboard_rows([two_roi_misses], P(), "now")[0]["is_candidate"], 0)
+        for window_name in ("week", "month", "allTime"):
+            row = {**base, "windowPerformances": [
+                (name, {**values, "pnl": float(values["pnl"]) - 0.01})
                 if name == window_name else (name, dict(values))
                 for name, values in base["windowPerformances"]
             ]}

@@ -27,6 +27,9 @@ class CopyPolicy:
     core_min_win_rate_30d: float
     core_min_win_rate_14d: float
     core_min_win_rate_7d: float
+    core_min_campaigns_30d: int
+    core_min_campaigns_14d: int
+    core_min_campaigns_7d: int
     core_win_rate_lcb_confidence: float
     core_min_win_rate_lcb_30d: float
     core_recent_body_min_closed: int
@@ -86,6 +89,13 @@ class CopyPolicy:
         if int(days) <= 14:
             return self.core_min_win_rate_14d
         return self.core_min_win_rate_30d
+
+    def core_min_campaigns(self, days: int) -> int:
+        if int(days) <= 7:
+            return self.core_min_campaigns_7d
+        if int(days) <= 14:
+            return self.core_min_campaigns_14d
+        return self.core_min_campaigns_30d
 
     @property
     def version(self) -> str:
@@ -147,6 +157,9 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         core_min_win_rate_30d=float(_value(values, "CORE_COPY_WIN_RATE_30D_MIN", 0.65)),
         core_min_win_rate_14d=float(_value(values, "CORE_COPY_WIN_RATE_14D_MIN", 0.65)),
         core_min_win_rate_7d=float(_value(values, "CORE_COPY_WIN_RATE_7D_MIN", 0.65)),
+        core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 5) or 0),
+        core_min_campaigns_14d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_14D", 3) or 0),
+        core_min_campaigns_7d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_7D", 2) or 0),
         core_win_rate_lcb_confidence=float(_value(
             values, "CORE_COPY_WIN_RATE_LCB_CONFIDENCE", 0.80,
         )),

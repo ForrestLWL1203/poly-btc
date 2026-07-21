@@ -31,6 +31,8 @@ PARAM_SPEC = [
         "官方近30日 ROI 下限", "默认10%；过滤一个月整体不盈利的钱包，严格质量由交易级回放判断"),
     ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
         "官方历史 ROI 下限", "默认10%；排除长期表现明显偏弱的钱包"),
+    ("HARVEST_ROI_WINDOWS_MIN_PASS", "scanner", "hidden", "int", "rescan",
+        config.HARVEST_ROI_WINDOWS_MIN_PASS, "ROI达标窗口数", "三个官方ROI窗口至少两个达到门槛"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
         "近7日绝对 PnL 下限", "默认$2,000；排除极小本金或资金流造成的虚高 ROI"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
@@ -52,6 +54,10 @@ PARAM_SPEC = [
         "扫描收尾预留时间", ""),
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
         "初始跟单上限", "每轮先取质量最优且达到Core硬标准的钱包（不足则全取），整体调参后只从质量末尾做前缀缩减"),
+    ("CORE_TARGET_MIN_N", "scanner", "green", "int", "rescan", config.CORE_TARGET_MIN_N,
+        "Core最低目标数", "低于此数量时每日可补入合格钱包；不会为了凑数放松胜率和爆仓硬门槛"),
+    ("CORE_REBALANCE_INTERVAL_DAYS", "scanner", "hidden", "int", "rescan",
+        config.CORE_REBALANCE_INTERVAL_DAYS, "Core常规换榜周期", ""),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
@@ -91,7 +97,11 @@ PARAM_SPEC = [
         f"{config.CORE_COPY_WIN_RATE_30D_MIN * 100:.0f} / "
         f"{config.CORE_COPY_WIN_RATE_14D_MIN * 100:.0f} / "
         f"{config.CORE_COPY_WIN_RATE_7D_MIN * 100:.0f} %",
-        "Core严格Copy胜率线", "允许板块30日 / 14日 / 7日胜率硬门槛；任一已采足窗口失败即拒绝"),
+        "Core独立批次胜率线", "重叠的同钱包/同板块/同方向篮子仓先合并为一次campaign，再计算30/14/7日胜率"),
+    ("CORE_COPY_CAMPAIGN_FLOORS", "scanner", "black", "display", "rescan",
+        f"{config.CORE_COPY_MIN_CAMPAIGNS_30D} / {config.CORE_COPY_MIN_CAMPAIGNS_14D} / "
+        f"{config.CORE_COPY_MIN_CAMPAIGNS_7D} 批",
+        "Core独立方向批次数", "不足时只进候选观察，不能用同一篮子里的多个币伪造样本量"),
     ("CORE_COPY_WIN_RATE_LCB", "scanner", "black", "display", "rescan",
         f"{config.CORE_COPY_WIN_RATE_LCB_CONFIDENCE * 100:.0f}% 置信 / "
         f"{config.CORE_COPY_WIN_RATE_LCB_30D_MIN * 100:.0f}% 下界",
@@ -125,7 +135,7 @@ PARAM_SPEC = [
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
     #  tier cap + master-lev cap + margin/coin/deploy limits)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
-        "自动调保证金", "每日采集/重筛后按当前跟单钱包组合回测,小网格微调仓位上限/杠杆/满火力线与智能加仓k/g/硬顶;下限/单币上限/总上限由人工控制"),
+        "自动调保证金", "每日采集刷新证据；常规每7天按当前Core组合回测调参，Core少于目标数时可为安全补位同步重算;下限/单币上限/总上限由人工控制"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
         "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、压力、回撤与爆仓门槛"),
     ("AUTO_TUNE_APPLY_MIN_SHADOW_DAYS", "follow", "hidden", "int", "immediate",
@@ -243,6 +253,19 @@ PARAM_SPEC = [
         "股票杠杆上限", "股票/大宗 perp(xyz:*)的硬性杠杆上限,不管 σ 落哪档、目标用多少倍。股票会跳空,平静的 σ 低估尾部风险,必须按品类一刀切"),
     ("MAX_DEPLOY_PCT",       "follow",  "yellow", "pct",     "immediate", config.MAX_DEPLOY_PCT * 100,
         "组合部署上限", "总占用保证金到此比例就停开新仓,留下(100-此)%干火药给加仓+新信号+缓冲。加仓可动用这部分储备。防权益开单一路铺满"),
+    ("MAX_TOTAL_MARGIN_PCT", "follow", "hidden", "pct", "immediate",
+        config.MAX_TOTAL_MARGIN_PCT * 100, "组合硬保证金上限", "新开与加仓都不能突破，永久保留风险缓冲"),
+    ("WALLET_MARGIN_CAP_PCT", "follow", "yellow", "pct", "immediate",
+        config.WALLET_MARGIN_CAP_PCT * 100, "单钱包总保证金上限",
+        "同一目标钱包跨全部市场和方向的有效保证金总和最多占权益此比例"),
+    ("WALLET_SECTOR_SIDE_CAP_PCT", "follow", "yellow", "pct", "immediate",
+        config.WALLET_SECTOR_SIDE_CAP_PCT * 100, "单钱包同板块同向上限",
+        "同一目标钱包在Crypto或xyz板块的同一方向,有效保证金最多占权益此比例。新开和加仓受限,减仓和平仓不受限;单钱包与组合Copy回放使用同一规则"),
+    ("WALLET_MAX_OPEN_POSITIONS", "follow", "yellow", "int", "immediate",
+        config.WALLET_MAX_OPEN_POSITIONS, "单钱包同时持仓上限",
+        "同一目标钱包最多同时占用的跟单品种数；已有仓位照常退出，超限后不再新开"),
+    ("WALLET_FORWARD_LOSS_FREEZE_PCT", "follow", "hidden", "pct", "immediate",
+        config.WALLET_FORWARD_LOSS_FREEZE_PCT * 100, "单钱包Forward亏损熔断", ""),
     ("MIN_OPEN_MARGIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100, "单笔最小开仓额", ""),
     ("MAX_ENTRY_CHASE_PCT",  "follow",  "hidden", "nullable","immediate",
         (config.MAX_ENTRY_CHASE_PCT * 100) if config.MAX_ENTRY_CHASE_PCT is not None else None, "追价保护阈值", ""),
@@ -262,6 +285,11 @@ _HARVEST_PREVIOUS_DEFAULTS = {
     "HARVEST_WEEK_PNL_MIN": ("5000", "5000.0"),
     "HARVEST_MONTH_PNL_MIN": ("8000", "8000.0", "15000", "15000.0"),
     "HARVEST_ALL_PNL_MIN": ("20000", "20000.0"),
+}
+
+_RISK_PREVIOUS_DEFAULTS = {
+    "WALLET_SECTOR_SIDE_CAP_PCT": ("60", "60.0"),
+    "MAX_CONCURRENT_POS": ("15", "15.0"),
 }
 
 
@@ -322,6 +350,14 @@ def seed_params(db):
                 f"AND default_value IN ({marks})",
                 (dv, key, *old_values, *old_values),
             )
+        old_risk_values = _RISK_PREVIOUS_DEFAULTS.get(key)
+        if old_risk_values:
+            marks = ",".join("?" for _ in old_risk_values)
+            db.execute(
+                f"UPDATE params SET value=? WHERE key=? AND value IN ({marks}) "
+                f"AND default_value IN ({marks})",
+                (dv, key, *old_risk_values, *old_risk_values),
+            )
         db.execute(
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
@@ -329,6 +365,8 @@ def seed_params(db):
         db.execute(
             "UPDATE params SET category=?,level=?,type=?,effect=?,default_value=? WHERE key=?",
             (category, level, ptype, effect, dv, key))
+        if ptype == "display":
+            db.execute("UPDATE params SET value=? WHERE key=?", (dv, key))
     db.commit()
 
 
@@ -412,7 +450,8 @@ SCANNER_ARG_MAP = {
     "HARVEST_MIN_ACCT": "min_acct",
     "HARVEST_WEEK_VLM_MIN": "week_vlm_min",
     "HARVEST_WEEK_ROI_MIN": "week_roi_min", "HARVEST_MONTH_ROI_MIN": "month_roi_min",
-    "HARVEST_ALL_ROI_MIN": "all_roi_min", "HARVEST_WEEK_PNL_MIN": "week_pnl_min",
+    "HARVEST_ALL_ROI_MIN": "all_roi_min", "HARVEST_ROI_WINDOWS_MIN_PASS": "roi_windows_min_pass",
+    "HARVEST_WEEK_PNL_MIN": "week_pnl_min",
     "HARVEST_MONTH_PNL_MIN": "month_pnl_min", "HARVEST_ALL_PNL_MIN": "all_pnl_min",
     "HARVEST_PERP_PNL_SHARE_MIN": "perp_pnl_share_min",
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",

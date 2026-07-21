@@ -16,6 +16,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
                           config.HARVEST_ALL_PNL_MIN), (2_000.0, 5_000.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.80)
+        self.assertEqual(config.WALLET_MARGIN_CAP_PCT, 0.20)
+        self.assertEqual(config.WALLET_SECTOR_SIDE_CAP_PCT, 0.15)
+        self.assertEqual(config.WALLET_MAX_OPEN_POSITIONS, 3)
+        self.assertEqual(config.MAX_TOTAL_MARGIN_PCT, 0.85)
         self.assertFalse(hasattr(config, "HARVEST_WEEK_VLM_MAX"))
         self.assertFalse(hasattr(config, "HARVEST_PNL_VOL_MIN"))
 
@@ -39,6 +43,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("COPY_STOP_ENABLE", follow)
             self.assertNotIn("STOP_MARGIN_PCT", follow)
             self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
+            self.assertEqual(follow["WALLET_MARGIN_CAP_PCT"], 0.20)
+            self.assertEqual(follow["WALLET_SECTOR_SIDE_CAP_PCT"], 0.15)
+            self.assertEqual(follow["WALLET_MAX_OPEN_POSITIONS"], 3)
+            self.assertEqual(follow["MAX_TOTAL_MARGIN_PCT"], 0.85)
             self.assertFalse(follow["SMART_TP_ENABLE"])
             self.assertEqual(follow["SMART_TP_GIVEBACK_1_PCT"], 0.20)
             self.assertEqual(follow["SMART_TP_CLOSE_3_PCT"], 0.25)
@@ -48,6 +56,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
             visible_follow = {p["key"]: p for p in params.get_all(db)["follow"]}
             self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["value"], 100.0)
             self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["level"], "yellow")
+            self.assertEqual(visible_follow["WALLET_MARGIN_CAP_PCT"]["value"], 20.0)
+            self.assertEqual(visible_follow["WALLET_SECTOR_SIDE_CAP_PCT"]["value"], 15.0)
+            self.assertEqual(visible_follow["WALLET_SECTOR_SIDE_CAP_PCT"]["level"], "yellow")
             self.assertFalse(visible_follow["SMART_TP_ENABLE"]["value"])
             self.assertEqual(visible_follow["SMART_TP_ENABLE"]["level"], "green")
             self.assertNotIn("SMART_TP_GIVEBACK_1_PCT", visible_follow)
@@ -81,9 +92,12 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertIn("CORE_COPY_MAX_LIQUIDATIONS_30D", scanner_keys)
             self.assertEqual(levels["CORE_COPY_WIN_RATE_FLOORS"], "black")
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
+            self.assertIn("CORE_TARGET_MIN_N", scanner_keys)
             self.assertEqual(levels["CORE_INITIAL_MAX_N"], "green")
             initial_limit = next(p for p in scanner_params if p["key"] == "CORE_INITIAL_MAX_N")
             self.assertEqual(initial_limit["value"], 16)
+            target_min = next(p for p in scanner_params if p["key"] == "CORE_TARGET_MIN_N")
+            self.assertEqual(target_min["value"], 10)
             self.assertNotIn("AUTO_TUNE_RISK_PROFILE", scanner_keys)
             self.assertEqual(levels["PORTFOLIO_MAX_TURNOVER"], "blue")
             self.assertEqual(levels["EVIDENCE_MIN_TRADES"], "blue")
@@ -138,6 +152,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 10_000.0)
             self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
+            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
             self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 2_000.0)
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
             self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)
@@ -176,7 +191,27 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
+
+    def test_seed_params_migrates_previous_risk_defaults(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute(
+                "UPDATE params SET value='60',default_value='60' WHERE key='WALLET_SECTOR_SIDE_CAP_PCT'"
+            )
+            db.execute(
+                "UPDATE params SET value='15',default_value='15' WHERE key='MAX_CONCURRENT_POS'"
+            )
+            db.commit()
+
+            params.seed_params(db)
+
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='WALLET_SECTOR_SIDE_CAP_PCT'"
+            ).fetchone()[0]), 15.0)
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
+            ).fetchone()[0]), 8.0)
 
     def test_seed_params_removes_obsolete_raw_score_gate(self):
         with tempfile.TemporaryDirectory() as td:

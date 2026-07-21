@@ -269,6 +269,20 @@ class FollowScoreTests(unittest.TestCase):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])
 
+    def test_real_forward_liquidation_or_loss_removes_new_open_permission(self):
+        liquidated = evaluate_follow_eligibility(evidence(
+            forward_liquidations=1, forward_net_pnl=-100.0,
+        ))
+        loss_frozen = evaluate_follow_eligibility(evidence(
+            forward_liquidations=0, forward_net_pnl=-300.0,
+        ))
+
+        self.assertTrue(liquidated["eligible"])
+        self.assertFalse(liquidated["coreEligible"])
+        self.assertEqual(liquidated["status"], "challenger_forward_liquidation")
+        self.assertFalse(loss_frozen["coreEligible"])
+        self.assertEqual(loss_frozen["status"], "challenger_forward_loss_freeze")
+
     def test_allowed_sector_strict_copy_win_rates_are_hard_rejections(self):
         for overrides in (
             {"copy_bt_win_rate": 0.64},
@@ -280,6 +294,17 @@ class FollowScoreTests(unittest.TestCase):
                 self.assertFalse(result["eligible"])
                 self.assertEqual(result["status"], "copy_win_rate_below_floor")
 
+    def test_correlated_campaign_win_rate_replaces_inflated_position_win_rate(self):
+        result = evaluate_follow_eligibility(evidence(
+            copy_bt_closed_n=99,
+            copy_bt_win_rate=5 / 9,
+            copy_bt_campaign_closed_n=9,
+            copy_bt_campaign_wins=5,
+        ))
+
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["status"], "copy_win_rate_below_floor")
+
     def test_recent_negative_trade_body_and_liquidation_limit_only_downgrade_core(self):
         body = evaluate_follow_eligibility(evidence(
             copy_bt_14d_body_after_top3_n=10,
@@ -287,16 +312,16 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_7d_body_after_top3_n=10,
             copy_bt_7d_body_after_top3_net_pnl=-5,
         ))
-        liq5 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=5))
-        liq6 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=6))
+        clean = evaluate_follow_eligibility(evidence(copy_bt_liquidations=0))
+        liq1 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
 
         self.assertTrue(body["eligible"])
         self.assertFalse(body["coreEligible"])
         self.assertEqual(body["status"], "challenger_recent_body_negative")
-        self.assertTrue(liq5["coreEligible"])
-        self.assertTrue(liq6["eligible"])
-        self.assertFalse(liq6["coreEligible"])
-        self.assertEqual(liq6["status"], "challenger_liquidation_limit")
+        self.assertTrue(clean["coreEligible"])
+        self.assertTrue(liq1["eligible"])
+        self.assertFalse(liq1["coreEligible"])
+        self.assertEqual(liq1["status"], "challenger_liquidation_limit")
 
     def test_sampled_profit_factor_and_tail_failures_are_business_rejections(self):
         low_pf = evaluate_follow_eligibility(evidence(copy_bt_profit_factor=1.29))

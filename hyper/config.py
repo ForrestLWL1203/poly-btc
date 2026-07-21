@@ -49,6 +49,8 @@ MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load eve
 # Every complete generation starts from the highest-quality individually Core-ready wallets.  Portfolio
 # tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
 CORE_INITIAL_MAX_N = 16
+CORE_TARGET_MIN_N = 10           # when below this, daily scans may add qualified wallets without evicting incumbents.
+CORE_REBALANCE_INTERVAL_DAYS = 7 # normal rank/portfolio reshuffles are weekly; hard risk failures remain immediate.
 CORE_PREFIX_UTILITY_RETENTION = 0.97
 CORE_PREFIX_NET_RETENTION = 0.95
 CORE_PREFIX_STRESS_RETENTION = 0.90
@@ -247,6 +249,13 @@ MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positio
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
 #                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
+WALLET_MARGIN_CAP_PCT = 0.20       # all open exposure copied from one source wallet, across every market/side.
+WALLET_SECTOR_SIDE_CAP_PCT = 0.15  # same source wallet + board (crypto/xyz) + direction. Applies to opens/adds.
+WALLET_MAX_OPEN_POSITIONS = 3      # a basket trader cannot occupy the account with many simultaneous symbols.
+MAX_TOTAL_MARGIN_PCT = 0.85        # unlike MAX_DEPLOY_PCT this also caps ADDS, preserving a hard risk buffer.
+WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03  # stop NEW exposure when one source's realized+open forward PnL <= -3%.
+LIQUIDATION_REENTRY_COOLDOWN_HOURS = 24
+REPEAT_LIQUIDATION_FREEZE_DAYS = 7  # second copied liquidation inside 30d freezes the whole source for a week.
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is below this fraction of margin-calculation equity:
 #                             once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay
@@ -310,6 +319,7 @@ HARVEST_WEEK_VLM_MIN = 300_000.0
 HARVEST_WEEK_ROI_MIN = 0.10
 HARVEST_MONTH_ROI_MIN = 0.10
 HARVEST_ALL_ROI_MIN = 0.10
+HARVEST_ROI_WINDOWS_MIN_PASS = 2  # coarse discovery: pass any two windows; strict trade replay decides quality.
 HARVEST_WEEK_PNL_MIN = 2_000.0
 HARVEST_MONTH_PNL_MIN = 5_000.0
 HARVEST_ALL_PNL_MIN = 0.0
@@ -405,6 +415,10 @@ CORE_COPY_MIN_CLOSED_7D = 5
 CORE_COPY_WIN_RATE_30D_MIN = 0.65
 CORE_COPY_WIN_RATE_14D_MIN = 0.65
 CORE_COPY_WIN_RATE_7D_MIN = 0.65
+# Win-rate confidence is measured on independent same-direction campaigns, not on every correlated symbol.
+CORE_COPY_MIN_CAMPAIGNS_30D = 5
+CORE_COPY_MIN_CAMPAIGNS_14D = 3
+CORE_COPY_MIN_CAMPAIGNS_7D = 2
 CORE_COPY_WIN_RATE_LCB_CONFIDENCE = 0.80
 CORE_COPY_WIN_RATE_LCB_30D_MIN = 0.50
 # A negative post-Top3 trade body in both recent windows is meaningful only after each body contains this
@@ -412,7 +426,7 @@ CORE_COPY_WIN_RATE_LCB_30D_MIN = 0.50
 CORE_COPY_RECENT_BODY_MIN_CLOSED = 10
 # Final strict 30d replay may contain a small number of isolated liquidations because their full loss is
 # already charged to PnL/drawdown.  More than five is too path-dependent for new opens and becomes Challenger.
-CORE_COPY_MAX_LIQUIDATIONS_30D = 5
+CORE_COPY_MAX_LIQUIDATIONS_30D = 0
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled
@@ -468,7 +482,7 @@ AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08
 AUTO_TUNE_MARGIN_CAP_SKIP_FRAC = 0.05
 AUTO_TUNE_MARGIN_MIN_FOLLOWED = 1
-MAX_CONCURRENT_POS = 15  # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
+MAX_CONCURRENT_POS = 8   # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。
 MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行侧智能间距/单币cap/ADD_MAX_HARD

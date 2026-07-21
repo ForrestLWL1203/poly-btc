@@ -16,7 +16,9 @@ from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
-                          smart_add_order_margin, smart_take_profit_decision, tier_for_sigma)
+                          smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
+                          margin_cap_room, total_effective_margin, wallet_margin,
+                          wallet_sector_side_margin, wallet_sector_side_margin_room)
 from .fill_transition import classify_fill_transition
 from hyper.util import f
 
@@ -29,6 +31,11 @@ ADD_OUTCOMES = (
     "cash_blocked",
     "min_margin_blocked",
     "liquidity_blocked",
+    "wallet_sector_side_cap_blocked",
+    "wallet_cap_blocked",
+    "total_margin_cap_blocked",
+    "liquidation_cooldown_blocked",
+    "forward_loss_blocked",
 )
 ADD_BLOCKED_OUTCOMES = tuple(
     outcome for outcome in ADD_OUTCOMES
@@ -126,6 +133,71 @@ def profit_structure_metrics(positions: list[dict], *, total_net: float, fee_dra
         # An exact 1.5x replay is still run for portfolio finalists.  At the individual-evidence layer this
         # same-path value is the deterministic extra half-fee stress and avoids doubling profile CPU work.
         "cost_stress_net_pnl": float(total_net) - 0.5 * max(0.0, float(fee_drag)),
+    }
+
+
+def campaign_structure_metrics(positions: list[dict]) -> dict:
+    """Collapse overlapping same-wallet/board/direction positions into independent trade campaigns.
+
+    A basket trader may open ten correlated stock shorts at once. Counting those symbols as ten independent
+    wins makes both win rate and Wilson confidence fictitious; economically they are one directional bet.
+    """
+    grouped = {}
+    for position in positions or ():
+        opened = int(f(position.get("opened_at")) or 0)
+        closed = int(f(position.get("closed_at")) or 0)
+        is_open = str(position.get("status") or "open") == "open" or closed <= 0
+        end = float("inf") if is_open else closed
+        key = (
+            str(position.get("addr") or "").lower(),
+            "stock" if str(position.get("coin") or "").lower().startswith("xyz:") else "crypto",
+            str(position.get("side") or "").lower(),
+        )
+        grouped.setdefault(key, []).append((opened, end, position, is_open))
+
+    campaigns = []
+    for key, rows in grouped.items():
+        rows.sort(key=lambda row: (row[0], row[1]))
+        current = None
+        for opened, end, position, is_open in rows:
+            pnl = _endpoint_pnl(position)
+            if current is None or opened > current["end"]:
+                if current is not None:
+                    campaigns.append(current)
+                current = {
+                    "key": key, "opened_at": opened, "end": end, "closed": not is_open,
+                    "pnl": pnl, "position_n": 1,
+                }
+            else:
+                current["end"] = max(current["end"], end)
+                current["closed"] = bool(current["closed"] and not is_open)
+                current["pnl"] += pnl
+                current["position_n"] += 1
+        if current is not None:
+            campaigns.append(current)
+
+    closed_campaigns = [campaign for campaign in campaigns if campaign["closed"]]
+    pnls = [float(campaign["pnl"]) for campaign in closed_campaigns]
+    wins = sorted((value for value in pnls if value > 0.0), reverse=True)
+    losses = [-value for value in pnls if value < 0.0]
+    gross_profit = sum(wins)
+    gross_loss = sum(losses)
+    return {
+        "campaign_closed_n": len(closed_campaigns),
+        "campaign_open_n": len(campaigns) - len(closed_campaigns),
+        "campaign_wins": len(wins),
+        "campaign_win_rate": len(wins) / len(closed_campaigns) if closed_campaigns else 0.0,
+        "campaign_net_pnl": sum(pnls),
+        "campaign_gross_profit": gross_profit,
+        "campaign_gross_loss": gross_loss,
+        "campaign_profit_factor": (
+            gross_profit / gross_loss if gross_loss > 0.0 else (999.0 if gross_profit > 0.0 else 0.0)
+        ),
+        "campaign_top1_profit_share": wins[0] / gross_profit if gross_profit > 0.0 else 0.0,
+        "campaign_top2_profit_share": sum(wins[:2]) / gross_profit if gross_profit > 0.0 else 0.0,
+        "campaign_net_after_top1": sum(pnls) - sum(wins[:1]),
+        "campaign_net_after_top2": sum(pnls) - sum(wins[:2]),
+        "campaign_max_positions": max((campaign["position_n"] for campaign in campaigns), default=0),
     }
 
 
@@ -318,6 +390,27 @@ class Backtest:
         self.add_frac = overrides.get("ADD_FRAC", config.ADD_FRAC)
         self.deploy_full_pct = overrides.get("DEPLOY_FULL_PCT", config.DEPLOY_FULL_PCT)
         self.max_deploy_pct = overrides.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
+        self.wallet_sector_side_cap_pct = overrides.get(
+            "WALLET_SECTOR_SIDE_CAP_PCT", config.WALLET_SECTOR_SIDE_CAP_PCT,
+        )
+        self.wallet_margin_cap_pct = overrides.get("WALLET_MARGIN_CAP_PCT", config.WALLET_MARGIN_CAP_PCT)
+        self.wallet_max_open_positions = int(overrides.get(
+            "WALLET_MAX_OPEN_POSITIONS", config.WALLET_MAX_OPEN_POSITIONS,
+        ))
+        self.max_total_margin_pct = overrides.get("MAX_TOTAL_MARGIN_PCT", config.MAX_TOTAL_MARGIN_PCT)
+        self.wallet_forward_loss_freeze_pct = overrides.get(
+            "WALLET_FORWARD_LOSS_FREEZE_PCT", config.WALLET_FORWARD_LOSS_FREEZE_PCT,
+        )
+        self.liquidation_reentry_cooldown_ms = int(
+            overrides.get("LIQUIDATION_REENTRY_COOLDOWN_HOURS", config.LIQUIDATION_REENTRY_COOLDOWN_HOURS)
+            * 60 * 60 * 1000
+        )
+        self.repeat_liquidation_freeze_ms = int(
+            overrides.get("REPEAT_LIQUIDATION_FREEZE_DAYS", config.REPEAT_LIQUIDATION_FREEZE_DAYS)
+            * 24 * 60 * 60 * 1000
+        )
+        self.liquidation_times = {}
+        self.liquidation_cooldown_until = {}
         self.margin_equity_pct = overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.tail_close_enable = bool(overrides.get("TAIL_CLOSE_ENABLE", config.TAIL_CLOSE_ENABLE))
@@ -432,6 +525,42 @@ class Backtest:
 
     def risk_available(self):
         return max(0.0, self.available() + min(0.0, self.unrealized()))
+
+    def wallet_forward_pnl(self, addr):
+        wanted = str(addr or "").lower()
+        closed = sum(
+            f(position.get("realized_net")) for position in self.closed
+            if str(position.get("addr") or "").lower() == wanted
+        )
+        opened = 0.0
+        for position in self.open.values():
+            if str(position.get("addr") or "").lower() != wanted:
+                continue
+            mark = self.last_px.get(position.get("coin")) or position.get("entry_px")
+            opened += f(position.get("realized_net"))
+            opened += f(position.get("rem_size")) * (f(mark) - f(position.get("entry_px"))) * f(position.get("sign"))
+        return closed + opened
+
+    def _liquidation_freeze_active(self, addr, coin, t):
+        stamp = int(t or 0)
+        return max(
+            int(self.liquidation_cooldown_until.get((str(addr or "").lower(), "*"), 0)),
+            int(self.liquidation_cooldown_until.get((str(addr or "").lower(), str(coin or "").lower()), 0)),
+        ) > stamp
+
+    def _record_liquidation_freeze(self, addr, coin, t):
+        stamp = int(t or 0)
+        wallet = str(addr or "").lower()
+        cutoff = stamp - 30 * 24 * 60 * 60 * 1000
+        times = [value for value in self.liquidation_times.get(wallet, []) if value >= cutoff]
+        times.append(stamp)
+        self.liquidation_times[wallet] = times
+        duration = self.repeat_liquidation_freeze_ms if len(times) >= 2 else self.liquidation_reentry_cooldown_ms
+        until = stamp + duration
+        self.liquidation_cooldown_until[(wallet, str(coin or "").lower())] = until
+        self.liquidation_cooldown_until[(wallet, "*")] = max(
+            until, int(self.liquidation_cooldown_until.get((wallet, "*"), 0)),
+        )
 
     def coin_cap_pct(self, tier):
         return self.tier_coin_cap[tier]
@@ -592,6 +721,21 @@ class Backtest:
         sigma = self.sigma(coin)
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
+        wallet_key = str(addr or "").lower()
+        if self._liquidation_freeze_active(addr, coin, t):
+            self.skip_reasons["skip_liquidation_cooldown"] += 1
+            return
+        loss_limit = self.initial_balance * self.wallet_forward_loss_freeze_pct
+        if loss_limit > 0 and self.wallet_forward_pnl(addr) <= -loss_limit:
+            self.skip_reasons["skip_wallet_forward_loss"] += 1
+            return
+        wallet_open_n = sum(
+            1 for position in self.open.values()
+            if str(position.get("addr") or "").lower() == wallet_key
+        )
+        if wallet_open_n >= self.wallet_max_open_positions:
+            self.skip_reasons["skip_wallet_position_cap"] += 1
+            return
         target_notl = abs(pos1) * px
         risk_equity = self.risk_equity()
         avail = self.risk_available()
@@ -599,6 +743,20 @@ class Backtest:
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
             for (addr, c), p in self.open.items()
             if c == coin and p["side"] == side
+        )
+        group_existing = wallet_sector_side_margin(
+            self.open.values(), addr=addr, coin=coin, side=side,
+        )
+        group_room = wallet_sector_side_margin_room(
+            cap_pct=self.wallet_sector_side_cap_pct,
+            risk_equity=risk_equity,
+            existing_margin=group_existing,
+        )
+        source_existing = wallet_margin(self.open.values(), addr=addr)
+        source_room = margin_cap_room(
+            cap_pct=self.wallet_margin_cap_pct,
+            risk_equity=risk_equity,
+            existing_margin=source_existing,
         )
         master_lev = extract_master_leverage(fill)
         if master_lev:
@@ -622,6 +780,8 @@ class Backtest:
             master_leverage=master_lev,
             params=self.open_sizing_params(),
             maintenance_leverage=maintenance_leverage,
+            wallet_sector_side_room=group_room,
+            wallet_room=source_room,
         )
         tier = plan.tier
         if not plan.ok:
@@ -755,6 +915,14 @@ class Backtest:
             if oid is not None:
                 ep["observed_add_oids"].add(oid)
 
+        if self._liquidation_freeze_active(addr, coin, t):
+            self.skip_reasons["skip_liquidation_cooldown_add"] += 1
+            return self._observe_add(ep, oid, "liquidation_cooldown_blocked")
+        loss_limit = self.initial_balance * self.wallet_forward_loss_freeze_pct
+        if loss_limit > 0 and self.wallet_forward_pnl(addr) <= -loss_limit:
+            self.skip_reasons["skip_wallet_forward_loss_add"] += 1
+            return self._observe_add(ep, oid, "forward_loss_blocked")
+
         # Once our first proactive profit cut has executed, the released exposure stays released.  Target
         # re-adds are observed for source state but never rebuild the protected position.
         if self.smart_tp_enable and int(ep.get("smart_tp_stage") or 0) > 0:
@@ -766,6 +934,24 @@ class Backtest:
         is_buy = ep["side"] == "long"
         risk_equity = self.risk_equity()
         risk_available = self.risk_available()
+        group_existing = wallet_sector_side_margin(
+            self.open.values(), addr=addr, coin=coin, side=ep["side"],
+        )
+        group_room = wallet_sector_side_margin_room(
+            cap_pct=self.wallet_sector_side_cap_pct,
+            risk_equity=risk_equity,
+            existing_margin=group_existing,
+        )
+        source_room = margin_cap_room(
+            cap_pct=self.wallet_margin_cap_pct,
+            risk_equity=risk_equity,
+            existing_margin=wallet_margin(self.open.values(), addr=addr),
+        )
+        total_room = margin_cap_room(
+            cap_pct=self.max_total_margin_pct,
+            risk_equity=risk_equity,
+            existing_margin=total_effective_margin(self.open.values()),
+        )
         existing = sum(
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
             for (addr, c), p in self.open.items()
@@ -803,12 +989,21 @@ class Backtest:
                 followed_margin=followed_margin,
                 coin_room=coin_room,
                 risk_available=risk_available,
+                wallet_sector_side_room=group_room,
+                wallet_room=source_room,
+                total_margin_room=total_room,
             )
             if add_margin < self.min_open_margin_pct * risk_equity * self.margin_equity_pct:
                 if already_counted:
                     return False
                 eps = 1e-12
-                if coin_room + eps < desired_remaining and coin_room <= risk_available + eps:
+                if group_room + eps < desired_remaining and group_room <= min(coin_room, risk_available) + eps:
+                    reason = "wallet_sector_side_cap_blocked"
+                elif source_room + eps < desired_remaining and source_room <= min(coin_room, risk_available) + eps:
+                    reason = "wallet_cap_blocked"
+                elif total_room + eps < desired_remaining and total_room <= min(coin_room, risk_available) + eps:
+                    reason = "total_margin_cap_blocked"
+                elif coin_room + eps < desired_remaining and coin_room <= risk_available + eps:
                     reason = "coin_cap_blocked"
                 elif risk_available + eps < desired_remaining and risk_available < coin_room - eps:
                     reason = "cash_blocked"
@@ -823,9 +1018,19 @@ class Backtest:
                 ep["first_margin"] * self.add_frac,
                 coin_room,
                 risk_available,
+                group_room,
+                source_room,
+                total_room,
             ))
             if add_margin <= 0:
-                reason = "coin_cap_blocked" if coin_room <= risk_available else "cash_blocked"
+                if group_room <= min(coin_room, risk_available):
+                    reason = "wallet_sector_side_cap_blocked"
+                elif source_room <= min(coin_room, risk_available):
+                    reason = "wallet_cap_blocked"
+                elif total_room <= min(coin_room, risk_available):
+                    reason = "total_margin_cap_blocked"
+                else:
+                    reason = "coin_cap_blocked" if coin_room <= risk_available else "cash_blocked"
                 return self._observe_add(ep, oid, reason)
 
         add_size = (add_margin * ep["leverage"] / px) if px else 0.0
@@ -960,6 +1165,8 @@ class Backtest:
             ep["status"] = status
             self.closed.append(ep)
             self.open.pop(key, None)
+            if status == "liquidated":
+                self._record_liquidation_freeze(addr, coin, t)
         self._sample_deploy(t)
 
     def _smart_take_profit_decision(self, ep, mark_px):
@@ -1061,7 +1268,10 @@ class Backtest:
         path_completion_rate = natural_closes / len(self.closed) if self.closed else 1.0
         initial_notl = sum(p["target_initial_notl"] for p in self.closed) + sum(p["target_initial_notl"] for p in self.open.values())
         add_notl = sum(p["target_add_notl"] for p in self.closed) + sum(p["target_add_notl"] for p in self.open.values())
-        capacity_skips = sum(self.skip_reasons[k] for k in ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small"))
+        capacity_skips = sum(self.skip_reasons[k] for k in (
+            "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
+            "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
+        ))
         equity_pnl = self.balance - self.initial_balance + unreal
         curve = []
         equity = self.initial_balance
@@ -1095,6 +1305,7 @@ class Backtest:
             total_net=equity_pnl,
             fee_drag=self.fee_drag,
         )
+        campaign_metrics = campaign_structure_metrics(all_positions)
         open_rate = self.opened_n / self.target_open_events if self.target_open_events else 1.0
         behavior_v2 = _clamp01(
             open_rate
@@ -1146,6 +1357,12 @@ class Backtest:
             "copy_win_rate": wins / len(self.closed) if self.closed else 0.0,
             "copy_net_pnl": equity_pnl,
             "margin_equity_pct": self.margin_equity_pct,
+            "wallet_margin_cap_pct": self.wallet_margin_cap_pct,
+            "wallet_sector_side_cap_pct": self.wallet_sector_side_cap_pct,
+            "wallet_max_open_positions": self.wallet_max_open_positions,
+            "max_total_margin_pct": self.max_total_margin_pct,
+            "liquidation_reentry_blocks": self.skip_reasons["skip_liquidation_cooldown"],
+            "wallet_forward_loss_blocks": self.skip_reasons["skip_wallet_forward_loss"],
             "initial_margin_equity": self.initial_balance * self.margin_equity_pct,
             "closed_net_pnl": closed_net,
             "copy_gross_pnl": self.gross_pnl,
@@ -1204,6 +1421,7 @@ class Backtest:
         }
         result.update(add_metrics)
         result.update(profit_metrics)
+        result.update(campaign_metrics)
         return result
 
 
@@ -1383,4 +1601,5 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         total_net=closed_net + open_unrealized,
         fee_drag=fees,
     ))
+    out.update(campaign_structure_metrics(positions + open_positions))
     return out

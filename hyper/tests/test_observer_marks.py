@@ -122,12 +122,16 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         ).fetchone()
         obs = Observer(db, [], {})
 
-        obs._reload_params({"MARGIN_EQUITY_PCT": 0.5})
+        obs._reload_params({
+            "MARGIN_EQUITY_PCT": 0.5,
+            "WALLET_SECTOR_SIDE_CAP_PCT": 0.45,
+        })
 
         after = db.execute(
             "SELECT margin,notional,size FROM copy_position WHERE addr='0xaaa'"
         ).fetchone()
         self.assertEqual(obs.margin_equity_pct, 0.5)
+        self.assertEqual(obs.wallet_sector_side_cap_pct, 0.45)
         self.assertEqual(obs._open_sizing_params().margin_equity_pct, 0.5)
         self.assertEqual(tuple(after), tuple(before))
 
@@ -574,6 +578,33 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertEqual(res["cooldownUntil"], row["expires_at"])
 
         asyncio.run(run())
+
+    def test_liquidation_freezes_new_exposure_across_wallet_coins(self):
+        db = self._db()
+        pos_id = db.execute(
+            "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+        ).fetchone()["pos_id"]
+        obs = Observer(db, [], {})
+        obs.target_sector_policy = {
+            "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
+        }
+        obs._add_liquidation_cooldown("0xaaa", "BTC", pos_id)
+
+        with patch.object(obs, "_open_position") as open_position:
+            obs._dispatch_fill(
+                "0xaaa", "ETH", ("0xaaa", "ETH"), now_ms(),
+                1.0, 0.0, 1.0, 200.0, False, 9001,
+            )
+
+        open_position.assert_not_called()
+        self.assertEqual(obs.hb.get("skip_liquidation_cooldown"), 1)
+        rows = db.execute(
+            "SELECT coin,reason FROM manual_close_cooldown WHERE addr='0xaaa' ORDER BY coin"
+        ).fetchall()
+        self.assertEqual([(row["coin"], row["reason"]) for row in rows], [
+            ("*", "liquidation_wallet_freeze"),
+            ("BTC", "liquidation_reentry"),
+        ])
 
     def test_manual_full_profit_does_not_add_cooldown(self):
         async def run():

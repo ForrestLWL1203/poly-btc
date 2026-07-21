@@ -230,8 +230,12 @@ The user-facing roles are:
 - **Rejected**: business value/structure is below the observation line and is not shown as Challenger.
 - **Quarantine**: collection/cache/replay/valuation/strategy data is invalid and is not a new-entry target.
 
-`CORE_INITIAL_MAX_N` (default 16, bounded by `MAX_TARGETS=40`) is a user-set hard maximum, not a quota, target,
-minimum, or auto-tuned value. Production automatic formation is:
+`CORE_INITIAL_MAX_N` (default 16, bounded by `MAX_TARGETS=40`) is a user-set hard maximum, not a quota or
+auto-tuned value. `CORE_TARGET_MIN_N` (default 10) is a service target, never a permission to weaken individual
+quality gates: while below it, a daily generation may make portfolio-safe additions. Normal ranking replacement,
+parameter retuning, and leave-one-out reshuffling run only after seven days since the last actual membership
+change. Daily evidence still removes liquidation, Forward-loss, campaign-structure, or other individual hard
+failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
 1. Rank the current generation's individually qualified Core/Challenger pool under one parameter surface.
    Parameter-sensitive return/weekly/thin-edge Challengers and a hidden, tightly bounded 5–10% cold-start return
@@ -253,9 +257,9 @@ minimum, or auto-tuned value. Production automatic formation is:
 6. Stress the final set after removing its largest one and two winning trades and after removing its largest
    contributing wallet. Normal and 1.5x-cost net must remain positive; only an all-strong-evidence set may
    publish with an explicit single-wallet-dependency warning. Persist wallet/coin/day/side concentration.
-7. Repeatedly apply strict leave-one-out elimination only when removing a member raises funded net PnL by at
-   least `$1` and the smaller set already passed the same membership robustness checks, then publish that
-   current-evidence result immediately.
+7. On a scheduled rebalance, repeatedly apply strict leave-one-out elimination only when removing a member raises
+   funded net PnL by at least `$1` and the smaller set already passed the same membership robustness checks.
+   Between rebalances, publish only hard-failure removals and validated additions toward the service target.
 
 An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag
 locks ordering and retention only while the wallet still passes the current Core business gates: an enabled,

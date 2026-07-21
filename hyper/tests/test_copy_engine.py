@@ -2,11 +2,73 @@ import unittest
 from dataclasses import replace
 
 from hyper.copy.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
-                            smart_add_order_margin, smart_take_profit_decision)
+                            smart_add_order_margin, smart_take_profit_decision,
+                            wallet_sector_side_margin, wallet_sector_side_margin_room)
 from hyper.copy.sizing import sizing_equity_for_drawdown
 
 
 class CopyEngineTests(unittest.TestCase):
+    def test_wallet_sector_side_margin_groups_only_same_source_board_and_direction(self):
+        positions = [
+            {"addr": "0xaaa", "coin": "xyz:MU", "side": "short", "margin": 300, "size": 10, "rem_size": 5},
+            {"addr": "0xaaa", "coin": "xyz:SMH", "side": "short", "margin": 200, "size": 10, "rem_size": 10},
+            {"addr": "0xaaa", "coin": "xyz:MU", "side": "long", "margin": 900, "size": 10, "rem_size": 10},
+            {"addr": "0xaaa", "coin": "ETH", "side": "short", "margin": 800, "size": 10, "rem_size": 10},
+            {"addr": "0xbbb", "coin": "xyz:MU", "side": "short", "margin": 700, "size": 10, "rem_size": 10},
+        ]
+
+        used = wallet_sector_side_margin(
+            positions, addr="0xAAA", coin="xyz:GOLD", side="short",
+        )
+
+        self.assertEqual(used, 350.0)
+        self.assertEqual(wallet_sector_side_margin_room(
+            cap_pct=0.60, risk_equity=1_000, existing_margin=used,
+        ), 250.0)
+
+    def test_open_sizing_shrinks_then_blocks_at_wallet_sector_side_cap(self):
+        params = OpenSizingParams(
+            stable_sigma_max=0.05,
+            high_sigma_min=0.09,
+            tier_margin={"stable": 0.03, "mid": 0.03, "high": 0.02},
+            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.01},
+            tier_lev_cap={"stable": 20.0, "mid": 10.0, "high": 4.0},
+            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
+            tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
+            min_lev=1.0,
+            stock_max_lev=10.0,
+            deploy_full_pct=0.40,
+            max_deploy_pct=0.80,
+            min_open_margin_pct=0.005,
+        )
+        partial = plan_open_sizing(
+            coin="xyz:MU", side="short", entry_px=100.0, sigma=0.06,
+            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=10.0, params=params,
+            wallet_sector_side_room=175.0,
+        )
+        blocked = plan_open_sizing(
+            coin="xyz:SMH", side="short", entry_px=100.0, sigma=0.06,
+            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=10.0, params=params,
+            wallet_sector_side_room=25.0,
+        )
+
+        self.assertTrue(partial.ok)
+        self.assertEqual(partial.margin, 175.0)
+        self.assertFalse(blocked.ok)
+        self.assertEqual(blocked.reason, "wallet_sector_side_full")
+
+    def test_smart_add_margin_obeys_wallet_sector_side_room(self):
+        self.assertEqual(smart_add_order_margin(
+            first_margin=300.0,
+            target_ratio=1.0,
+            followed_margin=0.0,
+            coin_room=500.0,
+            risk_available=1_000.0,
+            wallet_sector_side_room=75.0,
+        ), 75.0)
+
     def test_all_tiers_reserve_four_adds_and_last_add_fills_remaining_cap(self):
         params = OpenSizingParams(
             stable_sigma_max=0.05,

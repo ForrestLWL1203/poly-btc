@@ -57,8 +57,9 @@ Wallet quality and funded-account membership are separate decisions.
   starts, then repeatedly checks add/remove/swap/pair-add moves under strict K-line replay. Score orders the
   candidate pool; it does not force a score prefix or fixed base count.
 - Final moves must improve portfolio economics and pass non-overlapping ten-day folds, a recent holdout, and
-  1.5x transaction-cost stress without adding a stress liquidation. This can admit several complementary
-  wallets in one run, or replace a weak incumbent. There is no fixed minimum Core count or wall-clock cutoff.
+  1.5x transaction-cost stress without adding a stress liquidation. Normal replacement/reordering is weekly;
+  daily evidence refresh still removes a wallet immediately for a hard failure. While Core has fewer than ten
+  wallets, a daily run may add independently qualified, portfolio-safe wallets without evicting incumbents.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
   search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
@@ -75,7 +76,8 @@ Profiles are not re-downloaded from zero on every daily run.
   cache.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
-- Leaderboard candidates first pass official 7d/30d/all-time ROI and absolute-PnL thresholds, then an official
+- Leaderboard candidates first pass at least two of the three official 7d/30d/all-time ROI thresholds plus all
+  absolute-PnL thresholds, then an official
   Portfolio precheck requiring Perp PnL to meet the same dollar floors and contribute at least 80% in every
   window. Missing Portfolio data is deferred and cannot open a new copy.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
@@ -110,6 +112,13 @@ database is removed after a redacted JSON report is written.
 The replay uses the same copyable-fill normalization and shared execution state used by the Observer. It models
 shared available balance, isolated margin, volatility-tier sizing, leverage caps, deployment and per-coin caps,
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
+
+Core win rate is computed from independent campaigns: overlapping positions from the same source wallet, market
+board, and direction are collapsed into one directional bet before win-rate/Wilson tests. Core permits zero
+30-day replay liquidations and no recent Forward liquidation. Execution independently freezes a source after a
+liquidation (24 hours, escalating to seven days on a repeat), stops new exposure after a 3% Forward loss, limits
+one source to 20% total effective margin, 15% per board/direction, three simultaneous symbols, and preserves a
+15% account-wide margin buffer even during adds.
 
 After Core publication, a generation-bound tuner searches:
 

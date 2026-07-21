@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.copy.copy_backtest import profit_structure_metrics, run_backtest
+from hyper.copy.copy_backtest import campaign_structure_metrics, profit_structure_metrics, run_backtest
 
 
 def fill(t, coin, side, sz, start, px, oid, crossed=True):
@@ -24,6 +24,49 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_overlapping_same_direction_basket_is_one_independent_campaign(self):
+        positions = [
+            {
+                "addr": "0xaaa", "coin": f"xyz:C{i}", "side": "short", "status": "closed",
+                "opened_at": 1_000 + i, "closed_at": 5_000 + i, "net_pnl": 10.0,
+            }
+            for i in range(10)
+        ]
+
+        metrics = campaign_structure_metrics(positions)
+
+        self.assertEqual(metrics["campaign_closed_n"], 1)
+        self.assertEqual(metrics["campaign_wins"], 1)
+        self.assertEqual(metrics["campaign_max_positions"], 10)
+
+    def test_liquidation_blocks_immediate_reentry_in_replay(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 1),
+            fill(2_000, "BTC", "B", 1, 100, 90.0, 2),
+            fill(3_000, "BTC", "A", 101, 101, 90.0, 3),
+            fill(4_000, "BTC", "B", 100, 0, 90.0, 4),
+        ]
+
+        result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04})
+
+        self.assertEqual(result["liquidations"], 1)
+        self.assertEqual(result["liquidation_reentry_blocks"], 1)
+        self.assertEqual(result["opened_n"], 1)
+
+    def test_wallet_position_cap_preserves_slots_for_other_sources(self):
+        fills = [
+            fill(i + 1, f"C{i}", "B", 10_000, 0, 100.0, i + 1)
+            for i in range(4)
+        ]
+        result = run_backtest("0xabc", fills, sigmas={f"C{i}": 0.06 for i in range(4)}, overrides={
+            "MID_MIN_NOTIONAL": 0.0,
+            "WALLET_MARGIN_CAP_PCT": 1.0,
+            "WALLET_SECTOR_SIDE_CAP_PCT": 1.0,
+        })
+
+        self.assertEqual(result["opened_n"], 3)
+        self.assertEqual(result["skip_reasons"].get("skip_wallet_position_cap"), 1)
+
     def test_profit_body_after_top3_distinguishes_repeatable_from_lottery_wallet(self):
         wallet_a = [1000, 800, 600, 40, 35, 30, 25, 20, 15, -10]
         wallet_b = [1000, 800, 600, 10, -10, -15, -20, -25, -30, -35]
@@ -180,6 +223,9 @@ class CopyBacktestTests(unittest.TestCase):
             "STABLE_MIN_NOTIONAL": 0.0,
             "ADD_GAP_K": 0.01,
             "ADD_GAP_SHRINK_G": 1.0,
+            "WALLET_MARGIN_CAP_PCT": 1.0,
+            "WALLET_SECTOR_SIDE_CAP_PCT": 1.0,
+            "MAX_TOTAL_MARGIN_PCT": 1.0,
         })
 
         self.assertEqual(result["followed_adds"], 1)
@@ -311,6 +357,9 @@ class CopyBacktestTests(unittest.TestCase):
             "MID_COIN_CAP_PCT": 1.0,
             "DEPLOY_FULL_PCT": 0.08,
             "MAX_DEPLOY_PCT": 0.50,
+            "WALLET_MARGIN_CAP_PCT": 1.0,
+            "WALLET_SECTOR_SIDE_CAP_PCT": 1.0,
+            "WALLET_MAX_OPEN_POSITIONS": 20,
         })
 
         margins = [p["margin"] for p in sorted(result["open_positions"], key=lambda p: p["opened_at"])]
@@ -322,6 +371,55 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertGreater(margins[3], 300)
         self.assertGreater(margins[-1], 190)
         self.assertLess(margins[-1], margins[3])
+
+    def test_single_wallet_replay_caps_same_stock_direction_across_coins(self):
+        fills = [
+            fill(1, "xyz:AAA", "A", 1_000, 0, 100.0, 1),
+            fill(2, "xyz:BBB", "A", 1_000, 0, 100.0, 2),
+            fill(3, "xyz:CCC", "A", 1_000, 0, 100.0, 3),
+        ]
+        result = run_backtest("0xaaa", fills, sigmas={
+            "xyz:AAA": 0.06, "xyz:BBB": 0.06, "xyz:CCC": 0.06,
+        }, overrides={
+            "WALLET_SECTOR_SIDE_CAP_PCT": 0.05,
+            "MID_MARGIN_PCT": 0.03,
+            "MID_MARGIN_MIN_PCT": 0.02,
+            "MID_COIN_CAP_PCT": 1.0,
+            "MID_MIN_NOTIONAL": 0.0,
+        })
+
+        used = sum(position["margin"] for position in result["open_positions"])
+        self.assertEqual(result["wallet_sector_side_cap_pct"], 0.05)
+        self.assertGreater(used, 499.0)
+        self.assertLessEqual(used, 500.0)
+        self.assertEqual(result["opened_n"], 2)
+        self.assertEqual(result["skip_reasons"].get("skip_wallet_sector_side_full"), 1)
+
+    def test_portfolio_replay_gives_each_wallet_an_independent_group_cap(self):
+        fills = [
+            user_fill("0xaaa", 1, "xyz:AAA", "A", 1_000, 0, 100.0, 1),
+            user_fill("0xbbb", 2, "xyz:BBB", "A", 1_000, 0, 100.0, 2),
+            user_fill("0xaaa", 3, "xyz:CCC", "A", 1_000, 0, 100.0, 3),
+            user_fill("0xbbb", 4, "xyz:DDD", "A", 1_000, 0, 100.0, 4),
+        ]
+        result = run_backtest("portfolio", fills, sigmas={
+            coin: 0.06 for coin in ("xyz:AAA", "xyz:BBB", "xyz:CCC", "xyz:DDD")
+        }, overrides={
+            "WALLET_SECTOR_SIDE_CAP_PCT": 0.05,
+            "MID_MARGIN_PCT": 0.03,
+            "MID_MARGIN_MIN_PCT": 0.02,
+            "MID_COIN_CAP_PCT": 1.0,
+            "MID_MIN_NOTIONAL": 0.0,
+        })
+
+        by_wallet = {}
+        for position in result["open_positions"]:
+            by_wallet[position["addr"]] = by_wallet.get(position["addr"], 0.0) + position["margin"]
+        self.assertEqual(result["opened_n"], 4)
+        self.assertGreater(by_wallet["0xaaa"], 499.0)
+        self.assertLessEqual(by_wallet["0xaaa"], 500.0)
+        self.assertGreater(by_wallet["0xbbb"], 499.0)
+        self.assertLessEqual(by_wallet["0xbbb"], 500.0)
 
     def test_price_path_can_liquidate_between_target_fills(self):
         fills = [

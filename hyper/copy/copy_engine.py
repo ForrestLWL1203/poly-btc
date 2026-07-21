@@ -99,17 +99,90 @@ def smart_add_order_margin(
     followed_margin: float,
     coin_room: float,
     risk_available: float,
+    wallet_sector_side_room: float | None = None,
+    wallet_room: float | None = None,
+    total_margin_room: float | None = None,
 ) -> float:
     """Size one target add order; a single order cannot consume multiple add slots."""
     first = max(0.0, float(first_margin or 0.0))
     followed = max(0.0, float(followed_margin or 0.0))
+    group_room = (
+        float("inf") if wallet_sector_side_room is None
+        else max(0.0, float(wallet_sector_side_room or 0.0))
+    )
+    source_room = float("inf") if wallet_room is None else max(0.0, float(wallet_room or 0.0))
+    portfolio_room = (
+        float("inf") if total_margin_room is None
+        else max(0.0, float(total_margin_room or 0.0))
+    )
     desired_total = min(
         max(0.0, float(target_ratio or 0.0)) * first,
         first,
         followed + max(0.0, float(coin_room or 0.0)),
         followed + max(0.0, float(risk_available or 0.0)),
+        followed + group_room,
+        followed + source_room,
+        followed + portfolio_room,
     )
     return max(0.0, desired_total - followed)
+
+
+def copy_market_sector(coin: str | None) -> str:
+    """Execution-level market board used by concentration controls."""
+    return "stock" if str(coin or "").lower().startswith("xyz:") else "crypto"
+
+
+def effective_position_margin(position: dict) -> float:
+    """Remaining isolated margin after any partial closes."""
+    margin = max(0.0, f(position.get("margin")))
+    size = abs(f(position.get("size")))
+    remaining_raw = position.get("rem_size")
+    remaining = abs(f(size if remaining_raw is None else remaining_raw))
+    return margin * (remaining / size if size > 0.0 else 1.0)
+
+
+def wallet_sector_side_margin(
+    positions, *, addr: str, coin: str, side: str,
+) -> float:
+    """Aggregate one source wallet's effective margin on one board and direction."""
+    wanted_addr = str(addr or "").lower()
+    wanted_sector = copy_market_sector(coin)
+    wanted_side = str(side or "").lower()
+    return sum(
+        effective_position_margin(position)
+        for position in positions
+        if str(position.get("addr") or "").lower() == wanted_addr
+        and copy_market_sector(position.get("coin")) == wanted_sector
+        and str(position.get("side") or "").lower() == wanted_side
+    )
+
+
+def wallet_margin(positions, *, addr: str) -> float:
+    """Aggregate effective margin copied from one source wallet across its whole basket."""
+    wanted_addr = str(addr or "").lower()
+    return sum(
+        effective_position_margin(position)
+        for position in positions
+        if str(position.get("addr") or "").lower() == wanted_addr
+    )
+
+
+def total_effective_margin(positions) -> float:
+    return sum(effective_position_margin(position) for position in positions)
+
+
+def wallet_sector_side_margin_room(
+    *, cap_pct: float, risk_equity: float, existing_margin: float,
+) -> float:
+    cap = max(0.0, min(1.0, f(cap_pct)))
+    return max(0.0, cap * max(0.0, f(risk_equity)) - max(0.0, f(existing_margin)))
+
+
+def margin_cap_room(*, cap_pct: float, risk_equity: float, existing_margin: float) -> float:
+    """Remaining effective-margin room for any equity-relative concentration cap."""
+    return wallet_sector_side_margin_room(
+        cap_pct=cap_pct, risk_equity=risk_equity, existing_margin=existing_margin,
+    )
 
 
 def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
@@ -324,6 +397,8 @@ def plan_open_sizing(
     master_leverage: float | None,
     params: OpenSizingParams,
     maintenance_leverage: float | None = None,
+    wallet_sector_side_room: float | None = None,
+    wallet_room: float | None = None,
 ) -> OpenSizingPlan:
     tier = tier_for_sigma(sigma, params.stable_sigma_max, params.high_sigma_min, coin)
     lev = max(params.min_lev, float(int(params.tier_lev_cap[tier])))
@@ -364,12 +439,25 @@ def plan_open_sizing(
         coin_room=room,
         min_add_margin=min_add_margin,
     )
-    margin = min(wanted_margin, room, deploy_room, add_capacity_margin)
+    group_room = (
+        float("inf") if wallet_sector_side_room is None
+        else max(0.0, float(wallet_sector_side_room or 0.0))
+    )
+    source_room = float("inf") if wallet_room is None else max(0.0, float(wallet_room or 0.0))
+    margin = min(wanted_margin, room, deploy_room, add_capacity_margin, group_room, source_room)
+    group_limited = group_room <= min(
+        wanted_margin, room, deploy_room, add_capacity_margin, source_room,
+    ) + 1e-12
+    wallet_limited = source_room <= min(
+        wanted_margin, room, deploy_room, add_capacity_margin, group_room,
+    ) + 1e-12
     # The relative dust threshold follows the same manual sizing base.  Otherwise lowering the sizing
     # budget would silently turn valid proportional opens into "margin_too_small" skips.  Fixed per-tier
     # minimum notionals remain real execution/economic floors and are intentionally not scaled.
     if margin < min_add_margin:
         reason = (
+            "wallet_sector_side_full" if group_limited else
+            "wallet_full" if wallet_limited else
             "coin_full" if min(room, add_capacity_margin) < wanted_margin else
             "no_cash" if risk_available < wanted_margin else
             "deploy_cap" if deploy_room < wanted_margin else
@@ -384,7 +472,8 @@ def plan_open_sizing(
         notional = master_notional
         margin = notional / lev if lev else margin
     if notional < params.tier_min_notional[tier]:
-        return OpenSizingPlan(False, "small_notl", tier, side, margin_pct, margin, notional, lev, 0.0, 0.0,
+        reason = "wallet_sector_side_full" if group_limited else "wallet_full" if wallet_limited else "small_notl"
+        return OpenSizingPlan(False, reason, tier, side, margin_pct, margin, notional, lev, 0.0, 0.0,
                               room, deploy_room, risk_available, wanted_margin, master_notional,
                               risk_equity, sizing_equity, margin_equity)
 

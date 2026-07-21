@@ -91,7 +91,7 @@ export function Wallets({ confirm }) {
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
               <th className="num" title="按当前已生效的调参结果回放，已扣手续费；同时展示长期与近期结果">当前参数回放</th>
               <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
-              <th className="num">胜率</th><th>主力</th>
+              <th className="num" title="重叠的同钱包、同板块、同方向仓位合并为一次独立campaign后计算">独立胜率</th><th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>
             <tbody>
@@ -138,7 +138,10 @@ export function Wallets({ confirm }) {
                         <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>共 {w.followCount} 笔</div>
                       </React.Fragment> : <span className="muted">暂无跟单</span>}
                     </td>
-                    <td className="num">{w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</td>
+                    <td className="num">
+                      {w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}
+                      {w.campaignClosedN != null && <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{w.campaignClosedN} 批</div>}
+                    </td>
                     <td><b>{w.mainCoin || "—"}</b></td>
                     {tab === "challenger" && <td><span className="muted">{w.selectionReasonText || "未满足实跟条件"}</span></td>}
                     <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>

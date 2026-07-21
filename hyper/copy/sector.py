@@ -104,16 +104,26 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     closed = {days: _int(results[days].get("closed_n")) for days in results}
     pnl = {days: _num(results[days].get("copy_net_pnl")) for days in results}
     enough = {days: closed[days] >= policy.core_min_closed(days) for days in results}
+    win_samples = {
+        days: (
+            _int(results[days].get("campaign_closed_n"))
+            if results[days].get("campaign_closed_n") is not None else closed[days]
+        )
+        for days in results
+    }
     wins = {
-        days: max(0, min(closed[days], _int(results[days].get("wins"))))
+        days: max(0, min(win_samples[days], _int(
+            results[days].get("campaign_wins")
+            if results[days].get("campaign_wins") is not None else results[days].get("wins")
+        )))
         for days in results
     }
     win_rate = {
-        days: wins[days] / closed[days] if closed[days] else 0.0
+        days: wins[days] / win_samples[days] if win_samples[days] else 0.0
         for days in results
     }
     win_lcb30 = one_sided_wilson_lower_bound(
-        wins[30], closed[30], policy.core_win_rate_lcb_confidence,
+        wins[30], win_samples[30], policy.core_win_rate_lcb_confidence,
     )
     equity = _qualification_equity(windows)
     return30 = pnl[30] / equity
@@ -124,6 +134,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
         "returns": {"30": return30, "14": return14, "7": return7},
         "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
+        "campaigns": {str(days): win_samples[days] for days in (30, 14, 7)},
         "winRateLcb30": win_lcb30,
         "qualificationEquity": equity,
     }
@@ -153,6 +164,19 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "status": "sector_sample_watch",
             "reason": "板块未独立达到30/14/7日实跟样本线",
             "watch": bool(closed[30] > 0 and pnl[30] > min_net),
+        }
+    thin_campaign_windows = [
+        days for days in (30, 14, 7)
+        if win_samples[days] < policy.core_min_campaigns(days)
+    ]
+    if thin_campaign_windows:
+        labels = "/".join(f"{days}日" for days in thin_campaign_windows)
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_campaign_sample_watch",
+            "reason": f"板块{labels}独立方向交易批次不足，相关篮子仓不能冒充独立胜率样本",
+            "watch": bool(pnl[30] > min_net),
         }
     weak_windows = [
         days for days in (30, 14, 7)
@@ -241,6 +265,12 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "板块30天移除最大两笔盈利后未达到尾部收益线",
         ),
         (
+            primary.get("campaign_net_after_top2") is not None
+            and _num(primary.get("campaign_net_after_top2")) <= min_net,
+            "sector_campaign_tail_weak",
+            "板块30天移除最大两个独立方向批次后不盈利",
+        ),
+        (
             recent.get("net_after_top1") is not None
             and _num(recent.get("net_after_top1")) <= min_net,
             "sector_recent_tail_weak",
@@ -305,6 +335,11 @@ def _compact_result(result: Mapping) -> dict:
         "body_after_top3_gross_profit", "body_after_top3_gross_loss",
         "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
         "body_after_top3_median_pnl",
+        "campaign_closed_n", "campaign_open_n", "campaign_wins", "campaign_win_rate",
+        "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
+        "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
+        "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
+        "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         "cost_stress_net_pnl", "initial_margin_equity",
     )
     return {k: result.get(k) for k in keys if k in result}
@@ -747,6 +782,15 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         closed_n = _int(primary.get("closed_n"))
         out["copy_bt_wins"] = _int(primary.get("wins"))
         out["copy_bt_win_rate"] = out["copy_bt_wins"] / closed_n if closed_n else 0.0
+        out["copy_bt_position_win_rate"] = out["copy_bt_win_rate"]
+        if primary.get("campaign_closed_n") is not None:
+            campaign_n = _int(primary.get("campaign_closed_n"))
+            out["copy_bt_campaign_closed_n"] = campaign_n
+            out["copy_bt_campaign_wins"] = _int(primary.get("campaign_wins"))
+            out["copy_bt_campaign_win_rate"] = (
+                out["copy_bt_campaign_wins"] / campaign_n if campaign_n else 0.0
+            )
+            out["copy_bt_win_rate"] = out["copy_bt_campaign_win_rate"]
         target_open = _int(primary.get("target_open_events"))
         out["copy_bt_open_fill_rate"] = primary.get("open_fill_rate")
         if out["copy_bt_open_fill_rate"] is None and target_open:
@@ -770,6 +814,10 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "entry_gap_sigma_weighted", "entry_gap_sigma_p90", "entry_alignment",
             "add_execution", "add_fidelity", "add_fidelity_applied",
             "behavior_replication_v2", "behavior_replication_rate",
+            "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
+            "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
+            "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
+            "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         ):
             if key in primary:
                 out[f"copy_bt_{key}"] = primary[key]
@@ -786,6 +834,15 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
                 out[f"copy_bt_{days}d_wins"] / _int(agg.get("closed_n"))
                 if _int(agg.get("closed_n")) else 0.0
             )
+            out[f"copy_bt_{days}d_position_win_rate"] = out[f"copy_bt_{days}d_win_rate"]
+            if agg.get("campaign_closed_n") is not None:
+                campaign_n = _int(agg.get("campaign_closed_n"))
+                out[f"copy_bt_{days}d_campaign_closed_n"] = campaign_n
+                out[f"copy_bt_{days}d_campaign_wins"] = _int(agg.get("campaign_wins"))
+                out[f"copy_bt_{days}d_campaign_win_rate"] = (
+                    out[f"copy_bt_{days}d_campaign_wins"] / campaign_n if campaign_n else 0.0
+                )
+                out[f"copy_bt_{days}d_win_rate"] = out[f"copy_bt_{days}d_campaign_win_rate"]
             out[f"copy_bt_{days}d_unrealized_pnl"] = _num(agg.get("unrealized_pnl"))
             for key in (
                 "profit_factor", "net_after_top1", "net_after_top2", "liquidations",
@@ -795,6 +852,9 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
                 "body_after_top3_gross_profit", "body_after_top3_gross_loss",
                 "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
                 "body_after_top3_median_pnl",
+                "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
+                "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
+                "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
             ):
                 out[f"copy_bt_{days}d_{key}"] = agg.get(key)
     out["allowed_sectors"] = sorted(allowed)
