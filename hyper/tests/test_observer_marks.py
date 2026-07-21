@@ -56,6 +56,19 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         obs.bbo[coin] = (bid, ask)
         obs.bbo_ms[coin] = now_ms()
 
+    def test_observer_restart_preserves_operator_pause(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO process_status (name,state) VALUES ('observer','paused') "
+            "ON CONFLICT(name) DO UPDATE SET state=excluded.state"
+        )
+        db.commit()
+
+        restarted = Observer(db, [], {})
+
+        self.assertTrue(restarted.paused)
+        self.assertEqual(restarted._proc_state, "paused")
+
     def test_null_sigma_placeholder_is_not_loaded_as_warm_cache(self):
         db = self._db()
         db.execute(

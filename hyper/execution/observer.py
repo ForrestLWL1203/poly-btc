@@ -188,8 +188,14 @@ class Observer:
         self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
         self.ws = None
         self.stop = False
-        self.paused = False              # dashboard pause: stop opening NEW copies; existing keep to close
-        self._proc_state = "running"     # process_status state machine (running|pausing|paused|resuming)
+        prior_state = self.db.execute(
+            "SELECT state FROM process_status WHERE name='observer'"
+        ).fetchone()
+        prior_state = str(prior_state[0] or "") if prior_state else ""
+        # Pause is operator intent, not process-local state. Preserve it across deploys/restarts so a worker
+        # cannot briefly originate new positions before its command loop receives another pause command.
+        self.paused = prior_state in {"paused", "pausing"}
+        self._proc_state = "paused" if self.paused else "running"
         self._proc_owner = f"observer:{os.getpid()}"
         self.risk_radar = RiskRadar(db)
 
@@ -1380,7 +1386,7 @@ class Observer:
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_strategy(init=True)           # atomic Core + exact follow-param revision (forward-only)
         try:
-            self._write_proc_status("running")     # advertise liveness + state to the dashboard
+            self._write_proc_status(self._proc_state)  # preserve operator pause across worker restarts
         except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
             _log(f"proc status init failed: {exc}")
         asyncio.create_task(self.consume_commands())  # dashboard control plane (pause/close/toggle)
