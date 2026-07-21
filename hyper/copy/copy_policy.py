@@ -145,8 +145,8 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         core_min_closed_14d=int(_value(values, "CORE_COPY_MIN_CLOSED_14D", 7) or 0),
         core_min_closed_7d=int(_value(values, "CORE_COPY_MIN_CLOSED_7D", 5) or 0),
         core_min_win_rate_30d=float(_value(values, "CORE_COPY_WIN_RATE_30D_MIN", 0.65)),
-        core_min_win_rate_14d=float(_value(values, "CORE_COPY_WIN_RATE_14D_MIN", 0.60)),
-        core_min_win_rate_7d=float(_value(values, "CORE_COPY_WIN_RATE_7D_MIN", 0.60)),
+        core_min_win_rate_14d=float(_value(values, "CORE_COPY_WIN_RATE_14D_MIN", 0.65)),
+        core_min_win_rate_7d=float(_value(values, "CORE_COPY_WIN_RATE_7D_MIN", 0.65)),
         core_win_rate_lcb_confidence=float(_value(
             values, "CORE_COPY_WIN_RATE_LCB_CONFIDENCE", 0.80,
         )),

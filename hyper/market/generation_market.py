@@ -53,13 +53,16 @@ def load(db, generation: str) -> tuple[dict[str, float], dict[str, dict]]:
     if manifest and manifest[0] == "sealed":
         summary(db, generation)  # verifies the stored immutable hash before returning replay inputs
     rows = db.execute(
-        "SELECT coin,sigma,day_ntl_vlm,oi_notional,max_leverage "
+        "SELECT coin,sigma,day_ntl_vlm,oi_notional,mark_px,max_leverage "
         "FROM generation_market_snapshot WHERE generation=? ORDER BY coin",
         (generation,),
     ).fetchall()
     sigmas = {row[0]: float(row[1]) for row in rows}
     market_ctx = {
-        row[0]: {"day_ntl_vlm": row[2], "oi_notional": row[3], "max_leverage": row[4]}
+        row[0]: {
+            "day_ntl_vlm": row[2], "oi_notional": row[3],
+            "mark_px": row[4], "max_leverage": row[5],
+        }
         for row in rows
     }
     return sigmas, market_ctx
@@ -254,7 +257,8 @@ class Resolver:
             )
             self.db.commit()
         return float(sample["sigma"]), {
-            "day_ntl_vlm": day_vlm, "oi_notional": oi_notional, "max_leverage": max_leverage,
+            "day_ntl_vlm": day_vlm, "oi_notional": oi_notional,
+            "mark_px": mark_px, "max_leverage": max_leverage,
         }
 
     def ensure(self, coins) -> tuple[dict[str, float], dict[str, dict]]:

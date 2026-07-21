@@ -102,7 +102,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 - Leaderboard harvesting uses official 7d/30d/all-time ROI, absolute PnL, account value and a weekly activity
   floor. Nominal leveraged volume is never a profitability denominator and has no upper bound. Every survivor
   must then pass the official Portfolio Perp PnL/share precheck before history profiling. Current defaults are
-  account value `$10,000`, official ROI `15%/20%/20%`, absolute PnL `$2,000/$8,000/$0`, weekly volume
+  account value `$10,000`, official ROI `10%/10%/10%`, absolute PnL `$2,000/$5,000/$0`, weekly volume
   `$300,000`, and Perp PnL share `80%` in all three windows.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
@@ -158,7 +158,7 @@ default classification is:
 
 - 30/14/7 observation floors remain 7/5/5, but new-open Core permission requires 15/7/5 closed episodes and
   at least five independent evidence days. High ROI/PnL never creates a small-sample exception;
-- within every allowed sector, strict-Copy win rate must be at least 65%/60%/60% for 30/14/7 days. The 30-day
+- within every allowed sector, strict-Copy win rate must be at least 65%/65%/65% for 30/14/7 days. The 30-day
   rate must also have an 80% one-sided Wilson lower confidence bound of at least 50%. A sampled failure is a
   business rejection, not a ranking penalty;
 - Challenger needs 30-day strict Copy return at least 10%; once 7-day evidence reaches five closes, 7-day
@@ -360,6 +360,13 @@ the current published generation.
   mirrored reduce, while a full close always executes. After a target reduce, a profitable tail at or below 20%
   of peak size exits; up to 35% may exit when its market-specific liquidation path could give back at least 50%
   of close-now episode profit. This is profit protection and never converts a losing episode into a stop-loss.
+- Optional `SMART_TP_ENABLE` is off by default and is captured in the same immutable follow-parameter revision
+  used by Observer and canonical replay. When enabled, each position arms a volatility-normalized high-water at
+  `0.60σ/0.50σ/0.40σ` for stable/mid/high without selling; after 20%/35%/50% giveback it closes 20%/25%/25%
+  of the arming size, rebasing the remaining high-water after each cut and preserving a 30% tail. Once that tail
+  exists, target trims below 30% are observed but not mirrored; cumulative target reduction of at least 30%, a
+  full close, or a flip exits the tail completely. Target adds after the first proactive cut never rebuild exposure.
+  The legacy liquidation-risk tail rule is bypassed while smart take-profit owns the episode.
 - A manual 100% close creates a 24-hour same-wallet/same-coin cooldown only when the realized episode is losing.
   A profitable/breakeven full close has no cooldown. Any partial manual close keeps the episode live so later
   target adds, reductions and close remain actionable.

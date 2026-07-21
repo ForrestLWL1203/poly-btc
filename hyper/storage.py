@@ -556,12 +556,18 @@ CREATE INDEX IF NOT EXISTS idx_stats_ts ON account_stats(ts);
 CREATE TABLE IF NOT EXISTS copy_position (
     pos_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     addr TEXT, coin TEXT, side TEXT,
-    status         TEXT,                 -- open / closed / gap_closed / liquidated
+    status         TEXT,                 -- open / closed / gap_closed / liquidated / tail_closed
     master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
     master_leverage REAL, master_margin REAL,     -- target's leverage + margin captured AT OPEN
     leverage REAL, margin REAL, notional REAL,    -- our sizing (margin = 2% of available at open)
     entry_px REAL, size REAL, rem_size REAL,       -- our fill px, cumulative followed size, remaining
     peak_size REAL,                                -- historical peak live size; tail exits use rem/peak
+    master_current_sz REAL,                        -- latest observed target size; includes ignored tiny reductions
+    smart_tp_armed INTEGER DEFAULT 0,
+    smart_tp_stage INTEGER DEFAULT 0,
+    smart_tp_peak_pnl REAL DEFAULT 0,
+    smart_tp_base_size REAL,
+    smart_tp_master_anchor REAL,
     liq_px REAL,                                   -- isolated liquidation price (loss = margin)
     realized_pnl REAL DEFAULT 0,                   -- accumulated realized PnL on this position
     add_count INTEGER DEFAULT 0,                   -- follow-on adds taken (capped at MAX_ADDS)
@@ -1081,6 +1087,12 @@ _MIGRATIONS = (
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_position ADD COLUMN peak_size REAL",
+    "ALTER TABLE copy_position ADD COLUMN master_current_sz REAL",
+    "ALTER TABLE copy_position ADD COLUMN smart_tp_armed INTEGER DEFAULT 0",
+    "ALTER TABLE copy_position ADD COLUMN smart_tp_stage INTEGER DEFAULT 0",
+    "ALTER TABLE copy_position ADD COLUMN smart_tp_peak_pnl REAL DEFAULT 0",
+    "ALTER TABLE copy_position ADD COLUMN smart_tp_base_size REAL",
+    "ALTER TABLE copy_position ADD COLUMN smart_tp_master_anchor REAL",
     # AI risk radar development migrations (safe no-ops on a fresh schema).
     "ALTER TABLE market_risk_intent ADD COLUMN source_oid INTEGER",
     "ALTER TABLE market_risk_assessment ADD COLUMN estimated_cost REAL",

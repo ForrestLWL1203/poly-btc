@@ -12,9 +12,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
         self.assertEqual(config.HARVEST_MIN_ACCT, 10_000.0)
         self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
-                          config.HARVEST_ALL_ROI_MIN), (0.15, 0.20, 0.20))
+                          config.HARVEST_ALL_ROI_MIN), (0.10, 0.10, 0.10))
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
-                          config.HARVEST_ALL_PNL_MIN), (2_000.0, 8_000.0, 0.0))
+                          config.HARVEST_ALL_PNL_MIN), (2_000.0, 5_000.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.80)
         self.assertFalse(hasattr(config, "HARVEST_WEEK_VLM_MAX"))
         self.assertFalse(hasattr(config, "HARVEST_PNL_VOL_MIN"))
@@ -28,21 +28,29 @@ class ScannerSettingsParamTests(unittest.TestCase):
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
             self.assertEqual(scanner["HARVEST_MIN_ACCT"], 10_000.0)
-            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.15)
-            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.20)
-            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.20)
+            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.10)
+            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.10)
+            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.10)
             self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 2_000.0)
-            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 8_000.0)
+            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 5_000.0)
             self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_PERP_PNL_SHARE_MIN"], 0.80)
             self.assertEqual(scanner["inactive_days"], 2)
             self.assertNotIn("COPY_STOP_ENABLE", follow)
             self.assertNotIn("STOP_MARGIN_PCT", follow)
             self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
+            self.assertFalse(follow["SMART_TP_ENABLE"])
+            self.assertEqual(follow["SMART_TP_GIVEBACK_1_PCT"], 0.20)
+            self.assertEqual(follow["SMART_TP_CLOSE_3_PCT"], 0.25)
+            self.assertEqual(follow["SMART_TP_TAIL_REMAIN_PCT"], 0.30)
+            self.assertEqual(follow["SMART_TP_TARGET_REDUCE_EXIT_PCT"], 0.30)
 
             visible_follow = {p["key"]: p for p in params.get_all(db)["follow"]}
             self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["value"], 100.0)
             self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["level"], "yellow")
+            self.assertFalse(visible_follow["SMART_TP_ENABLE"]["value"])
+            self.assertEqual(visible_follow["SMART_TP_ENABLE"]["level"], "green")
+            self.assertNotIn("SMART_TP_GIVEBACK_1_PCT", visible_follow)
 
     def test_scanner_settings_expose_basic_and_folded_advanced_knobs(self):
         with tempfile.TemporaryDirectory() as td:
@@ -126,12 +134,12 @@ class ScannerSettingsParamTests(unittest.TestCase):
             values = dict(db.execute(
                 "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
             ).fetchall())
-            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 15.0)
+            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 10_000.0)
-            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 20.0)
-            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 20.0)
+            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 10.0)
+            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 2_000.0)
-            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 8_000.0)
+            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
             self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_PERP_PNL_SHARE_MIN"]), 12.0)
 
@@ -143,6 +151,32 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='HARVEST_MONTH_ROI_MIN'"
             ).fetchone()[0]), 45.0)
+
+    def test_seed_params_migrates_immediately_previous_harvest_surface(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            previous = {
+                "HARVEST_WEEK_ROI_MIN": "15",
+                "HARVEST_MONTH_ROI_MIN": "20",
+                "HARVEST_ALL_ROI_MIN": "20",
+                "HARVEST_MONTH_PNL_MIN": "8000",
+            }
+            for key, value in previous.items():
+                db.execute("UPDATE params SET value=?,default_value=? WHERE key=?", (value, value, key))
+            db.commit()
+
+            params.seed_params(db)
+
+            values = dict(db.execute(
+                "SELECT key,value FROM params WHERE key IN "
+                "('HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
+                "'HARVEST_MONTH_PNL_MIN')"
+            ).fetchall())
+            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
+            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 10.0)
+            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
+            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
 
     def test_seed_params_removes_obsolete_raw_score_gate(self):
         with tempfile.TemporaryDirectory() as td:

@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 
 from hyper.copy.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
-                            smart_add_order_margin)
+                            smart_add_order_margin, smart_take_profit_decision)
 from hyper.copy.sizing import sizing_equity_for_drawdown
 
 
@@ -276,6 +276,70 @@ class CopyEngineTests(unittest.TestCase):
         self.assertTrue(decision.close)
         self.assertEqual(decision.reason, "hard_profit_tail")
         self.assertAlmostEqual(decision.remaining_fraction, 0.15)
+
+    def test_smart_take_profit_arms_without_selling_then_cuts_fixed_original_share(self):
+        common = dict(
+            enabled=True,
+            rem_size=100,
+            base_size=0,
+            entry_px=100,
+            side="long",
+            sigma=0.10,
+            tier="high",
+            armed=False,
+            stage=0,
+            peak_pnl=0,
+            arm_sigma={"stable": 0.60, "mid": 0.50, "high": 0.40},
+            giveback_pcts=(0.20, 0.35, 0.50),
+            close_pcts=(0.20, 0.25, 0.25),
+            tail_remain_pct=0.30,
+            fee_rate=0.00045,
+            min_fee_multiple=2.0,
+        )
+        armed = smart_take_profit_decision(mark_px=104, **common)
+        self.assertTrue(armed.armed)
+        self.assertFalse(armed.trigger)
+        self.assertEqual(armed.base_size, 100)
+        self.assertEqual(armed.peak_pnl, 400)
+
+        cut = smart_take_profit_decision(
+            mark_px=103.1,
+            **{
+                **common,
+                "armed": True,
+                "base_size": armed.base_size,
+                "peak_pnl": armed.peak_pnl,
+            },
+        )
+        self.assertTrue(cut.trigger)
+        self.assertEqual(cut.stage, 0)
+        self.assertEqual(cut.close_size, 20)
+        self.assertEqual(cut.remaining_size, 80)
+        self.assertGreater(cut.giveback_fraction, 0.20)
+
+    def test_smart_take_profit_fee_guard_and_tail_floor(self):
+        decision = smart_take_profit_decision(
+            enabled=True,
+            rem_size=31,
+            base_size=100,
+            entry_px=100,
+            mark_px=100.01,
+            side="long",
+            sigma=0.01,
+            tier="mid",
+            armed=True,
+            stage=2,
+            peak_pnl=10,
+            arm_sigma={"mid": 0.50},
+            giveback_pcts=(0.20, 0.35, 0.50),
+            close_pcts=(0.20, 0.25, 0.25),
+            tail_remain_pct=0.30,
+            fee_rate=0.01,
+            min_fee_multiple=2.0,
+        )
+        self.assertFalse(decision.trigger)
+        self.assertEqual(decision.close_size, 1)
+        self.assertEqual(decision.remaining_size, 30)
 
 
 if __name__ == "__main__":

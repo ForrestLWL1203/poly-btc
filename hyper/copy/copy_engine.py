@@ -61,6 +61,22 @@ class ProfitTailDecision:
     giveback_fraction: float
 
 
+@dataclass(frozen=True)
+class SmartTakeProfitDecision:
+    armed: bool
+    trigger: bool
+    stage: int
+    peak_pnl: float
+    base_size: float
+    current_pnl: float
+    favorable_move: float
+    giveback_fraction: float
+    close_size: float
+    remaining_size: float
+    exit_fee: float
+    reason: str
+
+
 def smart_add_margin_ceiling(
     *,
     coin_room: float,
@@ -188,6 +204,95 @@ def profit_tail_close_decision(
         close_now_profit,
         loss_to_liquidation,
         giveback_fraction,
+    )
+
+
+def smart_take_profit_decision(
+    *,
+    enabled: bool,
+    rem_size: float,
+    base_size: float,
+    entry_px: float,
+    mark_px: float,
+    side: str,
+    sigma: float,
+    tier: str,
+    armed: bool,
+    stage: int,
+    peak_pnl: float,
+    arm_sigma: dict,
+    giveback_pcts: tuple[float, ...],
+    close_pcts: tuple[float, ...],
+    tail_remain_pct: float,
+    fee_rate: float,
+    min_fee_multiple: float,
+) -> SmartTakeProfitDecision:
+    """Advance one position's volatility-armed high-water take-profit state.
+
+    Arming never sells.  Once armed, each stage watches floating PnL on the *remaining* position,
+    cuts a fixed share of the arming-size after the configured giveback, and leaves the caller to
+    rebase ``peak_pnl`` after execution.  This helper is pure so Observer and canonical replay cannot
+    drift apart.
+    """
+    rem = max(0.0, abs(float(rem_size or 0.0)))
+    entry = float(entry_px or 0.0)
+    mark = float(mark_px or 0.0)
+    stage_i = max(0, int(stage or 0))
+    base = max(0.0, abs(float(base_size or 0.0)))
+    peak = max(0.0, float(peak_pnl or 0.0))
+    zero = SmartTakeProfitDecision(
+        bool(armed), False, stage_i, peak, base, 0.0, 0.0, 0.0, 0.0, rem, 0.0, "",
+    )
+    if not enabled or rem <= 0 or entry <= 0 or mark <= 0:
+        return zero
+    sign = 1.0 if side == "long" else -1.0
+    favorable_move = (mark - entry) * sign / entry
+    current_pnl = rem * (mark - entry) * sign
+    if not armed:
+        arm_k = max(0.0, float((arm_sigma or {}).get(tier, 0.0) or 0.0))
+        if favorable_move + 1e-12 < arm_k * max(0.0, float(sigma or 0.0)):
+            return SmartTakeProfitDecision(
+                False, False, stage_i, peak, base, current_pnl, favorable_move,
+                0.0, 0.0, rem, 0.0, "",
+            )
+        armed = True
+        base = rem
+        peak = max(0.0, current_pnl)
+    else:
+        base = base or rem
+        peak = max(peak, current_pnl)
+
+    if stage_i >= min(len(giveback_pcts), len(close_pcts)) or peak <= 0:
+        return SmartTakeProfitDecision(
+            True, False, stage_i, peak, base, current_pnl, favorable_move,
+            0.0, 0.0, rem, 0.0, "armed",
+        )
+    giveback = max(0.0, (peak - current_pnl) / peak)
+    tail_size = base * max(0.0, min(1.0, float(tail_remain_pct or 0.0)))
+    close_size = min(
+        base * max(0.0, float(close_pcts[stage_i] or 0.0)),
+        max(0.0, rem - tail_size),
+    )
+    exit_fee = close_size * mark * max(0.0, float(fee_rate or 0.0))
+    trigger = (
+        close_size > 1e-12
+        and giveback + 1e-12 >= max(0.0, float(giveback_pcts[stage_i] or 0.0))
+        and current_pnl > 0.0
+        and current_pnl + 1e-12 >= max(0.0, float(min_fee_multiple or 0.0)) * exit_fee
+    )
+    return SmartTakeProfitDecision(
+        True,
+        trigger,
+        stage_i,
+        peak,
+        base,
+        current_pnl,
+        favorable_move,
+        giveback,
+        close_size,
+        max(0.0, rem - close_size),
+        exit_fee,
+        f"giveback_stage_{stage_i + 1}" if trigger else "armed",
     )
 
 

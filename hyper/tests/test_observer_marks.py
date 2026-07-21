@@ -419,6 +419,113 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_smart_take_profit_cut_persists_high_water_stage_across_restart(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            db.execute(
+                "UPDATE copy_position SET master_open_px=100,master_peak_sz=2,master_current_sz=2,peak_size=2 "
+                "WHERE pos_id=?",
+                (pos_id,),
+            )
+            db.commit()
+            obs = Observer(db, [], {})
+            obs.smart_tp_enable = True
+            obs.vol["BTC"] = 0.10
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            ep.update(
+                peak_size=2,
+                liq_px=80,
+                master_open_px=100,
+                master_current=2,
+                smart_tp_armed=False,
+                smart_tp_stage=0,
+                smart_tp_peak_pnl=0.0,
+                smart_tp_base_size=0.0,
+                smart_tp_master_anchor=0.0,
+                smart_tp_inflight=False,
+            )
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            self._set_bbo(obs, "BTC", 105.9, 106.1)
+            obs._queue_smart_take_profit("BTC", 106.0)
+            self.assertTrue(ep["smart_tp_armed"])
+            self.assertEqual(ep["smart_tp_stage"], 0)
+
+            self._set_bbo(obs, "BTC", 104.4, 104.6)
+            obs._queue_smart_take_profit("BTC", 104.5)
+            await asyncio.sleep(0.05)
+
+            row = db.execute(
+                "SELECT rem_size,smart_tp_armed,smart_tp_stage,smart_tp_peak_pnl,smart_tp_base_size,"
+                "smart_tp_master_anchor FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertAlmostEqual(row["rem_size"], 1.6)
+            self.assertEqual(row["smart_tp_armed"], 1)
+            self.assertEqual(row["smart_tp_stage"], 1)
+            self.assertEqual(row["smart_tp_base_size"], 2)
+            self.assertEqual(row["smart_tp_master_anchor"], 2)
+
+            restarted = Observer(db, [], {})
+            restarted._reload_open()
+            restored = restarted.taker.open_ep[("0xaaa", "BTC")]
+            self.assertTrue(restored["smart_tp_armed"])
+            self.assertEqual(restored["smart_tp_stage"], 1)
+            self.assertEqual(restored["smart_tp_base_size"], 2)
+            self.assertGreater(restored["smart_tp_peak_pnl"], 0)
+
+        asyncio.run(run())
+
+    def test_smart_take_profit_tail_ignores_small_trim_then_closes_all_at_thirty_pct(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            obs.smart_tp_enable = True
+            ep = self._live_ep(pos_id, "long", 100, 0.6)
+            ep.update(
+                size=2,
+                peak_size=2,
+                rem_size=0.6,
+                liq_px=80,
+                master_open_px=100,
+                master_current=100,
+                smart_tp_armed=True,
+                smart_tp_stage=3,
+                smart_tp_peak_pnl=6,
+                smart_tp_base_size=2,
+                smart_tp_master_anchor=100,
+                smart_tp_inflight=False,
+            )
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            await obs._apply_reduce(
+                "0xaaa", "BTC", ep, now_ms(), 110, -29, 71,
+                closing=False, liq=False, forced_px=110,
+            )
+            self.assertAlmostEqual(ep["rem_size"], 0.6)
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM copy_action WHERE pos_id=?", (pos_id,)
+            ).fetchone()[0], 0)
+
+            await obs._apply_reduce(
+                "0xaaa", "BTC", ep, now_ms(), 110, -1, 70,
+                closing=False, liq=False, forced_px=110,
+            )
+            row = db.execute(
+                "SELECT status,rem_size FROM copy_position WHERE pos_id=?", (pos_id,)
+            ).fetchone()
+            self.assertEqual(row["status"], "tail_closed")
+            self.assertEqual(row["rem_size"], 0)
+            self.assertNotIn(("0xaaa", "BTC"), obs.taker.open_ep)
+
+        asyncio.run(run())
+
     def test_target_reduce_closes_profitable_risky_tail(self):
         async def run():
             db = self._db()

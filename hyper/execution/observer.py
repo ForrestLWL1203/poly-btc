@@ -25,7 +25,7 @@ import websockets
 from hyper import config
 from hyper.copy.copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
-                          smart_add_order_margin, tier_for_sigma)
+                          smart_add_order_margin, smart_take_profit_decision, tier_for_sigma)
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.copy.sector import parse_json_obj, policy_allows_coin
 from hyper.market import rest, volatility, ws
@@ -142,6 +142,25 @@ class Observer:
         self.tail_close_hard_remain_pct = config.TAIL_CLOSE_HARD_REMAIN_PCT
         self.tail_close_risk_remain_pct = config.TAIL_CLOSE_RISK_REMAIN_PCT
         self.tail_close_profit_giveback_pct = config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT
+        self.smart_tp_enable = config.SMART_TP_ENABLE
+        self.smart_tp_arm_sigma = {
+            "stable": config.SMART_TP_STABLE_ARM_SIGMA,
+            "mid": config.SMART_TP_MID_ARM_SIGMA,
+            "high": config.SMART_TP_HIGH_ARM_SIGMA,
+        }
+        self.smart_tp_giveback_pcts = (
+            config.SMART_TP_GIVEBACK_1_PCT,
+            config.SMART_TP_GIVEBACK_2_PCT,
+            config.SMART_TP_GIVEBACK_3_PCT,
+        )
+        self.smart_tp_close_pcts = (
+            config.SMART_TP_CLOSE_1_PCT,
+            config.SMART_TP_CLOSE_2_PCT,
+            config.SMART_TP_CLOSE_3_PCT,
+        )
+        self.smart_tp_tail_remain_pct = config.SMART_TP_TAIL_REMAIN_PCT
+        self.smart_tp_target_reduce_exit_pct = config.SMART_TP_TARGET_REDUCE_EXIT_PCT
+        self.smart_tp_min_fee_mult = config.SMART_TP_MIN_FEE_MULT
         self.vol: dict = {}              # coin -> σ (read-cache mirror of coin_vol; refreshed off hot path)
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
@@ -400,8 +419,46 @@ class Observer:
             if f.get("TAIL_CLOSE_HARD_REMAIN_PCT") is not None: self.tail_close_hard_remain_pct = f["TAIL_CLOSE_HARD_REMAIN_PCT"]
             if f.get("TAIL_CLOSE_RISK_REMAIN_PCT") is not None: self.tail_close_risk_remain_pct = f["TAIL_CLOSE_RISK_REMAIN_PCT"]
             if f.get("TAIL_CLOSE_PROFIT_GIVEBACK_PCT") is not None: self.tail_close_profit_giveback_pct = f["TAIL_CLOSE_PROFIT_GIVEBACK_PCT"]
+            if f.get("SMART_TP_ENABLE") is not None: self.smart_tp_enable = bool(f["SMART_TP_ENABLE"])
+            for tier, key in (("stable", "SMART_TP_STABLE_ARM_SIGMA"),
+                              ("mid", "SMART_TP_MID_ARM_SIGMA"),
+                              ("high", "SMART_TP_HIGH_ARM_SIGMA")):
+                if f.get(key) is not None: self.smart_tp_arm_sigma[tier] = f[key]
+            self.smart_tp_giveback_pcts = tuple(
+                f.get(key, current) for key, current in zip(
+                    ("SMART_TP_GIVEBACK_1_PCT", "SMART_TP_GIVEBACK_2_PCT", "SMART_TP_GIVEBACK_3_PCT"),
+                    self.smart_tp_giveback_pcts,
+                )
+            )
+            self.smart_tp_close_pcts = tuple(
+                f.get(key, current) for key, current in zip(
+                    ("SMART_TP_CLOSE_1_PCT", "SMART_TP_CLOSE_2_PCT", "SMART_TP_CLOSE_3_PCT"),
+                    self.smart_tp_close_pcts,
+                )
+            )
+            if f.get("SMART_TP_TAIL_REMAIN_PCT") is not None: self.smart_tp_tail_remain_pct = f["SMART_TP_TAIL_REMAIN_PCT"]
+            if f.get("SMART_TP_TARGET_REDUCE_EXIT_PCT") is not None: self.smart_tp_target_reduce_exit_pct = f["SMART_TP_TARGET_REDUCE_EXIT_PCT"]
+            if f.get("SMART_TP_MIN_FEE_MULT") is not None: self.smart_tp_min_fee_mult = f["SMART_TP_MIN_FEE_MULT"]
+            if not self.smart_tp_enable:
+                self._clear_smart_take_profit_state()
         except Exception as exc:  # noqa: BLE001
             _log(f"param reload failed (keeping current): {exc}")
+
+    def _clear_smart_take_profit_state(self):
+        """Disabling the strategy starts any later re-enable from a fresh live high-water."""
+        for ep in self.open_ep.values():
+            ep.update(
+                smart_tp_armed=False,
+                smart_tp_stage=0,
+                smart_tp_peak_pnl=0.0,
+                smart_tp_base_size=0.0,
+                smart_tp_master_anchor=0.0,
+            )
+        self.db.execute(
+            "UPDATE copy_position SET smart_tp_armed=0,smart_tp_stage=0,smart_tp_peak_pnl=0,"
+            "smart_tp_base_size=NULL,smart_tp_master_anchor=NULL WHERE status='open'"
+        )
+        self.db.commit()
 
     def _reload_open(self, book=None):
         book = book or self.taker
@@ -410,13 +467,16 @@ class Observer:
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
             "margin,notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,"
-            f"master_margin,master_leverage FROM {book.pos_table} WHERE status='open'").fetchall()
+            "master_margin,master_leverage,master_current_sz,smart_tp_armed,smart_tp_stage,"
+            f"smart_tp_peak_pnl,smart_tp_base_size,smart_tp_master_anchor FROM {book.pos_table} "
+            "WHERE status='open'").fetchall()
         loaded = 0
         closed_dust = 0
         reconstructed_peaks = []
         for r in rows:
             (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, peak_sz, liq, rpnl, adds, mae, na,
-             m_mgn, m_lev) = r
+             m_mgn, m_lev, master_current, smart_armed, smart_stage, smart_peak, smart_base,
+             smart_master_anchor) = r
             rem = rem or 0.0
             sz = sz or 0.0
             dust_px = epx or ((notl or 0.0) / sz if sz else 0.0)
@@ -457,6 +517,7 @@ class Observer:
             book.open_ep[(addr, coin)] = {
                 "pos_id": pid, "side": side, "sign": 1 if side == "long" else -1,
                 "master_open_ms": mo, "master_open_px": mpx, "master_peak": peak or 0.0,
+                "master_current": abs(master_current if master_current is not None else (peak or 0.0)),
                 "open_oid": None, "leverage": lev or 0.0, "margin": mgn or 0.0,
                 "notional": notl or 0.0, "entry_px": epx, "size": sz, "rem_size": rem,
                 "peak_size": peak_sz or abs(rem),
@@ -468,6 +529,12 @@ class Observer:
                 "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0),
                 "last_target_add_px": exact_last_target_add_px,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False, "add_orders": {},
+                "smart_tp_armed": bool(smart_armed),
+                "smart_tp_stage": int(smart_stage or 0),
+                "smart_tp_peak_pnl": float(smart_peak or 0.0),
+                "smart_tp_base_size": float(smart_base or 0.0),
+                "smart_tp_master_anchor": float(smart_master_anchor or 0.0),
+                "smart_tp_inflight": False,
                 "seen_oids": {o for (o,) in self.db.execute(   # orders already consumed (restart-safe)
                     f"SELECT DISTINCT master_oid FROM {book.act_table} WHERE pos_id=? AND action IN "
                     "('open','add')", (pid,)).fetchall() if o is not None}}
@@ -1159,6 +1226,7 @@ class Observer:
                                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                                 ep["mae"] = max(ep.get("mae", 0.0), adv)
                         self._maybe_liquidate(coin, mid, self.taker)
+                        self._queue_smart_take_profit(coin, mid, self.taker)
                 if coins and time.time() - last_log > 300:
                     _log(f"stock mids refreshed: {len(coins)} coins")
                     last_log = time.time()
@@ -1272,6 +1340,7 @@ class Observer:
                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
         self._maybe_liquidate(coin, mid, self.taker)
+        self._queue_smart_take_profit(coin, mid, self.taker)
 
     def _record_fill(self, addr, x) -> bool:
         """Insert the (aggregated, trade-level) fill; True if NEW, False if this tid was already seen
@@ -1334,6 +1403,13 @@ class Observer:
                             "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
                             "skip_midway", book)         # midway = target already in the position when we saw it
             return
+        # Persist every observed target size, including tiny reductions that the 10% mirror step suppresses.
+        # The protected-tail exit therefore measures the target's true cumulative reduction, not our actions.
+        ep["master_current"] = abs(pos1)
+        self.db.execute(
+            f"UPDATE {book.pos_table} SET master_current_sz=? WHERE pos_id=?",
+            (abs(pos1), ep["pos_id"]),
+        )
         if transition == "flip":
             ep["master_peak"] = max(ep["master_peak"], abs(pos0))
             asyncio.create_task(self._apply_flip(addr, coin, ep, t, px, pos0, pos1, liq, oid, book))
@@ -1381,15 +1457,18 @@ class Observer:
         lag_sec = max(0.0, (now_ms() - t) / 1000.0)   # copy latency: master fill -> our detection (dashboard)
         cur = self.db.execute(
             f"INSERT INTO {book.pos_table} (addr,coin,side,status,master_open_ms,master_open_px,"
-            "master_peak_sz,opened_at,num_actions,open_lag_sec,strategy_revision_id) "
-            "VALUES (?,?,?,'open',?,?,?,?,0,?,?)",
-            (addr, coin, side, t, px, abs(pos1), now_iso(), lag_sec, self.strategy_revision_id))
+            "master_peak_sz,master_current_sz,opened_at,num_actions,open_lag_sec,strategy_revision_id) "
+            "VALUES (?,?,?,'open',?,?,?,?,?,0,?,?)",
+            (addr, coin, side, t, px, abs(pos1), abs(pos1), now_iso(), lag_sec, self.strategy_revision_id))
         ep = {"pos_id": cur.lastrowid, "side": side, "sign": 1 if side == "long" else -1,
-              "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1),
+              "master_open_ms": t, "master_open_px": px, "master_peak": abs(pos1), "master_current": abs(pos1),
               "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
               "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
               "add_count": 0, "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
-              "num_actions": 0, "gap": False, "seen_oids": {oid}, "add_orders": {}}  # order accumulators
+              "num_actions": 0, "gap": False, "seen_oids": {oid}, "add_orders": {},
+              "smart_tp_armed": False, "smart_tp_stage": 0, "smart_tp_peak_pnl": 0.0,
+              "smart_tp_base_size": 0.0, "smart_tp_master_anchor": 0.0,
+              "smart_tp_inflight": False}  # order accumulators
         if forced_entry_px is not None:
             ep["forced_entry_px"] = forced_entry_px
         book.open_ep[(addr, coin)] = ep
@@ -1584,6 +1663,11 @@ class Observer:
                 self.db.commit()
                 return False
 
+            if self.smart_tp_enable and int(ep.get("smart_tp_stage") or 0) > 0:
+                # Profit already banked by our own policy is never re-risked because the target adds again.
+                self._tally("skip_smart_tp_readd", book)
+                return _observe_only(final=True)
+
             if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
                 self._tally("skip_coin_blacklist_add", book)
                 return _observe_only(final=True)
@@ -1668,6 +1752,13 @@ class Observer:
                 ep["add_count"] += 1
             ep["last_target_add_px"] = decision_master_px  # target VWAP anchor; never an execution quote
             ep["reduce_anchor"] = None                # master grew → invalidate the reduce-step window
+            ep.update(
+                smart_tp_armed=False,
+                smart_tp_stage=0,
+                smart_tp_peak_pnl=0.0,
+                smart_tp_base_size=0.0,
+                smart_tp_master_anchor=0.0,
+            )
             slip = (px - master_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             act_id = self._record_action(ep, addr, coin, t, "add", oid, master_px, signed, pos1,
                                          add_size * ep["sign"], px, 0.0, slip, book=book)
@@ -1686,13 +1777,16 @@ class Observer:
             self._save_account(book)
             self.db.execute(
                 f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,"
-                "add_count=?,master_open_px=? WHERE pos_id=?", (ep["margin"], ep["notional"], ep["entry_px"], ep["size"],
-                ep["rem_size"], ep["peak_size"], ep["liq_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
+                "add_count=?,master_open_px=?,smart_tp_armed=0,smart_tp_stage=0,smart_tp_peak_pnl=0,"
+                "smart_tp_base_size=NULL,smart_tp_master_anchor=NULL WHERE pos_id=?",
+                (ep["margin"], ep["notional"], ep["entry_px"], ep["size"], ep["rem_size"], ep["peak_size"],
+                 ep["liq_px"], ep["add_count"], ep["master_open_px"], ep["pos_id"]))
             self.db.commit()                                  # the add is in the action table
             return True
 
     async def _apply_reduce(self, addr, coin, ep, t, master_px, signed, pos1, closing, liq,
-                            oid=None, gap=False, forced_px=None, forced_frac=None, book=None):
+                            oid=None, gap=False, forced_px=None, forced_frac=None, book=None,
+                            smart_tp_stage=None):
         book = book or self.taker
         async with ep["lock"]:
             try:
@@ -1705,35 +1799,59 @@ class Observer:
             stale = (now_ms() - t) > STALE_MS
             exit_px = (forced_px if forced_px is not None
                        else master_px if stale else await self._execution_px(coin, is_buy, master_px))
+            old_rem = ep["rem_size"]
+            smart_cut = smart_tp_stage is not None
+            smart_tail_close = False
             # delta-based: close the SAME fraction of our position the master just closed of his —
             # correct for any build-up (adds we followed, adds we skipped past the cap, or none).
-            if forced_frac is not None:                       # operator manual close: EXACT fraction of rem_size
+            if smart_cut:
+                if int(ep.get("smart_tp_stage") or 0) != int(smart_tp_stage):
+                    return
+                decision = self._smart_take_profit_decision(coin, ep, exit_px)
+                if decision is None or not decision.trigger:
+                    return
+                reduce_frac = min(1.0, decision.close_size / max(ep["rem_size"], 1e-12))
+            elif forced_frac is not None:                     # operator manual close: EXACT fraction of rem_size
                 reduce_frac = max(0.0, min(1.0, forced_frac))
                 closing = reduce_frac >= 0.999                # <100% keeps the position OPEN (partial reduce)
             elif closing or abs(pos1 - signed) < config.FLAT:
                 reduce_frac = 1.0                             # full close always executes → exact flat
             else:
-                # STEP-mirror: an algo master unwinds a big position in 100s of tiny orders. Instead of
-                # mirroring every dust reduce, only act once his cumulative unwind since our last reduce
-                # reaches REDUCE_STEP_FRAC of his position (→ ≤~10 partial reduces). `reduce_anchor` = his
-                # |position| at our last executed reduce (re-anchored to pre-fill size if he grew via an add).
-                pos0 = pos1 - signed
-                anchor = ep.get("reduce_anchor")
-                if not anchor or anchor <= abs(pos1):         # first reduce, or he added since → re-anchor
-                    anchor = abs(pos0)
-                cum_frac = (anchor - abs(pos1)) / anchor if anchor else 0.0
-                if cum_frac < config.REDUCE_STEP_FRAC:
-                    ep["reduce_anchor"] = anchor              # accumulate; skip this sub-step (no fill/log)
-                    return
-                reduce_frac = min(1.0, cum_frac)              # rem still matches `anchor` → cut the whole ratio
-                ep["reduce_anchor"] = abs(pos1)               # open a fresh 10% window from here
+                if (self.smart_tp_enable
+                        and int(ep.get("smart_tp_stage") or 0) >= len(self.smart_tp_close_pcts)):
+                    anchor = float(ep.get("smart_tp_master_anchor") or 0.0)
+                    if (anchor > 0
+                            and abs(pos1) <= anchor * (1.0 - self.smart_tp_target_reduce_exit_pct) + config.FLAT):
+                        reduce_frac = 1.0
+                        closing = True
+                        smart_tail_close = True
+                    else:
+                        # Keep the 30% tail whole.  Target trims below the cumulative line are observed
+                        # through master_current_sz but are not mirrored into a sequence of residue fills.
+                        return
+                else:
+                    # STEP-mirror: an algo master unwinds a big position in 100s of tiny orders. Instead of
+                    # mirroring every dust reduce, only act once his cumulative unwind since our last reduce
+                    # reaches REDUCE_STEP_FRAC of his position (→ ≤~10 partial reduces). `reduce_anchor` = his
+                    # |position| at our last executed reduce (re-anchored to pre-fill size if he grew via an add).
+                    pos0 = pos1 - signed
+                    anchor = ep.get("reduce_anchor")
+                    if not anchor or anchor <= abs(pos1):     # first reduce, or he added since → re-anchor
+                        anchor = abs(pos0)
+                    cum_frac = (anchor - abs(pos1)) / anchor if anchor else 0.0
+                    if cum_frac < config.REDUCE_STEP_FRAC:
+                        ep["reduce_anchor"] = anchor          # accumulate; skip this sub-step (no fill/log)
+                        return
+                    reduce_frac = min(1.0, cum_frac)          # rem still matches `anchor` → cut the whole ratio
+                    ep["reduce_anchor"] = abs(pos1)           # open a fresh 10% window from here
             tail_close = False
             tail_decision = None
             dust_close = not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, exit_px)
             if dust_close:
                 reduce_frac = 1.0
                 closing = True
-            elif (not closing and forced_frac is None and not liq and not gap):
+            elif (not closing and forced_frac is None and not smart_cut and not self.smart_tp_enable
+                  and not liq and not gap):
                 tail_decision = profit_tail_close_decision(
                     rem_size=ep["rem_size"],
                     peak_size=ep.get("peak_size") or max(ep.get("size", 0.0), ep["rem_size"]),
@@ -1760,6 +1878,17 @@ class Observer:
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl
             book.balance += pnl                       # realize (net of fee) into the paper account
+            if smart_cut:
+                ep["smart_tp_stage"] = int(smart_tp_stage) + 1
+                if int(smart_tp_stage) == 0 and not ep.get("smart_tp_master_anchor"):
+                    ep["smart_tp_master_anchor"] = float(ep.get("master_current") or abs(pos1) or 0.0)
+                ep["smart_tp_peak_pnl"] = max(
+                    0.0, ep["rem_size"] * (exit_px - ep["entry_px"]) * ep["sign"],
+                )
+            elif not closing and ep.get("smart_tp_armed") and old_rem > 0:
+                ep["smart_tp_peak_pnl"] = max(
+                    0.0, float(ep.get("smart_tp_peak_pnl") or 0.0) * ep["rem_size"] / old_rem,
+                )
             slip = (master_px - exit_px) / master_px * 1e4 * ep["sign"] if master_px else 0.0
             action = "close" if closing else "reduce"
             act_id = self._record_action(ep, addr, coin, t, action, oid, master_px, signed, pos1,
@@ -1770,15 +1899,20 @@ class Observer:
                     ep["pos_id"], action, ep["side"], -close_size * ep["sign"], exit_px, reduce_frac,
                     copy_act_id=act_id, source_oid=oid,
                 )
+            tail_close = tail_close or smart_tail_close
             status = ("liquidated" if (closing and liq) else "tail_closed" if (closing and tail_close)
                       else "gap_closed" if (closing and gap) else "closed" if closing else "open")
             was_liq = 1 if (closing and liq) else 0
             ep["was_liq"] = was_liq
             self.db.execute(
                 f"UPDATE {book.pos_table} SET rem_size=?,realized_pnl=?,mae_pct=?,was_liq=?,status=?,"
-                "closed_at=? WHERE pos_id=?", (ep["rem_size"], ep["realized_pnl"], ep["mae"],
-                was_liq, status,
-                now_iso() if closing else None, ep["pos_id"]))
+                "closed_at=?,smart_tp_armed=?,smart_tp_stage=?,smart_tp_peak_pnl=?,smart_tp_base_size=?,"
+                "smart_tp_master_anchor=? WHERE pos_id=?",
+                (ep["rem_size"], ep["realized_pnl"], ep["mae"], was_liq, status,
+                 now_iso() if closing else None, 1 if ep.get("smart_tp_armed") else 0,
+                 int(ep.get("smart_tp_stage") or 0), float(ep.get("smart_tp_peak_pnl") or 0.0),
+                 float(ep.get("smart_tp_base_size") or 0.0) or None,
+                 float(ep.get("smart_tp_master_anchor") or 0.0) or None, ep["pos_id"]))
             self._save_account(book)
             self.db.commit()
             if closing:
@@ -1802,6 +1936,20 @@ class Observer:
                         f"giveback={tail_decision.giveback_fraction:.0%} "
                         f"pnl=${ep['realized_pnl']:+,.0f}"
                     )
+                elif smart_tail_close:
+                    self._tally("smart_tp_tail_close", book)
+                    _log(
+                        f"[{book.name}] SMART-TP TAIL {addr[:10]} {coin} {ep['side']} "
+                        f"target-cut={self.smart_tp_target_reduce_exit_pct:.0%} "
+                        f"pnl=${ep['realized_pnl']:+,.0f}"
+                    )
+            elif smart_cut:
+                self._tally("smart_tp_cut", book)
+                _log(
+                    f"[{book.name}] SMART-TP {addr[:10]} {coin} {ep['side']} "
+                    f"stage={int(smart_tp_stage) + 1} remain={ep['rem_size'] / max(ep.get('smart_tp_base_size') or 1.0, 1e-12):.0%} "
+                    f"pnl=${ep['realized_pnl']:+,.0f}"
+                )
 
     async def _liquidate(self, addr, coin, ep, book=None):
         book = book or self.taker
@@ -1820,6 +1968,90 @@ class Observer:
                 hit = mid <= ep["liq_px"] if ep["side"] == "long" else mid >= ep["liq_px"]
                 if hit:
                     asyncio.create_task(self._liquidate(a, coin, ep, book))
+
+    def _smart_take_profit_decision(self, coin, ep, mark_px):
+        sigma = self._sigma(coin)
+        return smart_take_profit_decision(
+            enabled=self.smart_tp_enable,
+            rem_size=ep.get("rem_size", 0.0),
+            base_size=ep.get("smart_tp_base_size", 0.0),
+            entry_px=ep.get("entry_px", 0.0),
+            mark_px=mark_px,
+            side=ep.get("side"),
+            sigma=sigma,
+            tier=self._tier(sigma, coin),
+            armed=bool(ep.get("smart_tp_armed")),
+            stage=int(ep.get("smart_tp_stage") or 0),
+            peak_pnl=float(ep.get("smart_tp_peak_pnl") or 0.0),
+            arm_sigma=self.smart_tp_arm_sigma,
+            giveback_pcts=self.smart_tp_giveback_pcts,
+            close_pcts=self.smart_tp_close_pcts,
+            tail_remain_pct=self.smart_tp_tail_remain_pct,
+            fee_rate=config.TAKER_FEE,
+            min_fee_multiple=self.smart_tp_min_fee_mult,
+        )
+
+    def _queue_smart_take_profit(self, coin, mark_px, book=None):
+        """Advance live high-water state and enqueue at most one cut per position."""
+        book = book or self.taker
+        if not self.smart_tp_enable or not mark_px or mark_px <= 0:
+            return
+        stamp = now_ms()
+        dirty = []
+        for (addr, c), ep in list(book.open_ep.items()):
+            if c != coin or ep.get("entry_px") is None or ep.get("rem_size", 0.0) <= config.FLAT:
+                continue
+            decision = self._smart_take_profit_decision(coin, ep, mark_px)
+            prior = (
+                bool(ep.get("smart_tp_armed")),
+                float(ep.get("smart_tp_peak_pnl") or 0.0),
+                float(ep.get("smart_tp_base_size") or 0.0),
+            )
+            ep["smart_tp_armed"] = decision.armed
+            ep["smart_tp_peak_pnl"] = decision.peak_pnl
+            ep["smart_tp_base_size"] = decision.base_size
+            changed = prior != (decision.armed, decision.peak_pnl, decision.base_size)
+            last_write = int(ep.get("smart_tp_state_write_ms") or 0)
+            if changed and (decision.trigger or decision.armed != prior[0]
+                            or stamp - last_write >= MARK_WRITE_MIN_MS):
+                dirty.append((
+                    1 if decision.armed else 0,
+                    decision.peak_pnl,
+                    decision.base_size or None,
+                    ep["pos_id"],
+                ))
+                ep["smart_tp_state_write_ms"] = stamp
+            if decision.trigger and not ep.get("smart_tp_inflight"):
+                ep["smart_tp_inflight"] = True
+                asyncio.create_task(
+                    self._execute_smart_take_profit(addr, coin, ep, mark_px, decision.stage, book)
+                )
+        if dirty:
+            self.db.executemany(
+                f"UPDATE {book.pos_table} SET smart_tp_armed=?,smart_tp_peak_pnl=?,smart_tp_base_size=? "
+                "WHERE pos_id=? AND status='open'",
+                dirty,
+            )
+            self.db.commit()
+
+    async def _execute_smart_take_profit(self, addr, coin, ep, mark_px, stage, book=None):
+        book = book or self.taker
+        try:
+            await self._apply_reduce(
+                addr,
+                coin,
+                ep,
+                now_ms(),
+                mark_px,
+                0.0,
+                float(ep.get("master_current") or 0.0),
+                closing=False,
+                liq=False,
+                book=book,
+                smart_tp_stage=stage,
+            )
+        finally:
+            ep["smart_tp_inflight"] = False
 
     def _record_action(self, ep, addr, coin, t, action, oid, master_px, sz_delta, pos_after,
                        our_qty_delta, our_px, realized, slip, book=None):

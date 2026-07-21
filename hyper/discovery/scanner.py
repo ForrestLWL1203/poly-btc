@@ -1021,6 +1021,50 @@ def _current_copy_valuation_marks():
     return out
 
 
+def _missing_copy_valuation_coins(*result_groups) -> set[str]:
+    """Collect terminal marks that canonical replay could not value, including nested sector windows."""
+    missing = set()
+
+    def visit(value):
+        if not isinstance(value, dict):
+            return
+        missing.update(str(coin) for coin in value.get("valuation_missing_coins") or () if coin)
+        for child in value.values():
+            if isinstance(child, dict):
+                visit(child)
+
+    for group in result_groups:
+        visit(group)
+    return missing
+
+
+def _retry_missing_copy_valuation_marks(current_marks, *result_groups, attempts: int = 2) -> dict:
+    """Retry missing terminal prices through the independent bulk ``allMids`` source.
+
+    Fresh profiling first uses the generation's immutable scan-start marks.  This retry exists for the
+    narrow case where that context or a target position snapshot was transiently incomplete; an unresolved
+    market still fails closed instead of trusting a stale last fill.
+    """
+    marks = {str(coin): f(px) for coin, px in dict(current_marks or {}).items() if f(px) > 0}
+    missing = _missing_copy_valuation_coins(*result_groups) - set(marks)
+    by_dex = {}
+    for coin in missing:
+        dex = coin.split(":", 1)[0] if ":" in coin else None
+        by_dex.setdefault(dex, set()).add(coin)
+    for dex, coins in by_dex.items():
+        unresolved = set(coins)
+        for _ in range(max(1, int(attempts or 1))):
+            mids = rest.all_mids(dex=dex) or {}
+            for coin in tuple(unresolved):
+                px = f(mids.get(coin))
+                if px > 0:
+                    marks[coin] = px
+                    unresolved.remove(coin)
+            if not unresolved:
+                break
+    return marks
+
+
 def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
     # ONE aggregated fetch per wallet (aggregateByTime -> ~1 page, trade-level). No separate
     # pre-screen call: the response crosses the executable-market boundary before cache/metrics,
@@ -1204,7 +1248,16 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                         )
         except generation_market.MarketSnapshotError as exc:
             return _defer_profile(db, addr, prior, stamp, str(exc))
-        valuation_marks = snap.get("mark_prices") or {}
+        # Qualification is anchored to the generation's scan-start context, not whichever target snapshot
+        # happens to finish first.  A target can close between its history fetch and clearinghouse snapshot;
+        # the replay then still has an as-of open position while the later account snapshot no longer lists
+        # that coin.  The immutable market context supplies the correct independent terminal mark.
+        generation_marks = {
+            coin: f((replay_market_ctx.get(coin) or {}).get("mark_px"))
+            for coin in replay_market_ctx
+            if f((replay_market_ctx.get(coin) or {}).get("mark_px")) > 0
+        }
+        valuation_marks = {**(snap.get("mark_prices") or {}), **generation_marks}
         copy_results = _copy_bt_results(
             addr, replay_fills, now_ms, p, valuation_marks=valuation_marks,
             sigmas=replay_sigmas, market_ctx=replay_market_ctx,
@@ -1213,6 +1266,19 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             addr, replay_fills, now_ms, p, valuation_marks=valuation_marks,
             sigmas=replay_sigmas, market_ctx=replay_market_ctx,
         )
+        retried_marks = _retry_missing_copy_valuation_marks(
+            valuation_marks, copy_results, sector_results,
+        )
+        if retried_marks != valuation_marks:
+            valuation_marks = retried_marks
+            copy_results = _copy_bt_results(
+                addr, replay_fills, now_ms, p, valuation_marks=valuation_marks,
+                sigmas=replay_sigmas, market_ctx=replay_market_ctx,
+            )
+            sector_results = _sector_copy_bt_results(
+                addr, replay_fills, now_ms, p, valuation_marks=valuation_marks,
+                sigmas=replay_sigmas, market_ctx=replay_market_ctx,
+            )
         ok, reason = _apply_sector_copy_bt_gate(
             m, copy_results, sector_results, p,
             previous_policy=(

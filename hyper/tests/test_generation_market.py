@@ -37,11 +37,33 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
             self.assertEqual(compute.call_count, 1)
             self.assertEqual(first, second)
             self.assertEqual(first[0]["BTC"], .12)
+            self.assertEqual(first[1]["BTC"]["mark_px"], 50_000.0)
             sealed = generation_market.seal(db, "g1")
             db.execute("UPDATE coin_vol SET sigma=.99 WHERE coin='BTC'")
             db.commit()
             self.assertEqual(generation_market.load(db, "g1")[0]["BTC"], .12)
+            self.assertEqual(generation_market.load(db, "g1")[1]["BTC"]["mark_px"], 50_000.0)
             self.assertEqual(generation_market.summary(db, "g1")["hash"], sealed["hash"])
+
+    def test_missing_terminal_mark_retries_independent_bulk_price_source(self):
+        replay = {30: {
+            "valuation_status": "missing_marks",
+            "valuation_missing_coins": ["BTC"],
+        }}
+        with patch.object(scanner.rest, "all_mids", side_effect=[{}, {"BTC": "65000"}]) as mids:
+            marks = scanner._retry_missing_copy_valuation_marks({}, replay)
+        self.assertEqual(marks["BTC"], 65_000.0)
+        self.assertEqual(mids.call_count, 2)
+
+    def test_existing_generation_mark_avoids_price_retry(self):
+        replay = {30: {
+            "valuation_status": "missing_marks",
+            "valuation_missing_coins": ["BTC"],
+        }}
+        with patch.object(scanner.rest, "all_mids") as mids:
+            marks = scanner._retry_missing_copy_valuation_marks({"BTC": 64_000}, replay)
+        self.assertEqual(marks["BTC"], 64_000.0)
+        mids.assert_not_called()
 
     def test_profile_resolves_market_before_first_strict_copy_replay(self):
         source = inspect.getsource(scanner._profile_one)

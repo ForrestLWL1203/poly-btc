@@ -463,6 +463,50 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["tail_profit_closes"], 0)
         self.assertEqual(len(result["open_positions"]), 1)
 
+    def test_smart_take_profit_replays_three_cuts_and_exits_tail_after_target_reduces_thirty_pct(self):
+        fills = [
+            fill(1_000, "ZEC", "B", 100, 0, 100.0, 120),
+            fill(5_000, "ZEC", "A", 29, 100, 109.0, 121),
+            fill(6_000, "ZEC", "A", 1, 71, 109.0, 122),
+        ]
+        path = {"ZEC": [
+            {"time": 2_000, "low": 103.0, "high": 104.0, "close": 103.1},
+            {"time": 3_000, "low": 106.0, "high": 110.0, "close": 106.4},
+            {"time": 4_000, "low": 108.0, "high": 120.0, "close": 109.0},
+        ]}
+
+        result = run_backtest(
+            "0xabc",
+            fills,
+            sigmas={"ZEC": 0.10},
+            price_path=path,
+            overrides={"SMART_TP_ENABLE": True, "HIGH_MIN_NOTIONAL": 0.0},
+        )
+
+        self.assertEqual(result["closed_n"], 1)
+        self.assertEqual(result["tail_profit_closes"], 1)
+        self.assertEqual(result["positions"][0]["status"], "tail_closed")
+        self.assertEqual(result["positions"][0]["closed_at"], 6_000)
+        self.assertEqual(result["skip_reasons"].get("smart_tp_cut"), 3)
+        self.assertAlmostEqual(result["positions"][0]["remaining_size"], 0.0, places=8)
+
+    def test_smart_take_profit_is_disabled_by_default(self):
+        fills = [fill(1_000, "ZEC", "B", 100, 0, 100.0, 130)]
+        path = {"ZEC": [
+            {"time": 2_000, "low": 103.0, "high": 104.0, "close": 103.1},
+            {"time": 3_000, "low": 106.0, "high": 110.0, "close": 106.4},
+            {"time": 4_000, "low": 108.0, "high": 120.0, "close": 109.0},
+        ]}
+
+        result = run_backtest(
+            "0xabc", fills, sigmas={"ZEC": 0.10}, price_path=path,
+            overrides={"HIGH_MIN_NOTIONAL": 0.0},
+        )
+
+        self.assertEqual(result["skip_reasons"].get("smart_tp_cut"), None)
+        self.assertEqual(result["open_n"], 1)
+        self.assertGreater(result["open_positions"][0]["remaining_size"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

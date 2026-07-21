@@ -16,7 +16,7 @@ from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
-                          smart_add_order_margin, tier_for_sigma)
+                          smart_add_order_margin, smart_take_profit_decision, tier_for_sigma)
 from .fill_transition import classify_fill_transition
 from hyper.util import f
 
@@ -327,6 +327,28 @@ class Backtest:
             "TAIL_CLOSE_RISK_REMAIN_PCT", config.TAIL_CLOSE_RISK_REMAIN_PCT)
         self.tail_close_profit_giveback_pct = overrides.get(
             "TAIL_CLOSE_PROFIT_GIVEBACK_PCT", config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT)
+        self.smart_tp_enable = bool(overrides.get("SMART_TP_ENABLE", config.SMART_TP_ENABLE))
+        self.smart_tp_arm_sigma = {
+            "stable": overrides.get("SMART_TP_STABLE_ARM_SIGMA", config.SMART_TP_STABLE_ARM_SIGMA),
+            "mid": overrides.get("SMART_TP_MID_ARM_SIGMA", config.SMART_TP_MID_ARM_SIGMA),
+            "high": overrides.get("SMART_TP_HIGH_ARM_SIGMA", config.SMART_TP_HIGH_ARM_SIGMA),
+        }
+        self.smart_tp_giveback_pcts = tuple(overrides.get(key, default) for key, default in (
+            ("SMART_TP_GIVEBACK_1_PCT", config.SMART_TP_GIVEBACK_1_PCT),
+            ("SMART_TP_GIVEBACK_2_PCT", config.SMART_TP_GIVEBACK_2_PCT),
+            ("SMART_TP_GIVEBACK_3_PCT", config.SMART_TP_GIVEBACK_3_PCT),
+        ))
+        self.smart_tp_close_pcts = tuple(overrides.get(key, default) for key, default in (
+            ("SMART_TP_CLOSE_1_PCT", config.SMART_TP_CLOSE_1_PCT),
+            ("SMART_TP_CLOSE_2_PCT", config.SMART_TP_CLOSE_2_PCT),
+            ("SMART_TP_CLOSE_3_PCT", config.SMART_TP_CLOSE_3_PCT),
+        ))
+        self.smart_tp_tail_remain_pct = overrides.get(
+            "SMART_TP_TAIL_REMAIN_PCT", config.SMART_TP_TAIL_REMAIN_PCT)
+        self.smart_tp_target_reduce_exit_pct = overrides.get(
+            "SMART_TP_TARGET_REDUCE_EXIT_PCT", config.SMART_TP_TARGET_REDUCE_EXIT_PCT)
+        self.smart_tp_min_fee_mult = overrides.get(
+            "SMART_TP_MIN_FEE_MULT", config.SMART_TP_MIN_FEE_MULT)
         self.coin_blacklist = parse_coin_blacklist(overrides.get("COIN_BLACKLIST", config.COIN_BLACKLIST))
         self.block_korean_stocks = bool(overrides.get("BLOCK_KOREAN_STOCKS", config.BLOCK_KOREAN_STOCKS))
         self.low_liquidity_filter_enable = bool(overrides.get(
@@ -502,6 +524,8 @@ class Backtest:
                 self.skip_reasons["skip_midway"] += 1
             return
 
+        ep["master_current"] = abs(pos1)
+
         if transition == "flip":
             ep["master_peak"] = max(ep["master_peak"], abs(pos0))
             self._apply_reduce(addr, coin, px, -pos0, 0.0, closing=True, t=x.get("time"))
@@ -540,6 +564,23 @@ class Backtest:
             coin, lo, hi, x.get("time"), candle_open_time=x.get("open_time"),
             ambiguous=bool(x.get("has_fill_events")), candle_close_time=x.get("close_time"),
         )
+        # Candle close is always after its favorable extreme, so it is safe to update the high-water from
+        # high/low and evaluate giveback at close without inventing an intra-candle high/low ordering.
+        for (addr, c), ep in list(self.open.items()):
+            if c != coin:
+                continue
+            boundary = (
+                x.get("open_time") is not None
+                and int(ep.get("opened_at") or 0) > int(x.get("open_time") or 0)
+            )
+            if boundary or bool(x.get("has_fill_events")):
+                # The candle's favorable extreme may predate an entry/add/reduce inside that candle.
+                # Without a finer path, skipping the TP update is safer than manufacturing a high-water.
+                continue
+            favorable = hi if ep["side"] == "long" else lo
+            self._advance_smart_take_profit(addr, coin, ep, favorable, x.get("time"), allow_cut=False)
+            if (addr, coin) in self.open:
+                self._advance_smart_take_profit(addr, coin, ep, close, x.get("time"), allow_cut=True)
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
         if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
@@ -603,6 +644,7 @@ class Backtest:
             "opened_at": t,
             "master_open_px": px,
             "master_peak": abs(pos1),
+            "master_current": abs(pos1),
             "master_first_notl": target_notl,
             "target_initial_notl": target_notl,
             "target_add_notl": 0.0,
@@ -633,6 +675,11 @@ class Backtest:
             "add_order_outcomes": {},
             "add_outcome_counts": Counter(),
             "reduce_anchor": None,
+            "smart_tp_armed": False,
+            "smart_tp_stage": 0,
+            "smart_tp_peak_pnl": 0.0,
+            "smart_tp_base_size": 0.0,
+            "smart_tp_master_anchor": 0.0,
         }
         self.opened_n += 1
         self.copy_peak_concurrent = max(self.copy_peak_concurrent, len(self.open))
@@ -707,6 +754,12 @@ class Backtest:
             self.target_adds += 1
             if oid is not None:
                 ep["observed_add_oids"].add(oid)
+
+        # Once our first proactive profit cut has executed, the released exposure stays released.  Target
+        # re-adds are observed for source state but never rebuild the protected position.
+        if self.smart_tp_enable and int(ep.get("smart_tp_stage") or 0) > 0:
+            self.skip_reasons["skip_smart_tp_readd"] += 1
+            return self._observe_add(ep, oid, "noise_merged")
 
         sigma = self.sigma(coin)
         tier = self.tier(sigma, coin)
@@ -793,6 +846,13 @@ class Backtest:
             self._record_add_outcome(ep, oid, "followed")
         ep["last_target_add_px"] = decision_px
         ep["reduce_anchor"] = None
+        # A followed add changes both size and average entry.  Before the first proactive cut it starts a
+        # fresh arm/high-water episode; after a cut adds are blocked above.
+        ep["smart_tp_armed"] = False
+        ep["smart_tp_stage"] = 0
+        ep["smart_tp_peak_pnl"] = 0.0
+        ep["smart_tp_base_size"] = 0.0
+        ep["smart_tp_master_anchor"] = 0.0
         fee = abs(add_size * px) * config.TAKER_FEE * self.replay_cost_mult
         ep["entry_fees"] += fee
         ep["realized_net"] -= fee
@@ -804,31 +864,52 @@ class Backtest:
         self._sample_deploy(t)
         return True
 
-    def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed", t=None):
+    def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed", t=None,
+                      smart_tp_stage=None):
         key = (addr, coin)
         ep = self.open.get(key)
         if not ep:
             return
-        if closing or abs(pos1 - signed) < config.FLAT:
+        old_rem = ep["rem_size"]
+        if smart_tp_stage is not None:
+            if int(ep.get("smart_tp_stage") or 0) != int(smart_tp_stage):
+                return
+            decision = self._smart_take_profit_decision(ep, px)
+            if not decision.trigger:
+                return
+            reduce_frac = min(1.0, decision.close_size / max(ep["rem_size"], 1e-12))
+        elif closing or abs(pos1 - signed) < config.FLAT:
             reduce_frac = 1.0
             closing = True
         else:
-            pos0 = pos1 - signed
-            anchor = ep.get("reduce_anchor")
-            if not anchor or anchor <= abs(pos1):
-                anchor = abs(pos0)
-            reduce_frac = (anchor - abs(pos1)) / anchor if anchor else 0.0
-            if reduce_frac < config.REDUCE_STEP_FRAC:
-                ep["reduce_anchor"] = anchor
-                return
-            reduce_frac = min(1.0, reduce_frac)
-            ep["reduce_anchor"] = abs(pos1)
+            if (self.smart_tp_enable
+                    and int(ep.get("smart_tp_stage") or 0) >= len(self.smart_tp_close_pcts)):
+                anchor = float(ep.get("smart_tp_master_anchor") or 0.0)
+                if anchor > 0 and abs(pos1) <= anchor * (1.0 - self.smart_tp_target_reduce_exit_pct) + config.FLAT:
+                    reduce_frac = 1.0
+                    closing = True
+                    status = "tail_closed"
+                else:
+                    # The protected 30% tail is intentionally not chipped into dust.  Ignore target trims
+                    # below the cumulative exit line and close it once that line is reached.
+                    return
+            else:
+                pos0 = pos1 - signed
+                anchor = ep.get("reduce_anchor")
+                if not anchor or anchor <= abs(pos1):
+                    anchor = abs(pos0)
+                reduce_frac = (anchor - abs(pos1)) / anchor if anchor else 0.0
+                if reduce_frac < config.REDUCE_STEP_FRAC:
+                    ep["reduce_anchor"] = anchor
+                    return
+                reduce_frac = min(1.0, reduce_frac)
+                ep["reduce_anchor"] = abs(pos1)
         dust_close = not closing and reduce_leaves_dust(ep["rem_size"], reduce_frac, px)
         if dust_close:
             reduce_frac = 1.0
             closing = True
             status = "closed"
-        elif not closing:
+        elif not closing and smart_tp_stage is None and not self.smart_tp_enable:
             decision = profit_tail_close_decision(
                 rem_size=ep["rem_size"],
                 peak_size=ep.get("peak_size") or max(ep["size"], ep["rem_size"]),
@@ -860,12 +941,61 @@ class Backtest:
         self.gross_pnl += gross
         self.fee_drag += fee
         self.balance += pnl
+        if smart_tp_stage is not None:
+            ep["smart_tp_stage"] = int(smart_tp_stage) + 1
+            if int(smart_tp_stage) == 0 and not ep.get("smart_tp_master_anchor"):
+                ep["smart_tp_master_anchor"] = float(ep.get("master_current") or abs(pos1) or 0.0)
+            ep["smart_tp_peak_pnl"] = max(
+                0.0, ep["rem_size"] * (px - ep["entry_px"]) * ep["sign"],
+            )
+            self.skip_reasons["smart_tp_cut"] += 1
+        elif not closing and ep.get("smart_tp_armed") and old_rem > 0:
+            # A normal mirrored reduce changes dollars, not the high-water price.  Scale the stored peak
+            # with remaining size so the next drawdown comparison stays on the same price level.
+            ep["smart_tp_peak_pnl"] = max(
+                0.0, float(ep.get("smart_tp_peak_pnl") or 0.0) * ep["rem_size"] / old_rem,
+            )
         if closing:
             ep["closed_at"] = t
             ep["status"] = status
             self.closed.append(ep)
             self.open.pop(key, None)
         self._sample_deploy(t)
+
+    def _smart_take_profit_decision(self, ep, mark_px):
+        sigma = self.sigma(ep["coin"])
+        return smart_take_profit_decision(
+            enabled=self.smart_tp_enable,
+            rem_size=ep["rem_size"],
+            base_size=ep.get("smart_tp_base_size", 0.0),
+            entry_px=ep["entry_px"],
+            mark_px=mark_px,
+            side=ep["side"],
+            sigma=sigma,
+            tier=self.tier(sigma, ep["coin"]),
+            armed=bool(ep.get("smart_tp_armed")),
+            stage=int(ep.get("smart_tp_stage") or 0),
+            peak_pnl=float(ep.get("smart_tp_peak_pnl") or 0.0),
+            arm_sigma=self.smart_tp_arm_sigma,
+            giveback_pcts=self.smart_tp_giveback_pcts,
+            close_pcts=self.smart_tp_close_pcts,
+            tail_remain_pct=self.smart_tp_tail_remain_pct,
+            fee_rate=config.TAKER_FEE * self.replay_cost_mult,
+            min_fee_multiple=self.smart_tp_min_fee_mult,
+        )
+
+    def _advance_smart_take_profit(self, addr, coin, ep, mark_px, t, *, allow_cut):
+        if not self.smart_tp_enable or (addr, coin) not in self.open:
+            return
+        decision = self._smart_take_profit_decision(ep, mark_px)
+        ep["smart_tp_armed"] = decision.armed
+        ep["smart_tp_peak_pnl"] = decision.peak_pnl
+        ep["smart_tp_base_size"] = decision.base_size
+        if allow_cut and decision.trigger:
+            self._apply_reduce(
+                addr, coin, mark_px, 0.0, float(ep.get("master_current") or 0.0),
+                t=t, smart_tp_stage=decision.stage,
+            )
 
     def _mark_liquidations(self, coin, px, t):
         for (addr, c), ep in list(self.open.items()):

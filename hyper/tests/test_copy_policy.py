@@ -17,7 +17,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(
             (policy.core_min_win_rate_30d, policy.core_min_win_rate_14d,
              policy.core_min_win_rate_7d),
-            (0.65, 0.60, 0.60),
+            (0.65, 0.65, 0.65),
         )
         self.assertEqual(policy.core_max_liquidations_30d, 5)
         self.assertGreaterEqual(policy.min_actionable_open_rate, 0.7)

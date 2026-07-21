@@ -185,6 +185,22 @@ TAIL_CLOSE_ENABLE = True     # protect already-earned episode profit after a mir
 TAIL_CLOSE_HARD_REMAIN_PCT = 0.20  # profitable tail at/below this share of our peak position exits outright.
 TAIL_CLOSE_RISK_REMAIN_PCT = 0.35  # larger tails are eligible when their asset-specific liq risk is material.
 TAIL_CLOSE_PROFIT_GIVEBACK_PCT = 0.50  # exit if tail-to-liq loss can erase this share of close-now profit.
+# Optional high-water take-profit.  It is deliberately OFF by default: enabling it changes exit ownership
+# for both live Paper execution and canonical Copy replay.  Arm is volatility-normalized (no sale at arm),
+# then each stage measures drawdown from the remaining position's own high-water and rebases after a cut.
+SMART_TP_ENABLE = False
+SMART_TP_STABLE_ARM_SIGMA = 0.60
+SMART_TP_MID_ARM_SIGMA = 0.50
+SMART_TP_HIGH_ARM_SIGMA = 0.40
+SMART_TP_GIVEBACK_1_PCT = 0.20
+SMART_TP_GIVEBACK_2_PCT = 0.35
+SMART_TP_GIVEBACK_3_PCT = 0.50
+SMART_TP_CLOSE_1_PCT = 0.20
+SMART_TP_CLOSE_2_PCT = 0.25
+SMART_TP_CLOSE_3_PCT = 0.25
+SMART_TP_TAIL_REMAIN_PCT = 0.30
+SMART_TP_TARGET_REDUCE_EXIT_PCT = 0.30  # once only the tail remains, this cumulative target cut exits all.
+SMART_TP_MIN_FEE_MULT = 2.0             # current floating profit must cover this multiple of the cut's exit fee.
 STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz:*), regardless of σ-tier or
 #                           master lev. Stocks GAP (earnings/news) and their calm realized σ (e.g. TSLA 4%)
 #                           badly understates tail risk — mean-daily-range σ let TSLA into the STABLE tier at
@@ -291,11 +307,11 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # leverage makes PnL/volume incomparable across otherwise identical contract traders.
 HARVEST_MIN_ACCT = 10_000.0
 HARVEST_WEEK_VLM_MIN = 300_000.0
-HARVEST_WEEK_ROI_MIN = 0.15
-HARVEST_MONTH_ROI_MIN = 0.20
-HARVEST_ALL_ROI_MIN = 0.20
+HARVEST_WEEK_ROI_MIN = 0.10
+HARVEST_MONTH_ROI_MIN = 0.10
+HARVEST_ALL_ROI_MIN = 0.10
 HARVEST_WEEK_PNL_MIN = 2_000.0
-HARVEST_MONTH_PNL_MIN = 8_000.0
+HARVEST_MONTH_PNL_MIN = 5_000.0
 HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.80
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
@@ -387,8 +403,8 @@ CORE_COPY_MIN_CLOSED_30D = 15
 CORE_COPY_MIN_CLOSED_14D = 7
 CORE_COPY_MIN_CLOSED_7D = 5
 CORE_COPY_WIN_RATE_30D_MIN = 0.65
-CORE_COPY_WIN_RATE_14D_MIN = 0.60
-CORE_COPY_WIN_RATE_7D_MIN = 0.60
+CORE_COPY_WIN_RATE_14D_MIN = 0.65
+CORE_COPY_WIN_RATE_7D_MIN = 0.65
 CORE_COPY_WIN_RATE_LCB_CONFIDENCE = 0.80
 CORE_COPY_WIN_RATE_LCB_30D_MIN = 0.50
 # A negative post-Top3 trade body in both recent windows is meaningful only after each body contains this
