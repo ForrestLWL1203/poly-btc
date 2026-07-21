@@ -2158,36 +2158,61 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     # Parameter tuning changes leverage, initial margin and add behaviour.  Replaying only the portfolio
     # after that change is insufficient: every potential owner must still clear the percentage-based
     # individual profit floors under the exact surface that will be sealed for Observer.
-    effective_qualifications = {}
-    effective_scores = {}
-    effective_ranked = []
-    admission_audit = []
-    qualification_rejected = []
-    for row in ranked_candidates:
-        effective = _effective_follow_replay(
-            db, row, now_ms, generation_id=generation_id, follow=fixed_follow,
-            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-        )
-        qualification = dict(effective.get("qualification") or {})
-        addr = row["addr"]
-        if qualification.get("deferred") or qualification.get("role") == "quarantine":
-            raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
-        effective_qualifications[addr] = qualification
-        effective_scores[addr] = f(effective.get("score"))
-        # A star controls ordering/retention only after the wallet clears the same current business gates.
-        # It cannot turn low win-rate, weak recent-body or over-liquidated replay evidence into new-open
-        # permission. Held positions are converted to exit-only by selection materialization below.
-        passed = bool(qualification.get("coreEligible"))
-        admission_audit.append({
-            "addr": addr,
-            "passed": passed,
-            "status": qualification.get("status") or "unknown",
-            "operatorStarred": addr in pinned,
-        })
-        if passed:
-            effective_ranked.append(row)
-        else:
-            qualification_rejected.append(addr)
+    base_core_count = sum(
+        1 for row in surface_ranked
+        if (row.get("follow_qualification") or {}).get("coreEligible")
+    )
+    active_tune_surface = {
+        key: f(base_follow.get(key)) for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+    }
+    tune_surface_changed = any(
+        abs(f(tuned_params.get(key)) - value) > 1e-12
+        for key, value in active_tune_surface.items()
+    )
+
+    def replay_effective_surface(follow_surface):
+        qualifications = {}
+        scores = {}
+        qualified_rows = []
+        audit = []
+        rejected = []
+        for row in ranked_candidates:
+            effective = _effective_follow_replay(
+                db, row, now_ms, generation_id=generation_id, follow=follow_surface,
+                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+            )
+            qualification = dict(effective.get("qualification") or {})
+            addr = row["addr"]
+            if qualification.get("deferred") or qualification.get("role") == "quarantine":
+                raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
+            qualifications[addr] = qualification
+            scores[addr] = f(effective.get("score"))
+            passed = bool(qualification.get("coreEligible"))
+            audit.append({
+                "addr": addr,
+                "passed": passed,
+                "status": qualification.get("status") or "unknown",
+                "operatorStarred": addr in pinned,
+            })
+            if passed:
+                qualified_rows.append(row)
+            else:
+                rejected.append(addr)
+        return qualifications, scores, qualified_rows, audit, rejected
+
+    (effective_qualifications, effective_scores, effective_ranked,
+     admission_audit, qualification_rejected) = replay_effective_surface(fixed_follow)
+    tune_coverage_fallback = False
+    # Parameters serve the qualified pool. They may improve shared-account dollars, but may not win by
+    # shrinking today's individually Core-qualified coverage. Membership search owns capital contention.
+    if tune_surface_changed and len(effective_ranked) < base_core_count:
+        tuned_params = dict(active_tune_surface)
+        fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
+        (effective_qualifications, effective_scores, effective_ranked,
+         admission_audit, qualification_rejected) = replay_effective_surface(fixed_follow)
+        tune_coverage_fallback = True
+        tune_eligible = False
+        tune_reason = "qualified_wallet_coverage_regressed"
     effective_pinned_order = tuple(
         addr for addr in pinned_order
         if (effective_qualifications.get(addr) or {}).get("coreEligible")
@@ -2222,6 +2247,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 "effectiveRejected": qualification_rejected,
                 "formationTuneEligible": tune_eligible,
                 "formationTuneReason": tune_reason,
+                "tuneCoverageFallback": tune_coverage_fallback,
                 "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
                 "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
                 "qualificationRejected": qualification_rejected,
@@ -2469,7 +2495,66 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             robust_winner = (key, value, check)
             break
     if robust_winner is None:
-        raise RuntimeError("no_robust_quality_membership")
+        reason_counts = {}
+        for item in robust_audit:
+            for reason in item.get("reasons") or ():
+                reason_counts[reason] = int(reason_counts.get(reason, 0)) + 1
+        # No robust set is a valid business result, not corrupt generation data. Publishing an explicit empty
+        # Core removes current hard failures instead of retaining an obsolete, newly-dangerous strategy. An
+        # eligible operator star is the exception: its retention contract must fail closed, not be cleared.
+        if effective_pinned:
+            raise RuntimeError(
+                "no_robust_quality_membership_with_required_wallet:"
+                + json.dumps(reason_counts, sort_keys=True, separators=(",", ":"))
+            )
+        evaluations = tuple({
+            "count": value.count, "netPnl": value.net_pnl,
+            "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
+            "openRate": value.actionable_open_rate, "capacityFit": value.capacity_fit,
+            "liquidations": value.liquidations, "utility": value.utility,
+            "feasible": bool(value.feasible),
+        } for value in prefix_search.evaluated)
+        tune_evaluations = tuple({
+            "count": value.count, "netPnl": value.net_pnl,
+            "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
+            "openRate": value.actionable_open_rate, "capacityFit": value.capacity_fit,
+            "liquidations": value.liquidations, "utility": value.utility,
+            "feasible": bool(value.feasible),
+        } for value in (tune_search.evaluated if tune_search is not None else ()))
+        return {
+            "selected": (), "ranked": ordered, "params": {}, "evaluations": evaluations,
+            "qualifications": effective_qualifications, "scores": effective_scores,
+            "search": {
+                "algorithm": "quality_membership_joint_tune_v5", "initialCount": len(ordered),
+                "selectedCount": 0, "boundary": prefix_search.boundary,
+                "evaluatedCounts": [value.count for value in prefix_search.evaluated],
+                "evaluations": evaluations,
+                "membershipAlgorithm": membership_search.algorithm,
+                "membershipEvaluated": membership_search.evaluated,
+                "membershipSelected": [], "membershipRobustAudit": robust_audit,
+                "membershipRobustReasonCounts": reason_counts,
+                "robustAllowedMemberships": [], "noRobustMembership": True,
+                "rebalanceDue": rebalance_due, "coreAgeDays": core_age_days,
+                "rebalanceIntervalDays": rebalance_interval, "targetMinCount": target_min,
+                "operatorStarred": list(pinned_order), "effectiveStarred": [],
+                "tunePoolCount": len(tune_ordered),
+                "tunedInputCount": (
+                    int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
+                ),
+                "fullTuneRuns": len(tune_runs),
+                "tuneBoundary": tune_search.boundary if tune_search is not None else None,
+                "tuneEvaluatedCounts": (
+                    [value.count for value in tune_search.evaluated] if tune_search is not None else []
+                ),
+                "tuneEvaluations": tune_evaluations,
+                "tuneCoverageFallback": tune_coverage_fallback,
+                "effectiveRejected": qualification_rejected,
+                "formationTuneEligible": tune_eligible, "formationTuneReason": tune_reason,
+                "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
+                "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
+                "qualificationRejected": qualification_rejected, "admission": admission_audit,
+            },
+        }
     chosen_addrs, chosen, robust_check = robust_winner
     stability_applied = False
     stable_additions = []
@@ -2573,6 +2658,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "effectiveRejected": qualification_rejected,
             "formationTuneEligible": tune_eligible,
             "formationTuneReason": tune_reason,
+            "tuneCoverageFallback": tune_coverage_fallback,
             "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
             "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
             "qualificationRejected": qualification_rejected,

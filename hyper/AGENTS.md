@@ -101,9 +101,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 - Leaderboard harvesting uses official 7d/30d/all-time ROI, absolute PnL, account value and a weekly activity
   floor. Nominal leveraged volume is never a profitability denominator and has no upper bound. Every survivor
-  must then pass the official Portfolio Perp PnL/share precheck before history profiling. Current defaults are
-  account value `$10,000`, official ROI `10%/10%/10%`, absolute PnL `$2,000/$5,000/$0`, weekly volume
-  `$300,000`, and Perp PnL share `80%` in all three windows.
+  must then pass the official Portfolio Perp PnL/share precheck before history profiling. Current coarse
+  defaults are account value `$5,000`, official ROI `5%/5%/5%` (any two windows), absolute PnL
+  `$250/$500/$0`, weekly volume `$50,000`, and Perp PnL share `80%` in all three windows. These only expand
+  who receives strict replay and never weaken the Core qualification surface.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -201,7 +202,7 @@ liquidation; repeated/heavier failure remains rejected.
 
 There is no lifetime zero-liquidation gate. Isolated liquidation losses already reduce net PnL and increase
 drawdown, while liquidation frequency receives a bounded score penalty. Final-parameter 30-day strict replay
-may contain at most five liquidations for Core; more than five is Challenger-only. A currently losing 7-day
+may contain at most one isolated liquidation for Core; repetition is Challenger-only. A currently losing 7-day
 sector whose loss includes liquidation is still a hard recent failure, and Heavy-DCA pressure has its stricter
 rule.
 

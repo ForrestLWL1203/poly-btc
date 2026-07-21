@@ -268,6 +268,7 @@ class FollowScoreTests(unittest.TestCase):
     def test_liquidation_is_risk_evidence_not_an_automatic_rejection(self):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])
+        self.assertTrue(result["coreEligible"])
 
     def test_real_forward_liquidation_or_loss_removes_new_open_permission(self):
         liquidated = evaluate_follow_eligibility(evidence(
@@ -313,15 +314,15 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_7d_body_after_top3_net_pnl=-5,
         ))
         clean = evaluate_follow_eligibility(evidence(copy_bt_liquidations=0))
-        liq1 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
+        liq2 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=2))
 
         self.assertTrue(body["eligible"])
         self.assertFalse(body["coreEligible"])
         self.assertEqual(body["status"], "challenger_recent_body_negative")
         self.assertTrue(clean["coreEligible"])
-        self.assertTrue(liq1["eligible"])
-        self.assertFalse(liq1["coreEligible"])
-        self.assertEqual(liq1["status"], "challenger_liquidation_limit")
+        self.assertTrue(liq2["eligible"])
+        self.assertFalse(liq2["coreEligible"])
+        self.assertEqual(liq2["status"], "challenger_liquidation_limit")
 
     def test_sampled_profit_factor_and_tail_failures_are_business_rejections(self):
         low_pf = evaluate_follow_eligibility(evidence(copy_bt_profit_factor=1.29))

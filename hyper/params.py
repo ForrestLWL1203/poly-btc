@@ -26,17 +26,17 @@ PARAM_SPEC = [
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
     ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
-        "官方近7日 ROI 下限", "默认10%；直接读取 Leaderboard 官方 ROI，不使用成交量或余额作收益率分母"),
+        "官方近7日 ROI 下限", "粗筛默认5%；只决定进入深度回放，不是Core收益门槛"),
     ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
-        "官方近30日 ROI 下限", "默认10%；过滤一个月整体不盈利的钱包，严格质量由交易级回放判断"),
+        "官方近30日 ROI 下限", "粗筛默认5%；严格盈利与稳定性由30/14/7交易级回放判断"),
     ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
-        "官方历史 ROI 下限", "默认10%；排除长期表现明显偏弱的钱包"),
+        "官方历史 ROI 下限", "粗筛默认5%；排除长期明显偏弱的钱包，不直接授予Core资格"),
     ("HARVEST_ROI_WINDOWS_MIN_PASS", "scanner", "hidden", "int", "rescan",
         config.HARVEST_ROI_WINDOWS_MIN_PASS, "ROI达标窗口数", "三个官方ROI窗口至少两个达到门槛"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
-        "近7日绝对 PnL 下限", "默认$2,000；排除极小本金或资金流造成的虚高 ROI"),
+        "近7日绝对 PnL 下限", "粗筛默认$250；仅排除极小本金或资金流造成的虚高 ROI"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
-        "近30日绝对 PnL 下限", "默认$5,000；官方账户近期总 PnL 必须达到此金额"),
+        "近30日绝对 PnL 下限", "粗筛默认$500；最终按我们的严格Copy账户收益重新判定"),
     ("HARVEST_ALL_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_ALL_PNL_MIN,
         "历史绝对 PnL 下限", "默认$0；只要求历史不亏损，主要关注近期表现"),
     ("HARVEST_PERP_PNL_SHARE_MIN", "scanner", "yellow", "pct", "rescan",
@@ -278,12 +278,17 @@ _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 
 # Known predecessor defaults that are policy-migrated on deploy. Values are stored in UI units.
 _HARVEST_PREVIOUS_DEFAULTS = {
-    "HARVEST_MIN_ACCT": ("30000", "30000.0"),
-    "HARVEST_WEEK_ROI_MIN": ("15", "15.0", "25", "25.0"),
-    "HARVEST_MONTH_ROI_MIN": ("20", "20.0", "30", "30.0", "45", "45.0", "50", "50.0"),
-    "HARVEST_ALL_ROI_MIN": ("20", "20.0", "30", "30.0", "50", "50.0"),
-    "HARVEST_WEEK_PNL_MIN": ("5000", "5000.0"),
-    "HARVEST_MONTH_PNL_MIN": ("8000", "8000.0", "15000", "15000.0"),
+    "HARVEST_MIN_ACCT": ("10000", "10000.0", "30000", "30000.0"),
+    "HARVEST_WEEK_VLM_MIN": ("300000", "300000.0"),
+    "HARVEST_WEEK_ROI_MIN": ("10", "10.0", "15", "15.0", "25", "25.0"),
+    "HARVEST_MONTH_ROI_MIN": (
+        "10", "10.0", "20", "20.0", "30", "30.0", "45", "45.0", "50", "50.0",
+    ),
+    "HARVEST_ALL_ROI_MIN": ("10", "10.0", "20", "20.0", "30", "30.0", "50", "50.0"),
+    "HARVEST_WEEK_PNL_MIN": ("2000", "2000.0", "5000", "5000.0"),
+    "HARVEST_MONTH_PNL_MIN": (
+        "5000", "5000.0", "8000", "8000.0", "15000", "15000.0",
+    ),
     "HARVEST_ALL_PNL_MIN": ("20000", "20000.0"),
 }
 

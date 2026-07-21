@@ -310,18 +310,18 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # high-churn bots. (3) RETURN uses 30d magnitude + 7d magnitude TOGETHER: 30d alone can be one big early
 # day then dormant; requiring the 7d to ALSO be earning blocks that, while the 30d requirement stops a
 # single-week fluke. We copy by %/leverage so low-ROI wallets give us low returns (small capital).
-# Stage-1 is deliberately demanding: the official leaderboard's deposit-adjusted ROI supplies return
-# quality, while absolute PnL prevents a tiny account/flow artefact from earning an expensive profile.
-# Nominal volume is used only as a recent-activity floor.  It is never a profitability denominator because
-# leverage makes PnL/volume incomparable across otherwise identical contract traders.
-HARVEST_MIN_ACCT = 10_000.0
-HARVEST_WEEK_VLM_MIN = 300_000.0
-HARVEST_WEEK_ROI_MIN = 0.10
-HARVEST_MONTH_ROI_MIN = 0.10
-HARVEST_ALL_ROI_MIN = 0.10
+# Stage-1 is deliberately inclusive: it decides who receives expensive strict replay, not who may enter Core.
+# Repeating the final profitability floors here starves the quality stage of calmer medium-size wallets and
+# over-samples large/high-turnover accounts. Small absolute PnL floors still reject tiny flow artefacts;
+# nominal volume remains only a recent-activity floor and is never a profitability denominator.
+HARVEST_MIN_ACCT = 5_000.0
+HARVEST_WEEK_VLM_MIN = 50_000.0
+HARVEST_WEEK_ROI_MIN = 0.05
+HARVEST_MONTH_ROI_MIN = 0.05
+HARVEST_ALL_ROI_MIN = 0.05
 HARVEST_ROI_WINDOWS_MIN_PASS = 2  # coarse discovery: pass any two windows; strict trade replay decides quality.
-HARVEST_WEEK_PNL_MIN = 2_000.0
-HARVEST_MONTH_PNL_MIN = 5_000.0
+HARVEST_WEEK_PNL_MIN = 250.0
+HARVEST_MONTH_PNL_MIN = 500.0
 HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.80
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
@@ -424,9 +424,9 @@ CORE_COPY_WIN_RATE_LCB_30D_MIN = 0.50
 # A negative post-Top3 trade body in both recent windows is meaningful only after each body contains this
 # many episodes.  It blocks Core but remains Challenger observation rather than erasing the wallet.
 CORE_COPY_RECENT_BODY_MIN_CLOSED = 10
-# Final strict 30d replay may contain a small number of isolated liquidations because their full loss is
-# already charged to PnL/drawdown.  More than five is too path-dependent for new opens and becomes Challenger.
-CORE_COPY_MAX_LIQUIDATIONS_30D = 0
+# One isolated 30d replay liquidation is already fully charged to PnL/drawdown and may coexist with a high-
+# win, profitable surface. Repetition is path-dependent gambling and remains Challenger-only.
+CORE_COPY_MAX_LIQUIDATIONS_30D = 1
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled

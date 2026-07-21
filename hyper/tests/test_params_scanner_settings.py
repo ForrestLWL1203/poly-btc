@@ -9,12 +9,12 @@ from hyper import config, params, storage
 
 class ScannerSettingsParamTests(unittest.TestCase):
     def test_product_defaults_use_official_roi_and_absolute_pnl(self):
-        self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
-        self.assertEqual(config.HARVEST_MIN_ACCT, 10_000.0)
+        self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 50_000.0)
+        self.assertEqual(config.HARVEST_MIN_ACCT, 5_000.0)
         self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
-                          config.HARVEST_ALL_ROI_MIN), (0.10, 0.10, 0.10))
+                          config.HARVEST_ALL_ROI_MIN), (0.05, 0.05, 0.05))
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
-                          config.HARVEST_ALL_PNL_MIN), (2_000.0, 5_000.0, 0.0))
+                          config.HARVEST_ALL_PNL_MIN), (250.0, 500.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.80)
         self.assertEqual(config.WALLET_MARGIN_CAP_PCT, 0.20)
         self.assertEqual(config.WALLET_SECTOR_SIDE_CAP_PCT, 0.15)
@@ -30,13 +30,13 @@ class ScannerSettingsParamTests(unittest.TestCase):
 
             scanner = params.load_category(db, "scanner")
             follow = params.load_follow(db)
-            self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
-            self.assertEqual(scanner["HARVEST_MIN_ACCT"], 10_000.0)
-            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.10)
-            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.10)
-            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.10)
-            self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 2_000.0)
-            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 5_000.0)
+            self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 50_000.0)
+            self.assertEqual(scanner["HARVEST_MIN_ACCT"], 5_000.0)
+            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.05)
+            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.05)
+            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.05)
+            self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 250.0)
+            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 500.0)
             self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_PERP_PNL_SHARE_MIN"], 0.80)
             self.assertEqual(scanner["inactive_days"], 2)
@@ -148,13 +148,13 @@ class ScannerSettingsParamTests(unittest.TestCase):
             values = dict(db.execute(
                 "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
             ).fetchall())
-            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 10_000.0)
-            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
-            self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 2_000.0)
-            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 5_000.0)
+            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 5.0)
+            self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 5_000.0)
+            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 5.0)
+            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 5.0)
+            self.assertEqual(float(values["HARVEST_WEEK_VLM_MIN"]), 50_000.0)
+            self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 250.0)
+            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 500.0)
             self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_PERP_PNL_SHARE_MIN"]), 12.0)
 
@@ -188,9 +188,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "('HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
                 "'HARVEST_MONTH_PNL_MIN')"
             ).fetchall())
-            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
+            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 5.0)
+            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 5.0)
+            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 5.0)
 
     def test_seed_params_migrates_previous_risk_defaults(self):
         with tempfile.TemporaryDirectory() as td:
