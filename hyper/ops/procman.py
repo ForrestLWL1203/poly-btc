@@ -257,14 +257,19 @@ def _unit_state(unit):
 
 def observer_running(db_path):
     if _use_systemd():
-        return _unit_state(OBSERVER_UNIT) == "active"
+        # ``systemctl start --no-block`` normally returns while the unit is still activating.  Treat that
+        # transitional state as live/accepted; the process heartbeat or reconcile loop will report a later
+        # startup failure instead of the start endpoint immediately overwriting it as ``stopped``.
+        return _unit_state(OBSERVER_UNIT) in ("active", "activating", "reloading")
     return is_running(db_path, OBSERVER)
 
 
 def start_observer(db_path):
     """'启动跟单' → systemd (VPS) or a detached child (local). Idempotent; supervised by OS / pidfile."""
     if _use_systemd():
-        _systemctl("start", "--no-block", OBSERVER_UNIT)
+        result = _systemctl("start", "--no-block", OBSERVER_UNIT)
+        if result is None or result.returncode != 0:
+            raise RuntimeError("observer_start_failed")
     else:
         _spawn(db_path, OBSERVER, _observe_argv(db_path))
     running = observer_running(db_path)

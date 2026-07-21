@@ -3,6 +3,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hyper import storage
@@ -10,6 +11,36 @@ from hyper.ops import procman
 
 
 class ProcmanTests(unittest.TestCase):
+
+    def test_systemd_observer_start_accepts_activating_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = str(Path(td) / "hl.db")
+            db = storage.connect(db_path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.close()
+
+            responses = [
+                SimpleNamespace(returncode=0, stdout="", stderr=""),
+                SimpleNamespace(returncode=0, stdout="activating\n", stderr=""),
+            ]
+            with patch.object(procman, "_use_systemd", return_value=True), \
+                    patch.object(procman, "_systemctl", side_effect=responses):
+                result = procman.start_observer(db_path)
+
+            self.assertTrue(result["running"])
+            self.assertTrue(result["started"])
+
+    def test_systemd_observer_start_reports_real_systemctl_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            db_path = str(Path(td) / "hl.db")
+            db = storage.connect(db_path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.close()
+
+            with patch.object(procman, "_use_systemd", return_value=True), \
+                    patch.object(procman, "_systemctl", return_value=SimpleNamespace(
+                        returncode=1, stdout="", stderr="failed",
+                    )):
+                with self.assertRaisesRegex(RuntimeError, "observer_start_failed"):
+                    procman.start_observer(db_path)
 
     def test_dashboard_startup_status_ticker_does_not_start_scan(self):
         with tempfile.TemporaryDirectory() as td:
