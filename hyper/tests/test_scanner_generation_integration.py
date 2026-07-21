@@ -96,6 +96,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(surface["STABLE_MARGIN_PCT"], 1.0)
         self.assertEqual(reason, "holdout_not_better")
 
+    def test_no_robust_membership_fails_closed_instead_of_publishing_empty_core(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+        failure_branch = source[
+            source.index("if robust_winner is None:"):
+            source.index("chosen_addrs, chosen, robust_check = robust_winner")
+        ]
+
+        self.assertIn('raise RuntimeError("no_robust_quality_membership")', failure_branch)
+        self.assertNotIn('"selected": ()', failure_branch)
+
     def test_core_formation_tune_pool_includes_parameter_sensitive_challengers_only(self):
         self.assertTrue(scanner._formation_tune_candidate({
             "follow_qualification": {"eligible": True, "coreEligible": True},

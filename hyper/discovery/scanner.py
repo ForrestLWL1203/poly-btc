@@ -2495,66 +2495,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             robust_winner = (key, value, check)
             break
     if robust_winner is None:
-        reason_counts = {}
-        for item in robust_audit:
-            for reason in item.get("reasons") or ():
-                reason_counts[reason] = int(reason_counts.get(reason, 0)) + 1
-        # No robust set is a valid business result, not corrupt generation data. Publishing an explicit empty
-        # Core removes current hard failures instead of retaining an obsolete, newly-dangerous strategy. An
-        # eligible operator star is the exception: its retention contract must fail closed, not be cleared.
-        if effective_pinned:
-            raise RuntimeError(
-                "no_robust_quality_membership_with_required_wallet:"
-                + json.dumps(reason_counts, sort_keys=True, separators=(",", ":"))
-            )
-        evaluations = tuple({
-            "count": value.count, "netPnl": value.net_pnl,
-            "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
-            "openRate": value.actionable_open_rate, "capacityFit": value.capacity_fit,
-            "liquidations": value.liquidations, "utility": value.utility,
-            "feasible": bool(value.feasible),
-        } for value in prefix_search.evaluated)
-        tune_evaluations = tuple({
-            "count": value.count, "netPnl": value.net_pnl,
-            "stressNetPnl": value.stress_net_pnl, "maxDrawdown": value.max_drawdown,
-            "openRate": value.actionable_open_rate, "capacityFit": value.capacity_fit,
-            "liquidations": value.liquidations, "utility": value.utility,
-            "feasible": bool(value.feasible),
-        } for value in (tune_search.evaluated if tune_search is not None else ()))
-        return {
-            "selected": (), "ranked": ordered, "params": {}, "evaluations": evaluations,
-            "qualifications": effective_qualifications, "scores": effective_scores,
-            "search": {
-                "algorithm": "quality_membership_joint_tune_v5", "initialCount": len(ordered),
-                "selectedCount": 0, "boundary": prefix_search.boundary,
-                "evaluatedCounts": [value.count for value in prefix_search.evaluated],
-                "evaluations": evaluations,
-                "membershipAlgorithm": membership_search.algorithm,
-                "membershipEvaluated": membership_search.evaluated,
-                "membershipSelected": [], "membershipRobustAudit": robust_audit,
-                "membershipRobustReasonCounts": reason_counts,
-                "robustAllowedMemberships": [], "noRobustMembership": True,
-                "rebalanceDue": rebalance_due, "coreAgeDays": core_age_days,
-                "rebalanceIntervalDays": rebalance_interval, "targetMinCount": target_min,
-                "operatorStarred": list(pinned_order), "effectiveStarred": [],
-                "tunePoolCount": len(tune_ordered),
-                "tunedInputCount": (
-                    int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
-                ),
-                "fullTuneRuns": len(tune_runs),
-                "tuneBoundary": tune_search.boundary if tune_search is not None else None,
-                "tuneEvaluatedCounts": (
-                    [value.count for value in tune_search.evaluated] if tune_search is not None else []
-                ),
-                "tuneEvaluations": tune_evaluations,
-                "tuneCoverageFallback": tune_coverage_fallback,
-                "effectiveRejected": qualification_rejected,
-                "formationTuneEligible": tune_eligible, "formationTuneReason": tune_reason,
-                "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
-                "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
-                "qualificationRejected": qualification_rejected, "admission": admission_audit,
-            },
-        }
+        # Formation failure must not publish an empty strategy over a previously funded Core.  Raising here
+        # keeps generation, selection and strategy-revision publication inside the caller's atomic rollback.
+        raise RuntimeError("no_robust_quality_membership")
     chosen_addrs, chosen, robust_check = robust_winner
     stability_applied = False
     stable_additions = []
