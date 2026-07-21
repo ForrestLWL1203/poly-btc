@@ -11,7 +11,7 @@ import math
 from typing import Mapping
 
 from hyper import config
-from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy.copy_policy import load_copy_policy, one_sided_wilson_lower_bound
 from hyper.copy.sector import apply_allowed_sector_copy_metrics, parse_json_obj
 
 
@@ -199,7 +199,58 @@ def evaluate_follow_eligibility(
             "role": "rejected",
             "reasons": [f"资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%"],
         }
-    standard_samples = c30 >= min_closed30 and evidence_days >= min_evidence_days and c7 >= min_closed7
+    closed_by_window = {30: c30, 14: c14, 7: c7}
+    win_rate_by_window = {
+        30: _num(metrics.get("copy_bt_win_rate")),
+        14: _num(metrics.get("copy_bt_14d_win_rate")),
+        7: _num(metrics.get("copy_bt_7d_win_rate")),
+    }
+    wins_by_window = {}
+    for days in (30, 14, 7):
+        # Profile storage persists the canonical rate/count pair, while scoped sector JSON also carries the
+        # integer win count.  Derive from the public pair so both paths make the identical boundary decision.
+        wins_by_window[days] = int(round(win_rate_by_window[days] * closed_by_window[days]))
+        wins_by_window[days] = max(0, min(closed_by_window[days], wins_by_window[days]))
+    sampled_win_failures = [
+        days for days in (30, 14, 7)
+        if closed_by_window[days] >= policy.core_min_closed(days)
+        and win_rate_by_window[days] < policy.core_min_win_rate(days)
+    ]
+    win_lcb30 = one_sided_wilson_lower_bound(
+        wins_by_window[30], c30, policy.core_win_rate_lcb_confidence,
+    )
+    if sampled_win_failures:
+        labels = "/".join(f"{days}日" for days in sampled_win_failures)
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_win_rate_below_floor",
+            "role": "rejected",
+            "winRates": win_rate_by_window,
+            "winRateLcb30": win_lcb30,
+            "reasons": [f"允许板块{labels}严格Copy胜率低于实跟硬门槛"],
+        }
+    if c30 >= policy.core_min_closed_30d and win_lcb30 < policy.core_min_win_rate_lcb_30d:
+        return {
+            "eligible": False,
+            "coreEligible": False,
+            "status": "copy_win_rate_confidence_low",
+            "role": "rejected",
+            "winRates": win_rate_by_window,
+            "winRateLcb30": win_lcb30,
+            "reasons": [
+                f"30日严格Copy胜率{policy.core_win_rate_lcb_confidence * 100:.0f}%单侧置信下界"
+                f"低于{policy.core_min_win_rate_lcb_30d * 100:.0f}%"
+            ],
+        }
+    core_samples = all(
+        closed_by_window[days] >= policy.core_min_closed(days)
+        for days in (30, 14, 7)
+    )
+    standard_samples = bool(
+        c30 >= min_closed30 and evidence_days >= min_evidence_days and c7 >= min_closed7
+        and core_samples
+    )
     recent_warning = (
         (
             c7 >= min_closed7 and pnl7 < 0.0
@@ -221,6 +272,15 @@ def evaluate_follow_eligibility(
     body_net = _num(metrics.get("copy_bt_body_after_top3_net_pnl"))
     body_profit_factor = _num(metrics.get("copy_bt_body_after_top3_profit_factor"))
     body_median = _num(metrics.get("copy_bt_body_after_top3_median_pnl"))
+    recent_body_floor = policy.core_recent_body_min_closed
+    recent_body_negative = bool(
+        int(_num(metrics.get("copy_bt_14d_body_after_top3_n"))) >= recent_body_floor
+        and int(_num(metrics.get("copy_bt_7d_body_after_top3_n"))) >= recent_body_floor
+        and _num(metrics.get("copy_bt_14d_body_after_top3_net_pnl")) < 0.0
+        and _num(metrics.get("copy_bt_7d_body_after_top3_net_pnl")) < 0.0
+    )
+    final_liquidations = int(_num(metrics.get("copy_bt_liquidations")))
+    liquidation_limit_exceeded = final_liquidations > policy.core_max_liquidations_30d
     concentration_sampled = positive_episodes >= policy.concentration_min_positive_episodes
     concentration_warning = bool(
         concentration_sampled
@@ -320,22 +380,10 @@ def evaluate_follow_eligibility(
                 f"保证金归一化预期收益低于候选观察线{challenger_edge_floor * 100:.1f}%"
             ],
         }
-    # Five recent closes remains the normal evidence floor.  A deliberately narrow strong-sparse route admits
-    # three/four recent closes only when 30d economics, independent days, the recent win rate, and the
-    # post-Top3 body are all already strong.  This recovers a 12/14 wallet without letting a three-trade
-    # windfall redefine Core.
-    recent_win_rate = _num(metrics.get("copy_bt_7d_win_rate"))
-    sparse_recent_strong = bool(
-        policy.strong_sparse_min_closed_7d <= c7 < min_closed7
-        and c30 >= policy.strong_sparse_min_closed_30d
-        and evidence_days >= policy.strong_sparse_min_evidence_days
-        and recent_win_rate >= policy.strong_sparse_min_win_rate_7d
-        and pnl30 >= strong_floor
-        and weekly_economics_ok
-        and tail7 is not None and _num(tail7) > 0.0
-        and concentration_body_strong
-    )
-    strong_samples = bool(strong_samples and c7 >= min_closed7)
+    # Core never uses a small-sample win-rate exception.  High ROI/PnL may keep a thin wallet visible as a
+    # Challenger, but new opens require the complete 15/7/5 strict-Copy evidence surface.
+    sparse_recent_strong = False
+    strong_samples = bool(strong_samples and core_samples)
     strong_entry = (
         pnl30 >= strong_floor and (strong_samples or sparse_recent_strong) and not recent_warning
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
@@ -346,6 +394,8 @@ def evaluate_follow_eligibility(
     )
     core_eligible = bool(strong_entry or standard_entry)
     if concentration_warning and not concentration_exception:
+        core_eligible = False
+    if recent_body_negative or liquidation_limit_exceeded:
         core_eligible = False
     if core_eligible and not structural_core_blocked:
         return {
@@ -375,7 +425,18 @@ def evaluate_follow_eligibility(
             ],
         }
 
-    if structural_core_blocked:
+    if liquidation_limit_exceeded:
+        status, reason = (
+            "challenger_liquidation_limit",
+            f"最终参数30日严格回放爆仓{final_liquidations}次，超过Core上限"
+            f"{policy.core_max_liquidations_30d}次",
+        )
+    elif recent_body_negative:
+        status, reason = (
+            "challenger_recent_body_negative",
+            "7日与14日移除前三大盈利后的交易主体持续为负，暂不允许新开仓",
+        )
+    elif structural_core_blocked:
         status, reason = (
             "challenger_structural_watch",
             "单次Heavy-DCA受限回放通过，但结构压力验证只允许候选观察",
@@ -396,8 +457,8 @@ def evaluate_follow_eligibility(
             "challenger_profit_concentration_sample",
             "利润集中，移除前三大盈利后的剩余样本不足，暂留观察",
         )
-    elif c30 < min_closed30 or evidence_days < min_evidence_days or c7 < min_closed7:
-        status, reason = "challenger_sample_watch", "Copy样本或独立证据尚不足"
+    elif not core_samples or evidence_days < min_evidence_days:
+        status, reason = "challenger_sample_watch", "Core所需15/7/5 Copy样本或独立证据尚不足"
     elif concentration_warning:
         status, reason = "challenger_profit_concentration", "利润集中度偏高，暂不进入Core"
     elif pnl7 < weekly_core_floor:

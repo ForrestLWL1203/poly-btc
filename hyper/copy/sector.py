@@ -14,7 +14,7 @@ from typing import Mapping
 from hyper import config
 from .copy_backtest import ADD_BLOCKED_OUTCOMES, ADD_METRICS_VERSION, ADD_OUTCOMES
 from .copy_data import is_copyable_coin
-from .copy_policy import load_copy_policy
+from .copy_policy import load_copy_policy, one_sided_wilson_lower_bound
 
 SECTORS = ("crypto", "stock")
 
@@ -103,7 +103,18 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     results = {days: _window_result(windows, days) for days in (30, 14, 7)}
     closed = {days: _int(results[days].get("closed_n")) for days in results}
     pnl = {days: _num(results[days].get("copy_net_pnl")) for days in results}
-    enough = {days: closed[days] >= policy.min_closed(days) for days in results}
+    enough = {days: closed[days] >= policy.core_min_closed(days) for days in results}
+    wins = {
+        days: max(0, min(closed[days], _int(results[days].get("wins"))))
+        for days in results
+    }
+    win_rate = {
+        days: wins[days] / closed[days] if closed[days] else 0.0
+        for days in results
+    }
+    win_lcb30 = one_sided_wilson_lower_bound(
+        wins[30], closed[30], policy.core_win_rate_lcb_confidence,
+    )
     equity = _qualification_equity(windows)
     return30 = pnl[30] / equity
     return14 = pnl[14] / equity
@@ -112,9 +123,29 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "closed": {str(days): closed[days] for days in (30, 14, 7)},
         "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
         "returns": {"30": return30, "14": return14, "7": return7},
+        "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
+        "winRateLcb30": win_lcb30,
         "qualificationEquity": equity,
     }
 
+    # A current sampled loss removes live permission even when the longer Core evidence surface is still
+    # thin; sample insufficiency must never hide a plainly negative recent result.
+    if closed[14] >= policy.min_closed_14d and pnl[14] <= min_net:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_recent_weak",
+            "reason": "板块14天严格Copy不盈利，已移出实跟权限",
+            "watch": bool(pnl[30] > min_net),
+        }
+    if closed[7] >= policy.min_closed_7d and pnl[7] <= min_net:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_recent_weak",
+            "reason": "板块7天严格Copy不盈利，已移出实跟权限",
+            "watch": bool(pnl[30] > min_net),
+        }
     if not all(enough.values()):
         return {
             **base,
@@ -123,12 +154,28 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "reason": "板块未独立达到30/14/7日实跟样本线",
             "watch": bool(closed[30] > 0 and pnl[30] > min_net),
         }
-    if pnl[14] <= min_net:
+    weak_windows = [
+        days for days in (30, 14, 7)
+        if win_rate[days] < policy.core_min_win_rate(days)
+    ]
+    if weak_windows:
+        labels = "/".join(f"{days}日" for days in weak_windows)
         return {
             **base,
             "allow": False,
-            "status": "sector_recent_weak",
-            "reason": "板块14天严格Copy不盈利，已移出实跟权限",
+            "status": "sector_win_rate_below_floor",
+            "reason": f"板块{labels}严格Copy胜率低于Core硬门槛",
+            "watch": bool(pnl[30] > min_net),
+        }
+    if win_lcb30 < policy.core_min_win_rate_lcb_30d:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_win_rate_confidence_low",
+            "reason": (
+                f"板块30日胜率80%单侧置信下界{win_lcb30 * 100:.1f}%低于"
+                f"{policy.core_min_win_rate_lcb_30d * 100:.0f}%"
+            ),
             "watch": bool(pnl[30] > min_net),
         }
     if return30 < policy.core_min_return_30d:
@@ -155,8 +202,26 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         }
 
     primary = results[30]
+    recent14 = results[14]
     recent = results[7]
+    body_floor = policy.core_recent_body_min_closed
+    recent_body_negative = bool(
+        _int(recent14.get("body_after_top3_n")) >= body_floor
+        and _int(recent.get("body_after_top3_n")) >= body_floor
+        and _num(recent14.get("body_after_top3_net_pnl")) < 0.0
+        and _num(recent.get("body_after_top3_net_pnl")) < 0.0
+    )
     checks = (
+        (
+            _int(primary.get("liquidations")) > policy.core_max_liquidations_30d,
+            "sector_liquidation_limit",
+            f"板块30日最终回放爆仓超过{policy.core_max_liquidations_30d}次",
+        ),
+        (
+            recent_body_negative,
+            "sector_recent_body_negative",
+            "板块7日与14日移除前三大盈利后的交易主体持续为负",
+        ),
         (
             primary.get("valuation_status") is not None
             and str(primary.get("valuation_status") or "").strip().lower() != "complete",
@@ -680,7 +745,8 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         out["copy_bt_net_pnl"] = primary["copy_net_pnl"]
         out["copy_bt_closed_n"] = primary["closed_n"]
         closed_n = _int(primary.get("closed_n"))
-        out["copy_bt_win_rate"] = _int(primary.get("wins")) / closed_n if closed_n else 0.0
+        out["copy_bt_wins"] = _int(primary.get("wins"))
+        out["copy_bt_win_rate"] = out["copy_bt_wins"] / closed_n if closed_n else 0.0
         target_open = _int(primary.get("target_open_events"))
         out["copy_bt_open_fill_rate"] = primary.get("open_fill_rate")
         if out["copy_bt_open_fill_rate"] is None and target_open:
@@ -715,14 +781,20 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         if agg:
             out[net_key] = agg["copy_net_pnl"]
             out[n_key] = agg["closed_n"]
+            out[f"copy_bt_{days}d_wins"] = _int(agg.get("wins"))
             out[f"copy_bt_{days}d_win_rate"] = (
-                _int(agg.get("wins")) / _int(agg.get("closed_n"))
+                out[f"copy_bt_{days}d_wins"] / _int(agg.get("closed_n"))
                 if _int(agg.get("closed_n")) else 0.0
             )
             out[f"copy_bt_{days}d_unrealized_pnl"] = _num(agg.get("unrealized_pnl"))
             for key in (
-                "profit_factor", "net_after_top1", "net_after_top2",
+                "profit_factor", "net_after_top1", "net_after_top2", "liquidations",
                 "top1_profit_share", "top3_profit_share", "cost_stress_net_pnl",
+                "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
+                "body_after_top3_win_rate", "body_after_top3_net_pnl",
+                "body_after_top3_gross_profit", "body_after_top3_gross_loss",
+                "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
+                "body_after_top3_median_pnl",
             ):
                 out[f"copy_bt_{days}d_{key}"] = agg.get(key)
     out["allowed_sectors"] = sorted(allowed)

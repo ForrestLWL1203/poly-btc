@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import math
 from typing import Mapping
 
 from hyper import config
@@ -20,6 +21,16 @@ class CopyPolicy:
     min_closed_30d: int
     min_closed_14d: int
     min_closed_7d: int
+    core_min_closed_30d: int
+    core_min_closed_14d: int
+    core_min_closed_7d: int
+    core_min_win_rate_30d: float
+    core_min_win_rate_14d: float
+    core_min_win_rate_7d: float
+    core_win_rate_lcb_confidence: float
+    core_min_win_rate_lcb_30d: float
+    core_recent_body_min_closed: int
+    core_max_liquidations_30d: int
     min_expected_margin_return: float
     min_return_lcb: float
     entry_positive_probability: float
@@ -62,6 +73,20 @@ class CopyPolicy:
             return self.min_closed_14d
         return self.min_closed_30d
 
+    def core_min_closed(self, days: int) -> int:
+        if int(days) <= 7:
+            return self.core_min_closed_7d
+        if int(days) <= 14:
+            return self.core_min_closed_14d
+        return self.core_min_closed_30d
+
+    def core_min_win_rate(self, days: int) -> float:
+        if int(days) <= 7:
+            return self.core_min_win_rate_7d
+        if int(days) <= 14:
+            return self.core_min_win_rate_14d
+        return self.core_min_win_rate_30d
+
     @property
     def version(self) -> str:
         payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
@@ -74,6 +99,39 @@ def _value(values: Mapping | None, key: str, default):
     return getattr(config, key, default)
 
 
+def one_sided_wilson_lower_bound(wins: int, total: int, confidence: float = 0.80) -> float:
+    """Return a one-sided Wilson lower confidence bound for a binomial win rate.
+
+    The production policy uses 80%, whose standard-normal z-score is fixed here to avoid a scipy runtime
+    dependency.  A conservative interpolation covers the narrow operator-tunable range while invalid or empty
+    samples fail closed at zero.
+    """
+    total = max(0, int(total or 0))
+    wins = max(0, min(total, int(wins or 0)))
+    if total <= 0:
+        return 0.0
+    confidence = max(0.50, min(0.99, float(confidence or 0.80)))
+    # Common one-sided normal quantiles. Linear interpolation is more than sufficient for a policy threshold;
+    # the default 80% value is represented exactly.
+    quantiles = (
+        (0.50, 0.0), (0.75, 0.6744897502), (0.80, 0.8416212336),
+        (0.85, 1.0364333895), (0.90, 1.2815515655), (0.95, 1.6448536270),
+        (0.975, 1.9599639845), (0.99, 2.3263478740),
+    )
+    z = quantiles[-1][1]
+    for (lo_c, lo_z), (hi_c, hi_z) in zip(quantiles, quantiles[1:]):
+        if lo_c <= confidence <= hi_c:
+            span = hi_c - lo_c
+            z = lo_z + (confidence - lo_c) * (hi_z - lo_z) / span if span else lo_z
+            break
+    p = wins / total
+    z2 = z * z
+    denominator = 1.0 + z2 / total
+    centre = p + z2 / (2.0 * total)
+    radius = z * math.sqrt((p * (1.0 - p) + z2 / (4.0 * total)) / total)
+    return max(0.0, min(1.0, (centre - radius) / denominator))
+
+
 def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
     primary = int(_value(values, "COPY_BT_DAYS", 30) or 30)
     recent = tuple(int(x) for x in _value(values, "COPY_BT_RECENT_DAYS", (14, 7)) if int(x) > 0)
@@ -83,6 +141,24 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_closed_30d=int(_value(values, "COPY_BT_MIN_CLOSED", 7) or 0),
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
         min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
+        core_min_closed_30d=int(_value(values, "CORE_COPY_MIN_CLOSED_30D", 15) or 0),
+        core_min_closed_14d=int(_value(values, "CORE_COPY_MIN_CLOSED_14D", 7) or 0),
+        core_min_closed_7d=int(_value(values, "CORE_COPY_MIN_CLOSED_7D", 5) or 0),
+        core_min_win_rate_30d=float(_value(values, "CORE_COPY_WIN_RATE_30D_MIN", 0.65)),
+        core_min_win_rate_14d=float(_value(values, "CORE_COPY_WIN_RATE_14D_MIN", 0.60)),
+        core_min_win_rate_7d=float(_value(values, "CORE_COPY_WIN_RATE_7D_MIN", 0.60)),
+        core_win_rate_lcb_confidence=float(_value(
+            values, "CORE_COPY_WIN_RATE_LCB_CONFIDENCE", 0.80,
+        )),
+        core_min_win_rate_lcb_30d=float(_value(
+            values, "CORE_COPY_WIN_RATE_LCB_30D_MIN", 0.50,
+        )),
+        core_recent_body_min_closed=int(_value(
+            values, "CORE_COPY_RECENT_BODY_MIN_CLOSED", 10,
+        ) or 0),
+        core_max_liquidations_30d=int(_value(
+            values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 5,
+        ) or 0),
         min_expected_margin_return=float(_value(values, "COPY_MIN_EXPECTED_MARGIN_RETURN", 0.02)),
         min_return_lcb=float(_value(values, "COPY_MIN_RETURN_LCB", 0.0)),
         entry_positive_probability=float(_value(values, "CORE_ENTRY_MIN_POSITIVE_PROB", 0.70)),

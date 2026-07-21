@@ -733,7 +733,8 @@ class ScannerWatchlistTests(unittest.TestCase):
                 30: {"copy_net_pnl": 100.0, "copy_win_rate": 0.6, "closed_n": 8,
                      "opened_n": 8, "target_open_events": 8, "liquidations": 0, "fee_drag": 5.0},
                 14: {"copy_net_pnl": -12.0, "copy_win_rate": 0.25, "closed_n": 5,
-                     "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
+                     "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0,
+                     "body_after_top3_n": 2, "body_after_top3_net_pnl": -4.0},
                 7: {"copy_net_pnl": 3.0, "copy_win_rate": 0.5, "closed_n": 2,
                     "opened_n": 2, "target_open_events": 2, "liquidations": 0, "fee_drag": 1.0},
             },
@@ -747,6 +748,9 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertEqual(m["copy_bt_closed_n"], 8)
         self.assertEqual(m["copy_bt_14d_net_pnl"], -12.0)
         self.assertEqual(m["copy_bt_14d_closed_n"], 5)
+        self.assertEqual(m["copy_bt_14d_win_rate"], 0.25)
+        self.assertEqual(m["copy_bt_14d_body_after_top3_n"], 2)
+        self.assertEqual(m["copy_bt_14d_body_after_top3_net_pnl"], -4.0)
 
     def test_copy_backtest_gate_allows_primary_loss_when_recent_windows_recover(self):
         m = {"net_pnl": 50.0, "roi_total": 0.05, "net_30d": 200.0, "net_life": 500.0}
@@ -860,11 +864,11 @@ class ScannerWatchlistTests(unittest.TestCase):
             },
             {
                 "crypto": {
-                    30: {"copy_net_pnl": 1200.0, "copy_win_rate": 0.7, "closed_n": 10, "wins": 7,
-                         "opened_n": 10, "target_open_events": 10, "liquidations": 0, "fee_drag": 7.0},
-                    14: {"copy_net_pnl": 600.0, "copy_win_rate": 0.67, "closed_n": 6, "wins": 4,
-                         "opened_n": 6, "target_open_events": 6, "liquidations": 0, "fee_drag": 4.0},
-                    7: {"copy_net_pnl": 500.0, "copy_win_rate": 0.6, "closed_n": 5, "wins": 3,
+                    30: {"copy_net_pnl": 1200.0, "copy_win_rate": 0.73, "closed_n": 15, "wins": 11,
+                         "opened_n": 15, "target_open_events": 15, "liquidations": 0, "fee_drag": 7.0},
+                    14: {"copy_net_pnl": 600.0, "copy_win_rate": 0.71, "closed_n": 7, "wins": 5,
+                         "opened_n": 7, "target_open_events": 7, "liquidations": 0, "fee_drag": 4.0},
+                    7: {"copy_net_pnl": 500.0, "copy_win_rate": 0.8, "closed_n": 5, "wins": 4,
                         "opened_n": 5, "target_open_events": 5, "liquidations": 0, "fee_drag": 2.0},
                 },
                 "stock": {

@@ -50,8 +50,8 @@ class SectorPolicyTests(unittest.TestCase):
     def test_policy_allows_profitable_sector_and_denies_losing_sector(self):
         sector_results = {
             "crypto": {
-                30: bt(1200, 10),
-                14: bt(600, 6),
+                30: bt(1200, 15),
+                14: bt(600, 7),
                 7: bt(600, 5),
             },
             "stock": {
@@ -71,7 +71,7 @@ class SectorPolicyTests(unittest.TestCase):
 
     def test_current_generation_structure_limits_profitable_sector_without_prior_policy(self):
         sector_results = {
-            "crypto": {30: bt(1800, 10), 14: bt(900, 6), 7: bt(600, 5)},
+            "crypto": {30: bt(1800, 15), 14: bt(900, 7), 7: bt(600, 5)},
             "stock": {30: bt(2200, 12), 14: bt(1100, 7), 7: bt(700, 5)},
         }
         structure = {
@@ -110,7 +110,7 @@ class SectorPolicyTests(unittest.TestCase):
 
     def test_single_heavy_dca_pressure_pass_can_enter_core(self):
         sector_results = {
-            "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(600, 5)},
+            "crypto": {30: bt(2200, 15), 14: bt(1000, 7), 7: bt(600, 5)},
         }
         structure = {
             "source": "current_generation",
@@ -161,8 +161,8 @@ class SectorPolicyTests(unittest.TestCase):
 
     def test_mix_wallet_keeps_clean_and_pressure_tested_heavy_dca_sectors(self):
         sector_results = {
-            "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(600, 5)},
-            "stock": {30: bt(1800, 10), 14: bt(900, 6), 7: bt(500, 5)},
+            "crypto": {30: bt(2200, 15), 14: bt(1000, 7), 7: bt(600, 5)},
+            "stock": {30: bt(1800, 15), 14: bt(900, 7), 7: bt(500, 5)},
         }
         structure = {
             "source": "current_generation",
@@ -274,6 +274,52 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(policy["allowed"], [])
         self.assertEqual(policy["watch"], ["crypto"])
         self.assertEqual(policy["crypto"]["status"], "sector_recent_weak")
+
+    def test_low_win_sector_cannot_hide_behind_a_strong_allowed_sector(self):
+        sector_results = {
+            "crypto": {
+                30: bt(2400, 20, wins=15),
+                14: bt(1200, 10, wins=7),
+                7: bt(700, 5, wins=4),
+            },
+            "stock": {
+                30: bt(2600, 20, wins=10),
+                14: bt(1300, 10, wins=5),
+                7: bt(800, 5, wins=2),
+            },
+        }
+
+        policy = sector.evaluate_sector_policy(sector_results)
+
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertEqual(policy["watch"], ["stock"])
+        self.assertEqual(policy["stock"]["status"], "sector_win_rate_below_floor")
+
+    def test_sector_final_replay_liquidation_and_recent_body_caps_are_observation_only(self):
+        liquidated = {
+            30: {**bt(2400, 20, wins=15), "liquidations": 6},
+            14: bt(1200, 10, wins=7),
+            7: bt(700, 5, wins=4),
+        }
+        body = {
+            30: bt(2400, 20, wins=15),
+            14: {
+                **bt(1200, 13, wins=9),
+                "body_after_top3_n": 10, "body_after_top3_net_pnl": -20,
+            },
+            7: {
+                **bt(700, 13, wins=9),
+                "body_after_top3_n": 10, "body_after_top3_net_pnl": -5,
+            },
+        }
+
+        liq_policy = sector.evaluate_sector_policy({"crypto": liquidated})
+        body_policy = sector.evaluate_sector_policy({"crypto": body})
+
+        self.assertEqual(liq_policy["crypto"]["status"], "sector_liquidation_limit")
+        self.assertEqual(liq_policy["watch"], ["crypto"])
+        self.assertEqual(body_policy["crypto"]["status"], "sector_recent_body_negative")
+        self.assertEqual(body_policy["watch"], ["crypto"])
 
     def test_recent_liquidation_has_no_grace(self):
         now_ms = 100 * DAY_MS

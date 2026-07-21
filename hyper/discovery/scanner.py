@@ -1495,7 +1495,8 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
 
     Isolated liquidations already lose their full allocated margin in ``copy_net_pnl`` and equity drawdown.
     Risk-adjusted utility subtracts max drawdown dollars once more, so a wallet passes only when its added
-    net profit more than compensates for any added drawdown; liquidation count itself is not a veto.
+    net profit more than compensates for any added drawdown. Individual final replay already limits Core to
+    five 30-day liquidations; the shared portfolio layer does not charge the same event a third time.
     """
     usable = []
     for days, result in (windows or {}).items():
@@ -2019,7 +2020,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
         effective_qualifications[addr] = qualification
         effective_scores[addr] = f(effective.get("score"))
-        passed = bool(qualification.get("coreEligible") or addr in pinned)
+        # A star controls ordering/retention only after the wallet clears the same current business gates.
+        # It cannot turn low win-rate, weak recent-body or over-liquidated replay evidence into new-open
+        # permission. Held positions are converted to exit-only by selection materialization below.
+        passed = bool(qualification.get("coreEligible"))
         admission_audit.append({
             "addr": addr,
             "passed": passed,
@@ -2030,6 +2034,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             effective_ranked.append(row)
         else:
             qualification_rejected.append(addr)
+    effective_pinned_order = tuple(
+        addr for addr in pinned_order
+        if (effective_qualifications.get(addr) or {}).get("coreEligible")
+    )
+    effective_pinned = set(effective_pinned_order)
     pin_rank = {addr: rank for rank, addr in enumerate(pinned_order)}
     effective_ranked.sort(key=lambda row: (
         0 if row["addr"] in pinned else 1,
@@ -2120,12 +2129,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-        min_count=max(1, len(pinned_order)),
+        min_count=max(1, len(effective_pinned_order)),
     )
     membership_search = core_formation.search_quality_membership(
         ordered, evaluate_members,
         initial=ordered[:prefix_search.selected.count],
-        required=pinned_order,
+        required=effective_pinned_order,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
     )
     chosen = membership_search.metrics
@@ -2206,7 +2215,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     previous_qualified = tuple(
         addr for addr in current_core
         if addr in set(ordered) and (
-            (effective_qualifications.get(addr) or {}).get("coreEligible") or addr in pinned
+            (effective_qualifications.get(addr) or {}).get("coreEligible")
         )
     )
     baseline_eval = evaluate_members(previous_qualified) if previous_qualified else None
@@ -2279,7 +2288,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     finalist_limit = max(1, int(getattr(config, "CORE_SEARCH_ROBUST_FINALISTS", 12) or 12))
     finalist_pool = {
         key: value for key, value in membership_eval_cache.items()
-        if key and value.feasible and pinned.issubset(key)
+        if key and value.feasible and effective_pinned.issubset(key)
     }
     # A bounded add/swap search can return a winner which was not retained in the generic replay cache's
     # highest-utility slice.  Include it in the same ordering, but never give it artificial priority over a
@@ -2310,7 +2319,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     # the resulting set has passed these same membership stress rules.
     robust_allowed = {tuple(sorted(chosen_addrs))}
     for outgoing in chosen_addrs:
-        if outgoing in pinned:
+        if outgoing in effective_pinned:
             continue
         smaller = tuple(addr for addr in chosen_addrs if addr != outgoing)
         if smaller:
@@ -2358,6 +2367,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 robust_check.get("singleWalletDependencyWarning")
             ),
             "operatorStarred": list(pinned_order),
+            "effectiveStarred": list(effective_pinned_order),
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": (
                 int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
@@ -2480,10 +2490,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     copy_policy = load_copy_policy()
     by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
     pinned_controls = selection.pinned_core_controls(db)
-    pinned_all_order = tuple(item["addr"] for item in pinned_controls)
-    pinned_all = set(pinned_all_order)
     pinned_enabled_order = tuple(item["addr"] for item in pinned_controls if item["enabled"])
-    pinned_enabled = set(pinned_enabled_order)
     for addr, qualification in dict(effective_qualifications or {}).items():
         addr = (addr or "").lower()
         if addr in by_addr:
@@ -2501,21 +2508,25 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
-    missing_required = [addr for addr in pinned_enabled_order if addr not in desired]
+    declared_effective_pins = tuple(
+        (addr or "").lower()
+        for addr in (formation_meta or {}).get("effectiveStarred") or ()
+        if addr
+    )
+    effective_pinned_order = tuple(
+        addr for addr in pinned_enabled_order
+        if addr in desired
+        and (by_addr.get(addr, {}).get("follow_qualification") or {}).get("coreEligible")
+    )
+    missing_required = [addr for addr in declared_effective_pins if addr not in effective_pinned_order]
     if missing_required:
         raise RuntimeError(f"quality_prefix_missing_pinned_wallets:{len(missing_required)}")
     invalid = [
         addr for addr in desired
         if addr not in by_addr
         or by_addr[addr].get("profile_generation") != generation_id
-        or (
-            addr not in pinned_enabled
-            and by_addr[addr].get("status") not in {"active", "qualified"}
-        )
-        or (
-            addr not in pinned_enabled
-            and not (by_addr[addr].get("follow_qualification") or {}).get("coreEligible")
-        )
+        or by_addr[addr].get("status") not in {"active", "qualified"}
+        or not (by_addr[addr].get("follow_qualification") or {}).get("coreEligible")
         or (by_addr[addr].get("data_status") or "valid") != "valid"
         or not controls.get(addr, True)
     ]
@@ -2568,11 +2579,11 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         desired_order=desired,
         strict_evaluate=strict_evaluate,
         robust_allowed_memberships=(formation_meta or {}).get("robustAllowedMemberships") or (),
-        pinned_order=pinned_enabled_order,
+        pinned_order=effective_pinned_order,
     )
     selected_enabled_set = set(transition["selected"])
-    core_order = pinned_all_order + tuple(
-        addr for addr in transition["selected"] if addr not in pinned_all
+    core_order = effective_pinned_order + tuple(
+        addr for addr in transition["selected"] if addr not in set(effective_pinned_order)
     )
     selected_set = set(core_order)
     core_rank = {addr: rank for rank, addr in enumerate(core_order, 1)}
@@ -2605,11 +2616,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         qualification = row.get("follow_qualification") or {}
         candidate_ok = active and bool(qualification.get("eligible"))
         include = True
-        if addr in selected_set and (enabled or addr in pinned_all):
+        if addr in selected_set and enabled:
             role = selection.CORE
             reason = (
-                "operator_starred_core" if enabled and addr in pinned_all
-                else "operator_starred_disabled" if addr in pinned_all
+                "operator_starred_core" if addr in set(effective_pinned_order)
                 else transition_reasons.get(addr, "core_quality_selected")
             )
         elif addr in held and data_status != "valid":
@@ -2760,7 +2770,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     if selection_mode == "auto":
         # Active means the wallet itself is structurally/economically copyable.  Score orders the bounded
         # candidate pool; the shared-account replay then keeps candidates whose added net profit exceeds
-        # their added max-drawdown dollars.  There is no LCB, observation-period or liquidation-count veto.
+        # their added max-drawdown dollars. Individual sample/win/Wilson/recent-body/liquidation gates have
+        # already run before this shared-account membership stage.
         ranked_candidates = [
             (row.get("addr") or "").lower() for row in profiles
             if row.get("status") in {"active", "qualified"}

@@ -32,6 +32,23 @@ def portfolio_rows():
     ]
 
 
+def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
+    def window(net, closed, rate):
+        wins = int(round(closed * rate))
+        return {
+            "copy_net_pnl": net, "closed_n": closed, "wins": wins,
+            "opened_n": closed, "target_open_events": closed,
+            "liquidations": 0, "valuation_status": "complete",
+        }
+    return json.dumps({
+        "crypto": {
+            "30": window(net30, n30, .75),
+            "14": window(net14, n14, .70),
+            "7": window(net7, n7, .80),
+        },
+    })
+
+
 def scan_args():
     return SimpleNamespace(
         days=14,
@@ -338,6 +355,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_positive_probability": .9, "copy_evidence_days": 12,
                 "actionable_open_rate": .9, "capacity_fit": .9,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "sector_copy_json": strict_sector_json(3000, 20, 1200, 10, 900, 8),
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -365,6 +383,44 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
                 ("0xaaa", "challenger", "challenger_weekly_return_watch"),
             ])
+
+    def test_star_cannot_bypass_final_win_gate_and_held_position_becomes_exit_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xstar", "status": "active", "reason": "ok", "score": .9,
+                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(col) for col in cols],
+            )
+            db.execute(
+                "INSERT INTO target_controls(addr,enabled,pinned,pinned_at,updated_at) "
+                "VALUES('0xstar',1,1,'old','old')"
+            )
+            db.execute(
+                "INSERT INTO copy_position(addr,coin,side,status,opened_at) "
+                "VALUES('0xstar','BTC','long','open','old')"
+            )
+            db.commit()
+
+            rows, marginal = scanner._build_explicit_selection(
+                db, "g1", "now", 1000,
+                forced_core_order=(), formation_meta={"effectiveStarred": []},
+                effective_qualifications={
+                    "0xstar": {
+                        "eligible": False, "coreEligible": False, "role": "rejected",
+                        "status": "copy_win_rate_below_floor",
+                    },
+                },
+            )
+
+            self.assertEqual(marginal.selected, ())
+            self.assertEqual([(row.addr, row.role) for row in rows], [("0xstar", "exit_only")])
 
 
     def test_warmup_backfill_targets_only_wallets_with_copy_evidence(self):
@@ -534,7 +590,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "raw_quality_score": 0.9, "profile_generation": p.scan_generation,
                     "evaluated_at": stamp, "last_refreshed": stamp, "data_status": "valid",
                     "evidence_status": "qualified", "last_copyable_open_ms": now_ms,
-                    "copy_bt_closed_n": 12, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 8,
+                    "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 8,
                     "copy_positive_probability": 0.85, "copy_expected_return": 0.05,
                     "copy_return_lcb": 0.015, "copy_return_volatility": 0.08,
                     "copy_evidence_days": 10, "copy_recent_return_14d": 0.04,
@@ -544,6 +600,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "capacity_fit": 0.95, "copy_bt_net_pnl": 1800,
                     "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                    "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 8),
                     "times_seen": 1, "times_active": 1,
                 }
                 cols = storage.PROFILE_COLS.split(",")
@@ -745,6 +802,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_positive_probability": .8, "copy_evidence_days": 8,
                 "actionable_open_rate": .9, "capacity_fit": .9,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "sector_copy_json": strict_sector_json(1800, 12, 900, 8, 600, 5),
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -790,6 +848,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900,
                 "copy_bt_7d_net_pnl": 600,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 6),
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -831,6 +890,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_positive_probability": .85, "copy_evidence_days": 10,
                     "actionable_open_rate": .9, "capacity_fit": .9,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                    "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 6),
                 }
                 db.execute(
                     f"INSERT INTO profile ({storage.PROFILE_COLS}) "
@@ -919,6 +979,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
                 "copy_bt_7d_net_pnl": 600,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "sector_copy_json": strict_sector_json(2500, 20, 900, 10, 600, 6),
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -996,6 +1057,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
                     "copy_bt_7d_net_pnl": 600,
                     "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                    "sector_copy_json": strict_sector_json(2500, 20, 900, 10, 600, 9),
                 }
                 db.execute(
                     f"INSERT INTO profile ({storage.PROFILE_COLS}) "

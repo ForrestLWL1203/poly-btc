@@ -189,12 +189,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["looRemoved"], ("0xb",))
         self.assertEqual(result["reasons"]["0xb"], "portfolio_negative_incremental_net")
 
-    def test_starred_core_ignores_business_gate_and_cannot_be_removed_by_loo(self):
+    def test_prequalified_starred_core_cannot_be_removed_by_loo(self):
         profiles = [
             {
-                "addr": "0xstar", "status": "rejected", "profile_generation": "g2",
+                "addr": "0xstar", "status": "active", "profile_generation": "g2",
                 "data_status": "valid",
-                "follow_qualification": {"coreEligible": False, "status": "recent_copy_loss"},
+                "follow_qualification": {"coreEligible": True, "status": "core_eligible"},
             },
             {
                 "addr": "0xgood", "status": "active", "profile_generation": "g2",

@@ -101,7 +101,9 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 - Leaderboard harvesting uses official 7d/30d/all-time ROI, absolute PnL, account value and a weekly activity
   floor. Nominal leveraged volume is never a profitability denominator and has no upper bound. Every survivor
-  must then pass the official Portfolio Perp PnL/share precheck before history profiling.
+  must then pass the official Portfolio Perp PnL/share precheck before history profiling. Current defaults are
+  account value `$10,000`, official ROI `15%/20%/20%`, absolute PnL `$2,000/$8,000/$0`, weekly volume
+  `$300,000`, and Perp PnL share `80%` in all three windows.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -154,17 +156,17 @@ Every public economic line is a percentage of the canonical replay's recorded `i
 back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$500` dollar threshold. Current
 default classification is:
 
-- 30/14/7 closed-sample floors are 7/5/5, with at least five independent evidence days for normal Core. A
-  narrow strong-sparse route permits three or four 7-day closes only with at least ten 30-day closes, seven
-  evidence days, a 20% 30-day return, a 5% recent return, at least 75% recent win rate, positive recent
-  post-Top1 PnL, and a strong post-Top3 trade body;
+- 30/14/7 observation floors remain 7/5/5, but new-open Core permission requires 15/7/5 closed episodes and
+  at least five independent evidence days. High ROI/PnL never creates a small-sample exception;
+- within every allowed sector, strict-Copy win rate must be at least 65%/60%/60% for 30/14/7 days. The 30-day
+  rate must also have an 80% one-sided Wilson lower confidence bound of at least 50%. A sampled failure is a
+  business rejection, not a ranking penalty;
 - Challenger needs 30-day strict Copy return at least 10%; once 7-day evidence reaches five closes, 7-day
   total return must be at least 3%;
-- normal Core needs 30-day return at least 10%, 7-day return at least 5%, 30-day seven closes, 7-day five
-  closes, five evidence days, complete open-position valuation, and no recent warning;
-- strong Core normally uses a 20% 30-day line with at least 20 closes and ten evidence days. Only the narrow
-  strong-sparse route described above may use three or four recent closes; neither path waives execution,
-  capacity, valuation, structure, or recent-risk checks;
+- normal Core needs 30-day return at least 10%, 7-day return at least 5%, the 15/7/5 sample and win-rate
+  surface above, five evidence days, complete open-position valuation, and no recent warning;
+- strong Core normally uses a 20% 30-day line with at least 20 closes and ten evidence days. It still needs
+  the same 14-day/seven-day sample, win-rate, execution, capacity, valuation, structure and recent-risk checks;
 - actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;
 - expected normalized margin return has a 2% Core line. A narrow default 1.5–2% miss may remain Challenger
   only when strict Copy totals, recent economics and samples are already strong; materially thinner or negative
@@ -187,6 +189,8 @@ Qualification includes both realized and marked open PnL from one canonical valu
 collapse rejects the wallet/sector: sustained sampled 14-day and 7-day losses, a sampled negative 7-day loss at
 least 25% of the positive 30-day edge, or a hard non-overlapping recent-distribution failure. A warning-level
 decline can remain Challenger; a low-value or hard-loss wallet must not be used as candidate-list filler.
+If both the seven-day and 14-day post-Top3 trade bodies contain at least ten episodes and remain negative, the
+wallet/sector is Challenger-only even when total PnL is positive.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
 and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only
@@ -196,8 +200,10 @@ sector still clears sample, PnL, recent, 70% open-rate and 75% capacity checks w
 liquidation; repeated/heavier failure remains rejected.
 
 There is no lifetime zero-liquidation gate. Isolated liquidation losses already reduce net PnL and increase
-drawdown, while liquidation frequency receives a bounded score penalty. A currently losing 7-day sector whose
-loss includes liquidation is still a hard recent failure, and Heavy-DCA pressure has its stricter rule.
+drawdown, while liquidation frequency receives a bounded score penalty. Final-parameter 30-day strict replay
+may contain at most five liquidations for Core; more than five is Challenger-only. A currently losing 7-day
+sector whose loss includes liquidation is still a hard recent failure, and Heavy-DCA pressure has its stricter
+rule.
 
 `profile.score` is the raw profile quality score. `watchlist.score` is the final copy-follow score, combining
 10% raw quality, 40% normalized Copy quality, 40% account-normalized scalable economics and 10% activity,
@@ -251,13 +257,14 @@ minimum, or auto-tuned value. Production automatic formation is:
    least `$1` and the smaller set already passed the same membership robustness checks, then publish that
    current-evidence result immediately.
 
-An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag is
-an explicit manual Core lock: enabled starred wallets are required members in count search, parameter tuning,
-membership search and LOO, occupy the user Core maximum, and are ordered before automatic members by
-`pinned_at`. Business score or qualification changes do not demote them. A true replay/cache/market-snapshot or
+An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag
+locks ordering and retention only while the wallet still passes the current Core business gates: an enabled,
+qualified star is required in membership search and LOO, occupies the user Core maximum, and is ordered before
+automatic members by `pinned_at`. A star cannot bypass strict-Copy win/sample, recent-body, liquidation,
+economics or structure gates; a failing held wallet becomes exit-only. A true replay/cache/market-snapshot or
 strategy-integrity failure still fails the generation closed and retains the prior complete strategy; it must not
-silently clear the star or publish corrupt execution context. Disabling a starred wallet keeps its list lock but
-removes it from the immutable execution target set until re-enabled. Removing the star returns it to normal
+silently clear the star or publish corrupt execution context. Disabling a starred wallet removes it from the
+immutable execution target set until re-enabled. Removing the star returns it to normal
 automatic selection on the next generation.
 
 A wallet is not considered inactive merely because it has emitted no new flat-to-open event within 48 hours

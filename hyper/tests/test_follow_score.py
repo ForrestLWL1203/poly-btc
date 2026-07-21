@@ -10,6 +10,12 @@ def evidence(**overrides):
         "copy_bt_closed_n": 16,
         "copy_bt_14d_closed_n": 9,
         "copy_bt_7d_closed_n": 5,
+        "copy_bt_wins": 12,
+        "copy_bt_win_rate": 0.75,
+        "copy_bt_14d_wins": 6,
+        "copy_bt_14d_win_rate": 2 / 3,
+        "copy_bt_7d_wins": 4,
+        "copy_bt_7d_win_rate": 0.80,
         "copy_bt_net_pnl": 1800.0,
         "copy_bt_14d_net_pnl": 900.0,
         "copy_bt_7d_net_pnl": 600.0,
@@ -263,6 +269,35 @@ class FollowScoreTests(unittest.TestCase):
         result = evaluate_follow_eligibility(evidence(copy_bt_liquidations=1))
         self.assertTrue(result["eligible"])
 
+    def test_allowed_sector_strict_copy_win_rates_are_hard_rejections(self):
+        for overrides in (
+            {"copy_bt_win_rate": 0.64},
+            {"copy_bt_14d_win_rate": 0.59},
+            {"copy_bt_7d_win_rate": 0.59},
+        ):
+            with self.subTest(overrides=overrides):
+                result = evaluate_follow_eligibility(evidence(**overrides))
+                self.assertFalse(result["eligible"])
+                self.assertEqual(result["status"], "copy_win_rate_below_floor")
+
+    def test_recent_negative_trade_body_and_liquidation_limit_only_downgrade_core(self):
+        body = evaluate_follow_eligibility(evidence(
+            copy_bt_14d_body_after_top3_n=10,
+            copy_bt_14d_body_after_top3_net_pnl=-10,
+            copy_bt_7d_body_after_top3_n=10,
+            copy_bt_7d_body_after_top3_net_pnl=-5,
+        ))
+        liq5 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=5))
+        liq6 = evaluate_follow_eligibility(evidence(copy_bt_liquidations=6))
+
+        self.assertTrue(body["eligible"])
+        self.assertFalse(body["coreEligible"])
+        self.assertEqual(body["status"], "challenger_recent_body_negative")
+        self.assertTrue(liq5["coreEligible"])
+        self.assertTrue(liq6["eligible"])
+        self.assertFalse(liq6["coreEligible"])
+        self.assertEqual(liq6["status"], "challenger_liquidation_limit")
+
     def test_sampled_profit_factor_and_tail_failures_are_business_rejections(self):
         low_pf = evaluate_follow_eligibility(evidence(copy_bt_profit_factor=1.29))
         low_tail = evaluate_follow_eligibility(evidence(copy_bt_net_after_top2=499.0))
@@ -312,7 +347,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(lottery["eligible"])
         self.assertEqual(lottery["status"], "copy_profit_concentration_body_weak")
 
-    def test_very_strong_clean_wallet_can_use_narrow_three_close_recent_path(self):
+    def test_very_strong_clean_wallet_with_three_recent_closes_stays_challenger(self):
         result = evaluate_follow_eligibility(evidence(
             copy_bt_net_pnl=7155.0,
             copy_bt_closed_n=14,
@@ -330,9 +365,9 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_body_after_top3_median_pnl=67.0,
         ))
 
-        self.assertTrue(result["coreEligible"])
-        self.assertTrue(result["strongEntry"])
-        self.assertTrue(result["sparseRecentEntry"])
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_sample_watch")
 
     def test_three_close_recent_windfall_without_strong_body_stays_challenger(self):
         result = evaluate_follow_eligibility(evidence(
@@ -424,8 +459,8 @@ class FollowScoreTests(unittest.TestCase):
 
     def test_five_recent_closes_are_sufficient_core_evidence(self):
         result = evaluate_follow_eligibility(evidence(
-            copy_bt_closed_n=9,
-            copy_bt_14d_closed_n=5,
+            copy_bt_closed_n=15,
+            copy_bt_14d_closed_n=7,
             copy_bt_7d_closed_n=5,
             copy_evidence_days=5,
             copy_bt_net_pnl=3100,

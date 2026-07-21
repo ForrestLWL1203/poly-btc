@@ -17,8 +17,8 @@ from .util import now_iso
 
 # (key, category, level, type, effect, default, name, desc) — default in UI-facing units; name = 中文显示名,
 # desc = 一句话影响说明(UI 在参数后以灰色字体直接展示). level "hidden" = 底层参数,UI 不渲染(引擎仍读取).
-# ONLY green/yellow render in the UI. Everything else is "hidden" — kept here so the engine wiring
-# (apply_scanner_params / _reload_params) still resolves them, but the operator never sees them.
+# Non-hidden rows render in the UI; black/display rows are read-only. Hidden rows remain here so engine
+# wiring (apply_scanner_params / _reload_params) still resolves them without adding operator clutter.
 PARAM_SPEC = [
     # ── ① 采集 watchlist 参数 (effect = rescan) ──────────────────────────────────
     ("HARVEST_MIN_ACCT",     "scanner", "yellow", "usd",     "rescan", config.HARVEST_MIN_ACCT,
@@ -28,9 +28,9 @@ PARAM_SPEC = [
     ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
         "官方近7日 ROI 下限", "默认15%；直接读取 Leaderboard 官方 ROI，不使用成交量或余额作收益率分母"),
     ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
-        "官方近30日 ROI 下限", "默认30%；过滤一个月表现平平或只靠单周行情的钱包"),
+        "官方近30日 ROI 下限", "默认20%；过滤一个月表现平平或只靠单周行情的钱包"),
     ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
-        "官方历史 ROI 下限", "默认30%；排除长期表现明显偏弱的钱包"),
+        "官方历史 ROI 下限", "默认20%；排除长期表现明显偏弱的钱包"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
         "近7日绝对 PnL 下限", "默认$2,000；排除极小本金或资金流造成的虚高 ROI"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
@@ -83,6 +83,25 @@ PARAM_SPEC = [
         "copy回测最低已平仓数", "低于此样本只记录,不作为硬闸"),
     ("COPY_BT_MIN_NET_PNL",  "scanner", "hidden", "usd",     "rescan", config.COPY_BT_MIN_NET_PNL,
         "copy回测最低净收益", "扣费后的 copy 回测净收益必须高于此值才可 active"),
+    ("CORE_COPY_SAMPLE_FLOORS", "scanner", "black", "display", "rescan",
+        f"{config.CORE_COPY_MIN_CLOSED_30D} / {config.CORE_COPY_MIN_CLOSED_14D} / "
+        f"{config.CORE_COPY_MIN_CLOSED_7D} 笔",
+        "Core严格Copy样本线", "允许板块30日 / 14日 / 7日的最低已平回合数；高ROI不能绕过"),
+    ("CORE_COPY_WIN_RATE_FLOORS", "scanner", "black", "display", "rescan",
+        f"{config.CORE_COPY_WIN_RATE_30D_MIN * 100:.0f} / "
+        f"{config.CORE_COPY_WIN_RATE_14D_MIN * 100:.0f} / "
+        f"{config.CORE_COPY_WIN_RATE_7D_MIN * 100:.0f} %",
+        "Core严格Copy胜率线", "允许板块30日 / 14日 / 7日胜率硬门槛；任一已采足窗口失败即拒绝"),
+    ("CORE_COPY_WIN_RATE_LCB", "scanner", "black", "display", "rescan",
+        f"{config.CORE_COPY_WIN_RATE_LCB_CONFIDENCE * 100:.0f}% 置信 / "
+        f"{config.CORE_COPY_WIN_RATE_LCB_30D_MIN * 100:.0f}% 下界",
+        "30日胜率置信下界", "Wilson单侧置信下界，避免刚好踩线的小样本偶然高胜率"),
+    ("CORE_COPY_RECENT_BODY", "scanner", "black", "display", "rescan",
+        f"7日与14日各 ≥ {config.CORE_COPY_RECENT_BODY_MIN_CLOSED} 笔",
+        "近期交易主体门槛", "两窗移除前三大盈利后的主体均为负时降为Challenger"),
+    ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
+        f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
+        "最终回放爆仓上限", "最终参数30日严格回放超过此次数降为Challenger"),
     ("WINDFALL_CONC",        "scanner", "hidden", "pct",     "rescan", config.WINDFALL_CONC * 100,
         "单日利润集中度上限", "单日≥此比例毛利且胜率<下条=靠一笔偶然大赚撑着(亏损未覆盖),排除"),
     ("WINDFALL_WIN_MAX",     "scanner", "hidden", "pct",     "rescan", config.WINDFALL_WIN_MAX * 100,
@@ -210,9 +229,10 @@ _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 
 # Known predecessor defaults that are policy-migrated on deploy. Values are stored in UI units.
 _HARVEST_PREVIOUS_DEFAULTS = {
+    "HARVEST_MIN_ACCT": ("30000", "30000.0"),
     "HARVEST_WEEK_ROI_MIN": ("25", "25.0"),
-    "HARVEST_MONTH_ROI_MIN": ("45", "45.0", "50", "50.0"),
-    "HARVEST_ALL_ROI_MIN": ("50", "50.0"),
+    "HARVEST_MONTH_ROI_MIN": ("30", "30.0", "45", "45.0", "50", "50.0"),
+    "HARVEST_ALL_ROI_MIN": ("30", "30.0", "50", "50.0"),
     "HARVEST_WEEK_PNL_MIN": ("5000", "5000.0"),
     "HARVEST_MONTH_PNL_MIN": ("15000", "15000.0"),
     "HARVEST_ALL_PNL_MIN": ("20000", "20000.0"),
@@ -265,13 +285,8 @@ def seed_params(db):
         # strategy change, not a metadata-default refresh, so existing databases must move with the code.
         if key == "max_single_adds":
             db.execute("UPDATE params SET value=? WHERE key=? AND value='20'", (dv, key))
-        if key == "HARVEST_MIN_ACCT":
-            db.execute(
-                "UPDATE params SET value=? WHERE key=? AND value IN ('10000','10000.0')",
-                (dv, key),
-            )
         # Approved ROI-policy migration. Move only the two previously approved default surfaces
-        # (25/50/50 + 5k/15k/20k and the accepted shadow surface 15/45/50 + 2k/8k/0)
+        # (25/50/50 + 5k/15k/20k, 15/45/50 and 15/30/30 + 2k/8k/0)
         # to the new production default. Unrelated operator custom values remain untouched.
         old_values = _HARVEST_PREVIOUS_DEFAULTS.get(key)
         if old_values:

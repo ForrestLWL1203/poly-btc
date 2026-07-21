@@ -10,9 +10,9 @@ from hyper import config, params, storage
 class ScannerSettingsParamTests(unittest.TestCase):
     def test_product_defaults_use_official_roi_and_absolute_pnl(self):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 300_000.0)
-        self.assertEqual(config.HARVEST_MIN_ACCT, 30_000.0)
+        self.assertEqual(config.HARVEST_MIN_ACCT, 10_000.0)
         self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
-                          config.HARVEST_ALL_ROI_MIN), (0.15, 0.30, 0.30))
+                          config.HARVEST_ALL_ROI_MIN), (0.15, 0.20, 0.20))
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
                           config.HARVEST_ALL_PNL_MIN), (2_000.0, 8_000.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.80)
@@ -27,9 +27,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
             scanner = params.load_category(db, "scanner")
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 300_000.0)
+            self.assertEqual(scanner["HARVEST_MIN_ACCT"], 10_000.0)
             self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.15)
-            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.30)
-            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.30)
+            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.20)
+            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.20)
             self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 2_000.0)
             self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 8_000.0)
             self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
@@ -67,6 +68,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("MIN_ACTIVE_SCORE", scanner_keys)
             self.assertIn("EVIDENCE_MIN_DAYS", scanner_keys)
             self.assertIn("EVIDENCE_MIN_TRADES", scanner_keys)
+            self.assertIn("CORE_COPY_WIN_RATE_FLOORS", scanner_keys)
+            self.assertIn("CORE_COPY_WIN_RATE_LCB", scanner_keys)
+            self.assertIn("CORE_COPY_MAX_LIQUIDATIONS_30D", scanner_keys)
+            self.assertEqual(levels["CORE_COPY_WIN_RATE_FLOORS"], "black")
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
             self.assertEqual(levels["CORE_INITIAL_MAX_N"], "green")
             initial_limit = next(p for p in scanner_params if p["key"] == "CORE_INITIAL_MAX_N")
@@ -103,6 +108,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
             old = {
+                "HARVEST_MIN_ACCT": "30000",
                 "HARVEST_WEEK_ROI_MIN": "25",
                 "HARVEST_MONTH_ROI_MIN": "45",
                 "HARVEST_ALL_ROI_MIN": "50",
@@ -121,8 +127,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
             ).fetchall())
             self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 15.0)
-            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 30.0)
-            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 30.0)
+            self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 10_000.0)
+            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 20.0)
+            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 20.0)
             self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 2_000.0)
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 8_000.0)
             self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)

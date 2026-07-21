@@ -296,6 +296,7 @@ def record_recent_copy_bt(metrics, days, result):
         metrics["copy_bt_14d_net_pnl"] = result.get("copy_net_pnl")
         metrics["copy_bt_14d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_14d_closed_n"] = int(result.get("closed_n") or 0)
+        metrics["copy_bt_14d_win_rate"] = result.get("copy_win_rate")
     elif days == 7:
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
         metrics["copy_bt_7d_unrealized_pnl"] = result.get("unrealized_pnl")
@@ -305,6 +306,11 @@ def record_recent_copy_bt(metrics, days, result):
     for key in (
         "profit_factor", "payoff_ratio", "top1_profit_share", "top3_profit_share",
         "net_after_top1", "net_after_top2", "cost_stress_net_pnl",
+        "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
+        "body_after_top3_win_rate", "body_after_top3_net_pnl",
+        "body_after_top3_gross_profit", "body_after_top3_gross_loss",
+        "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
+        "body_after_top3_median_pnl",
     ):
         if key in result:
             metrics[prefix + key] = result.get(key)
