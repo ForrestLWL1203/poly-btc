@@ -775,6 +775,7 @@ def evaluate_follow_eligibility(
     capacity_ok = capacity is None or _num(capacity) >= policy.min_capacity_fit
     thin_edge = expected_return is not None and _num(expected_return) < min_expected_return
     core_return_floor = policy.retention_min_return_30d if retention else policy.core_min_return_30d
+    recent_return_ok = returns[7] >= policy.core_min_return_7d
     core_win_floor = policy.retention_min_win_rate_30d if retention else policy.core_min_win_rate_30d
     core_lcb_floor = (
         policy.retention_min_win_rate_lcb_30d if retention else policy.core_min_win_rate_lcb_30d
@@ -821,6 +822,7 @@ def evaluate_follow_eligibility(
     )
     core_eligible = bool(
         returns[30] >= core_return_floor
+        and recent_return_ok
         and (core_samples or strong_sparse_entry)
         and win30_ok
         and recent14_ok
@@ -886,8 +888,13 @@ def evaluate_follow_eligibility(
         status, reason = "challenger_thin_edge_watch", "归一化单回合预期边际未达Core质量线"
     elif returns[30] < core_return_floor:
         status, reason = "challenger_return_watch", f"30日收益率未达到{core_return_floor * 100:.0f}% Core线"
+    elif not recent_return_ok:
+        status, reason = (
+            "challenger_weekly_return_watch",
+            f"7日收益率未达到{policy.core_min_return_7d * 100:.0f}% Core线",
+        )
     elif not core_samples:
-        status, reason = "challenger_sample_watch", "Core所需12/5/3已平回合或10个30日Campaign不足"
+        status, reason = "challenger_sample_watch", "Core所需12/5/5已平回合或10个30日Campaign不足"
     elif not win30_ok:
         status, reason = "challenger_win_rate_watch", "30日Campaign胜率或Wilson下界未达到Core线"
     elif not recent14_ok:

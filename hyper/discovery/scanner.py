@@ -4200,12 +4200,32 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     expected_strategy_revision = strategy_revision.active_revision_id(db)
     if existing_core and not replace_existing:
         return {"status": "skipped", "reason": "core_already_present", "core": len(existing_core)}
-    stale_active = db.execute(
+    stale_active = int(db.execute(
         "SELECT COUNT(*) FROM profile WHERE status='active' AND COALESCE(profile_generation,'')<>?",
         (generation_id,),
-    ).fetchone()[0]
+    ).fetchone()[0] or 0)
     if stale_active:
-        raise RuntimeError("selection_repair_has_stale_active_profiles")
+        stale_protected = int(db.execute(
+            "SELECT COUNT(*) FROM profile p WHERE p.status='active' "
+            "AND COALESCE(p.profile_generation,'')<>? AND ("
+            "EXISTS (SELECT 1 FROM follow_selection fs WHERE fs.generation=? "
+            "AND lower(fs.addr)=lower(p.addr) AND fs.role IN ('core','challenger')) OR "
+            "EXISTS (SELECT 1 FROM copy_position cp WHERE lower(cp.addr)=lower(p.addr) "
+            "AND cp.status='open'))",
+            (generation_id, generation_id),
+        ).fetchone()[0] or 0)
+        if stale_protected:
+            raise RuntimeError("selection_repair_has_protected_stale_active_profiles")
+        # A complete current generation is authoritative.  Old unselected/non-owning active rows otherwise
+        # pollute the derived watchlist and can block a safe cached selection repair forever.
+        db.execute(
+            "UPDATE profile SET status='retired',reason='stale_generation_not_profiled' "
+            "WHERE status='active' AND COALESCE(profile_generation,'')<>? "
+            "AND NOT EXISTS (SELECT 1 FROM copy_position cp WHERE lower(cp.addr)=lower(profile.addr) "
+            "AND cp.status='open')",
+            (generation_id,),
+        )
+        db.commit()
 
     stamp = stamp or now_iso()
     repair_now_ms = int(time.time() * 1000)

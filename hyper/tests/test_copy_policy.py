@@ -12,7 +12,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(
             (policy.core_min_closed_30d, policy.core_min_closed_14d,
              policy.core_min_closed_7d),
-            (12, 5, 3),
+            (12, 5, 5),
         )
         self.assertEqual(
             (policy.core_min_win_rate_30d, policy.core_min_win_rate_14d,

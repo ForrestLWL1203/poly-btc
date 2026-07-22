@@ -125,13 +125,13 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Core win rate is computed from independent campaigns: overlapping positions from the same source wallet, market
 board, and direction are collapsed into one directional bet before win-rate/Wilson tests. New Core requires
-`12/5/3` closes, ten 30-day campaigns, 60% campaign win rate, an 80% one-sided Wilson lower bound of 50%,
+`12/5/5` closes, ten 30-day campaigns, 60% campaign win rate, an 80% one-sided Wilson lower bound of 50%,
 PF ≥ 1.25, at least 3% return after removing the two largest campaigns, and positive 1.5x-cost stress. Retention
 uses 7% return, 55% win rate and a 45% Wilson lower bound; soft failures need two distinct complete scans, while
 hard risk exits immediately.
 
 A narrow Strong-sparse alternative restores high-confidence low-frequency wallets without lowering risk lines:
-30-day strict-Copy return must be at least 20%, with ten closes/ten campaigns, seven evidence days, three recent
+30-day strict-Copy return must be at least 20%, with ten closes/ten campaigns, seven evidence days, five recent
 closes, at least 75% 30-day and 7-day campaign wins, and the normal Wilson, PF, tail, cost, capacity and path-risk
 checks. Shared-account tuning receives only wallets that already pass one of these individual Core surfaces.
 

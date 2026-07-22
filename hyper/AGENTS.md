@@ -158,18 +158,18 @@ Every public economic line is a percentage of the canonical replay's recorded `i
 back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$500` dollar threshold. Current
 default classification is:
 
-- 30/14/7 observation floors remain 7/5/5, while normal new-open Core permission requires 12/5/3 closed
+- 30/14/7 observation floors remain 7/5/5, while normal new-open Core permission requires 12/5/5 closed
   episodes, ten 30d Campaigns and at least five independent evidence days. A narrow Strong-sparse route may
   waive only that ordinary sample shape when 30d strict-Copy return is at least 20%, there are at least ten
-  30d closes/ten Campaigns, seven evidence days, three 7d closes, at least 75% 30d/7d Campaign wins and a 50%
+  30d closes/ten Campaigns, seven evidence days, five 7d closes, at least 75% 30d/7d Campaign wins and a 50%
   Wilson lower bound; every tail, cost, execution, liquidation and deep-loss gate still applies;
 - aggregate 30d Campaign win rate must be at least 60% and its 80% one-sided Wilson lower confidence bound at
   least 50%. Once 14d has five Campaigns it needs 55% wins and positive net. Seven-day evidence has no fixed
   positive line; at five Campaigns, win rate below 40% together with negative net is a hard recent collapse;
 - Challenger needs 30-day strict Copy return at least 5%; seven-day return is recorded but has no positive
   floor unless the sampled hard-collapse rule above fires;
-- normal Core needs 30-day return at least 10%, the aggregate sample/win surface above, five evidence days,
-  complete open-position valuation, and no recent hard collapse;
+- normal Core needs 30-day return at least 10%, 7-day return at least 3%, the aggregate sample/win surface
+  above, five evidence days, complete open-position valuation, and no recent hard collapse;
 - strong Core normally uses a 20% 30-day line; the narrow Strong-sparse shape above is its only sample
   alternative and still needs every economic, execution, valuation, structure and recent-risk check;
 - actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;

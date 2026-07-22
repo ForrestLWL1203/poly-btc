@@ -131,33 +131,33 @@ class FollowScoreTests(unittest.TestCase):
         strong = evaluate_follow_eligibility(evidence(
             copy_bt_closed_n=10,
             copy_bt_14d_closed_n=4,
-            copy_bt_7d_closed_n=4,
+            copy_bt_7d_closed_n=5,
             copy_bt_campaign_closed_n=10,
             copy_bt_campaign_wins=9,
-            copy_bt_7d_campaign_closed_n=4,
-            copy_bt_7d_campaign_wins=3,
+            copy_bt_7d_campaign_closed_n=5,
+            copy_bt_7d_campaign_wins=4,
             copy_bt_net_pnl=2200.0,
             copy_evidence_days=8,
         ))
         weak_win = evaluate_follow_eligibility(evidence(
             copy_bt_closed_n=10,
             copy_bt_14d_closed_n=4,
-            copy_bt_7d_closed_n=4,
+            copy_bt_7d_closed_n=5,
             copy_bt_campaign_closed_n=10,
             copy_bt_campaign_wins=7,
-            copy_bt_7d_campaign_closed_n=4,
-            copy_bt_7d_campaign_wins=3,
+            copy_bt_7d_campaign_closed_n=5,
+            copy_bt_7d_campaign_wins=4,
             copy_bt_net_pnl=2200.0,
             copy_evidence_days=8,
         ))
         weak_recent = evaluate_follow_eligibility(evidence(
             copy_bt_closed_n=10,
             copy_bt_14d_closed_n=4,
-            copy_bt_7d_closed_n=4,
+            copy_bt_7d_closed_n=5,
             copy_bt_campaign_closed_n=10,
             copy_bt_campaign_wins=9,
-            copy_bt_7d_campaign_closed_n=4,
-            copy_bt_7d_campaign_wins=2,
+            copy_bt_7d_campaign_closed_n=5,
+            copy_bt_7d_campaign_wins=3,
             copy_bt_net_pnl=2200.0,
             copy_evidence_days=8,
         ))
@@ -166,6 +166,13 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(strong["strongSparseEntry"])
         self.assertFalse(weak_win["coreEligible"])
         self.assertFalse(weak_recent["coreEligible"])
+
+    def test_core_requires_three_percent_recent_return(self):
+        result = evaluate_follow_eligibility(evidence(copy_bt_7d_net_pnl=100.0))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_weekly_return_watch")
 
     def test_campaign_win_rate_and_wilson_control_core_not_challenger(self):
         result = evaluate_follow_eligibility(evidence(
@@ -199,10 +206,10 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(sampled["coreEligible"])
         self.assertEqual(sampled["status"], "challenger_recent_decline")
 
-    def test_7d_has_no_fixed_win_line_but_detects_hard_collapse(self):
+    def test_7d_has_no_fixed_win_line_above_return_floor_but_detects_hard_collapse(self):
         sparse_loss = evaluate_follow_eligibility(evidence(
             copy_bt_7d_campaign_closed_n=4, copy_bt_7d_campaign_wins=0,
-            copy_bt_7d_net_pnl=-100.0,
+            copy_bt_7d_net_pnl=400.0,
         ))
         collapse = evaluate_follow_eligibility(evidence(
             copy_bt_7d_campaign_closed_n=5, copy_bt_7d_campaign_wins=1,
