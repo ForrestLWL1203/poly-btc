@@ -245,7 +245,7 @@ failures immediately while retaining every other qualified incumbent. Production
    probe may inform tuning, but cannot be published unless the final surface clears the real public gates.
 2. Tune a complete portfolio parameter surface once on the bounded full quality pool. Do not rerun the entire
    parameter grid for every wallet-count prefix: the fixed-surface membership search below already owns capital
-   contention and wallet count. The tuner has an eight-minute wall-clock budget; on timeout formation continues
+   contention and wallet count. The tuner has a thirty-minute wall-clock budget; on timeout formation continues
    on the active parameter surface while retaining every individual/path/cost/capacity/membership hard gate.
 3. Re-run every candidate's canonical individual replay under the winning parameters, the same refined intratrade
    price path used by shared replay, and one valuation snapshot.
