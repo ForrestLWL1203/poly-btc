@@ -314,16 +314,17 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
 # Stage-1 leaderboard recall (UI-tunable). Official ROI magnitude is retained for rank/audit only. The cheap
-# hard surface proves $5k equity, $250k leveraged 7d notional activity and positive 7d OR 30d PnL; scoped
-# Perp evidence, structure and canonical strict-Copy replay decide every executable role later in the funnel.
+# hard surface proves $5k equity, $250k leveraged 7d notional activity, at least $250 7d PnL and at least
+# $1,000 30d PnL.  These absolute floors keep recently losing/dust-profit accounts out without restoring an
+# official ROI magnitude veto; scoped Perp evidence and strict-Copy replay decide executable roles later.
 HARVEST_MIN_ACCT = 5_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
 HARVEST_WEEK_ROI_MIN = 0.05
 HARVEST_MONTH_ROI_MIN = 0.05
 HARVEST_ALL_ROI_MIN = 0.05
 HARVEST_ROI_WINDOWS_MIN_PASS = 2  # legacy reference retained for migration/audit; never a recall hard gate.
-HARVEST_WEEK_PNL_MIN = 0.0
-HARVEST_MONTH_PNL_MIN = 0.0
+HARVEST_WEEK_PNL_MIN = 250.0
+HARVEST_MONTH_PNL_MIN = 1_000.0
 HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.60
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets

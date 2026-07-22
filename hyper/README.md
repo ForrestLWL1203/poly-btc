@@ -32,7 +32,7 @@ The current runtime turns the public Hyperliquid leaderboard into a live, paper-
 Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
-    ↓ account ≥ $5k, 7d notional volume ≥ $250k, positive 7d or 30d PnL
+    ↓ account ≥ $5k, 7d notional volume ≥ $250k, 7d PnL ≥ $250 and 30d PnL ≥ $1,000
 30d Perp prefilter + sector-isolated structure filter
     ↓ cached 37-day profile (30-day evidence + 7-day warm-up)
 Canonical Copy replay: Research → Challenger → personal Core
@@ -85,7 +85,8 @@ Profiles are not re-downloaded from zero on every daily run.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
 - Leaderboard candidates require at least `$5,000` account value, `$250,000` leveraged 7-day notional volume,
-  and positive PnL in either the 7-day or 30-day official window. There is no ROI magnitude gate or volume cap.
+  at least `$250` 7-day PnL and at least `$1,000` 30-day PnL. Both recent PnL floors must pass; there is no
+  ROI magnitude gate or volume cap.
   The Portfolio precheck uses only the primary 30-day window: Perp PnL must be positive and at least 60% of
   total PnL. The 7-day and lifetime windows remain visible in audit but do not form an `AND` rejection.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There

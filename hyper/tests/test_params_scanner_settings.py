@@ -14,7 +14,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
                           config.HARVEST_ALL_ROI_MIN), (0.05, 0.05, 0.05))
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
-                          config.HARVEST_ALL_PNL_MIN), (0.0, 0.0, 0.0))
+                          config.HARVEST_ALL_PNL_MIN), (250.0, 1_000.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.60)
         self.assertEqual(config.WALLET_MARGIN_CAP_PCT, 0.25)
         self.assertEqual(config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT, 0.20)
@@ -39,8 +39,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.05)
             self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.05)
             self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.05)
-            self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 0.0)
-            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 0.0)
+            self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 250.0)
+            self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 1_000.0)
             self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_PERP_PNL_SHARE_MIN"], 0.60)
             self.assertEqual(scanner["inactive_days"], 2)
@@ -162,8 +162,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 5.0)
             self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 5.0)
             self.assertEqual(float(values["HARVEST_WEEK_VLM_MIN"]), 250_000.0)
-            self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 0.0)
-            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 0.0)
+            self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 250.0)
+            self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 1_000.0)
             self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_PERP_PNL_SHARE_MIN"]), 12.0)
 

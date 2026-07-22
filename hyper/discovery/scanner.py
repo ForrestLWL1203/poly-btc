@@ -476,8 +476,8 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
     """Attach the cheap discovery decision without mutating the live leaderboard.
 
     Official ROI remains a ranking/audit input, never a magnitude gate.  The bulk endpoint is used only to
-    prove useful account size, leveraged activity and some current positive PnL before the authoritative
-    scoped Copy replay.
+    prove useful account size, leveraged activity and positive PnL in both recent windows before the
+    authoritative scoped Copy replay.
     """
     min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
     vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
@@ -510,7 +510,8 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         r["is_candidate"] = int(
             acct >= min_acct
             and wk_vlm >= vlm_min
-            and (week_positive or month_positive)
+            and week_positive
+            and month_positive
         )
         r["fetched_at"] = fetched_at
         mon_vlm = f(mo.get("vlm"))
@@ -612,7 +613,8 @@ def _official_roi_audit(db, generation_id, stamp, p):
         checks = {
             "account_value_below_floor": f(item["accountValue"]) < getattr(p, "min_acct", config.HARVEST_MIN_ACCT),
             "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
-            "recent_pnl_not_positive": not (week_positive or month_positive),
+            "week_pnl_below_floor": not week_positive,
+            "month_pnl_below_floor": not month_positive,
         }
         failed_checks = [reason for reason, failed in checks.items() if failed]
         roi_windows_passed = 3 - sum(bool(value) for value in diagnostics.values())
