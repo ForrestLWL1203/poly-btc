@@ -243,9 +243,10 @@ failures immediately while retaining every other qualified incumbent. Production
 1. Rank the current generation's individually qualified Core/Challenger pool under one parameter surface.
    Parameter-sensitive return/weekly/thin-edge Challengers and a hidden, tightly bounded 5–10% cold-start return
    probe may inform tuning, but cannot be published unless the final surface clears the real public gates.
-2. Jointly search wallet count and a complete portfolio parameter surface. Pools of at most eight evaluate every
-   count; larger pools use `search_quality_prefix` with the bounded `N → N/2 → boundary` search plus
-   neighbours and the full prefix.
+2. Tune a complete portfolio parameter surface once on the bounded full quality pool. Do not rerun the entire
+   parameter grid for every wallet-count prefix: the fixed-surface membership search below already owns capital
+   contention and wallet count. The tuner has an eight-minute wall-clock budget; on timeout formation continues
+   on the active parameter surface while retaining every individual/path/cost/capacity/membership hard gate.
 3. Re-run every candidate's canonical individual replay under the winning parameters, the same refined intratrade
    price path used by shared replay, and one valuation snapshot.
    Anyone no longer Core-eligible is removed before shared-account membership.
@@ -447,7 +448,9 @@ wallet cache; only new or incomplete wallets fetch the 37-day bootstrap window. 
 first-generation `cold_full`, a Dashboard manual rescan is incremental unless its command payload requests
 `full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
 and jointly tunes the current published generation without wallet fill refetch; `finalize-profiled` retries an
-already-complete but unpublished generation after a finalization failure.
+already-complete but unpublished generation after a finalization failure. `finalize-profiled --no-retune` is the
+explicit operational fallback for sealing the active parameter surface when expensive tuning exceeds host
+capacity; it does not skip strict individual, path, cost, capacity, or shared-membership gates.
 
 `reset-paper --yes` is the supported from-zero reset. Stop Observer and Scanner first. It clears discovery,
 cache, selection, strategy, replay and Paper trading state, preserves operator `params` and encrypted provider

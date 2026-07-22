@@ -261,6 +261,8 @@ def main() -> int:
     fg = sub.add_parser("finalize-profiled", help="finish a cached profiled generation without wallet refetch")
     fg.add_argument("--generation")
     fg.add_argument("--stamp")
+    fg.add_argument("--no-retune", action="store_true",
+                    help="seal the active parameter surface while retaining strict path/portfolio gates")
     reset = sub.add_parser("reset-paper", help="clear discovery/Paper state while preserving operator params")
     reset.add_argument("--factory-params", action="store_true",
                        help="also restore all params to code defaults")
@@ -349,6 +351,7 @@ def main() -> int:
     elif args.cmd == "finalize-profiled":
         result = scanner.finalize_profiled_generation(
             db, generation_id=args.generation, stamp=args.stamp,
+            retune=not bool(args.no_retune),
         )
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "reset-paper":

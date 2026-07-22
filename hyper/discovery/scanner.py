@@ -2292,8 +2292,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     tune_ordered = tuple(row["addr"] for row in tune_ranked)
 
     # A generation with individually promising profiles but no copyable portfolio fills is a valid zero-Core
-    # outcome, not a reason to roll back to stale members.  Preflight the exact bounded tune pool before the
-    # binary search so ``maybe_tune_margins`` cannot turn ``no_cached_fills`` into a publication failure.
+    # outcome, not a reason to roll back to stale members. Preflight the exact bounded tune pool before the
+    # tuner so ``maybe_tune_margins`` cannot turn ``no_cached_fills`` into a publication failure.
     tune_window_fills = auto_tune._portfolio_window_fills(
         db, list(tune_ordered), now_ms, include_watch=True,
     )
@@ -2311,42 +2311,45 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     chosen_run = {}
     retention = _core_prefix_retention()
     if retune:
-        def tune_evaluate(count):
-            count = int(count)
-            _set_scan_progress(
-                db, stage="portfolio_tune", candidates_scanned=count,
-                candidates_total=len(tune_ordered),
-            )
-            result = auto_tune.maybe_tune_margins(
-                db, source="core_formation", stamp=f"{stamp}:k{count}",
+        # Tune the shared parameter surface exactly once on the complete bounded quality pool. The old flow
+        # reran the *entire* parameter grid for wallet prefixes 16→8→12→14→15, even though the later fixed-
+        # surface membership search already owns wallet-count/capital-contention selection. Besides being
+        # redundant, those repeated full fills/path loads pushed the VPS into swap and made formation appear
+        # hung. One full-pool tune followed by strict individual and shared membership replay preserves the
+        # economic proof while reducing the expensive tuner count from O(log N) to one.
+        tune_count = len(tune_ordered)
+        _set_scan_progress(
+            db, stage="portfolio_tune", candidates_scanned=tune_count,
+            candidates_total=tune_count,
+        )
+        try:
+            chosen_run = auto_tune.maybe_tune_margins(
+                db, source="core_formation", stamp=f"{stamp}:full_pool",
                 dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
-                addrs_override=list(tune_ordered[:count]), record_run=False,
+                addrs_override=list(tune_ordered), record_run=False,
                 formation_admission=True, market_generation=generation_id,
             )
-            if result.get("status") != "ok":
+            if chosen_run.get("status") != "ok":
                 raise RuntimeError(
-                    "core_prefix_tune_failed:" + str(result.get("reason") or result.get("status"))
+                    "core_full_pool_tune_failed:"
+                    + str(chosen_run.get("reason") or chosen_run.get("status"))
                 )
-            tune_runs[count] = result
+            tune_runs[tune_count] = chosen_run
             db.commit()  # reusable path-cache writes only; membership/params remain untouched.
-            return _prefix_eval_from_tune(
-                count, result,
-                initial_balance=f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
+            tuned_params, tune_eligible, tune_reason = _formation_param_surface(
+                base_follow, chosen_run, retune=True,
             )
-
-        tune_search = core_formation.search_quality_prefix(
-            len(tune_ordered), tune_evaluate, retention_kwargs=retention,
-            tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
-            exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-            min_count=max(1, len(pinned_order)),
-        )
-        tuned_params = dict(tune_search.selected.params or {})
-        chosen_run = tune_runs.get(int(tune_search.selected.count)) or {}
-        _surface, tune_eligible, tune_reason = _formation_param_surface(
-            base_follow, chosen_run, retune=True,
-        )
-        if not tuned_params:
-            tuned_params = _surface
+        except TimeoutError as exc:
+            # A time budget is an operational capacity limit, not evidence that every wallet is invalid.
+            # Continue on the active parameter surface; all individual/path/cost/capacity/membership gates
+            # below still run and may legally publish zero Core.
+            db.rollback()
+            tuned_params, tune_eligible, _unused = _formation_param_surface(
+                base_follow, None, retune=False,
+            )
+            tune_eligible = False
+            tune_reason = str(exc)
+            chosen_run = {"status": "timeout", "reason": tune_reason}
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
@@ -4638,8 +4641,13 @@ def _profiled_generation_coverage(db, generation_id: str, scan_stamp=None) -> di
     }
 
 
-def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
-    """Finish selection/tuning from an already-profiled generation without fetching wallet history."""
+def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=True) -> dict:
+    """Finish selection from an already-profiled generation without fetching wallet history.
+
+    ``retune=False`` is an operational escape hatch for a generation whose bounded parameter search is too
+    expensive on the production host. It preserves every strict individual/path/portfolio membership gate
+    and seals the currently active parameter surface; only the multi-node parameter search is skipped.
+    """
     stamp = stamp or now_iso()
     if generation_id is None:
         row = db.execute(
@@ -4692,7 +4700,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     if preview:
         _set_scan_progress(db, stage="prefetch_selection_paths")
         _prefetch_selection_paths(db, preview, now_ms, generation_id)
-    formation = form_quality_prefix(db, generation_id, stamp, now_ms)
+    formation = form_quality_prefix(db, generation_id, stamp, now_ms, retune=bool(retune))
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:

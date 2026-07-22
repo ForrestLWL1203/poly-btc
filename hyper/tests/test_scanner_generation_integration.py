@@ -115,6 +115,15 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("chosen_addrs = ()", failure_branch)
         self.assertIn('"explicitEmptyCore": True', failure_branch)
 
+    def test_core_formation_tunes_full_pool_once_and_falls_back_on_timeout(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+
+        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 1)
+        self.assertNotIn("def tune_evaluate", source)
+        self.assertIn("addrs_override=list(tune_ordered)", source)
+        self.assertIn("except TimeoutError as exc", source)
+        self.assertIn("retune=False", source)
+
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -473,11 +482,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             db.commit()
             self.seal_market(db, "cached-g")
 
-            with patch.object(scanner.rest, "post", side_effect=AssertionError("wallet fetch forbidden")):
-                result = scanner.finalize_profiled_generation(db, "cached-g", stamp="finish")
+            with patch.object(scanner.rest, "post", side_effect=AssertionError("wallet fetch forbidden")), \
+                    patch.object(scanner, "form_quality_prefix",
+                                 wraps=scanner.form_quality_prefix) as formation:
+                result = scanner.finalize_profiled_generation(
+                    db, "cached-g", stamp="finish", retune=False,
+                )
 
             self.assertEqual(result["status"], "published")
             self.assertEqual(result["core"], 0)
+            self.assertFalse(formation.call_args.kwargs["retune"])
             self.assertEqual(db.execute(
                 "SELECT status,complete,is_current FROM scan_generation WHERE generation='cached-g'"
             ).fetchone(), ("published", 1, 1))
