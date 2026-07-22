@@ -2227,7 +2227,7 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
         "scores": scores,
         "policies": policies,
         "search": {
-            "algorithm": "quality_prefix_joint_binary_v4",
+            "algorithm": "quality_prefix_coarse_then_full_v5",
             "initialCount": len(rows),
             "selectedCount": 0,
             "explicitEmptyCore": True,
@@ -2309,47 +2309,106 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     tune_search = None
     tune_runs = {}
     chosen_run = {}
+    winning_count = len(tune_ordered)
     retention = _core_prefix_retention()
     if retune:
-        # Tune the shared parameter surface exactly once on the complete bounded quality pool. The old flow
-        # reran the *entire* parameter grid for wallet prefixes 16→8→12→14→15, even though the later fixed-
-        # surface membership search already owns wallet-count/capital-contention selection. Besides being
-        # redundant, those repeated full fills/path loads pushed the VPS into swap and made formation appear
-        # hung. One full-pool tune followed by strict individual and shared membership replay preserves the
-        # economic proof while reducing the expensive tuner count from O(log N) to one.
-        tune_count = len(tune_ordered)
+        # Wallet count and sizing are coupled: a 16-wallet account needs more conservative margins than an
+        # 8-wallet account. Keep the bounded 16→8→boundary prefix search, but use a deliberately sparse grid
+        # for those exploratory nodes. Only the winning count receives the complete leverage/margin/deploy/
+        # Add grid and full finalist validation. This preserves count-specific economics without paying for
+        # five complete tuners or forcing the smaller prefix to inherit the congested full-pool surface.
+        timed_out_counts = []
+
+        def coarse_tune_evaluate(count):
+            count = int(count)
+            _set_scan_progress(
+                db, stage="portfolio_tune_coarse", candidates_scanned=count,
+                candidates_total=len(tune_ordered),
+            )
+            try:
+                result = auto_tune.maybe_tune_margins(
+                    db, source="core_formation_coarse", stamp=f"{stamp}:coarse:k{count}",
+                    dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
+                    addrs_override=list(tune_ordered[:count]), record_run=False,
+                    formation_admission=True, market_generation=generation_id,
+                    search_profile="coarse",
+                    time_budget_s=float(config.AUTO_TUNE_COARSE_TIME_BUDGET_SEC),
+                )
+            except TimeoutError:
+                db.rollback()
+                timed_out_counts.append(count)
+                return core_formation.PrefixEvaluation(
+                    count=count, net_pnl=-1e12, stress_net_pnl=-1e12,
+                    max_drawdown=1.0, actionable_open_rate=0.0, capacity_fit=0.0,
+                    liquidations=1, params={}, payload={"coarseTuneTimeout": True},
+                )
+            if result.get("status") != "ok":
+                raise RuntimeError(
+                    "core_coarse_tune_failed:"
+                    + str(result.get("reason") or result.get("status"))
+                )
+            tune_runs[count] = result
+            db.commit()
+            return _prefix_eval_from_tune(
+                count, result,
+                initial_balance=f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
+            )
+
+        try:
+            tune_search = core_formation.search_quality_prefix(
+                len(tune_ordered), coarse_tune_evaluate, retention_kwargs=retention,
+                tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
+                exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
+                min_count=max(1, len(pinned_order)),
+            )
+            winning_count = int(tune_search.selected.count)
+        except RuntimeError as exc:
+            if str(exc) != "no_feasible_quality_prefix" or not timed_out_counts:
+                raise
+            # Every sparse node that mattered timed out. The later fixed-surface membership search still
+            # owns the actual count, so run one complete tune at the service target instead of discarding
+            # the already-profiled generation.
+            winning_count = min(len(tune_ordered), max(1, target_min, len(pinned_order)))
+            tune_reason = "coarse_prefix_timeout_fallback"
+
+        coarse_winner = tune_runs.get(winning_count) or {}
         _set_scan_progress(
-            db, stage="portfolio_tune", candidates_scanned=tune_count,
-            candidates_total=tune_count,
+            db, stage="portfolio_tune_full", candidates_scanned=winning_count,
+            candidates_total=len(tune_ordered),
         )
         try:
-            chosen_run = auto_tune.maybe_tune_margins(
-                db, source="core_formation", stamp=f"{stamp}:full_pool",
+            full_run = auto_tune.maybe_tune_margins(
+                db, source="core_formation_full", stamp=f"{stamp}:full:k{winning_count}",
                 dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
-                addrs_override=list(tune_ordered), record_run=False,
+                addrs_override=list(tune_ordered[:winning_count]), record_run=False,
                 formation_admission=True, market_generation=generation_id,
+                search_profile="full",
+                time_budget_s=float(config.AUTO_TUNE_TIME_BUDGET_SEC),
             )
-            if chosen_run.get("status") != "ok":
+            if full_run.get("status") != "ok":
                 raise RuntimeError(
-                    "core_full_pool_tune_failed:"
-                    + str(chosen_run.get("reason") or chosen_run.get("status"))
+                    "core_full_tune_failed:"
+                    + str(full_run.get("reason") or full_run.get("status"))
                 )
-            tune_runs[tune_count] = chosen_run
-            db.commit()  # reusable path-cache writes only; membership/params remain untouched.
+            chosen_run = full_run
+            db.commit()
             tuned_params, tune_eligible, tune_reason = _formation_param_surface(
                 base_follow, chosen_run, retune=True,
             )
         except TimeoutError as exc:
-            # A time budget is an operational capacity limit, not evidence that every wallet is invalid.
-            # Continue on the active parameter surface; all individual/path/cost/capacity/membership gates
-            # below still run and may legally publish zero Core.
             db.rollback()
-            tuned_params, tune_eligible, _unused = _formation_param_surface(
-                base_follow, None, retune=False,
-            )
-            tune_eligible = False
-            tune_reason = str(exc)
-            chosen_run = {"status": "timeout", "reason": tune_reason}
+            chosen_run = coarse_winner
+            if chosen_run:
+                tuned_params, tune_eligible, coarse_reason = _formation_param_surface(
+                    base_follow, chosen_run, retune=True,
+                )
+                tune_reason = f"full_tune_timeout_using_coarse:{exc}:{coarse_reason}"
+            else:
+                tuned_params, tune_eligible, _unused = _formation_param_surface(
+                    base_follow, None, retune=False,
+                )
+                tune_eligible = False
+                tune_reason = f"full_tune_timeout_using_active:{exc}"
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
@@ -2454,14 +2513,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "scores": effective_scores,
             "policies": effective_policies,
             "search": {
-                "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0,
+                "algorithm": "quality_prefix_coarse_then_full_v5", "initialCount": 0,
                 "selectedCount": 0,
                 "explicitEmptyCore": True,
                 "tunePoolCount": len(tune_ordered),
-                "tunedInputCount": (
-                    int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
-                ),
-                "fullTuneRuns": len(tune_runs),
+                "tunedInputCount": winning_count,
+                "coarseTuneRuns": len(tune_runs),
+                "fullTuneRuns": 1 if chosen_run.get("search_profile") == "full" else 0,
                 "tuneEvaluatedCounts": (
                     [value.count for value in tune_search.evaluated] if tune_search is not None else []
                 ),
@@ -2823,10 +2881,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "operatorStarred": list(pinned_order),
             "effectiveStarred": list(effective_pinned_order),
             "tunePoolCount": len(tune_ordered),
-            "tunedInputCount": (
-                int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
-            ),
-            "fullTuneRuns": len(tune_runs),
+            "tunedInputCount": winning_count,
+            "coarseTuneRuns": len(tune_runs),
+            "fullTuneRuns": 1 if chosen_run.get("search_profile") == "full" else 0,
             "tuneBoundary": tune_search.boundary if tune_search is not None else None,
             "tuneEvaluatedCounts": (
                 [value.count for value in tune_search.evaluated] if tune_search is not None else []

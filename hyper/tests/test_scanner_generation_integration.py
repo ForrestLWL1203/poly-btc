@@ -115,14 +115,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("chosen_addrs = ()", failure_branch)
         self.assertIn('"explicitEmptyCore": True', failure_branch)
 
-    def test_core_formation_tunes_full_pool_once_and_falls_back_on_timeout(self):
+    def test_core_formation_uses_coarse_prefixes_and_one_full_winner_tune(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
-        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 1)
-        self.assertNotIn("def tune_evaluate", source)
-        self.assertIn("addrs_override=list(tune_ordered)", source)
+        self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 2)
+        self.assertIn('search_profile="coarse"', source)
+        self.assertIn('search_profile="full"', source)
+        self.assertIn("addrs_override=list(tune_ordered[:count])", source)
+        self.assertIn("addrs_override=list(tune_ordered[:winning_count])", source)
         self.assertIn("except TimeoutError as exc", source)
-        self.assertIn("retune=False", source)
+        self.assertIn("full_tune_timeout_using_coarse", source)
 
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:

@@ -479,9 +479,10 @@ AUTO_TUNE_LEVERAGE_SHORTLIST = 2  # 每档保留当前/最佳代表值；组合�
 AUTO_TUNE_DEPLOY_FULL_PCTS = (0.40, 0.50, 0.60)
 AUTO_TUNE_SIZING_FINALISTS = 5
 AUTO_TUNE_MARGIN_COORD_ROUNDS = 2  # bounded closure can combine two profitable tier moves without 3-D grid
-# One full-pool tune is enough: wallet-count selection is replayed later on the sealed parameter surface.
-# Bound the expensive parameter search so a large fills/path set cannot swap-thrash the production host.
+# Prefix-count discovery uses a sparse grid; the winning count receives one complete tune. Bound both modes
+# so a large fills/path set cannot swap-thrash the production host indefinitely.
 AUTO_TUNE_TIME_BUDGET_SEC = 1800
+AUTO_TUNE_COARSE_TIME_BUDGET_SEC = 600
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.08, 0.12)
 AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.09, 0.12)
 AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.3)

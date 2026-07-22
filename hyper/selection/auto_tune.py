@@ -601,6 +601,30 @@ def independent_leverage_candidates(base: dict) -> list[dict]:
     return candidates
 
 
+def coarse_leverage_candidates(base: dict) -> list[dict]:
+    """Baseline plus only each tier's low/high endpoint for prefix-count exploration."""
+    candidates = independent_leverage_candidates(base)
+    out = [candidates[0]]
+    for key in LEV_KEYS:
+        rows = [
+            candidate for candidate in candidates[1:]
+            if sum(
+                abs(float((candidate.get("params") or {}).get(name, base[name])) - float(base[name])) > 1e-12
+                for name in LEV_KEYS
+            ) == 1
+            and abs(float((candidate.get("params") or {})[key]) - float(base[key])) > 1e-12
+        ]
+        rows.sort(key=lambda candidate: float((candidate.get("params") or {})[key]))
+        for candidate in (rows[:1] + rows[-1:]):
+            marker = tuple(float((candidate.get("params") or {})[name]) for name in TUNE_KEYS)
+            if not any(
+                tuple(float((existing.get("params") or {})[name]) for name in TUNE_KEYS) == marker
+                for existing in out
+            ):
+                out.append(candidate)
+    return out
+
+
 def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
                              limit: int = 3) -> list[float]:
     """Keep current, best-profit and fewest-liquidation values for one independently tested tier."""
@@ -1420,13 +1444,21 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                        data_complete: bool = True, expected_generation: str | None = None,
                        addrs_override: list[str] | tuple[str, ...] | None = None,
                        record_run: bool = True, formation_admission: bool = False,
-                       market_generation: str | None = None) -> dict:
+                       market_generation: str | None = None, search_profile: str = "full",
+                       time_budget_s: float | None = None) -> dict:
     """Run the post-scan margin tuner. Returns a compact audit dict."""
     ephemeral = addrs_override is not None
     if ephemeral and expected_generation:
         raise ValueError("addrs_override cannot target a published generation")
+    search_profile = str(search_profile or "full").strip().lower()
+    if search_profile not in {"coarse", "full"}:
+        raise ValueError("search_profile must be coarse or full")
+    coarse_search = search_profile == "coarse"
     tune_started = time.monotonic()
-    time_budget_s = float(getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 600))
+    time_budget_s = float(
+        getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 1800)
+        if time_budget_s is None else time_budget_s
+    )
     deadline = (
         float("inf") if time_budget_s <= 0 else tune_started + time_budget_s
     )
@@ -1570,7 +1602,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
     # for a full leverage Cartesian grid.
     axis_quick = []
-    for candidate in independent_leverage_candidates(base):
+    leverage_axis_candidates = (
+        coarse_leverage_candidates(base) if coarse_search else independent_leverage_candidates(base)
+    )
+    for candidate in leverage_axis_candidates:
         check_budget("leverage_axes")
         axis_quick.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
@@ -1581,7 +1616,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
         axis_quick[0],
     )
-    shortlist_limit = max(1, int(getattr(config, "AUTO_TUNE_LEVERAGE_SHORTLIST", 2) or 2))
+    shortlist_limit = 1 if coarse_search else max(
+        1, int(getattr(config, "AUTO_TUNE_LEVERAGE_SHORTLIST", 2) or 2)
+    )
     tier_values = {
         key: _tier_leverage_shortlist(axis_quick, quick_baseline, key, limit=shortlist_limit)
         for key in LEV_KEYS
@@ -1599,7 +1636,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         ))
     joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
-    sizing_limit = max(2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12))
+    sizing_limit = 2 if coarse_search else max(
+        2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12)
+    )
     quick_finalists = sorted(
         quick_valid or [quick_baseline],
         key=lambda candidate: _candidate_rank_key(candidate, quick_baseline), reverse=True,
@@ -1634,7 +1673,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
             market_ctx=market_ctx,
         ))
-    if formation_admission:
+    if formation_admission and not coarse_search:
         for candidate in global_margin_candidates(joint_params, follow):
             check_budget("global_margin_polish")
             margin_candidates.append(evaluate_tune_candidate(
@@ -1646,7 +1685,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         [selected_joint, *margin_candidates], baseline,
     )
     margin_params = dict(selected_margin_seed.get("params") or joint_params)
-    margin_round_limit = max(1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2))
+    margin_round_limit = 0 if coarse_search else max(
+        1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2)
+    )
     for round_index in range(margin_round_limit):
         round_candidates = []
         for candidate in independent_margin_candidates(margin_params, follow):
@@ -1698,7 +1739,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     add_baseline = None
     selected_add = None
     selected_add_params = add_base
-    if follow_for_add.get("SMART_ADD", True):
+    if follow_for_add.get("SMART_ADD", True) and not coarse_search:
         for candidate in add_candidates_from_axes(add_base):
             check_budget("add_polish")
             add_candidates.append(evaluate_add_candidate(
@@ -1719,7 +1760,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     for candidate in sorted(candidates, key=lambda item: _candidate_rank_key(item, baseline), reverse=True):
         key = tuple(round(float((candidate.get("params") or {})[name]), 12) for name in TUNE_KEYS)
         unique_finalists.setdefault(key, candidate)
-    finalist_limit = int(getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16)
+    finalist_limit = 2 if coarse_search else int(
+        getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16
+    )
     sizing_options = _diverse_sizing_candidates(
         list(unique_finalists.values()), baseline, max(1, finalist_limit),
     )
@@ -1730,7 +1773,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             unique_finalists.values(),
             key=lambda item: _candidate_admission_rank_key(item, baseline),
             reverse=True,
-        )[:2]
+        )[:(1 if coarse_search else 2)]
         combined_sizing = []
         seen_sizing = set()
         for candidate in [*admission_leaders, *sizing_options]:
@@ -1756,7 +1799,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             if key not in seen_add:
                 seen_add.add(key)
                 add_options.append(params_)
-            if len(add_options) >= max(1, int(getattr(config, "AUTO_TUNE_ADD_FINALISTS", 3) or 3)):
+            add_limit = 1 if coarse_search else max(
+                1, int(getattr(config, "AUTO_TUNE_ADD_FINALISTS", 3) or 3)
+            )
+            if len(add_options) >= add_limit:
                 break
     else:
         add_options = [selected_add_params]
@@ -1957,6 +2003,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
         "margin_rounds": margin_rounds,
         "formation_admission": bool(formation_admission),
+        "search_profile": search_profile,
+        "elapsed_s": round(time.monotonic() - tune_started, 3),
     }
     if record_run:
         _record_run(db, source, stamp, selected, applied, len(addrs), base, result,

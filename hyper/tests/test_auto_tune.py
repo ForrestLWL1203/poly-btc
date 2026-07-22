@@ -412,6 +412,25 @@ class AutoTuneTests(unittest.TestCase):
             row["STABLE_LEV_CAP"] != 32 and row["MID_LEV_CAP"] != 12 for row in values
         ))
 
+    def test_coarse_leverage_grid_keeps_only_baseline_and_tier_endpoints(self):
+        base = {
+            "STABLE_MARGIN_PCT": 0.0644, "MID_MARGIN_PCT": 0.0552,
+            "HIGH_MARGIN_PCT": 0.0368, "STABLE_LEV_CAP": 32.0,
+            "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0, "DEPLOY_FULL_PCT": 0.60,
+        }
+
+        full = auto_tune.independent_leverage_candidates(base)
+        coarse = auto_tune.coarse_leverage_candidates(base)
+
+        self.assertLess(len(coarse), len(full))
+        self.assertLessEqual(len(coarse), 7)
+        self.assertEqual(coarse[0]["params"], base)
+        for candidate in coarse[1:]:
+            changed = sum(
+                candidate["params"][key] != base[key] for key in auto_tune.LEV_KEYS
+            )
+            self.assertEqual(changed, 1)
+
 
     def test_load_portfolio_fills_filters_disallowed_wallet_sectors(self):
         db = self._db()

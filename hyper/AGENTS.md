@@ -243,10 +243,12 @@ failures immediately while retaining every other qualified incumbent. Production
 1. Rank the current generation's individually qualified Core/Challenger pool under one parameter surface.
    Parameter-sensitive return/weekly/thin-edge Challengers and a hidden, tightly bounded 5–10% cold-start return
    probe may inform tuning, but cannot be published unless the final surface clears the real public gates.
-2. Tune a complete portfolio parameter surface once on the bounded full quality pool. Do not rerun the entire
-   parameter grid for every wallet-count prefix: the fixed-surface membership search below already owns capital
-   contention and wallet count. The tuner has a thirty-minute wall-clock budget; on timeout formation continues
-   on the active parameter surface while retaining every individual/path/cost/capacity/membership hard gate.
+2. Jointly search wallet count and parameters without making a smaller Core inherit the conservative surface
+   required by a crowded full pool. The bounded `N → N/2 → boundary` prefix nodes use a sparse coarse grid
+   (one leverage value per tier shortlist, two sizing finalists, no Add polish and no coordinate-closure rounds).
+   Only the winning count receives one complete fine-grid tune. Coarse nodes have a ten-minute budget and the
+   winning fine tune has a thirty-minute budget; a fine timeout may use its already-validated coarse surface,
+   but no individual/path/cost/capacity/membership hard gate is skipped.
 3. Re-run every candidate's canonical individual replay under the winning parameters, the same refined intratrade
    price path used by shared replay, and one valuation snapshot.
    Anyone no longer Core-eligible is removed before shared-account membership.
