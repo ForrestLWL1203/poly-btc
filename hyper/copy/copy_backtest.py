@@ -21,7 +21,6 @@ from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_li
                           wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
                           wallet_sector_side_margin_room, wallet_sector_side_position_count)
 from .fill_transition import classify_fill_transition
-from .wallet_risk import HighWaterPolicy, advance_high_water, new_high_water_state
 from hyper.util import f
 
 
@@ -628,17 +627,6 @@ class Backtest:
         self.campaign_risk_high_water = {}
         self.campaign_intratrade_max_drawdown = 0.0
         self.track_price_path = False
-        self.high_water_policy = HighWaterPolicy(
-            freeze_drawdown=f(overrides.get("WALLET_HWM_FREEZE_DD_PCT", config.WALLET_HWM_FREEZE_DD_PCT)),
-            reduce_drawdown=f(overrides.get("WALLET_HWM_REDUCE_DD_PCT", config.WALLET_HWM_REDUCE_DD_PCT)),
-            exit_drawdown=f(overrides.get("WALLET_HWM_EXIT_DD_PCT", config.WALLET_HWM_EXIT_DD_PCT)),
-            release_drawdown=f(overrides.get("WALLET_HWM_RELEASE_DD_PCT", config.WALLET_HWM_RELEASE_DD_PCT)),
-            cooldown_ms=int(f(overrides.get(
-                "WALLET_HWM_EXIT_COOLDOWN_DAYS", config.WALLET_HWM_EXIT_COOLDOWN_DAYS,
-            )) * 86_400_000),
-        )
-        self.wallet_risk_states = {}
-        self.wallet_breaker_actions = Counter()
 
     def open_sizing_params(self):
         return OpenSizingParams(
@@ -755,78 +743,6 @@ class Backtest:
     def risk_available(self):
         return max(0.0, self.available() + min(0.0, self.unrealized()))
 
-    def wallet_forward_pnl(self, addr):
-        wanted = str(addr or "").lower()
-        closed = sum(
-            f(position.get("realized_net")) for position in self.closed
-            if str(position.get("addr") or "").lower() == wanted
-        )
-        opened = 0.0
-        for position in self.open.values():
-            if str(position.get("addr") or "").lower() != wanted:
-                continue
-            mark = self.last_px.get(position.get("coin")) or position.get("entry_px")
-            opened += f(position.get("realized_net"))
-            opened += f(position.get("rem_size")) * (f(mark) - f(position.get("entry_px"))) * f(position.get("sign"))
-        return closed + opened
-
-    def _wallet_high_water_state(self, addr, stamp=0):
-        wallet = str(addr or "").lower()
-        state = self.wallet_risk_states.get(wallet)
-        if state is None:
-            state = new_high_water_state(
-                membership_cycle=f"replay:{wallet}", baseline_equity=self.initial_balance,
-                selection_generation="replay", now_ms=int(f(stamp)),
-            )
-            self.wallet_risk_states[wallet] = state
-        return state
-
-    def _wallet_breaker_stage(self, addr, stamp=0) -> int:
-        state = self._wallet_high_water_state(addr, stamp)
-        updated, _action = advance_high_water(
-            state,
-            current_equity=f(state.get("baseline_equity")) + self.wallet_forward_pnl(addr),
-            now_ms=int(f(stamp)), policy=self.high_water_policy,
-        )
-        self.wallet_risk_states[str(addr or "").lower()] = updated
-        return int(updated.get("breaker_stage") or 0)
-
-    def _enforce_wallet_high_water(self, stamp=0):
-        wallets = set(self.wallet_risk_states)
-        wallets.update(str(position.get("addr") or "").lower() for position in self.open.values())
-        for wallet in sorted(wallet for wallet in wallets if wallet):
-            state = self._wallet_high_water_state(wallet, stamp)
-            updated, action = advance_high_water(
-                state,
-                current_equity=f(state.get("baseline_equity")) + self.wallet_forward_pnl(wallet),
-                now_ms=int(f(stamp)), policy=self.high_water_policy,
-            )
-            self.wallet_risk_states[wallet] = updated
-            if action:
-                self.wallet_breaker_actions[action] += 1
-            if action == "reduce_half":
-                reduced = False
-                for (addr, coin), ep in list(self.open.items()):
-                    if str(addr or "").lower() != wallet:
-                        continue
-                    px = self.last_px.get(coin) or ep.get("entry_px")
-                    self._apply_reduce(
-                        addr, coin, px, 0.0, f(ep.get("master_current")),
-                        t=stamp, forced_frac=0.50,
-                    )
-                    reduced = True
-                if reduced or not any(str(addr).lower() == wallet for addr, _coin in self.open):
-                    self.wallet_risk_states[wallet]["reduced_in_cycle"] = True
-            elif action == "exit_all":
-                for (addr, coin), ep in list(self.open.items()):
-                    if str(addr or "").lower() != wallet:
-                        continue
-                    px = self.last_px.get(coin) or ep.get("entry_px")
-                    self._apply_reduce(
-                        addr, coin, px, 0.0, 0.0, closing=True,
-                        status="high_water_exit", t=stamp,
-                    )
-
     def _liquidation_freeze_active(self, addr, coin, t):
         stamp = int(t or 0)
         return max(
@@ -888,7 +804,6 @@ class Backtest:
         if not path_events:
             for x in fills:
                 self.process_fill(x)
-                self._enforce_wallet_high_water(x.get("time"))
             return self.result()
 
         fill_times = {}
@@ -913,7 +828,6 @@ class Backtest:
             else:
                 self.process_fill(fills[fill_i])
                 self._sample_path_equity(fill_time)
-                self._enforce_wallet_high_water(fill_time)
                 fill_i += 1
         return self.result()
 
@@ -997,12 +911,11 @@ class Backtest:
         # Capture the candle's adverse account-equity extreme without assuming high/low order. The close
         # sample below is the state carried into elapsed-time deep-bag calculations. If a fill occurred
         # inside this candle, its high/low may predate the changed position. Never let that unresolved range
-        # manufacture either a deep-drawdown sample or a high-water exit; finer path data must resolve it.
+        # manufacture a deep-drawdown sample; finer path data must resolve it.
         if not ambiguous_candle:
             for probe in (lo, hi):
                 self.last_px[coin] = probe
                 self._sample_path_equity(x.get("time"))
-                self._enforce_wallet_high_water(x.get("time"))
         self.last_px[coin] = close
         self.path_mark_coins.add(coin)
         self._mark_liquidations_range(
@@ -1027,7 +940,6 @@ class Backtest:
             if (addr, coin) in self.open:
                 self._advance_smart_take_profit(addr, coin, ep, close, x.get("time"), allow_cut=True)
         self._sample_path_equity(x.get("close_time") or x.get("time"))
-        self._enforce_wallet_high_water(x.get("close_time") or x.get("time"))
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
         if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
@@ -1042,9 +954,6 @@ class Backtest:
         wallet_key = str(addr or "").lower()
         if self._liquidation_freeze_active(addr, coin, t):
             self.skip_reasons["skip_liquidation_cooldown"] += 1
-            return
-        if self._wallet_breaker_stage(addr, t) >= 1:
-            self.skip_reasons["skip_wallet_high_water"] += 1
             return
         wallet_open_n = sum(
             1 for position in self.open.values()
@@ -1241,9 +1150,6 @@ class Backtest:
         if self._liquidation_freeze_active(addr, coin, t):
             self.skip_reasons["skip_liquidation_cooldown_add"] += 1
             return self._observe_add(ep, oid, "liquidation_cooldown_blocked")
-        if self._wallet_breaker_stage(addr, t) >= 1:
-            self.skip_reasons["skip_wallet_high_water_add"] += 1
-            return self._observe_add(ep, oid, "forward_loss_blocked")
 
         # Once our first proactive profit cut has executed, the released exposure stays released.  Target
         # re-adds are observed for source state but never rebuild the protected position.
@@ -1732,13 +1638,8 @@ class Backtest:
             "wallet_stock_side_max_positions": self.wallet_stock_side_max_positions,
             "max_total_margin_pct": self.max_total_margin_pct,
             "liquidation_reentry_blocks": self.skip_reasons["skip_liquidation_cooldown"],
-            "wallet_forward_loss_blocks": self.skip_reasons["skip_wallet_forward_loss"],
-            "wallet_high_water_blocks": self.skip_reasons["skip_wallet_high_water"],
-            "wallet_high_water_add_blocks": self.skip_reasons["skip_wallet_high_water_add"],
-            "wallet_breaker_actions": dict(self.wallet_breaker_actions),
-            "wallet_risk_states": {addr: dict(state) for addr, state in self.wallet_risk_states.items()},
-            # Qualification returns and source-wallet breakers are normalized to the full Paper risk
-            # capital.  ``MARGIN_EQUITY_PCT`` is a sizing budget, not a smaller return denominator.
+            # Qualification returns are normalized to the full Paper risk capital.
+            # ``MARGIN_EQUITY_PCT`` is a sizing budget, not a smaller return denominator.
             "initial_margin_equity": self.initial_balance,
             "closed_net_pnl": closed_net,
             "copy_gross_pnl": self.gross_pnl,

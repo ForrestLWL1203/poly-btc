@@ -115,6 +115,10 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
     thresholds = asdict(policy)
     margin_equity_pct = float(policy_values.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT))
     for r in rows:
+        try:
+            sector_policy = json.loads(r.get("sector_policy_json") or "{}")
+        except (TypeError, ValueError):
+            sector_policy = {}
         qualification = evaluate_follow_eligibility(
             {
                 **r,
@@ -142,10 +146,20 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
             decision_stage, failure_category = "copy_qualification", "soft_retention_failure"
         else:
             decision_stage, failure_category = "copy_qualification", "business_reject"
-        first_hard_failure = (
-            qualification.get("status") if failure_category in {"data_error", "hard_risk_exit"}
-            else (reason if reason in structural_reasons else None)
-        )
+        sector_failures = [
+            str((sector_policy.get(sector) or {}).get("status") or "")
+            for sector in ("crypto", "stock")
+            if isinstance(sector_policy.get(sector), dict)
+            and not (sector_policy.get(sector) or {}).get("allow")
+            and str((sector_policy.get(sector) or {}).get("status") or "")
+        ]
+        qualification_status = str(qualification.get("status") or "")
+        first_hard_failure = None
+        if failure_category != "passed":
+            if qualification_status in {"no_allowed_sector", "economically_disqualified"} and sector_failures:
+                first_hard_failure = sector_failures[0]
+            else:
+                first_hard_failure = qualification_status or reason or None
         payload = {
             "marketType": r["market_type"],
             "net": {
@@ -182,6 +196,9 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "stage": decision_stage,
                 "failureCategory": failure_category,
                 "firstHardFailure": first_hard_failure,
+                "failures": list(dict.fromkeys(
+                    [value for value in (qualification_status, reason, *sector_failures) if value]
+                )),
                 "thresholds": thresholds,
                 "actual": {
                     "return30d": (qualification.get("returns") or {}).get(30),
@@ -202,7 +219,7 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "lastCopyableOpenMs": r["last_copyable_open_ms"],
             },
             "sectorCopy": json.loads(r["sector_copy_json"] or "{}"),
-            "sectorPolicy": json.loads(r["sector_policy_json"] or "{}"),
+            "sectorPolicy": sector_policy,
             "openState": {
                 "openLossFrac": r["open_loss_frac"],
                 "openWinFrac": r["open_win_frac"],

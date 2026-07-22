@@ -26,7 +26,7 @@ def _portfolio(*, total=(6000, 18000, 25000), perp=(5000, 15000, 20000)):
 class PerpPrefilterTests(unittest.TestCase):
     minima = {"week": 5000, "month": 15000, "all": 20000}
 
-    def test_accepts_all_window_boundaries(self):
+    def test_accepts_month_boundary_and_keeps_other_windows_for_audit(self):
         result = perp_prefilter.evaluate(
             _portfolio(total=(6250, 18750, 25000), perp=(5000, 15000, 20000)),
             pnl_minima=self.minima, share_min=0.8,
@@ -35,17 +35,24 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertEqual(result.windows["week"]["perpShare"], 0.8)
         self.assertEqual(result.windows["month"]["perpShare"], 0.8)
 
-    def test_rejects_weak_week_or_lifetime_before_deep_profile(self):
+    def test_week_and_lifetime_are_audit_only(self):
         weak_week = perp_prefilter.evaluate(
             _portfolio(total=(6250, 18750, 25000), perp=(4999, 15000, 20000)),
             pnl_minima=self.minima, share_min=0.8,
         )
-        self.assertEqual(weak_week.reason, "perp_pnl_below_floor:week")
+        self.assertTrue(weak_week.passed)
         weak_all = perp_prefilter.evaluate(
             _portfolio(total=(6250, 18750, 25000), perp=(5000, 15000, 19999)),
             pnl_minima=self.minima, share_min=0.8,
         )
-        self.assertEqual(weak_all.reason, "perp_pnl_below_floor:all")
+        self.assertTrue(weak_all.passed)
+
+    def test_rejects_non_profitable_month_perp(self):
+        result = perp_prefilter.evaluate(
+            _portfolio(total=(6250, 18750, 25000), perp=(5000, 0, 20000)),
+            pnl_minima=self.minima, share_min=0.8,
+        )
+        self.assertEqual(result.reason, "perp_pnl_not_profitable:month")
 
     def test_rejects_spot_or_vault_dominated_profit(self):
         result = perp_prefilter.evaluate(
@@ -82,7 +89,7 @@ class PerpPrefilterTests(unittest.TestCase):
         high = scanner._prepare_leaderboard_rows([row(300000000)], P(), "now")[0]
         self.assertEqual((low["is_candidate"], high["is_candidate"]), (1, 1))
 
-    def test_roi_is_diagnostic_and_both_recent_pnl_floors_are_required(self):
+    def test_recent_roi_and_positive_pnl_are_joint_recall_gates(self):
         base = {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
             ("week", {"pnl": 2000, "roi": 0.15, "vlm": 300000}),
             ("month", {"pnl": 8000, "roi": 0.30, "vlm": 600000}),
@@ -98,7 +105,14 @@ class PerpPrefilterTests(unittest.TestCase):
         all_roi_miss = {**base, "windowPerformances": [
             (name, {**values, "roi": -10.0}) for name, values in base["windowPerformances"]
         ]}
-        self.assertEqual(scanner._prepare_leaderboard_rows([all_roi_miss], P(), "now")[0]["is_candidate"], 1)
+        self.assertEqual(scanner._prepare_leaderboard_rows([all_roi_miss], P(), "now")[0]["is_candidate"], 0)
+        all_time_only_miss = {**base, "windowPerformances": [
+            (name, {**values, "roi": -10.0}) if name == "allTime" else (name, dict(values))
+            for name, values in base["windowPerformances"]
+        ]}
+        self.assertEqual(
+            scanner._prepare_leaderboard_rows([all_time_only_miss], P(), "now")[0]["is_candidate"], 1,
+        )
         weak_week = {**base, "windowPerformances": [
             (name, {**values, "pnl": 1999.0}) if name == "week" else (name, dict(values))
             for name, values in base["windowPerformances"]

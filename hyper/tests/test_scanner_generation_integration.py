@@ -570,6 +570,66 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 ("0xaaa", "challenger", "challenger_weekly_return_watch"),
             ])
 
+    def test_final_parameter_policy_promotes_watch_sector_for_selected_core(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            profile = {
+                "addr": "0xaaa", "status": "active", "reason": "ok", "score": .9,
+                "profile_generation": "g1", "data_status": "valid",
+                "evidence_status": "qualified", "follow_score": .9,
+                "sector_policy_json": json.dumps({
+                    "allowed": [], "watch": ["crypto"],
+                    "crypto": {"allow": False, "watch": True},
+                }),
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": False,
+                    "status": "challenger_return_watch", "role": "challenger",
+                },
+            }
+            final_policy = json.dumps({
+                "allowed": ["crypto"], "watch": [],
+                "crypto": {"allow": True, "watch": False},
+            })
+            final_qualification = {
+                "eligible": True, "coreEligible": True,
+                "status": "core_eligible", "role": "core_eligible",
+            }
+            metrics = scanner.selection.PortfolioMetrics(
+                100, 80, 0, .9, .9, .01, .1, .01,
+                net_pnl=100, stress_net_pnl=80, drawdown_dollars=10,
+                risk_adjusted_utility=90,
+            )
+            transition = {
+                "selected": ("0xaaa",), "metrics": metrics,
+                "utilities": {"0xaaa": 90}, "reasons": {}, "looRemoved": (),
+            }
+            self.seal_market(db, "g1")
+            with patch.object(
+                    scanner.auto_tune, "_portfolio_window_fills",
+                    return_value={30: [{"user": "0xaaa", "coin": "BTC", "time": 1}]},
+            ) as window_fills, patch.object(
+                    scanner.price_path, "load_refined", return_value=[],
+            ), patch.object(
+                    scanner.price_path, "coverage", return_value={"coverage": 1.0},
+            ), patch.object(
+                    scanner, "_quality_first_core_transition", return_value=transition,
+            ):
+                rows, _marginal = scanner._build_forced_prefix_selection(
+                    db, "g1", "now", 1,
+                    profiles=[profile], previous_roles={}, controls={"0xaaa": True}, held=set(),
+                    desired_order=("0xaaa",), formation_meta={
+                        "robustAllowedMemberships": [["0xaaa"]],
+                    },
+                    effective_qualifications={"0xaaa": final_qualification},
+                    effective_scores={"0xaaa": .95},
+                    effective_policies={"0xaaa": final_policy},
+                )
+
+            self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "core")])
+            self.assertEqual(json.loads(rows[0].sector_policy_json)["allowed"], ["crypto"])
+            self.assertTrue(window_fills.call_args.kwargs["include_watch"])
+
     def test_star_cannot_bypass_final_win_gate_and_held_position_becomes_exit_only(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

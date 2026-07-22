@@ -62,27 +62,39 @@ class Result:
 
 
 def evaluate(payload, *, pnl_minima: dict[str, float], share_min: float) -> Result:
-    """Require profitable, Perp-led activity in every official window.
+    """Require only profitable, Perp-led 30-day activity.
 
-    Deep history collection is deliberately reserved for wallets whose cheap Portfolio surface already
-    clears the configured 7d/30d/lifetime absolute PnL floors and Perp-share floor. Missing transport in any
-    window is quarantined; non-positive total PnL cannot establish a meaningful positive Perp share.
+    The Leaderboard coarse gate already owns absolute 7/30-day PnL. Portfolio week/all-time windows are
+    retained for audit but never participate in an AND rejection: doing so removed current profitable Perp
+    wallets for irrelevant historical or short-window mix. ``pnl_minima`` remains in the API so callers can
+    record the coarse policy snapshot; the authoritative Perp hard floor is simply month Perp PnL > 0.
     """
+    del pnl_minima
     windows = _portfolio_map(payload)
     if not windows:
         return Result("deferred_data_error", "portfolio_unavailable", {})
     metrics = {}
     for total_key, perp_key, label in WINDOWS:
         if total_key not in windows or perp_key not in windows:
-            return Result("deferred_data_error", f"portfolio_window_missing:{label}", metrics)
+            if label == "month":
+                return Result("deferred_data_error", f"portfolio_window_missing:{label}", metrics)
+            metrics[label] = {"auditStatus": "missing", "hardGate": False}
+            continue
         total_pnl = pnl_delta(windows[total_key])
         perp_pnl = pnl_delta(windows[perp_key])
         if total_pnl is None or perp_pnl is None:
-            return Result("deferred_data_error", f"portfolio_history_incomplete:{label}", metrics)
+            if label == "month":
+                return Result("deferred_data_error", f"portfolio_history_incomplete:{label}", metrics)
+            metrics[label] = {"auditStatus": "incomplete", "hardGate": False}
+            continue
         share = (perp_pnl / total_pnl) if total_pnl > 0 else None
-        metrics[label] = {"totalPnl": total_pnl, "perpPnl": perp_pnl, "perpShare": share}
-        if perp_pnl < float(pnl_minima[label]):
-            return Result("rejected", f"perp_pnl_below_floor:{label}", metrics)
-        if share is None or share < float(share_min):
-            return Result("rejected", f"perp_share_below_floor:{label}", metrics)
+        metrics[label] = {
+            "totalPnl": total_pnl, "perpPnl": perp_pnl, "perpShare": share,
+            "hardGate": label == "month", "auditStatus": "complete",
+        }
+    month = metrics.get("month") or {}
+    if float(month.get("perpPnl") or 0.0) <= 0.0:
+        return Result("rejected", "perp_pnl_not_profitable:month", metrics)
+    if month.get("perpShare") is None or float(month["perpShare"]) < float(share_min):
+        return Result("rejected", "perp_share_below_floor:month", metrics)
     return Result("passed", "perp_prefilter_passed", metrics)

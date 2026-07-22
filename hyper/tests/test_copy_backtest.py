@@ -26,6 +26,29 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_retired_source_high_water_overrides_cannot_block_later_entries(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100, 1),
+            fill(2_000, "BTC", "A", 100, 100, 110, 2),
+            fill(3_000, "ETH", "B", 100, 0, 100, 3),
+            fill(4_000, "ETH", "A", 100, 100, 90, 4),
+            fill(5_000, "SOL", "B", 100, 0, 100, 5),
+            fill(6_000, "SOL", "A", 100, 100, 110, 6),
+        ]
+        baseline = run_backtest("0xabc", fills, sigmas={coin: .04 for coin in ("BTC", "ETH", "SOL")})
+        retired = run_backtest(
+            "0xabc", fills, sigmas={coin: .04 for coin in ("BTC", "ETH", "SOL")},
+            overrides={
+                "WALLET_HWM_FREEZE_DD_PCT": .0001,
+                "WALLET_HWM_REDUCE_DD_PCT": .0002,
+                "WALLET_HWM_EXIT_DD_PCT": .0003,
+            },
+        )
+
+        self.assertEqual(retired["closed_n"], baseline["closed_n"])
+        self.assertAlmostEqual(retired["copy_net_pnl"], baseline["copy_net_pnl"])
+        self.assertNotIn("wallet_high_water_blocks", retired)
+
     def test_path_risk_ignores_quick_deep_dip_but_counts_four_hour_recovery(self):
         hour = 3_600_000
         quick = path_risk_metrics([

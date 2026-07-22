@@ -14,7 +14,7 @@ from typing import Mapping
 from hyper import config
 from .copy_backtest import ADD_BLOCKED_OUTCOMES, ADD_METRICS_VERSION, ADD_OUTCOMES
 from .copy_data import is_copyable_coin
-from .copy_policy import load_copy_policy, one_sided_wilson_lower_bound
+from .copy_policy import load_copy_policy
 
 SECTORS = ("crypto", "stock")
 
@@ -92,18 +92,17 @@ def _qualification_equity(windows: Mapping) -> float:
 
 
 def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
-    """Apply live-sector economics independently from wallet-level aggregation.
+    """Admit only positive, Challenger-grade sectors into wallet-level aggregation.
 
-    A Mix wallet receives two permissions, not one blended permission. Strong Crypto evidence therefore
-    cannot mask weak Stock evidence (or vice versa). Optional fields are checked whenever the canonical
-    replay provides them; legacy rows without those fields still have to pass every sample/return floor.
+    Sector isolation prevents a profitable Crypto side from masking a losing Stock side. It must not repeat
+    the complete Core sample/win/Wilson surface per sector, however: the wallet aggregate owns that proof.
+    Requiring every side to be a standalone Core was the main sector-level false-negative cliff.
     """
     policy = load_copy_policy()
     results = {days: _window_result(windows, days) for days in (30, 14, 7)}
     closed = {days: _int(results[days].get("closed_n")) for days in results}
     pnl = {days: _num(results[days].get("copy_net_pnl")) for days in results}
-    enough = {days: closed[days] >= policy.core_min_closed(days) for days in results}
-    win_samples = {
+    campaigns = {
         days: (
             _int(results[days].get("campaign_closed_n"))
             if results[days].get("campaign_closed_n") is not None else closed[days]
@@ -111,39 +110,42 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         for days in results
     }
     wins = {
-        days: max(0, min(win_samples[days], _int(
+        days: max(0, min(campaigns[days], _int(
             results[days].get("campaign_wins")
             if results[days].get("campaign_wins") is not None else results[days].get("wins")
         )))
         for days in results
     }
     win_rate = {
-        days: wins[days] / win_samples[days] if win_samples[days] else 0.0
+        days: wins[days] / campaigns[days] if campaigns[days] else 0.0
         for days in results
     }
-    win_lcb30 = one_sided_wilson_lower_bound(
-        wins[30], win_samples[30], policy.core_win_rate_lcb_confidence,
-    )
     equity = _qualification_equity(windows)
     return30 = pnl[30] / equity
     return14 = pnl[14] / equity
     return7 = pnl[7] / equity
-    # Positive strict-Copy economics remain visible as Research even when samples are too thin for the
-    # executable Challenger tier. ``watch`` therefore means evidence-bearing/non-live, not pre-approved.
+    primary = results[30]
+    evidence_days = _int(primary.get("evidence_days"))
+    if evidence_days <= 0:
+        evidence_days = len({
+            int(position.get("closed_at") or 0) // 86_400_000
+            for position in primary.get("positions") or ()
+            if int(position.get("closed_at") or 0) > 0
+        })
     challenger_watch = bool(return30 > 0.0 and closed[30] > 0)
     base = {
         "closed": {str(days): closed[days] for days in (30, 14, 7)},
         "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
         "returns": {"30": return30, "14": return14, "7": return7},
         "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
-        "campaigns": {str(days): win_samples[days] for days in (30, 14, 7)},
-        "winRateLcb30": win_lcb30,
+        "campaigns": {str(days): campaigns[days] for days in (30, 14, 7)},
+        "evidenceDays": evidence_days,
         "qualificationEquity": equity,
     }
 
     # Seven-day performance has no fixed positive-return gate. It becomes an immediate hard collapse only
     # once five independent campaigns exist, their win rate is below 40%, and the slice is net negative.
-    if win_samples[7] >= policy.core_min_campaigns_7d and (
+    if campaigns[7] >= policy.core_min_campaigns_7d and (
         win_rate[7] < policy.core_min_win_rate_7d and pnl[7] < min_net
     ):
         return {
@@ -153,62 +155,6 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "reason": "板块7日已有5个Campaign、胜率低于40%且净收益为负",
             "watch": False,
         }
-    if not all(enough.values()):
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_sample_watch",
-            "reason": "板块未独立达到12/5/3个30/14/7日已平回合",
-            "watch": challenger_watch,
-        }
-    thin_campaign_windows = [30] if win_samples[30] < policy.core_min_campaigns_30d else []
-    if thin_campaign_windows:
-        labels = "/".join(f"{days}日" for days in thin_campaign_windows)
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_campaign_sample_watch",
-            "reason": f"板块{labels}独立方向交易批次不足，相关篮子仓不能冒充独立胜率样本",
-            "watch": challenger_watch,
-        }
-    weak_windows = [30] if win_rate[30] < policy.core_min_win_rate_30d else []
-    if win_samples[14] >= policy.core_min_campaigns_14d and (
-        win_rate[14] < policy.core_min_win_rate_14d or pnl[14] <= min_net
-    ):
-        weak_windows.append(14)
-    if weak_windows:
-        labels = "/".join(f"{days}日" for days in weak_windows)
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_win_rate_below_floor",
-            "reason": f"板块{labels}严格Copy胜率低于Core硬门槛",
-            "watch": challenger_watch,
-        }
-    if win_lcb30 < policy.core_min_win_rate_lcb_30d:
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_win_rate_confidence_low",
-            "reason": (
-                f"板块30日胜率80%单侧置信下界{win_lcb30 * 100:.1f}%低于"
-                f"{policy.core_min_win_rate_lcb_30d * 100:.0f}%"
-            ),
-            "watch": challenger_watch,
-        }
-    if return30 < policy.core_min_return_30d:
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_return_weak",
-            "reason": (
-                f"板块30天严格Copy收益率{return30 * 100:.1f}%低于"
-                f"{policy.core_min_return_30d * 100:.0f}%实跟线"
-            ),
-            "watch": challenger_watch,
-        }
-
-    primary = results[30]
     recent14 = results[14]
     recent = results[7]
     body_floor = policy.core_recent_body_min_closed
@@ -218,11 +164,16 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         and _num(recent14.get("body_after_top3_net_pnl")) < 0.0
         and _num(recent.get("body_after_top3_net_pnl")) < 0.0
     )
-    checks = (
+    hard_checks = (
         (
             _int(primary.get("liquidations")) > policy.core_max_liquidations_30d,
             "sector_liquidation_limit",
             f"板块30日最终回放爆仓超过{policy.core_max_liquidations_30d}次",
+        ),
+        (
+            _int(recent.get("liquidations")) > 0 and pnl[7] < min_net,
+            "sector_recent_liquidation",
+            "板块7日亏损中发生爆仓，判定近期硬风险",
         ),
         (
             recent_body_negative,
@@ -236,46 +187,70 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "板块持仓末端估值不完整",
         ),
         (
+            _num(primary.get("intratrade_max_drawdown")) > policy.intratrade_dd_reject,
+            "sector_intratrade_drawdown_reject",
+            "板块30日盘中回撤超过15%硬风险线",
+        ),
+        (
+            _int(primary.get("failed_deep_bag_n")) > policy.deep_bag_max_failed,
+            "sector_failed_deep_loss_reject",
+            "板块失败深亏事件超过硬风险上限",
+        ),
+        (
+            _int(primary.get("deep_bag_event_n")) >= 2
+            and _num(primary.get("deep_bag_recovery_rate"), 1.0) < policy.deep_bag_min_recovery_rate,
+            "sector_deep_loss_recovery_reject",
+            "板块多次深亏且恢复率不足50%",
+        ),
+    )
+    for failed, status, reason in hard_checks:
+        if failed:
+            return {
+                **base, "allow": False, "status": status, "reason": reason, "watch": False,
+                "hardRisk": True,
+            }
+    if return30 < policy.challenger_min_return_30d:
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_challenger_return_watch",
+            "reason": (
+                f"板块30天严格Copy收益率{return30 * 100:.1f}%低于"
+                f"{policy.challenger_min_return_30d * 100:.0f}%板块聚合线"
+            ),
+            "watch": challenger_watch,
+        }
+    if (
+        closed[30] < policy.min_closed_30d
+        or campaigns[30] < 5
+        or evidence_days < 5
+    ):
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_sample_watch",
+            "reason": "板块尚未达到7个已平回合、5个Campaign和5个独立证据日",
+            "watch": challenger_watch,
+        }
+
+    checks = (
+        (
             primary.get("profit_factor") is not None
-            and _num(primary.get("profit_factor")) < policy.min_profit_factor,
-            "sector_profit_structure_weak",
-            f"板块严格Copy PF低于{policy.min_profit_factor:.2f}",
+            and _num(primary.get("profit_factor")) <= 0.0,
+            "sector_no_profit_factor",
+            "板块严格Copy没有可验证的正向盈亏结构",
         ),
         (
-            primary.get("net_after_top2") is not None
-            and _num(primary.get("net_after_top2")) < equity * policy.min_tail_return_30d,
-            "sector_tail_profit_weak",
-            "板块30天移除最大两笔盈利后未达到尾部收益线",
-        ),
-        (
-            primary.get("campaign_net_after_top2") is not None
-            and _num(primary.get("campaign_net_after_top2")) <= min_net,
+            primary.get("campaign_net_after_top2") is None
+            or _num(primary.get("campaign_net_after_top2")) <= min_net,
             "sector_campaign_tail_weak",
             "板块30天移除最大两个独立方向批次后不盈利",
         ),
         (
-            recent.get("net_after_top1") is not None
-            and _num(recent.get("net_after_top1")) <= min_net,
-            "sector_recent_tail_weak",
-            "板块7天收益依赖单一盈利回合",
-        ),
-        (
-            primary.get("cost_stress_net_pnl") is not None
-            and _num(primary.get("cost_stress_net_pnl")) <= min_net,
+            primary.get("cost_stress_net_pnl") is None
+            or _num(primary.get("cost_stress_net_pnl")) <= min_net,
             "sector_cost_stress_weak",
             "板块1.5倍成本压力后不盈利",
-        ),
-        (
-            primary.get("open_fill_rate") is not None
-            and _num(primary.get("open_fill_rate")) < policy.min_actionable_open_rate,
-            "sector_execution_weak",
-            f"板块开仓跟随率低于{policy.min_actionable_open_rate * 100:.0f}%",
-        ),
-        (
-            primary.get("capacity_open_fit") is not None
-            and _num(primary.get("capacity_open_fit")) < policy.min_capacity_fit,
-            "sector_capacity_weak",
-            f"板块资金容量适配率低于{policy.min_capacity_fit * 100:.0f}%",
         ),
     )
     for failed, status, reason in checks:
@@ -285,13 +260,14 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
                 "allow": False,
                 "status": status,
                 "reason": reason,
-                "watch": True,
+                "watch": False,
+                "hardRisk": True,
             }
     return {
         **base,
         "allow": True,
         "status": "allowed",
-        "reason": "板块独立达到Core实跟标准",
+        "reason": "板块达到Challenger经济证据且无硬风险，纳入钱包级Core聚合",
         "watch": False,
     }
 

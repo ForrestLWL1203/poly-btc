@@ -865,6 +865,8 @@ class ScannerWatchlistTests(unittest.TestCase):
             {
                 "crypto": {
                     30: {"copy_net_pnl": 1200.0, "copy_win_rate": 0.73, "closed_n": 15, "wins": 11,
+                         "campaign_closed_n": 12, "campaign_wins": 9, "evidence_days": 5,
+                         "campaign_net_after_top2": 300.0, "cost_stress_net_pnl": 800.0,
                          "opened_n": 15, "target_open_events": 15, "liquidations": 0, "fee_drag": 7.0},
                     14: {"copy_net_pnl": 600.0, "copy_win_rate": 0.71, "closed_n": 7, "wins": 5,
                          "opened_n": 7, "target_open_events": 7, "liquidations": 0, "fee_drag": 4.0},

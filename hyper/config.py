@@ -261,7 +261,9 @@ WALLET_STOCK_SIDE_CAP_PCT = 0.10
 WALLET_MAX_OPEN_POSITIONS = 3      # a basket trader cannot occupy the account with many simultaneous symbols.
 WALLET_STOCK_SIDE_MAX_POSITIONS = 2
 MAX_TOTAL_MARGIN_PCT = 0.85        # unlike MAX_DEPLOY_PCT this also caps ADDS, preserving a hard risk buffer.
-WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03  # legacy persisted setting; execution now uses member-cycle HWM 3/6/10.
+# Retired source-wallet breaker constants remain import-compatible for old offline records only. They are not
+# included in strategy revisions and neither Observer nor canonical replay reads them.
+WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03
 WALLET_HWM_FREEZE_DD_PCT = 0.03
 WALLET_HWM_REDUCE_DD_PCT = 0.06
 WALLET_HWM_EXIT_DD_PCT = 0.10
@@ -313,20 +315,21 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard recall (UI-tunable). Official ROI magnitude is retained for rank/audit only. The cheap
-# hard surface proves $5k equity, $250k leveraged 7d notional activity, at least $250 7d PnL and at least
-# $1,000 30d PnL.  These absolute floors keep recently losing/dust-profit accounts out without restoring an
-# official ROI magnitude veto; scoped Perp evidence and strict-Copy replay decide executable roles later.
+# Stage-1 leaderboard recall (UI-tunable). The cheap hard surface proves $5k equity, $250k leveraged 7d
+# notional activity, positive 7d/30d PnL, and stable capital efficiency in both recent windows: at least
+# 10% 7d ROI and 20% 30d ROI. All-time ROI is audit/ranking only. Incumbent roles and open-position owners
+# bypass recall and still receive their mandatory retention replay.
+# This official ROI gate is discovery-only; scoped Perp evidence and strict-Copy replay decide executable roles.
 HARVEST_MIN_ACCT = 5_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
-HARVEST_WEEK_ROI_MIN = 0.05
-HARVEST_MONTH_ROI_MIN = 0.05
-HARVEST_ALL_ROI_MIN = 0.05
-HARVEST_ROI_WINDOWS_MIN_PASS = 2  # legacy reference retained for migration/audit; never a recall hard gate.
-HARVEST_WEEK_PNL_MIN = 250.0
-HARVEST_MONTH_PNL_MIN = 1_000.0
+HARVEST_WEEK_ROI_MIN = 0.10
+HARVEST_MONTH_ROI_MIN = 0.20
+HARVEST_ALL_ROI_MIN = 0.10
+HARVEST_ROI_WINDOWS_MIN_PASS = 2  # compatibility/audit; hard recall explicitly requires week + month.
+HARVEST_WEEK_PNL_MIN = 0.0
+HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0
-HARVEST_PERP_PNL_SHARE_MIN = 0.80
+HARVEST_PERP_PNL_SHARE_MIN = 0.60
 PERP_PREFILTER_CACHE_TTL_S = 2 * 3600  # interrupted/redeployed scans reuse the same fresh Portfolio evidence
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline

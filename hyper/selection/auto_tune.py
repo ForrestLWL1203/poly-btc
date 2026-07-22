@@ -351,7 +351,7 @@ def _load_followed_wallets(db, follow: dict) -> list[str]:
     return explicit or []
 
 
-def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]:
+def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int, *, include_watch=False) -> list[dict]:
     addrs = [(a or "").lower() for a in addrs if a]
     if not addrs:
         return []
@@ -383,6 +383,23 @@ def _load_portfolio_fills(db, addrs: Iterable[str], start_ms: int) -> list[dict]
             policy = parse_json_obj(raw)
             if policy.get("allowed"):
                 policies[(addr or "").lower()] = policy
+    if include_watch:
+        # Formation deliberately admits parameter-sensitive return-watch wallets so a safe sizing surface
+        # can prove whether they cross the public Core return line.  Their live ``allowed`` list is empty by
+        # definition; use ``watch`` only inside that sealed, non-executing replay.  Observer and ordinary
+        # auto-tune callers keep the fail-closed allowed-only policy.
+        for addr, policy in list(policies.items()):
+            if policy.get("watch"):
+                watched = list(policy.get("watch") or ())
+                promoted_sectors = list(dict.fromkeys([
+                    *(policy.get("allowed") or ()), *watched,
+                ]))
+                promoted = {**policy, "allowed": promoted_sectors}
+                for sector in watched:
+                    item = policy.get(sector)
+                    if isinstance(item, dict):
+                        promoted[sector] = {**item, "allow": True}
+                policies[addr] = promoted
     return load_copyable_fills(
         db,
         addrs,
@@ -422,7 +439,7 @@ def _tune_days() -> list[int]:
     return out or [30]
 
 
-def _portfolio_window_fills(db, addrs: list[str], now_ms: int) -> dict[int, list[dict]] | None:
+def _portfolio_window_fills(db, addrs: list[str], now_ms: int, *, include_watch=False) -> dict[int, list[dict]] | None:
     days = _tune_days()
     max_days = max(days)
     warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
@@ -430,7 +447,7 @@ def _portfolio_window_fills(db, addrs: list[str], now_ms: int) -> dict[int, list
     max_bytes = int(getattr(config, "AUTO_TUNE_FILL_CACHE_MAX_BYTES", 64 * 1024 * 1024) or 0)
     if max_bytes > 0 and _portfolio_fill_json_bytes(db, addrs, start_ms) > max_bytes:
         return None
-    fills = _load_portfolio_fills(db, addrs, start_ms)
+    fills = _load_portfolio_fills(db, addrs, start_ms, include_watch=include_watch)
     windows = {}
     for day in days:
         start_ms = now_ms - (day + warmup_days) * 86400_000
@@ -1513,7 +1530,9 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     market_generation = market_generation or expected_generation
     sigmas = _load_sigmas(db, market_generation)
     now_ms = int(time.time() * 1000)
-    window_fills = _portfolio_window_fills(db, addrs, now_ms)
+    window_fills = _portfolio_window_fills(
+        db, addrs, now_ms, include_watch=bool(formation_admission),
+    )
     if window_fills is None:
         result = {
             "status": "skipped",

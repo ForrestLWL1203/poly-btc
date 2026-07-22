@@ -57,7 +57,7 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(active["params"]["CORE_INTRATRADE_DD_MAX"], .12)
         self.assertEqual(active["params"]["COPY_DEEP_BAG_EVENT_MIN_HOURS"], 4.0)
         self.assertEqual(active["params"]["CORE_DEEP_BAG_MIN_RECOVERY_RATE"], .50)
-        self.assertEqual(active["params"]["WALLET_HWM_EXIT_DD_PCT"], .10)
+        self.assertNotIn("WALLET_HWM_EXIT_DD_PCT", active["params"])
         self.assertEqual(active["params"]["WALLET_STOCK_SIDE_CAP_PCT"], .10)
 
     def test_revision_legally_snapshots_zero_core_targets(self):

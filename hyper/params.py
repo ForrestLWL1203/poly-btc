@@ -26,22 +26,22 @@ PARAM_SPEC = [
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
     ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
-        "官方近7日 ROI 参考线", "仅用于质量评分和漏斗审计，不决定是否进入深度回放"),
+        "新钱包近7日 ROI 线", "7日和30日ROI必须同时达标，只限制新发现钱包"),
     ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
-        "官方近30日 ROI 参考线", "仅用于质量评分和漏斗审计；严格盈利由Copy回放判断"),
+        "新钱包近30日 ROI 线", "与7日ROI同时达标，避免单窗口暴涨冒充稳定收益"),
     ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
-        "官方历史 ROI 参考线", "仅用于质量评分和漏斗审计，不参与候选硬筛"),
+        "官方历史 ROI 参考线", "仅用于评分和漏斗审计，不参与新钱包硬筛"),
     ("HARVEST_ROI_WINDOWS_MIN_PASS", "scanner", "hidden", "int", "rescan",
-        config.HARVEST_ROI_WINDOWS_MIN_PASS, "旧版ROI达标窗口数", "仅迁移和审计兼容，不参与候选硬筛"),
+        config.HARVEST_ROI_WINDOWS_MIN_PASS, "旧版ROI达标窗口数", "仅兼容旧revision；当前固定要求7日和30日同时达标"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
-        "近7日 PnL 下限", "近7日必须达到此绝对盈利，和近30日下限同时生效"),
+        "新钱包近7日 PnL 下限", "默认0表示必须盈利；不按绝对利润偏向大账户"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
-        "近30日 PnL 下限", "近30日必须达到此绝对盈利，默认与$10,000 Core回放收益线对齐"),
+        "新钱包近30日 PnL 下限", "默认0表示必须盈利；Core/Challenger和持仓钱包始终进入保留回放"),
     ("HARVEST_ALL_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_ALL_PNL_MIN,
         "历史绝对 PnL 参考线", "仅作审计，不参与候选硬筛"),
     ("HARVEST_PERP_PNL_SHARE_MIN", "scanner", "yellow", "pct", "rescan",
         config.HARVEST_PERP_PNL_SHARE_MIN * 100, "Perp盈利占比下限",
-        "7日、30日和历史三个窗口都必须达到此Perp盈利占比，才进入昂贵深度回放"),
+        "只检查30日Perp盈利占比；7日和历史窗口仅记录审计，不参与淘汰"),
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", config.INACTIVE_DAYS,
@@ -311,18 +311,6 @@ PARAM_SPEC = [
         "同一目标钱包最多同时占用的跟单品种数；已有仓位照常退出，超限后不再新开"),
     ("WALLET_STOCK_SIDE_MAX_POSITIONS", "follow", "yellow", "int", "immediate",
         config.WALLET_STOCK_SIDE_MAX_POSITIONS, "单钱包·美股同向持仓数", "同一来源钱包在xyz同方向最多同时复制的标的数"),
-    ("WALLET_HWM_FREEZE_DD_PCT", "follow", "black", "pct", "immediate",
-        config.WALLET_HWM_FREEZE_DD_PCT * 100, "来源钱包高水位·冻结", "从成员周期收益高点回撤达到此值，冻结新开仓与加仓"),
-    ("WALLET_HWM_REDUCE_DD_PCT", "follow", "black", "pct", "immediate",
-        config.WALLET_HWM_REDUCE_DD_PCT * 100, "来源钱包高水位·减半", "按比例减半全部来源仓位，同周期不得补回"),
-    ("WALLET_HWM_EXIT_DD_PCT", "follow", "black", "pct", "immediate",
-        config.WALLET_HWM_EXIT_DD_PCT * 100, "来源钱包高水位·退出", "退出来源全部仓位并进入7天冷却"),
-    ("WALLET_HWM_RELEASE_DD_PCT", "follow", "hidden", "pct", "immediate",
-        config.WALLET_HWM_RELEASE_DD_PCT * 100, "高水位冻结解除线", "仅在回撤恢复到此线内且下一轮完整扫描通过保留线后解除"),
-    ("WALLET_HWM_EXIT_COOLDOWN_DAYS", "follow", "black", "int", "immediate",
-        config.WALLET_HWM_EXIT_COOLDOWN_DAYS, "来源钱包退出冷却天数", "10%退出后禁止重新准入的天数"),
-    ("WALLET_FORWARD_LOSS_FREEZE_PCT", "follow", "hidden", "pct", "immediate",
-        config.WALLET_FORWARD_LOSS_FREEZE_PCT * 100, "旧版Forward亏损熔断（仅迁移兼容）", ""),
     ("MIN_OPEN_MARGIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100, "单笔最小开仓额", ""),
     ("MAX_ENTRY_CHASE_PCT",  "follow",  "hidden", "nullable","immediate",
         (config.MAX_ENTRY_CHASE_PCT * 100) if config.MAX_ENTRY_CHASE_PCT is not None else None, "追价保护阈值", ""),
@@ -337,17 +325,18 @@ _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 _HARVEST_PREVIOUS_DEFAULTS = {
     "HARVEST_MIN_ACCT": ("10000", "10000.0", "30000", "30000.0"),
     "HARVEST_WEEK_VLM_MIN": ("50000", "50000.0", "300000", "300000.0"),
-    "HARVEST_WEEK_ROI_MIN": ("10", "10.0", "15", "15.0", "25", "25.0"),
+    "HARVEST_WEEK_ROI_MIN": ("5", "5.0", "10", "10.0", "15", "15.0", "25", "25.0"),
     "HARVEST_MONTH_ROI_MIN": (
-        "10", "10.0", "20", "20.0", "30", "30.0", "45", "45.0", "50", "50.0",
+        "5", "5.0", "10", "10.0", "20", "20.0", "30", "30.0", "45", "45.0", "50", "50.0",
     ),
-    "HARVEST_ALL_ROI_MIN": ("10", "10.0", "20", "20.0", "30", "30.0", "50", "50.0"),
+    "HARVEST_ALL_ROI_MIN": ("5", "5.0", "10", "10.0", "20", "20.0", "30", "30.0", "50", "50.0"),
     "HARVEST_WEEK_PNL_MIN": ("0", "0.0", "250", "250.0", "2000", "2000.0", "5000", "5000.0"),
     "HARVEST_MONTH_PNL_MIN": (
-        "0", "0.0", "500", "500.0", "5000", "5000.0", "8000", "8000.0", "15000", "15000.0",
+        "0", "0.0", "500", "500.0", "1000", "1000.0", "5000", "5000.0",
+        "8000", "8000.0", "15000", "15000.0",
     ),
     "HARVEST_ALL_PNL_MIN": ("20000", "20000.0"),
-    "HARVEST_PERP_PNL_SHARE_MIN": ("60", "60.0"),
+    "HARVEST_PERP_PNL_SHARE_MIN": ("60", "60.0", "80", "80.0"),
 }
 
 _RISK_PREVIOUS_DEFAULTS = {
@@ -395,7 +384,10 @@ def seed_params(db):
         "('MIN_ACTIVE_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT','HARVEST_WEEK_VLM_MAX',"
         "'HARVEST_PNL_VOL_MIN','HARVEST_PNL_VOL_MAX','DAILY_PROFILE_BUDGET',"
         "'FULL_REFRESH_SHARDS','RANDOM_EXPLORATION_RATIO','DISCOVERY_MAX_EXTRA_SHARDS',"
-        "'CANDIDATE_MAX_RECHECK_DAYS')"
+        "'CANDIDATE_MAX_RECHECK_DAYS','WALLET_HWM_FREEZE_DD_PCT',"
+        "'WALLET_HWM_REDUCE_DD_PCT','WALLET_HWM_EXIT_DD_PCT',"
+        "'WALLET_HWM_RELEASE_DD_PCT','WALLET_HWM_EXIT_COOLDOWN_DAYS',"
+        "'WALLET_FORWARD_LOSS_FREEZE_PCT')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
@@ -411,16 +403,16 @@ def seed_params(db):
             marks = ",".join("?" for _ in old_values)
             db.execute(
                 f"UPDATE params SET value=? WHERE key=? AND value IN ({marks}) "
-                f"AND default_value IN ({marks})",
-                (dv, key, *old_values, *old_values),
+                f"AND default_value IN ({marks}) AND value=default_value AND default_value<>?",
+                (dv, key, *old_values, *old_values, dv),
             )
         old_risk_values = _RISK_PREVIOUS_DEFAULTS.get(key)
         if old_risk_values:
             marks = ",".join("?" for _ in old_risk_values)
             db.execute(
                 f"UPDATE params SET value=? WHERE key=? AND value IN ({marks}) "
-                f"AND default_value IN ({marks})",
-                (dv, key, *old_risk_values, *old_risk_values),
+                f"AND default_value IN ({marks}) AND value=default_value AND default_value<>?",
+                (dv, key, *old_risk_values, *old_risk_values, dv),
             )
         db.execute(
             "INSERT OR IGNORE INTO params (key,value,category,level,type,effect,default_value,updated_at) "

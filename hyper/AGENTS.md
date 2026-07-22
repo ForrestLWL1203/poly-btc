@@ -99,12 +99,12 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 ### 2. Candidate workset and profiles
 
-- Leaderboard harvesting uses official 7d/30d/all-time ROI, absolute PnL, account value and a weekly activity
-  floor. Nominal leveraged volume is never a profitability denominator and has no upper bound. Every survivor
-  must then pass the official Portfolio Perp PnL/share precheck before history profiling. Current coarse
-  defaults are account value `$5,000`, official ROI `5%/5%/5%` (any two windows), absolute PnL
-  `$250/$500/$0`, weekly volume `$50,000`, and Perp PnL share `80%` in all three windows. These only expand
-  who receives strict replay and never weaken the Core qualification surface.
+- New-wallet Leaderboard recall requires account value `$5,000`, leveraged 7d notional volume `$250,000`,
+  positive 7d and 30d PnL, plus both 7d ROI `10%` and 30d ROI `20%`. All-time ROI remains score/audit only;
+  nominal leveraged volume is never a profitability denominator and has no upper bound. Current Core,
+  Challenger and open-position owners bypass discovery recall and always receive retention replay. Every new
+  survivor then needs positive 30d Perp PnL and at least 60% 30d Perp PnL share; 7d/all-time Portfolio windows
+  are audit-only and never form an AND rejection.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -132,11 +132,12 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 - Crypto and stock/index/commodity evidence are evaluated independently. A complete/cold scan rebuilds each
   wallet's `sector_policy_json` from the current generation; an incremental scan may carry prior evidence for
   audit continuity only, never to preserve a current-generation weak sector's live permission.
-- A wallet may be Crypto-only, Stock-only, or genuine Mix. Each side independently applies the same Core
-  30/14/7 sample, 30d/7d percentage-return, profit-structure, cost-pressure, execution, and capacity rules.
-  If both sides pass, both are copied. If either side weakens, that side is removed from live permission in
-  the same generation (observation-only); the other side cannot mask it and prior policy grants no grace.
-  Failure in one sector must not contaminate an otherwise copyable sector.
+- A wallet may be Crypto-only, Stock-only, or genuine Mix. Each side must independently reach Challenger
+  economics (5% 30d return, seven closes, five Campaigns, five evidence days), stay profitable after the two
+  largest Campaigns and 1.5x costs, and avoid structural/deep-loss/liquidation hard risk. The complete Core
+  12/5/3 sample, ten-Campaign, win-rate/Wilson, execution and capacity surface is applied once to the aggregate
+  of those safe sectors. This keeps a bad side from contaminating a good side without requiring every side to
+  be a standalone Core.
 - A profitable sector with too few closed samples is `watch` evidence for Challenger ranking, not live-trading
   permission. Observer, individual replay, shared replay and Dashboard metrics use the same allowed/watch policy;
   an execution snapshot without an explicit allowed sector fails closed.
@@ -157,15 +158,16 @@ Every public economic line is a percentage of the canonical replay's recorded `i
 back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$500` dollar threshold. Current
 default classification is:
 
-- 30/14/7 observation floors remain 7/5/5, but new-open Core permission requires 15/7/5 closed episodes and
-  at least five independent evidence days. High ROI/PnL never creates a small-sample exception;
-- within every allowed sector, strict-Copy win rate must be at least 65%/65%/65% for 30/14/7 days. The 30-day
-  rate must also have an 80% one-sided Wilson lower confidence bound of at least 50%. A sampled failure is a
-  business rejection, not a ranking penalty;
+- 30/14/7 observation floors remain 7/5/5, while new-open Core permission requires 12/5/3 closed episodes,
+  ten 30d Campaigns and at least five independent evidence days. High ROI/PnL never creates a small-sample
+  exception;
+- aggregate 30d Campaign win rate must be at least 60% and its 80% one-sided Wilson lower confidence bound at
+  least 50%. Once 14d has five Campaigns it needs 55% wins and positive net. Seven-day evidence has no fixed
+  positive line; at five Campaigns, win rate below 40% together with negative net is a hard recent collapse;
 - Challenger needs 30-day strict Copy return at least 10%; once 7-day evidence reaches five closes, 7-day
   total return must be at least 3%;
-- normal Core needs 30-day return at least 10%, 7-day return at least 5%, the 15/7/5 sample and win-rate
-  surface above, five evidence days, complete open-position valuation, and no recent warning;
+- normal Core needs 30-day return at least 10%, the aggregate sample/win surface above, five evidence days,
+  complete open-position valuation, and no recent hard collapse;
 - strong Core normally uses a 20% 30-day line with at least 20 closes and ten evidence days. It still needs
   the same 14-day/seven-day sample, win-rate, execution, capacity, valuation, structure and recent-risk checks;
 - actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;
@@ -343,6 +345,10 @@ the current published generation.
 - Copy state is persisted in `copy_position` and `copy_action`. Paper execution is taker-only; maker execution
   will be designed separately before a real-money deployment. Live `copy_position` PnL includes realized closed
   PnL plus unrealized PnL for open rows.
+- The source-wallet membership high-water breaker is retired. Observer and canonical replay do not freeze,
+  reduce or exit a wallet merely because it gave back prior profit; historical `wallet_risk_state` rows and
+  `WALLET_HWM_*` values are migration-only and cannot affect qualification or execution. Deep-loss path risk,
+  liquidation cooldowns, mirrored exits and portfolio/margin caps remain active.
 - Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
   through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
   remain hard execution boundaries.

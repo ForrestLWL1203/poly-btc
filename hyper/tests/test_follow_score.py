@@ -225,11 +225,11 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(current["role"], "exit_only")
         self.assertEqual(slow["status"], "current_deep_loss_freeze")
 
-    def test_high_water_stage_or_cooldown_is_exit_only(self):
+    def test_retired_high_water_fields_do_not_change_qualification(self):
         stage = evaluate_follow_eligibility(evidence(wallet_breaker_stage=2))
         cooldown = evaluate_follow_eligibility(evidence(wallet_cooldown_until_ms=9_999_999_999_999))
-        self.assertEqual(stage["status"], "wallet_high_water_exit_only")
-        self.assertEqual(cooldown["role"], "exit_only")
+        self.assertTrue(stage["coreEligible"])
+        self.assertTrue(cooldown["coreEligible"])
 
     def test_no_allowed_specialty_sector_is_rejected(self):
         result = evaluate_follow_eligibility(evidence(sector_policy_json=json.dumps({
@@ -238,6 +238,17 @@ class FollowScoreTests(unittest.TestCase):
             "stock": {"allow": False, "status": "grid_dca"},
         })))
         self.assertEqual(result["status"], "no_allowed_sector")
+
+    def test_watch_only_sector_can_be_challenger_but_never_core(self):
+        result = evaluate_follow_eligibility(evidence(sector_policy_json=json.dumps({
+            "allowed": [],
+            "watch": ["crypto"],
+            "crypto": {"allow": False, "watch": True, "status": "sector_return_weak"},
+        })))
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["role"], "challenger")
 
     def test_score_scales_with_replay_equity_and_rewards_more_copy_profit(self):
         small, small_detail = compute_follow_score(evidence(

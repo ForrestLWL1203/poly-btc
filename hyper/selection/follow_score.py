@@ -8,7 +8,6 @@ under our own sizing/add/stop rules.
 from __future__ import annotations
 
 import math
-import time
 from typing import Mapping
 
 from hyper import config
@@ -100,6 +99,7 @@ def _evaluate_follow_eligibility_legacy(
     strong_floor = qualification_equity * policy.strong_core_return_30d
     data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
+    economic_disqualification_hint = evidence_status == "economically_disqualified"
     valuation_status = str(metrics.get("copy_bt_valuation_status") or "complete").strip().lower()
     if data_status and data_status not in {"valid", "ok"}:
         return {
@@ -128,6 +128,12 @@ def _evaluate_follow_eligibility_legacy(
             "reasons": ["缺少保证金归一化的非重叠copy证据"],
         }
     policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
+    if economic_disqualification_hint and not policy_json:
+        return {
+            "eligible": False, "coreEligible": False, "status": "economically_disqualified",
+            "role": "rejected", "deferred": False,
+            "reasons": ["严格Copy经济证据未通过，且旧记录缺少可细分的板块失败标签"],
+        }
     allowed = set(policy_json.get("allowed") or ())
     watched = set(policy_json.get("watch") or ())
     structural_core_blocked = bool(policy_json.get("coreBlocked"))
@@ -422,7 +428,11 @@ def _evaluate_follow_eligibility_legacy(
         pnl30 >= core_floor and standard_samples and not recent_warning
         and weekly_economics_ok and valuation_status == "complete" and not thin_edge
     )
-    core_eligible = bool(strong_entry or standard_entry)
+    # ``watch`` sectors are evidence-only and cannot become executable merely because their joint wallet
+    # aggregate crosses the return line.  Formation may replay them to discover a safe parameter surface,
+    # but the final-parameter sector gate must promote at least one sector into ``allowed`` first.
+    live_sector_ready = bool(allowed) if "allowed" in policy_json else True
+    core_eligible = bool((strong_entry or standard_entry) and live_sector_ready)
     if concentration_warning and not concentration_exception:
         core_eligible = False
     if recent_body_negative or liquidation_limit_exceeded or forward_risk_exceeded:
@@ -580,6 +590,7 @@ def evaluate_follow_eligibility(
     valuation_status = str(metrics.get("copy_bt_valuation_status") or "complete").strip().lower()
     data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
+    economic_disqualification_hint = evidence_status == "economically_disqualified"
 
     if data_status and data_status not in {"valid", "ok"}:
         return {
@@ -593,15 +604,11 @@ def evaluate_follow_eligibility(
             "role": "quarantine", "deferred": True,
             "reasons": ["copy回放证据无效，等待重新生成"],
         }
-    if evidence_status in {"no_evidence", "no_fills", "no_open_events", "economically_disqualified"}:
-        status = "economically_disqualified" if evidence_status == "economically_disqualified" else "no_copy_evidence"
-        reason = (
-            "严格Copy经济证据未通过，保留原始淘汰标签"
-            if evidence_status == "economically_disqualified" else "缺少有效copy回测证据，资格阶段排除"
-        )
+    if evidence_status in {"no_evidence", "no_fills", "no_open_events"}:
         return {
-            "eligible": False, "coreEligible": False, "status": status,
-            "role": "rejected", "deferred": False, "reasons": [reason],
+            "eligible": False, "coreEligible": False, "status": "no_copy_evidence",
+            "role": "rejected", "deferred": False,
+            "reasons": ["缺少有效copy回测证据，资格阶段排除"],
         }
     if not _has_copy_evidence(metrics, c30, c14, c7):
         return {
@@ -610,6 +617,12 @@ def evaluate_follow_eligibility(
         }
 
     policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
+    if economic_disqualification_hint and not policy_json:
+        return {
+            "eligible": False, "coreEligible": False, "status": "economically_disqualified",
+            "role": "rejected", "deferred": False,
+            "reasons": ["严格Copy经济证据未通过，且旧记录缺少可细分的板块失败标签"],
+        }
     allowed = set(policy_json.get("allowed") or ())
     watched = set(policy_json.get("watch") or ())
     structural_core_blocked = bool(policy_json.get("coreBlocked"))
@@ -697,17 +710,6 @@ def evaluate_follow_eligibility(
             "deepBagRecoveryRate": recovery_rate,
             "reasons": ["历史盘中深亏超过15%、失败事件过多或多次深亏恢复率不足"],
         }
-    breaker_stage = int(_num(metrics.get("wallet_breaker_stage")))
-    cooldown_until_ms = int(_num(metrics.get("wallet_cooldown_until_ms")))
-    breaker_active_member = bool(metrics.get("wallet_risk_active_member", True))
-    if (breaker_stage >= 2 and breaker_active_member) or cooldown_until_ms > int(time.time() * 1000):
-        return {
-            "eligible": False, "coreEligible": False, "status": "wallet_high_water_exit_only",
-            "role": "exit_only", "hardRisk": True, "breakerStage": breaker_stage,
-            "cooldownUntilMs": cooldown_until_ms,
-            "reasons": ["来源钱包已触发6%减半或10%退出高水位熔断，本成员周期仅允许退出"],
-        }
-
     # Research is intentionally non-executable: positive strict-Copy economics are visible without becoming
     # a source of live orders. A zero or losing 30-day replay is a real economic rejection.
     if pnl[30] <= 0.0:
@@ -795,10 +797,10 @@ def evaluate_follow_eligibility(
     long_deep_bag = deep_events > 0 and max_deep_bag_hours >= policy.deep_bag_long_hours
     path_core_ok = path_core_ok and not long_deep_bag
     forward_liquidations = int(_num(metrics.get("forward_liquidations")))
-    # Cumulative forward PnL is deliberately not an eligibility gate. Live loss protection is the persisted
-    # member-cycle high-water state: a plain -3% net-PnL check would duplicate the first breaker stage and
-    # could silently reintroduce the old daily-ejection behaviour.
+    # Cumulative forward PnL is deliberately not an eligibility gate. A plain daily net-PnL threshold would
+    # recreate the old churn where a source is removed before its later winning Campaign can be copied.
     forward_risk = bool(forward_liquidations > 0)
+    live_sector_ready = bool(allowed) if "allowed" in policy_json else True
     core_eligible = bool(
         returns[30] >= core_return_floor
         and core_samples
@@ -813,6 +815,7 @@ def evaluate_follow_eligibility(
         and not thin_edge
         and path_core_ok
         and not forward_risk
+        and live_sector_ready
     )
     strong_entry = bool(core_eligible and not retention and returns[30] >= policy.strong_core_return_30d)
     base_detail = {

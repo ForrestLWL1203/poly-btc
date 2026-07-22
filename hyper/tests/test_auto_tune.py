@@ -434,6 +434,36 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertEqual([x["coin"] for x in fills], ["BTC"])
 
+    def test_formation_can_replay_watch_sector_without_granting_live_permission(self):
+        db = self._db()
+        policy = {
+            "crypto": {"allow": False, "watch": True},
+            "stock": {"allow": False, "watch": False},
+            "allowed": [],
+            "watch": ["crypto"],
+        }
+        db.execute(
+            "INSERT INTO profile(addr,status,sector_policy_json) VALUES('0xaaa','active',?)",
+            (json.dumps(policy),),
+        )
+        fill = {
+            "time": 1_000, "tid": 1, "coin": "BTC", "side": "B",
+            "sz": "1", "px": "100", "startPosition": "0",
+        }
+        db.execute(
+            "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES('0xaaa',1,1000,?)",
+            (json.dumps(fill),),
+        )
+        db.commit()
+
+        live = auto_tune._load_portfolio_fills(db, ["0xaaa"], 0)
+        formation = auto_tune._load_portfolio_fills(
+            db, ["0xaaa"], 0, include_watch=True,
+        )
+
+        self.assertEqual(live, [])
+        self.assertEqual([row["coin"] for row in formation], ["BTC"])
+
 
     def test_choose_candidate_prices_liquidation_loss_through_net_pnl(self):
         baseline = {
