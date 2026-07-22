@@ -2,14 +2,54 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from hyper.launcher.core import targets
+from hyper.launcher.core.ssh import SSHExecutor
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class LauncherTests(unittest.TestCase):
+    def test_quiet_ssh_command_waits_instead_of_busy_spinning(self):
+        class Channel:
+            polls = 0
+
+            def exec_command(self, _cmd):
+                pass
+
+            def recv_ready(self):
+                return False
+
+            def recv_stderr_ready(self):
+                return False
+
+            def exit_status_ready(self):
+                self.polls += 1
+                return self.polls >= 3
+
+            def recv_exit_status(self):
+                return 0
+
+        channel = Channel()
+
+        class Transport:
+            def open_session(self):
+                return channel
+
+        class Client:
+            def get_transport(self):
+                return Transport()
+
+        executor = SSHExecutor.__new__(SSHExecutor)
+        executor._client = Client()
+        with patch("hyper.launcher.core.ssh.time.sleep") as wait:
+            result = executor.run("true")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(wait.call_count, 2)
+
     def test_root_launcher_shortcuts_exist(self):
         mac = ROOT / "launcher" / "launcher.command"
         win = ROOT / "launcher" / "launcher.cmd"

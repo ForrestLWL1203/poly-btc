@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import os
 import subprocess
+import time
 
 
 class ExecResult:
@@ -110,9 +111,8 @@ class SSHExecutor(Executor):
 
     def run(self, cmd, on_line=None, timeout=None):
         chan = self._client.get_transport().open_session()
-        if timeout:
-            chan.settimeout(timeout)
         chan.exec_command(cmd)
+        started = time.monotonic()
         buf, pending = io.StringIO(), ""
         while True:
             got = False
@@ -127,6 +127,13 @@ class SSHExecutor(Executor):
                     on_line(line)
             if chan.exit_status_ready() and not got and not chan.recv_ready() and not chan.recv_stderr_ready():
                 break
+            if not got:
+                if timeout is not None and time.monotonic() - started >= float(timeout):
+                    chan.close()
+                    raise TimeoutError("remote command timed out")
+                # ``recv_ready`` is a non-blocking predicate.  Without a wait this loop consumes an entire
+                # local CPU core for every quiet remote command (long scans/tuners commonly emit no output).
+                time.sleep(0.05)
         if pending:                                        # trailing line w/o newline
             buf.write(pending)
             if on_line:
