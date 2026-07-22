@@ -390,6 +390,10 @@ def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
                 "updated_at=excluded.updated_at",
                 (addr, resume_start, int(next_cursor), now_iso()),
             )
+            # Do not carry a write transaction into the caller's potentially expensive metric/replay work.
+            # Scanner and Observer intentionally share this WAL database; even a resumable cursor write must
+            # release the single SQLite writer slot immediately.
+            db.commit()
     return scoped_full, hit_cap, scoped_delta, True
 
 
@@ -638,6 +642,9 @@ def _official_roi_audit(db, generation_id, stamp, p):
 def _run_perp_prefilter(db, addrs, p, stamp):
     """Run the authoritative Portfolio precheck for ROI survivors before history collection."""
     pipeline_audit._delete_stage(db, stamp, "scan", "perp_prefilter")
+    # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
+    # single writer slot across a batch of rate-paced Portfolio calls freezes Observer marks and commands.
+    db.commit()
     minima = {
         "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
         "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
@@ -645,6 +652,14 @@ def _run_perp_prefilter(db, addrs, p, stamp):
     }
     share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
     results = {}
+    pending_audit = []
+
+    def flush_audit():
+        for event in pending_audit:
+            pipeline_audit._insert_event(db, **event)
+        db.commit()
+        pending_audit.clear()
+
     for rank, addr in enumerate(addrs, 1):
         try:
             payload = rest.portfolio(addr)
@@ -655,15 +670,18 @@ def _run_perp_prefilter(db, addrs, p, stamp):
         else:
             result = perp_prefilter.evaluate(payload, pnl_minima=minima, share_min=share_min)
         results[addr] = result
-        pipeline_audit._insert_event(
-            db, stamp=stamp, source="scan", stage="perp_prefilter", addr=addr, rank=rank,
-            status=result.status, reason=result.reason, payload=result.payload(),
-        )
+        # Buffer audit values in memory so no write transaction remains open during the next REST call.
+        pending_audit.append({
+            "stamp": stamp, "source": "scan", "stage": "perp_prefilter", "addr": addr,
+            "rank": rank, "status": result.status, "reason": result.reason,
+            "payload": result.payload(),
+        })
         if rank % 10 == 0:
-            db.commit()
+            flush_audit()
             _set_scan_progress(db, stage="perp_prefilter", candidates_scanned=rank,
                                candidates_total=len(addrs))
-    db.commit()
+    if pending_audit:
+        flush_audit()
     return results
 
 

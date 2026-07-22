@@ -106,6 +106,24 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn('raise RuntimeError("no_robust_quality_membership")', failure_branch)
         self.assertNotIn('"selected": ()', failure_branch)
 
+    def test_perp_prefilter_never_holds_writer_transaction_during_network_calls(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            transaction_states = []
+
+            def portfolio(_addr):
+                transaction_states.append(db.in_transaction)
+                return portfolio_rows()
+
+            with patch.object(scanner.rest, "portfolio", side_effect=portfolio):
+                results = scanner._run_perp_prefilter(
+                    db, ["0xaaa", "0xbbb", "0xccc"], scan_args(), "scan-lock-test",
+                )
+
+            self.assertEqual(transaction_states, [False, False, False])
+            self.assertTrue(all(result.passed for result in results.values()))
+            self.assertFalse(db.in_transaction)
+
     def test_core_formation_tune_pool_includes_parameter_sensitive_challengers_only(self):
         self.assertTrue(scanner._formation_tune_candidate({
             "follow_qualification": {"eligible": True, "coreEligible": True},
