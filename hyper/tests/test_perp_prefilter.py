@@ -19,13 +19,26 @@ def _portfolio(*, total=(6000, 18000, 25000), perp=(5000, 15000, 20000)):
 class PerpPrefilterTests(unittest.TestCase):
     minima = {"week": 5000, "month": 15000, "all": 20000}
 
-    def test_accepts_month_boundary_and_ignores_other_window_weakness(self):
+    def test_accepts_all_window_boundaries(self):
         result = perp_prefilter.evaluate(
-            _portfolio(total=(-100, 18750, -100), perp=(-200, 15000, -200)),
+            _portfolio(total=(6250, 18750, 25000), perp=(5000, 15000, 20000)),
             pnl_minima=self.minima, share_min=0.8,
         )
         self.assertTrue(result.passed)
+        self.assertEqual(result.windows["week"]["perpShare"], 0.8)
         self.assertEqual(result.windows["month"]["perpShare"], 0.8)
+
+    def test_rejects_weak_week_or_lifetime_before_deep_profile(self):
+        weak_week = perp_prefilter.evaluate(
+            _portfolio(total=(6250, 18750, 25000), perp=(4999, 15000, 20000)),
+            pnl_minima=self.minima, share_min=0.8,
+        )
+        self.assertEqual(weak_week.reason, "perp_pnl_below_floor:week")
+        weak_all = perp_prefilter.evaluate(
+            _portfolio(total=(6250, 18750, 25000), perp=(5000, 15000, 19999)),
+            pnl_minima=self.minima, share_min=0.8,
+        )
+        self.assertEqual(weak_all.reason, "perp_pnl_below_floor:all")
 
     def test_rejects_spot_or_vault_dominated_profit(self):
         result = perp_prefilter.evaluate(

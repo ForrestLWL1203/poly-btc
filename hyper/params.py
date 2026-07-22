@@ -40,8 +40,8 @@ PARAM_SPEC = [
     ("HARVEST_ALL_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_ALL_PNL_MIN,
         "历史绝对 PnL 参考线", "仅作审计，不参与候选硬筛"),
     ("HARVEST_PERP_PNL_SHARE_MIN", "scanner", "yellow", "pct", "rescan",
-        config.HARVEST_PERP_PNL_SHARE_MIN * 100, "30日Perp盈利占比下限",
-        "仅近30日要求Perp PnL为正且达到此占比；7日和历史只作审计"),
+        config.HARVEST_PERP_PNL_SHARE_MIN * 100, "Perp盈利占比下限",
+        "7日、30日和历史三个窗口都必须达到此Perp盈利占比，才进入昂贵深度回放"),
     ("EXCLUDE_HFT",          "scanner", "green",  "bool",    "rescan", True,
         "排除高频交易", "过滤持仓数秒的高频/量化盘(延迟跟不上)"),
     ("inactive_days",        "scanner", "green",  "int",     "rescan", config.INACTIVE_DAYS,
@@ -347,6 +347,7 @@ _HARVEST_PREVIOUS_DEFAULTS = {
         "0", "0.0", "500", "500.0", "5000", "5000.0", "8000", "8000.0", "15000", "15000.0",
     ),
     "HARVEST_ALL_PNL_MIN": ("20000", "20000.0"),
+    "HARVEST_PERP_PNL_SHARE_MIN": ("60", "60.0"),
 }
 
 _RISK_PREVIOUS_DEFAULTS = {

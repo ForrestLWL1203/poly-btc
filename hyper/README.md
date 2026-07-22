@@ -87,8 +87,9 @@ Profiles are not re-downloaded from zero on every daily run.
 - Leaderboard candidates require at least `$5,000` account value, `$250,000` leveraged 7-day notional volume,
   at least `$250` 7-day PnL and at least `$1,000` 30-day PnL. Both recent PnL floors must pass; there is no
   ROI magnitude gate or volume cap.
-  The Portfolio precheck uses only the primary 30-day window: Perp PnL must be positive and at least 60% of
-  total PnL. The 7-day and lifetime windows remain visible in audit but do not form an `AND` rejection.
+  The cheap Portfolio precheck reserves deep history replay for wallets whose 7-day, 30-day and lifetime
+  windows all clear their absolute Perp PnL floors and an 80% Perp-profit share. Official ROI remains audit
+  only; these three executable-market checks form the high-quality `AND` admission surface.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
   is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
