@@ -325,6 +325,14 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual([row["addr"] for row in ranked], ["0xstrong", "0xold"])
         self.assertEqual(ranked[0]["follow_score"], .90)
 
+    def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+
+        self.assertNotIn('raise RuntimeError(f"effective_copy_replay_invalid:', source)
+        self.assertIn('raise RuntimeError(f"pinned_core_replay_invalid:', source)
+        self.assertIn("if replay_invalid:", source)
+        self.assertIn("rejected.append(addr)", source)
+
 
     def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
         source = inspect.getsource(scanner._build_explicit_selection)

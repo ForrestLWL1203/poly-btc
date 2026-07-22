@@ -2387,12 +2387,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 qualification = _apply_core_soft_failure_grace(
                     db, addr, generation_id, qualification, policy_values=follow_surface,
                 )
-            if qualification.get("deferred") or qualification.get("role") == "quarantine":
-                raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
             qualifications[addr] = qualification
             scores[addr] = f(effective.get("score"))
             if effective.get("sectorPolicyJson"):
                 policies[addr] = effective["sectorPolicyJson"]
+            replay_invalid = bool(
+                qualification.get("deferred") or qualification.get("role") == "quarantine"
+            )
+            # A data/path failure belongs to this wallet, not to the whole generation. Publish the exact
+            # quarantine label and keep searching the remaining candidates. Only an operator-pinned Core
+            # is allowed to fail the formation closed because silently dropping that explicit control would
+            # violate operator intent. Incumbent non-pinned Core rows naturally become Exit-only below.
+            if replay_invalid and addr in pinned:
+                raise RuntimeError(f"pinned_core_replay_invalid:{addr}")
             passed = bool(qualification.get("coreEligible"))
             audit.append({
                 "addr": addr,
@@ -2400,6 +2407,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
                 "status": qualification.get("status") or "unknown",
                 "operatorStarred": addr in pinned,
             })
+            if replay_invalid:
+                rejected.append(addr)
+                continue
             if passed:
                 qualified_rows.append(row)
             else:
