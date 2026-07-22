@@ -4557,6 +4557,53 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
 
 
 # ----------------------------------------------------------------------------- staged-generation finalization
+def _profiled_generation_coverage(db, generation_id: str, scan_stamp=None) -> dict:
+    """Count durable profile outcomes, including deferred rows which intentionally retain old evidence."""
+    current = db.execute(
+        "SELECT COUNT(*),"
+        "SUM(CASE WHEN COALESCE(data_status,'valid') NOT IN "
+        "('deferred_data_error','rejected') THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN data_status='deferred_data_error' THEN 1 ELSE 0 END) "
+        "FROM profile WHERE profile_generation=?",
+        (generation_id,),
+    ).fetchone()
+    current_total = int((current[0] if current else 0) or 0)
+    current_valid = int((current[1] if current else 0) or 0)
+    current_deferred = int((current[2] if current else 0) or 0)
+    if not scan_stamp:
+        return {
+            "complete": current_total,
+            "valid": current_valid,
+            "deferred": current_deferred,
+            "rejected": max(0, current_total - current_valid - current_deferred),
+            "source": "profile_generation",
+        }
+    audited = db.execute(
+        "SELECT COUNT(DISTINCT lower(a.addr)),"
+        "COUNT(DISTINCT CASE WHEN p.data_status='deferred_data_error' THEN lower(a.addr) END) "
+        "FROM pipeline_audit a LEFT JOIN profile p ON lower(p.addr)=lower(a.addr) "
+        "WHERE a.source='scan' AND a.stamp=? AND a.stage='profile' AND a.addr IS NOT NULL",
+        (scan_stamp,),
+    ).fetchone()
+    audited_total = int((audited[0] if audited else 0) or 0)
+    if not audited_total:
+        return {
+            "complete": current_total,
+            "valid": current_valid,
+            "deferred": current_deferred,
+            "rejected": max(0, current_total - current_valid - current_deferred),
+            "source": "profile_generation",
+        }
+    audited_deferred = int((audited[1] if audited else 0) or 0)
+    return {
+        "complete": audited_total,
+        "valid": current_valid,
+        "deferred": audited_deferred,
+        "rejected": max(0, audited_total - current_valid - audited_deferred),
+        "source": "profile_audit",
+    }
+
+
 def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     """Finish selection/tuning from an already-profiled generation without fetching wallet history."""
     stamp = stamp or now_iso()
@@ -4570,16 +4617,15 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
     if not generation_id:
         raise RuntimeError("no_profiled_generation_to_finalize")
     meta = db.execute(
-        "SELECT status,leaderboard_valid,workset_n,leaderboard_rows,metrics_json "
+        "SELECT status,leaderboard_valid,workset_n,leaderboard_rows,metrics_json,started_at "
         "FROM scan_generation WHERE generation=?",
         (generation_id,),
     ).fetchone()
     if not meta or meta[0] in {"published", "failed"} or not int(meta[1] or 0):
         raise RuntimeError("generation_not_resumable")
     workset_n = int(meta[2] or 0)
-    profile_total = int(db.execute(
-        "SELECT COUNT(*) FROM profile WHERE profile_generation=?", (generation_id,),
-    ).fetchone()[0] or 0)
+    profile_coverage = _profiled_generation_coverage(db, generation_id, meta[5])
+    profile_total = int(profile_coverage["complete"])
     if workset_n <= 0 or profile_total < workset_n:
         raise RuntimeError(f"profile_generation_incomplete:{profile_total}:{workset_n}")
     staged_n = int(db.execute(
@@ -4630,16 +4676,9 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None) -> dict:
             audit_stamp=stamp,
         )
         _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
-        valid = int(db.execute(
-            "SELECT COUNT(*) FROM profile WHERE profile_generation=? "
-            "AND COALESCE(data_status,'valid') NOT IN ('deferred_data_error','rejected')",
-            (generation_id,),
-        ).fetchone()[0] or 0)
-        deferred = int(db.execute(
-            "SELECT COUNT(*) FROM profile WHERE profile_generation=? AND data_status='deferred_data_error'",
-            (generation_id,),
-        ).fetchone()[0] or 0)
-        rejected = max(0, profile_total - valid - deferred)
+        valid = int(profile_coverage["valid"])
+        deferred = int(profile_coverage["deferred"])
+        rejected = int(profile_coverage["rejected"])
         generation.mark_generation_ready(
             db, generation_id, profile_total=profile_total, profile_valid=valid,
             profile_deferred=deferred, profile_rejected=rejected,

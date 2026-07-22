@@ -410,6 +410,36 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         scanner.generation_market.Resolver(db, generation, 1, set(), {})
         return scanner.generation_market.seal(db, generation)
 
+    def test_profiled_generation_coverage_counts_audited_deferred_outcomes(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile(addr,status,profile_generation,data_status) VALUES(?,?,?,?)",
+                [
+                    ("0xvalid", "rejected", "g1", "valid"),
+                    ("0xdeferred", "quarantine", "old-g", "deferred_data_error"),
+                ],
+            )
+            for addr, status, reason in (
+                ("0xvalid", "rejected", "economically_disqualified"),
+                ("0xdeferred", "quarantine", "hit_page_cap"),
+            ):
+                scanner.pipeline_audit._insert_event(
+                    db, stamp="scan-start", source="scan", stage="profile",
+                    addr=addr, status=status, reason=reason,
+                )
+            db.commit()
+
+            coverage = scanner._profiled_generation_coverage(db, "g1", "scan-start")
+
+            self.assertEqual(coverage, {
+                "complete": 2,
+                "valid": 1,
+                "deferred": 1,
+                "rejected": 0,
+                "source": "profile_audit",
+            })
+
     def test_finalize_profiled_generation_reuses_cache_without_wallet_fetch(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
