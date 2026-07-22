@@ -141,14 +141,35 @@ class MetricsGateTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
 
-    def test_rejects_habitual_dca_by_median_adds(self):
+    def test_rejects_habitual_dca_only_with_five_complete_majority_grid_episodes(self):
         ok, reason = metrics.gates_structural(
-            gate_metrics(median_adds_per_ep=4, max_adds_per_ep=4),
+            gate_metrics(median_adds_per_ep=4, max_adds_per_ep=4,
+                         complete_episode_n=5, grid_episode_n=3),
             gate_params(grid_max_adds=3),
         )
 
         self.assertFalse(ok)
         self.assertEqual(reason, "grid_dca")
+
+    def test_small_grid_sample_and_one_fill_outlier_are_not_structural_rejects(self):
+        grid_ok, _ = metrics.gates_structural(
+            gate_metrics(median_adds_per_ep=8, complete_episode_n=2, grid_episode_n=2),
+            gate_params(grid_max_adds=3),
+        )
+        hft_ok, _ = metrics.gates_structural(
+            gate_metrics(n_trades=10, p90_fills_ep=100, heavy_fills_episode_n=1),
+            gate_params(max_fills_per_ep=50),
+        )
+        self.assertTrue(grid_ok)
+        self.assertTrue(hft_ok)
+
+    def test_systematic_fill_slicing_requires_two_or_more_heavy_episodes(self):
+        ok, reason = metrics.gates_structural(
+            gate_metrics(n_trades=10, p90_fills_ep=100, heavy_fills_episode_n=2),
+            gate_params(max_fills_per_ep=50),
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "hft_uncopyable")
 
     def test_recent_copyable_loss_is_left_for_authoritative_copy_profile_gate(self):
         ok, reason = metrics.gates_state(

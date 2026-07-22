@@ -3,11 +3,35 @@ from dataclasses import replace
 
 from hyper.copy.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
                             smart_add_order_margin, smart_take_profit_decision,
-                            wallet_sector_side_margin, wallet_sector_side_margin_room)
+                            wallet_sector_side_cap_pct, wallet_sector_side_effective_cap_pct,
+                            wallet_sector_side_margin,
+                            wallet_sector_side_margin_room)
 from hyper.copy.sizing import sizing_equity_for_drawdown
 
 
 class CopyEngineTests(unittest.TestCase):
+    def test_dynamic_wallet_basket_caps_follow_board_and_volatility(self):
+        self.assertEqual(wallet_sector_side_cap_pct("BTC", "stable"), 0.20)
+        self.assertEqual(wallet_sector_side_cap_pct("ETH", "mid"), 0.15)
+        self.assertEqual(wallet_sector_side_cap_pct("DOGE", "high"), 0.10)
+        self.assertEqual(wallet_sector_side_cap_pct("xyz:NVDA", "stable"), 0.10)
+
+    def test_mixed_volatility_basket_uses_most_conservative_cap_regardless_of_order(self):
+        existing_high = [{
+            "addr": "0xaaa", "coin": "DOGE", "side": "long", "risk_tier": "high",
+        }]
+        existing_stable = [{
+            "addr": "0xaaa", "coin": "BTC", "side": "long", "risk_tier": "stable",
+        }]
+        high_then_stable = wallet_sector_side_effective_cap_pct(
+            existing_high, addr="0xaaa", coin="BTC", side="long", candidate_tier="stable",
+        )
+        stable_then_high = wallet_sector_side_effective_cap_pct(
+            existing_stable, addr="0xaaa", coin="DOGE", side="long", candidate_tier="high",
+        )
+        self.assertEqual(high_then_stable, 0.10)
+        self.assertEqual(stable_then_high, 0.10)
+
     def test_wallet_sector_side_margin_groups_only_same_source_board_and_direction(self):
         positions = [
             {"addr": "0xaaa", "coin": "xyz:MU", "side": "short", "margin": 300, "size": 10, "rem_size": 5},

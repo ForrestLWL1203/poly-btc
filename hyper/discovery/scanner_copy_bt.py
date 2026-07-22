@@ -7,7 +7,7 @@ import json
 from hyper import config, params
 from hyper.copy.copy_backtest import run_backtest, slice_backtest_result
 from hyper.copy.copy_data import market_evidence_key, normalize_copyable_fills
-from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy.sector import SECTORS, compact_sector_results, evaluate_sector_policy, filter_fills
 
 
@@ -35,6 +35,11 @@ def copy_bt_overrides(db):
     except Exception:  # noqa: BLE001
         return {}
     out = dict(vals)
+    try:
+        scanner_values = params.load_category(db, "scanner")
+        out.update({key: scanner_values[key] for key in COPY_POLICY_PARAM_KEYS if key in scanner_values})
+    except Exception:  # noqa: BLE001
+        pass
     if "SMART_ADD" in vals:
         out["ADD_STRATEGY"] = "smart" if vals["SMART_ADD"] else "hardcap"
     return out
@@ -239,6 +244,19 @@ def record_primary_copy_bt(metrics, result):
         initial_margin_equity=result.get("initial_margin_equity"),
         copy_bt_data_status=result.get("data_status", "valid"),
         copy_bt_evidence_status=result.get("evidence_status", "observed"),
+        copy_path_risk_status=result.get("path_risk_status", "missing"),
+        copy_intratrade_max_drawdown=result.get("intratrade_max_drawdown"),
+        copy_max_underwater_hours=result.get("max_underwater_hours"),
+        copy_loss_over_5_time_ratio=result.get("loss_over_5_time_ratio"),
+        copy_deep_bag_event_n=int(result.get("deep_bag_event_n") or 0),
+        copy_failed_deep_bag_n=int(result.get("failed_deep_bag_n") or 0),
+        copy_deep_bag_recovery_rate=result.get("deep_bag_recovery_rate"),
+        copy_max_deep_bag_hours=result.get("max_deep_bag_hours"),
+        copy_current_open_loss_frac=result.get("current_open_loss_frac"),
+        copy_current_bag_hours=result.get("current_bag_hours"),
+        copy_campaign_max_drawdown=result.get("campaign_max_drawdown"),
+        copy_campaign_peak_positions=int(result.get("campaign_peak_positions") or 0),
+        copy_campaign_peak_margin_pct=result.get("campaign_peak_margin_pct"),
     )
     for key in (
         "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
@@ -254,6 +272,9 @@ def record_primary_copy_bt(metrics, result):
         "entry_gap_pct_weighted", "entry_gap_pct_p90", "entry_gap_sigma_weighted",
         "entry_gap_sigma_p90", "entry_alignment", "add_execution", "add_fidelity",
         "add_fidelity_applied", "behavior_replication_v2", "behavior_replication_rate",
+        "campaign_closed_n", "campaign_wins", "campaign_win_rate", "campaign_net_pnl",
+        "campaign_profit_factor", "campaign_net_after_top1", "campaign_net_after_top2",
+        "campaign_max_positions", "campaign_peak_positions", "campaign_peak_margin_pct",
     ):
         if key in result:
             metrics[f"copy_bt_{key}"] = result.get(key)
@@ -311,6 +332,9 @@ def record_recent_copy_bt(metrics, days, result):
         "body_after_top3_gross_profit", "body_after_top3_gross_loss",
         "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
         "body_after_top3_median_pnl",
+        "campaign_closed_n", "campaign_wins", "campaign_win_rate", "campaign_net_pnl",
+        "campaign_profit_factor", "campaign_net_after_top1", "campaign_net_after_top2",
+        "campaign_max_positions", "campaign_peak_positions", "campaign_peak_margin_pct",
     ):
         if key in result:
             metrics[prefix + key] = result.get(key)

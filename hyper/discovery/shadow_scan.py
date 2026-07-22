@@ -137,8 +137,31 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
     roles = dict(db.execute(
         "SELECT role,COUNT(*) FROM follow_selection WHERE generation=? GROUP BY role", (generation_id,)
     ).fetchall())
-    funnel.update(core=roles.get("core", 0), challenger=roles.get("challenger", 0),
-                  exitOnly=roles.get("exit_only", 0))
+    evidence_roles = Counter()
+    structure_passed = 0
+    for payload_json, in db.execute(
+        "SELECT payload_json FROM pipeline_audit WHERE stamp=? AND stage='profile'", (stamp,),
+    ).fetchall():
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        qualification = payload.get("followEligibility") or {}
+        role = qualification.get("role")
+        if role:
+            evidence_roles[role] += 1
+        if (payload.get("decisionAudit") or {}).get("stage") not in {
+            "data_validation", "structure_filter",
+        }:
+            structure_passed += 1
+    funnel.update(
+        coarseRecall=funnel["officialRoi"], structureFilter=structure_passed,
+        research=sum(evidence_roles[role] for role in ("research", "challenger", "core_eligible")),
+        challengerEvidence=sum(evidence_roles[role] for role in ("challenger", "core_eligible")),
+        personalCore=evidence_roles["core_eligible"], finalCore=roles.get("core", 0),
+        core=roles.get("core", 0), challenger=roles.get("challenger", 0),
+        exitOnly=roles.get("exit_only", 0),
+    )
     perp_payload = {}
     for addr, payload in db.execute(
         "SELECT addr,payload_json FROM pipeline_audit WHERE stamp=? AND stage='perp_prefilter'",

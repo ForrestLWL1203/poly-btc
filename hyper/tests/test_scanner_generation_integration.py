@@ -35,10 +35,18 @@ def portfolio_rows():
 def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
     def window(net, closed, rate):
         wins = int(round(closed * rate))
+        campaigns = min(closed, 12)
+        campaign_wins = int(round(campaigns * rate))
         return {
             "copy_net_pnl": net, "closed_n": closed, "wins": wins,
             "opened_n": closed, "target_open_events": closed,
             "liquidations": 0, "valuation_status": "complete",
+            "profit_factor": 1.6, "cost_stress_net_pnl": net * .7,
+            "campaign_closed_n": campaigns, "campaign_wins": campaign_wins,
+            "campaign_net_after_top2": net * .3,
+            "path_risk_status": "complete", "intratrade_max_drawdown": .05,
+            "deep_bag_event_n": 0, "failed_deep_bag_n": 0,
+            "deep_bag_recovery_rate": 1.0, "initial_margin_equity": 10_000,
         }
     return json.dumps({
         "crypto": {
@@ -96,15 +104,98 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(surface["STABLE_MARGIN_PCT"], 1.0)
         self.assertEqual(reason, "holdout_not_better")
 
-    def test_no_robust_membership_fails_closed_instead_of_publishing_empty_core(self):
+    def test_no_robust_membership_returns_an_explicit_legal_empty_core(self):
         source = inspect.getsource(scanner.form_quality_prefix)
         failure_branch = source[
             source.index("if robust_winner is None:"):
             source.index("chosen_addrs, chosen, robust_check = robust_winner")
         ]
 
-        self.assertIn('raise RuntimeError("no_robust_quality_membership")', failure_branch)
-        self.assertNotIn('"selected": ()', failure_branch)
+        self.assertNotIn('raise RuntimeError("no_robust_quality_membership")', failure_branch)
+        self.assertIn("chosen_addrs = ()", failure_branch)
+        self.assertIn('"explicitEmptyCore": True', failure_branch)
+
+    def test_explicit_empty_core_turns_old_core_exit_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {key: None for key in cols}
+            profile.update(
+                addr="0xold", status="active", reason="ok", score=.8,
+                profile_generation="g2", data_status="valid", evidence_status="qualified",
+            )
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(key) for key in cols],
+            )
+            db.commit()
+            profiles = [{
+                **profile,
+                "follow_score": .8,
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": False,
+                    "role": "challenger", "status": "challenger_return_watch",
+                },
+            }]
+
+            rows, _marginal = scanner._build_forced_prefix_selection(
+                db, "g2", "2026-07-07T00:00:00Z", 1,
+                profiles=profiles,
+                previous_roles={"0xold": scanner.selection.CORE},
+                controls={"0xold": True}, held=set(), desired_order=(),
+                formation_meta={"explicitEmptyCore": True},
+            )
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].role, scanner.selection.EXIT_ONLY)
+            self.assertFalse(rows[0].enabled)
+            self.assertIn("no_robust_core", rows[0].reason)
+
+    def test_core_soft_failure_needs_two_distinct_complete_generations(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
+                "VALUES ('0xold','core','core','now','now','now')"
+            )
+            soft = {
+                "eligible": True, "coreEligible": False, "role": "challenger",
+                "status": "challenger_return_watch", "reasons": ["soft"],
+            }
+
+            first = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", soft)
+            duplicate = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", soft)
+            second = scanner._apply_core_soft_failure_grace(db, "0xold", "g2", soft)
+
+            self.assertTrue(first["coreEligible"])
+            self.assertTrue(duplicate["coreEligible"])
+            self.assertFalse(second["coreEligible"])
+            count = db.execute(
+                "SELECT core_soft_fail_count FROM wallet_registry WHERE addr='0xold'"
+            ).fetchone()[0]
+            self.assertEqual(count, 2)
+
+    def test_core_hard_risk_bypasses_soft_failure_grace(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
+                "VALUES ('0xold','core','core','now','now','now')"
+            )
+            hard = {
+                "eligible": False, "coreEligible": False, "role": "exit_only",
+                "status": "current_deep_loss_freeze", "hardRisk": True,
+            }
+
+            result = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", hard)
+
+            self.assertFalse(result["coreEligible"])
+            self.assertEqual(result["role"], "exit_only")
 
     def test_perp_prefilter_never_holds_writer_transaction_during_network_calls(self):
         with tempfile.TemporaryDirectory() as td:

@@ -52,6 +52,27 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertNotEqual(active["params"]["STABLE_MARGIN_PCT"], .09)
         self.assertEqual(active["targets"][0]["acctValue"], 12345)
         self.assertEqual(active["targets"][0]["seedCoins"], ["BTC"])
+        self.assertIn("COPY_POLICY_VERSION", active["params"])
+        self.assertEqual(active["params"]["CORE_MIN_COPY_RETURN_30D"], .10)
+        self.assertEqual(active["params"]["CORE_INTRATRADE_DD_MAX"], .12)
+        self.assertEqual(active["params"]["COPY_DEEP_BAG_EVENT_MIN_HOURS"], 4.0)
+        self.assertEqual(active["params"]["CORE_DEEP_BAG_MIN_RECOVERY_RATE"], .50)
+        self.assertEqual(active["params"]["WALLET_HWM_EXIT_DD_PCT"], .10)
+        self.assertEqual(active["params"]["WALLET_STOCK_SIDE_CAP_PCT"], .10)
+
+    def test_revision_legally_snapshots_zero_core_targets(self):
+        db = self._db()
+        db.execute(
+            "UPDATE follow_selection SET role='exit_only',enabled=0 WHERE generation='g1'"
+        )
+
+        created = strategy_revision.create_revision(db, "g1", source="zero_core")
+        db.commit()
+        active = strategy_revision.load_active(db)
+
+        self.assertEqual(created["targetCount"], 0)
+        self.assertEqual(active["targets"], [])
+        self.assertEqual(strategy_revision.resolved_targets(db, active), [])
 
     def test_activation_compare_and_swap_rejects_stale_parent(self):
         db = self._db()

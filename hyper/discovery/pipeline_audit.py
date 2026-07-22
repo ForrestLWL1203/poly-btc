@@ -7,10 +7,14 @@ scan without reverse-engineering transient logs.
 """
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 import sqlite3
 from typing import Iterable
 
+from hyper import config, params, storage
+from hyper.copy.copy_policy import load_copy_policy
+from hyper.selection.follow_score import evaluate_follow_eligibility
 from hyper.util import now_iso
 
 
@@ -101,18 +105,47 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
     _delete_stage(db, stamp, source, "profile")
     where, args = _addr_filter(addrs)
     rows = _fetch_dicts(db.execute(
-        "SELECT addr,status,reason,score,market_type,net_7d,net_14d,net_30d,net_life,"
-        "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
-        "copy_bt_liquidations,copy_bt_fee_drag,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
-        "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,sector_copy_json,sector_policy_json,"
-        "copy_expected_return,copy_return_lcb,copy_positive_probability,copy_evidence_days,"
-        "copy_recent_return_14d,copy_recent_return_7d,copy_risk_score,execution_score,"
-        "last_copyable_open_ms,actionable_open_rate,capacity_fit,data_status,evidence_status,"
-        "open_loss_frac,open_win_frac,bag_count,max_bag_days "
-        f"FROM profile WHERE 1=1{where} ORDER BY addr",
-        args,
+        f"SELECT {storage.PROFILE_COLS} FROM profile WHERE 1=1{where} ORDER BY addr", args,
     ))
+    try:
+        policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
+    except sqlite3.Error:
+        policy_values = {}
+    policy = load_copy_policy(policy_values)
+    thresholds = asdict(policy)
+    margin_equity_pct = float(policy_values.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT))
     for r in rows:
+        qualification = evaluate_follow_eligibility(
+            {
+                **r,
+                "copy_bt_data_status": r.get("data_status"),
+                "copy_bt_evidence_status": r.get("evidence_status"),
+                "initial_margin_equity": float(config.INITIAL_BALANCE),
+            },
+            margin_equity_pct=margin_equity_pct,
+            policy_values=policy_values,
+        )
+        reason = str(r.get("reason") or qualification.get("status") or "unknown")
+        structural_reasons = {
+            "spot_dominant", "bot_frequency", "hft_uncopyable", "hft_turnover", "grid_dca",
+            "heavy_dca", "too_many_concurrent", "no_copyable_perp_fills",
+        }
+        if qualification.get("role") == "quarantine" or str(r.get("data_status") or "") != "valid":
+            decision_stage, failure_category = "data_validation", "data_error"
+        elif qualification.get("hardRisk"):
+            decision_stage, failure_category = "copy_risk", "hard_risk_exit"
+        elif reason in structural_reasons:
+            decision_stage, failure_category = "structure_filter", "business_reject"
+        elif qualification.get("coreEligible"):
+            decision_stage, failure_category = "personal_core", "passed"
+        elif qualification.get("role") == "challenger":
+            decision_stage, failure_category = "copy_qualification", "soft_retention_failure"
+        else:
+            decision_stage, failure_category = "copy_qualification", "business_reject"
+        first_hard_failure = (
+            qualification.get("status") if failure_category in {"data_error", "hard_risk_exit"}
+            else (reason if reason in structural_reasons else None)
+        )
         payload = {
             "marketType": r["market_type"],
             "net": {
@@ -142,6 +175,26 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "executionScore": r["execution_score"],
                 "actionableOpenRate": r["actionable_open_rate"],
                 "capacityFit": r["capacity_fit"],
+                "campaigns30d": qualification.get("campaigns", {}).get(30),
+            },
+            "followEligibility": qualification,
+            "decisionAudit": {
+                "stage": decision_stage,
+                "failureCategory": failure_category,
+                "firstHardFailure": first_hard_failure,
+                "thresholds": thresholds,
+                "actual": {
+                    "return30d": (qualification.get("returns") or {}).get(30),
+                    "closed30d": r.get("copy_bt_closed_n"),
+                    "closed14d": r.get("copy_bt_14d_closed_n"),
+                    "closed7d": r.get("copy_bt_7d_closed_n"),
+                    "campaignWinRate30d": (qualification.get("winRates") or {}).get(30),
+                    "campaignWinRateLcb30d": qualification.get("winRateLcb30"),
+                    "intratradeDrawdown": r.get("copy_intratrade_max_drawdown"),
+                    "failedDeepEvents": r.get("copy_failed_deep_bag_n"),
+                    "actionableOpenRate": r.get("actionable_open_rate"),
+                    "capacityFit": r.get("capacity_fit"),
+                },
             },
             "qualification": {
                 "dataStatus": r["data_status"],

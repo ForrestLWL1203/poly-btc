@@ -66,7 +66,7 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertTrue(policy["crypto"]["allow"])
         self.assertEqual(policy["crypto"]["status"], "allowed")
         self.assertFalse(policy["stock"]["allow"])
-        self.assertEqual(policy["stock"]["status"], "sector_recent_weak")
+        self.assertEqual(policy["stock"]["status"], "sector_recent_collapse")
         self.assertEqual(policy["allowed"], ["crypto"])
 
     def test_current_generation_structure_limits_profitable_sector_without_prior_policy(self):
@@ -157,7 +157,7 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(policy["allowed"], [])
         self.assertFalse(policy["coreBlocked"])
         self.assertFalse(policy["crypto"]["allow"])
-        self.assertEqual(policy["crypto"]["status"], "sector_recent_weak")
+        self.assertEqual(policy["crypto"]["status"], "heavy_dca_pressure_failed")
 
     def test_mix_wallet_keeps_clean_and_pressure_tested_heavy_dca_sectors(self):
         sector_results = {
@@ -190,8 +190,8 @@ class SectorPolicyTests(unittest.TestCase):
         policy = sector.evaluate_sector_policy(sector_results)
 
         self.assertFalse(policy["crypto"]["allow"])
-        self.assertEqual(policy["crypto"]["status"], "sector_recent_weak")
-        self.assertEqual(policy["watch"], ["crypto"])
+        self.assertEqual(policy["crypto"]["status"], "sector_recent_collapse")
+        self.assertEqual(policy["watch"], [])
         self.assertEqual(policy["crypto"]["recent"]["classification"], "insufficient_recent")
 
     def test_recent_loss_uses_margin_normalized_wallet_distribution(self):
@@ -212,7 +212,7 @@ class SectorPolicyTests(unittest.TestCase):
         policy = sector.evaluate_sector_policy(sector_results)
 
         self.assertFalse(policy["crypto"]["allow"])
-        self.assertEqual(policy["crypto"]["status"], "sector_recent_weak")
+        self.assertEqual(policy["crypto"]["status"], "sector_sample_watch")
         self.assertEqual(policy["watch"], ["crypto"])
         self.assertEqual(policy["crypto"]["recent"]["classification"], "shallow_loss")
         self.assertFalse(policy["crypto"]["recent"]["hard"])
@@ -237,12 +237,13 @@ class SectorPolicyTests(unittest.TestCase):
         repeated = sector.evaluate_sector_policy(sector_results, previous_policy=first)
 
         self.assertFalse(first["crypto"]["allow"])
-        self.assertEqual(first["crypto"]["status"], "sector_recent_weak")
+        self.assertEqual(first["crypto"]["status"], "sector_sample_watch")
         self.assertEqual(first["crypto"]["recent"]["streak"], 0)
         self.assertFalse(repeated["crypto"]["allow"])
+        self.assertEqual(first["crypto"]["recent"]["classification"], "significant_loss")
         self.assertEqual(repeated["crypto"]["recent"]["streak"], 0)
 
-    def test_mix_wallet_drops_recently_weak_stock_without_masking_from_crypto(self):
+    def test_mix_wallet_does_not_apply_a_fixed_seven_day_return_gate(self):
         sector_results = {
             "crypto": {
                 30: bt(1227, 30),
@@ -258,22 +259,22 @@ class SectorPolicyTests(unittest.TestCase):
 
         policy = sector.evaluate_sector_policy(sector_results)
 
-        self.assertEqual(policy["allowed"], ["crypto"])
-        self.assertEqual(policy["watch"], ["stock"])
+        self.assertEqual(policy["allowed"], ["crypto", "stock"])
+        self.assertEqual(policy["watch"], [])
         self.assertTrue(policy["crypto"]["allow"])
-        self.assertFalse(policy["stock"]["allow"])
-        self.assertEqual(policy["stock"]["status"], "sector_recent_weak")
+        self.assertTrue(policy["stock"]["allow"])
+        self.assertEqual(policy["stock"]["status"], "allowed")
 
-    def test_positive_but_sub_five_percent_recent_sector_is_not_live(self):
+    def test_positive_but_sub_five_percent_recent_sector_can_stay_live(self):
         sector_results = {
             "crypto": {30: bt(2400, 20), 14: bt(1100, 10), 7: bt(499, 5)},
         }
 
         policy = sector.evaluate_sector_policy(sector_results)
 
-        self.assertEqual(policy["allowed"], [])
-        self.assertEqual(policy["watch"], ["crypto"])
-        self.assertEqual(policy["crypto"]["status"], "sector_recent_weak")
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertEqual(policy["watch"], [])
+        self.assertEqual(policy["crypto"]["status"], "allowed")
 
     def test_low_win_sector_cannot_hide_behind_a_strong_allowed_sector(self):
         sector_results = {

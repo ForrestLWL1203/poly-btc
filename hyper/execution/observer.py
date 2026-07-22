@@ -27,9 +27,11 @@ from hyper.copy.copy_engine import (OpenSizingParams, isolated_liq_px, plan_open
                           profit_tail_close_decision, reduce_leaves_dust,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
                           margin_cap_room, total_effective_margin, wallet_margin,
-                          wallet_sector_side_margin, wallet_sector_side_margin_room)
+                          wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
+                          wallet_sector_side_margin_room, wallet_sector_side_position_count)
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.copy.sector import parse_json_obj, policy_allows_coin
+from hyper.copy.wallet_risk import HighWaterPolicy, advance_high_water, new_high_water_state
 from hyper.market import rest, volatility, ws
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from hyper.selection import state as selection, strategy_revision
@@ -125,7 +127,14 @@ class Observer:
         self.max_total_margin_pct = config.MAX_TOTAL_MARGIN_PCT
         self.wallet_margin_cap_pct = config.WALLET_MARGIN_CAP_PCT
         self.wallet_sector_side_cap_pct = config.WALLET_SECTOR_SIDE_CAP_PCT
+        self.wallet_sector_side_caps = {
+            "stable": config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT,
+            "mid": config.WALLET_CRYPTO_MID_SIDE_CAP_PCT,
+            "high": config.WALLET_CRYPTO_HIGH_SIDE_CAP_PCT,
+            "stock": config.WALLET_STOCK_SIDE_CAP_PCT,
+        }
         self.wallet_max_open_positions = config.WALLET_MAX_OPEN_POSITIONS
+        self.wallet_stock_side_max_positions = config.WALLET_STOCK_SIDE_MAX_POSITIONS
         self.wallet_forward_loss_freeze_pct = config.WALLET_FORWARD_LOSS_FREEZE_PCT
         self.margin_equity_pct = config.MARGIN_EQUITY_PCT    # manual per-open sizing base; full cash remains available
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
@@ -186,6 +195,9 @@ class Observer:
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
         self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
+        self.selection_generation = None
+        self.high_water_policy = HighWaterPolicy()
+        self._wallet_breaker_inflight = set()
         self.ws = None
         self.stop = False
         prior_state = self.db.execute(
@@ -408,16 +420,121 @@ class Observer:
         ).fetchone()
         return float(row[0] or 0.0) if row else 0.0
 
+    def _load_wallet_risk_state(self, addr: str, book=None):
+        book = book or self.taker
+        row = self.db.execute(
+            "SELECT membership_cycle,selection_generation,baseline_equity,pnl_baseline,"
+            "high_water_equity,current_equity,drawdown_frac,breaker_stage,reduced_in_cycle,"
+            "cooldown_until_ms,active_member,started_at FROM wallet_risk_state "
+            "WHERE execution_book=? AND lower(addr)=?",
+            (book.name, str(addr or "").lower()),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "membership_cycle": row[0], "selection_generation": row[1],
+            "baseline_equity": f(row[2]), "pnl_baseline": f(row[3]),
+            "high_water_equity": f(row[4]), "current_equity": f(row[5]),
+            "drawdown_frac": f(row[6]), "breaker_stage": int(row[7] or 0),
+            "reduced_in_cycle": bool(row[8]), "cooldown_until_ms": row[9],
+            "active_member": bool(row[10]), "started_at": row[11],
+        }
+
+    def _save_wallet_risk_state(self, addr: str, state: dict, book=None, *, commit=False):
+        book = book or self.taker
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO wallet_risk_state "
+            "(execution_book,addr,membership_cycle,selection_generation,baseline_equity,pnl_baseline,"
+            "high_water_equity,current_equity,drawdown_frac,breaker_stage,reduced_in_cycle,"
+            "cooldown_until_ms,params_hash,active_member,started_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_book,addr) DO UPDATE SET "
+            "membership_cycle=excluded.membership_cycle,selection_generation=excluded.selection_generation,"
+            "baseline_equity=excluded.baseline_equity,pnl_baseline=excluded.pnl_baseline,"
+            "high_water_equity=excluded.high_water_equity,current_equity=excluded.current_equity,"
+            "drawdown_frac=excluded.drawdown_frac,breaker_stage=excluded.breaker_stage,"
+            "reduced_in_cycle=excluded.reduced_in_cycle,cooldown_until_ms=excluded.cooldown_until_ms,"
+            "params_hash=excluded.params_hash,active_member=excluded.active_member,updated_at=excluded.updated_at",
+            (
+                book.name, str(addr or "").lower(), state["membership_cycle"],
+                state.get("selection_generation"), f(state.get("baseline_equity")),
+                f(state.get("pnl_baseline")), f(state.get("high_water_equity")),
+                f(state.get("current_equity")), f(state.get("drawdown_frac")),
+                int(state.get("breaker_stage") or 0), 1 if state.get("reduced_in_cycle") else 0,
+                state.get("cooldown_until_ms"), self.strategy_revision_id,
+                1 if state.get("active_member", True) else 0,
+                state.get("started_at") or stamp, stamp,
+            ),
+        )
+        if commit:
+            self.db.commit()
+
+    def _sync_wallet_risk_membership(self, active_addrs, book=None):
+        """Start/preserve contiguous Core member cycles and return wallets forced to Exit-only."""
+        book = book or self.taker
+        stamp_ms = now_ms()
+        active = {str(addr or "").lower() for addr in active_addrs if addr}
+        self.db.execute(
+            "UPDATE wallet_risk_state SET active_member=0,updated_at=? WHERE execution_book=? "
+            "AND active_member=1 AND lower(addr) NOT IN ("
+            + (",".join("?" for _ in active) if active else "''") + ")",
+            (now_iso(), book.name, *sorted(active)),
+        )
+        exit_only = set()
+        for addr in sorted(active):
+            state = self._load_wallet_risk_state(addr, book)
+            total_pnl = self._wallet_forward_pnl(addr, book)
+            prior_generation = state.get("selection_generation") if state else None
+            cooldown = int((state or {}).get("cooldown_until_ms") or 0)
+            same_generation = bool(
+                state and prior_generation == self.selection_generation
+            )
+            if state and not state.get("active_member") and (
+                cooldown > stamp_ms
+                or (int(state.get("breaker_stage") or 0) >= 2 and same_generation)
+            ):
+                state["active_member"] = False
+                exit_only.add(addr)
+            elif state and state.get("active_member"):
+                state["active_member"] = True
+                state["selection_generation"] = self.selection_generation
+                current = f(state.get("baseline_equity")) + total_pnl - f(state.get("pnl_baseline"))
+                state, _action = advance_high_water(
+                    state, current_equity=current, now_ms=stamp_ms, policy=self.high_water_policy,
+                    retention_passed=bool(
+                        prior_generation and self.selection_generation
+                        and prior_generation != self.selection_generation
+                    ),
+                )
+            else:
+                cycle = f"{self.selection_generation or 'legacy'}:{stamp_ms}"
+                state = new_high_water_state(
+                    membership_cycle=cycle, baseline_equity=self._risk_equity(book),
+                    pnl_baseline=total_pnl, selection_generation=self.selection_generation,
+                    now_ms=stamp_ms,
+                )
+                state["active_member"] = True
+                state["started_at"] = now_iso()
+            if int(state.get("breaker_stage") or 0) >= 2:
+                state["active_member"] = False
+                exit_only.add(addr)
+            self._save_wallet_risk_state(addr, state, book)
+        self.db.commit()
+        return exit_only
+
     def _wallet_risk_block_reason(self, addr: str, coin: str, book=None):
         book = book or self.taker
         if self._liquidation_cooldown_until(addr, coin):
             return "liquidation_cooldown"
-        threshold = max(0.0, book.initial_balance * self.wallet_forward_loss_freeze_pct)
-        if threshold and self._wallet_forward_pnl(addr, book) <= -threshold:
-            return "wallet_forward_loss"
+        state = self._load_wallet_risk_state(addr, book)
+        if state:
+            if int(state.get("cooldown_until_ms") or 0) > now_ms():
+                return "wallet_high_water_cooldown"
+            if int(state.get("breaker_stage") or 0) >= 1:
+                return "wallet_high_water"
         return None
 
-    def _new_exposure_block_reason(self, addr: str, coin: str, book=None):
+    def _new_exposure_block_reason(self, addr: str, coin: str, book=None, side=None):
         book = book or self.taker
         risk_reason = self._wallet_risk_block_reason(addr, coin, book)
         if risk_reason:
@@ -428,7 +545,24 @@ class Observer:
         )
         if wallet_open_n >= self.wallet_max_open_positions:
             return "wallet_position_cap"
+        if side and str(coin).lower().startswith("xyz:") and wallet_sector_side_position_count(
+            book.open_ep.values(), addr=addr, coin=coin, side=side,
+        ) >= self.wallet_stock_side_max_positions:
+            return "wallet_stock_side_position_cap"
         return None
+
+    def _wallet_group_cap_pct(self, book, addr, coin, side, tier, *, exclude=None):
+        positions = (position for position in book.open_ep.values() if position is not exclude)
+        return wallet_sector_side_effective_cap_pct(
+            positions, addr=addr, coin=coin, side=side, candidate_tier=tier,
+            tier_for_coin=lambda current_coin: tier_for_sigma(
+                self._sigma(current_coin), self.stable_sigma_max, self.high_sigma_min, current_coin,
+            ),
+            crypto_stable=self.wallet_sector_side_caps["stable"],
+            crypto_mid=self.wallet_sector_side_caps["mid"],
+            crypto_high=self.wallet_sector_side_caps["high"],
+            stock=self.wallet_sector_side_caps["stock"],
+        )
 
     # -- pricing off the live book -------------------------------------------
     def _fill_px(self, coin, is_buy, fallback):
@@ -490,8 +624,26 @@ class Observer:
             if f.get("MAX_TOTAL_MARGIN_PCT"): self.max_total_margin_pct = f["MAX_TOTAL_MARGIN_PCT"]
             if f.get("WALLET_MARGIN_CAP_PCT") is not None: self.wallet_margin_cap_pct = f["WALLET_MARGIN_CAP_PCT"]
             if f.get("WALLET_SECTOR_SIDE_CAP_PCT") is not None: self.wallet_sector_side_cap_pct = f["WALLET_SECTOR_SIDE_CAP_PCT"]
+            for tier, key in (
+                ("stable", "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT"),
+                ("mid", "WALLET_CRYPTO_MID_SIDE_CAP_PCT"),
+                ("high", "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT"),
+                ("stock", "WALLET_STOCK_SIDE_CAP_PCT"),
+            ):
+                if f.get(key) is not None: self.wallet_sector_side_caps[tier] = f[key]
             if f.get("WALLET_MAX_OPEN_POSITIONS") is not None: self.wallet_max_open_positions = int(f["WALLET_MAX_OPEN_POSITIONS"])
+            if f.get("WALLET_STOCK_SIDE_MAX_POSITIONS") is not None: self.wallet_stock_side_max_positions = int(f["WALLET_STOCK_SIDE_MAX_POSITIONS"])
             if f.get("WALLET_FORWARD_LOSS_FREEZE_PCT") is not None: self.wallet_forward_loss_freeze_pct = f["WALLET_FORWARD_LOSS_FREEZE_PCT"]
+            self.high_water_policy = HighWaterPolicy(
+                freeze_drawdown=f.get("WALLET_HWM_FREEZE_DD_PCT", self.high_water_policy.freeze_drawdown),
+                reduce_drawdown=f.get("WALLET_HWM_REDUCE_DD_PCT", self.high_water_policy.reduce_drawdown),
+                exit_drawdown=f.get("WALLET_HWM_EXIT_DD_PCT", self.high_water_policy.exit_drawdown),
+                release_drawdown=f.get("WALLET_HWM_RELEASE_DD_PCT", self.high_water_policy.release_drawdown),
+                cooldown_ms=int(f.get(
+                    "WALLET_HWM_EXIT_COOLDOWN_DAYS",
+                    self.high_water_policy.cooldown_ms / 86_400_000,
+                ) * 86_400_000),
+            )
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
@@ -741,6 +893,13 @@ class Observer:
             target_sector_policy = {
                 row["addr"].lower(): dict(row.get("sectorPolicy") or {}) for row in rows
             }
+        risk_exit_only = self._sync_wallet_risk_membership(addrs, self.taker)
+        addrs = [addr for addr in addrs if addr not in risk_exit_only]
+        seed = {addr: value for addr, value in seed.items() if addr not in risk_exit_only}
+        target_acct = {addr: value for addr, value in target_acct.items() if addr not in risk_exit_only}
+        target_sector_policy = {
+            addr: value for addr, value in target_sector_policy.items() if addr not in risk_exit_only
+        }
         self.seed_coins = seed
         self.target_acct = target_acct
         self.target_sector_policy = target_sector_policy
@@ -782,10 +941,11 @@ class Observer:
             if self.db.in_transaction:
                 self.db.rollback()
             raise
-        self._reload_params(follow)
-        self._reload_targets(init=init, target_snapshot=targets)
         changed = revision != self.strategy_revision_id
         self.strategy_revision_id = revision
+        self.selection_generation = published_generation
+        self._reload_params(follow)
+        self._reload_targets(init=init, target_snapshot=targets)
         if changed:
             _log(f"strategy revision: {revision or 'legacy-fallback'}")
 
@@ -1010,12 +1170,76 @@ class Observer:
         if wrote:
             self.mark_write_ms[coin] = now
 
+    async def _execute_wallet_breaker(self, addr: str, action: str, book=None) -> int:
+        book = book or self.taker
+        key = (book.name, str(addr or "").lower())
+        if key in self._wallet_breaker_inflight:
+            return 0
+        self._wallet_breaker_inflight.add(key)
+        changed = 0
+        try:
+            fraction = 0.50 if action == "reduce_half" else 1.0
+            for (wallet, coin), ep in list(book.open_ep.items()):
+                if str(wallet or "").lower() != key[1] or ep.get("entry_px") is None:
+                    continue
+                closing_buy = ep.get("side") == "short"
+                fallback = self._mark_px(coin, ep.get("entry_px"))
+                exit_px = await self._execution_px(coin, closing_buy, fallback)
+                await self._apply_reduce(
+                    wallet, coin, ep, now_ms(), exit_px, 0.0,
+                    f(ep.get("master_current")), closing=fraction >= 0.999,
+                    liq=False, forced_px=exit_px, forced_frac=fraction, book=book,
+                )
+                changed += 1
+            return changed
+        finally:
+            self._wallet_breaker_inflight.discard(key)
+
+    async def _enforce_wallet_high_water(self, book=None):
+        book = book or self.taker
+        wallets = {
+            str(addr or "").lower() for (addr, _coin) in book.open_ep
+        }
+        wallets.update(
+            str(row[0] or "").lower() for row in self.db.execute(
+                "SELECT addr FROM wallet_risk_state WHERE execution_book=? AND active_member=1",
+                (book.name,),
+            ).fetchall()
+        )
+        for addr in sorted(wallet for wallet in wallets if wallet):
+            state = self._load_wallet_risk_state(addr, book)
+            if not state:
+                continue
+            total_pnl = self._wallet_forward_pnl(addr, book)
+            current = f(state.get("baseline_equity")) + total_pnl - f(state.get("pnl_baseline"))
+            updated, action = advance_high_water(
+                state, current_equity=current, now_ms=now_ms(), policy=self.high_water_policy,
+            )
+            if int(updated.get("breaker_stage") or 0) >= 2:
+                updated["active_member"] = False
+                self.held_off.add(addr)
+            self._save_wallet_risk_state(addr, updated, book)
+            self.db.commit()
+            if action == "freeze_new":
+                _log(f"wallet HWM freeze {addr[:10]} drawdown={f(updated.get('drawdown_frac')):.1%}")
+            elif action == "reduce_half":
+                count = await self._execute_wallet_breaker(addr, action, book)
+                updated["reduced_in_cycle"] = True
+                self._save_wallet_risk_state(addr, updated, book, commit=True)
+                _log(f"wallet HWM reduce-half {addr[:10]} positions={count} "
+                     f"drawdown={f(updated.get('drawdown_frac')):.1%}")
+            elif action == "exit_all":
+                count = await self._execute_wallet_breaker(addr, action, book)
+                _log(f"wallet HWM exit {addr[:10]} positions={count} "
+                     f"drawdown={f(updated.get('drawdown_frac')):.1%}")
+
     async def mark_refresh_loop(self):
         """Frequent mark refresh for dashboard freshness (between the 5-min account_stats snapshots)."""
         while not self.stop:
             await asyncio.sleep(25)
             try:
                 self._refresh_marks(self.taker)
+                await self._enforce_wallet_high_water(self.taker)
             except Exception as exc:  # noqa: BLE001 — never let dashboard freshness kill the engine
                 self._rollback_db()
                 _log(f"mark refresh failed: {exc}")
@@ -1481,7 +1705,8 @@ class Observer:
         transition = classify_fill_transition(pos0, pos1)
         target_in_position = abs(pos1) >= config.FLAT
         cooldown_until = self._manual_close_cooldown_until(addr, coin) if target_in_position else None
-        risk_block = self._new_exposure_block_reason(addr, coin, book) if target_in_position else None
+        side = "long" if pos1 > 0 else "short"
+        risk_block = self._new_exposure_block_reason(addr, coin, book, side=side) if target_in_position else None
         ep = book.open_ep.get(key)
         if ep is None:
             if transition in ("open", "flip") and target_in_position:
@@ -1552,7 +1777,9 @@ class Observer:
         if (addr in self.held_off or self.paused or not self._sector_allowed(addr, coin)
                 or self._manual_close_cooldown_until(addr, coin)):
             return
-        risk_block = self._new_exposure_block_reason(addr, coin, book)
+        risk_block = self._new_exposure_block_reason(
+            addr, coin, book, side="long" if pos1 > 0 else "short",
+        )
         if risk_block:
             self._tally(f"skip_{risk_block}", book)
             return
@@ -1560,7 +1787,8 @@ class Observer:
 
     def _open_position(self, addr, coin, t, px, pos1, oid, book=None, forced_entry_px=None):
         book = book or self.taker
-        risk_block = self._new_exposure_block_reason(addr, coin, book)
+        side = "long" if pos1 > 0 else "short"
+        risk_block = self._new_exposure_block_reason(addr, coin, book, side=side)
         if risk_block:
             self._tally(f"skip_{risk_block}", book)
             return
@@ -1570,7 +1798,6 @@ class Observer:
         if not self._copyable(coin):
             self._tally("skip_opaque", book)
             return              # copy crypto + transparent builder (stocks); skip opaque/unknown
-        side = "long" if pos1 > 0 else "short"
         lag_sec = max(0.0, (now_ms() - t) / 1000.0)   # copy latency: master fill -> our detection (dashboard)
         cur = self.db.execute(
             f"INSERT INTO {book.pos_table} (addr,coin,side,status,master_open_ms,master_open_px,"
@@ -1650,8 +1877,13 @@ class Observer:
                 (e for e in book.open_ep.values() if e is not ep),
                 addr=addr, coin=coin, side=ep["side"],
             )
+            group_cap = self._wallet_group_cap_pct(
+                book, addr, coin, ep["side"],
+                tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin),
+                exclude=ep,
+            )
             group_room = wallet_sector_side_margin_room(
-                cap_pct=self.wallet_sector_side_cap_pct,
+                cap_pct=group_cap,
                 risk_equity=risk_equity,
                 existing_margin=group_existing,
             )
@@ -1843,7 +2075,7 @@ class Observer:
                         book.open_ep.values(), addr=addr, coin=coin, side=ep["side"],
                     )
                     group_room = wallet_sector_side_margin_room(
-                        cap_pct=self.wallet_sector_side_cap_pct,
+                        cap_pct=self._wallet_group_cap_pct(book, addr, coin, ep["side"], tier),
                         risk_equity=risk_equity,
                         existing_margin=group_existing,
                     )
@@ -1891,7 +2123,7 @@ class Observer:
                         book.open_ep.values(), addr=addr, coin=coin, side=ep["side"],
                     )
                     group_room = wallet_sector_side_margin_room(
-                        cap_pct=self.wallet_sector_side_cap_pct,
+                        cap_pct=self._wallet_group_cap_pct(book, addr, coin, ep["side"], tier),
                         risk_equity=risk_equity,
                         existing_margin=group_existing,
                     )

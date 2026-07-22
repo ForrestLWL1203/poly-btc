@@ -15,6 +15,12 @@ def qualified(**overrides):
         "copy_bt_closed_n": 16,
         "copy_bt_14d_closed_n": 9,
         "copy_bt_7d_closed_n": 5,
+        "copy_bt_campaign_closed_n": 12,
+        "copy_bt_campaign_wins": 9,
+        "copy_bt_14d_campaign_closed_n": 6,
+        "copy_bt_14d_campaign_wins": 4,
+        "copy_bt_7d_campaign_closed_n": 5,
+        "copy_bt_7d_campaign_wins": 4,
         "copy_bt_win_rate": 0.75,
         "copy_bt_14d_win_rate": 2 / 3,
         "copy_bt_7d_win_rate": 0.80,
@@ -30,6 +36,13 @@ def qualified(**overrides):
         "actionable_open_rate": 0.90,
         "capacity_fit": 0.90,
         "copy_bt_liquidations": 0,
+        "copy_bt_profit_factor": 1.6,
+        "copy_bt_campaign_net_after_top2": 400,
+        "copy_bt_cost_stress_net_pnl": 1200,
+        "copy_path_risk_status": "complete",
+        "copy_intratrade_max_drawdown": .08,
+        "copy_deep_bag_recovery_rate": 1.0,
+        "initial_margin_equity": 10_000,
         "last_copyable_open_ms": NOW - 3_600_000,
     }
     row.update(overrides)
@@ -43,14 +56,15 @@ class ProfileQualificationTests(unittest.TestCase):
     def test_quality_passes_once_before_ranking(self):
         self.assertEqual(scanner._profile_copy_qualification(qualified(), NOW, self.params), (True, "ok"))
 
-    def test_thin_sample_is_excluded(self):
+    def test_thin_sample_is_research_only(self):
         ok, reason = scanner._profile_copy_qualification(qualified(copy_evidence_days=2), NOW, self.params)
-        self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "research_insufficient_evidence")
 
     def test_recent_loss_is_excluded(self):
         ok, reason = scanner._profile_copy_qualification(qualified(
             copy_bt_14d_net_pnl=-50, copy_bt_7d_net_pnl=-220,
+            copy_bt_7d_campaign_wins=1,
         ), NOW, self.params)
         self.assertFalse(ok)
         self.assertEqual(reason, "recent_copy_collapse")
@@ -101,6 +115,7 @@ class ProfileQualificationTests(unittest.TestCase):
             open_unrealized=500,
             copy_bt_14d_net_pnl=-50,
             copy_bt_7d_net_pnl=-220,
+            copy_bt_7d_campaign_wins=1,
         )
         scanner._attach_open_copy_activity_context(row, "0xaaa", {"0xaaa": 80})
         self.assertEqual(
@@ -148,12 +163,12 @@ class ProfileQualificationTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
 
-    def test_truly_thin_normalized_copy_edge_is_excluded(self):
+    def test_thin_normalized_copy_edge_remains_challenger_not_core(self):
         ok, reason = scanner._profile_copy_qualification(qualified(
             copy_expected_return=0.005, copy_bt_net_pnl=1600, copy_bt_7d_net_pnl=400,
         ), NOW, self.params)
-        self.assertFalse(ok)
-        self.assertEqual(reason, "thin_copy_edge")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
 
     def test_copy_gate_switch_bypasses_copy_evidence_but_not_activity(self):
         params = SimpleNamespace(copy_bt_gate_enable=False, inactive_days=1)

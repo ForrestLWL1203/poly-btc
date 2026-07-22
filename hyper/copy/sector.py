@@ -87,8 +87,7 @@ def _qualification_equity(windows: Mapping) -> float:
             return value
     return max(
         1.0,
-        float(getattr(config, "INITIAL_BALANCE", 10_000.0))
-        * max(0.0, min(1.0, float(getattr(config, "MARGIN_EQUITY_PCT", 1.0)))),
+        float(getattr(config, "INITIAL_BALANCE", 10_000.0)),
     )
 
 
@@ -129,6 +128,9 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     return30 = pnl[30] / equity
     return14 = pnl[14] / equity
     return7 = pnl[7] / equity
+    # Positive strict-Copy economics remain visible as Research even when samples are too thin for the
+    # executable Challenger tier. ``watch`` therefore means evidence-bearing/non-live, not pre-approved.
+    challenger_watch = bool(return30 > 0.0 and closed[30] > 0)
     base = {
         "closed": {str(days): closed[days] for days in (30, 14, 7)},
         "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
@@ -139,36 +141,27 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "qualificationEquity": equity,
     }
 
-    # A current sampled loss removes live permission even when the longer Core evidence surface is still
-    # thin; sample insufficiency must never hide a plainly negative recent result.
-    if closed[14] >= policy.min_closed_14d and pnl[14] <= min_net:
+    # Seven-day performance has no fixed positive-return gate. It becomes an immediate hard collapse only
+    # once five independent campaigns exist, their win rate is below 40%, and the slice is net negative.
+    if win_samples[7] >= policy.core_min_campaigns_7d and (
+        win_rate[7] < policy.core_min_win_rate_7d and pnl[7] < min_net
+    ):
         return {
             **base,
             "allow": False,
-            "status": "sector_recent_weak",
-            "reason": "板块14天严格Copy不盈利，已移出实跟权限",
-            "watch": bool(pnl[30] > min_net),
-        }
-    if closed[7] >= policy.min_closed_7d and pnl[7] <= min_net:
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_recent_weak",
-            "reason": "板块7天严格Copy不盈利，已移出实跟权限",
-            "watch": bool(pnl[30] > min_net),
+            "status": "sector_recent_collapse",
+            "reason": "板块7日已有5个Campaign、胜率低于40%且净收益为负",
+            "watch": False,
         }
     if not all(enough.values()):
         return {
             **base,
             "allow": False,
             "status": "sector_sample_watch",
-            "reason": "板块未独立达到30/14/7日实跟样本线",
-            "watch": bool(closed[30] > 0 and pnl[30] > min_net),
+            "reason": "板块未独立达到12/5/3个30/14/7日已平回合",
+            "watch": challenger_watch,
         }
-    thin_campaign_windows = [
-        days for days in (30, 14, 7)
-        if win_samples[days] < policy.core_min_campaigns(days)
-    ]
+    thin_campaign_windows = [30] if win_samples[30] < policy.core_min_campaigns_30d else []
     if thin_campaign_windows:
         labels = "/".join(f"{days}日" for days in thin_campaign_windows)
         return {
@@ -176,12 +169,13 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "allow": False,
             "status": "sector_campaign_sample_watch",
             "reason": f"板块{labels}独立方向交易批次不足，相关篮子仓不能冒充独立胜率样本",
-            "watch": bool(pnl[30] > min_net),
+            "watch": challenger_watch,
         }
-    weak_windows = [
-        days for days in (30, 14, 7)
-        if win_rate[days] < policy.core_min_win_rate(days)
-    ]
+    weak_windows = [30] if win_rate[30] < policy.core_min_win_rate_30d else []
+    if win_samples[14] >= policy.core_min_campaigns_14d and (
+        win_rate[14] < policy.core_min_win_rate_14d or pnl[14] <= min_net
+    ):
+        weak_windows.append(14)
     if weak_windows:
         labels = "/".join(f"{days}日" for days in weak_windows)
         return {
@@ -189,7 +183,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "allow": False,
             "status": "sector_win_rate_below_floor",
             "reason": f"板块{labels}严格Copy胜率低于Core硬门槛",
-            "watch": bool(pnl[30] > min_net),
+            "watch": challenger_watch,
         }
     if win_lcb30 < policy.core_min_win_rate_lcb_30d:
         return {
@@ -200,7 +194,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
                 f"板块30日胜率80%单侧置信下界{win_lcb30 * 100:.1f}%低于"
                 f"{policy.core_min_win_rate_lcb_30d * 100:.0f}%"
             ),
-            "watch": bool(pnl[30] > min_net),
+            "watch": challenger_watch,
         }
     if return30 < policy.core_min_return_30d:
         return {
@@ -211,18 +205,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
                 f"板块30天严格Copy收益率{return30 * 100:.1f}%低于"
                 f"{policy.core_min_return_30d * 100:.0f}%实跟线"
             ),
-            "watch": bool(pnl[30] > min_net),
-        }
-    if return7 < policy.core_min_return_7d:
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_recent_weak",
-            "reason": (
-                f"板块7天严格Copy收益率{return7 * 100:.1f}%低于"
-                f"{policy.core_min_return_7d * 100:.0f}%实跟线，已立即移出实跟权限"
-            ),
-            "watch": True,
+            "watch": challenger_watch,
         }
 
     primary = results[30]
@@ -339,6 +322,11 @@ def _compact_result(result: Mapping) -> dict:
         "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
         "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
         "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
+        "campaign_peak_positions", "campaign_peak_margin", "campaign_peak_margin_pct",
+        "path_risk_status", "intratrade_max_drawdown", "max_underwater_hours",
+        "loss_over_5_time_ratio", "deep_bag_event_n", "failed_deep_bag_n",
+        "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
+        "current_bag_hours", "campaign_max_drawdown",
         "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         "cost_stress_net_pnl", "initial_margin_equity",
     )
@@ -814,13 +802,36 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "entry_gap_sigma_weighted", "entry_gap_sigma_p90", "entry_alignment",
             "add_execution", "add_fidelity", "add_fidelity_applied",
             "behavior_replication_v2", "behavior_replication_rate",
+            "initial_margin_equity",
             "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
             "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
             "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
+            "campaign_peak_positions", "campaign_peak_margin", "campaign_peak_margin_pct",
+            "path_risk_status", "intratrade_max_drawdown", "max_underwater_hours",
+            "loss_over_5_time_ratio", "deep_bag_event_n", "failed_deep_bag_n",
+            "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
+            "current_bag_hours", "campaign_max_drawdown",
             "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         ):
             if key in primary:
                 out[f"copy_bt_{key}"] = primary[key]
+        for source, target in (
+            ("path_risk_status", "copy_path_risk_status"),
+            ("intratrade_max_drawdown", "copy_intratrade_max_drawdown"),
+            ("max_underwater_hours", "copy_max_underwater_hours"),
+            ("loss_over_5_time_ratio", "copy_loss_over_5_time_ratio"),
+            ("deep_bag_event_n", "copy_deep_bag_event_n"),
+            ("failed_deep_bag_n", "copy_failed_deep_bag_n"),
+            ("deep_bag_recovery_rate", "copy_deep_bag_recovery_rate"),
+            ("max_deep_bag_hours", "copy_max_deep_bag_hours"),
+            ("current_open_loss_frac", "copy_current_open_loss_frac"),
+            ("current_bag_hours", "copy_current_bag_hours"),
+            ("campaign_max_drawdown", "copy_campaign_max_drawdown"),
+            ("campaign_peak_positions", "copy_campaign_peak_positions"),
+            ("campaign_peak_margin_pct", "copy_campaign_peak_margin_pct"),
+        ):
+            if source in primary:
+                out[target] = primary[source]
     for days, net_key, n_key in (
         (14, "copy_bt_14d_net_pnl", "copy_bt_14d_closed_n"),
         (7, "copy_bt_7d_net_pnl", "copy_bt_7d_closed_n"),

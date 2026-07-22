@@ -178,6 +178,79 @@ def wallet_sector_side_margin_room(
     return max(0.0, cap * max(0.0, f(risk_equity)) - max(0.0, f(existing_margin)))
 
 
+def wallet_sector_side_cap_pct(
+    coin: str | None,
+    tier: str | None,
+    *,
+    crypto_stable: float = config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT,
+    crypto_mid: float = config.WALLET_CRYPTO_MID_SIDE_CAP_PCT,
+    crypto_high: float = config.WALLET_CRYPTO_HIGH_SIDE_CAP_PCT,
+    stock: float = config.WALLET_STOCK_SIDE_CAP_PCT,
+) -> float:
+    """Return the shared source-wallet board/direction cap for one market."""
+    if copy_market_sector(coin) == "stock":
+        return max(0.0, min(1.0, f(stock)))
+    by_tier = {"stable": crypto_stable, "mid": crypto_mid, "high": crypto_high}
+    return max(0.0, min(1.0, f(by_tier.get(str(tier or "mid").lower(), crypto_mid))))
+
+
+def wallet_sector_side_effective_cap_pct(
+    positions,
+    *,
+    addr: str,
+    coin: str,
+    side: str,
+    candidate_tier: str,
+    tier_for_coin=None,
+    crypto_stable: float = config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT,
+    crypto_mid: float = config.WALLET_CRYPTO_MID_SIDE_CAP_PCT,
+    crypto_high: float = config.WALLET_CRYPTO_HIGH_SIDE_CAP_PCT,
+    stock: float = config.WALLET_STOCK_SIDE_CAP_PCT,
+) -> float:
+    """Use the most conservative tier present in a same-wallet/board/direction basket.
+
+    This removes order dependence: opening a high-volatility coin first and a stable coin second may not
+    expand the combined basket from 10% to 20%.
+    """
+    wanted_addr = str(addr or "").lower()
+    wanted_sector = copy_market_sector(coin)
+    wanted_side = str(side or "").lower()
+    caps = [wallet_sector_side_cap_pct(
+        coin, candidate_tier, crypto_stable=crypto_stable, crypto_mid=crypto_mid,
+        crypto_high=crypto_high, stock=stock,
+    )]
+    for position in positions or ():
+        position_coin = position.get("coin")
+        if (
+            str(position.get("addr") or "").lower() != wanted_addr
+            or copy_market_sector(position_coin) != wanted_sector
+            or str(position.get("side") or "").lower() != wanted_side
+        ):
+            continue
+        position_tier = position.get("risk_tier")
+        if not position_tier and tier_for_coin is not None:
+            position_tier = tier_for_coin(position_coin)
+        caps.append(wallet_sector_side_cap_pct(
+            position_coin, position_tier or candidate_tier,
+            crypto_stable=crypto_stable, crypto_mid=crypto_mid,
+            crypto_high=crypto_high, stock=stock,
+        ))
+    return min(caps)
+
+
+def wallet_sector_side_position_count(positions, *, addr: str, coin: str, side: str) -> int:
+    wanted_addr = str(addr or "").lower()
+    wanted_sector = copy_market_sector(coin)
+    wanted_side = str(side or "").lower()
+    return sum(
+        1 for position in positions
+        if str(position.get("addr") or "").lower() == wanted_addr
+        and copy_market_sector(position.get("coin")) == wanted_sector
+        and str(position.get("side") or "").lower() == wanted_side
+        and abs(f(position.get("rem_size", position.get("size")))) > 0.0
+    )
+
+
 def margin_cap_room(*, cap_pct: float, risk_equity: float, existing_margin: float) -> float:
     """Remaining effective-margin room for any equity-relative concentration cap."""
     return wallet_sector_side_margin_room(

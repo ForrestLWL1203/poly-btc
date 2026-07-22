@@ -8,6 +8,7 @@ under our own sizing/add/stop rules.
 from __future__ import annotations
 
 import math
+import time
 from typing import Mapping
 
 from hyper import config
@@ -37,7 +38,7 @@ def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
     )) and c30 > 0
 
 
-def evaluate_follow_eligibility(
+def _evaluate_follow_eligibility_legacy(
     metrics: Mapping,
     *,
     min_closed30: int | None = None,
@@ -527,6 +528,355 @@ def evaluate_follow_eligibility(
     }
 
 
+def evaluate_follow_eligibility(
+    metrics: Mapping,
+    *,
+    min_closed30: int | None = None,
+    min_closed14: int | None = None,
+    min_closed7: int | None = None,
+    min_open_fill_rate: float | None = None,
+    min_expected_return: float | None = None,
+    min_evidence_days: int | None = None,
+    min_pnl_per_closed=None,
+    margin_equity_pct: float | None = None,
+    retention: bool = False,
+    policy_values: Mapping | None = None,
+) -> dict:
+    """Return the strict-Copy economic role for one wallet.
+
+    Research is deliberately not executable. Challenger is the minimum economic evidence surface. Core uses
+    entry or retention thresholds, while hard risk failures always override the two-scan soft-failure grace.
+    Missing optional legacy metrics do not manufacture a pass: path-risk data must be explicitly complete for
+    a new Core once a row advertises the path-risk schema.
+    """
+    del min_pnl_per_closed  # Kept for API compatibility; dollar-per-trade is not an economic gate.
+    policy = load_copy_policy(policy_values)
+    min_closed30 = policy.min_closed_30d if min_closed30 is None else int(min_closed30)
+    min_closed14 = policy.min_closed_14d if min_closed14 is None else int(min_closed14)
+    min_closed7 = policy.min_closed_7d if min_closed7 is None else int(min_closed7)
+    min_open_fill_rate = (
+        policy.min_actionable_open_rate if min_open_fill_rate is None else float(min_open_fill_rate)
+    )
+    min_expected_return = (
+        policy.min_expected_margin_return if min_expected_return is None else float(min_expected_return)
+    )
+    min_evidence_days = min(5, min_closed30) if min_evidence_days is None else int(min_evidence_days)
+
+    source_metrics = metrics
+    metrics = apply_allowed_sector_copy_metrics(metrics)
+    c30 = int(_num(metrics.get("copy_bt_closed_n")))
+    c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
+    c7 = int(_num(metrics.get("copy_bt_7d_closed_n")))
+    closed = {30: c30, 14: c14, 7: c7}
+    pnl = {
+        30: _num(metrics.get("copy_bt_net_pnl")),
+        14: _num(metrics.get("copy_bt_14d_net_pnl")),
+        7: _num(metrics.get("copy_bt_7d_net_pnl")),
+    }
+    evidence_days = int(_num(metrics.get("copy_evidence_days")))
+    expected_return = metrics.get("copy_expected_return")
+    return_lcb = metrics.get("copy_return_lcb")
+    execution = metrics.get("execution_score")
+    valuation_status = str(metrics.get("copy_bt_valuation_status") or "complete").strip().lower()
+    data_status = str(metrics.get("copy_bt_data_status") or "").strip().lower()
+    evidence_status = str(metrics.get("copy_bt_evidence_status") or "").strip().lower()
+
+    if data_status and data_status not in {"valid", "ok"}:
+        return {
+            "eligible": False, "coreEligible": False, "status": "copy_data_error",
+            "role": "quarantine", "deferred": True,
+            "reasons": ["copy回放数据无效，禁止进入实跟集合"],
+        }
+    if evidence_status == "invalid":
+        return {
+            "eligible": False, "coreEligible": False, "status": "copy_data_error",
+            "role": "quarantine", "deferred": True,
+            "reasons": ["copy回放证据无效，等待重新生成"],
+        }
+    if evidence_status in {"no_evidence", "no_fills", "no_open_events", "economically_disqualified"}:
+        status = "economically_disqualified" if evidence_status == "economically_disqualified" else "no_copy_evidence"
+        reason = (
+            "严格Copy经济证据未通过，保留原始淘汰标签"
+            if evidence_status == "economically_disqualified" else "缺少有效copy回测证据，资格阶段排除"
+        )
+        return {
+            "eligible": False, "coreEligible": False, "status": status,
+            "role": "rejected", "deferred": False, "reasons": [reason],
+        }
+    if not _has_copy_evidence(metrics, c30, c14, c7):
+        return {
+            "eligible": False, "coreEligible": False, "status": "normalized_evidence_missing",
+            "role": "rejected", "reasons": ["缺少保证金归一化的非重叠copy证据"],
+        }
+
+    policy_json = parse_json_obj(source_metrics.get("sector_policy_json"))
+    allowed = set(policy_json.get("allowed") or ())
+    watched = set(policy_json.get("watch") or ())
+    structural_core_blocked = bool(policy_json.get("coreBlocked"))
+    if "allowed" in policy_json and not allowed and not watched:
+        return {
+            "eligible": False, "coreEligible": False, "status": "no_allowed_sector",
+            "role": "rejected", "reasons": ["当轮没有同时通过结构与严格Copy验证的专精板块"],
+        }
+
+    initial_balance = max(1.0, float(getattr(config, "INITIAL_BALANCE", 10_000.0)))
+    if margin_equity_pct is None:
+        margin_equity_pct = metrics.get("margin_equity_pct", config.MARGIN_EQUITY_PCT)
+    margin_equity_pct = max(0.0, min(1.0, _num(margin_equity_pct, config.MARGIN_EQUITY_PCT)))
+    qualification_equity = max(1.0, _num(metrics.get("initial_margin_equity"), initial_balance))
+    returns = {days: pnl[days] / qualification_equity for days in (30, 14, 7)}
+    campaign = {
+        30: int(_num(metrics.get("copy_bt_campaign_closed_n"), c30)),
+        14: int(_num(metrics.get("copy_bt_14d_campaign_closed_n"), c14)),
+        7: int(_num(metrics.get("copy_bt_7d_campaign_closed_n"), c7)),
+    }
+    position_win_rate = {
+        30: _num(metrics.get("copy_bt_win_rate")),
+        14: _num(metrics.get("copy_bt_14d_win_rate")),
+        7: _num(metrics.get("copy_bt_7d_win_rate")),
+    }
+    wins = {}
+    win_rate = {}
+    for days in (30, 14, 7):
+        explicit = "copy_bt_campaign_wins" if days == 30 else f"copy_bt_{days}d_campaign_wins"
+        wins[days] = int(_num(metrics.get(explicit), round(position_win_rate[days] * campaign[days])))
+        wins[days] = max(0, min(campaign[days], wins[days]))
+        win_rate[days] = wins[days] / campaign[days] if campaign[days] else 0.0
+    win_lcb30 = one_sided_wilson_lower_bound(
+        wins[30], campaign[30], policy.core_win_rate_lcb_confidence,
+    )
+
+    policy_hard_recent = any(
+        isinstance(policy_json.get(sector), dict)
+        and isinstance(policy_json[sector].get("recent"), dict)
+        and bool(policy_json[sector]["recent"].get("hard"))
+        for sector in allowed
+    )
+    recent_hard_collapse = bool(
+        policy_hard_recent
+        or (campaign[7] >= 5 and win_rate[7] < policy.core_min_win_rate_7d and pnl[7] < 0.0)
+    )
+    if recent_hard_collapse:
+        return {
+            "eligible": False, "coreEligible": False, "status": "recent_copy_collapse",
+            "role": "rejected", "hardRisk": True, "winRates": win_rate,
+            "reasons": ["7日已有至少5个独立Campaign且胜率低于40%、净收益为负，判定近期硬崩塌"],
+        }
+
+    # Historical/open path-risk evidence. Negative current loss values are accepted for backwards-compatible
+    # storage; normalize them to a positive drawdown fraction here.
+    path_status = str(metrics.get("copy_path_risk_status") or "").strip().lower()
+    intratrade_dd = max(0.0, _num(metrics.get("copy_intratrade_max_drawdown")))
+    failed_deep = int(_num(metrics.get("copy_failed_deep_bag_n")))
+    deep_events = int(_num(metrics.get("copy_deep_bag_event_n")))
+    recovery_rate = _num(metrics.get("copy_deep_bag_recovery_rate"), 1.0)
+    max_deep_bag_hours = max(0.0, _num(metrics.get("copy_max_deep_bag_hours")))
+    current_loss = abs(min(0.0, _num(metrics.get("copy_current_open_loss_frac"))))
+    current_loss = max(current_loss, max(0.0, _num(metrics.get("copy_current_drawdown_frac"))))
+    current_bag_hours = max(0.0, _num(metrics.get("copy_current_bag_hours")))
+    current_deep_risk = bool(
+        current_loss >= policy.deep_bag_event_pct
+        or (current_loss >= 0.05 and current_bag_hours >= policy.deep_bag_long_hours)
+    )
+    deep_reject = bool(
+        intratrade_dd > policy.intratrade_dd_reject
+        or failed_deep > policy.deep_bag_max_failed
+        or (deep_events >= 2 and recovery_rate < policy.deep_bag_min_recovery_rate)
+    )
+    if current_deep_risk:
+        return {
+            "eligible": False, "coreEligible": False, "status": "current_deep_loss_freeze",
+            "role": "exit_only", "hardRisk": True,
+            "reasons": ["当前严格Copy浮亏已触发-8%或-5%持续24小时硬风险线，仅允许退出"],
+        }
+    if deep_reject:
+        return {
+            "eligible": False, "coreEligible": False, "status": "historical_deep_loss_reject",
+            "role": "rejected", "hardRisk": True,
+            "intratradeDrawdown": intratrade_dd, "failedDeepBagEvents": failed_deep,
+            "deepBagRecoveryRate": recovery_rate,
+            "reasons": ["历史盘中深亏超过15%、失败事件过多或多次深亏恢复率不足"],
+        }
+    breaker_stage = int(_num(metrics.get("wallet_breaker_stage")))
+    cooldown_until_ms = int(_num(metrics.get("wallet_cooldown_until_ms")))
+    breaker_active_member = bool(metrics.get("wallet_risk_active_member", True))
+    if (breaker_stage >= 2 and breaker_active_member) or cooldown_until_ms > int(time.time() * 1000):
+        return {
+            "eligible": False, "coreEligible": False, "status": "wallet_high_water_exit_only",
+            "role": "exit_only", "hardRisk": True, "breakerStage": breaker_stage,
+            "cooldownUntilMs": cooldown_until_ms,
+            "reasons": ["来源钱包已触发6%减半或10%退出高水位熔断，本成员周期仅允许退出"],
+        }
+
+    # Research is intentionally non-executable: positive strict-Copy economics are visible without becoming
+    # a source of live orders. A zero or losing 30-day replay is a real economic rejection.
+    if pnl[30] <= 0.0:
+        return {
+            "eligible": False, "coreEligible": False, "status": "copy_not_profitable",
+            "role": "rejected", "returns": returns,
+            "reasons": ["30天严格Copy净收益不为正"],
+        }
+    if returns[30] < policy.challenger_min_return_30d:
+        return {
+            "eligible": False, "coreEligible": False, "status": "research_copy_positive",
+            "role": "research", "researchEligible": True, "returns": returns,
+            "reasons": [
+                f"30天严格Copy盈利但收益率低于{policy.challenger_min_return_30d * 100:.0f}% Challenger线"
+            ],
+        }
+
+    challenger_samples = bool(
+        c30 >= min_closed30 and campaign[30] >= 5 and evidence_days >= min_evidence_days
+    )
+    if not challenger_samples:
+        return {
+            "eligible": False, "coreEligible": False, "status": "research_insufficient_evidence",
+            "role": "research", "researchEligible": True, "returns": returns,
+            "campaigns": campaign,
+            "reasons": ["收益已达Challenger线，但不足7个已平回合、5个Campaign或5个证据日"],
+        }
+
+    profit_factor = metrics.get("copy_bt_profit_factor")
+    tail30 = metrics.get("copy_bt_net_after_top2")
+    campaign_tail30 = metrics.get("copy_bt_campaign_net_after_top2")
+    cost_stress = metrics.get("copy_bt_cost_stress_net_pnl")
+    final_liquidations = int(_num(metrics.get("copy_bt_liquidations")))
+    repeated_liquidation = final_liquidations > policy.core_max_liquidations_30d
+    if campaign_tail30 is None or cost_stress is None:
+        return {
+            "eligible": False, "coreEligible": False, "status": "research_stress_evidence_missing",
+            "role": "research", "researchEligible": True, "returns": returns,
+            "reasons": ["缺少Campaign去极值或1.5倍成本压力证据，不得进入可执行角色"],
+        }
+    if _num(campaign_tail30) <= 0.0:
+        return {
+            "eligible": False, "coreEligible": False, "status": "copy_campaign_tail_weak",
+            "role": "rejected", "hardRisk": True,
+            "reasons": ["移除最大两个独立Campaign盈利后严格Copy不再盈利"],
+        }
+    if _num(cost_stress) <= 0.0:
+        return {
+            "eligible": False, "coreEligible": False, "status": "copy_cost_stress_weak",
+            "role": "rejected", "hardRisk": True,
+            "reasons": ["1.5倍手续费/滑点压力后严格Copy不盈利"],
+        }
+    if repeated_liquidation:
+        return {
+            "eligible": False, "coreEligible": False, "status": "repeated_copy_liquidation",
+            "role": "rejected", "hardRisk": True,
+            "reasons": [f"30日严格回放爆仓{final_liquidations}次，超过允许的一次孤立爆仓"],
+        }
+
+    open_fill_rate = metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate"))
+    capacity = metrics.get("capacity_fit")
+    execution_ok = open_fill_rate is None or _num(open_fill_rate, 1.0) >= min_open_fill_rate
+    capacity_ok = capacity is None or _num(capacity) >= policy.min_capacity_fit
+    thin_edge = expected_return is not None and _num(expected_return) < min_expected_return
+    core_return_floor = policy.retention_min_return_30d if retention else policy.core_min_return_30d
+    core_win_floor = policy.retention_min_win_rate_30d if retention else policy.core_min_win_rate_30d
+    core_lcb_floor = (
+        policy.retention_min_win_rate_lcb_30d if retention else policy.core_min_win_rate_lcb_30d
+    )
+    core_samples = bool(
+        c30 >= policy.core_min_closed_30d
+        and c14 >= policy.core_min_closed_14d
+        and c7 >= policy.core_min_closed_7d
+        and campaign[30] >= policy.core_min_campaigns_30d
+    )
+    win30_ok = win_rate[30] >= core_win_floor and win_lcb30 >= core_lcb_floor
+    recent14_ok = bool(
+        campaign[14] < policy.core_min_campaigns_14d
+        or (win_rate[14] >= policy.core_min_win_rate_14d and pnl[14] > 0.0)
+    )
+    pf_ok = profit_factor is not None and _num(profit_factor) >= policy.min_profit_factor
+    tail_ok = _num(campaign_tail30) >= qualification_equity * policy.min_tail_return_30d
+    path_complete = path_status not in {"pending", "missing", "invalid", "replay_error", "incomplete"}
+    path_core_ok = path_complete and intratrade_dd <= policy.intratrade_dd_core_max
+    long_deep_bag = deep_events > 0 and max_deep_bag_hours >= policy.deep_bag_long_hours
+    path_core_ok = path_core_ok and not long_deep_bag
+    forward_liquidations = int(_num(metrics.get("forward_liquidations")))
+    # Cumulative forward PnL is deliberately not an eligibility gate. Live loss protection is the persisted
+    # member-cycle high-water state: a plain -3% net-PnL check would duplicate the first breaker stage and
+    # could silently reintroduce the old daily-ejection behaviour.
+    forward_risk = bool(forward_liquidations > 0)
+    core_eligible = bool(
+        returns[30] >= core_return_floor
+        and core_samples
+        and win30_ok
+        and recent14_ok
+        and pf_ok
+        and tail_ok
+        and execution_ok
+        and capacity_ok
+        and valuation_status == "complete"
+        and not structural_core_blocked
+        and not thin_edge
+        and path_core_ok
+        and not forward_risk
+    )
+    strong_entry = bool(core_eligible and not retention and returns[30] >= policy.strong_core_return_30d)
+    base_detail = {
+        "returnLcb": return_lcb,
+        "executionScore": execution,
+        "returns": returns,
+        "campaigns": campaign,
+        "winRates": win_rate,
+        "winRateLcb30": win_lcb30,
+        "intratradeDrawdown": intratrade_dd,
+        "profitFactor": _num(profit_factor) if profit_factor is not None else None,
+        "campaignNetAfterTop2": _num(campaign_tail30),
+        "costStressNetPnl": _num(cost_stress),
+        "retentionSurface": bool(retention),
+        "softFailConfirmationsRequired": policy.soft_fail_confirmations,
+    }
+    if core_eligible:
+        return {
+            "eligible": True, "coreEligible": True, "strongEntry": strong_entry,
+            "status": "core_retention_eligible" if retention else (
+                "core_eligible_strong" if strong_entry else "core_eligible"
+            ),
+            "role": "core_eligible", **base_detail,
+            "reasons": ["个人严格Copy证据达到Core保留线" if retention else "个人严格Copy证据达到Core新进入线"],
+        }
+
+    if forward_liquidations > 0:
+        status, reason = "challenger_forward_liquidation", "真实跟单已发生爆仓，冻结该来源新开仓"
+    elif intratrade_dd > policy.intratrade_dd_core_max:
+        status, reason = "challenger_intratrade_drawdown", "30日最大盘中回撤超过12%，只允许Challenger"
+    elif long_deep_bag:
+        status, reason = "challenger_long_deep_bag", "历史8%以上浮亏持续超过24小时，最多只允许Challenger"
+    elif not path_complete:
+        status, reason = "challenger_path_risk_pending", "价格路径风险尚未完整重建，不得授予新Core权限"
+    elif valuation_status != "complete":
+        status, reason = "challenger_open_valuation_pending", "开放仓位缺少可靠末端估值，暂不进入Core"
+    elif structural_core_blocked:
+        status, reason = "challenger_structural_watch", "结构压力回放只允许候选观察"
+    elif not execution_ok:
+        status, reason = "challenger_execution_watch", f"开仓跟随率低于{min_open_fill_rate * 100:.0f}% Core线"
+    elif not capacity_ok:
+        status, reason = "challenger_capacity_watch", f"容量适配低于{policy.min_capacity_fit * 100:.0f}% Core线"
+    elif thin_edge:
+        status, reason = "challenger_thin_edge_watch", "归一化单回合预期边际未达Core质量线"
+    elif returns[30] < core_return_floor:
+        status, reason = "challenger_return_watch", f"30日收益率未达到{core_return_floor * 100:.0f}% Core线"
+    elif not core_samples:
+        status, reason = "challenger_sample_watch", "Core所需12/5/3已平回合或10个30日Campaign不足"
+    elif not win30_ok:
+        status, reason = "challenger_win_rate_watch", "30日Campaign胜率或Wilson下界未达到Core线"
+    elif not recent14_ok:
+        status, reason = "challenger_recent_decline", "14日已有5个Campaign但胜率低于55%或净收益不为正"
+    elif not pf_ok:
+        status, reason = "challenger_profit_structure_watch", f"严格Copy PF低于{policy.min_profit_factor:.2f}"
+    elif not tail_ok:
+        status, reason = "challenger_tail_profit_watch", "移除最大两个回合盈利后收益率未达到3%"
+    else:
+        status, reason = "challenger_policy_watch", "其他Core软条件尚未满足"
+    return {
+        "eligible": True, "coreEligible": False, "status": status, "role": "challenger",
+        **base_detail, "reasons": [reason],
+    }
+
+
 def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     """Rank copyability, repeatability and account-normalized strict Copy economics."""
     metrics = apply_allowed_sector_copy_metrics(metrics)
@@ -582,10 +932,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     margin_equity_pct = _clamp(_num(metrics.get("margin_equity_pct"), config.MARGIN_EQUITY_PCT))
     economic_equity = max(
         1.0,
-        _num(
-            metrics.get("initial_margin_equity"),
-            float(getattr(config, "INITIAL_BALANCE", 10_000.0)) * margin_equity_pct,
-        ),
+        _num(metrics.get("initial_margin_equity"), float(getattr(config, "INITIAL_BALANCE", 10_000.0))),
     )
     returns = {
         "30d": pnl30 / economic_equity,

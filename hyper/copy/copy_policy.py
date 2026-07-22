@@ -15,6 +15,31 @@ from typing import Mapping
 from hyper import config
 
 
+COPY_POLICY_PARAM_KEYS = (
+    "COPY_BT_DAYS", "COPY_BT_RECENT_DAYS", "COPY_BT_MIN_CLOSED", "COPY_BT_MIN_CLOSED_14D",
+    "COPY_BT_MIN_CLOSED_7D", "CORE_COPY_MIN_CLOSED_30D", "CORE_COPY_MIN_CLOSED_14D",
+    "CORE_COPY_MIN_CLOSED_7D", "CORE_COPY_WIN_RATE_30D_MIN", "CORE_COPY_WIN_RATE_14D_MIN",
+    "CORE_COPY_WIN_RATE_7D_MIN", "CORE_COPY_MIN_CAMPAIGNS_30D", "CORE_COPY_MIN_CAMPAIGNS_14D",
+    "CORE_COPY_MIN_CAMPAIGNS_7D", "CORE_COPY_WIN_RATE_LCB_CONFIDENCE",
+    "CORE_COPY_WIN_RATE_LCB_30D_MIN", "CORE_RETENTION_MIN_COPY_RETURN_30D",
+    "CORE_RETENTION_WIN_RATE_30D_MIN", "CORE_RETENTION_WIN_RATE_LCB_30D_MIN",
+    "CORE_SOFT_FAIL_CONFIRMATIONS", "CORE_COPY_RECENT_BODY_MIN_CLOSED",
+    "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
+    "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS", "CORE_INTRATRADE_DD_MAX",
+    "CORE_INTRATRADE_DD_REJECT", "CORE_DEEP_BAG_MAX_FAILED", "CORE_DEEP_BAG_MIN_RECOVERY_RATE",
+    "COPY_MIN_EXPECTED_MARGIN_RETURN", "COPY_MIN_RETURN_LCB", "CORE_ENTRY_MIN_POSITIVE_PROB",
+    "CHALLENGER_MIN_COPY_RETURN_30D", "CHALLENGER_MIN_COPY_RETURN_7D",
+    "CORE_MIN_COPY_RETURN_30D", "CORE_MIN_COPY_RETURN_7D", "CORE_STRONG_COPY_RETURN_30D",
+    "CORE_STRONG_MIN_CLOSED_30D", "CORE_STRONG_MIN_EVIDENCE_DAYS",
+    "CORE_RECENT_WARNING_LOSS_RATIO", "CORE_RECENT_HARD_LOSS_RATIO",
+    "COPY_MIN_RAW_PAYOFF_RATIO", "COPY_MIN_PROFIT_FACTOR", "COPY_MIN_TAIL_RETURN_30D",
+    "COPY_MAX_TOP1_PROFIT_SHARE", "COPY_MAX_TOP3_PROFIT_SHARE",
+    "COPY_CONCENTRATION_MIN_POSITIVE_EPISODES", "COPY_CONCENTRATION_BODY_MIN_EPISODES",
+    "COPY_CONCENTRATION_BODY_MIN_WIN_RATE", "COPY_CONCENTRATION_BODY_MIN_PROFIT_FACTOR",
+    "SELECTION_MIN_ACTIONABLE_RATE", "SELECTION_MIN_CAPACITY_FIT", "COPY_BT_GATE_ENABLE",
+)
+
+
 @dataclass(frozen=True)
 class CopyPolicy:
     windows: tuple[int, ...]
@@ -32,8 +57,19 @@ class CopyPolicy:
     core_min_campaigns_7d: int
     core_win_rate_lcb_confidence: float
     core_min_win_rate_lcb_30d: float
+    retention_min_return_30d: float
+    retention_min_win_rate_30d: float
+    retention_min_win_rate_lcb_30d: float
+    soft_fail_confirmations: int
     core_recent_body_min_closed: int
     core_max_liquidations_30d: int
+    deep_bag_event_pct: float
+    deep_bag_event_min_hours: float
+    deep_bag_long_hours: float
+    intratrade_dd_core_max: float
+    intratrade_dd_reject: float
+    deep_bag_max_failed: int
+    deep_bag_min_recovery_rate: float
     min_expected_margin_return: float
     min_return_lcb: float
     entry_positive_probability: float
@@ -151,42 +187,55 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_closed_30d=int(_value(values, "COPY_BT_MIN_CLOSED", 7) or 0),
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
         min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
-        core_min_closed_30d=int(_value(values, "CORE_COPY_MIN_CLOSED_30D", 15) or 0),
-        core_min_closed_14d=int(_value(values, "CORE_COPY_MIN_CLOSED_14D", 7) or 0),
-        core_min_closed_7d=int(_value(values, "CORE_COPY_MIN_CLOSED_7D", 5) or 0),
-        core_min_win_rate_30d=float(_value(values, "CORE_COPY_WIN_RATE_30D_MIN", 0.65)),
-        core_min_win_rate_14d=float(_value(values, "CORE_COPY_WIN_RATE_14D_MIN", 0.65)),
-        core_min_win_rate_7d=float(_value(values, "CORE_COPY_WIN_RATE_7D_MIN", 0.65)),
-        core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 5) or 0),
-        core_min_campaigns_14d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_14D", 3) or 0),
-        core_min_campaigns_7d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_7D", 2) or 0),
+        core_min_closed_30d=int(_value(values, "CORE_COPY_MIN_CLOSED_30D", 12) or 0),
+        core_min_closed_14d=int(_value(values, "CORE_COPY_MIN_CLOSED_14D", 5) or 0),
+        core_min_closed_7d=int(_value(values, "CORE_COPY_MIN_CLOSED_7D", 3) or 0),
+        core_min_win_rate_30d=float(_value(values, "CORE_COPY_WIN_RATE_30D_MIN", 0.60)),
+        core_min_win_rate_14d=float(_value(values, "CORE_COPY_WIN_RATE_14D_MIN", 0.55)),
+        core_min_win_rate_7d=float(_value(values, "CORE_COPY_WIN_RATE_7D_MIN", 0.40)),
+        core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 10) or 0),
+        core_min_campaigns_14d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_14D", 5) or 0),
+        core_min_campaigns_7d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_7D", 5) or 0),
         core_win_rate_lcb_confidence=float(_value(
             values, "CORE_COPY_WIN_RATE_LCB_CONFIDENCE", 0.80,
         )),
         core_min_win_rate_lcb_30d=float(_value(
             values, "CORE_COPY_WIN_RATE_LCB_30D_MIN", 0.50,
         )),
+        retention_min_return_30d=float(_value(values, "CORE_RETENTION_MIN_COPY_RETURN_30D", 0.07)),
+        retention_min_win_rate_30d=float(_value(values, "CORE_RETENTION_WIN_RATE_30D_MIN", 0.55)),
+        retention_min_win_rate_lcb_30d=float(_value(
+            values, "CORE_RETENTION_WIN_RATE_LCB_30D_MIN", 0.45,
+        )),
+        soft_fail_confirmations=int(_value(values, "CORE_SOFT_FAIL_CONFIRMATIONS", 2) or 1),
         core_recent_body_min_closed=int(_value(
             values, "CORE_COPY_RECENT_BODY_MIN_CLOSED", 10,
         ) or 0),
         core_max_liquidations_30d=int(_value(
-            values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 5,
+            values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 1,
         ) or 0),
+        deep_bag_event_pct=float(_value(values, "COPY_DEEP_BAG_EVENT_PCT", 0.08)),
+        deep_bag_event_min_hours=float(_value(values, "COPY_DEEP_BAG_EVENT_MIN_HOURS", 4.0)),
+        deep_bag_long_hours=float(_value(values, "COPY_DEEP_BAG_LONG_HOURS", 24.0)),
+        intratrade_dd_core_max=float(_value(values, "CORE_INTRATRADE_DD_MAX", 0.12)),
+        intratrade_dd_reject=float(_value(values, "CORE_INTRATRADE_DD_REJECT", 0.15)),
+        deep_bag_max_failed=int(_value(values, "CORE_DEEP_BAG_MAX_FAILED", 1) or 0),
+        deep_bag_min_recovery_rate=float(_value(values, "CORE_DEEP_BAG_MIN_RECOVERY_RATE", 0.50)),
         min_expected_margin_return=float(_value(values, "COPY_MIN_EXPECTED_MARGIN_RETURN", 0.02)),
         min_return_lcb=float(_value(values, "COPY_MIN_RETURN_LCB", 0.0)),
         entry_positive_probability=float(_value(values, "CORE_ENTRY_MIN_POSITIVE_PROB", 0.70)),
-        challenger_min_return_30d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_30D", 0.10)),
-        challenger_min_return_7d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_7D", 0.03)),
+        challenger_min_return_30d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_30D", 0.05)),
+        challenger_min_return_7d=float(_value(values, "CHALLENGER_MIN_COPY_RETURN_7D", 0.00)),
         core_min_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.10)),
-        core_min_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.05)),
+        core_min_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.00)),
         strong_core_return_30d=float(_value(values, "CORE_STRONG_COPY_RETURN_30D", 0.20)),
         strong_min_closed_30d=int(_value(values, "CORE_STRONG_MIN_CLOSED_30D", 20)),
         strong_min_evidence_days=int(_value(values, "CORE_STRONG_MIN_EVIDENCE_DAYS", 10)),
         recent_warning_loss_ratio=float(_value(values, "CORE_RECENT_WARNING_LOSS_RATIO", 0.10)),
         recent_hard_loss_ratio=float(_value(values, "CORE_RECENT_HARD_LOSS_RATIO", 0.25)),
         min_raw_payoff_ratio=float(_value(values, "COPY_MIN_RAW_PAYOFF_RATIO", 0.60)),
-        min_profit_factor=float(_value(values, "COPY_MIN_PROFIT_FACTOR", 1.30)),
-        min_tail_return_30d=float(_value(values, "COPY_MIN_TAIL_RETURN_30D", 0.05)),
+        min_profit_factor=float(_value(values, "COPY_MIN_PROFIT_FACTOR", 1.25)),
+        min_tail_return_30d=float(_value(values, "COPY_MIN_TAIL_RETURN_30D", 0.03)),
         max_top1_profit_share=float(_value(values, "COPY_MAX_TOP1_PROFIT_SHARE", 0.50)),
         max_top3_profit_share=float(_value(values, "COPY_MAX_TOP3_PROFIT_SHARE", 0.80)),
         concentration_min_positive_episodes=int(_value(

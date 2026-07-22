@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import Counter
 
 from .common import iso_epoch, q1, qall, score100
 
@@ -76,6 +77,97 @@ _REJECT_BUCKETS = [
 ]
 
 
+def _audit_count(row, payload):
+    try:
+        return max(0, int((payload or {}).get("count", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _reason_category(reason, status="", payload=None):
+    decision = (payload or {}).get("decisionAudit") or {}
+    if decision.get("failureCategory"):
+        return decision["failureCategory"]
+    value = str(reason or "unknown").lower()
+    state = str(status or "").lower()
+    if state in {"deferred_data_error", "quarantine"} or any(
+            token in value for token in ("unavailable", "data_error", "invalid", "missing_path")):
+        return "data_error"
+    if any(token in value for token in (
+        "deep_loss", "liquidation", "recent_copy_collapse", "high_water", "cost_stress_weak",
+        "campaign_tail_weak",
+    )):
+        return "hard_risk_exit"
+    if value.startswith("challenger_"):
+        return "soft_retention_failure"
+    return "business_reject"
+
+
+def _latest_funnel_audit(db, stamp):
+    """Return stage-local top reasons and role counts for the latest complete decision."""
+    if not stamp:
+        return {}, {}, [], 0
+    roles = Counter()
+    structure_passed = 0
+    reason_counts = {}
+    category_counts = Counter()
+    rows = _dict_rows(db.execute(
+        "SELECT stage,status,reason,payload_json FROM pipeline_audit "
+        "WHERE stamp=? AND source='scan' "
+        "AND stage IN ('official_roi','perp_prefilter','profile','selection')",
+        (stamp,),
+    ))
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        stage = row["stage"]
+        status = row["status"] or "unknown"
+        reason = row["reason"] or "unknown"
+        count = _audit_count(row, payload)
+        reason_stage = stage
+        if stage == "profile":
+            qualification = payload.get("followEligibility") or {}
+            role = qualification.get("role")
+            decision = payload.get("decisionAudit") or {}
+            if decision.get("stage") == "structure_filter":
+                reason_stage = "structure"
+            elif role == "research":
+                reason_stage = "challenger"
+            elif role == "challenger":
+                reason_stage = "personalCore"
+            elif role in {"rejected", "quarantine", "exit_only"}:
+                reason_stage = "personalCore" if qualification.get("hardRisk") else "research"
+        elif stage == "selection":
+            reason_stage = "finalCore"
+        failed = status not in {"passed", "active", "qualified", "core", "core_eligible"}
+        if stage == "profile":
+            failed = role != "core_eligible"
+        if failed:
+            category = _reason_category(reason, status, payload)
+            reason_counts.setdefault(reason_stage, Counter())[(reason, category)] += count
+            category_counts[category] += count
+        if stage == "profile":
+            role = qualification.get("role")
+            if role:
+                roles[role] += count
+            if decision.get("stage") not in {"data_validation", "structure_filter"}:
+                structure_passed += count
+    top_reasons = {
+        stage: [
+            {"reason": reason, "category": category, "count": count}
+            for (reason, category), count in counts.most_common(5)
+        ]
+        for stage, counts in reason_counts.items()
+    }
+    categories = [
+        {"category": key, "count": value}
+        for key, value in category_counts.most_common()
+    ]
+    return dict(roles), top_reasons, categories, structure_passed
+
+
 def ep_discovery(db):
     leaderboard = (q1(db, "SELECT COUNT(*) c FROM leaderboard") or {"c": 0})["c"]
     candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
@@ -91,6 +183,7 @@ def ep_discovery(db):
     challenger = 0
     core = watchlist
     generation_out = None
+    audit_stamp = None
     if generation:
         roles = qall(
             db,
@@ -121,6 +214,18 @@ def ep_discovery(db):
             "deferred": generation["deferred_n"] or 0,
             "performance": perf,
         }
+        audit_row = q1(
+            db,
+            "SELECT stamp FROM pipeline_audit WHERE source='scan' AND stage='selection_summary' "
+            "ORDER BY id DESC LIMIT 1",
+        )
+        audit_stamp = audit_row["stamp"] if audit_row else None
+    audit_roles, stage_reasons, category_counts, structure_passed = _latest_funnel_audit(
+        db, audit_stamp,
+    ) if audit_stamp else ({}, {}, [], 0)
+    research = sum(audit_roles.get(role, 0) for role in ("research", "challenger", "core_eligible"))
+    challenger_evidence = sum(audit_roles.get(role, 0) for role in ("challenger", "core_eligible"))
+    personal_core = audit_roles.get("core_eligible", 0)
     reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
     counts = {row["reason"]: row["n"] for row in reason_rows}
     total_rej = sum(counts.values()) or 0
@@ -144,10 +249,31 @@ def ep_discovery(db):
         if 0 <= idx < nbins:
             bins[idx] = row["n"]
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    return {"funnel": {"leaderboard": leaderboard, "candidates": candidates, "qualified": qualified,
+    funnel = {"leaderboard": leaderboard, "candidates": candidates, "qualified": qualified,
                         "officialRoi": (generation_out or {}).get("performance", {}).get("officialRoiPassed", candidates),
                         "perpPrefilter": (generation_out or {}).get("performance", {}).get("perpPrefilterPassed", candidates),
-                        "challenger": challenger, "core": core, "active": active, "watchlist": watchlist},
+                        "structureFilter": structure_passed,
+                        "research": research, "challengerEvidence": challenger_evidence,
+                        "personalCore": personal_core,
+                        "challenger": challenger, "core": core, "finalCore": core,
+                        "active": active, "watchlist": watchlist}
+    stage_values = (
+        ("leaderboard", "Leaderboard", funnel["leaderboard"], []),
+        ("coarse", "粗筛", funnel["candidates"], stage_reasons.get("official_roi", [])),
+        ("perp", "Perp预筛", funnel["perpPrefilter"], stage_reasons.get("perp_prefilter", [])),
+        ("structure", "结构过滤", funnel["structureFilter"], stage_reasons.get("structure", [])),
+        ("research", "Research", funnel["research"], stage_reasons.get("research", [])),
+        ("challenger", "Challenger", funnel["challengerEvidence"], stage_reasons.get("challenger", [])),
+        ("personalCore", "个人Core", funnel["personalCore"], stage_reasons.get("personalCore", [])),
+        ("finalCore", "最终Core", funnel["finalCore"], stage_reasons.get("finalCore", [])),
+    )
+    funnel_stages = [
+        {"key": key, "label": label, "count": count, "topReasons": reasons}
+        for key, label, count, reasons in stage_values
+    ]
+    return {"funnel": funnel,
+            "funnelStages": funnel_stages,
+            "failureCategories": category_counts,
             "rejectReasons": reject_reasons,
             "scoreHistogram": {"bins": bins},
             "scanner": scanner_status(db),
@@ -262,7 +388,10 @@ def _compact_audit_payload(payload):
             "winRate", "openFillRate", "liquidations", "feeDrag",
         )),
         "followEligibility": _pick_nonempty(payload.get("followEligibility"), (
-            "eligible", "status", "reasons",
+            "eligible", "coreEligible", "role", "status", "hardRisk", "reasons",
+        )),
+        "decisionAudit": _pick_nonempty(payload.get("decisionAudit"), (
+            "stage", "failureCategory", "firstHardFailure", "thresholds", "actual",
         )),
         "sectorCopy": _compact_sector_copy(payload.get("sectorCopy")),
         "sectorPolicy": _compact_sector_policy(payload.get("sectorPolicy")),

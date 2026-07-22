@@ -24,7 +24,7 @@ from hyper.copy.copy_data import (
     normalize_copyable_fills,
     out_of_scope_fills,
 )
-from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy.copy_evidence import summarize_copy_evidence
 from hyper.copy.sector import (
     SECTORS,
@@ -109,7 +109,7 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
         one_off_heavy = bool(
             reason == "heavy_dca"
             and heavy_count == 1
-            and int(current.get("median_adds_per_ep") or 0) <= int(p.grid_max_adds)
+            and float(current.get("median_adds_per_ep") or 0) <= float(p.grid_max_adds)
         )
         if one_off_heavy:
             out[sector] = {
@@ -473,7 +473,12 @@ def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, act
 
 # -------------------------------------------------------------------------- harvest
 def _prepare_leaderboard_rows(rows, p, fetched_at):
-    """Attach the official high-ROI harvest decision without mutating the live leaderboard."""
+    """Attach the cheap discovery decision without mutating the live leaderboard.
+
+    Official ROI remains a ranking/audit input, never a magnitude gate.  The bulk endpoint is used only to
+    prove useful account size, leveraged activity and some current positive PnL before the authoritative
+    scoped Copy replay.
+    """
     min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
     vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
     roi_min = {
@@ -481,9 +486,6 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         "month": getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
         "all": getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
     }
-    roi_windows_min_pass = max(1, min(3, int(getattr(
-        p, "roi_windows_min_pass", config.HARVEST_ROI_WINDOWS_MIN_PASS,
-    ))))
     pnl_min = {
         "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
         "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
@@ -498,17 +500,17 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
         month_pnl, all_pnl = f(mo.get("pnl")), f(al.get("pnl"))
         week_roi, month_roi, all_roi = f(wk.get("roi")), f(mo.get("roi")), f(al.get("roi"))
-        roi_windows_passed = sum((
-            week_roi >= roi_min["week"],
-            month_roi >= roi_min["month"],
-            all_roi >= roi_min["all"],
+        # Retain the old diagnostics so shadow reports can compare the removed ROI policy with the new
+        # recall surface.  They intentionally do not participate in ``is_candidate``.
+        r["roi_windows_passed"] = sum((
+            week_roi >= roi_min["week"], month_roi >= roi_min["month"], all_roi >= roi_min["all"],
         ))
+        week_positive = wk_pnl >= pnl_min["week"] if pnl_min["week"] > 0 else wk_pnl > 0
+        month_positive = month_pnl >= pnl_min["month"] if pnl_min["month"] > 0 else month_pnl > 0
         r["is_candidate"] = int(
             acct >= min_acct
             and wk_vlm >= vlm_min
-            and roi_windows_passed >= roi_windows_min_pass
-            and wk_pnl >= pnl_min["week"] and month_pnl >= pnl_min["month"]
-            and all_pnl >= pnl_min["all"]
+            and (week_positive or month_positive)
         )
         r["fetched_at"] = fetched_at
         mon_vlm = f(mo.get("vlm"))
@@ -598,36 +600,32 @@ def _official_roi_audit(db, generation_id, stamp, p):
     for rank, row in enumerate(rows, 1):
         item = dict(zip(names, row))
         passed = bool(item.pop("is_candidate"))
+        diagnostics = {
+            "week_roi_below_reference": f(item["weekRoi"]) < getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN),
+            "month_roi_below_reference": f(item["monthRoi"]) < getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
+            "all_roi_below_reference": f(item["allRoi"]) < getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
+        }
+        week_floor = getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN)
+        month_floor = getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN)
+        week_positive = f(item["weekPnl"]) >= week_floor if week_floor > 0 else f(item["weekPnl"]) > 0
+        month_positive = f(item["monthPnl"]) >= month_floor if month_floor > 0 else f(item["monthPnl"]) > 0
         checks = {
             "account_value_below_floor": f(item["accountValue"]) < getattr(p, "min_acct", config.HARVEST_MIN_ACCT),
             "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
-            "week_roi_below_floor": f(item["weekRoi"]) < getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN),
-            "month_roi_below_floor": f(item["monthRoi"]) < getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
-            "all_roi_below_floor": f(item["allRoi"]) < getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
-            "week_pnl_below_floor": f(item["weekPnl"]) < getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
-            "month_pnl_below_floor": f(item["monthPnl"]) < getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
-            "all_pnl_below_floor": f(item["allPnl"]) < getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
+            "recent_pnl_not_positive": not (week_positive or month_positive),
         }
         failed_checks = [reason for reason, failed in checks.items() if failed]
-        roi_windows_passed = 3 - sum(
-            1 for reason in ("week_roi_below_floor", "month_roi_below_floor", "all_roi_below_floor")
-            if checks[reason]
-        )
+        roi_windows_passed = 3 - sum(bool(value) for value in diagnostics.values())
         item["roiWindowsPassed"] = roi_windows_passed
-        item["roiWindowsRequired"] = max(1, min(3, int(getattr(
-            p, "roi_windows_min_pass", config.HARVEST_ROI_WINDOWS_MIN_PASS,
-        ))))
+        item["roiMagnitudeGateEnabled"] = False
+        item["roiDiagnostics"] = [reason for reason, failed in diagnostics.items() if failed]
         item["failedChecks"] = failed_checks
         addr = item.pop("addr")
-        reason = (
-            "roi_windows_below_min_pass"
-            if roi_windows_passed < item["roiWindowsRequired"] else
-            failed_checks[0] if failed_checks else "official_roi_below_floor"
-        )
+        reason = failed_checks[0] if failed_checks else "discovery_recall_below_floor"
         if passed:
             pipeline_audit._insert_event(
                 db, stamp=stamp, source="scan", stage="official_roi", addr=addr, rank=rank,
-                status="passed", reason="official_roi_passed", payload=item,
+                status="passed", reason="discovery_recall_passed", payload=item,
             )
         else:
             rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
@@ -840,6 +838,7 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
                 p, "copy_min_expected_margin_return", config.COPY_MIN_EXPECTED_MARGIN_RETURN
             ),
             margin_equity_pct=getattr(p, "margin_equity_pct", config.MARGIN_EQUITY_PCT),
+            policy_values=getattr(p, "copy_bt_overrides", None),
         )
         if not result.get("eligible"):
             if result.get("deferred"):
@@ -1427,13 +1426,16 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
     )
     row_cols = [d[0] for d in cur.description]
     rows = [dict(zip(row_cols, r)) for r in cur.fetchall()]
+    policy_values = {
+        **params.load_follow(db), **params.load_category(db, "scanner"),
+    }
     ranked = []
     for r in rows:
         r["margin_equity_pct"] = margin_equity_pct
         score, detail = follow_score.compute_follow_score(r)
         detail = dict(detail or {})
         eligibility = follow_score.evaluate_follow_eligibility(
-            r, margin_equity_pct=margin_equity_pct,
+            r, margin_equity_pct=margin_equity_pct, policy_values=policy_values,
         )
         if not eligibility.get("eligible"):
             detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
@@ -1670,17 +1672,17 @@ def _selection_prefetch_candidates(db, limit=None) -> list[str]:
 def _is_parameter_return_probe(row, margin_equity_pct: float) -> bool:
     """Whether a below-floor wallet is close enough to inform cold-start sizing without being published.
 
-    The public Challenger line remains 10%.  This internal set exists only to break the circular dependency
+    The public Challenger line is 5%.  This internal set exists only to break the circular dependency
     where a low seeded margin rejects a strong wallet before the tuner can test the larger safe margin that
     would make it qualify.  Final replay must still clear the real line before the wallet can be published.
     """
-    if str(row.get("reason") or "") != "copy_value_below_challenger_floor":
+    if str(row.get("reason") or "") not in {
+        "copy_value_below_challenger_floor", "research_copy_positive", "research_insufficient_evidence",
+    }:
         return False
     policy = load_copy_policy()
     scoped = apply_allowed_sector_copy_metrics(row)
-    qualification_equity = max(
-        1.0, float(config.INITIAL_BALANCE) * max(0.0, min(1.0, float(margin_equity_pct))),
-    )
+    qualification_equity = max(1.0, float(config.INITIAL_BALANCE))
     pnl30 = f(scoped.get("copy_bt_net_pnl"))
     pnl7 = f(scoped.get("copy_bt_7d_net_pnl"))
     try:
@@ -1747,13 +1749,28 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
             "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM copy_position GROUP BY lower(addr)"
         ).fetchall()
     }
+    live_wallet_risk = {
+        (addr or "").lower(): {
+            "wallet_breaker_stage": int(stage or 0),
+            "wallet_cooldown_until_ms": cooldown,
+            "wallet_drawdown_frac": f(drawdown),
+            "wallet_risk_active_member": bool(active_member),
+        }
+        for addr, stage, cooldown, drawdown, active_member in db.execute(
+            "SELECT addr,breaker_stage,cooldown_until_ms,drawdown_frac,active_member FROM wallet_risk_state "
+            "WHERE execution_book='paper'"
+        ).fetchall()
+    }
     rows = []
-    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    follow_values = params.load_follow(db)
+    margin_equity_pct = follow_values.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
+    policy_values = {**follow_values, **params.load_category(db, "scanner")}
     for raw in cur.fetchall():
         row = dict(zip(names, raw))
         addr = (row.get("addr") or "").lower()
         row["addr"] = addr
         row.update(forward_risk.get(addr) or {})
+        row.update(live_wallet_risk.get(addr) or {})
         if addr in pinned:
             try:
                 current_policy = json.loads(row.get("sector_policy_json") or "{}")
@@ -1768,7 +1785,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct)
+        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values)
         qualified = (
             row.get("status") in {"active", "qualified"}
             and (row.get("follow_qualification") or {}).get(
@@ -1797,7 +1814,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
 
 
 def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuation_marks,
-                             sigmas=None, market_ctx=None) -> dict:
+                             sigmas=None, market_ctx=None, retention=False) -> dict:
     """Replay one wallet under the final parameter surface without mutating its scan-time profile.
 
     Formation first tunes the shared account.  This second, cache-only pass is the authoritative individual
@@ -1866,7 +1883,11 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     _apply_copy_bt_gate(effective, results, replay_ctx)
     effective.update(_open_flow_metrics(evidence_fills, int(now_ms)))
     _copy_profile_evidence(effective, results, replay_ctx, addr=addr, now_ms=int(now_ms))
-    for key in ("forward_net_pnl", "forward_liquidations", "forward_closed_n"):
+    for key in (
+        "forward_net_pnl", "forward_liquidations", "forward_closed_n",
+        "wallet_breaker_stage", "wallet_cooldown_until_ms", "wallet_drawdown_frac",
+        "wallet_risk_active_member",
+    ):
         if row.get(key) is not None:
             effective[key] = row[key]
     qualification = follow_score.evaluate_follow_eligibility(
@@ -1878,6 +1899,8 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
             ),
         },
         margin_equity_pct=replay_ctx.margin_equity_pct,
+        policy_values=follow,
+        retention=bool(retention),
     )
     # The replay already contains only sectors allowed by the sealed policy.  Do not let the scan-time
     # sector aggregate overwrite these final-parameter metrics while recomputing rank.
@@ -1886,6 +1909,48 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         "margin_equity_pct": replay_ctx.margin_equity_pct,
     })
     return {"metrics": effective, "qualification": qualification, "score": score}
+
+
+def _apply_core_soft_failure_grace(db, addr, generation_id, qualification, policy_values=None):
+    """Persist the two-complete-scan Core retention counter and apply one soft-failure grace round."""
+    result = dict(qualification or {})
+    row = db.execute(
+        "SELECT core_soft_fail_count,core_soft_fail_generation FROM wallet_registry WHERE addr=?",
+        (str(addr or "").lower(),),
+    ).fetchone()
+    old_count = int(row[0] or 0) if row else 0
+    old_generation = row[1] if row else None
+    if result.get("coreEligible"):
+        count = 0
+        reason = None
+    elif result.get("hardRisk") or result.get("role") in {"exit_only", "quarantine"}:
+        count = load_copy_policy(policy_values).soft_fail_confirmations
+        reason = result.get("status") or "hard_risk"
+    else:
+        count = old_count if old_generation == generation_id else old_count + 1
+        reason = result.get("status") or "soft_failure"
+        required = load_copy_policy(policy_values).soft_fail_confirmations
+        if count < required:
+            original = dict(result)
+            result.update({
+                "eligible": True,
+                "coreEligible": True,
+                "strongEntry": False,
+                "status": "core_retained_soft_grace",
+                "role": "core_eligible",
+                "softFailureCount": count,
+                "softFailureOriginal": original,
+                "reasons": [
+                    f"Core软条件第{count}轮失败，达到连续{required}轮前保留；硬风险仍即时退出"
+                ],
+            })
+    if row:
+        db.execute(
+            "UPDATE wallet_registry SET core_soft_fail_count=?,core_soft_fail_generation=?,"
+            "core_soft_fail_reason=?,updated_at=? WHERE addr=?",
+            (count, generation_id, reason, now_iso(), str(addr or "").lower()),
+        )
+    return result
 
 
 def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
@@ -1969,7 +2034,9 @@ def _formation_tune_candidate(row) -> bool:
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     if (row or {}).get("formation_probe"):
-        return qualification.get("status") == "copy_value_below_challenger_floor"
+        return qualification.get("status") in {
+            "copy_value_below_challenger_floor", "research_copy_positive", "research_insufficient_evidence",
+        }
     if not qualification.get("eligible"):
         return False
     return bool(
@@ -1991,13 +2058,19 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
     ranked = []
     required_order = tuple(dict.fromkeys((addr or "").lower() for addr in required_order if addr))
     required = set(required_order)
+    current_core = set(selection.published_core_addrs(db) or ()) if db is not None else set()
     for row in rows:
         effective = _effective_follow_replay(
             db, row, now_ms, generation_id=generation_id, follow=follow,
             valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+            retention=(row.get("addr") or "").lower() in current_core,
         )
         qualification = dict(effective.get("qualification") or {})
         addr = (row.get("addr") or "").lower()
+        if addr in current_core:
+            qualification = _apply_core_soft_failure_grace(
+                db, addr, generation_id, qualification, policy_values=follow,
+            )
         if qualification.get("deferred") or qualification.get("role") == "quarantine":
             if addr in required:
                 raise RuntimeError(f"pinned_core_replay_invalid:{addr}")
@@ -2078,6 +2151,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     now_ms = int(now_ms or time.time() * 1000)
     ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False)
     base_follow = params.load_follow(db)
+    scanner_values = params.load_category(db, "scanner")
+    base_follow.update({
+        key: scanner_values[key] for key in COPY_POLICY_PARAM_KEYS if key in scanner_values
+    })
     if "SMART_ADD" in base_follow:
         base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
     sigmas = auto_tune._load_sigmas(db, generation_id)
@@ -2119,6 +2196,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
             "search": {
                 "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0, "selectedCount": 0,
+                "explicitEmptyCore": True,
                 "qualificationRejected": [], "admission": [],
             },
         }
@@ -2198,9 +2276,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             effective = _effective_follow_replay(
                 db, row, now_ms, generation_id=generation_id, follow=follow_surface,
                 valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                retention=row["addr"] in set(current_core),
             )
             qualification = dict(effective.get("qualification") or {})
             addr = row["addr"]
+            if addr in set(current_core):
+                qualification = _apply_core_soft_failure_grace(
+                    db, addr, generation_id, qualification, policy_values=follow_surface,
+                )
             if qualification.get("deferred") or qualification.get("role") == "quarantine":
                 raise RuntimeError(f"effective_copy_replay_invalid:{addr}")
             qualifications[addr] = qualification
@@ -2254,6 +2337,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "search": {
                 "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0,
                 "selectedCount": 0,
+                "explicitEmptyCore": True,
                 "tunePoolCount": len(tune_ordered),
                 "tunedInputCount": (
                     int(tune_search.selected.count) if tune_search is not None else len(tune_ordered)
@@ -2420,10 +2504,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
     )
     baseline_eval = evaluate_members(previous_qualified) if previous_qualified else None
     baseline_folds, _baseline_cost_stress = fold_replays(previous_qualified)
-    initial_margin_equity = (
-        float(config.INITIAL_BALANCE)
-        * f(fixed_follow.get("MARGIN_EQUITY_PCT") or config.MARGIN_EQUITY_PCT)
-    )
+    initial_margin_equity = float(config.INITIAL_BALANCE)
     robust_cache = {}
 
     def validate_members(addrs):
@@ -2513,10 +2594,22 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             robust_winner = (key, value, check)
             break
     if robust_winner is None:
-        # Formation failure must not publish an empty strategy over a previously funded Core.  Raising here
-        # keeps generation, selection and strategy-revision publication inside the caller's atomic rollback.
-        raise RuntimeError("no_robust_quality_membership")
-    chosen_addrs, chosen, robust_check = robust_winner
+        # An explicit zero-Core generation is safer than silently keeping wallets which failed the latest
+        # strict evidence. Existing positions are materialized as Exit-only by the selection builder.
+        chosen_addrs = ()
+        chosen = core_formation.PrefixEvaluation(
+            count=0, net_pnl=0.0, stress_net_pnl=0.0, max_drawdown=0.0,
+            actionable_open_rate=1.0, capacity_fit=1.0, liquidations=0,
+            params=tuned_params,
+            payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
+        )
+        robust_check = {
+            "eligible": False, "reason": "no_robust_quality_membership",
+            "explicitEmptyCore": True,
+        }
+        previous_qualified = ()
+    else:
+        chosen_addrs, chosen, robust_check = robust_winner
     stability_applied = False
     stable_additions = []
     if not rebalance_due and previous_qualified:
@@ -2594,6 +2687,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
             "membershipEvaluated": membership_search.evaluated,
             "membershipSelected": list(chosen_addrs),
             "membershipRobustAudit": robust_audit,
+            "explicitEmptyCore": bool(robust_check.get("explicitEmptyCore")),
             "robustAllowedMemberships": [list(key) for key in sorted(robust_allowed)],
             "singleWalletDependencyWarning": bool(
                 robust_check.get("singleWalletDependencyWarning")
@@ -2726,7 +2820,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    desired_order, formation_meta,
                                    effective_qualifications=None, effective_scores=None):
     """Materialize the jointly tuned, skip-aware quality membership selected during formation."""
-    copy_policy = load_copy_policy()
+    policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
+    copy_policy = load_copy_policy(policy_values)
     by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
     pinned_controls = selection.pinned_core_controls(db)
     pinned_enabled_order = tuple(item["addr"] for item in pinned_controls if item["enabled"])
@@ -2827,6 +2922,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     selected_set = set(core_order)
     core_rank = {addr: rank for rank, addr in enumerate(core_order, 1)}
     previous_core = {addr for addr, role in previous_roles.items() if role == selection.CORE}
+    explicit_empty_core = bool((formation_meta or {}).get("explicitEmptyCore"))
     marginal = selection.MarginalSelectionResult(
         selected=transition["selected"],
         baseline=strict_evaluate(tuple(sorted(previous_core & set(by_addr)))),
@@ -2861,6 +2957,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 "operator_starred_core" if addr in set(effective_pinned_order)
                 else transition_reasons.get(addr, "core_quality_selected")
             )
+        elif explicit_empty_core and addr in previous_core:
+            role, reason = selection.EXIT_ONLY, "no_robust_core_latest_evidence:exit_only"
+            enabled = False
         elif addr in held and data_status != "valid":
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         elif data_status != "valid":
@@ -2930,7 +3029,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                               forced_core_order=None, formation_meta=None,
                               effective_qualifications=None, effective_scores=None):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
-    copy_policy = load_copy_policy()
+    policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
+    copy_policy = load_copy_policy(policy_values)
     previous_generation = None if force_cold_bootstrap else selection.latest_published_generation(db)
     previous_roles = {}
     previous_selection = {}
@@ -2974,6 +3074,18 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) FROM copy_position GROUP BY lower(addr)"
         ).fetchall()
     }
+    live_wallet_risk = {
+        (addr or "").lower(): {
+            "wallet_breaker_stage": int(stage or 0),
+            "wallet_cooldown_until_ms": cooldown,
+            "wallet_drawdown_frac": f(drawdown),
+            "wallet_risk_active_member": bool(active_member),
+        }
+        for addr, stage, cooldown, drawdown, active_member in db.execute(
+            "SELECT addr,breaker_stage,cooldown_until_ms,drawdown_frac,active_member "
+            "FROM wallet_risk_state WHERE execution_book='paper'"
+        ).fetchall()
+    }
     # watchlist.score is the published final Copy-follow score.  Selection must consume that exact value
     # rather than recomputing from a narrower row projection and creating an invisible second score line.
     watch_scores = {
@@ -2987,6 +3099,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     for row in profiles:
         addr = (row.get("addr") or "").lower()
         row.update(forward_risk.get(addr) or {})
+        row.update(live_wallet_risk.get(addr) or {})
         if addr in pinned_addrs:
             try:
                 current_policy = json.loads(row.get("sector_policy_json") or "{}")
@@ -3003,7 +3116,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct)
+        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values)
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -4318,7 +4431,12 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             "copy_expected_return=?,copy_return_lcb=?,copy_return_volatility=?,copy_positive_probability=?,"
             "copy_evidence_days=?,copy_recent_return_14d=?,copy_recent_return_7d=?,copy_risk_score=?,"
             "execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
-            "actionable_open_rate=?,capacity_fit=?,data_status=?,evidence_status=? WHERE addr=?",
+            "actionable_open_rate=?,capacity_fit=?,"
+            "copy_path_risk_status=?,copy_intratrade_max_drawdown=?,copy_max_underwater_hours=?,"
+            "copy_loss_over_5_time_ratio=?,copy_deep_bag_event_n=?,copy_failed_deep_bag_n=?,"
+            "copy_deep_bag_recovery_rate=?,copy_max_deep_bag_hours=?,copy_current_open_loss_frac=?,"
+            "copy_current_bag_hours=?,copy_campaign_max_drawdown=?,copy_campaign_peak_positions=?,"
+            "copy_campaign_peak_margin_pct=?,data_status=?,evidence_status=? WHERE addr=?",
             (status, reason, score, m.get("raw_quality_score"), m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
@@ -4334,6 +4452,13 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              m.get("copy_risk_score"), m.get("execution_score"), m.get("model_coverage"),
              m.get("oos_net_pnl"), m.get("oos_max_drawdown"), m.get("oos_cvar95"),
              m.get("actionable_open_rate"), m.get("capacity_fit"),
+             m.get("copy_path_risk_status"), m.get("copy_intratrade_max_drawdown"),
+             m.get("copy_max_underwater_hours"), m.get("copy_loss_over_5_time_ratio"),
+             m.get("copy_deep_bag_event_n"), m.get("copy_failed_deep_bag_n"),
+             m.get("copy_deep_bag_recovery_rate"), m.get("copy_max_deep_bag_hours"),
+             m.get("copy_current_open_loss_frac"), m.get("copy_current_bag_hours"),
+             m.get("copy_campaign_max_drawdown"), m.get("copy_campaign_peak_positions"),
+             m.get("copy_campaign_peak_margin_pct"),
              m.get("data_status") or "valid", m.get("evidence_status"),
              addr),
         )
@@ -4713,7 +4838,7 @@ def scan(db, p) -> None:
         "warmupBackfillDue": len(warmup_backfill_addrs),
         "warmupBackfillScheduled": len(migration_backfill),
         "marginEquityPct": float(p.margin_equity_pct),
-        "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct),
+        "initialMarginEquity": float(config.INITIAL_BALANCE),
     }
     generation.record_workset(
         db,
@@ -5081,7 +5206,7 @@ def scan(db, p) -> None:
                 "selectionEvaluated": marginal.evaluated if marginal else 0,
                 "selectionSearch": marginal.search_meta if marginal else None,
                 "marginEquityPct": float(p.margin_equity_pct),
-                "initialMarginEquity": float(config.INITIAL_BALANCE) * float(p.margin_equity_pct),
+                "initialMarginEquity": float(config.INITIAL_BALANCE),
                 "marketScopeAudit": scope_audit,
                 "marketScopeCount": len(universe),
                 "marketScopeHash": hashlib.sha256(

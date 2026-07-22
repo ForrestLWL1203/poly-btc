@@ -18,8 +18,10 @@ from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_li
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
                           margin_cap_room, total_effective_margin, wallet_margin,
-                          wallet_sector_side_margin, wallet_sector_side_margin_room)
+                          wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
+                          wallet_sector_side_margin_room, wallet_sector_side_position_count)
 from .fill_transition import classify_fill_transition
+from .wallet_risk import HighWaterPolicy, advance_high_water, new_high_water_state
 from hyper.util import f
 
 
@@ -166,13 +168,14 @@ def campaign_structure_metrics(positions: list[dict]) -> dict:
                     campaigns.append(current)
                 current = {
                     "key": key, "opened_at": opened, "end": end, "closed": not is_open,
-                    "pnl": pnl, "position_n": 1,
+                    "pnl": pnl, "position_n": 1, "positions": [position],
                 }
             else:
                 current["end"] = max(current["end"], end)
                 current["closed"] = bool(current["closed"] and not is_open)
                 current["pnl"] += pnl
                 current["position_n"] += 1
+                current["positions"].append(position)
         if current is not None:
             campaigns.append(current)
 
@@ -182,6 +185,32 @@ def campaign_structure_metrics(positions: list[dict]) -> dict:
     losses = [-value for value in pnls if value < 0.0]
     gross_profit = sum(wins)
     gross_loss = sum(losses)
+    peak_positions = 0
+    peak_margin = 0.0
+    for campaign in campaigns:
+        events = []
+        for position in campaign.get("positions") or ():
+            opened = int(f(position.get("opened_at")))
+            closed = int(f(position.get("closed_at")))
+            margin = max(0.0, f(position.get("margin")))
+            events.append((opened, 1, margin))
+            if closed:
+                events.append((closed, -1, -margin))
+        current_n = 0
+        current_margin = 0.0
+        # Process opens before closes at an identical timestamp so a flip/rebalance cannot under-report
+        # the momentary basket capacity required by a strict follower.
+        for _stamp, count_delta, margin_delta in sorted(events, key=lambda row: (row[0], -row[1])):
+            current_n += count_delta
+            current_margin += margin_delta
+            peak_positions = max(peak_positions, current_n)
+            peak_margin = max(peak_margin, current_margin)
+    open_campaigns = [campaign for campaign in campaigns if not campaign["closed"]]
+    worst_open = min((float(campaign["pnl"]) for campaign in open_campaigns), default=0.0)
+    oldest_losing_open = min(
+        (int(campaign["opened_at"]) for campaign in open_campaigns if float(campaign["pnl"]) < 0.0),
+        default=0,
+    )
     return {
         "campaign_closed_n": len(closed_campaigns),
         "campaign_open_n": len(campaigns) - len(closed_campaigns),
@@ -198,6 +227,108 @@ def campaign_structure_metrics(positions: list[dict]) -> dict:
         "campaign_net_after_top1": sum(pnls) - sum(wins[:1]),
         "campaign_net_after_top2": sum(pnls) - sum(wins[:2]),
         "campaign_max_positions": max((campaign["position_n"] for campaign in campaigns), default=0),
+        "campaign_peak_positions": peak_positions,
+        "campaign_peak_margin": peak_margin,
+        "campaign_worst_pnl": min((float(campaign["pnl"]) for campaign in campaigns), default=0.0),
+        "campaign_worst_open_pnl": worst_open,
+        "campaign_oldest_losing_open_ms": oldest_losing_open,
+    }
+
+
+def path_risk_metrics(
+    samples: list[dict],
+    *,
+    initial_equity: float,
+    liquidation_times=(),
+    event_pct: float = config.COPY_DEEP_BAG_EVENT_PCT,
+    event_min_hours: float = config.COPY_DEEP_BAG_EVENT_MIN_HOURS,
+) -> dict:
+    """Summarize time-weighted marked-equity risk from the canonical replay path."""
+    initial = max(1.0, f(initial_equity))
+    rows = sorted(
+        (
+            {"time": int(f(row.get("time"))), "equity": f(row.get("equity"))}
+            for row in samples or () if int(f(row.get("time"))) > 0
+        ),
+        key=lambda row: row["time"],
+    )
+    deduped = []
+    for row in rows:
+        if deduped and row["time"] == deduped[-1]["time"]:
+            # Preserve both an intra-candle adverse extreme and its close for max-DD while letting the
+            # close become the state carried through the following time interval.
+            deduped.append(row)
+        else:
+            deduped.append(row)
+    rows = deduped
+    if not rows:
+        return {
+            "path_risk_status": "missing", "intratrade_max_drawdown": None,
+            "max_underwater_hours": None, "loss_over_5_time_ratio": None,
+            "deep_bag_event_n": 0, "failed_deep_bag_n": 0,
+            "deep_bag_recovery_rate": None, "max_deep_bag_hours": None,
+        }
+
+    peak = initial
+    max_dd = 0.0
+    below5_ms = 0
+    total_ms = max(0, rows[-1]["time"] - rows[0]["time"])
+    underwater_start = None
+    max_underwater_ms = 0
+    deep = None
+    events = []
+    liq_times = sorted(int(f(value)) for value in liquidation_times or () if int(f(value)) > 0)
+    for index, row in enumerate(rows):
+        stamp = row["time"]
+        equity = row["equity"]
+        peak = max(peak, equity)
+        dd = max(0.0, (peak - equity) / initial)
+        max_dd = max(max_dd, dd)
+        next_stamp = rows[index + 1]["time"] if index + 1 < len(rows) else stamp
+        interval = max(0, next_stamp - stamp)
+        if dd >= 0.05:
+            below5_ms += interval
+        if dd > 1e-12:
+            underwater_start = stamp if underwater_start is None else underwater_start
+            max_underwater_ms = max(max_underwater_ms, next_stamp - underwater_start)
+        else:
+            if underwater_start is not None:
+                max_underwater_ms = max(max_underwater_ms, stamp - underwater_start)
+            underwater_start = None
+        if deep is None and dd >= event_pct:
+            deep = {"start": stamp, "recovery_equity": peak, "max_dd": dd,
+                    "max_loss_frac": dd}
+        elif deep is not None:
+            deep["max_dd"] = max(deep["max_dd"], dd)
+            deep["max_loss_frac"] = max(deep["max_loss_frac"], dd)
+            # A recovered historical deep drawdown must regain the equity high that preceded the event;
+            # merely remaining above the original $10k base after first making money is not a recovery.
+            if equity >= deep["recovery_equity"] - 1e-9:
+                duration = max(0, stamp - deep["start"])
+                if duration >= event_min_hours * 3_600_000:
+                    liquidated = any(deep["start"] <= value <= stamp for value in liq_times)
+                    events.append({**deep, "end": stamp, "duration_ms": duration,
+                                   "recovered": not liquidated, "liquidated": liquidated})
+                deep = None
+    if underwater_start is not None:
+        max_underwater_ms = max(max_underwater_ms, rows[-1]["time"] - underwater_start)
+    if deep is not None:
+        duration = max(0, rows[-1]["time"] - deep["start"])
+        if duration >= event_min_hours * 3_600_000:
+            events.append({**deep, "end": None, "duration_ms": duration,
+                           "recovered": False, "liquidated": any(value >= deep["start"] for value in liq_times)})
+    recovered_n = sum(1 for event in events if event["recovered"])
+    failed_n = len(events) - recovered_n
+    return {
+        "path_risk_status": "complete",
+        "intratrade_max_drawdown": max_dd,
+        "max_underwater_hours": max_underwater_ms / 3_600_000,
+        "loss_over_5_time_ratio": below5_ms / total_ms if total_ms > 0 else 0.0,
+        "deep_bag_event_n": len(events),
+        "failed_deep_bag_n": failed_n,
+        "deep_bag_recovery_rate": recovered_n / len(events) if events else 1.0,
+        "max_deep_bag_hours": max((event["duration_ms"] for event in events), default=0) / 3_600_000,
+        "deep_bag_events": events,
     }
 
 
@@ -393,14 +524,40 @@ class Backtest:
         self.wallet_sector_side_cap_pct = overrides.get(
             "WALLET_SECTOR_SIDE_CAP_PCT", config.WALLET_SECTOR_SIDE_CAP_PCT,
         )
+        dynamic_side_keys = {
+            "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", "WALLET_CRYPTO_MID_SIDE_CAP_PCT",
+            "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", "WALLET_STOCK_SIDE_CAP_PCT",
+        }
+        legacy_side_default = (
+            self.wallet_sector_side_cap_pct if not dynamic_side_keys.intersection(overrides)
+            else None
+        )
+        self.wallet_sector_side_caps = {
+            "stable": overrides.get(
+                "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT",
+                config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
+            ),
+            "mid": overrides.get(
+                "WALLET_CRYPTO_MID_SIDE_CAP_PCT",
+                config.WALLET_CRYPTO_MID_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
+            ),
+            "high": overrides.get(
+                "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT",
+                config.WALLET_CRYPTO_HIGH_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
+            ),
+            "stock": overrides.get(
+                "WALLET_STOCK_SIDE_CAP_PCT",
+                config.WALLET_STOCK_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
+            ),
+        }
         self.wallet_margin_cap_pct = overrides.get("WALLET_MARGIN_CAP_PCT", config.WALLET_MARGIN_CAP_PCT)
         self.wallet_max_open_positions = int(overrides.get(
             "WALLET_MAX_OPEN_POSITIONS", config.WALLET_MAX_OPEN_POSITIONS,
         ))
+        self.wallet_stock_side_max_positions = int(overrides.get(
+            "WALLET_STOCK_SIDE_MAX_POSITIONS", config.WALLET_STOCK_SIDE_MAX_POSITIONS,
+        ))
         self.max_total_margin_pct = overrides.get("MAX_TOTAL_MARGIN_PCT", config.MAX_TOTAL_MARGIN_PCT)
-        self.wallet_forward_loss_freeze_pct = overrides.get(
-            "WALLET_FORWARD_LOSS_FREEZE_PCT", config.WALLET_FORWARD_LOSS_FREEZE_PCT,
-        )
         self.liquidation_reentry_cooldown_ms = int(
             overrides.get("LIQUIDATION_REENTRY_COOLDOWN_HOURS", config.LIQUIDATION_REENTRY_COOLDOWN_HOURS)
             * 60 * 60 * 1000
@@ -465,6 +622,23 @@ class Backtest:
         self.maintenance_margin_known = 0
         self.maintenance_margin_missing = 0
         self.deploy_samples = []
+        self.path_equity_samples = []
+        self.path_liquidation_times = []
+        self.campaign_closed_net = Counter()
+        self.campaign_risk_high_water = {}
+        self.campaign_intratrade_max_drawdown = 0.0
+        self.track_price_path = False
+        self.high_water_policy = HighWaterPolicy(
+            freeze_drawdown=f(overrides.get("WALLET_HWM_FREEZE_DD_PCT", config.WALLET_HWM_FREEZE_DD_PCT)),
+            reduce_drawdown=f(overrides.get("WALLET_HWM_REDUCE_DD_PCT", config.WALLET_HWM_REDUCE_DD_PCT)),
+            exit_drawdown=f(overrides.get("WALLET_HWM_EXIT_DD_PCT", config.WALLET_HWM_EXIT_DD_PCT)),
+            release_drawdown=f(overrides.get("WALLET_HWM_RELEASE_DD_PCT", config.WALLET_HWM_RELEASE_DD_PCT)),
+            cooldown_ms=int(f(overrides.get(
+                "WALLET_HWM_EXIT_COOLDOWN_DAYS", config.WALLET_HWM_EXIT_COOLDOWN_DAYS,
+            )) * 86_400_000),
+        )
+        self.wallet_risk_states = {}
+        self.wallet_breaker_actions = Counter()
 
     def open_sizing_params(self):
         return OpenSizingParams(
@@ -523,6 +697,61 @@ class Backtest:
         # risk immediately, matching the live sizing path.
         return max(0.0, self.balance + min(0.0, self.unrealized()))
 
+    def marked_equity(self):
+        """Full marked equity with isolated-loss floors for path-risk reconstruction."""
+        unrealized = 0.0
+        for position in self.open.values():
+            mark = self.last_px.get(position.get("coin")) or position.get("entry_px")
+            raw = f(position.get("rem_size")) * (
+                f(mark) - f(position.get("entry_px"))
+            ) * f(position.get("sign"))
+            effective_margin = max(0.0, f(position.get("margin"))) * (
+                f(position.get("rem_size")) / max(f(position.get("size")), 1e-12)
+            )
+            unrealized += max(-effective_margin, raw)
+        return self.balance + unrealized
+
+    def _sample_path_equity(self, stamp):
+        if not self.track_price_path:
+            return
+        stamp = int(f(stamp))
+        if stamp <= 0:
+            return
+        self.path_equity_samples.append({"time": stamp, "equity": self.marked_equity()})
+        self._sample_campaign_risk()
+
+    @staticmethod
+    def _campaign_key(position):
+        return (
+            str(position.get("addr") or "").lower(),
+            "stock" if str(position.get("coin") or "").lower().startswith("xyz:") else "crypto",
+            str(position.get("side") or "").lower(),
+        )
+
+    def _sample_campaign_risk(self):
+        """Mark every currently overlapping source/sector/direction basket on the same price path."""
+        grouped = {}
+        for position in self.open.values():
+            key = self._campaign_key(position)
+            mark = self.last_px.get(position.get("coin")) or position.get("entry_px")
+            pnl = f(position.get("realized_net")) + f(position.get("rem_size")) * (
+                f(mark) - f(position.get("entry_px"))
+            ) * f(position.get("sign"))
+            grouped[key] = grouped.get(key, 0.0) + pnl
+        for key, open_pnl in grouped.items():
+            campaign_pnl = f(self.campaign_closed_net.get(key)) + open_pnl
+            campaign_equity = self.initial_balance + campaign_pnl
+            peak = max(
+                self.initial_balance,
+                f(self.campaign_risk_high_water.get(key) or self.initial_balance),
+                campaign_equity,
+            )
+            self.campaign_risk_high_water[key] = peak
+            self.campaign_intratrade_max_drawdown = max(
+                self.campaign_intratrade_max_drawdown,
+                max(0.0, peak - campaign_equity) / self.initial_balance,
+            )
+
     def risk_available(self):
         return max(0.0, self.available() + min(0.0, self.unrealized()))
 
@@ -540,6 +769,63 @@ class Backtest:
             opened += f(position.get("realized_net"))
             opened += f(position.get("rem_size")) * (f(mark) - f(position.get("entry_px"))) * f(position.get("sign"))
         return closed + opened
+
+    def _wallet_high_water_state(self, addr, stamp=0):
+        wallet = str(addr or "").lower()
+        state = self.wallet_risk_states.get(wallet)
+        if state is None:
+            state = new_high_water_state(
+                membership_cycle=f"replay:{wallet}", baseline_equity=self.initial_balance,
+                selection_generation="replay", now_ms=int(f(stamp)),
+            )
+            self.wallet_risk_states[wallet] = state
+        return state
+
+    def _wallet_breaker_stage(self, addr, stamp=0) -> int:
+        state = self._wallet_high_water_state(addr, stamp)
+        updated, _action = advance_high_water(
+            state,
+            current_equity=f(state.get("baseline_equity")) + self.wallet_forward_pnl(addr),
+            now_ms=int(f(stamp)), policy=self.high_water_policy,
+        )
+        self.wallet_risk_states[str(addr or "").lower()] = updated
+        return int(updated.get("breaker_stage") or 0)
+
+    def _enforce_wallet_high_water(self, stamp=0):
+        wallets = set(self.wallet_risk_states)
+        wallets.update(str(position.get("addr") or "").lower() for position in self.open.values())
+        for wallet in sorted(wallet for wallet in wallets if wallet):
+            state = self._wallet_high_water_state(wallet, stamp)
+            updated, action = advance_high_water(
+                state,
+                current_equity=f(state.get("baseline_equity")) + self.wallet_forward_pnl(wallet),
+                now_ms=int(f(stamp)), policy=self.high_water_policy,
+            )
+            self.wallet_risk_states[wallet] = updated
+            if action:
+                self.wallet_breaker_actions[action] += 1
+            if action == "reduce_half":
+                reduced = False
+                for (addr, coin), ep in list(self.open.items()):
+                    if str(addr or "").lower() != wallet:
+                        continue
+                    px = self.last_px.get(coin) or ep.get("entry_px")
+                    self._apply_reduce(
+                        addr, coin, px, 0.0, f(ep.get("master_current")),
+                        t=stamp, forced_frac=0.50,
+                    )
+                    reduced = True
+                if reduced or not any(str(addr).lower() == wallet for addr, _coin in self.open):
+                    self.wallet_risk_states[wallet]["reduced_in_cycle"] = True
+            elif action == "exit_all":
+                for (addr, coin), ep in list(self.open.items()):
+                    if str(addr or "").lower() != wallet:
+                        continue
+                    px = self.last_px.get(coin) or ep.get("entry_px")
+                    self._apply_reduce(
+                        addr, coin, px, 0.0, 0.0, closing=True,
+                        status="high_water_exit", t=stamp,
+                    )
 
     def _liquidation_freeze_active(self, addr, coin, t):
         stamp = int(t or 0)
@@ -565,6 +851,16 @@ class Backtest:
     def coin_cap_pct(self, tier):
         return self.tier_coin_cap[tier]
 
+    def wallet_group_cap_pct(self, addr, coin, side, tier):
+        return wallet_sector_side_effective_cap_pct(
+            self.open.values(), addr=addr, coin=coin, side=side, candidate_tier=tier,
+            tier_for_coin=lambda current_coin: self.tier(self.sigma(current_coin), current_coin),
+            crypto_stable=self.wallet_sector_side_caps["stable"],
+            crypto_mid=self.wallet_sector_side_caps["mid"],
+            crypto_high=self.wallet_sector_side_caps["high"],
+            stock=self.wallet_sector_side_caps["stock"],
+        )
+
     def liquidity_block_reason(self, coin):
         if not self.low_liquidity_filter_enable or not coin or ":" in coin:
             return None
@@ -588,9 +884,11 @@ class Backtest:
         )
         path_events = _price_events(price_path)
         self.price_path_points = len(path_events)
+        self.track_price_path = bool(path_events)
         if not path_events:
             for x in fills:
                 self.process_fill(x)
+                self._enforce_wallet_high_water(x.get("time"))
             return self.result()
 
         fill_times = {}
@@ -614,6 +912,8 @@ class Backtest:
                 path_i += 1
             else:
                 self.process_fill(fills[fill_i])
+                self._sample_path_equity(fill_time)
+                self._enforce_wallet_high_water(fill_time)
                 fill_i += 1
         return self.result()
 
@@ -687,6 +987,22 @@ class Backtest:
         if hi < lo:
             lo, hi = hi, lo
         close = f(x.get("close")) or (lo + hi) / 2
+        boundary_positions = [
+            ep for (_addr, current_coin), ep in self.open.items()
+            if current_coin == coin
+            and x.get("open_time") is not None
+            and int(ep.get("opened_at") or 0) > int(x.get("open_time") or 0)
+        ]
+        ambiguous_candle = bool(x.get("has_fill_events")) or bool(boundary_positions)
+        # Capture the candle's adverse account-equity extreme without assuming high/low order. The close
+        # sample below is the state carried into elapsed-time deep-bag calculations. If a fill occurred
+        # inside this candle, its high/low may predate the changed position. Never let that unresolved range
+        # manufacture either a deep-drawdown sample or a high-water exit; finer path data must resolve it.
+        if not ambiguous_candle:
+            for probe in (lo, hi):
+                self.last_px[coin] = probe
+                self._sample_path_equity(x.get("time"))
+                self._enforce_wallet_high_water(x.get("time"))
         self.last_px[coin] = close
         self.path_mark_coins.add(coin)
         self._mark_liquidations_range(
@@ -702,7 +1018,7 @@ class Backtest:
                 x.get("open_time") is not None
                 and int(ep.get("opened_at") or 0) > int(x.get("open_time") or 0)
             )
-            if boundary or bool(x.get("has_fill_events")):
+            if boundary or ambiguous_candle:
                 # The candle's favorable extreme may predate an entry/add/reduce inside that candle.
                 # Without a finer path, skipping the TP update is safer than manufacturing a high-water.
                 continue
@@ -710,6 +1026,8 @@ class Backtest:
             self._advance_smart_take_profit(addr, coin, ep, favorable, x.get("time"), allow_cut=False)
             if (addr, coin) in self.open:
                 self._advance_smart_take_profit(addr, coin, ep, close, x.get("time"), allow_cut=True)
+        self._sample_path_equity(x.get("close_time") or x.get("time"))
+        self._enforce_wallet_high_water(x.get("close_time") or x.get("time"))
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
         if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
@@ -725,9 +1043,8 @@ class Backtest:
         if self._liquidation_freeze_active(addr, coin, t):
             self.skip_reasons["skip_liquidation_cooldown"] += 1
             return
-        loss_limit = self.initial_balance * self.wallet_forward_loss_freeze_pct
-        if loss_limit > 0 and self.wallet_forward_pnl(addr) <= -loss_limit:
-            self.skip_reasons["skip_wallet_forward_loss"] += 1
+        if self._wallet_breaker_stage(addr, t) >= 1:
+            self.skip_reasons["skip_wallet_high_water"] += 1
             return
         wallet_open_n = sum(
             1 for position in self.open.values()
@@ -735,6 +1052,11 @@ class Backtest:
         )
         if wallet_open_n >= self.wallet_max_open_positions:
             self.skip_reasons["skip_wallet_position_cap"] += 1
+            return
+        if str(coin).lower().startswith("xyz:") and wallet_sector_side_position_count(
+            self.open.values(), addr=addr, coin=coin, side=side,
+        ) >= self.wallet_stock_side_max_positions:
+            self.skip_reasons["skip_wallet_stock_side_position_cap"] += 1
             return
         target_notl = abs(pos1) * px
         risk_equity = self.risk_equity()
@@ -747,8 +1069,9 @@ class Backtest:
         group_existing = wallet_sector_side_margin(
             self.open.values(), addr=addr, coin=coin, side=side,
         )
+        group_cap = self.wallet_group_cap_pct(addr, coin, side, self.tier(sigma, coin))
         group_room = wallet_sector_side_margin_room(
-            cap_pct=self.wallet_sector_side_cap_pct,
+            cap_pct=group_cap,
             risk_equity=risk_equity,
             existing_margin=group_existing,
         )
@@ -918,9 +1241,8 @@ class Backtest:
         if self._liquidation_freeze_active(addr, coin, t):
             self.skip_reasons["skip_liquidation_cooldown_add"] += 1
             return self._observe_add(ep, oid, "liquidation_cooldown_blocked")
-        loss_limit = self.initial_balance * self.wallet_forward_loss_freeze_pct
-        if loss_limit > 0 and self.wallet_forward_pnl(addr) <= -loss_limit:
-            self.skip_reasons["skip_wallet_forward_loss_add"] += 1
+        if self._wallet_breaker_stage(addr, t) >= 1:
+            self.skip_reasons["skip_wallet_high_water_add"] += 1
             return self._observe_add(ep, oid, "forward_loss_blocked")
 
         # Once our first proactive profit cut has executed, the released exposure stays released.  Target
@@ -937,8 +1259,9 @@ class Backtest:
         group_existing = wallet_sector_side_margin(
             self.open.values(), addr=addr, coin=coin, side=ep["side"],
         )
+        group_cap = self.wallet_group_cap_pct(addr, coin, ep["side"], tier)
         group_room = wallet_sector_side_margin_room(
-            cap_pct=self.wallet_sector_side_cap_pct,
+            cap_pct=group_cap,
             risk_equity=risk_equity,
             existing_margin=group_existing,
         )
@@ -1070,13 +1393,16 @@ class Backtest:
         return True
 
     def _apply_reduce(self, addr, coin, px, signed, pos1, closing=False, status="closed", t=None,
-                      smart_tp_stage=None):
+                      smart_tp_stage=None, forced_frac=None):
         key = (addr, coin)
         ep = self.open.get(key)
         if not ep:
             return
         old_rem = ep["rem_size"]
-        if smart_tp_stage is not None:
+        if forced_frac is not None:
+            reduce_frac = max(0.0, min(1.0, f(forced_frac)))
+            closing = closing or reduce_frac >= 1.0
+        elif smart_tp_stage is not None:
             if int(ep.get("smart_tp_stage") or 0) != int(smart_tp_stage):
                 return
             decision = self._smart_take_profit_decision(ep, px)
@@ -1165,8 +1491,26 @@ class Backtest:
             ep["status"] = status
             self.closed.append(ep)
             self.open.pop(key, None)
+            campaign_key = self._campaign_key(ep)
+            self.campaign_closed_net[campaign_key] += f(ep.get("realized_net"))
+            self._sample_campaign_risk()
+            if not any(self._campaign_key(position) == campaign_key for position in self.open.values()):
+                final_campaign_pnl = f(self.campaign_closed_net.get(campaign_key))
+                campaign_equity = self.initial_balance + final_campaign_pnl
+                peak = max(
+                    self.initial_balance,
+                    f(self.campaign_risk_high_water.get(campaign_key) or self.initial_balance),
+                    campaign_equity,
+                )
+                self.campaign_intratrade_max_drawdown = max(
+                    self.campaign_intratrade_max_drawdown,
+                    max(0.0, peak - campaign_equity) / self.initial_balance,
+                )
+                self.campaign_closed_net.pop(campaign_key, None)
+                self.campaign_risk_high_water.pop(campaign_key, None)
             if status == "liquidated":
                 self._record_liquidation_freeze(addr, coin, t)
+                self.path_liquidation_times.append(int(f(t)))
         self._sample_deploy(t)
 
     def _smart_take_profit_decision(self, ep, mark_px):
@@ -1271,6 +1615,7 @@ class Backtest:
         capacity_skips = sum(self.skip_reasons[k] for k in (
             "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
             "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
+            "skip_wallet_stock_side_position_cap",
         ))
         equity_pnl = self.balance - self.initial_balance + unreal
         curve = []
@@ -1306,6 +1651,11 @@ class Backtest:
             fee_drag=self.fee_drag,
         )
         campaign_metrics = campaign_structure_metrics(all_positions)
+        path_metrics = path_risk_metrics(
+            self.path_equity_samples,
+            initial_equity=self.initial_balance,
+            liquidation_times=self.path_liquidation_times,
+        )
         open_rate = self.opened_n / self.target_open_events if self.target_open_events else 1.0
         behavior_v2 = _clamp01(
             open_rate
@@ -1344,6 +1694,24 @@ class Backtest:
             fallback_reasons.append("missing_price_path")
         if leverage_coverage < 1.0:
             fallback_reasons.append("missing_master_leverage")
+        path_complete = bool(
+            self.price_path_points
+            and price_path_coverage >= float(getattr(config, "AUTO_TUNE_PRICE_PATH_MIN_COVERAGE", 0.95))
+            and not self.price_path_meta.get("missingCoins")
+        )
+        if not path_complete:
+            path_metrics["path_risk_status"] = "missing"
+        latest_path_ms = max((int(row.get("time") or 0) for row in self.path_equity_samples), default=0)
+        current_asof_ms = int(self.valuation_asof_ms or latest_path_ms or 0)
+        aggregate_open_loss = min(0.0, unreal) / self.initial_balance
+        campaign_open_loss = min(0.0, f(campaign_metrics.get("campaign_worst_open_pnl"))) / self.initial_balance
+        current_open_loss = min(aggregate_open_loss, campaign_open_loss)
+        oldest_losing_open = int(campaign_metrics.get("campaign_oldest_losing_open_ms") or 0)
+        current_bag_hours = (
+            max(0, current_asof_ms - oldest_losing_open) / 3_600_000
+            if current_open_loss < 0.0 and oldest_losing_open and current_asof_ms else 0.0
+        )
+        campaign_worst_endpoint = f(campaign_metrics.get("campaign_worst_pnl"))
         result = {
             "addr": self.addr,
             "closed_n": len(self.closed),
@@ -1359,11 +1727,19 @@ class Backtest:
             "margin_equity_pct": self.margin_equity_pct,
             "wallet_margin_cap_pct": self.wallet_margin_cap_pct,
             "wallet_sector_side_cap_pct": self.wallet_sector_side_cap_pct,
+            "wallet_sector_side_caps": dict(self.wallet_sector_side_caps),
             "wallet_max_open_positions": self.wallet_max_open_positions,
+            "wallet_stock_side_max_positions": self.wallet_stock_side_max_positions,
             "max_total_margin_pct": self.max_total_margin_pct,
             "liquidation_reentry_blocks": self.skip_reasons["skip_liquidation_cooldown"],
             "wallet_forward_loss_blocks": self.skip_reasons["skip_wallet_forward_loss"],
-            "initial_margin_equity": self.initial_balance * self.margin_equity_pct,
+            "wallet_high_water_blocks": self.skip_reasons["skip_wallet_high_water"],
+            "wallet_high_water_add_blocks": self.skip_reasons["skip_wallet_high_water_add"],
+            "wallet_breaker_actions": dict(self.wallet_breaker_actions),
+            "wallet_risk_states": {addr: dict(state) for addr, state in self.wallet_risk_states.items()},
+            # Qualification returns and source-wallet breakers are normalized to the full Paper risk
+            # capital.  ``MARGIN_EQUITY_PCT`` is a sizing budget, not a smaller return denominator.
+            "initial_margin_equity": self.initial_balance,
             "closed_net_pnl": closed_net,
             "copy_gross_pnl": self.gross_pnl,
             "unrealized_pnl": unreal,
@@ -1407,6 +1783,17 @@ class Backtest:
                 for coin, lo, hi in sorted(self.ambiguous_path_events)
             ],
             "price_path_missing_coins": list(self.price_path_meta.get("missingCoins") or []),
+            "path_equity_samples": self.path_equity_samples,
+            "path_liquidation_times": self.path_liquidation_times,
+            "current_open_loss_frac": current_open_loss,
+            "current_bag_hours": current_bag_hours,
+            "campaign_max_drawdown": max(
+                self.campaign_intratrade_max_drawdown,
+                abs(min(0.0, campaign_worst_endpoint)) / self.initial_balance,
+            ),
+            "campaign_peak_margin_pct": (
+                f(campaign_metrics.get("campaign_peak_margin")) / self.initial_balance
+            ),
             "master_leverage_known": self.master_leverage_known,
             "master_leverage_missing": self.master_leverage_missing,
             "master_leverage_coverage": leverage_coverage,
@@ -1422,6 +1809,7 @@ class Backtest:
         result.update(add_metrics)
         result.update(profit_metrics)
         result.update(campaign_metrics)
+        result.update(path_metrics)
         return result
 
 
@@ -1556,6 +1944,28 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         row for row in (out.get("ambiguous_path_ranges") or [])
         if int(row.get("close_time") or 0) >= int(start_ms)
     ]
+    all_path_samples = list(out.get("path_equity_samples") or ())
+    prior_sample = max(
+        (row for row in all_path_samples if int(row.get("time") or 0) < int(start_ms)),
+        key=lambda row: int(row.get("time") or 0),
+        default=None,
+    )
+    path_samples = []
+    if prior_sample:
+        path_samples.append({"time": int(start_ms), "equity": f(prior_sample.get("equity"))})
+    path_samples.extend(
+        dict(row) for row in all_path_samples if int(row.get("time") or 0) >= int(start_ms)
+    )
+    path_risk = path_risk_metrics(
+        path_samples,
+        initial_equity=f(out.get("initial_margin_equity")) or config.INITIAL_BALANCE,
+        liquidation_times=[
+            value for value in (out.get("path_liquidation_times") or ())
+            if int(f(value)) >= int(start_ms)
+        ],
+    )
+    if str(out.get("path_risk_status") or "") != "complete":
+        path_risk["path_risk_status"] = str(out.get("path_risk_status") or "missing")
     out.update({
         "closed_n": len(positions),
         "wins": wins,
@@ -1571,6 +1981,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         ),
         "ambiguous_liquidations": len(ambiguous_ranges),
         "ambiguous_path_ranges": ambiguous_ranges,
+        "path_equity_samples": path_samples,
         "copy_win_rate": wins / len(positions) if positions else 0.0,
         "copy_net_pnl": closed_net + open_unrealized,
         "closed_net_pnl": closed_net,
@@ -1602,4 +2013,5 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         fee_drag=fees,
     ))
     out.update(campaign_structure_metrics(positions + open_positions))
+    out.update(path_risk)
     return out

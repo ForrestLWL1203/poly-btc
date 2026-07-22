@@ -63,22 +63,25 @@ FOLLOW_SELECTION_MODE = "auto"       # auto | manual
 CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
 # Individual Copy economics are classified before the shared-account selector.  Challenger is a
 # real observation tier, not a dumping ground for economically worthless wallets.
-CHALLENGER_MIN_COPY_RETURN_30D = 0.10
-CHALLENGER_MIN_COPY_RETURN_7D = 0.03
+CHALLENGER_MIN_COPY_RETURN_30D = 0.05
+CHALLENGER_MIN_COPY_RETURN_7D = 0.00
 CORE_MIN_COPY_RETURN_30D = 0.10
-CORE_MIN_COPY_RETURN_7D = 0.05
+CORE_MIN_COPY_RETURN_7D = 0.00
 CORE_STRONG_COPY_RETURN_30D = 0.20
-# Internal-only cold-start probe. Wallets between 5% and the public 10% Challenger line may participate in
-# parameter search when every sample/edge/execution condition is already strong. They remain hidden unless
-# the winning sealed surface lifts them above the real 10% qualification line.
+CORE_RETENTION_MIN_COPY_RETURN_30D = 0.07
+CORE_RETENTION_WIN_RATE_30D_MIN = 0.55
+CORE_RETENTION_WIN_RATE_LCB_30D_MIN = 0.45
+CORE_SOFT_FAIL_CONFIRMATIONS = 2
+# Internal-only cold-start probe at the same 5% Challenger floor. It may participate in parameter search but
+# never bypasses the final 10% Core entry line on the sealed replay surface.
 CORE_TUNE_PROBE_MIN_RETURN_30D = 0.05
 CORE_STRONG_MIN_CLOSED_30D = 20
 CORE_STRONG_MIN_EVIDENCE_DAYS = 10
 CORE_RECENT_WARNING_LOSS_RATIO = 0.10
 CORE_RECENT_HARD_LOSS_RATIO = 0.25
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
-COPY_MIN_PROFIT_FACTOR = 1.30
-COPY_MIN_TAIL_RETURN_30D = 0.05
+COPY_MIN_PROFIT_FACTOR = 1.25
+COPY_MIN_TAIL_RETURN_30D = 0.03
 COPY_MAX_TOP1_PROFIT_SHARE = 0.50
 COPY_MAX_TOP3_PROFIT_SHARE = 0.80
 COPY_CONCENTRATION_MIN_POSITIVE_EPISODES = 5
@@ -249,11 +252,21 @@ MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positio
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
 #                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
-WALLET_MARGIN_CAP_PCT = 0.20       # all open exposure copied from one source wallet, across every market/side.
-WALLET_SECTOR_SIDE_CAP_PCT = 0.15  # same source wallet + board (crypto/xyz) + direction. Applies to opens/adds.
+WALLET_MARGIN_CAP_PCT = 0.25       # all open exposure copied from one source wallet, across every market/side.
+WALLET_SECTOR_SIDE_CAP_PCT = 0.15  # legacy fallback; live cap is selected by board and volatility tier below.
+WALLET_CRYPTO_STABLE_SIDE_CAP_PCT = 0.20
+WALLET_CRYPTO_MID_SIDE_CAP_PCT = 0.15
+WALLET_CRYPTO_HIGH_SIDE_CAP_PCT = 0.10
+WALLET_STOCK_SIDE_CAP_PCT = 0.10
 WALLET_MAX_OPEN_POSITIONS = 3      # a basket trader cannot occupy the account with many simultaneous symbols.
+WALLET_STOCK_SIDE_MAX_POSITIONS = 2
 MAX_TOTAL_MARGIN_PCT = 0.85        # unlike MAX_DEPLOY_PCT this also caps ADDS, preserving a hard risk buffer.
-WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03  # stop NEW exposure when one source's realized+open forward PnL <= -3%.
+WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03  # legacy persisted setting; execution now uses member-cycle HWM 3/6/10.
+WALLET_HWM_FREEZE_DD_PCT = 0.03
+WALLET_HWM_REDUCE_DD_PCT = 0.06
+WALLET_HWM_EXIT_DD_PCT = 0.10
+WALLET_HWM_RELEASE_DD_PCT = 0.02
+WALLET_HWM_EXIT_COOLDOWN_DAYS = 7
 LIQUIDATION_REENTRY_COOLDOWN_HOURS = 24
 REPEAT_LIQUIDATION_FREEZE_DAYS = 7  # second copied liquidation inside 30d freezes the whole source for a week.
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is below this fraction of margin-calculation equity:
@@ -300,30 +313,19 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard prefilter (UI-tunable). The leaderboard carries each wallet's 24h/7d/30d/allTime
-# perf in ONE bulk fetch, so we pre-bias on what it CAN reliably say — multi-window profitability +
-# return magnitude + 7d activity — BEFORE any per-wallet API profiling. What it CANNOT say (true week-
-# to-week stability, copyability, loss-discipline) is the PROFILE stage's job (pos_day_ratio, grid gate,
-# worst_loss gate). Key lessons baked in: (1) bots/grids are INVISIBLE here (volume/turnover/efficiency
-# don't separate them from directional — proven), so don't try; profile catches them. (2) ACTIVITY uses
-# the 7d window, NOT 24h — a 24h floor kills the holders we want (low 24h volume mid-hold) and biases to
-# high-churn bots. (3) RETURN uses 30d magnitude + 7d magnitude TOGETHER: 30d alone can be one big early
-# day then dormant; requiring the 7d to ALSO be earning blocks that, while the 30d requirement stops a
-# single-week fluke. We copy by %/leverage so low-ROI wallets give us low returns (small capital).
-# Stage-1 is deliberately inclusive: it decides who receives expensive strict replay, not who may enter Core.
-# Repeating the final profitability floors here starves the quality stage of calmer medium-size wallets and
-# over-samples large/high-turnover accounts. Small absolute PnL floors still reject tiny flow artefacts;
-# nominal volume remains only a recent-activity floor and is never a profitability denominator.
+# Stage-1 leaderboard recall (UI-tunable). Official ROI magnitude is retained for rank/audit only. The cheap
+# hard surface proves $5k equity, $250k leveraged 7d notional activity and positive 7d OR 30d PnL; scoped
+# Perp evidence, structure and canonical strict-Copy replay decide every executable role later in the funnel.
 HARVEST_MIN_ACCT = 5_000.0
-HARVEST_WEEK_VLM_MIN = 50_000.0
+HARVEST_WEEK_VLM_MIN = 250_000.0
 HARVEST_WEEK_ROI_MIN = 0.05
 HARVEST_MONTH_ROI_MIN = 0.05
 HARVEST_ALL_ROI_MIN = 0.05
-HARVEST_ROI_WINDOWS_MIN_PASS = 2  # coarse discovery: pass any two windows; strict trade replay decides quality.
-HARVEST_WEEK_PNL_MIN = 250.0
-HARVEST_MONTH_PNL_MIN = 500.0
+HARVEST_ROI_WINDOWS_MIN_PASS = 2  # legacy reference retained for migration/audit; never a recall hard gate.
+HARVEST_WEEK_PNL_MIN = 0.0
+HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0
-HARVEST_PERP_PNL_SHARE_MIN = 0.80
+HARVEST_PERP_PNL_SHARE_MIN = 0.60
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
 # that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);
@@ -407,26 +409,35 @@ COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 
 
 # Core repeatability hard gates.  These use our strict Copy replay after market/sector scoping, not the
 # target wallet's broad profile win rate.  The lower 7/5/5 evidence floors above still define whether a
-# wallet has enough evidence to remain visible as Challenger; new opens require the stronger 15/7/5 Core
+# wallet has enough evidence to remain visible as Challenger; new opens require the stronger 12/5/3 Core
 # sample and win-rate surface below.
-CORE_COPY_MIN_CLOSED_30D = 15
-CORE_COPY_MIN_CLOSED_14D = 7
-CORE_COPY_MIN_CLOSED_7D = 5
-CORE_COPY_WIN_RATE_30D_MIN = 0.65
-CORE_COPY_WIN_RATE_14D_MIN = 0.65
-CORE_COPY_WIN_RATE_7D_MIN = 0.65
+CORE_COPY_MIN_CLOSED_30D = 12
+CORE_COPY_MIN_CLOSED_14D = 5
+CORE_COPY_MIN_CLOSED_7D = 3
+CORE_COPY_WIN_RATE_30D_MIN = 0.60
+CORE_COPY_WIN_RATE_14D_MIN = 0.55
+CORE_COPY_WIN_RATE_7D_MIN = 0.40
 # Win-rate confidence is measured on independent same-direction campaigns, not on every correlated symbol.
-CORE_COPY_MIN_CAMPAIGNS_30D = 5
-CORE_COPY_MIN_CAMPAIGNS_14D = 3
-CORE_COPY_MIN_CAMPAIGNS_7D = 2
+CORE_COPY_MIN_CAMPAIGNS_30D = 10
+CORE_COPY_MIN_CAMPAIGNS_14D = 5
+CORE_COPY_MIN_CAMPAIGNS_7D = 5
 CORE_COPY_WIN_RATE_LCB_CONFIDENCE = 0.80
 CORE_COPY_WIN_RATE_LCB_30D_MIN = 0.50
 # A negative post-Top3 trade body in both recent windows is meaningful only after each body contains this
 # many episodes.  It blocks Core but remains Challenger observation rather than erasing the wallet.
 CORE_COPY_RECENT_BODY_MIN_CLOSED = 10
 # One isolated 30d replay liquidation is already fully charged to PnL/drawdown and may coexist with a high-
-# win, profitable surface. Repetition is path-dependent gambling and remains Challenger-only.
+# win, profitable surface. Repetition is path-dependent gambling and is rejected as a hard risk.
 CORE_COPY_MAX_LIQUIDATIONS_30D = 1
+
+# Intratrade path risk.  These percentages are normalized to the replay/member-epoch risk base.
+COPY_DEEP_BAG_EVENT_PCT = 0.08
+COPY_DEEP_BAG_EVENT_MIN_HOURS = 4.0
+COPY_DEEP_BAG_LONG_HOURS = 24.0
+CORE_INTRATRADE_DD_MAX = 0.12
+CORE_INTRATRADE_DD_REJECT = 0.15
+CORE_DEEP_BAG_MAX_FAILED = 1
+CORE_DEEP_BAG_MIN_RECOVERY_RATE = 0.50
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled

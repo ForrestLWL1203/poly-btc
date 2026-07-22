@@ -231,6 +231,19 @@ CREATE TABLE IF NOT EXISTS profile (
     oos_cvar95 REAL,
     actionable_open_rate REAL,
     capacity_fit REAL,
+    copy_path_risk_status TEXT DEFAULT 'pending', -- pending/complete/missing/invalid; old rows fail closed for Core
+    copy_intratrade_max_drawdown REAL,
+    copy_max_underwater_hours REAL,
+    copy_loss_over_5_time_ratio REAL,
+    copy_deep_bag_event_n INTEGER DEFAULT 0,
+    copy_failed_deep_bag_n INTEGER DEFAULT 0,
+    copy_deep_bag_recovery_rate REAL,
+    copy_max_deep_bag_hours REAL,
+    copy_current_open_loss_frac REAL,
+    copy_current_bag_hours REAL,
+    copy_campaign_max_drawdown REAL,
+    copy_campaign_peak_positions INTEGER DEFAULT 0,
+    copy_campaign_peak_margin_pct REAL,
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -312,6 +325,9 @@ CREATE TABLE IF NOT EXISTS wallet_registry (
     core_entries               INTEGER NOT NULL DEFAULT 0,
     core_exits                 INTEGER NOT NULL DEFAULT 0,
     recovery_count             INTEGER NOT NULL DEFAULT 0,
+    core_soft_fail_count       INTEGER NOT NULL DEFAULT 0,
+    core_soft_fail_generation  TEXT,
+    core_soft_fail_reason      TEXT,
     last_valid_generation      TEXT,
     last_evaluated_generation  TEXT,
     last_actionable_open_ms    INTEGER,
@@ -321,6 +337,30 @@ CREATE INDEX IF NOT EXISTS idx_wallet_registry_state_role
     ON wallet_registry(state, current_role, last_seen_at DESC, addr);
 CREATE INDEX IF NOT EXISTS idx_wallet_registry_last_evaluated
     ON wallet_registry(last_evaluated_generation, addr);
+
+-- Source-wallet high-water state is independent for each execution ledger and contiguous Core membership
+-- cycle. Observer restarts therefore cannot erase a freeze/reduction/cooldown already earned by drawdown.
+CREATE TABLE IF NOT EXISTS wallet_risk_state (
+    execution_book       TEXT NOT NULL DEFAULT 'paper',
+    addr                 TEXT NOT NULL,
+    membership_cycle     TEXT NOT NULL,
+    selection_generation TEXT,
+    baseline_equity      REAL NOT NULL,
+    high_water_equity    REAL NOT NULL,
+    current_equity       REAL NOT NULL,
+    drawdown_frac        REAL NOT NULL DEFAULT 0,
+    breaker_stage        INTEGER NOT NULL DEFAULT 0,
+    reduced_in_cycle     INTEGER NOT NULL DEFAULT 0,
+    cooldown_until_ms    INTEGER,
+    params_hash          TEXT,
+    pnl_baseline         REAL NOT NULL DEFAULT 0,
+    active_member        INTEGER NOT NULL DEFAULT 1,
+    started_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    PRIMARY KEY (execution_book, addr)
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_risk_state_stage
+    ON wallet_risk_state(execution_book, breaker_stage, updated_at DESC, addr);
 
 -- Explicit generation-scoped Observer target set.  Roles are core/challenger/exit_only; only enabled core
 -- rows from the current published generation may originate new positions.
@@ -484,6 +524,10 @@ PROFILE_COLS = (
     "copy_risk_score,execution_score,"
     "selection_marginal_utility,model_coverage,oos_net_pnl,oos_max_drawdown,oos_cvar95,"
     "actionable_open_rate,capacity_fit,"
+    "copy_path_risk_status,copy_intratrade_max_drawdown,copy_max_underwater_hours,"
+    "copy_loss_over_5_time_ratio,copy_deep_bag_event_n,copy_failed_deep_bag_n,"
+    "copy_deep_bag_recovery_rate,copy_max_deep_bag_hours,copy_current_open_loss_frac,copy_current_bag_hours,"
+    "copy_campaign_max_drawdown,copy_campaign_peak_positions,copy_campaign_peak_margin_pct,"
     "first_added,last_refreshed,times_seen,times_active"
 )
 
@@ -1049,6 +1093,24 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN oos_cvar95 REAL",
     "ALTER TABLE profile ADD COLUMN actionable_open_rate REAL",
     "ALTER TABLE profile ADD COLUMN capacity_fit REAL",
+    "ALTER TABLE profile ADD COLUMN copy_path_risk_status TEXT DEFAULT 'pending'",
+    "ALTER TABLE profile ADD COLUMN copy_intratrade_max_drawdown REAL",
+    "ALTER TABLE profile ADD COLUMN copy_max_underwater_hours REAL",
+    "ALTER TABLE profile ADD COLUMN copy_loss_over_5_time_ratio REAL",
+    "ALTER TABLE profile ADD COLUMN copy_deep_bag_event_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_failed_deep_bag_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_deep_bag_recovery_rate REAL",
+    "ALTER TABLE profile ADD COLUMN copy_max_deep_bag_hours REAL",
+    "ALTER TABLE profile ADD COLUMN copy_current_open_loss_frac REAL",
+    "ALTER TABLE profile ADD COLUMN copy_current_bag_hours REAL",
+    "ALTER TABLE profile ADD COLUMN copy_campaign_max_drawdown REAL",
+    "ALTER TABLE profile ADD COLUMN copy_campaign_peak_positions INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_campaign_peak_margin_pct REAL",
+    "ALTER TABLE wallet_registry ADD COLUMN core_soft_fail_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_registry ADD COLUMN core_soft_fail_generation TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN core_soft_fail_reason TEXT",
+    "ALTER TABLE wallet_risk_state ADD COLUMN pnl_baseline REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_risk_state ADD COLUMN active_member INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE watchlist ADD COLUMN generation TEXT",
     "ALTER TABLE watchlist ADD COLUMN profile_generation TEXT",
     "ALTER TABLE watchlist ADD COLUMN evaluated_at TEXT",

@@ -32,9 +32,11 @@ The current runtime turns the public Hyperliquid leaderboard into a live, paper-
 Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
+    ↓ account ≥ $5k, 7d notional volume ≥ $250k, positive 7d or 30d PnL
+30d Perp prefilter + sector-isolated structure filter
     ↓ cached 37-day profile (30-day evidence + 7-day warm-up)
-Quality gates + canonical copy replay
-    ↓ qualified active pool / final copy-follow score
+Canonical Copy replay: Research → Challenger → personal Core
+    ↓ campaign economics, path risk, cost/tail/capacity stress
 Shared-account smart Core search
     ↓ explicit follow_selection publication
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
@@ -49,8 +51,12 @@ final new-entry membership once an explicit selection generation exists.
 
 Wallet quality and funded-account membership are separate decisions.
 
-- Profile hard gates remove structurally uncopyable wallets, HFT/grid/heavy-DCA/spot-hedge patterns, invalid
-  data, insufficient evidence, stale activity, thin copy edge, and copy replays that lose after costs.
+- Leaderboard ROI is a ranking/audit signal, not a hard admission threshold. Profile hard gates remove invalid
+  data and systematic uncopyable structures; HFT needs at least ten complete rounds, Grid needs at least five
+  complete rounds with a strict majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
+- Strict Copy evidence has three roles: positive 30-day economics are Research-only; at least 5% with seven
+  closes, five independent campaigns/days, positive 1.5x-cost stress and positive profit after removing the two
+  largest campaigns is Challenger; new Core requires at least 10% plus the campaign/sample/risk gates.
 - The final copy-follow score ranks wallets that passed those gates. It combines raw profile quality and copy
   evidence; it is displayed on a 0–100 scale while stored natively in `[0, 1]`.
 - The Core selector evaluates one shared simulated account using empty-forward, all-backward, and current-Core
@@ -66,6 +72,8 @@ Wallet quality and funded-account membership are separate decisions.
   the work without publishing a timed-out partial result.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
+- A complete scan may legally publish zero Core. This activates an empty strategy revision, converts old Core
+  rows to exit-only, and never rolls back to an economically disqualified prior wallet.
 
 ## Daily complete candidate reevaluation
 
@@ -76,10 +84,10 @@ Profiles are not re-downloaded from zero on every daily run.
   cache.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
-- Leaderboard candidates first pass at least two of the three official 7d/30d/all-time ROI thresholds plus all
-  absolute-PnL thresholds, then an official
-  Portfolio precheck requiring Perp PnL to meet the same dollar floors and contribute at least 80% in every
-  window. Missing Portfolio data is deferred and cannot open a new copy.
+- Leaderboard candidates require at least `$5,000` account value, `$250,000` leveraged 7-day notional volume,
+  and positive PnL in either the 7-day or 30-day official window. There is no ROI magnitude gate or volume cap.
+  The Portfolio precheck uses only the primary 30-day window: Perp PnL must be positive and at least 60% of
+  total PnL. The 7-day and lifetime windows remain visible in audit but do not form an `AND` rejection.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
   is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
@@ -114,11 +122,21 @@ shared available balance, isolated margin, volatility-tier sizing, leverage caps
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Core win rate is computed from independent campaigns: overlapping positions from the same source wallet, market
-board, and direction are collapsed into one directional bet before win-rate/Wilson tests. Core permits zero
-30-day replay liquidations and no recent Forward liquidation. Execution independently freezes a source after a
-liquidation (24 hours, escalating to seven days on a repeat), stops new exposure after a 3% Forward loss, limits
-one source to 20% total effective margin, 15% per board/direction, three simultaneous symbols, and preserves a
-15% account-wide margin buffer even during adds.
+board, and direction are collapsed into one directional bet before win-rate/Wilson tests. New Core requires
+`12/5/3` closes, ten 30-day campaigns, 60% campaign win rate, an 80% one-sided Wilson lower bound of 50%,
+PF ≥ 1.25, at least 3% return after removing the two largest campaigns, and positive 1.5x-cost stress. Retention
+uses 7% return, 55% win rate and a 45% Wilson lower bound; soft failures need two distinct complete scans, while
+hard risk exits immediately.
+
+The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
+time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is
+Challenger-only and above 15% is rejected. Current -8%, or -5% lasting 24 hours, becomes exit-only.
+
+Source-wallet high-water state is persisted per contiguous Core member cycle. A 3% giveback freezes opens/adds,
+6% halves every source position without same-cycle refill, and 10% exits all positions with a seven-day cooldown.
+One source may use 25% total effective margin. Same-direction baskets use the most conservative included tier:
+20% stable Crypto, 15% mid Crypto, 10% high-volatility Crypto, and 10% `xyz`/stock; there are at most three
+simultaneous symbols and two same-direction stock symbols. The account-wide 85% hard-margin ceiling remains.
 
 After Core publication, a generation-bound tuner searches:
 

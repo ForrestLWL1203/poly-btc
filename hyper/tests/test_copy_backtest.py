@@ -1,6 +1,8 @@
 import unittest
 
-from hyper.copy.copy_backtest import campaign_structure_metrics, profit_structure_metrics, run_backtest
+from hyper.copy.copy_backtest import (
+    campaign_structure_metrics, path_risk_metrics, profit_structure_metrics, run_backtest,
+)
 
 
 def fill(t, coin, side, sz, start, px, oid, crossed=True):
@@ -24,6 +26,64 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_path_risk_ignores_quick_deep_dip_but_counts_four_hour_recovery(self):
+        hour = 3_600_000
+        quick = path_risk_metrics([
+            {"time": hour, "equity": 10_000},
+            {"time": 2 * hour, "equity": 9_000},
+            {"time": 5 * hour, "equity": 10_000},
+        ], initial_equity=10_000)
+        recovered = path_risk_metrics([
+            {"time": hour, "equity": 10_000},
+            {"time": 2 * hour, "equity": 9_000},
+            {"time": 7 * hour, "equity": 10_000},
+        ], initial_equity=10_000)
+
+        self.assertEqual(quick["deep_bag_event_n"], 0)
+        self.assertEqual(recovered["deep_bag_event_n"], 1)
+        self.assertEqual(recovered["failed_deep_bag_n"], 0)
+        self.assertEqual(recovered["deep_bag_recovery_rate"], 1.0)
+        self.assertEqual(recovered["max_deep_bag_hours"], 5.0)
+
+    def test_unresolved_or_liquidated_deep_loss_is_failed(self):
+        hour = 3_600_000
+        unresolved = path_risk_metrics([
+            {"time": hour, "equity": 10_000},
+            {"time": 2 * hour, "equity": 8_800},
+            {"time": 30 * hour, "equity": 9_100},
+        ], initial_equity=10_000)
+        liquidated = path_risk_metrics([
+            {"time": hour, "equity": 10_000},
+            {"time": 2 * hour, "equity": 8_800},
+            {"time": 8 * hour, "equity": 10_000},
+        ], initial_equity=10_000, liquidation_times=[4 * hour])
+
+        self.assertEqual(unresolved["failed_deep_bag_n"], 1)
+        self.assertEqual(unresolved["max_deep_bag_hours"], 28.0)
+        self.assertEqual(liquidated["deep_bag_event_n"], 1)
+        self.assertEqual(liquidated["failed_deep_bag_n"], 1)
+
+    def test_deep_loss_is_measured_from_prior_equity_high_not_only_initial_cash(self):
+        hour = 3_600_000
+        result = path_risk_metrics([
+            {"time": hour, "equity": 10_000},
+            {"time": 2 * hour, "equity": 12_000},
+            {"time": 3 * hour, "equity": 11_000},
+            {"time": 8 * hour, "equity": 11_000},
+            {"time": 9 * hour, "equity": 12_000},
+        ], initial_equity=10_000)
+
+        self.assertAlmostEqual(result["intratrade_max_drawdown"], 0.10)
+        self.assertEqual(result["deep_bag_event_n"], 1)
+        self.assertEqual(result["failed_deep_bag_n"], 0)
+        self.assertEqual(result["max_deep_bag_hours"], 6.0)
+        self.assertGreater(result["loss_over_5_time_ratio"], 0.0)
+
+    def test_missing_path_is_explicit_and_never_synthesizes_safe_risk(self):
+        result = path_risk_metrics([], initial_equity=10_000)
+        self.assertEqual(result["path_risk_status"], "missing")
+        self.assertIsNone(result["intratrade_max_drawdown"])
+
     def test_overlapping_same_direction_basket_is_one_independent_campaign(self):
         positions = [
             {
@@ -38,6 +98,28 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(metrics["campaign_closed_n"], 1)
         self.assertEqual(metrics["campaign_wins"], 1)
         self.assertEqual(metrics["campaign_max_positions"], 10)
+
+    def test_campaign_drawdown_keeps_its_own_profit_high_water(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100, 1),
+            fill(3_000, "BTC", "A", 100, 100, 100, 2),
+        ]
+        path = [{
+            "coin": "BTC", "time": 2_000, "open_time": 1_500, "close_time": 2_000,
+            "low": 200, "high": 200, "close": 200,
+        }]
+        result = run_backtest(
+            "0xabc", fills, sigmas={"BTC": 0.04}, price_path=path,
+            price_path_meta={"coverage": 1},
+            overrides={
+                "WALLET_HWM_FREEZE_DD_PCT": 2,
+                "WALLET_HWM_REDUCE_DD_PCT": 3,
+                "WALLET_HWM_EXIT_DD_PCT": 4,
+            },
+        )
+
+        self.assertLess(abs(result["copy_net_pnl"]), 0.01 * 10_000)
+        self.assertGreater(result["campaign_max_drawdown"], 0.50)
 
     def test_liquidation_blocks_immediate_reentry_in_replay(self):
         fills = [
@@ -99,7 +181,7 @@ class CopyBacktestTests(unittest.TestCase):
 
         self.assertEqual(full["margin_equity_pct"], 1.0)
         self.assertEqual(half["margin_equity_pct"], 0.5)
-        self.assertEqual(half["initial_margin_equity"], 5_000.0)
+        self.assertEqual(half["initial_margin_equity"], 10_000.0)
         self.assertAlmostEqual(half["positions"][0]["margin"], full["positions"][0]["margin"] * 0.5)
         self.assertAlmostEqual(half["copy_net_pnl"], full["copy_net_pnl"] * 0.5)
 
@@ -393,7 +475,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertGreater(used, 499.0)
         self.assertLessEqual(used, 500.0)
         self.assertEqual(result["opened_n"], 2)
-        self.assertEqual(result["skip_reasons"].get("skip_wallet_sector_side_full"), 1)
+        self.assertEqual(result["skip_reasons"].get("skip_wallet_stock_side_position_cap"), 1)
 
     def test_portfolio_replay_gives_each_wallet_an_independent_group_cap(self):
         fills = [

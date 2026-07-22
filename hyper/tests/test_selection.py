@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from hyper import storage
+from hyper.copy.wallet_risk import new_high_water_state
 from hyper.discovery import scanner
 from hyper.execution.observer import Observer, load_targets
 from hyper.selection import state as selection
@@ -83,6 +84,58 @@ class SelectionTests(unittest.TestCase):
 
             self.assertEqual(obs.addrs, ["0xheld"])
             self.assertEqual(obs.held_off, {"0xheld"})
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_wallet_high_water_state_survives_observer_restart(self):
+        db = self._db()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            first = Observer(db, [], {})
+            state = new_high_water_state(
+                membership_cycle="g1:1", baseline_equity=10_000,
+                selection_generation="g1", now_ms=1,
+            )
+            state.update(
+                high_water_equity=12_000, current_equity=11_300,
+                drawdown_frac=.07, breaker_stage=2,
+                reduced_in_cycle=True, active_member=False,
+            )
+            first._save_wallet_risk_state("0xabc", state, commit=True)
+
+            restarted = Observer(db, [], {})
+            restored = restarted._load_wallet_risk_state("0xabc")
+
+            self.assertEqual(restored["membership_cycle"], "g1:1")
+            self.assertEqual(restored["high_water_equity"], 12_000)
+            self.assertEqual(restored["breaker_stage"], 2)
+            self.assertTrue(restored["reduced_in_cycle"])
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_stage_two_cannot_restart_member_cycle_in_same_generation(self):
+        db = self._db()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            observer = Observer(db, [], {})
+            observer.selection_generation = "g1"
+            state = new_high_water_state(
+                membership_cycle="g1:1", baseline_equity=10_000,
+                selection_generation="g1", now_ms=1,
+            )
+            state.update(breaker_stage=2, reduced_in_cycle=True, active_member=False)
+            observer._save_wallet_risk_state("0xabc", state, commit=True)
+
+            exit_only = observer._sync_wallet_risk_membership(["0xabc"])
+            restored = observer._load_wallet_risk_state("0xabc")
+
+            self.assertEqual(exit_only, {"0xabc"})
+            self.assertEqual(restored["membership_cycle"], "g1:1")
+            self.assertEqual(restored["breaker_stage"], 2)
         finally:
             asyncio.set_event_loop(None)
             loop.close()

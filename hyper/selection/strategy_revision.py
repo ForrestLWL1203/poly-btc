@@ -11,8 +11,9 @@ import json
 import uuid
 from typing import Any, Optional
 
-from hyper import params
+from hyper import config, params
 from hyper.copy.sector import parse_json_obj
+from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.util import now_iso
 from . import state as selection
 
@@ -32,6 +33,13 @@ def active_revision_id(db) -> Optional[str]:
 
 def params_snapshot(db, values: Optional[dict] = None) -> tuple[dict, str]:
     snapshot = dict(values if values is not None else params.load_follow(db))
+    scanner_values = params.load_category(db, "scanner")
+    snapshot.update({
+        key: scanner_values[key] if key in scanner_values else getattr(config, key)
+        for key in COPY_POLICY_PARAM_KEYS
+        if key in scanner_values or hasattr(config, key)
+    })
+    snapshot["COPY_POLICY_VERSION"] = load_copy_policy(snapshot).version
     return snapshot, _hash(snapshot)
 
 

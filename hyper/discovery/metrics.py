@@ -152,16 +152,18 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         # 0–few times; a grid/ladder trader stuffs one episode with dozens (e.g. 73 on SKHX). median_eps
         # (round-trips/day) can't see this — it all rolls into one episode. max = worst single episode.
         "max_adds_per_ep": max((e.get("n_adds", 0) for e in complete_eps), default=0),
-        "median_adds_per_ep": (
-            sorted(e.get("n_adds", 0) for e in complete_eps)[len(complete_eps) // 2]
-            if complete_eps else 0
-        ),
+        "median_adds_per_ep": statistics.median(
+            [e.get("n_adds", 0) for e in complete_eps]
+        ) if complete_eps else 0,
+        "complete_episode_n": len(complete_eps),
+        "grid_episode_n": sum(1 for e in complete_eps if e.get("n_adds", 0) > 3),
         # ALGO-SLICER signature: use the p90 of per-episode fills, NOT the average (hidden by light episodes,
         # e.g. avg 34 but a 294-fill round-trip) and NOT the max (a single outlier — a swing trader forced to
         # slice ONE illiquid-stock fill shows max 114 but p90 15; killing it is a false positive). p90 fires
         # only on SYSTEMATIC slicing: ≥10% of round-trips are fill-heavy → a real algo, not a one-off.
         "max_fills_ep": max((e.get("n_fills", 0) for e in eps), default=0),
         "p90_fills_ep": sorted(e.get("n_fills", 0) for e in eps)[min(len(eps) - 1, int(len(eps) * 0.9))] if eps else 0,
+        "heavy_fills_episode_n": sum(1 for e in eps if e.get("n_fills", 0) > 50),
         # LOSS DISCIPLINE: the single worst losing round-trip ($, <=0). Caller divides by acct_value
         # -> worst_loss_pct. Small = cuts losses promptly (followable even at 50% win); large = holds
         # one loser to disaster (扛单到爆) — the thing to gate, distinct from cumulative max_drawdown.
@@ -193,7 +195,9 @@ def gates_structural(m: dict, p) -> tuple:
         if getattr(p, "exclude_hft", True) and m.get("median_hold_s") is not None \
                 and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
             return False, "hft_uncopyable"
-        if (m.get("median_adds_per_ep") or 0) > p.grid_max_adds:  # grid/DCA: TYPICALLY laddered scale-ins.
+        complete_n = int(m.get("complete_episode_n") or 0)
+        grid_n = int(m.get("grid_episode_n") or 0)
+        if complete_n >= 5 and grid_n * 2 > complete_n:  # habitual means a strict majority, not one small sample.
             return False, "grid_dca"
         # Heavy one-off DCA is also uncopyable: median catches habitual grid bots, but a single 20-100+
         # scale-in winner can be exactly where the target's edge lives and where our copy path diverges.
@@ -204,7 +208,11 @@ def gates_structural(m: dict, p) -> tuple:
         # hides when its heavy round-trips are diluted by light ones: avg 34 but one round-trip = 294 fills), and
         # NOT the max (a swing trader forced to slice ONE illiquid-stock fill has max 114 but p90 15 — killing it
         # is a false positive, empirically confirmed). p90 > threshold ⇒ ≥10% of round-trips are fill-heavy = algo.
-        if (m.get("p90_fills_ep") or 0) > getattr(p, "max_fills_per_ep", 50):
+        fills_limit = getattr(p, "max_fills_per_ep", 50)
+        heavy_fills_n = int(m.get("heavy_fills_episode_n") or 0)
+        systematic_n = max(2, int(math.ceil((m.get("n_trades") or 0) * 0.10)))
+        if ((m.get("n_trades") or 0) >= 10 and heavy_fills_n >= systematic_n
+                and (m.get("p90_fills_ep") or 0) > fills_limit):
             return False, "hft_uncopyable"
         # v9 装不下: 峰值同时持仓 > cap. Our equity-均额 sizing + deploy cap fits ~5-8 concurrent; a wallet that
         # habitually holds 15-20 at once (portfolio/basket trader) can only be copied as a RANDOM subset — we
