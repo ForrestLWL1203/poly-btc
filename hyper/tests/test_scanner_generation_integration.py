@@ -341,6 +341,30 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual([row["addr"] for row in ranked], ["0xstrong", "0xold"])
         self.assertEqual(ranked[0]["follow_score"], .90)
 
+    def test_formation_ranking_never_reloads_incumbents_during_forced_entry_replay(self):
+        retained = []
+
+        def replay(_db, row, _now_ms, **kwargs):
+            retained.append((row["addr"], kwargs["retention"]))
+            return {
+                "score": .80,
+                "qualification": {
+                    "eligible": True, "coreEligible": True, "status": "core_eligible",
+                },
+            }
+
+        with (
+            patch.object(scanner.selection, "published_core_addrs", side_effect=AssertionError),
+            patch.object(scanner, "_effective_follow_replay", side_effect=replay),
+        ):
+            ranked = scanner._rank_formation_candidates_for_surface(
+                object(), [{"addr": "0xold"}], 1000, generation_id="g1", follow={},
+                valuation_marks={}, sigmas={}, market_ctx={}, retention_addrs=(),
+            )
+
+        self.assertEqual([row["addr"] for row in ranked], ["0xold"])
+        self.assertEqual(retained, [("0xold", False)])
+
     def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 

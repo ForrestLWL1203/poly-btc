@@ -2069,7 +2069,7 @@ def _formation_tune_candidate(row) -> bool:
 
 def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, follow,
                                            valuation_marks, sigmas, market_ctx,
-                                           required_order=()) -> list[dict]:
+                                           required_order=(), retention_addrs=()) -> list[dict]:
     """Re-rank the bounded quality pool under the exact active parameter surface.
 
     Profile Copy columns are immutable scan-time evidence and may have been produced before the latest
@@ -2080,7 +2080,13 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
     ranked = []
     required_order = tuple(dict.fromkeys((addr or "").lower() for addr in required_order if addr))
     required = set(required_order)
-    current_core = set(selection.published_core_addrs(db) or ()) if db is not None else set()
+    # Retention is a formation-level decision.  In particular, a forced optimize deliberately supplies an
+    # empty set so incumbents are tested as new entries.  Reloading the published Core here used to leak the
+    # old membership back into the tuning pre-pass: two incumbents passed with soft grace, owned the tuning
+    # pool, then correctly failed the final entry-only replay and produced the contradictory 2 -> 0 funnel.
+    current_core = {
+        (addr or "").lower() for addr in (retention_addrs or ()) if addr
+    }
     for row in rows:
         # Never mutate the generation profile row while exploring an effective surface.  A failed replay can
         # legitimately return an empty sector policy; writing that transient policy back used to turn the
@@ -2263,7 +2269,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     surface_ranked = _rank_formation_candidates_for_surface(
         db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
         valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-        required_order=pinned_order,
+        required_order=pinned_order, retention_addrs=current_core,
     )
     upper = max(1, len(pinned_order), min(
         int(config.MAX_TARGETS),
