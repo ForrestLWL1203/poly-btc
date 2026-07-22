@@ -2179,6 +2179,49 @@ def _core_rebalance_due(db, current_core, *, now_ms: int, interval_days: int) ->
     return age_days >= max(0, int(interval_days)), age_days
 
 
+def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -> dict:
+    """Seal a zero-Core result when strict portfolio evidence is unavailable.
+
+    Individual profile evidence may still be useful for Research/Challenger classification, but it is not
+    sufficient to fund a shared Core without a replayable portfolio fill surface.  Returning an explicit
+    empty formation lets the normal atomic publication path turn every old Core into Exit-only instead of
+    failing the whole generation and silently retaining stale risk.
+    """
+    rows = list(ranked_rows or ())
+    qualifications = {
+        (row.get("addr") or "").lower(): dict(row.get("follow_qualification") or {})
+        for row in rows if row.get("addr")
+    }
+    scores = {
+        (row.get("addr") or "").lower(): f(row.get("follow_score"))
+        for row in rows if row.get("addr")
+    }
+    admission = [{
+        "addr": (row.get("addr") or "").lower(),
+        "passed": bool((row.get("follow_qualification") or {}).get("coreEligible")),
+        "status": (row.get("follow_qualification") or {}).get("status") or "unknown",
+    } for row in rows if row.get("addr")]
+    return {
+        "selected": (),
+        "ranked": tuple((row.get("addr") or "").lower() for row in rows if row.get("addr")),
+        "params": {},
+        "evaluations": (),
+        "qualifications": qualifications,
+        "scores": scores,
+        "search": {
+            "algorithm": "quality_prefix_joint_binary_v4",
+            "initialCount": len(rows),
+            "selectedCount": 0,
+            "explicitEmptyCore": True,
+            "formationTuneEligible": False,
+            "formationTuneReason": str(reason or "strict_portfolio_evidence_unavailable"),
+            "qualificationRejected": [],
+            "admission": admission,
+            **search_meta,
+        },
+    }
+
+
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -> dict:
     """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
     now_ms = int(now_ms or time.time() * 1000)
@@ -2225,15 +2268,21 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         if row.get("addr") in pinned or _formation_tune_candidate(row)
     ][:upper]
     if not tune_ranked:
-        return {
-            "selected": (), "ranked": (), "params": {}, "evaluations": (),
-            "search": {
-                "algorithm": "quality_prefix_joint_binary_v4", "initialCount": 0, "selectedCount": 0,
-                "explicitEmptyCore": True,
-                "qualificationRejected": [], "admission": [],
-            },
-        }
+        return _explicit_empty_core_formation(
+            surface_ranked, reason="no_core_qualified_wallets", tunePoolCount=0,
+        )
     tune_ordered = tuple(row["addr"] for row in tune_ranked)
+
+    # A generation with individually promising profiles but no copyable portfolio fills is a valid zero-Core
+    # outcome, not a reason to roll back to stale members.  Preflight the exact bounded tune pool before the
+    # binary search so ``maybe_tune_margins`` cannot turn ``no_cached_fills`` into a publication failure.
+    tune_window_fills = auto_tune._portfolio_window_fills(db, list(tune_ordered), now_ms)
+    if tune_window_fills is None or not any(tune_window_fills.values()):
+        return _explicit_empty_core_formation(
+            surface_ranked,
+            reason=("fill_cache_guard" if tune_window_fills is None else "no_cached_fills"),
+            tunePoolCount=len(tune_ordered),
+        )
 
     tune_eligible = None
     tune_reason = "retune_disabled"

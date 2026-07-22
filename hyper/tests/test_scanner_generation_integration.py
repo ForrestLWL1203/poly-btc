@@ -115,6 +115,43 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("chosen_addrs = ()", failure_branch)
         self.assertIn('"explicitEmptyCore": True', failure_branch)
 
+    def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            candidate = {
+                "addr": "0xaaa",
+                "follow_score": 0.9,
+                "follow_qualification": {
+                    "eligible": True,
+                    "coreEligible": True,
+                    "role": "core_eligible",
+                    "status": "core_entry_qualified",
+                },
+            }
+            with patch.object(scanner, "_quality_core_profiles", return_value=[candidate]), \
+                    patch.object(scanner.auto_tune, "_load_sigmas", return_value={}), \
+                    patch.object(scanner.auto_tune, "_load_market_ctx", return_value={}), \
+                    patch.object(scanner, "_current_copy_valuation_marks", return_value={}), \
+                    patch.object(scanner.selection, "pinned_core_controls", return_value=[]), \
+                    patch.object(scanner.selection, "published_core_addrs", return_value=[]), \
+                    patch.object(scanner, "_core_rebalance_due", return_value=(True, None)), \
+                    patch.object(scanner, "_rank_formation_candidates_for_surface",
+                                 return_value=[candidate]), \
+                    patch.object(scanner.auto_tune, "_portfolio_window_fills",
+                                 return_value={30: [], 14: [], 7: []}), \
+                    patch.object(scanner.auto_tune, "maybe_tune_margins") as tune:
+                formation = scanner.form_quality_prefix(
+                    db, "g1", "2026-07-22T00:00:00Z", now_ms=1_800_000_000_000,
+                )
+
+            self.assertEqual(formation["selected"], ())
+            self.assertTrue(formation["search"]["explicitEmptyCore"])
+            self.assertEqual(formation["search"]["formationTuneReason"], "no_cached_fills")
+            self.assertEqual(formation["search"]["tunePoolCount"], 1)
+            self.assertTrue(formation["qualifications"]["0xaaa"]["coreEligible"])
+            tune.assert_not_called()
+
     def test_explicit_empty_core_turns_old_core_exit_only(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
