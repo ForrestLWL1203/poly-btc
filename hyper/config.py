@@ -327,6 +327,7 @@ HARVEST_WEEK_PNL_MIN = 250.0
 HARVEST_MONTH_PNL_MIN = 1_000.0
 HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.80
+PERP_PREFILTER_CACHE_TTL_S = 2 * 3600  # interrupted/redeployed scans reuse the same fresh Portfolio evidence
 INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
 # that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);

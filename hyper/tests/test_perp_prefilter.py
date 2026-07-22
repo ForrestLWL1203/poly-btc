@@ -1,5 +1,12 @@
+import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
+from hyper import storage
 from hyper.discovery import perp_prefilter, scanner
 
 
@@ -102,6 +109,31 @@ class PerpPrefilterTests(unittest.TestCase):
         ]}
         self.assertEqual(scanner._prepare_leaderboard_rows([weak_week], P(), "now")[0]["is_candidate"], 0)
         self.assertEqual(scanner._prepare_leaderboard_rows([weak_month], P(), "now")[0]["is_candidate"], 0)
+
+    def test_recent_exact_policy_portfolio_result_is_reused_after_restart(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA)
+            db.row_factory = sqlite3.Row
+            policy = SimpleNamespace(
+                week_pnl_min=5000, month_pnl_min=15000, all_pnl_min=20000,
+                perp_pnl_share_min=0.8,
+            )
+            payload = _portfolio()
+            with mock.patch.object(scanner.rest, "portfolio", return_value=payload) as fetch:
+                first = scanner._run_perp_prefilter(db, ["0xabc"], policy, "scan-one")
+                second = scanner._run_perp_prefilter(db, ["0xabc"], policy, "scan-two")
+            self.assertTrue(first["0xabc"].passed)
+            self.assertTrue(second["0xabc"].passed)
+            fetch.assert_called_once_with("0xabc")
+            audit = json.loads(db.execute(
+                "SELECT payload_json FROM pipeline_audit WHERE stamp='scan-two' AND addr='0xabc'"
+            ).fetchone()[0])
+            self.assertTrue(audit["cacheHit"])
+
+            changed = SimpleNamespace(**{**vars(policy), "perp_pnl_share_min": 0.9})
+            with mock.patch.object(scanner.rest, "portfolio", return_value=payload) as refetch:
+                scanner._run_perp_prefilter(db, ["0xabc"], changed, "scan-three")
+            refetch.assert_called_once_with("0xabc")
 
 
 if __name__ == "__main__":

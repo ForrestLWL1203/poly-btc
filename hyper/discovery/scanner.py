@@ -651,6 +651,34 @@ def _run_perp_prefilter(db, addrs, p, stamp):
         "all": getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
     }
     share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
+    cache_policy = {
+        "version": "three_window_perp_v1",
+        "pnlMinima": {key: float(value) for key, value in minima.items()},
+        "shareMin": float(share_min),
+    }
+    addr_set = {str(addr).lower() for addr in addrs}
+    cached_results = {}
+    # A deployment/restart starts a new generation but does not make Portfolio evidence fetched minutes ago
+    # stale. Reuse only exact-policy business decisions inside a short TTL; deferred transport failures are
+    # deliberately retried. Every cache hit is copied into the new stamp's audit surface below.
+    for addr, status, reason, payload_json in db.execute(
+        "SELECT addr,status,reason,payload_json FROM pipeline_audit "
+        "WHERE source='scan' AND stage='perp_prefilter' AND addr IS NOT NULL "
+        "AND strftime('%s',created_at)>=strftime('%s','now')-? ORDER BY id DESC",
+        (int(config.PERP_PREFILTER_CACHE_TTL_S),),
+    ).fetchall():
+        addr = str(addr or "").lower()
+        if addr not in addr_set or addr in cached_results or status not in {"passed", "rejected"}:
+            continue
+        try:
+            cached_payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if cached_payload.get("policy") != cache_policy:
+            continue
+        cached_results[addr] = perp_prefilter.Result(
+            str(status), str(reason or "perp_prefilter_cached"), dict(cached_payload.get("windows") or {}),
+        )
     results = {}
     pending_audit = []
 
@@ -661,20 +689,23 @@ def _run_perp_prefilter(db, addrs, p, stamp):
         pending_audit.clear()
 
     for rank, addr in enumerate(addrs, 1):
-        try:
-            payload = rest.portfolio(addr)
-        except Exception as exc:  # noqa: BLE001
-            result = perp_prefilter.Result(
-                "deferred_data_error", f"portfolio_error:{type(exc).__name__}", {},
-            )
-        else:
-            result = perp_prefilter.evaluate(payload, pnl_minima=minima, share_min=share_min)
+        result = cached_results.get(str(addr).lower())
+        cache_hit = result is not None
+        if result is None:
+            try:
+                payload = rest.portfolio(addr)
+            except Exception as exc:  # noqa: BLE001
+                result = perp_prefilter.Result(
+                    "deferred_data_error", f"portfolio_error:{type(exc).__name__}", {},
+                )
+            else:
+                result = perp_prefilter.evaluate(payload, pnl_minima=minima, share_min=share_min)
         results[addr] = result
         # Buffer audit values in memory so no write transaction remains open during the next REST call.
         pending_audit.append({
             "stamp": stamp, "source": "scan", "stage": "perp_prefilter", "addr": addr,
             "rank": rank, "status": result.status, "reason": result.reason,
-            "payload": result.payload(),
+            "payload": {**result.payload(), "policy": cache_policy, "cacheHit": cache_hit},
         })
         if rank % 10 == 0:
             flush_audit()
