@@ -801,9 +801,27 @@ def evaluate_follow_eligibility(
     # recreate the old churn where a source is removed before its later winning Campaign can be copied.
     forward_risk = bool(forward_liquidations > 0)
     live_sector_ready = bool(allowed) if "allowed" in policy_json else True
+    # July's stricter 12/5/3 + ten-Campaign surface accidentally removed the existing high-confidence
+    # sparse route altogether.  That made a 9/10 winner with >20% strict-Copy return observation-only even
+    # when its Wilson bound, tail, cost stress, execution and path risk were all already safe.  Restore a
+    # deliberately narrow alternative: it can waive only the ordinary sample shape, never an economic,
+    # repeatability, execution, liquidation or deep-loss gate.
+    strong_sparse_entry = bool(
+        not retention
+        and returns[30] >= policy.strong_core_return_30d
+        and c30 >= policy.strong_sparse_min_closed_30d
+        and evidence_days >= policy.strong_sparse_min_evidence_days
+        and c7 >= policy.strong_sparse_min_closed_7d
+        and campaign[30] >= min(
+            policy.core_min_campaigns_30d, policy.strong_sparse_min_closed_30d,
+        )
+        and win_rate[30] >= max(policy.core_min_win_rate_30d, 0.75)
+        and win_lcb30 >= policy.core_min_win_rate_lcb_30d
+        and win_rate[7] >= policy.strong_sparse_min_win_rate_7d
+    )
     core_eligible = bool(
         returns[30] >= core_return_floor
-        and core_samples
+        and (core_samples or strong_sparse_entry)
         and win30_ok
         and recent14_ok
         and pf_ok
@@ -829,6 +847,7 @@ def evaluate_follow_eligibility(
         "profitFactor": _num(profit_factor) if profit_factor is not None else None,
         "campaignNetAfterTop2": _num(campaign_tail30),
         "costStressNetPnl": _num(cost_stress),
+        "strongSparseEntry": strong_sparse_entry,
         "retentionSurface": bool(retention),
         "softFailConfirmationsRequired": policy.soft_fail_confirmations,
     }
@@ -839,7 +858,12 @@ def evaluate_follow_eligibility(
                 "core_eligible_strong" if strong_entry else "core_eligible"
             ),
             "role": "core_eligible", **base_detail,
-            "reasons": ["个人严格Copy证据达到Core保留线" if retention else "个人严格Copy证据达到Core新进入线"],
+            "reasons": [
+                "个人严格Copy证据达到Core保留线" if retention else (
+                    "高收益高置信小样本路径达到Core新进入线"
+                    if strong_sparse_entry else "个人严格Copy证据达到Core新进入线"
+                )
+            ],
         }
 
     if forward_liquidations > 0:

@@ -2055,33 +2055,16 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
     return tuned, eligible, reason
 
 
-_PARAMETER_TUNABLE_CHALLENGER_STATUSES = {
-    "challenger_return_watch",
-    "challenger_weekly_return_watch",
-    "challenger_confidence_watch",
-    "challenger_thin_edge_watch",
-    "challenger_recent_decline",
-}
-
-
 def _formation_tune_candidate(row) -> bool:
-    """Whether a quality-qualified wallet should influence the joint sizing search.
+    """Whether an individually executable wallet may influence Core sizing.
 
-    Return/weekly/confidence misses can change when margin, leverage and add behaviour change, so excluding
-    them creates a circular tuner that can only optimize the incumbent Core.  Missing samples, unresolved
-    open valuation and structural-watch wallets cannot be repaired by sizing and remain observation-only.
+    The tuner optimizes the shared Core account; feeding it Challenger/Research wallets can produce a
+    profitable fifteen-wallet prefix that the admission layer immediately collapses back to two.  Candidate
+    discovery may still retain parameter probes for audit, but they cannot determine the Core count or
+    execution surface until an exact individual replay has made them Core-eligible.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
-    if (row or {}).get("formation_probe"):
-        return qualification.get("status") in {
-            "copy_value_below_challenger_floor", "research_copy_positive", "research_insufficient_evidence",
-        }
-    if not qualification.get("eligible"):
-        return False
-    return bool(
-        qualification.get("coreEligible")
-        or qualification.get("status") in _PARAMETER_TUNABLE_CHALLENGER_STATUSES
-    )
+    return bool(qualification.get("eligible") and qualification.get("coreEligible"))
 
 
 def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, follow,
@@ -2099,6 +2082,11 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
     required = set(required_order)
     current_core = set(selection.published_core_addrs(db) or ()) if db is not None else set()
     for row in rows:
+        # Never mutate the generation profile row while exploring an effective surface.  A failed replay can
+        # legitimately return an empty sector policy; writing that transient policy back used to turn the
+        # next authoritative pass into the misleading label ``effective_sector_policy_missing`` and hid the
+        # actual economic/sector failure.
+        row = dict(row)
         effective = _effective_follow_replay(
             db, row, now_ms, generation_id=generation_id, follow=follow,
             valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
@@ -2278,9 +2266,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         int(config.MAX_TARGETS),
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
     ))
-    # Tune against every quality wallet whose economics can improve under a different sizing surface.
-    # Individual qualification is recomputed once under the winning surface; portfolio folds/holdout/stress
-    # are the only stability checks and no second time-based admission gate may override them.
+    # Tune only the wallets already proven individually executable on this exact active replay surface.
+    # Otherwise the count optimizer can report a fifteen-wallet winner while final admission has only two
+    # legal members.  Parameter-sensitive Challenger probes remain visible in Research/Challenger but do not
+    # own the Core surface.
     tune_ranked = [
         row for row in surface_ranked
         if row.get("addr") in pinned or _formation_tune_candidate(row)

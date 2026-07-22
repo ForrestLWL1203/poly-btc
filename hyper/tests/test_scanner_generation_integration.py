@@ -263,11 +263,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(all(result.passed for result in results.values()))
             self.assertFalse(db.in_transaction)
 
-    def test_core_formation_tune_pool_includes_parameter_sensitive_challengers_only(self):
+    def test_core_formation_tune_pool_contains_only_individually_core_eligible_wallets(self):
         self.assertTrue(scanner._formation_tune_candidate({
             "follow_qualification": {"eligible": True, "coreEligible": True},
         }))
-        self.assertTrue(scanner._formation_tune_candidate({
+        self.assertFalse(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": True, "coreEligible": False,
                 "status": "challenger_weekly_return_watch",
@@ -285,7 +285,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "status": "challenger_sample_watch",
             },
         }))
-        self.assertTrue(scanner._formation_tune_candidate({
+        self.assertFalse(scanner._formation_tune_candidate({
             "formation_probe": True,
             "follow_qualification": {
                 "eligible": False, "coreEligible": False,

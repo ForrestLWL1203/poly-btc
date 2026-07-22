@@ -127,6 +127,46 @@ class FollowScoreTests(unittest.TestCase):
                 self.assertFalse(result["coreEligible"])
                 self.assertEqual(result["status"], "challenger_sample_watch")
 
+    def test_strong_sparse_route_requires_return_win_confidence_and_recent_wins(self):
+        strong = evaluate_follow_eligibility(evidence(
+            copy_bt_closed_n=10,
+            copy_bt_14d_closed_n=4,
+            copy_bt_7d_closed_n=4,
+            copy_bt_campaign_closed_n=10,
+            copy_bt_campaign_wins=9,
+            copy_bt_7d_campaign_closed_n=4,
+            copy_bt_7d_campaign_wins=3,
+            copy_bt_net_pnl=2200.0,
+            copy_evidence_days=8,
+        ))
+        weak_win = evaluate_follow_eligibility(evidence(
+            copy_bt_closed_n=10,
+            copy_bt_14d_closed_n=4,
+            copy_bt_7d_closed_n=4,
+            copy_bt_campaign_closed_n=10,
+            copy_bt_campaign_wins=7,
+            copy_bt_7d_campaign_closed_n=4,
+            copy_bt_7d_campaign_wins=3,
+            copy_bt_net_pnl=2200.0,
+            copy_evidence_days=8,
+        ))
+        weak_recent = evaluate_follow_eligibility(evidence(
+            copy_bt_closed_n=10,
+            copy_bt_14d_closed_n=4,
+            copy_bt_7d_closed_n=4,
+            copy_bt_campaign_closed_n=10,
+            copy_bt_campaign_wins=9,
+            copy_bt_7d_campaign_closed_n=4,
+            copy_bt_7d_campaign_wins=2,
+            copy_bt_net_pnl=2200.0,
+            copy_evidence_days=8,
+        ))
+
+        self.assertTrue(strong["coreEligible"])
+        self.assertTrue(strong["strongSparseEntry"])
+        self.assertFalse(weak_win["coreEligible"])
+        self.assertFalse(weak_recent["coreEligible"])
+
     def test_campaign_win_rate_and_wilson_control_core_not_challenger(self):
         result = evaluate_follow_eligibility(evidence(
             copy_bt_campaign_closed_n=10, copy_bt_campaign_wins=6,

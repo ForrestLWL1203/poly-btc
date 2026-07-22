@@ -158,18 +158,20 @@ Every public economic line is a percentage of the canonical replay's recorded `i
 back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$500` dollar threshold. Current
 default classification is:
 
-- 30/14/7 observation floors remain 7/5/5, while new-open Core permission requires 12/5/3 closed episodes,
-  ten 30d Campaigns and at least five independent evidence days. High ROI/PnL never creates a small-sample
-  exception;
+- 30/14/7 observation floors remain 7/5/5, while normal new-open Core permission requires 12/5/3 closed
+  episodes, ten 30d Campaigns and at least five independent evidence days. A narrow Strong-sparse route may
+  waive only that ordinary sample shape when 30d strict-Copy return is at least 20%, there are at least ten
+  30d closes/ten Campaigns, seven evidence days, three 7d closes, at least 75% 30d/7d Campaign wins and a 50%
+  Wilson lower bound; every tail, cost, execution, liquidation and deep-loss gate still applies;
 - aggregate 30d Campaign win rate must be at least 60% and its 80% one-sided Wilson lower confidence bound at
   least 50%. Once 14d has five Campaigns it needs 55% wins and positive net. Seven-day evidence has no fixed
   positive line; at five Campaigns, win rate below 40% together with negative net is a hard recent collapse;
-- Challenger needs 30-day strict Copy return at least 10%; once 7-day evidence reaches five closes, 7-day
-  total return must be at least 3%;
+- Challenger needs 30-day strict Copy return at least 5%; seven-day return is recorded but has no positive
+  floor unless the sampled hard-collapse rule above fires;
 - normal Core needs 30-day return at least 10%, the aggregate sample/win surface above, five evidence days,
   complete open-position valuation, and no recent hard collapse;
-- strong Core normally uses a 20% 30-day line with at least 20 closes and ten evidence days. It still needs
-  the same 14-day/seven-day sample, win-rate, execution, capacity, valuation, structure and recent-risk checks;
+- strong Core normally uses a 20% 30-day line; the narrow Strong-sparse shape above is its only sample
+  alternative and still needs every economic, execution, valuation, structure and recent-risk check;
 - actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;
 - expected normalized margin return has a 2% Core line. A narrow default 1.5–2% miss may remain Challenger
   only when strict Copy totals, recent economics and samples are already strong; materially thinner or negative
@@ -240,9 +242,9 @@ parameter retuning, and leave-one-out reshuffling run only after seven days sinc
 change. Daily evidence still removes liquidation, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
-1. Rank the current generation's individually qualified Core/Challenger pool under one parameter surface.
-   Parameter-sensitive return/weekly/thin-edge Challengers and a hidden, tightly bounded 5–10% cold-start return
-   probe may inform tuning, but cannot be published unless the final surface clears the real public gates.
+1. Rank the current generation under one exact active replay surface, then admit only individually Core-eligible
+   wallets to shared-account tuning. Challenger/Research probes remain visible for audit but may not determine
+   the Core count or parameter surface.
 2. Jointly search wallet count and parameters without making a smaller Core inherit the conservative surface
    required by a crowded full pool. The bounded `N → N/2 → boundary` prefix nodes use a sparse coarse grid
    (one leverage value per tier shortlist, two sizing finalists, no Add polish and no coordinate-closure rounds).

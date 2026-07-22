@@ -130,13 +130,17 @@ PF ≥ 1.25, at least 3% return after removing the two largest campaigns, and po
 uses 7% return, 55% win rate and a 45% Wilson lower bound; soft failures need two distinct complete scans, while
 hard risk exits immediately.
 
+A narrow Strong-sparse alternative restores high-confidence low-frequency wallets without lowering risk lines:
+30-day strict-Copy return must be at least 20%, with ten closes/ten campaigns, seven evidence days, three recent
+closes, at least 75% 30-day and 7-day campaign wins, and the normal Wilson, PF, tail, cost, capacity and path-risk
+checks. Shared-account tuning receives only wallets that already pass one of these individual Core surfaces.
+
 The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
 time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is
 Challenger-only and above 15% is rejected. Current -8%, or -5% lasting 24 hours, becomes exit-only.
 
-Source-wallet high-water state is persisted per contiguous Core member cycle. A 3% giveback freezes opens/adds,
-6% halves every source position without same-cycle refill, and 10% exits all positions with a seven-day cooldown.
-One source may use 25% total effective margin. Same-direction baskets use the most conservative included tier:
+Source-wallet profit high-water is not used as an admission or execution gate. One source may use 25% total
+effective margin. Same-direction baskets use the most conservative included tier:
 20% stable Crypto, 15% mid Crypto, 10% high-volatility Crypto, and 10% `xyz`/stock; there are at most three
 simultaneous symbols and two same-direction stock symbols. The account-wide 85% hard-margin ceiling remains.
 
