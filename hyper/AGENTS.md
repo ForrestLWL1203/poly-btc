@@ -254,6 +254,8 @@ failures immediately while retaining every other qualified incumbent. Production
 3. Re-run every candidate's canonical individual replay under the winning parameters, the same refined intratrade
    price path used by shared replay, and one valuation snapshot.
    Anyone no longer Core-eligible is removed before shared-account membership.
+   The explicit `optimize` repair command treats incumbents as new entries so a policy correction cannot preserve
+   an incorrectly published Core through the normal two-scan soft-retention grace; scheduled scans keep that grace.
 4. With that fixed surface, `search_quality_membership` evaluates every subset for pools of at most eight.
    Larger pools start from the winning prefix and run bounded add/swap closure so one congested wallet cannot
    block stronger wallets behind it.

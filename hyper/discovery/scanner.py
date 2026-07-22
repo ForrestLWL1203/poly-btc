@@ -2228,7 +2228,8 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
     }
 
 
-def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -> dict:
+def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
+                        force_entry_requalification=False) -> dict:
     """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
     now_ms = int(now_ms or time.time() * 1000)
     ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False)
@@ -2246,7 +2247,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True) -
         item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
     )
     pinned = set(pinned_order)
-    current_core = tuple(selection.published_core_addrs(db) or ())
+    current_core = (
+        () if force_entry_requalification else tuple(selection.published_core_addrs(db) or ())
+    )
     target_min = max(1, int(params.get(db, "CORE_TARGET_MIN_N", config.CORE_TARGET_MIN_N) or 1))
     rebalance_interval = max(1, int(params.get(
         db, "CORE_REBALANCE_INTERVAL_DAYS", config.CORE_REBALANCE_INTERVAL_DAYS,
@@ -4178,7 +4181,7 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
 
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
-                               retune_formation=True):
+                               retune_formation=True, force_entry_requalification=False):
     """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
     This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
@@ -4241,6 +4244,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms, generation_id)
     formation = form_quality_prefix(
         db, generation_id, stamp, repair_now_ms, retune=retune_formation,
+        force_entry_requalification=force_entry_requalification,
     )
     refresh_watchlist(
         db,
@@ -4347,6 +4351,7 @@ def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
     stamp = stamp or now_iso()
     selection_result = repair_published_selection(
         db, generation_id, stamp=stamp, replace_existing=True,
+        force_entry_requalification=True,
     )
     return {
         "status": "ok" if selection_result.get("status") == "repaired" else selection_result.get("status"),

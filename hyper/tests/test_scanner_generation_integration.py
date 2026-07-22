@@ -273,6 +273,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "status": "challenger_weekly_return_watch",
             },
         }))
+
+    def test_manual_optimize_requalifies_incumbents_as_new_entries(self):
+        source = inspect.getsource(scanner.optimize_published_generation)
+
+        self.assertIn("force_entry_requalification=True", source)
         self.assertFalse(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": True, "coreEligible": False,
