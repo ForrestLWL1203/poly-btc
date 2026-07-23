@@ -1539,7 +1539,9 @@ def _core_membership_hysteresis(db, profiles, previous_roles, *, now_ms: int) ->
     promotion_ready = set(previous_core)
     for row in profiles:
         addr = (row.get("addr") or "").lower()
-        if not addr or addr in previous_core or not (row.get("follow_qualification") or {}).get("coreEligible"):
+        if not addr or addr in previous_core or not _formation_core_permission(
+            row.get("follow_qualification")
+        ):
             continue
         prior = db.execute(
             "SELECT pa.created_at,pa.payload_json FROM pipeline_audit pa "
@@ -1618,7 +1620,7 @@ def _quality_first_core_transition(
         qualification = row.get("follow_qualification") or {}
         core_ok = (
             row.get("status") in {"active", "qualified"}
-            and bool(qualification.get("coreEligible"))
+            and _formation_core_permission(qualification)
             and data_valid and enabled
         )
         new_core_ready = addr in previous_core or addr in promotion_ready
@@ -2155,11 +2157,12 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
 def _formation_tune_candidate(row) -> bool:
     """Whether a path-certified wallet may enter parameter discovery.
 
-    ``ranked_candidates`` already passed every non-path Core business gate on the scan-time surface. The
+    ``ranked_candidates`` already passed the cheap, non-path business gates on the scan-time surface. The
     active execution surface can nevertheless turn that same wallet's exact replay from +22% into +6% through
     leverage/margin/capacity choices. Requiring ``coreEligible`` before tuning creates a circular gate: only a
     wallet that needs no tuning may be tuned. Admit positive, path-complete and hard-risk-safe exact replays
-    into parameter discovery, then re-run the complete Core contract on the winning sealed surface.
+    into parameter discovery, then apply the formation-entry contract and shared funded validation on the
+    winning sealed surface.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     checks = dict(qualification.get("checks") or {})
@@ -2174,11 +2177,83 @@ def _formation_tune_candidate(row) -> bool:
     )
 
 
+def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dict:
+    """Apply the non-duplicated individual contract before shared Core formation.
+
+    Individual replay owns data validity, minimum evidence, non-scalping economics and hard wallet risk.
+    The shared funded replay owns return magnitude, weekly timing/cost stress, congestion and membership
+    count. Requiring the complete individual Core contract here made those portfolio checks unreachable:
+    every candidate was discarded before the first shared replay.
+    """
+    metrics_ = apply_allowed_sector_copy_metrics(dict(effective or {}))
+    qualification = follow_score.evaluate_follow_eligibility(
+        {
+            **metrics_,
+            "copy_bt_data_status": metrics_.get(
+                "data_status", metrics_.get("copy_bt_data_status")
+            ),
+            "copy_bt_evidence_status": metrics_.get(
+                "evidence_status", metrics_.get("copy_bt_evidence_status")
+            ),
+        },
+        policy_values=policy_values,
+        follow_score_value=f(score),
+    )
+    checks = dict(qualification.get("checks") or {})
+    policy = load_copy_policy(policy_values)
+    closed_n = int(f(metrics_.get("copy_bt_closed_n")))
+    campaigns = int(f(metrics_.get("copy_bt_campaign_closed_n") or closed_n))
+    evidence_days = int(f(metrics_.get("copy_evidence_days")))
+    pnl7 = f(metrics_.get("copy_bt_7d_net_pnl"))
+    minimum_evidence = min(5, int(policy.core_min_campaigns_30d))
+    formation_checks = {
+        "researchEligible": bool(qualification.get("eligible")),
+        "dataValid": not bool(qualification.get("deferred"))
+            and qualification.get("role") != "quarantine",
+        "hardRiskSafe": not bool(qualification.get("hardRisk")),
+        "strictCopy30dPositive": bool(checks.get("strictCopy30dPositive")),
+        "strictCopy7dPositive": pnl7 > 0.0,
+        "notThinProfit": bool(checks.get("averageNetPerClose")),
+        "minimumClosedEvidence": closed_n >= minimum_evidence,
+        "minimumCampaignEvidence": campaigns >= minimum_evidence,
+        "minimumEvidenceDays": evidence_days >= min(5, minimum_evidence),
+        "campaignWinRate": bool(checks.get("campaignWinRate")),
+        "scoreAtLeastCoreFloor": f(score) >= float(policy.core_min_follow_score),
+        "activityWithin72h": bool(checks.get("activityWithin72h")),
+        "valuationComplete": bool(checks.get("valuationComplete")),
+        "pathRiskComplete": bool(checks.get("pathRiskComplete")),
+        "pathDrawdownWithinCore": bool(checks.get("pathDrawdownWithinCore")),
+        "sectorExecutable": bool(checks.get("sectorExecutable")),
+        "noRepeatedLiquidation": bool(checks.get("noRepeatedLiquidation")),
+        "noForwardLiquidation": bool(checks.get("noForwardLiquidation")),
+    }
+    return {
+        "eligible": all(formation_checks.values()),
+        "checks": formation_checks,
+        "closedN": closed_n,
+        "campaigns": campaigns,
+        "evidenceDays": evidence_days,
+        "score": f(score),
+        "scoreFloor": float(policy.core_min_follow_score),
+        "individualCoreEligible": bool(qualification.get("coreEligible")),
+        "individualStatus": qualification.get("status"),
+        "qualification": qualification,
+    }
+
+
+def _formation_core_permission(qualification) -> bool:
+    """Read the formation contract, falling back for legacy/test qualification payloads."""
+    qualification = dict(qualification or {})
+    if "formationEligible" in qualification:
+        return bool(qualification.get("formationEligible"))
+    return bool(qualification.get("coreEligible"))
+
+
 def _formation_prepath_candidate(row) -> bool:
     """Whether a profitable wallet belongs in the bounded pre-Core replay pool.
 
-    Individual replay has already proved positive economics.  Campaign/fold,
-    recency, score and sector-live status are final admission evidence, not
+    Individual replay has already proved positive economics. Campaign density,
+    recency, score and sector-live status are formation-entry evidence, not
     reasons to prevent a top-ranked wallet from receiving the one exact path
     replay and shared-parameter tune which can change those metrics.
     """
@@ -2371,7 +2446,7 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
     }
     admission = [{
         "addr": (row.get("addr") or "").lower(),
-        "passed": bool((row.get("follow_qualification") or {}).get("coreEligible")),
+        "passed": _formation_core_permission(row.get("follow_qualification")),
         "status": (row.get("follow_qualification") or {}).get("status") or "unknown",
     } for row in rows if row.get("addr")]
     return {
@@ -2638,6 +2713,23 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 qualification = _apply_core_soft_failure_grace(
                     db, addr, generation_id, qualification, policy_values=follow_surface,
                 )
+            formation = _formation_entry_eligibility(
+                effective.get("metrics") or {}, effective.get("score"),
+                policy_values=follow_surface,
+            )
+            qualification["individualCoreEligible"] = bool(
+                formation.get("individualCoreEligible")
+            )
+            qualification["formationEligible"] = bool(formation.get("eligible"))
+            qualification["formationStatus"] = (
+                "formation_eligible"
+                if formation.get("eligible") else "formation_entry_rejected"
+            )
+            qualification["formationChecks"] = dict(formation.get("checks") or {})
+            qualification["formationEvidence"] = {
+                key: formation.get(key)
+                for key in ("closedN", "campaigns", "evidenceDays", "score", "scoreFloor")
+            }
             qualifications[addr] = qualification
             scores[addr] = f(effective.get("score"))
             if effective.get("sectorPolicyJson"):
@@ -2651,11 +2743,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             # violate operator intent. Incumbent non-pinned Core rows naturally become Exit-only below.
             if replay_invalid and addr in pinned:
                 raise RuntimeError(f"pinned_core_replay_invalid:{addr}")
-            passed = bool(qualification.get("coreEligible"))
+            passed = bool(qualification.get("formationEligible"))
             audit.append({
                 "addr": addr,
                 "passed": passed,
-                "status": qualification.get("status") or "unknown",
+                "status": qualification.get("formationStatus")
+                or qualification.get("status") or "unknown",
+                "individualStatus": qualification.get("status") or "unknown",
                 "operatorStarred": addr in pinned,
             })
             if replay_invalid:
@@ -2678,7 +2772,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     tune_coverage_fallback = False
     effective_pinned_order = tuple(
         addr for addr in pinned_order
-        if (effective_qualifications.get(addr) or {}).get("coreEligible")
+        if _formation_core_permission(effective_qualifications.get(addr))
     )
     effective_pinned = set(effective_pinned_order)
     pin_rank = {addr: rank for rank, addr in enumerate(pinned_order)}
@@ -2903,9 +2997,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
 
     previous_qualified = tuple(
         addr for addr in current_core
-        if addr in set(ordered) and (
-            (effective_qualifications.get(addr) or {}).get("coreEligible")
-        )
+        if addr in set(ordered)
+        and _formation_core_permission(effective_qualifications.get(addr))
     )
     baseline_eval = evaluate_members(previous_qualified) if previous_qualified else None
     baseline_folds, _baseline_cost_stress = fold_replays(previous_qualified)
@@ -3283,7 +3376,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     effective_pinned_order = tuple(
         addr for addr in pinned_enabled_order
         if addr in desired
-        and (by_addr.get(addr, {}).get("follow_qualification") or {}).get("coreEligible")
+        and _formation_core_permission(
+            by_addr.get(addr, {}).get("follow_qualification")
+        )
     )
     missing_required = [addr for addr in declared_effective_pins if addr not in effective_pinned_order]
     if missing_required:
@@ -3293,7 +3388,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         if addr not in by_addr
         or by_addr[addr].get("profile_generation") != generation_id
         or by_addr[addr].get("status") not in {"active", "qualified"}
-        or not (by_addr[addr].get("follow_qualification") or {}).get("coreEligible")
+        or not _formation_core_permission(
+            by_addr[addr].get("follow_qualification")
+        )
         or (by_addr[addr].get("data_status") or "valid") != "valid"
         or not controls.get(addr, True)
     ]
@@ -3482,7 +3579,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             role = selection.CHALLENGER
             if not enabled:
                 reason = "operator_disabled"
-            elif qualification.get("coreEligible"):
+            elif _formation_core_permission(qualification):
                 reason = transition_reasons.get(addr, "portfolio_not_selected")
             else:
                 reason = qualification.get("status") or "sample_observation"
@@ -3652,7 +3749,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         ranked_candidates = [
             (row.get("addr") or "").lower() for row in profiles
             if row.get("status") in {"active", "qualified"}
-            and (row.get("follow_qualification") or {}).get("coreEligible")
+            and _formation_core_permission(row.get("follow_qualification"))
             and controls.get((row.get("addr") or "").lower(), True)
         ]
         # Active incumbents remain inside the bounded optimizer even when a one-day score move pushes them
@@ -4270,7 +4367,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     reason = transition_reasons[addr]
                 elif not enabled:
                     reason = "operator_disabled"
-                elif not qualification.get("coreEligible"):
+                elif not _formation_core_permission(qualification):
                     reason = qualification.get("status") or "challenger_confidence_watch"
                 elif marginal is not None and addr in portfolio_candidates:
                     reason = portfolio_rejections.get(addr, "portfolio_no_profit_improvement")

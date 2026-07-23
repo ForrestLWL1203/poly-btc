@@ -105,12 +105,13 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   `perpMonth` PnL/account-value series must provide four adjacent 7d folds and each must return at least 5%;
   incomplete time-series evidence is deferred, not rejected. The same Portfolio response must also show
   positive 30d Perp PnL and at least 60% 30d Perp PnL share. Current Core, Challenger and open-position owners
-  bypass discovery recall and always receive retention replay. Fill-based strict Copy later requires at
-  least 10% return over 30d and 3% over the latest rolling 7d on our own capital. At least three of its four
-  adjacent 7d folds must contain Campaign evidence and be profitable; one evidence-incomplete or losing fold
-  cannot exceed 25% of total 30d profit. Aggregate replay must remain profitable after taker fees are stressed
-  to 1.5x. Aggregate average net per close must be at least 0.5% of starting Copy equity so high-turnover
-  thin-profit wallets cannot reach the expensive pre-Core pool.
+  bypass discovery recall and always receive retention replay. Fill-based strict Copy later records the
+  individual 10% 30-day and 3% latest-7-day lines as score/watch evidence; it does not repeat them as vetoes
+  immediately before the shared funded replay. Formation entry still requires positive 30-day and latest-7-day
+  Copy PnL, a 0.5% average net per close, at least five closed positions/Campaigns/evidence days, a passing
+  Campaign win rate, score 75, current activity, complete valuation/path data and no hard risk. The shared
+  replay then owns four-fold stability, the permitted losing-fold bound, 1.5x taker-fee stress, congestion,
+  membership count and final return.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -174,9 +175,13 @@ default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
   score or outlier stress are explicit Challenger reasons rather than economic rejection;
-- normal Core needs eight independent 30-day Campaigns, at least five evidence days, complete valuation/path
-  data, at least 10% 30-day strict-Copy return, at least 3% latest rolling 7-day strict-Copy return, and no
-  hard risk;
+- individual Core diagnostics retain the eight-Campaign, 10% 30-day and 3% latest-7-day lines. The actual
+  formation-entry contract is deliberately narrower and non-duplicated: positive 30-day and latest-7-day
+  strict-Copy PnL, at least five independent Campaigns/closed positions/evidence days, 0.5% average net per
+  close, a passing Campaign win rate, score at least 75, activity within 72 hours, complete valuation/path
+  evidence, executable sector policy and no hard risk. Return magnitude, full eight-Campaign confidence and
+  individual weekly status continue to affect score/reason labels but cannot prevent the shared funded replay
+  from measuring the portfolio they are meant to judge;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
   latest 28 days, each with at least 5% return. Strict Copy uses four matching follower folds as timing
   stability evidence: at least three contain a Campaign and are profitable, and the one permitted losing fold
@@ -186,9 +191,9 @@ default classification is:
   stronger density continuously;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
-- rolling 14-day return, PF, Wilson confidence and raw payoff are ranking/diagnostic signals. Latest rolling
-  7-day return is the explicit 3% Core recency gate; Campaign win rate is the hard repeatability gate while
-  body-after-top-three remains a score diagnostic;
+- rolling 14-day return, PF, Wilson confidence, raw payoff and the 10%/3% individual return lines are
+  ranking/diagnostic signals. Positive latest rolling 7-day Copy PnL prevents admitting a wallet already losing
+  now; Campaign win rate is the hard repeatability gate while body-after-top-three remains a score diagnostic;
 - actionable open rate and capacity fit are score, tuning and congestion diagnostics. Missed opens are already
   absent from realized Copy PnL, so they are not charged a second time as admission vetoes when the actually
   funded fills remain profitable after costs and within the drawdown limit;
@@ -217,10 +222,11 @@ stop, while per-coin caps and isolated-margin liquidation still bound exposure.
 Liquidity rejection and target-dust minimum-notional rejection are never tuned away.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
-repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while
-rolling 14-day return remains diagnostic. A magnitude/fold failure or stale activity remains Challenger,
-while current deep loss, repeated liquidation, invalid data and 30-day strict-Copy loss retain
-their explicit hard outcomes.
+repeatability is judged by the shared-account non-overlapping folds above; rolling 7-day magnitude remains
+diagnostic while positive latest-7-day PnL and current activity are formation-entry gates. Individual
+magnitude/fold/eight-Campaign failures remain explicit Challenger evidence but are not replayed as a second
+pre-portfolio veto. Current latest-7-day loss, repeated liquidation, invalid data and 30-day strict-Copy loss
+retain their explicit hard outcomes.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
 and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only
@@ -240,8 +246,9 @@ rule.
 15% path risk. Funded economics combines explicit 30d and latest-7d return magnitude with non-overlapping
 fold timing and median per-close density; overlapping 14d return and the legacy raw score contribute zero.
 The sample-confidence factor saturates at the actual qualification floors. New Core must score at least
-75/100 after all binary hard gates pass; score then orders those survivors and cannot compensate for a failed
-weekly, win-rate, execution, capacity, valuation, or risk gate.
+75/100 after all formation-entry hard gates pass; score then orders those survivors and cannot compensate for
+a failed win-rate, thin-profit, current-profit, activity, valuation, path or risk gate. Weekly timing, cost
+stress, execution/capacity congestion and membership count are enforced once on the shared funded portfolio.
 
 Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
 `noise_merged`, `hard_cap_blocked`, `coin_cap_blocked`, `cash_blocked`, `min_margin_blocked`, or

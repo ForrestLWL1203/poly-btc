@@ -1,6 +1,7 @@
 import tempfile
 import inspect
 import json
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -444,6 +445,74 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 },
             },
         }))
+
+    def test_formation_entry_moves_magnitude_and_weekly_gates_to_shared_replay(self):
+        policy = json.loads(strict_policy_json())
+        policy["copyWeeklyProfitability"]["evidenceSufficient"] = False
+        policy["copyWeeklyProfitability"]["passed"] = False
+        effective = {
+            "copy_expected_return": .04,
+            "copy_return_lcb": .01,
+            "copy_positive_probability": .8,
+            "copy_evidence_days": 7,
+            "copy_risk_score": .9,
+            "execution_score": .9,
+            "actionable_open_rate": .9,
+            "capacity_fit": 1.0,
+            "open_probability_48h": .8,
+            "last_copyable_open_ms": int(time.time() * 1000),
+            "data_status": "valid",
+            "evidence_status": "qualified",
+            "sector_policy_json": json.dumps(policy),
+            # Both magnitude gates fail (9%/1%), while absolute recent/30d profit,
+            # per-close density, Campaign win rate and hard safety remain sound.
+            "sector_copy_json": strict_sector_json(900, 7, 400, 6, 100, 5),
+            "forward_liquidations": 0,
+        }
+
+        result = scanner._formation_entry_eligibility(effective, .80)
+
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["individualCoreEligible"])
+        self.assertFalse(
+            result["qualification"]["checks"]["strictCopy30dReturn"]
+        )
+        self.assertFalse(
+            result["qualification"]["checks"]["strictCopyRolling7dReturn"]
+        )
+        self.assertFalse(
+            result["qualification"]["checks"]["strictCopyWeeklyPositive"]
+        )
+
+    def test_formation_entry_keeps_score_and_recent_profit_as_hard_quality(self):
+        effective = {
+            "copy_expected_return": .04,
+            "copy_return_lcb": .01,
+            "copy_positive_probability": .8,
+            "copy_evidence_days": 7,
+            "copy_risk_score": .9,
+            "execution_score": .9,
+            "actionable_open_rate": .9,
+            "capacity_fit": 1.0,
+            "open_probability_48h": .8,
+            "last_copyable_open_ms": int(time.time() * 1000),
+            "data_status": "valid",
+            "evidence_status": "qualified",
+            "sector_policy_json": strict_policy_json(),
+            "sector_copy_json": strict_sector_json(1800, 7, 600, 6, 300, 5),
+            "forward_liquidations": 0,
+        }
+
+        low_score = scanner._formation_entry_eligibility(effective, .749)
+        losing_week = scanner._formation_entry_eligibility({
+            **effective,
+            "sector_copy_json": strict_sector_json(1800, 7, 600, 6, -1, 5),
+        }, .80)
+
+        self.assertFalse(low_score["eligible"])
+        self.assertFalse(low_score["checks"]["scoreAtLeastCoreFloor"])
+        self.assertFalse(losing_week["eligible"])
+        self.assertFalse(losing_week["checks"]["strictCopy7dPositive"])
 
     def test_manual_optimize_requalifies_incumbents_as_new_entries(self):
         source = inspect.getsource(scanner.optimize_published_generation)
