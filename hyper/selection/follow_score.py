@@ -59,9 +59,9 @@ def evaluate_follow_eligibility(
     checks were correlated views of the same trades and created an exclusion cascade.  V3 keeps hard data,
     liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
     The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
-    owned by the official Portfolio front gate; Core separately proves that our own funded strict Copy also
-    clears all four weekly folds, then adds ten campaigns, fresh activity, repeatability, cost stress and
-    executable capacity.
+    owned by the official Portfolio front gate. Core separately requires at least 10% strict-Copy return in
+    30d, at least 5% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
+    least three are profitable and the one permitted losing fold is bounded.
     """
     del min_closed14, min_closed7, margin_equity_pct
     policy = load_copy_policy(policy_values)
@@ -85,10 +85,12 @@ def evaluate_follow_eligibility(
     c30 = int(_num(scoped.get("copy_bt_closed_n")))
     campaigns = int(_num(scoped.get("copy_bt_campaign_closed_n"), c30))
     pnl30 = _num(scoped.get("copy_bt_net_pnl"))
+    pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
     equity = max(1.0, _num(
         scoped.get("initial_margin_equity"), getattr(config, "INITIAL_BALANCE", 10_000.0),
     ))
     return30 = pnl30 / equity
+    return7 = pnl7 / equity
     evidence_days = int(_num(scoped.get("copy_evidence_days")))
     data_status = str(scoped.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(scoped.get("copy_bt_evidence_status") or "").strip().lower()
@@ -141,6 +143,8 @@ def evaluate_follow_eligibility(
         "copyDataValid": not data_status or data_status in {"valid", "ok"},
         "normalizedEvidencePresent": _has_copy_evidence(scoped, c30, 0, 0),
         "strictCopy30dPositive": pnl30 > 0.0,
+        "strictCopy30dReturn": return30 >= policy.core_min_copy_return_30d,
+        "strictCopyRolling7dReturn": return7 >= policy.core_min_copy_return_7d,
         "strictCopyWeeklyPositive": copy_weekly_positive,
         "tenIndependentCampaigns": campaigns >= policy.core_min_campaigns_30d,
         "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
@@ -163,7 +167,11 @@ def evaluate_follow_eligibility(
         "noForwardLiquidation": forward_liquidations == 0,
     }
     detail = {
-        "returns": {"30": return30}, "campaigns": {"30": campaigns},
+        "returns": {"30": return30, "7": return7},
+        "returnFloors": {
+            "30": policy.core_min_copy_return_30d,
+            "7": policy.core_min_copy_return_7d,
+        },
         "evidenceDays": evidence_days, "copyWeeklyProfitability": copy_weekly,
         "repeatability": {
             "campaignWinRate": campaign_win_rate,
@@ -218,7 +226,8 @@ def evaluate_follow_eligibility(
                 "role": "rejected", **detail, "reasons": ["没有盈利且可执行的Crypto/Stock板块"]}
 
     core_eligible = bool(
-        sample_ok and copy_weekly_positive and activity_ok
+        sample_ok and checks["strictCopy30dReturn"] and checks["strictCopyRolling7dReturn"]
+        and copy_weekly_positive and activity_ok
         and checks["campaignWinRate"] and checks["repeatableBodyWinRate"]
         and checks["repeatableBodyPositive"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["costStressPositive"]
@@ -231,9 +240,19 @@ def evaluate_follow_eligibility(
         return {"eligible": True, "coreEligible": True,
                 "status": "core_retention_eligible" if retention else "core_eligible",
                 "role": "core_eligible", **detail,
-                "reasons": ["官方四段7日稳定性、严格Copy、可重复胜率、75分质量线、72小时活动及执行压力均通过"]}
+                "reasons": ["官方四段周收益、严格Copy 30d/最近7d盈利、四段时序稳定性、可重复性及执行风险均通过"]}
 
-    if not copy_weekly_sufficient:
+    if not checks["strictCopy30dReturn"]:
+        status, reason = (
+            "challenger_return_watch",
+            "30天严格Copy收益未达到10%，盈利能力暂不足以进入Core",
+        )
+    elif not checks["strictCopyRolling7dReturn"]:
+        status, reason = (
+            "challenger_recent_return_watch",
+            "最近7天严格Copy收益未达到5%，近期盈利能力暂不足以进入Core",
+        )
+    elif not copy_weekly_sufficient:
         status, reason = (
             "challenger_copy_weekly_evidence_building",
             "严格Copy四个非重叠7日区间证据不足，继续积累而不按亏损淘汰",
@@ -356,7 +375,7 @@ def compute_follow_score(
         for fold in weekly_folds if fold.get("averageClosedNetReturn") is not None
     ]
     weekly_floor = max(
-        1e-9, _num(copy_weekly.get("minReturn"), policy.copy_weekly_min_return),
+        1e-9, policy.copy_weekly_score_return_target,
     )
     density_floor = max(
         1e-9,

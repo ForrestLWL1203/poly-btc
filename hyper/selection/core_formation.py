@@ -78,7 +78,8 @@ def validate_final_membership(
     """
     reasons = []
     required_fold_count = int(config.COPY_STABILITY_FOLD_COUNT)
-    min_weekly_return = float(config.COPY_WEEKLY_MIN_RETURN)
+    min_profitable_folds = int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS)
+    max_loss_to_total_profit = float(config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT)
     weekly_rows = []
     floating_equity = max(1.0, float(initial_margin_equity))
     for fold in candidate_folds:
@@ -110,11 +111,21 @@ def validate_final_membership(
             reasons.append("membership_fold_infeasible")
         if len(evaluable_folds) < int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS):
             reasons.append("membership_fold_evidence_insufficient")
-        if any(
-            row["return"] < min_weekly_return or row["costStressNetPnl"] <= 0.0
-            for row in weekly_rows
+        profitable_folds = [row for row in weekly_rows if row["netPnl"] > 0.0]
+        if len(profitable_folds) < min_profitable_folds:
+            reasons.append("membership_weekly_profitability")
+        total_fold_net = sum(row["netPnl"] for row in weekly_rows)
+        worst_fold_loss = max(
+            (abs(row["netPnl"]) for row in weekly_rows if row["netPnl"] < 0.0),
+            default=0.0,
+        )
+        if worst_fold_loss and (
+            total_fold_net <= 0.0
+            or worst_fold_loss / total_fold_net > max_loss_to_total_profit
         ):
-            reasons.append("membership_weekly_return_stability")
+            reasons.append("membership_weekly_loss_bound")
+        if sum(row["costStressNetPnl"] for row in weekly_rows) <= 0.0:
+            reasons.append("membership_weekly_cost_stress")
     if candidate.net_pnl <= 0.0 or candidate.stress_net_pnl <= 0.0 or cost_stress_net <= 0.0:
         reasons.append("membership_cost_stress_not_profitable")
 
@@ -166,7 +177,8 @@ def validate_final_membership(
         "foldWins": sum(delta > 0.0 for delta in fold_deltas),
         "foldDeltas": fold_deltas,
         "weeklyFolds": weekly_rows,
-        "weeklyReturnFloor": min_weekly_return,
+        "requiredProfitableFolds": min_profitable_folds,
+        "maxLossToTotalProfit": max_loss_to_total_profit,
         "singleWalletDependencyWarning": dependency_warning,
     }
 

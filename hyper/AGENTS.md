@@ -99,15 +99,17 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 ### 2. Candidate workset and profiles
 
-- New-wallet Leaderboard recall requires account value `$5,000`, leveraged 7d notional volume `$250,000`,
+- New-wallet Leaderboard recall requires account value `$20,000`, leveraged 7d notional volume `$250,000`,
   and positive 7d and 30d PnL. Leaderboard ROI windows are score/audit only; nominal leveraged volume is never
   a profitability denominator and has no upper bound. Before fill history is downloaded, the official
   `perpMonth` PnL/account-value series must provide four adjacent 7d folds and each must return at least 5%;
   incomplete time-series evidence is deferred, not rejected. The same Portfolio response must also show
   positive 30d Perp PnL and at least 60% 30d Perp PnL share. Current Core, Challenger and open-position owners
-  bypass discovery recall and always receive retention replay. Fill-based strict Copy later confirms four
-  weekly follower returns of at least 4%, at least one Campaign per fold, average net of at least 0.5% of
-  weekly starting equity per closed position, and positive 1.5x-cost results on our own capital.
+  bypass discovery recall and always receive retention replay. Fill-based strict Copy later requires at
+  least 10% return over 30d and 5% over the latest rolling 7d on our own capital. Its four adjacent 7d folds
+  must all contain Campaign evidence, at least three must be profitable, and the one permitted losing fold
+  cannot exceed 25% of total 30d profit. Aggregate replay must remain profitable after taker fees are stressed
+  to 1.5x. Average net per close is a ranking diagnostic, not a duplicate hard economic gate.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -167,15 +169,18 @@ default classification is:
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
   outlier stress or cost stress are explicit Challenger reasons rather than economic rejection;
 - normal Core needs ten independent 30-day Campaigns, at least five evidence days, complete valuation/path
-  data and no hard risk. The old standalone 30-day 10% Core parameter is removed, not retained as a hidden veto;
+  data, at least 10% 30-day strict-Copy return, at least 5% latest rolling 7-day strict-Copy return, and no
+  hard risk;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
-  latest 28 days, each with at least 5% return. Strict Copy separately requires every matching follower fold
-  to return at least 4% on floating starting equity, contain at least one Campaign, average at least 0.5% of
-  weekly starting equity per closed position, and remain positive after charging 1.5x costs. All four pass;
+  latest 28 days, each with at least 5% return. Strict Copy uses four matching follower folds as timing
+  stability evidence: all four contain a Campaign, at least three are profitable, and the one permitted
+  losing fold cannot exceed 25% of total 30-day profit. Aggregate net stays positive when already-modeled
+  taker fees are increased to 1.5x. The preferred 0.5% average net per close remains in ranking so it can
+  penalize thin/high-turnover economics without becoming a duplicate hard veto;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
-- rolling 7/14-day returns, PF, Campaign win rate, Wilson confidence and raw payoff are ranking/diagnostic
-  signals, not repeated Core vetoes over the same underlying trades;
+- rolling 14-day return, PF, Wilson confidence and raw payoff are ranking/diagnostic signals. Latest rolling
+  7-day return is the explicit 5% Core recency gate; Campaign/body win rates are explicit repeatability gates;
 - actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;
 - expected normalized margin return has a 2% Core line; a miss remains Challenger while strict Copy stays
   profitable;
@@ -188,9 +193,10 @@ diagnostics only because hard-gating all of them repeatedly judged the same outl
 include the large winner. Positive 1.5x-cost stress remains a separate Core execution check.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
-repeatability is judged by the non-overlapping folds above; rolling 7/14-day losses remain diagnostics. A fold
-failure, stale activity or weak stress remains Challenger, while current deep loss, repeated liquidation,
-invalid data and 30-day strict-Copy loss retain their explicit hard outcomes.
+repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while
+rolling 14-day return remains diagnostic. A magnitude/fold failure, stale activity or weak stress remains
+Challenger, while current deep loss, repeated liquidation, invalid data and 30-day strict-Copy loss retain
+their explicit hard outcomes.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
 and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only
@@ -309,8 +315,9 @@ The compact portfolio tuner searches all three volatility-tier upper margins and
 not tune the three lower margins, per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
 or stop/risk-owner settings. Parameter finalists use three non-overlapping fill-driven ten-day folds solely to
 reject overfit sizing proposals, plus 1.5x-cost stress and open/capacity checks; these tuner folds do not decide
-  wallet admission. The selected wallet set must separately pass the official four-week 5% target screen and
-  the four-week 4% strict-Copy plus 0.5%-per-close economic-density screen.
+  wallet admission. The selected wallet set must separately pass the official four-week 5% target screen,
+  strict-Copy 30d/rolling-7d magnitude lines, and the four-fold follower stability contract. Per-close
+  economic density remains a ranking diagnostic.
 Price-path and maintenance-risk validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
 few absolute margins at 50/75/100% of the four-add-safe ceiling; it does not restore the old large Cartesian grid.
 Leverage probes pair a lower leverage with reciprocal margin so each tier's `margin × leverage` notional stays

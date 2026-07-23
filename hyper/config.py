@@ -69,12 +69,16 @@ COPY_MIN_RAW_PAYOFF_RATIO = 0.60
 COPY_STABILITY_FOLD_DAYS = 7
 COPY_STABILITY_FOLD_COUNT = 4
 COPY_STABILITY_MIN_EVALUABLE_FOLDS = 4
-COPY_STABILITY_MIN_PROFITABLE_FOLDS = 4
-COPY_STABILITY_MIN_RETURN = 0.05
-# Target-wallet magnitude and follower economics are deliberately different. Official Portfolio must show
-# 5% in each week; our strict Copy needs a smaller but material net return, enough independent Campaigns,
-# and a per-close edge buffer after modeled execution costs.
-COPY_WEEKLY_MIN_RETURN = 0.04
+COPY_STABILITY_MIN_PROFITABLE_FOLDS = 3
+COPY_STABILITY_MIN_RETURN = 0.05  # Official Portfolio: source wallet must earn at least 5% in every fold.
+CORE_MIN_COPY_RETURN_30D = 0.10   # Strict follower replay: at least +$1,000 on the $10k model account.
+CORE_MIN_COPY_RETURN_7D = 0.05    # Strict follower replay: latest rolling 7d at least +$500.
+# Strict Copy's four folds verify timing stability rather than repeating the two magnitude gates above:
+# all four folds need Campaign evidence, at least three must be profitable, and the one permitted losing fold
+# cannot exceed 25% of total 30d profit. Per-close edge remains a ranking diagnostic, not a second hard gate.
+COPY_WEEKLY_MIN_RETURN = 0.0
+COPY_WEEKLY_SCORE_RETURN_TARGET = 0.04
+COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT = 0.25
 COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN = 0.005
 COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD = 1
 SELECTION_MIN_RELATIVE_GAIN = 0.05
@@ -293,12 +297,12 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $5k equity, $250k leveraged
+# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $250k leveraged
 # 7d notional activity, and positive 7d/30d PnL before any wallet history is downloaded. The immediately
 # following official Portfolio prefilter owns target-wallet return quality: four non-overlapping 7d folds
 # must each return at least 5%. Incumbent roles and open-position owners bypass recall and still receive
 # their mandatory retention replay.
-HARVEST_MIN_ACCT = 5_000.0
+HARVEST_MIN_ACCT = 20_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
 HARVEST_WEEK_PNL_MIN = 0.0
 HARVEST_MONTH_PNL_MIN = 0.0

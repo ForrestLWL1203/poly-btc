@@ -810,20 +810,22 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         fold_days=policy.stability_fold_days,
         fold_count=policy.stability_fold_count,
         min_campaigns=policy.copy_weekly_min_campaigns_per_fold,
-        min_evaluable=policy.stability_fold_count,
-        min_profitable=policy.stability_fold_count,
+        min_evaluable=policy.stability_min_evaluable_folds,
+        min_profitable=policy.stability_min_profitable_folds,
         min_return=policy.copy_weekly_min_return,
         initial_equity=f(primary.get("initial_margin_equity")) or config.INITIAL_BALANCE,
         path_equity_samples=primary.get("path_equity_samples") or (),
         require_cost_stress=True,
         min_net_per_closed_return=policy.copy_weekly_min_net_per_closed_return,
+        max_loss_to_total_profit=policy.stability_max_loss_to_30d_profit,
     )
     try:
         policy_json = json.loads(m.get("sector_policy_json") or "{}")
     except (TypeError, ValueError):
         policy_json = {}
-    # Official Portfolio owns the 5% target-wallet floor. Copy uses a distinct 4% funded return plus per-close
-    # economic density and cost stress; it deliberately does not inherit the target's 5% magnitude.
+    # Official Portfolio owns the 5% target-wallet floor. Strict Copy owns rolling 7d/30d magnitude and
+    # uses these non-overlapping folds only to reject unstable timing: four evidence-complete folds, at
+    # least three profitable, with the one permitted loss bounded against total follower profit.
     policy_json.pop("stability", None)
     policy_json["copyWeeklyProfitability"] = copy_weekly
     m["sector_policy_json"] = json.dumps(policy_json, separators=(",", ":"), sort_keys=True)
@@ -2013,12 +2015,24 @@ def _apply_core_soft_failure_grace(db, addr, generation_id, qualification, polic
     ).fetchone()
     old_count = int(row[0] or 0) if row else 0
     old_generation = row[1] if row else None
+    checks = dict(result.get("checks") or {})
+    # Soft tenure protects a still-qualified wallet from ordinary portfolio/rank churn.  It must never
+    # manufacture Core eligibility after the wallet itself failed the current strict entry contract.
+    # Otherwise an incumbent can bypass the same 30-day/four-week/evidence/score/risk gates required of a
+    # new wallet, then make the final shared replay fail and roll the whole generation back.
+    strict_entry_failed = any(value is False for value in checks.values())
     if result.get("coreEligible"):
         count = 0
         reason = None
-    elif result.get("hardRisk") or result.get("role") in {"exit_only", "quarantine"}:
+    elif (
+        strict_entry_failed
+        or result.get("hardRisk")
+        or result.get("role") in {"exit_only", "quarantine"}
+    ):
         count = load_copy_policy(policy_values).soft_fail_confirmations
         reason = result.get("status") or "hard_risk"
+        if strict_entry_failed:
+            result["strictQualificationFailure"] = True
     else:
         count = old_count if old_generation == generation_id else old_count + 1
         reason = result.get("status") or "soft_failure"
@@ -2129,6 +2143,8 @@ def _formation_prepath_candidate(row) -> bool:
     checks = dict(qualification.get("checks") or {})
     required_checks = (
         "strictCopy30dPositive",
+        "strictCopy30dReturn",
+        "strictCopyRolling7dReturn",
         "strictCopyWeeklyPositive",
         "tenIndependentCampaigns",
         "campaignWinRate",

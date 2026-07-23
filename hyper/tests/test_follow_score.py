@@ -9,10 +9,10 @@ NOW = 2_000_000_000_000
 
 def stability(*, passed=True, sufficient=True, profitable=4):
     return {
-        "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": sufficient,
+        "version": "nonoverlap-weekly-return-v3", "evidenceSufficient": sufficient,
         "passed": passed, "evaluableFolds": 4 if sufficient else 1,
         "profitableFolds": profitable, "qualifiedFolds": profitable,
-        "minReturn": 0.04, "minNetPerClosedReturn": 0.005,
+        "minReturn": 0.0, "minNetPerClosedReturn": 0.005,
         "folds": [
             {
                 "evaluable": sufficient or index == 0,
@@ -112,7 +112,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(result["eligible"])
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["role"], "challenger")
-        self.assertEqual(result["status"], "challenger_score_watch")
+        self.assertEqual(result["status"], "challenger_return_watch")
 
     def test_insufficient_campaign_evidence_is_challenger(self):
         result = judge(copy_bt_closed_n=4, copy_bt_campaign_closed_n=3, copy_evidence_days=2)
@@ -197,13 +197,15 @@ class FollowScoreTests(unittest.TestCase):
         self.assertLess(score, 0.75)
         self.assertFalse(result["coreEligible"])
 
-    def test_rolling_7d_and_14d_results_do_not_repeat_core_gate(self):
+    def test_rolling_7d_is_a_core_profit_gate_but_14d_is_not(self):
         result = judge(
             copy_bt_14d_closed_n=0, copy_bt_7d_closed_n=0,
             copy_bt_14d_net_pnl=-10.0, copy_bt_7d_net_pnl=-10.0,
             copy_bt_campaign_wins=1, copy_bt_profit_factor=0.2,
         )
-        self.assertTrue(result["coreEligible"])
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_recent_return_watch")
 
     def test_copy_weekly_insufficient_is_unknown_and_one_losing_fold_is_watch(self):
         thin_policy = {

@@ -307,6 +307,38 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertFalse(result["coreEligible"])
             self.assertEqual(result["role"], "exit_only")
 
+    def test_core_strict_entry_failure_cannot_use_soft_grace(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
+                "VALUES ('0xold','core','core','now','now','now')"
+            )
+            weekly_loss = {
+                "eligible": True, "coreEligible": False, "role": "challenger",
+                "status": "challenger_copy_weekly_loss",
+                "checks": {
+                    "strictCopy30dPositive": True,
+                    "strictCopy30dReturn": True,
+                    "strictCopyRolling7dReturn": True,
+                    "strictCopyWeeklyPositive": False,
+                    "coreFollowScore": True,
+                },
+            }
+
+            result = scanner._apply_core_soft_failure_grace(
+                db, "0xold", "g1", weekly_loss,
+            )
+
+            self.assertFalse(result["coreEligible"])
+            self.assertTrue(result["strictQualificationFailure"])
+            count = db.execute(
+                "SELECT core_soft_fail_count FROM wallet_registry WHERE addr='0xold'"
+            ).fetchone()[0]
+            self.assertEqual(count, 2)
+
     def test_new_core_promotion_needs_prior_complete_generation_at_least_24h_old(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -490,7 +522,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_bounded_path_pool_prioritizes_incumbent_and_prepath_core_quality(self):
         checks = {
             key: True for key in (
-                "strictCopy30dPositive", "strictCopyWeeklyPositive", "tenIndependentCampaigns",
+                "strictCopy30dPositive", "strictCopy30dReturn",
+                "strictCopyRolling7dReturn", "strictCopyWeeklyPositive",
+                "tenIndependentCampaigns",
                 "campaignWinRate", "repeatableBodyWinRate", "repeatableBodyPositive",
                 "coreFollowScore", "activityWithin72h", "oneWinnerRemovalPositive",
                 "costStressPositive", "openExecution", "capacity", "valuationComplete",

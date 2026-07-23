@@ -891,6 +891,7 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
             path_equity_samples=result.get("path_equity_samples") or (),
             require_cost_stress=True,
             min_net_per_closed_return=float(config.COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN),
+            max_loss_to_total_profit=float(config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT),
         )
     result["fills"] = len(fills)
     return _compact_backtest(result)

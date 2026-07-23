@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from hyper.selection.core_formation import (
     PrefixEvaluation, retains_reference, search_quality_membership, search_quality_prefix,
@@ -77,6 +78,26 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertIn("membership_single_campaign_dependency", rejected["reasons"])
         self.assertTrue(warned["eligible"])
         self.assertFalse(warned["singleWalletDependencyWarning"])
+
+    def test_final_membership_allows_one_bounded_losing_week_only(self):
+        candidate = value(3, 1200)
+        positive = value(3, 300)
+        bounded_loss = replace(positive, net_pnl=-100, stress_net_pnl=-110)
+        excessive_loss = replace(positive, net_pnl=-500, stress_net_pnl=-510)
+
+        accepted = validate_final_membership(
+            candidate, [positive, positive, bounded_loss, positive],
+            cost_stress_net=100, baseline=candidate, tail_after_top1=700,
+        )
+        rejected = validate_final_membership(
+            candidate, [positive, positive, excessive_loss, positive],
+            cost_stress_net=100, baseline=candidate, tail_after_top1=700,
+        )
+
+        self.assertTrue(accepted["eligible"])
+        self.assertFalse(rejected["eligible"])
+        self.assertIn("membership_weekly_loss_bound", rejected["reasons"])
+
     def test_binary_search_follows_16_8_12_direction_and_checks_neighbours(self):
         calls = []
 

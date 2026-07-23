@@ -10,7 +10,7 @@ from hyper import config, params, storage
 class ScannerSettingsParamTests(unittest.TestCase):
     def test_product_defaults_use_cheap_recall_before_official_weekly_stability(self):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 250_000.0)
-        self.assertEqual(config.HARVEST_MIN_ACCT, 5_000.0)
+        self.assertEqual(config.HARVEST_MIN_ACCT, 20_000.0)
         self.assertFalse(hasattr(config, "HARVEST_WEEK_ROI_MIN"))
         self.assertFalse(hasattr(config, "HARVEST_MONTH_ROI_MIN"))
         self.assertFalse(hasattr(config, "HARVEST_ALL_ROI_MIN"))
@@ -36,7 +36,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             scanner = params.load_category(db, "scanner")
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 250_000.0)
-            self.assertEqual(scanner["HARVEST_MIN_ACCT"], 5_000.0)
+            self.assertEqual(scanner["HARVEST_MIN_ACCT"], 20_000.0)
             self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner)
             self.assertNotIn("HARVEST_MONTH_ROI_MIN", scanner)
             self.assertNotIn("HARVEST_ALL_ROI_MIN", scanner)
@@ -107,7 +107,6 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertIn("CORE_COPY_MAX_LIQUIDATIONS_30D", scanner_keys)
             self.assertEqual(levels["CORE_COPY_STABILITY"], "black")
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
-            self.assertNotIn("CORE_TARGET_MIN_N", scanner_keys)
             self.assertEqual(levels["CORE_INITIAL_MAX_N"], "green")
             initial_limit = next(p for p in scanner_params if p["key"] == "CORE_INITIAL_MAX_N")
             self.assertEqual(initial_limit["value"], 16)
@@ -157,7 +156,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             values = dict(db.execute(
                 "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
             ).fetchall())
-            self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 5_000.0)
+            self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 20_000.0)
             self.assertEqual(float(values["HARVEST_WEEK_VLM_MIN"]), 250_000.0)
             self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 0.0)
@@ -227,7 +226,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
             ).fetchone()[0]), 15.0)
 
-    def test_seed_params_removes_obsolete_score_and_copy_gate_rows(self):
+    def test_seed_params_removes_obsolete_rows_but_restores_current_copy_return_gate(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.executemany(
@@ -253,7 +252,6 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "MIN_ACTIVE_SCORE",
                 "CORE_COPY_WIN_RATE_30D_MIN",
                 "COPY_MIN_TAIL_RETURN_30D",
-                "CORE_MIN_COPY_RETURN_30D",
                 "CORE_RETENTION_MIN_COPY_RETURN_30D",
                 "HARVEST_WEEK_ROI_MIN",
                 "HARVEST_MONTH_ROI_MIN",
@@ -263,6 +261,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 self.assertIsNone(db.execute(
                     "SELECT 1 FROM params WHERE key=?", (key,)
                 ).fetchone())
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_30D'"
+            ).fetchone()[0]), 10.0)
 
     def test_db_score_rows_do_not_override_code_score_weights(self):
         original = {

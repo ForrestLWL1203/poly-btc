@@ -129,13 +129,14 @@ def summarize_campaign_stability(
     path_equity_samples: Iterable[Mapping] = (),
     require_cost_stress: bool = True,
     min_net_per_closed_return: float = 0.0,
+    max_loss_to_total_profit: float | None = None,
 ) -> dict:
     """Evaluate fee-paid Copy returns on adjacent, non-overlapping time folds.
 
     Returns use the continuously marked strict-replay equity path when it is available, so the denominator
     is each fold's actual starting equity and profits compound naturally.  The cache-only fallback carries
-    realized Campaign PnL forward on the same capital base.  Every qualifying fold must also remain positive
-    after charging an extra half of its already-paid fees when ``require_cost_stress`` is enabled.
+    realized Campaign PnL forward on the same capital base. When ``require_cost_stress`` is enabled, the
+    four-fold aggregate must remain positive after charging an extra half of its already-paid taker fees.
     """
     fold_days = max(1, int(fold_days))
     fold_count = max(1, int(fold_count))
@@ -144,6 +145,10 @@ def summarize_campaign_stability(
     min_profitable = max(1, int(min_profitable))
     min_return = max(0.0, float(min_return))
     min_net_per_closed_return = max(0.0, float(min_net_per_closed_return))
+    max_loss_to_total_profit = (
+        None if max_loss_to_total_profit is None
+        else max(0.0, float(max_loss_to_total_profit))
+    )
     initial_equity = max(1.0, _finite(initial_equity, 10_000.0))
     width = fold_days * DAY_MS
     start = int(now_ms) - fold_count * width
@@ -218,8 +223,13 @@ def summarize_campaign_stability(
                 and average_closed_return >= min_net_per_closed_return
             )
         )
+        # A material weekly account return plus positive 1.5x-cost stress already proves that the
+        # follower earned more than modeled execution costs.  Per-close density is still valuable for
+        # ranking thin/high-turnover wallets, but hard-gating every fold on it double-counts the same
+        # economics and can reject a strongly profitable diversified portfolio merely because it closed
+        # many independent positions.
         qualified = bool(
-            evaluable and return_ok and density_ok
+            evaluable and return_ok
             and (cost_stress_net > 0.0 or not require_cost_stress)
         )
         folds.append({
@@ -241,21 +251,61 @@ def summarize_campaign_stability(
         carried_equity = end_equity
     evaluated = [fold for fold in folds if fold["evaluable"]]
     profitable = [fold for fold in evaluated if fold["profitable"]]
+    return_qualified = [
+        fold for fold in evaluated
+        if (
+            float(fold["return"]) > 0.0
+            if min_return <= 0.0
+            else float(fold["return"]) >= min_return
+        )
+    ]
     qualified = [fold for fold in evaluated if fold["qualified"]]
     total_net = sum(float(fold["netPnl"]) for fold in folds)
+    losing = [abs(float(fold["netPnl"])) for fold in evaluated if float(fold["netPnl"]) < 0.0]
+    worst_loss = max(losing, default=0.0)
+    worst_loss_to_total_profit = (
+        worst_loss / total_net if worst_loss > 0.0 and total_net > 0.0
+        else (None if worst_loss > 0.0 else 0.0)
+    )
+    loss_bound_passed = bool(
+        not losing
+        or (
+            max_loss_to_total_profit is not None
+            and total_net > 0.0
+            and worst_loss_to_total_profit is not None
+            and worst_loss_to_total_profit <= max_loss_to_total_profit
+        )
+    )
+    aggregate_cost_stress_net = sum(float(fold["costStressNetPnl"]) for fold in evaluated)
+    aggregate_cost_stress_passed = bool(
+        not require_cost_stress or aggregate_cost_stress_net > 0.0
+    )
     sufficient = len(evaluated) >= min_evaluable
     passed = bool(
         sufficient
-        and len(profitable) >= min_profitable
-        and len(qualified) == fold_count
+        and len(return_qualified) >= min_profitable
+        and loss_bound_passed
+        and aggregate_cost_stress_passed
     )
     return {
-        "version": "nonoverlap-weekly-return-v2", "foldDays": fold_days,
+        "version": "nonoverlap-weekly-return-v3", "foldDays": fold_days,
         "folds": folds, "evaluableFolds": len(evaluated),
         "profitableFolds": len(profitable), "qualifiedFolds": len(qualified),
-        "requiredQualifiedFolds": fold_count, "minReturn": min_return,
-        "costStressRequiredPerFold": bool(require_cost_stress),
+        "returnQualifiedFolds": len(return_qualified),
+        "requiredEvaluableFolds": min_evaluable,
+        "requiredProfitableFolds": min_profitable,
+        "minReturn": min_return,
+        "maxLossToTotalProfit": max_loss_to_total_profit,
+        "worstLossToTotalProfit": worst_loss_to_total_profit,
+        "lossBoundPassed": loss_bound_passed,
+        "costStressRequired": bool(require_cost_stress),
+        "aggregateCostStressNetPnl": aggregate_cost_stress_net,
+        "aggregateCostStressPassed": aggregate_cost_stress_passed,
         "minNetPerClosedReturn": min_net_per_closed_return,
+        "economicDensityDiagnosticOnly": True,
+        "allEconomicDensityPassed": all(
+            bool(fold["economicDensityPassed"]) for fold in evaluated
+        ) if evaluated else False,
         "allCostStressPositive": all(
             float(fold["costStressNetPnl"]) > 0.0 for fold in evaluated
         ) if evaluated else False,

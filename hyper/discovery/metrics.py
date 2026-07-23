@@ -307,7 +307,8 @@ def score(m: dict) -> float:
 
     # ── v10 QUALITY-MAGNITUDE factors (folded INTO score, NOT末尾 hard gates — those double-count & over-cut) ──
     # `win_pt` remains an audit metric only. Thin-edge risk is handled by fee/slippage-paid strict Copy,
-    # four weekly 5% return folds and 1.5x cost stress; a second raw notional-edge penalty would double-count.
+    # official four-week 5% folds plus strict-Copy magnitude/stability and cost stress; a second raw
+    # notional-edge penalty would double-count.
     # 盈亏比: 只罚真·大亏小赚(payoff<1); payoff≥REF(1.0) 满分 → 不误伤 payoff 1.0 的高胜率盘. 高地板(0.6)=轻推.
     #   edge 厚度不单列因子(和 ROI 支柱重复);严格Copy和成本压力已判断净收益,ROI支柱负责奖励回报.
     g_payoff = _clip(g("payoff_ratio", 1.0) / config.SCORE_PAYOFF_REF, config.SCORE_PAYOFF_FLOOR, 1.0)

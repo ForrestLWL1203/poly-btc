@@ -112,7 +112,7 @@ class CopyEvidenceTests(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertTrue(all(.04 <= fold["return"] < .05 for fold in result["folds"]))
 
-    def test_high_turnover_thin_week_fails_per_close_economic_density(self):
+    def test_per_close_density_is_diagnostic_after_material_weekly_return(self):
         now = 28 * DAY
         rows = []
         for week in range(4):
@@ -128,7 +128,8 @@ class CopyEvidenceTests(unittest.TestCase):
         )
         self.assertTrue(all(fold["return"] >= .04 for fold in result["folds"]))
         self.assertTrue(all(not fold["economicDensityPassed"] for fold in result["folds"]))
-        self.assertFalse(result["passed"])
+        self.assertFalse(result["allEconomicDensityPassed"])
+        self.assertTrue(result["passed"])
 
     def test_thirty_four_closes_earning_only_fifty_six_dollars_fails(self):
         now = 28 * DAY
@@ -149,7 +150,45 @@ class CopyEvidenceTests(unittest.TestCase):
         self.assertEqual(latest["closedPositionN"], 34)
         self.assertAlmostEqual(latest["averageClosedNetPnl"], 56.0 / 34.0)
         self.assertFalse(latest["economicDensityPassed"])
+        # The latest fold earns only $56 on the follower account, so the 4% weekly return gate—not a
+        # duplicate per-close gate—rejects it.
         self.assertFalse(result["passed"])
+
+    def test_three_profitable_folds_and_one_bounded_loss_pass_stability(self):
+        now = 28 * DAY
+        rows = []
+        for week, net in enumerate((500.0, 500.0, -100.0, 500.0)):
+            stamp = (week * 7 + 2) * DAY
+            rows.append({
+                "addr": "0xa", "coin": "BTC", "side": "long",
+                "opened_at": stamp - 1_000, "closed_at": stamp,
+                "status": "closed", "net_pnl": net, "fee_drag": 10,
+            })
+        result = summarize_campaign_stability(
+            rows, now_ms=now, min_campaigns=1, min_profitable=3,
+            min_return=0.0, max_loss_to_total_profit=0.25,
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["profitableFolds"], 3)
+        self.assertTrue(result["lossBoundPassed"])
+        self.assertAlmostEqual(result["worstLossToTotalProfit"], 100 / 1400)
+
+    def test_single_losing_fold_cannot_consume_more_than_quarter_of_total_profit(self):
+        now = 28 * DAY
+        rows = []
+        for week, net in enumerate((500.0, 500.0, -500.0, 500.0)):
+            stamp = (week * 7 + 2) * DAY
+            rows.append({
+                "addr": "0xa", "coin": "BTC", "side": "long",
+                "opened_at": stamp - 1_000, "closed_at": stamp,
+                "status": "closed", "net_pnl": net, "fee_drag": 10,
+            })
+        result = summarize_campaign_stability(
+            rows, now_ms=now, min_campaigns=1, min_profitable=3,
+            min_return=0.0, max_loss_to_total_profit=0.25,
+        )
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["lossBoundPassed"])
 
 
 if __name__ == "__main__":

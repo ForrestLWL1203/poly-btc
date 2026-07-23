@@ -75,6 +75,10 @@ PARAM_SPEC = [
         "copy回测最低已平仓数", "低于此样本只记录,不作为硬闸"),
     ("COPY_BT_MIN_NET_PNL",  "scanner", "hidden", "usd",     "rescan", config.COPY_BT_MIN_NET_PNL,
         "copy回测最低净收益", "扣费后的 copy 回测净收益必须高于此值才可 active"),
+    ("CORE_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
+        config.CORE_MIN_COPY_RETURN_30D * 100, "Core严格Copy 30日收益", ""),
+    ("CORE_MIN_COPY_RETURN_7D", "scanner", "hidden", "pct", "rescan",
+        config.CORE_MIN_COPY_RETURN_7D * 100, "Core严格Copy最近7日收益", ""),
     ("CORE_COPY_CAMPAIGN_FLOOR", "scanner", "black", "display", "rescan",
         f"≥ {config.CORE_COPY_MIN_CAMPAIGNS_30D} 批",
         "独立Campaign证据", "Core要求30日至少10个独立Campaign；证据不足保留Challenger"),
@@ -88,11 +92,12 @@ PARAM_SPEC = [
         config.CORE_MIN_FOLLOW_SCORE * 100,
         "Core综合质量分", "新版评分同时覆盖收益、可重复性、置信度、可执行性和风险；新进入Core至少75分"),
     ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
-        f"官方每段≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%；"
-        f"Copy每段≥{config.COPY_WEEKLY_MIN_RETURN * 100:g}%",
-        "四周双重稳定盈利硬闸",
-        "官方Portfolio验证目标钱包每周≥5%；严格Copy验证我们每周≥4%、"
-        "平均每个平仓净收益≥周初权益0.5%，且1.5倍成本后仍盈利"),
+        f"官方4周各≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%；"
+        f"Copy 30d≥{config.CORE_MIN_COPY_RETURN_30D * 100:g}% / "
+        f"最近7d≥{config.CORE_MIN_COPY_RETURN_7D * 100:g}%",
+        "目标与跟单双重盈利硬闸",
+        "官方Portfolio验证目标钱包四个非重叠7日段均≥5%；严格Copy要求30日≥10%、"
+        "最近7日≥5%，四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
@@ -286,7 +291,7 @@ _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 
 # Known predecessor defaults that are policy-migrated on deploy. Values are stored in UI units.
 _HARVEST_PREVIOUS_DEFAULTS = {
-    "HARVEST_MIN_ACCT": ("10000", "10000.0", "30000", "30000.0"),
+    "HARVEST_MIN_ACCT": ("5000", "5000.0", "10000", "10000.0", "30000", "30000.0"),
     "HARVEST_WEEK_VLM_MIN": ("50000", "50000.0", "300000", "300000.0"),
     "HARVEST_WEEK_PNL_MIN": ("0", "0.0", "250", "250.0", "2000", "2000.0", "5000", "5000.0"),
     "HARVEST_MONTH_PNL_MIN": (
@@ -348,12 +353,12 @@ def seed_params(db):
         "'WALLET_FORWARD_LOSS_FREEZE_PCT','CORE_COPY_SAMPLE_FLOORS',"
         "'CORE_COPY_WIN_RATE_FLOORS','CORE_COPY_WIN_RATE_LCB','CORE_COPY_RECENT_BODY',"
         "'CORE_COPY_CAMPAIGN_FLOORS','CHALLENGER_MIN_COPY_RETURN_30D',"
-        "'CORE_MIN_COPY_RETURN_7D','CORE_STRONG_COPY_RETURN_30D',"
+        "'CORE_STRONG_COPY_RETURN_30D',"
         "'CORE_COPY_WIN_RATE_30D_MIN','CORE_RETENTION_WIN_RATE_30D_MIN',"
         "'CORE_COPY_WIN_RATE_LCB_30D_MIN','CORE_RETENTION_WIN_RATE_LCB_30D_MIN',"
-        "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D','CORE_TARGET_MIN_N',"
+        "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D',"
         "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS',"
-        "'CORE_MIN_COPY_RETURN_30D','CORE_RETENTION_MIN_COPY_RETURN_30D',"
+        "'CORE_RETENTION_MIN_COPY_RETURN_30D',"
         "'HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
         "'HARVEST_ROI_WINDOWS_MIN_PASS')"
     )
