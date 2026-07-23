@@ -12,7 +12,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(policy.core_min_campaigns_30d, 8)
         self.assertEqual(policy.stability_fold_count, 4)
         self.assertEqual(policy.stability_fold_days, 7)
-        self.assertEqual(policy.stability_min_evaluable_folds, 4)
+        self.assertEqual(policy.stability_min_evaluable_folds, 3)
         self.assertEqual(policy.stability_min_profitable_folds, 3)
         self.assertEqual(policy.stability_min_return, 0.05)
         self.assertEqual(policy.stability_max_loss_to_30d_profit, 0.25)

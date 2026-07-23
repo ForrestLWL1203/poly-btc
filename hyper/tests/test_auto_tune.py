@@ -72,6 +72,43 @@ class AutoTuneTests(unittest.TestCase):
         self.assertFalse(model["challengerFeasible"])
         self.assertIn("holdout_not_profitable", model["reasons"])
 
+    def test_walk_forward_folds_share_one_compounding_account(self):
+        day = 86_400_000
+        fills = []
+        for index, coin in enumerate(("BTC", "ETH", "SOL", "XRP")):
+            opened = (index * 7 + 1) * day
+            closed = (index * 7 + 2) * day
+            fills.extend([
+                {
+                    "user": "0xaaa", "time": opened, "tid": opened,
+                    "coin": coin, "side": "B", "sz": "1000",
+                    "startPosition": "0", "px": "100", "oid": index * 2 + 1,
+                    "crossed": True,
+                },
+                {
+                    "user": "0xaaa", "time": closed, "tid": closed,
+                    "coin": coin, "side": "A", "sz": "1000",
+                    "startPosition": "1000", "px": "110", "oid": index * 2 + 2,
+                    "crossed": True,
+                },
+            ])
+        follow = {
+            "STABLE_MARGIN_PCT": .03, "STABLE_MARGIN_MIN_PCT": .03,
+            "STABLE_LEV_CAP": 10, "STABLE_MIN_NOTIONAL": 0.0,
+        }
+
+        validation = auto_tune._walk_forward_validation(
+            ["0xaaa"], follow, {}, {coin: .04 for coin in ("BTC", "ETH", "SOL", "XRP")},
+            {30: fills}, 28 * day, fold_days=7, fold_count=4,
+        )
+
+        starts = [fold["baselineStartEquity"] for fold in validation["folds"]]
+        self.assertEqual(len(starts), 4)
+        self.assertAlmostEqual(starts[0], 10_000.0)
+        self.assertGreater(starts[1], starts[0])
+        self.assertGreater(starts[2], starts[1])
+        self.assertGreater(starts[3], starts[2])
+
     def test_candidate_can_improve_a_baseline_already_below_absolute_open_floor(self):
         baseline = {
             "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},

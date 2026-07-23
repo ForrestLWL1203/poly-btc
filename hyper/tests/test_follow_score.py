@@ -115,6 +115,17 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(result["role"], "challenger")
         self.assertEqual(result["status"], "challenger_return_watch")
 
+    def test_open_unrealized_profit_cannot_fake_realized_per_close_density(self):
+        result = judge(
+            copy_bt_net_pnl=1800.0,
+            copy_bt_unrealized_pnl=1700.0,
+            copy_bt_closed_n=16,
+        )
+
+        self.assertFalse(result["checks"]["averageNetPerClose"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_thin_profit_watch")
+
     def test_insufficient_campaign_evidence_is_challenger(self):
         result = judge(copy_bt_closed_n=4, copy_bt_campaign_closed_n=3, copy_evidence_days=2)
         self.assertTrue(result["eligible"])
@@ -168,12 +179,12 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_campaign_win_rate=0.48,
             copy_bt_body_after_top3_n=97,
             copy_bt_body_after_top3_win_rate=0.49,
-            copy_bt_body_after_top3_net_pnl=800.0,
+            copy_bt_body_after_top3_net_pnl=3600.0,
             copy_bt_payoff_ratio=2.47,
             copy_bt_profit_factor=2.52,
-            copy_bt_net_pnl=2100.0,
-            copy_bt_14d_net_pnl=1480.0,
-            copy_bt_7d_net_pnl=1020.0,
+            copy_bt_net_pnl=6000.0,
+            copy_bt_14d_net_pnl=3000.0,
+            copy_bt_7d_net_pnl=1500.0,
             copy_expected_return=0.04,
             copy_return_lcb=0.008,
             copy_positive_probability=0.975,

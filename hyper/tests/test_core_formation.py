@@ -219,6 +219,11 @@ class QualityPrefixSearchTests(unittest.TestCase):
     def test_capacity_is_diagnostic_after_realized_profit(self):
         self.assertTrue(value(1, 1000, capacity_fit=.75).feasible)
         self.assertTrue(value(1, 1000, capacity_fit=.20).feasible)
+        adaptive = replace(
+            value(1, 1000, capacity_fit=.20),
+            payload={"initialBalance": 10_000, "requireCongestionFit": True},
+        )
+        self.assertFalse(adaptive.feasible)
 
     def test_small_pool_keeps_profitable_wallet_despite_recorded_congestion(self):
         candidates = ("0xa", "0xb", "0xc")

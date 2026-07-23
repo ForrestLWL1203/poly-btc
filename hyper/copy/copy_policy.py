@@ -28,6 +28,7 @@ COPY_POLICY_PARAM_KEYS = (
     "COPY_STABILITY_MIN_EVALUABLE_FOLDS", "COPY_STABILITY_MIN_PROFITABLE_FOLDS",
     "COPY_STABILITY_MIN_RETURN", "COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT",
     "CORE_MIN_COPY_RETURN_30D", "CORE_MIN_COPY_RETURN_7D",
+    "CORE_MIN_AVG_NET_PER_CLOSE_RETURN",
     "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD", "COPY_WEEKLY_MIN_RETURN",
     "COPY_WEEKLY_SCORE_RETURN_TARGET", "COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN",
     "SELECTION_MIN_ACTIONABLE_RATE", "SELECTION_MIN_CAPACITY_FIT",
@@ -63,6 +64,7 @@ class CopyPolicy:
     stability_max_loss_to_30d_profit: float
     core_min_copy_return_30d: float
     core_min_copy_return_7d: float
+    core_min_avg_net_per_close_return: float
     copy_weekly_min_campaigns_per_fold: int
     copy_weekly_min_return: float
     copy_weekly_score_return_target: float
@@ -134,6 +136,9 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         )),
         core_min_copy_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.10)),
         core_min_copy_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.03)),
+        core_min_avg_net_per_close_return=float(_value(
+            values, "CORE_MIN_AVG_NET_PER_CLOSE_RETURN", 0.005,
+        )),
         copy_weekly_min_campaigns_per_fold=int(_value(
             values, "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD", 1,
         ) or 1),

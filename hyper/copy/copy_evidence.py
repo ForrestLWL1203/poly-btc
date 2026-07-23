@@ -260,7 +260,7 @@ def summarize_campaign_stability(
         )
     ]
     qualified = [fold for fold in evaluated if fold["qualified"]]
-    total_net = sum(float(fold["netPnl"]) for fold in folds)
+    total_net = sum(float(fold["netPnl"]) for fold in evaluated)
     losing = [abs(float(fold["netPnl"])) for fold in evaluated if float(fold["netPnl"]) < 0.0]
     worst_loss = max(losing, default=0.0)
     worst_loss_to_total_profit = (

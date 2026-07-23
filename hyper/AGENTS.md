@@ -6,7 +6,7 @@ This repository is organized as a multi-product copy-trade workspace. The active
 
 - leaderboard discovery and wallet profiling;
 - copyability scoring and canonical copy replay;
-- quality-first Core membership followed by one unified portfolio-parameter tune;
+- a bounded quality pre-Core pool followed by count-specific adaptive portfolio tuning and strict publication;
 - a forward-only paper Observer;
 - a read-oriented Dashboard API and React dashboard;
 - local/VPS process and deployment tooling.
@@ -79,9 +79,9 @@ Repository boundaries:
 The production flow is:
 
 `Leaderboard staging → candidate workset → executable-market fill cache → per-sector structure + canonical
-30/14/7 Copy replay → individual Core/Challenger/reject classification → bounded quality membership →
-one unified portfolio tune → final strict shared-account replay + strict LOO → atomic generation/selection/strategy
-revision publish → Observer reload → replay-summary materialization`
+30/14/7 Copy replay → individual Core/Challenger/reject classification → bounded 10–16 pre-Core ranking →
+count-specific adaptive tune (16→8→12...) → fixed-surface membership → one final strict shared-account replay +
+strict LOO → atomic generation/selection/strategy revision publish → Observer reload → replay-summary materialization`
 
 ### 1. Generation safety
 
@@ -106,10 +106,11 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   incomplete time-series evidence is deferred, not rejected. The same Portfolio response must also show
   positive 30d Perp PnL and at least 60% 30d Perp PnL share. Current Core, Challenger and open-position owners
   bypass discovery recall and always receive retention replay. Fill-based strict Copy later requires at
-  least 10% return over 30d and 5% over the latest rolling 7d on our own capital. Its four adjacent 7d folds
-  must all contain Campaign evidence, at least three must be profitable, and the one permitted losing fold
+  least 10% return over 30d and 3% over the latest rolling 7d on our own capital. At least three of its four
+  adjacent 7d folds must contain Campaign evidence and be profitable; one evidence-incomplete or losing fold
   cannot exceed 25% of total 30d profit. Aggregate replay must remain profitable after taker fees are stressed
-  to 1.5x. Average net per close is a ranking diagnostic, not a duplicate hard economic gate.
+  to 1.5x. Aggregate average net per close must be at least 0.5% of starting Copy equity so high-turnover
+  thin-profit wallets cannot reach the expensive pre-Core pool.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -162,8 +163,8 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 `active`/`qualified` means the wallet has passed the quality and copyability requirements. It is not a promise
 that every active wallet must fit into the funded Core account.
 
-Every public economic line is a percentage of the canonical replay's recorded `initial_margin_equity` (falling
-back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$500` dollar threshold. Current
+Every public economic line is a percentage of the canonical replay's recorded `window_start_equity` (falling
+back to `initial_margin_equity`), never a fixed `$250/$500` dollar threshold. Current
 default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
@@ -173,11 +174,11 @@ default classification is:
   hard risk;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
   latest 28 days, each with at least 5% return. Strict Copy uses four matching follower folds as timing
-  stability evidence: all four contain a Campaign, at least three are profitable, and the one permitted
-  losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost stress is diagnostic; aggregate final
-  portfolio net stays positive when already-modeled taker fees are increased to 1.5x. The preferred 0.5%
-  average net per close remains in ranking so it can
-  penalize thin/high-turnover economics without becoming a duplicate hard veto;
+  stability evidence: at least three contain a Campaign and are profitable, and the one permitted losing fold
+  cannot exceed 25% of total 30-day profit. Per-wallet cost stress is diagnostic; aggregate final portfolio
+  net stays positive when already-modeled taker fees are increased to 1.5x. The 0.5% aggregate average-net-
+  per-close floor prevents thin/high-turnover economics before path/tuning work, while the score still rewards
+  stronger density continuously;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
 - rolling 14-day return, PF, Wilson confidence and raw payoff are ranking/diagnostic signals. Latest rolling
@@ -196,12 +197,12 @@ the remaining 30-day net to stay positive. Top-two, body-after-top-three and top
 diagnostics only because hard-gating all of them repeatedly judged the same outlier. Public replay dollars still
 include the large winner. Positive aggregate 1.5x-cost stress remains a final funded-portfolio execution check.
 
-Formation first builds a bounded quality pool from individual evidence and path safety, then tunes one shared
-parameter surface for that complete pool. Parameter feasibility is never allowed to choose how many wallets
-qualify for consideration; after tuning, fixed-surface membership and the final strict shared-account replay
-may still remove a wallet whose actual contribution damages net economics or risk. The broad grid stays
-fill-only for speed, but every bounded finalist is validated on the cached refined path using the same four
-non-overlapping 7-day folds as qualification; a 30-day profit gain may not buy a newly losing recent fold.
+Formation first ranks at most 16 profitable, sample-dense, hard-risk-safe wallets. Wallet count and sizing are
+coupled, so sparse count-specific tuning follows the bounded 16→8→12 direction and considers open/capacity
+congestion at that layer only; the winning count receives the full grid. The grid and its four folds are
+fills-only and run on one continuous compounding account, never four fresh `$10k` accounts. After tuning,
+fixed-surface membership may publish fewer wallets with no minimum quota. Only the final chosen
+count/parameter/membership surface pays for one refined-path strict 30-day replay before publication.
 Alongside margin, leverage and smart-add knobs, tuning may cautiously raise aggregate deployment
 within the account's unchanged total-margin hard stop. Static per-wallet/per-sector margin slices and tiny
 per-wallet position counts are retired: actual combined timing and the aggregate replay own congestion.
@@ -264,19 +265,23 @@ parameter retuning, and leave-one-out reshuffling run only after seven days sinc
 change. Scheduled evidence refresh still removes liquidation, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
-1. First require every non-path Core gate. Then run only that bounded near-Core pool plus current Core through
+1. Require positive Copy economics, at least five closes, aggregate 0.5%-of-equity average net per close, and
+   every cheap hard-risk/data gate. Rank at most 16 pre-Core wallets plus required current/pinned members, then
+   run that bounded pool through
    canonical individual Copy replay once with the refined 15-minute path (and finer candles only for ambiguous
-   risk ranges). This is the authoritative liquidation/drawdown qualification pass. Only individually
-   Core-eligible wallets may enter formation; other research evidence remains visible for audit.
-2. On the currently active parameter surface, search wallet count and membership from the cached target fills.
+   risk ranges). A positive, path-safe wallet may enter parameter discovery even if default parameters miss a
+   final return/score threshold.
+2. Search wallet count and sizing together from cached fills: independently coarse-tune 16→8→12/boundary nodes,
+   using continuous floating equity and congestion evidence, then full-tune only the winning count.
    The fast replay still models shared cash, margin, deployment, coin caps, fees, open capture and 1.5x cost
    stress, but does not rescan the candle path inside every prefix/add/swap candidate.
-3. The explicit `optimize` operation runs only after a qualified pool exists. Its parameter grid and independent
-   folds are likewise fill-driven. It may propose higher-return sizing/Add parameters, but it cannot publish them
-   by itself.
+3. Recompute individual qualification and membership on the tuned surface. Four 7-day folds are slices of the
+   same continuously compounded 28-day replay; later folds inherit prior realized profit and contemporaneous
+   deploy/capacity room. There is no minimum Core count.
 4. After parameters and actual publishable membership are fixed, run exactly one final path-complete 30-day
-   portfolio Copy replay. Require positive net, at most 15% drawdown, at least 70% actionable opens, 75% capacity
-   fit and complete price-path coverage. A failed final replay rolls back the proposal/publication; it must not
+   portfolio Copy replay. Require positive net, at most 15% drawdown, weekly stability and complete price-path
+   coverage; the count search separately enforces 70% actionable opens and 75% capacity fit. A failed final
+   replay rolls back the proposal/publication; it must not
    restart a path-heavy parameter search.
 5. The explicit `optimize` command treats incumbents as new entries so a policy correction cannot preserve an
    incorrectly published Core through normal soft-retention grace; scheduled scans keep that grace. The first

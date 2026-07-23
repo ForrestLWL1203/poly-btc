@@ -214,6 +214,34 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(half["positions"][0]["margin"], full["positions"][0]["margin"] * 0.5)
         self.assertAlmostEqual(half["copy_net_pnl"], full["copy_net_pnl"] * 0.5)
 
+    def test_realized_profit_compounds_the_next_position_margin(self):
+        fills = [
+            fill(1_000, "BTC", "B", 1_000, 0, 100.0, 1),
+            fill(2_000, "BTC", "A", 1_000, 1_000, 200.0, 2),
+            fill(3_000, "ETH", "B", 1_000, 0, 100.0, 3),
+            fill(4_000, "ETH", "A", 1_000, 1_000, 101.0, 4),
+        ]
+        result = run_backtest(
+            "0xabc", fills, sigmas={"BTC": .04, "ETH": .04},
+            overrides={
+                "STABLE_MARGIN_PCT": .03,
+                "STABLE_MARGIN_MIN_PCT": .03,
+                "STABLE_LEV_CAP": 10,
+                "STABLE_MIN_NOTIONAL": 0.0,
+            },
+        )
+
+        self.assertEqual(result["closed_n"], 2)
+        first, second = result["positions"]
+        self.assertGreater(first["net_pnl"], 0.0)
+        self.assertGreater(second["margin"], first["margin"])
+        expected_scale = (
+            10_000.0 + first["net_pnl"]
+        ) / 10_000.0
+        self.assertAlmostEqual(
+            second["margin"] / first["margin"], expected_scale, places=6,
+        )
+
     def test_low_liquidity_crypto_open_is_skipped(self):
         fills = [
             fill(1_000, "VINE", "A", 100_000, 0, 0.0098, 1),

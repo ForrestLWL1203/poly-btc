@@ -34,16 +34,23 @@ class PrefixEvaluation:
     @property
     def feasible(self) -> bool:
         # Copy positions use isolated margin.  A liquidation loses that position's bounded margin and the
-        # loss is already debited from net_pnl and reflected in max_drawdown.  Treating the count itself as
-        # a veto double-charges the same loss and can let one profitable wallet collapse an otherwise valid
-        # quality prefix.  Open/capacity misses are likewise already present in the realized replay PnL:
-        # vetoing a portfolio which remains strongly profitable after those misses double-counts execution
-        # friction.  Keep those rates as tuning/congestion diagnostics; admission owns actual net, stress and
-        # drawdown.
+        # loss is already debited from net_pnl and reflected in max_drawdown. Treating the count itself as a
+        # veto double-charges the same loss. Open/capacity misses are likewise already priced into admission
+        # PnL. Only the explicit count-search projection sets ``requireCongestionFit`` because that search
+        # must decide whether reducing N releases enough real capital; final admission does not charge it
+        # twice.
+        congestion_ok = bool(
+            not self.payload.get("requireCongestionFit")
+            or (
+                self.actionable_open_rate >= float(config.SELECTION_MIN_ACTIONABLE_RATE)
+                and self.capacity_fit >= float(config.SELECTION_MIN_CAPACITY_FIT)
+            )
+        )
         return (
             self.net_pnl > 0
             and self.stress_net_pnl > 0
             and self.max_drawdown <= float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
+            and congestion_ok
         )
 
 
@@ -83,16 +90,23 @@ def validate_final_membership(
     floating_equity = max(1.0, float(initial_margin_equity))
     for fold in candidate_folds:
         net = float(fold.net_pnl)
-        fold_return = net / floating_equity
+        # Continuous replay owns the actual capital path.  Older callers did four independent $10k
+        # replays and then divided those fixed-size profits by an artificially compounded denominator,
+        # mixing two incompatible capital bases.  Prefer the boundary equity recorded by the one
+        # continuous replay; retain the carried fallback only for historical snapshots/tests.
+        start_equity = max(
+            1.0, float(fold.payload.get("startEquity") or floating_equity),
+        )
+        fold_return = net / start_equity
         cost_stress = float(fold.payload.get("costStressNetPnl", fold.stress_net_pnl))
         weekly_rows.append({
             "return": fold_return,
-            "startEquity": floating_equity,
+            "startEquity": start_equity,
             "netPnl": net,
             "costStressNetPnl": cost_stress,
             "campaignClosedN": int(fold.payload.get("campaignClosedN") or 0),
         })
-        floating_equity = max(1.0, floating_equity + net)
+        floating_equity = max(1.0, start_equity + net)
     if len(candidate_folds) != required_fold_count:
         reasons.append("membership_folds_unavailable")
     else:
@@ -108,12 +122,16 @@ def validate_final_membership(
             reasons.append("membership_fold_infeasible")
         if len(evaluable_folds) < int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS):
             reasons.append("membership_fold_evidence_insufficient")
-        profitable_folds = [row for row in weekly_rows if row["netPnl"] > 0.0]
+        evaluable_rows = [
+            row for row in weekly_rows
+            if row["campaignClosedN"] >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
+        ]
+        profitable_folds = [row for row in evaluable_rows if row["netPnl"] > 0.0]
         if len(profitable_folds) < min_profitable_folds:
             reasons.append("membership_weekly_profitability")
-        total_fold_net = sum(row["netPnl"] for row in weekly_rows)
+        total_fold_net = sum(row["netPnl"] for row in evaluable_rows)
         worst_fold_loss = max(
-            (abs(row["netPnl"]) for row in weekly_rows if row["netPnl"] < 0.0),
+            (abs(row["netPnl"]) for row in evaluable_rows if row["netPnl"] < 0.0),
             default=0.0,
         )
         if worst_fold_loss and (
@@ -121,7 +139,7 @@ def validate_final_membership(
             or worst_fold_loss / total_fold_net > max_loss_to_total_profit
         ):
             reasons.append("membership_weekly_loss_bound")
-        if sum(row["costStressNetPnl"] for row in weekly_rows) <= 0.0:
+        if sum(row["costStressNetPnl"] for row in evaluable_rows) <= 0.0:
             reasons.append("membership_weekly_cost_stress")
     if candidate.net_pnl <= 0.0 or candidate.stress_net_pnl <= 0.0 or cost_stress_net <= 0.0:
         reasons.append("membership_cost_stress_not_profitable")
@@ -338,6 +356,11 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     reference = get(initial_count)
     retain_args = dict(retention_kwargs or {})
     lo, hi = minimum_size, initial_count
+    if initial_count > max(0, int(exhaustive_below)):
+        # Keep the operationally useful bounded direction explicit: N -> N/2 -> midpoint.  Besides making
+        # the search auditable (16 -> 8 -> 12), this probes the likely congestion repair before assuming
+        # monotonic feasibility at either extreme.
+        get(max(minimum_size, initial_count // 2))
     if initial_count <= max(0, int(exhaustive_below)):
         for count in range(minimum_size, initial_count + 1):
             get(count)

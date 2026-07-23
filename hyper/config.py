@@ -68,14 +68,15 @@ CORE_MIN_FOLLOW_SCORE = 0.75
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
 COPY_STABILITY_FOLD_DAYS = 7
 COPY_STABILITY_FOLD_COUNT = 4
-COPY_STABILITY_MIN_EVALUABLE_FOLDS = 4
+COPY_STABILITY_MIN_EVALUABLE_FOLDS = 3
 COPY_STABILITY_MIN_PROFITABLE_FOLDS = 3
 COPY_STABILITY_MIN_RETURN = 0.05  # Official Portfolio: source wallet must earn at least 5% in every fold.
 CORE_MIN_COPY_RETURN_30D = 0.10   # Strict follower replay: at least +$1,000 on the $10k model account.
 CORE_MIN_COPY_RETURN_7D = 0.03    # Strict follower replay: latest rolling 7d at least +$300.
+CORE_MIN_AVG_NET_PER_CLOSE_RETURN = 0.005  # One aggregate anti-thin-profit gate: avg ≥$50/close on $10k.
 # Strict Copy's four folds verify timing stability rather than repeating the two magnitude gates above:
-# all four folds need Campaign evidence, at least three must be profitable, and the one permitted losing fold
-# cannot exceed 25% of total 30d profit. Per-close edge remains a ranking diagnostic, not a second hard gate.
+# at least three folds need Campaign evidence and profit; one missing/losing fold is tolerated only within
+# the 25%-of-total-profit loss bound. Aggregate average realized net per close has one anti-thin-profit gate.
 COPY_WEEKLY_MIN_RETURN = 0.0
 COPY_WEEKLY_SCORE_RETURN_TARGET = 0.04
 COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT = 0.25

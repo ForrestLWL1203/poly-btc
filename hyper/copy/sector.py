@@ -560,6 +560,10 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
     primary = _evidence_window(copy_json, evidence_sectors, 30)
     if primary:
         out["copy_bt_net_pnl"] = primary["copy_net_pnl"]
+        out["copy_bt_closed_net_pnl"] = primary.get(
+            "closed_net_pnl",
+            _num(primary.get("copy_net_pnl")) - _num(primary.get("unrealized_pnl")),
+        )
         out["copy_bt_closed_n"] = primary["closed_n"]
         closed_n = _int(primary.get("closed_n"))
         out["copy_bt_wins"] = _int(primary.get("wins"))

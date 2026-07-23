@@ -38,9 +38,9 @@ Official Portfolio stability + 30d Perp prefilter
 Sector-isolated structure filter
     ↓ cached 37-day profile (30-day evidence + 7-day warm-up)
 Canonical Copy replay: Challenger evidence → personal Core
-    ↓ 10 Campaigns, non-overlapping stability, path/cost/outlier/capacity stress
+    ↓ 8 Campaigns, non-overlapping stability, path/cost/outlier/capacity stress
 Shared-account smart Core search
-    ↓ explicit follow_selection publication
+    ↓ at most 16 pre-Core; count-specific 16→8→12 tuning; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ forward-only Observer
 Paper copy positions, PnL, and execution audit
@@ -61,15 +61,16 @@ Wallet quality and funded-account membership are separate decisions.
   majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
 - Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
   activity, score, or outlier evidence block Core but do not erase that research evidence. Refined
-  candle paths are fetched only for current Core and wallets that already clear every non-path business gate,
-  bounded at 40 for resource safety. The provisional pre-path score is not a gate because path-risk evidence
+  candle paths are fetched only for current Core and profitable/sample-dense wallets that clear cheap hard
+  data/risk gates, bounded at 16 for resource safety. The provisional pre-path score is not a gate because path-risk evidence
   is itself 15% of the final score; the 75-point line is applied after that path is available. New Core requires
   eight independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 3% over the latest
-  rolling 7 days. All four non-overlapping 7-day folds must contain Campaign evidence, at least three must be
-  profitable, and the one permitted losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost
+  rolling 7 days. At least three of four non-overlapping 7-day folds must contain Campaign evidence and be
+  profitable; the one permitted losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost
   stress, body-after-top-three, open-fill rate and capacity remain score diagnostics; the funded final
   portfolio must still remain profitable after taker fees are stressed to 1.5x and pass aggregate execution
-  capacity. Average net per close remains a ranking diagnostic rather than a second hard gate.
+  capacity. Aggregate average net per close must be at least 0.5% of starting Copy equity before expensive
+  path/tuning work; stronger density remains a continuous score input.
 - The final copy-follow score is calibrated as funded economics 30%, repeatability 25%, edge confidence 15%,
   operability 15%, and path risk 15%. Economics combines 30-day and latest-7-day follower return magnitude,
   fold timing and median per-close density; overlapping 14-day return and the legacy raw profile score
@@ -81,8 +82,10 @@ Wallet quality and funded-account membership are separate decisions.
 - The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
   A positive, path-complete and hard-risk-safe replay may enter parameter discovery even when the current
   execution surface misses the final return/score line; requiring Core eligibility before tuning would make
-  current parameters a circular prerequisite for changing them. Count, add/remove/swap and parameter search
-  then use normalized fills and the shared-account execution model; they do not repeatedly scan candles. The
+  current parameters a circular prerequisite for changing them. Wallet count and parameters are tuned together:
+  sparse count-specific nodes follow 16→8→12/boundary search and only the winning count receives the full grid.
+  Count, add/remove/swap and parameter search use normalized fills and the shared-account execution model; they
+  do not repeatedly scan candles. The
   winning surface must requalify every individual against the complete Core contract, and the winning
   membership receives exactly one conservative, path-complete 30-day strict-Copy certification before
   publication. Score orders the candidate pool; it does not force a score prefix or fixed base count.
@@ -159,12 +162,12 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
 Campaign. Target-wallet stability is screened first from official Portfolio: all four adjacent 7-day folds need
-at least 5% return. Our strict Copy separately requires at least 10% return over 30 days and at least 5% over
-the latest rolling 7 days. Its four floating-equity folds are a timing-stability check: every fold needs at
-least one independent Campaign, at least three folds must be profitable, and the one permitted losing fold
+at least 5% return. Our strict Copy separately requires at least 10% return over 30 days and at least 3% over
+the latest rolling 7 days. Its four floating-equity folds are slices of one continuous compounding replay:
+at least three need an independent Campaign and must be profitable, and the one permitted losing fold
 cannot exceed 25% of total 30-day profit. The aggregate must remain profitable after charging taker fees at
-1.5x. Average closed-position net relative to weekly starting equity remains a score/diagnostic signal. The
-30-day aggregate still needs ten Campaigns. Thin folds are unknown evidence, never synthetic losses. The
+1.5x. Aggregate average closed-position net must reach 0.5% of starting Copy equity. The 30-day aggregate
+still needs eight Campaigns. Thin folds are unknown evidence, never synthetic losses. The
 single outlier stress removes the largest winning Campaign and requires the remainder positive.
 
 The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
@@ -176,15 +179,18 @@ per-sector slices are also retired: wallets compete only when their positions ac
 stop at the account-wide 80% deployment line; adds may use the remaining real available cash. Per-coin
 same-direction caps, liquidity checks, isolated liquidation and the global concurrency ceiling remain.
 
-An explicit optimization run starts from the already qualified wallet pool and searches:
+An explicit optimization run starts from the bounded pre-Core pool, searches wallet count and sizing together,
+and then optimizes:
 
 - stable/mid/high volatility first-open margins;
 - leverage caps;
 - smart-add gap, shrink, and hard-count parameters.
 
-The search evaluates independent grid axes, finalist combinations, walk-forward folds, holdout, and stress
-scenarios from fills. It never changes the Core membership using stale profiles and never runs a candle replay
-for every parameter or membership proposal. After the winning parameters and membership are fixed, the one final
+The search evaluates independent grid axes, finalist combinations, continuous-capital walk-forward folds,
+holdout, and stress scenarios from fills. Each count node is tuned independently so an 8-wallet portfolio never
+inherits parameters fitted to a congested 16-wallet account. It never changes Core membership using stale
+profiles and never runs a candle replay for every parameter or membership proposal. After the winning parameters
+and membership are fixed, the one final
 strict 30-day portfolio certification supplies the estimated shared-account result shown above the “跟单中”
 list. Publication reuses that result; it does not synchronously recalculate every Core and Challenger for
 Dashboard enrichment.

@@ -1787,9 +1787,10 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     prevents an open loss from disappearing merely because it has not closed yet.
     """
     out = dict(result or {})
+    all_positions = [dict(position) for position in (out.get("positions") or [])]
     positions = [
         dict(position)
-        for position in (out.get("positions") or [])
+        for position in all_positions
         if int(position.get("closed_at") or 0) >= int(start_ms)
     ]
     positions.sort(key=lambda position: int(position.get("closed_at") or 0))
@@ -1820,7 +1821,16 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         f(out.get("missed_add_rate")) if out.get("missed_add_rate") is not None else 0.0
     )
 
-    equity = float(config.INITIAL_BALANCE)
+    initial_equity = (
+        f(out.get("initial_margin_equity")) or float(config.INITIAL_BALANCE)
+    )
+    realized_before_start = sum(
+        f(position.get("net_pnl"))
+        for position in all_positions
+        if int(position.get("closed_at") or 0) < int(start_ms)
+    )
+    equity = max(1.0, initial_equity + realized_before_start)
+    window_start_equity = equity
     peak = equity
     max_drawdown = 0.0
     curve = []
@@ -1863,9 +1873,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     path_samples.extend(
         dict(row) for row in all_path_samples if int(row.get("time") or 0) >= int(start_ms)
     )
+    if prior_sample and f(prior_sample.get("equity")) > 0.0:
+        window_start_equity = f(prior_sample.get("equity"))
     path_risk = path_risk_metrics(
         path_samples,
-        initial_equity=f(out.get("initial_margin_equity")) or config.INITIAL_BALANCE,
+        initial_equity=window_start_equity,
         liquidation_times=[
             value for value in (out.get("path_liquidation_times") or ())
             if int(f(value)) >= int(start_ms)
@@ -1891,6 +1903,10 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "path_equity_samples": path_samples,
         "copy_win_rate": wins / len(positions) if positions else 0.0,
         "copy_net_pnl": closed_net + open_unrealized,
+        "window_start_equity": window_start_equity,
+        "window_end_equity": max(
+            1.0, window_start_equity + closed_net + open_unrealized,
+        ),
         "closed_net_pnl": closed_net,
         "copy_gross_pnl": gross,
         "unrealized_pnl": open_unrealized,

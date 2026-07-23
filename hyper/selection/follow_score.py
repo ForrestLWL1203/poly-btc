@@ -87,12 +87,19 @@ def evaluate_follow_eligibility(
     c30 = int(_num(scoped.get("copy_bt_closed_n")))
     campaigns = int(_num(scoped.get("copy_bt_campaign_closed_n"), c30))
     pnl30 = _num(scoped.get("copy_bt_net_pnl"))
+    closed_pnl30 = _num(
+        scoped.get("copy_bt_closed_net_pnl"),
+        pnl30 - _num(scoped.get("copy_bt_unrealized_pnl")),
+    )
     pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
     equity = max(1.0, _num(
         scoped.get("initial_margin_equity"), getattr(config, "INITIAL_BALANCE", 10_000.0),
     ))
     return30 = pnl30 / equity
     return7 = pnl7 / equity
+    average_net_per_close_return = (
+        closed_pnl30 / max(1, c30) / equity if c30 > 0 else 0.0
+    )
     evidence_days = int(_num(scoped.get("copy_evidence_days")))
     data_status = str(scoped.get("copy_bt_data_status") or "").strip().lower()
     evidence_status = str(scoped.get("copy_bt_evidence_status") or "").strip().lower()
@@ -147,6 +154,9 @@ def evaluate_follow_eligibility(
         "strictCopy30dPositive": pnl30 > 0.0,
         "strictCopy30dReturn": return30 >= policy.core_min_copy_return_30d,
         "strictCopyRolling7dReturn": return7 >= policy.core_min_copy_return_7d,
+        "averageNetPerClose": (
+            average_net_per_close_return >= policy.core_min_avg_net_per_close_return
+        ),
         "strictCopyWeeklyPositive": copy_weekly_positive,
         "independentCampaignEvidence": campaigns >= policy.core_min_campaigns_30d,
         "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
@@ -174,6 +184,8 @@ def evaluate_follow_eligibility(
             "30": policy.core_min_copy_return_30d,
             "7": policy.core_min_copy_return_7d,
         },
+        "averageNetPerCloseReturn": average_net_per_close_return,
+        "averageNetPerCloseReturnFloor": policy.core_min_avg_net_per_close_return,
         "evidenceDays": evidence_days, "copyWeeklyProfitability": copy_weekly,
         "repeatability": {
             "campaignWinRate": campaign_win_rate,
@@ -229,6 +241,7 @@ def evaluate_follow_eligibility(
 
     core_eligible = bool(
         sample_ok and checks["strictCopy30dReturn"] and checks["strictCopyRolling7dReturn"]
+        and checks["averageNetPerClose"]
         and copy_weekly_positive and activity_ok
         and checks["campaignWinRate"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["valuationComplete"]
@@ -251,6 +264,11 @@ def evaluate_follow_eligibility(
         status, reason = (
             "challenger_recent_return_watch",
             "最近7天严格Copy收益未达到3%，近期盈利能力暂不足以进入Core",
+        )
+    elif not checks["averageNetPerClose"]:
+        status, reason = (
+            "challenger_thin_profit_watch",
+            "30天平均每个平仓的净收益低于本金0.5%，属于薄利高周转，不进入Core",
         )
     elif not copy_weekly_sufficient:
         status, reason = (

@@ -815,7 +815,10 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         min_evaluable=policy.stability_min_evaluable_folds,
         min_profitable=policy.stability_min_profitable_folds,
         min_return=policy.copy_weekly_min_return,
-        initial_equity=f(primary.get("initial_margin_equity")) or config.INITIAL_BALANCE,
+        initial_equity=f(
+            primary.get("window_start_equity")
+            or primary.get("initial_margin_equity")
+        ) or config.INITIAL_BALANCE,
         path_equity_samples=primary.get("path_equity_samples") or (),
         # Individual qualification already requires material 30d/latest-7d returns. Extra cost stress is
         # certified once on the funded final portfolio; hard-gating it here and again during membership
@@ -2065,6 +2068,50 @@ def _apply_core_soft_failure_grace(db, addr, generation_id, qualification, polic
     return result
 
 
+def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
+    """Project one count-specific tune onto the adaptive Core-size search."""
+    validation = dict((tune_result or {}).get("validation") or {})
+    folds = list(validation.get("folds") or ())
+
+    def side(prefix, stress_key, stress_liq_key, proposal):
+        net = sum(f(row.get(f"{prefix}Net")) for row in folds)
+        max_dd = max((f(row.get(f"{prefix}MaxDD")) for row in folds), default=1.0)
+        open_rate = min((f(row.get(f"{prefix}OpenRate")) for row in folds), default=0.0)
+        capacity = min((f(row.get(f"{prefix}CapacityFit")) for row in folds), default=0.0)
+        liquidations = max(
+            [int(row.get(f"{prefix}Liquidations") or 0) for row in folds]
+            + [int(validation.get(stress_liq_key) or 0)]
+        )
+        return core_formation.PrefixEvaluation(
+            count=int(count), net_pnl=net,
+            stress_net_pnl=f(validation.get(stress_key)), max_drawdown=max_dd,
+            actionable_open_rate=open_rate, capacity_fit=capacity,
+            liquidations=liquidations, params=dict(proposal or {}),
+            payload={
+                "initialBalance": float(initial_balance),
+                # Congestion selects wallet count here only. Individual/final admission prices missed opens
+                # into PnL and must not reject the same execution friction a second time.
+                "requireCongestionFit": True,
+            },
+        )
+
+    challenger = side(
+        "challenger", "stressNet", "stressLiquidations",
+        (tune_result or {}).get("proposal") or {},
+    )
+    baseline = side(
+        "baseline", "baselineStressNet", "baselineStressLiquidations",
+        (tune_result or {}).get("baseline_proposal") or {},
+    )
+    if (tune_result or {}).get("eligible_to_apply") is False:
+        return baseline
+    feasible = [value for value in (challenger, baseline) if value.feasible]
+    return max(
+        feasible or [challenger, baseline],
+        key=lambda value: (value.utility, value.stress_net_pnl),
+    )
+
+
 def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
     """Return the only parameter surface Core formation is allowed to seal."""
     tuned = {
@@ -2106,47 +2153,41 @@ def _formation_tune_candidate(row) -> bool:
         and qualification.get("role") != "quarantine"
         and checks.get("pathRiskComplete")
         and checks.get("valuationComplete")
-        and checks.get("sectorExecutable")
         and checks.get("noForwardLiquidation")
     )
 
 
 def _formation_prepath_candidate(row) -> bool:
-    """Whether a wallet clears every Core business gate available before refined candle paths.
+    """Whether a profitable wallet belongs in the bounded pre-Core replay pool.
 
-    The final score deliberately is not required here because path risk owns 15% of that score. Requiring
-    75 before fetching the evidence needed to compute it creates a circular gate and can force Core to zero.
+    Individual replay has already proved positive economics.  Campaign/fold,
+    recency, score and sector-live status are final admission evidence, not
+    reasons to prevent a top-ranked wallet from receiving the one exact path
+    replay and shared-parameter tune which can change those metrics.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
-    if not qualification.get("eligible"):
+    if (
+        not qualification.get("eligible")
+        or qualification.get("deferred")
+        or qualification.get("hardRisk")
+        or qualification.get("role") == "quarantine"
+    ):
         return False
     if qualification.get("coreEligible"):
         return True
     checks = dict(qualification.get("checks") or {})
     required_checks = (
         "strictCopy30dPositive",
-        "strictCopy30dReturn",
-        "strictCopyRolling7dReturn",
-        "strictCopyWeeklyPositive",
-        "independentCampaignEvidence",
-        "campaignWinRate",
-        "activityWithin72h",
-        "oneWinnerRemovalPositive",
+        "averageNetPerClose",
         "valuationComplete",
-        "sectorExecutable",
-        "expectedEdge",
         "noRepeatedLiquidation",
         "noForwardLiquidation",
     )
     if not all(bool(checks.get(key)) for key in required_checks):
         return False
-    if int(qualification.get("evidenceDays") or 0) < int(config.EVIDENCE_MIN_DAYS):
+    if int((row or {}).get("copy_bt_closed_n") or 0) < 5:
         return False
-    try:
-        policy = json.loads((row or {}).get("sector_policy_json") or "{}")
-    except (TypeError, ValueError):
-        policy = {}
-    return not bool(policy.get("coreBlocked"))
+    return True
 
 
 def _bounded_formation_candidates(rows, required_order, limit) -> list[dict]:
@@ -2359,6 +2400,15 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     current_core = (
         () if force_entry_requalification else tuple(selection.published_core_addrs(db) or ())
     )
+    upper = max(1, min(
+        int(config.MAX_TARGETS),
+        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
+        int(params.get(
+            db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
+        ) or config.CORE_INITIAL_MAX_N),
+    ))
+    if len(pinned_order) > upper:
+        raise RuntimeError("pinned_core_count_exceeds_upper_bound")
     all_ranked_candidates = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
     )
@@ -2369,7 +2419,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     ranked_candidates = _bounded_formation_candidates(
         all_ranked_candidates,
         (*pinned_order, *current_core),
-        int(config.MAX_TARGETS),
+        upper,
     )
     rebalance_interval = max(1, int(params.get(
         db, "CORE_REBALANCE_INTERVAL_DAYS", config.CORE_REBALANCE_INTERVAL_DAYS,
@@ -2387,13 +2437,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         required_order=pinned_order, retention_addrs=current_core,
         replay_cache=individual_replay_cache,
     )
-    upper = max(1, min(
-        int(config.MAX_TARGETS),
-        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
-        int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
-    ))
-    if len(pinned_order) > upper:
-        raise RuntimeError("pinned_core_count_exceeds_upper_bound")
     # Parameter discovery may include an exact positive/path-safe replay that misses economic Core thresholds
     # on the *current* surface. Requiring Core eligibility here made the current parameters a prerequisite for
     # tuning them. The winning surface is still sealed by ``replay_effective_surface`` below, where every
@@ -2404,7 +2447,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     ][:upper]
     if not tune_ranked:
         return _explicit_empty_core_formation(
-            ranked_candidates, reason="no_core_qualified_wallets", tunePoolCount=0,
+            surface_ranked, reason="no_core_qualified_wallets", tunePoolCount=0,
         )
     tune_ordered = tuple(row["addr"] for row in tune_ranked)
 
@@ -2423,14 +2466,87 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
 
     tune_eligible = None
     tune_reason = "retune_disabled"
+    tune_search = None
+    tune_runs = {}
     chosen_run = {}
     winning_count = len(tune_ordered)
     retention = _core_prefix_retention()
     if retune:
-        # Wallet quality owns admission and ordering.  Once that bounded set exists, tune one shared account
-        # surface for the complete set; never use parameter feasibility to decide how many wallets are allowed
-        # to be considered Core.  The fixed-surface membership pass below may still remove a wallet whose
-        # actual contribution hurts the funded portfolio.
+        # Wallet count and sizing are coupled. Search 16 -> 8 -> 12 (plus the bounded neighbours) with a
+        # sparse count-specific tuner, then pay for the full grid only on the winning count.  The later
+        # quality/membership pass may still publish fewer than eight wallets; eight is only the lower bound
+        # of this congestion-search bracket, never a Core quota.
+        timed_out_counts = []
+
+        def coarse_tune_evaluate(count):
+            count = int(count)
+            _set_scan_progress(
+                db, stage="portfolio_tune_coarse", candidates_scanned=count,
+                candidates_total=len(tune_ordered),
+            )
+            try:
+                result = auto_tune.maybe_tune_margins(
+                    db, source="core_formation_coarse",
+                    stamp=f"{stamp}:coarse:k{count}",
+                    dry_run=True, mode="apply", follow_values=base_follow,
+                    data_complete=True, addrs_override=list(tune_ordered[:count]),
+                    record_run=False, formation_admission=True,
+                    market_generation=generation_id, search_profile="coarse",
+                    time_budget_s=float(config.AUTO_TUNE_COARSE_TIME_BUDGET_SEC),
+                )
+            except TimeoutError:
+                db.rollback()
+                timed_out_counts.append(count)
+                return core_formation.PrefixEvaluation(
+                    count=count, net_pnl=-1e12, stress_net_pnl=-1e12,
+                    max_drawdown=1.0, actionable_open_rate=0.0, capacity_fit=0.0,
+                    liquidations=1, params={},
+                    payload={"initialBalance": f(
+                        base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE
+                    ), "requireCongestionFit": True, "coarseTuneTimeout": True},
+                )
+            if result.get("status") != "ok":
+                raise RuntimeError(
+                    "core_coarse_tune_failed:"
+                    + str(result.get("reason") or result.get("status"))
+                )
+            tune_runs[count] = result
+            db.commit()
+            return _prefix_eval_from_tune(
+                count, result,
+                initial_balance=f(
+                    base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE
+                ),
+            )
+
+        tune_search_floor = (
+            len(pinned_order)
+            if len(tune_ordered) <= 8
+            else max(len(pinned_order), 8)
+        )
+        try:
+            tune_search = core_formation.search_quality_prefix(
+                len(tune_ordered), coarse_tune_evaluate,
+                retention_kwargs=retention,
+                tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
+                exhaustive_below=int(
+                    getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0
+                ),
+                required_count=tune_search_floor,
+            )
+            winning_count = int(tune_search.selected.count)
+        except RuntimeError as exc:
+            if str(exc) != "no_feasible_quality_prefix":
+                raise
+            # Even if the 8-wallet bracket is congested, do not manufacture zero Core. Full-tune the
+            # smallest bracket once; fixed-surface membership remains free to reduce below eight.
+            winning_count = max(1, tune_search_floor)
+            tune_reason = (
+                "coarse_prefix_timeout_fallback"
+                if timed_out_counts else "coarse_prefix_congestion_fallback"
+            )
+
+        coarse_winner = tune_runs.get(winning_count) or {}
         _set_scan_progress(
             db, stage="portfolio_tune_full", candidates_scanned=winning_count,
             candidates_total=len(tune_ordered),
@@ -2456,24 +2572,27 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             )
         except TimeoutError as exc:
             db.rollback()
-            tuned_params, tune_eligible, _unused = _formation_param_surface(
-                base_follow, None, retune=False,
-            )
-            tune_eligible = False
-            tune_reason = f"full_tune_timeout_using_active:{exc}"
+            chosen_run = coarse_winner
+            if chosen_run:
+                tuned_params, tune_eligible, coarse_reason = _formation_param_surface(
+                    base_follow, chosen_run, retune=True,
+                )
+                tune_reason = f"full_tune_timeout_using_coarse:{exc}:{coarse_reason}"
+            else:
+                tuned_params, tune_eligible, _unused = _formation_param_surface(
+                    base_follow, None, retune=False,
+                )
+                tune_eligible = False
+                tune_reason = f"full_tune_timeout_using_active:{exc}"
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
         )
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
-
-    # Individual Core qualification is sealed once on the active surface before parameter search. The tuner
-    # optimizes only that qualified pool from fills; it must not rescan every wallet's candle path at every
-    # proposal. The actual tuned membership receives one final path-complete 30-day portfolio replay during
-    # publication.
-    active_tune_surface = {
-        key: f(base_follow.get(key)) for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
-    }
+    tuned_candidate_addrs = set(tune_ordered[:winning_count])
+    tuned_candidate_rows = [
+        row for row in ranked_candidates if row.get("addr") in tuned_candidate_addrs
+    ]
 
     def replay_effective_surface(follow_surface):
         qualifications = {}
@@ -2486,7 +2605,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             {**follow_surface, "AMBIGUOUS_PATH_MODE": "liquidate"},
             sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
-        for row in ranked_candidates:
+        for row in tuned_candidate_rows:
             replay_key = (row["addr"], surface_key, row["addr"] in set(current_core))
             effective = individual_replay_cache.get(replay_key)
             if effective is None:
@@ -2531,9 +2650,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 rejected.append(addr)
         return qualifications, scores, policies, qualified_rows, audit, rejected
 
-    qualification_follow = {
-        **base_follow, **active_tune_surface, "AMBIGUOUS_PATH_MODE": "liquidate",
-    }
+    # The active/default surface is only a discovery baseline.  Core eligibility must be measured on the
+    # count-specific winning surface; otherwise a wallet is rejected for needing the very tuning step that
+    # just succeeded.
+    qualification_follow = fixed_follow
     (effective_qualifications, effective_scores, effective_policies, effective_ranked,
      admission_audit, qualification_rejected) = replay_effective_surface(
         qualification_follow
@@ -2685,55 +2805,77 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             return fold_cache[key]
         filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
         all_rows = list(filtered.get(max(filtered)) or [])
-        warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86_400_000
-        folds = []
         fold_days = int(config.COPY_STABILITY_FOLD_DAYS)
         fold_count = int(config.COPY_STABILITY_FOLD_COUNT)
         total_days = fold_days * fold_count
-        fold_cost_stress = []
-        for index in range(fold_count):
-            older = total_days - index * fold_days
-            newer = older - fold_days
-            lo = now_ms - older * 86_400_000
-            hi = now_ms - newer * 86_400_000 if newer else now_ms + 1
-            rows = [
-                row for row in all_rows
-                if lo - warmup_ms <= int(row.get("time") or 0) < hi
-            ]
-            warm = run_backtest(
-                "portfolio", rows, sigmas=sigmas,
-                overrides={**fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
-                market_ctx=market_ctx,
+        start_ms = now_ms - total_days * 86_400_000
+        warm = run_backtest(
+            "portfolio", all_rows, sigmas=sigmas,
+            overrides={**fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
+            market_ctx=market_ctx,
+        )
+        result = slice_backtest_result(warm, start_ms, window_days=total_days)
+        stress_warm = run_backtest(
+            "portfolio", all_rows, sigmas=sigmas,
+            overrides={
+                **fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate",
+                "REPLAY_COST_MULT": 1.5,
+            },
+            market_ctx=market_ctx,
+        )
+        stress_result = slice_backtest_result(
+            stress_warm, start_ms, window_days=total_days,
+        )
+
+        def stability(replay):
+            return summarize_campaign_stability(
+                replay.get("positions") or (), now_ms=now_ms,
+                fold_days=fold_days, fold_count=fold_count,
+                min_campaigns=int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD),
+                min_evaluable=int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS),
+                min_profitable=int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS),
+                min_return=0.0,
+                initial_equity=f(
+                    replay.get("window_start_equity")
+                    or replay.get("initial_margin_equity")
+                    or config.INITIAL_BALANCE
+                ),
+                path_equity_samples=replay.get("path_equity_samples") or (),
+                require_cost_stress=False,
+                max_loss_to_total_profit=float(
+                    config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT
+                ),
             )
-            result = slice_backtest_result(warm, lo, window_days=fold_days)
-            stress_warm = run_backtest(
-                "portfolio", rows, sigmas=sigmas,
-                overrides={
-                    **fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate",
-                    "REPLAY_COST_MULT": 1.5,
-                },
-                market_ctx=market_ctx,
-            )
-            stress_result = slice_backtest_result(
-                stress_warm, lo, window_days=fold_days,
-            )
-            fold_cost_stress.append(f(stress_result.get("copy_net_pnl")))
-            open_rate = result.get("actionable_open_rate", result.get("open_fill_rate"))
-            capacity = result.get("capacity_open_fit")
+
+        normal_stability = stability(result)
+        stress_stability = stability(stress_result)
+        normal_rows = list(normal_stability.get("folds") or ())
+        stress_rows = list(stress_stability.get("folds") or ())
+        open_rate = result.get("actionable_open_rate", result.get("open_fill_rate"))
+        capacity = result.get("capacity_open_fit")
+        folds = []
+        for normal_fold, stress_fold in zip(normal_rows, stress_rows):
             folds.append(core_formation.PrefixEvaluation(
-                count=len(key), net_pnl=f(result.get("copy_net_pnl")),
-                stress_net_pnl=f(result.get("copy_net_pnl")),
+                count=len(key), net_pnl=f(normal_fold.get("netPnl")),
+                stress_net_pnl=f(stress_fold.get("netPnl")),
                 max_drawdown=f(result.get("max_drawdown")),
                 actionable_open_rate=1.0 if open_rate is None else f(open_rate),
                 capacity_fit=1.0 if capacity is None else f(capacity),
                 liquidations=int(result.get("liquidations") or 0), params=tuned_params,
                 payload={
                     "initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
-                    "campaignClosedN": int(result.get("campaign_closed_n") or 0),
-                    "costStressNetPnl": f(stress_result.get("copy_net_pnl")),
+                    "startEquity": f(normal_fold.get("startEquity")),
+                    "campaignClosedN": int(normal_fold.get("campaigns") or 0),
+                    "costStressNetPnl": f(stress_fold.get("netPnl")),
                 },
             ))
-        fold_cache[key] = (folds, min(fold_cost_stress, default=0.0))
+        evaluable_stress_net = sum(
+            f(stress_fold.get("netPnl"))
+            for normal_fold, stress_fold in zip(normal_rows, stress_rows)
+            if int(normal_fold.get("campaigns") or 0)
+            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
+        )
+        fold_cache[key] = (folds, evaluable_stress_net)
         return fold_cache[key]
 
     previous_qualified = tuple(
@@ -2877,13 +3019,24 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             if prefix_search.reference.feasible else value.feasible
         ),
     } for value in prefix_search.evaluated)
+    tune_evaluations = tuple({
+        "count": value.count,
+        "netPnl": value.net_pnl,
+        "stressNetPnl": value.stress_net_pnl,
+        "maxDrawdown": value.max_drawdown,
+        "openRate": value.actionable_open_rate,
+        "capacityFit": value.capacity_fit,
+        "liquidations": value.liquidations,
+        "utility": value.utility,
+        "feasible": bool(value.feasible),
+    } for value in (tune_search.evaluated if tune_search is not None else ()))
     return {
         "selected": chosen_addrs, "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,
         "qualifications": effective_qualifications, "scores": effective_scores,
         "policies": effective_policies,
         "search": {
-            "algorithm": "quality_first_then_unified_tune_v6", "initialCount": len(ordered),
+            "algorithm": "adaptive_count_continuous_equity_v7", "initialCount": len(ordered),
             "selectedCount": len(chosen_addrs), "boundary": prefix_search.boundary,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
@@ -2904,7 +3057,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "effectiveStarred": list(effective_pinned_order),
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": winning_count,
+            "coarseTuneRuns": len(tune_runs),
             "fullTuneRuns": 1 if chosen_run.get("search_profile") == "full" else 0,
+            "tuneBoundary": tune_search.boundary if tune_search is not None else None,
+            "tuneEvaluatedCounts": (
+                [value.count for value in tune_search.evaluated]
+                if tune_search is not None else []
+            ),
+            "tuneEvaluations": tune_evaluations,
             "effectiveRejected": qualification_rejected,
             "formationTuneEligible": tune_eligible,
             "formationTuneReason": tune_reason,
@@ -3197,7 +3357,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             {30: final_result}, selected_n=len(final_addrs),
         )
         initial_equity = f(
-            final_result.get("initial_margin_equity")
+            final_result.get("window_start_equity")
+            or final_result.get("initial_margin_equity")
             or follow.get("INITIAL_BALANCE")
             or config.INITIAL_BALANCE
         )
@@ -3219,6 +3380,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             "status": "failed" if failures else "passed",
             "selectedCount": len(final_addrs),
             "netPnl30d": f(final_metrics.net_pnl),
+            "startEquity30d": initial_equity,
+            "endEquity30d": f(final_result.get("window_end_equity")),
             "expectedReturn30d": (
                 f(final_metrics.net_pnl) / initial_equity if initial_equity > 0 else None
             ),

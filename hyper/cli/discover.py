@@ -246,7 +246,10 @@ def main() -> int:
     t = sub.add_parser("tune", help=argparse.SUPPRESS)
     t.add_argument("--generation", required=True)
     t.add_argument("--stamp")
-    opt = sub.add_parser("optimize", help="qualify Core first, then tune one shared copy-parameter surface")
+    opt = sub.add_parser(
+        "optimize",
+        help="rank pre-Core quality, adapt wallet count/params, then seal one strict surface",
+    )
     opt.add_argument("--generation")
     opt.add_argument("--stamp")
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
