@@ -994,7 +994,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_net_pnl,copy_bt_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("retired", "normalized_evidence_missing", -25.0, 9))
+            self.assertEqual(tuple(row), ("retired", "copy_not_profitable", -25.0, 9))
 
     def test_regate_reactivates_obsolete_low_quality_outcome_when_copy_gates_pass(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1124,8 +1124,8 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_open_fill_rate FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(row[0], "retired")
-            self.assertEqual(row[1], "normalized_evidence_missing")
+            self.assertEqual(row[0], "active")
+            self.assertEqual(row[1], "copy_backtest_deferred_data_error")
             self.assertAlmostEqual(row[2], 0.4)
 
     def test_regate_retires_thin_recent_copy_sample(self):
@@ -1199,7 +1199,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_7d_net_pnl,copy_bt_7d_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("retired", "normalized_evidence_missing", -5.0, 1))
+            self.assertEqual(tuple(row), ("active", "copy_backtest_deferred_data_error", -5.0, 1))
 
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):
         with tempfile.TemporaryDirectory() as td:

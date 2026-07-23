@@ -43,7 +43,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_PERP_PNL_SHARE_MIN"], 0.60)
-            self.assertEqual(scanner["inactive_days"], 2)
+            self.assertEqual(scanner["inactive_days"], 3)
             self.assertNotIn("COPY_STOP_ENABLE", follow)
             self.assertNotIn("STOP_MARGIN_PCT", follow)
             self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
@@ -96,17 +96,19 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("MIN_ACTIVE_SCORE", scanner_keys)
             self.assertIn("EVIDENCE_MIN_DAYS", scanner_keys)
             self.assertIn("EVIDENCE_MIN_TRADES", scanner_keys)
-            self.assertIn("CORE_COPY_WIN_RATE_FLOORS", scanner_keys)
-            self.assertIn("CORE_COPY_WIN_RATE_LCB", scanner_keys)
+            self.assertIn("CORE_COPY_CAMPAIGN_FLOOR", scanner_keys)
+            self.assertIn("CORE_COPY_STABILITY", scanner_keys)
+            self.assertNotIn("CORE_COPY_WIN_RATE_FLOORS", scanner_keys)
+            self.assertNotIn("CORE_COPY_WIN_RATE_LCB", scanner_keys)
             self.assertIn("CORE_COPY_MAX_LIQUIDATIONS_30D", scanner_keys)
-            self.assertEqual(levels["CORE_COPY_WIN_RATE_FLOORS"], "black")
+            self.assertEqual(levels["CORE_COPY_STABILITY"], "black")
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
             self.assertIn("CORE_TARGET_MIN_N", scanner_keys)
             self.assertEqual(levels["CORE_INITIAL_MAX_N"], "green")
             initial_limit = next(p for p in scanner_params if p["key"] == "CORE_INITIAL_MAX_N")
-            self.assertEqual(initial_limit["value"], 16)
+            self.assertEqual(initial_limit["value"], 10)
             target_min = next(p for p in scanner_params if p["key"] == "CORE_TARGET_MIN_N")
-            self.assertEqual(target_min["value"], 10)
+            self.assertEqual(target_min["value"], 8)
             self.assertNotIn("AUTO_TUNE_RISK_PROFILE", scanner_keys)
             self.assertEqual(levels["PORTFOLIO_MAX_TURNOVER"], "blue")
             self.assertEqual(levels["EVIDENCE_MIN_TRADES"], "blue")
@@ -235,22 +237,28 @@ class ScannerSettingsParamTests(unittest.TestCase):
             ).fetchone()[0]), 15.0)
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
-            ).fetchone()[0]), 8.0)
+            ).fetchone()[0]), 15.0)
 
-    def test_seed_params_removes_obsolete_raw_score_gate(self):
+    def test_seed_params_removes_obsolete_score_and_copy_gate_rows(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
-            db.execute(
+            db.executemany(
                 "INSERT INTO params (key,value,category,level,type,effect,default_value,updated_at) "
-                "VALUES ('MIN_ACTIVE_SCORE','0.6','scanner','blue','float','rescan','0.6','old')"
+                "VALUES (?,?,'scanner','blue','float','rescan',?,'old')",
+                [
+                    ("MIN_ACTIVE_SCORE", "0.6", "0.6"),
+                    ("CORE_COPY_WIN_RATE_30D_MIN", "60", "60"),
+                    ("COPY_MIN_TAIL_RETURN_30D", "3", "3"),
+                ],
             )
             db.commit()
 
             params.seed_params(db)
 
-            self.assertIsNone(db.execute(
-                "SELECT 1 FROM params WHERE key='MIN_ACTIVE_SCORE'"
-            ).fetchone())
+            for key in ("MIN_ACTIVE_SCORE", "CORE_COPY_WIN_RATE_30D_MIN", "COPY_MIN_TAIL_RETURN_30D"):
+                self.assertIsNone(db.execute(
+                    "SELECT 1 FROM params WHERE key=?", (key,)
+                ).fetchone())
 
     def test_db_score_rows_do_not_override_code_score_weights(self):
         original = {

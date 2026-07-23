@@ -40,6 +40,108 @@ class CopyEvidence:
     recent_return_7d: float | None
 
 
+def _endpoint_pnl(position: Mapping) -> float:
+    if position.get("net_pnl") is not None:
+        return _finite(position.get("net_pnl"))
+    return _finite(position.get("unrealized_pnl"))
+
+
+def _closed_campaign_rows(positions: Iterable[Mapping]) -> list[tuple[int, float]]:
+    """Return independent campaign ``(close_ms, pnl)`` rows.
+
+    Campaign identity deliberately matches ``copy_backtest.campaign_structure_metrics``: overlapping
+    positions on the same wallet, market board and direction are one economic decision, not several votes.
+    """
+    grouped: dict[tuple[str, str, str], list[tuple[int, float, Mapping, bool]]] = {}
+    for position in positions or ():
+        opened = int(_finite(position.get("opened_at")))
+        closed = int(_finite(position.get("closed_at")))
+        is_open = str(position.get("status") or "open") == "open" or closed <= 0
+        end = float("inf") if is_open else float(closed)
+        coin = str(position.get("coin") or "")
+        key = (
+            str(position.get("addr") or "").lower(),
+            "stock" if coin.lower().startswith("xyz:") else "crypto",
+            str(position.get("side") or "").lower(),
+        )
+        grouped.setdefault(key, []).append((opened, end, position, is_open))
+
+    out: list[tuple[int, float]] = []
+    for rows in grouped.values():
+        rows.sort(key=lambda row: (row[0], row[1]))
+        current = None
+        for opened, end, position, is_open in rows:
+            if current is None or opened > current["end"]:
+                if current is not None and current["closed"]:
+                    out.append((int(current["end"]), float(current["pnl"])))
+                current = {"end": end, "closed": not is_open, "pnl": _endpoint_pnl(position)}
+            else:
+                current["end"] = max(current["end"], end)
+                current["closed"] = bool(current["closed"] and not is_open)
+                current["pnl"] += _endpoint_pnl(position)
+        if current is not None and current["closed"]:
+            out.append((int(current["end"]), float(current["pnl"])))
+    return sorted(out)
+
+
+def summarize_campaign_stability(
+    positions: Iterable[Mapping],
+    *,
+    now_ms: int,
+    fold_days: int = 10,
+    fold_count: int = 3,
+    min_campaigns: int = 2,
+    min_evaluable: int = 2,
+    min_profitable: int = 2,
+    max_loss_ratio: float = 0.25,
+) -> dict:
+    """Evaluate repeatability on adjacent, non-overlapping time folds.
+
+    A fold with too few independent campaigns is unknown rather than a synthetic loss.  This is the
+    replacement for overlapping 7/14/30 ROI gates, which repeatedly judged the same trades.
+    """
+    fold_days = max(1, int(fold_days))
+    fold_count = max(1, int(fold_count))
+    min_campaigns = max(1, int(min_campaigns))
+    width = fold_days * DAY_MS
+    start = int(now_ms) - fold_count * width
+    rows = [(closed, pnl) for closed, pnl in _closed_campaign_rows(positions) if start <= closed <= now_ms]
+    folds = []
+    for index in range(fold_count):
+        lo = start + index * width
+        hi = lo + width
+        values = [pnl for closed, pnl in rows if lo <= closed < hi or (index == fold_count - 1 and closed == hi)]
+        evaluable = len(values) >= min_campaigns
+        net = sum(values)
+        folds.append({
+            "index": index + 1, "startMs": lo, "endMs": hi,
+            "campaigns": len(values), "netPnl": net,
+            "evaluable": evaluable, "profitable": bool(evaluable and net > 0.0),
+        })
+    evaluated = [fold for fold in folds if fold["evaluable"]]
+    profitable = [fold for fold in evaluated if fold["profitable"]]
+    total_net = sum(pnl for _closed, pnl in rows)
+    losing = [abs(float(fold["netPnl"])) for fold in evaluated if float(fold["netPnl"]) < 0.0]
+    worst_loss_ratio = max(losing, default=0.0) / max(1.0, total_net)
+    loss_ok = not losing or (total_net > 0.0 and worst_loss_ratio <= max_loss_ratio)
+    latest = evaluated[-1] if evaluated else None
+    latest_hard_collapse = bool(
+        latest and float(latest["netPnl"]) < 0.0
+        and abs(float(latest["netPnl"])) / max(1.0, total_net) > max_loss_ratio
+    )
+    sufficient = len(evaluated) >= min_evaluable
+    passed = bool(
+        sufficient and len(profitable) >= min_profitable and loss_ok and not latest_hard_collapse
+    )
+    return {
+        "version": "nonoverlap-campaign-v1", "foldDays": fold_days,
+        "folds": folds, "evaluableFolds": len(evaluated),
+        "profitableFolds": len(profitable), "totalNetPnl": total_net,
+        "worstLossTo30dProfit": worst_loss_ratio, "latestHardCollapse": latest_hard_collapse,
+        "evidenceSufficient": sufficient, "passed": passed,
+    }
+
+
 def _episode_rows(positions: Iterable[Mapping]) -> list[tuple[int, float]]:
     rows = []
     for position in positions or ():

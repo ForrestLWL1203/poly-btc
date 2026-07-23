@@ -89,7 +89,7 @@ class PerpPrefilterTests(unittest.TestCase):
         high = scanner._prepare_leaderboard_rows([row(300000000)], P(), "now")[0]
         self.assertEqual((low["is_candidate"], high["is_candidate"]), (1, 1))
 
-    def test_recent_roi_and_positive_pnl_are_joint_recall_gates(self):
+    def test_month_roi_and_positive_week_month_pnl_are_recall_gates(self):
         base = {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
             ("week", {"pnl": 2000, "roi": 0.15, "vlm": 300000}),
             ("month", {"pnl": 8000, "roi": 0.30, "vlm": 600000}),
@@ -112,6 +112,13 @@ class PerpPrefilterTests(unittest.TestCase):
         ]}
         self.assertEqual(
             scanner._prepare_leaderboard_rows([all_time_only_miss], P(), "now")[0]["is_candidate"], 1,
+        )
+        week_roi_miss = {**base, "windowPerformances": [
+            (name, {**values, "roi": -10.0}) if name == "week" else (name, dict(values))
+            for name, values in base["windowPerformances"]
+        ]}
+        self.assertEqual(
+            scanner._prepare_leaderboard_rows([week_roi_miss], P(), "now")[0]["is_candidate"], 1,
         )
         weak_week = {**base, "windowPerformances": [
             (name, {**values, "pnl": 1999.0}) if name == "week" else (name, dict(values))

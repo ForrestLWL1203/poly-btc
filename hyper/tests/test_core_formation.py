@@ -18,7 +18,7 @@ def value(count, utility, *, feasible=True, liquidations=0, capacity_fit=.95):
         capacity_fit=capacity_fit if feasible else 0.1,
         liquidations=liquidations if feasible else max(1, liquidations),
         params={"n": count},
-        payload={"initialBalance": 10_000},
+        payload={"initialBalance": 10_000, "campaignClosedN": 3},
     )
 
 
@@ -33,8 +33,7 @@ class QualityPrefixSearchTests(unittest.TestCase):
             candidate, good_folds, cost_stress_net=100,
             baseline=baseline, baseline_folds=base_folds,
             replacing_qualified_core=True, initial_margin_equity=10_000,
-            tail_after_top1=700, tail_after_top2=600,
-            top_wallet_normal_net=50, top_wallet_stress_net=25,
+            tail_after_top1=700,
         )
 
         self.assertTrue(result["eligible"])
@@ -52,35 +51,31 @@ class QualityPrefixSearchTests(unittest.TestCase):
             baseline=baseline, baseline_folds=base_folds,
             membership_changed=True, replacing_qualified_core=False,
             initial_margin_equity=10_000,
-            tail_after_top1=700, tail_after_top2=600,
-            top_wallet_normal_net=50, top_wallet_stress_net=25,
+            tail_after_top1=700,
         )
 
         self.assertTrue(result["eligible"])
         self.assertNotIn("membership_utility_gain_below_5pct", result["reasons"])
         self.assertNotIn("membership_net_gain_below_2pct_equity", result["reasons"])
 
-    def test_final_membership_rejects_single_wallet_dependency_unless_all_strong(self):
+    def test_final_membership_uses_one_campaign_outlier_stress_only(self):
         candidate = value(2, 1000)
         folds = [value(2, 100), value(2, 100), value(2, 100)]
         rejected = validate_final_membership(
             candidate, folds, cost_stress_net=100,
             baseline=None, baseline_folds=[value(0, 0)] * 3,
-            tail_after_top1=700, tail_after_top2=600,
-            top_wallet_normal_net=-1, top_wallet_stress_net=-1,
+            tail_after_top1=-1,
         )
         warned = validate_final_membership(
             candidate, folds, cost_stress_net=100,
             baseline=None, baseline_folds=[value(0, 0)] * 3,
-            tail_after_top1=700, tail_after_top2=600,
-            top_wallet_normal_net=-1, top_wallet_stress_net=-1,
-            all_members_strong=True,
+            tail_after_top1=700,
         )
 
         self.assertFalse(rejected["eligible"])
-        self.assertIn("membership_single_wallet_dependency", rejected["reasons"])
+        self.assertIn("membership_single_campaign_dependency", rejected["reasons"])
         self.assertTrue(warned["eligible"])
-        self.assertTrue(warned["singleWalletDependencyWarning"])
+        self.assertFalse(warned["singleWalletDependencyWarning"])
     def test_binary_search_follows_16_8_12_direction_and_checks_neighbours(self):
         calls = []
 
@@ -118,6 +113,18 @@ class QualityPrefixSearchTests(unittest.TestCase):
 
         self.assertEqual(sorted(calls), list(range(1, 8)))
         self.assertEqual(result.selected.count, 5)
+
+    def test_service_minimum_prevents_healthy_search_collapsing_below_eight(self):
+        candidates = tuple(f"0x{i}" for i in range(10))
+        result = search_quality_membership(
+            candidates,
+            lambda addrs: value(len(addrs), 1000 - len(addrs)),
+            initial=candidates,
+            exhaustive_below=12,
+            min_count=8,
+        )
+        self.assertGreaterEqual(len(result.selected), 8)
+        self.assertLessEqual(len(result.selected), 10)
 
     def test_prefix_search_never_evaluates_below_required_starred_count(self):
         calls = []

@@ -43,6 +43,7 @@ def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
             "liquidations": 0, "valuation_status": "complete",
             "profit_factor": 1.6, "cost_stress_net_pnl": net * .7,
             "campaign_closed_n": campaigns, "campaign_wins": campaign_wins,
+            "campaign_net_after_top1": net * .45,
             "campaign_net_after_top2": net * .3,
             "path_risk_status": "complete", "intratrade_max_drawdown": .05,
             "deep_bag_event_n": 0, "failed_deep_bag_n": 0,
@@ -53,6 +54,16 @@ def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
             "30": window(net30, n30, .75),
             "14": window(net14, n14, .70),
             "7": window(net7, n7, .80),
+        },
+    })
+
+
+def strict_policy_json():
+    return json.dumps({
+        "allowed": ["crypto"], "crypto": {"allow": True},
+        "stability": {
+            "version": "nonoverlap-campaign-v1", "evidenceSufficient": True,
+            "passed": True, "evaluableFolds": 3, "profitableFolds": 3,
         },
     })
 
@@ -245,6 +256,36 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertFalse(result["coreEligible"])
             self.assertEqual(result["role"], "exit_only")
 
+    def test_new_core_promotion_needs_prior_complete_generation_at_least_24h_old(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,started_at,published_at) "
+                "VALUES('old-good','published',1,'1970-01-01T00:00:00Z','1970-01-01T01:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO pipeline_audit "
+                "(stamp,source,stage,addr,status,payload_json,created_at) "
+                "VALUES('s','scan','profile','0xaaa','active',?, '1970-01-01T01:00:00Z')",
+                (json.dumps({
+                    "qualification": {"profileGeneration": "old-good"},
+                    "followEligibility": {"coreEligible": True},
+                }),),
+            )
+            db.commit()
+            profiles = [{"addr": "0xaaa", "follow_qualification": {"coreEligible": True}}]
+
+            early, _ = scanner._core_membership_hysteresis(
+                db, profiles, {}, now_ms=24 * 3_600_000,
+            )
+            ready, _ = scanner._core_membership_hysteresis(
+                db, profiles, {}, now_ms=26 * 3_600_000,
+            )
+
+            self.assertNotIn("0xaaa", early)
+            self.assertIn("0xaaa", ready)
+
     def test_perp_prefilter_never_holds_writer_transaction_during_network_calls(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -291,32 +332,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             },
         }))
         self.assertFalse(scanner._formation_tune_candidate({
-            "formation_probe": True,
             "follow_qualification": {
                 "eligible": False, "coreEligible": False,
                 "status": "copy_value_below_challenger_floor",
             },
         }))
-
-    def test_parameter_probe_breaks_low_seeded_margin_circularity_without_lowering_public_floor(self):
-        row = {
-            "reason": "copy_value_below_challenger_floor",
-            "copy_bt_net_pnl": 750.0,
-            "copy_bt_unrealized_pnl": 0.0,
-            "copy_bt_7d_net_pnl": 450.0,
-            "copy_bt_7d_unrealized_pnl": 0.0,
-            "copy_bt_closed_n": 20,
-            "copy_bt_7d_closed_n": 5,
-            "copy_evidence_days": 10,
-            "copy_expected_return": .05,
-            "actionable_open_rate": .90,
-            "capacity_fit": .90,
-            "copy_bt_valuation_status": "complete",
-            "sector_policy_json": json.dumps({"allowed": ["crypto"]}),
-        }
-
-        self.assertTrue(scanner._is_parameter_return_probe(row, 1.0))
-        self.assertFalse(scanner._is_parameter_return_probe({**row, "copy_bt_net_pnl": 499.0}, 1.0))
 
     def test_formation_ranking_uses_effective_surface_replay_not_scan_time_score(self):
         rows = [
@@ -898,7 +918,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_bt_open_fill_rate": 0.95, "actionable_open_rate": 0.95,
                     "capacity_fit": 0.95, "copy_bt_net_pnl": 1800,
                     "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
-                    "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                    "sector_policy_json": strict_policy_json(),
                     "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 8),
                     "times_seen": 1, "times_active": 1,
                 }
@@ -982,11 +1002,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             row = db.execute(
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (current,)
             ).fetchone()
-            self.assertEqual(row, ("0xaaa", "core"))
+            self.assertEqual(row, ("0xaaa", "challenger"))
             registry = db.execute(
                 "SELECT state,current_role FROM wallet_registry WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(registry, ("core", "core"))
+            self.assertEqual(registry, ("challenger", "challenger"))
 
 
     def test_repair_empty_published_selection_uses_cached_generation_and_launches_tuner(self):
@@ -1055,7 +1075,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
                 "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
-                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "last_copyable_open_ms": 1000,
+                "sector_policy_json": strict_policy_json(),
             }
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
@@ -1146,7 +1167,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
                 "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900,
                 "copy_bt_7d_net_pnl": 600,
-                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "last_copyable_open_ms": 1000,
+                "sector_policy_json": strict_policy_json(),
                 "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 6),
             }
             db.execute(
@@ -1188,7 +1210,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_expected_return": .05, "copy_return_lcb": .01,
                     "copy_positive_probability": .85, "copy_evidence_days": 10,
                     "actionable_open_rate": .9, "capacity_fit": .9,
-                    "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                    "last_copyable_open_ms": 10_000,
+                    "sector_policy_json": strict_policy_json(),
                     "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 6),
                 }
                 db.execute(
@@ -1277,7 +1300,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "actionable_open_rate": 0.9, "capacity_fit": 0.9,
                 "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
                 "copy_bt_7d_net_pnl": 600,
-                "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                "last_copyable_open_ms": 1000,
+                "sector_policy_json": strict_policy_json(),
                 "sector_copy_json": strict_sector_json(2500, 20, 900, 10, 600, 6),
             }
             db.execute(
@@ -1319,10 +1343,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db, "g1", "now", 1000, validate_price_path=False,
                 )
 
-            self.assertEqual(result.selected, ("0xaaa",))
+            self.assertEqual(result.selected, ())
             self.assertEqual(result.search_meta["desiredSelectedCount"], 1)
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "core", "core_strong_evidence"),
+                ("0xaaa", "challenger", "core_promotion_confirmation_pending"),
             ])
 
     def test_daily_desired_portfolio_does_not_replace_existing_core_in_one_generation(self):
@@ -1343,6 +1367,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
                 "VALUES('0xold','core','core','old','old','old')"
             )
+            db.execute(
+                "INSERT INTO follow_history "
+                "(addr,first_followed_at,last_followed_at) "
+                "VALUES('0xold','1970-01-01T00:00:00Z','1970-01-01T00:00:00Z')"
+            )
             cols = storage.PROFILE_COLS.split(",")
             for rank, (addr, score) in enumerate((("0xnew", .9), ("0xold", .8)), 1):
                 profile = {
@@ -1355,7 +1384,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_evidence_days": 10, "actionable_open_rate": .9, "capacity_fit": .9,
                     "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
                     "copy_bt_7d_net_pnl": 600,
-                    "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
+                    "sector_policy_json": strict_policy_json(),
                     "sector_copy_json": strict_sector_json(2500, 20, 900, 10, 600, 9),
                 }
                 db.execute(
@@ -1395,12 +1424,15 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 )
 
             by_addr = {row.addr: (row.role, row.reason) for row in rows}
-            self.assertEqual(result.selected, ("0xnew",))
+            self.assertEqual(result.selected, ("0xold",))
             self.assertEqual(
                 by_addr["0xold"],
-                ("challenger", "portfolio_not_selected:exit_pending"),
+                ("core", "core_quality_selected"),
             )
-            self.assertEqual(by_addr["0xnew"], ("core", "core_strong_evidence"))
+            self.assertEqual(
+                by_addr["0xnew"],
+                ("challenger", "core_promotion_confirmation_pending"),
+            )
 
     def test_manual_selection_mode_cannot_bypass_current_hard_gate(self):
         with tempfile.TemporaryDirectory() as td:

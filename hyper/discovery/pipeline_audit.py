@@ -124,7 +124,6 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 **r,
                 "copy_bt_data_status": r.get("data_status"),
                 "copy_bt_evidence_status": r.get("evidence_status"),
-                "initial_margin_equity": float(config.INITIAL_BALANCE),
             },
             margin_equity_pct=margin_equity_pct,
             policy_values=policy_values,
@@ -189,7 +188,11 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "executionScore": r["execution_score"],
                 "actionableOpenRate": r["actionable_open_rate"],
                 "capacityFit": r["capacity_fit"],
-                "campaigns30d": qualification.get("campaigns", {}).get(30),
+                "campaigns30d": (
+                    qualification.get("campaigns", {}).get(30)
+                    if 30 in qualification.get("campaigns", {})
+                    else qualification.get("campaigns", {}).get("30")
+                ),
             },
             "followEligibility": qualification,
             "decisionAudit": {
@@ -201,7 +204,11 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 )),
                 "thresholds": thresholds,
                 "actual": {
-                    "return30d": (qualification.get("returns") or {}).get(30),
+                    "return30d": (
+                        (qualification.get("returns") or {}).get(30)
+                        if 30 in (qualification.get("returns") or {})
+                        else (qualification.get("returns") or {}).get("30")
+                    ),
                     "closed30d": r.get("copy_bt_closed_n"),
                     "closed14d": r.get("copy_bt_14d_closed_n"),
                     "closed7d": r.get("copy_bt_7d_closed_n"),
@@ -214,6 +221,7 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 },
             },
             "qualification": {
+                "profileGeneration": r["profile_generation"],
                 "dataStatus": r["data_status"],
                 "evidenceStatus": r["evidence_status"],
                 "lastCopyableOpenMs": r["last_copyable_open_ms"],

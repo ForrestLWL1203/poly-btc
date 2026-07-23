@@ -48,9 +48,12 @@ SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running —
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
 # Every complete generation starts from the highest-quality individually Core-ready wallets.  Portfolio
 # tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
-CORE_INITIAL_MAX_N = 16
-CORE_TARGET_MIN_N = 10           # when below this, daily scans may add qualified wallets without evicting incumbents.
+CORE_INITIAL_MAX_N = 10
+CORE_TARGET_MIN_N = 8            # service target: form 8-10 Core wallets when hard-risk-qualified supply exists.
+CORE_TARGET_MAX_N = 10
 CORE_REBALANCE_INTERVAL_DAYS = 7 # normal rank/portfolio reshuffles are weekly; hard risk failures remain immediate.
+CORE_PROMOTION_MIN_HOURS = 24
+CORE_SOFT_MIN_TENURE_DAYS = 14
 CORE_PREFIX_UTILITY_RETENTION = 0.97
 CORE_PREFIX_NET_RETENTION = 0.95
 CORE_PREFIX_STRESS_RETENTION = 0.90
@@ -59,49 +62,22 @@ CORE_PREFIX_ABS_UTILITY_SLACK = 50.0
 CORE_PREFIX_ABS_NET_SLACK = 100.0
 CORE_PREFIX_ABS_STRESS_SLACK = 100.0
 CORE_PREFIX_MAX_DD_WORSEN = 0.01
+CORE_PORTFOLIO_MAX_DRAWDOWN = 0.15
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
-CORE_ENTRY_MIN_POSITIVE_PROB = 0.70
-# Individual Copy economics are classified before the shared-account selector.  Challenger is a
-# real observation tier, not a dumping ground for economically worthless wallets.
-CHALLENGER_MIN_COPY_RETURN_30D = 0.05
-CHALLENGER_MIN_COPY_RETURN_7D = 0.00
 CORE_MIN_COPY_RETURN_30D = 0.10
-CORE_MIN_COPY_RETURN_7D = 0.03
-CORE_STRONG_COPY_RETURN_30D = 0.20
 CORE_RETENTION_MIN_COPY_RETURN_30D = 0.07
-CORE_RETENTION_WIN_RATE_30D_MIN = 0.55
-CORE_RETENTION_WIN_RATE_LCB_30D_MIN = 0.45
 CORE_SOFT_FAIL_CONFIRMATIONS = 2
-# Internal-only cold-start probe at the same 5% Challenger floor. It may participate in parameter search but
-# never bypasses the final 10% Core entry line on the sealed replay surface.
-CORE_TUNE_PROBE_MIN_RETURN_30D = 0.05
-CORE_STRONG_MIN_CLOSED_30D = 20
-CORE_STRONG_MIN_EVIDENCE_DAYS = 10
-CORE_RECENT_WARNING_LOSS_RATIO = 0.10
-CORE_RECENT_HARD_LOSS_RATIO = 0.25
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
-COPY_MIN_PROFIT_FACTOR = 1.25
-COPY_MIN_TAIL_RETURN_30D = 0.03
-COPY_MAX_TOP1_PROFIT_SHARE = 0.50
-COPY_MAX_TOP3_PROFIT_SHARE = 0.80
-COPY_CONCENTRATION_MIN_POSITIVE_EPISODES = 5
-# Profit concentration is a warning, not a verdict.  Remove the three largest winners and judge the
-# remaining episode body: a repeatable wallet may keep a few outsized wins, while a lottery-like wallet
-# whose ordinary trades mostly lose is rejected.
-COPY_CONCENTRATION_BODY_MIN_EPISODES = 5
-COPY_CONCENTRATION_BODY_MIN_WIN_RATE = 0.60
-COPY_CONCENTRATION_BODY_MIN_PROFIT_FACTOR = 1.00
-# A very strong wallet may waive only the ordinary 30d/14d sample shape; it still needs the same five recent
-# closes as every new Core plus a clean recent win surface.
-CORE_STRONG_SPARSE_MIN_CLOSED_30D = 10
-CORE_STRONG_SPARSE_MIN_EVIDENCE_DAYS = 7
-CORE_STRONG_SPARSE_MIN_CLOSED_7D = 5
-CORE_STRONG_SPARSE_MIN_WIN_RATE_7D = 0.75
+COPY_STABILITY_FOLD_DAYS = 10
+COPY_STABILITY_FOLD_COUNT = 3
+COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD = 2
+COPY_STABILITY_MIN_EVALUABLE_FOLDS = 2
+COPY_STABILITY_MIN_PROFITABLE_FOLDS = 2
+COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT = 0.25
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means too many fundable opens were skipped
-SELECTION_MAX_DD_WORSEN = 0.01
 CORE_SEARCH_TIME_BUDGET_SEC = 0    # 0 = no wall-clock cutoff; the finite search graph remains bounded.
 # Production multi-start search: fast discovery -> strict finalists -> repeated
 # add/remove/swap/pair-add closure -> non-overlapping fold/cost-stress gate.
@@ -330,7 +306,7 @@ HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.60
 PERP_PREFILTER_CACHE_TTL_S = 2 * 3600  # interrupted/redeployed scans reuse the same fresh Portfolio evidence
-INACTIVE_DAYS = 2.0                 # require a copyable open within 48h; 24h was too noisy for swing wallets
+INACTIVE_DAYS = 3.0                 # Core needs a true flat->open signal within 72h; stale wallets remain Challenger.
 # ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
 # that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);
 # the temp hard gates (loss_pain/hold_skew/profit_conc) are FOLDED IN as smooth factors, not vetoes:
@@ -407,29 +383,11 @@ COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数
 COPY_BT_MIN_CLOSED = 7      # copy资格最低已平样本；不足则不进入Active
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
 COPY_MIN_EXPECTED_MARGIN_RETURN = 0.02  # 回放扣成本后、向零收缩的每episode保证金收益；低于2%=薄利排除
-COPY_MIN_RETURN_LCB = 0.0              # Bootstrap悲观参考线；只用于风险展示/评分，不作Core硬拒绝
 COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 
-# Core repeatability hard gates.  These use our strict Copy replay after market/sector scoping, not the
-# target wallet's broad profile win rate.  The lower 7/5/5 evidence floors above still define whether a
-# wallet has enough evidence to remain visible as Challenger; new opens require the stronger 12/5/3 Core
-# sample and win-rate surface below.
-CORE_COPY_MIN_CLOSED_30D = 12
-CORE_COPY_MIN_CLOSED_14D = 5
-CORE_COPY_MIN_CLOSED_7D = 5
-CORE_COPY_WIN_RATE_30D_MIN = 0.60
-CORE_COPY_WIN_RATE_14D_MIN = 0.55
-CORE_COPY_WIN_RATE_7D_MIN = 0.40
-# Win-rate confidence is measured on independent same-direction campaigns, not on every correlated symbol.
+# Core repeatability uses independent Campaigns and the non-overlapping folds above.
 CORE_COPY_MIN_CAMPAIGNS_30D = 10
-CORE_COPY_MIN_CAMPAIGNS_14D = 5
-CORE_COPY_MIN_CAMPAIGNS_7D = 5
-CORE_COPY_WIN_RATE_LCB_CONFIDENCE = 0.80
-CORE_COPY_WIN_RATE_LCB_30D_MIN = 0.50
-# A negative post-Top3 trade body in both recent windows is meaningful only after each body contains this
-# many episodes.  It blocks Core but remains Challenger observation rather than erasing the wallet.
-CORE_COPY_RECENT_BODY_MIN_CLOSED = 10
 # One isolated 30d replay liquidation is already fully charged to PnL/drawdown and may coexist with a high-
 # win, profitable surface. Repetition is path-dependent gambling and is rejected as a hard risk.
 CORE_COPY_MAX_LIQUIDATIONS_30D = 1
@@ -453,7 +411,6 @@ AUTO_TUNE_APPLY_MIN_SHADOW_DAYS = 0    # Paper validates by OOS/holdout/stress;�
 AUTO_TUNE_APPLY_MIN_FORWARD_CLOSED = 0 # Paper cold-start may apply;真钱环境改回100
 AUTO_TUNE_MIN_DIRECTION_STREAK = 1     # one complete Paper generation;真钱环境建议2
 AUTO_TUNE_MIN_RELATIVE_GAIN = 0.05
-AUTO_TUNE_MAX_DD_WORSEN = 0.01
 AUTO_TUNE_APPLY_COOLDOWN_DAYS = 0  # Paper每次完整generation都可重新寻优；真钱环境再设冷却
 AUTO_TUNE_ROLLBACK_RELATIVE_DROP = 0.10
 AUTO_TUNE_MASTER_LEVERAGE_MIN_COVERAGE = 0.0  # Paper exploration;真钱环境建议0.80
@@ -500,7 +457,7 @@ AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08
 AUTO_TUNE_MARGIN_CAP_SKIP_FRAC = 0.05
 AUTO_TUNE_MARGIN_MIN_FOLLOWED = 1
-MAX_CONCURRENT_POS = 8   # 峰值同时持仓数上限. 我们权益均额开仓 + 部署上限 → 只能同时装 ~5-8 个仓;目标同时开 >此 数量,
+MAX_CONCURRENT_POS = 15  # 与资金/部署模型及参数默认值一致；共享账户容量仍由严格Copy再次验证。
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。
 MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行侧智能间距/单币cap/ADD_MAX_HARD

@@ -1,6 +1,6 @@
 import unittest
 
-from hyper.copy.copy_evidence import summarize_copy_evidence
+from hyper.copy.copy_evidence import summarize_campaign_stability, summarize_copy_evidence
 
 
 DAY = 86_400_000
@@ -37,6 +37,32 @@ class CopyEvidenceTests(unittest.TestCase):
         result = summarize_copy_evidence(positions([0.05] * 20), seed="steady")
         self.assertGreater(result.positive_probability, 0.90)
         self.assertGreater(result.return_lcb, 0.0)
+
+    def test_nonoverlap_stability_needs_two_evaluable_profitable_folds(self):
+        now = 30 * DAY
+        rows = []
+        for day, pnl in ((2, 100), (4, 100), (12, 100), (14, 100), (22, -10), (24, 30)):
+            rows.append({
+                "addr": "0xa", "coin": "BTC", "side": "long",
+                "opened_at": day * DAY - 1_000, "closed_at": day * DAY,
+                "status": "closed", "net_pnl": pnl,
+            })
+        result = summarize_campaign_stability(rows, now_ms=now)
+        self.assertEqual(result["evaluableFolds"], 3)
+        self.assertEqual(result["profitableFolds"], 3)
+        self.assertTrue(result["passed"])
+
+    def test_thin_fold_is_unknown_not_a_loss(self):
+        now = 30 * DAY
+        rows = [
+            {"addr": "0xa", "coin": "BTC", "side": "long", "opened_at": day * DAY - 1_000,
+             "closed_at": day * DAY, "status": "closed", "net_pnl": 100}
+            for day in (2, 12, 14, 22, 24)
+        ]
+        result = summarize_campaign_stability(rows, now_ms=now)
+        self.assertEqual(result["evaluableFolds"], 2)
+        self.assertTrue(result["passed"])
+        self.assertFalse(result["folds"][0]["evaluable"])
 
 
 if __name__ == "__main__":

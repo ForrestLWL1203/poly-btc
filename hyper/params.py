@@ -89,55 +89,23 @@ PARAM_SPEC = [
         "copy回测最低已平仓数", "低于此样本只记录,不作为硬闸"),
     ("COPY_BT_MIN_NET_PNL",  "scanner", "hidden", "usd",     "rescan", config.COPY_BT_MIN_NET_PNL,
         "copy回测最低净收益", "扣费后的 copy 回测净收益必须高于此值才可 active"),
-    ("CORE_COPY_SAMPLE_FLOORS", "scanner", "black", "display", "rescan",
-        f"{config.CORE_COPY_MIN_CLOSED_30D} / {config.CORE_COPY_MIN_CLOSED_14D} / "
-        f"{config.CORE_COPY_MIN_CLOSED_7D} 笔",
-        "Core严格Copy样本线", "允许板块30日 / 14日 / 7日的最低已平回合数；高ROI不能绕过"),
-    ("CORE_COPY_WIN_RATE_FLOORS", "scanner", "black", "display", "rescan",
-        f"{config.CORE_COPY_WIN_RATE_30D_MIN * 100:.0f} / "
-        f"{config.CORE_COPY_WIN_RATE_14D_MIN * 100:.0f} / "
-        f"{config.CORE_COPY_WIN_RATE_7D_MIN * 100:.0f} %",
-        "Core独立批次胜率线", "重叠的同钱包/同板块/同方向篮子仓先合并为一次campaign，再计算30/14/7日胜率"),
-    ("CORE_COPY_CAMPAIGN_FLOORS", "scanner", "black", "display", "rescan",
-        f"{config.CORE_COPY_MIN_CAMPAIGNS_30D} / {config.CORE_COPY_MIN_CAMPAIGNS_14D} / "
-        f"{config.CORE_COPY_MIN_CAMPAIGNS_7D} 批",
-        "Core独立方向批次数", "不足时只进候选观察，不能用同一篮子里的多个币伪造样本量"),
-    ("CORE_COPY_WIN_RATE_LCB", "scanner", "black", "display", "rescan",
-        f"{config.CORE_COPY_WIN_RATE_LCB_CONFIDENCE * 100:.0f}% 置信 / "
-        f"{config.CORE_COPY_WIN_RATE_LCB_30D_MIN * 100:.0f}% 下界",
-        "30日胜率置信下界", "Wilson单侧置信下界，避免刚好踩线的小样本偶然高胜率"),
-    ("CORE_COPY_RECENT_BODY", "scanner", "black", "display", "rescan",
-        f"7日与14日各 ≥ {config.CORE_COPY_RECENT_BODY_MIN_CLOSED} 笔",
-        "近期交易主体门槛", "两窗移除前三大盈利后的主体均为负时降为Challenger"),
+    ("CORE_COPY_CAMPAIGN_FLOOR", "scanner", "black", "display", "rescan",
+        f"≥ {config.CORE_COPY_MIN_CAMPAIGNS_30D} 批",
+        "独立Campaign证据", "Core要求30日至少10个独立Campaign；证据不足保留Challenger"),
+    ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
+        f"{config.COPY_STABILITY_FOLD_COUNT}×{config.COPY_STABILITY_FOLD_DAYS}日；"
+        f"≥{config.COPY_STABILITY_MIN_EVALUABLE_FOLDS}段可评估/"
+        f"≥{config.COPY_STABILITY_MIN_PROFITABLE_FOLDS}段盈利",
+        "非重叠稳定性硬闸", "每段至少2个Campaign才可评估；薄段算未知，亏损段不得超过30日利润的25%"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
-    ("CHALLENGER_MIN_COPY_RETURN_30D", "scanner", "blue", "pct", "rescan",
-        config.CHALLENGER_MIN_COPY_RETURN_30D * 100, "Challenger·30日收益线",
-        "严格Copy按成员周期风险权益归一；低于此线只进入内部Research，不展示也不实跟"),
     ("CORE_MIN_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
         config.CORE_MIN_COPY_RETURN_30D * 100, "Core新进入·30日收益线", "新钱包进入Core的严格Copy收益率"),
-    ("CORE_MIN_COPY_RETURN_7D", "scanner", "black", "pct", "rescan",
-        config.CORE_MIN_COPY_RETURN_7D * 100, "Core新进入·7日收益线",
-        "近期严格Copy收益率；避免30日达标但最近一周只剩很薄收益的钱包进入Core"),
     ("CORE_RETENTION_MIN_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
         config.CORE_RETENTION_MIN_COPY_RETURN_30D * 100, "Core保留·30日收益线", "现有Core的软保留线；连续两轮失败才降级"),
-    ("CORE_STRONG_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
-        config.CORE_STRONG_COPY_RETURN_30D * 100, "Strong Core·30日收益线", "只标识强证据，不绕过胜率、尾部、成本和深亏线"),
-    ("CORE_COPY_WIN_RATE_30D_MIN", "scanner", "black", "pct", "rescan",
-        config.CORE_COPY_WIN_RATE_30D_MIN * 100, "Core新进入·Campaign胜率", "同板块同方向重叠仓先合并为独立Campaign"),
-    ("CORE_RETENTION_WIN_RATE_30D_MIN", "scanner", "black", "pct", "rescan",
-        config.CORE_RETENTION_WIN_RATE_30D_MIN * 100, "Core保留·Campaign胜率", "现有Core的30日软保留胜率"),
-    ("CORE_COPY_WIN_RATE_LCB_30D_MIN", "scanner", "black", "pct", "rescan",
-        config.CORE_COPY_WIN_RATE_LCB_30D_MIN * 100, "Core新进入·Wilson下界", "80%单侧Wilson胜率置信下界"),
-    ("CORE_RETENTION_WIN_RATE_LCB_30D_MIN", "scanner", "black", "pct", "rescan",
-        config.CORE_RETENTION_WIN_RATE_LCB_30D_MIN * 100, "Core保留·Wilson下界", "现有Core的软保留下界"),
     ("CORE_SOFT_FAIL_CONFIRMATIONS", "scanner", "black", "int", "rescan",
         config.CORE_SOFT_FAIL_CONFIRMATIONS, "Core软失败确认轮数", "收益、胜率、样本等软条件需连续完整扫描失败才降级；硬风险即时退出"),
-    ("COPY_MIN_PROFIT_FACTOR", "scanner", "black", "float", "rescan",
-        config.COPY_MIN_PROFIT_FACTOR, "Core·最低PF", "严格Copy扣费后的Profit Factor"),
-    ("COPY_MIN_TAIL_RETURN_30D", "scanner", "black", "pct", "rescan",
-        config.COPY_MIN_TAIL_RETURN_30D * 100, "Core·移除Top2收益线", "移除最大两个盈利回合后仍需达到此收益率"),
     ("COPY_DEEP_BAG_EVENT_PCT", "scanner", "black", "pct", "rescan",
         config.COPY_DEEP_BAG_EVENT_PCT * 100, "深亏事件线", "从成员周期权益高点回撤达到此比例并持续至少4小时计为深亏事件"),
     ("COPY_DEEP_BAG_EVENT_MIN_HOURS", "scanner", "blue", "float", "rescan",
@@ -380,8 +348,8 @@ def parse(value, ptype):
 def seed_params(db):
     """Insert missing params and refresh metadata without overwriting operator-edited values."""
     stamp = now_iso()
-    # Retired policies: raw profile score is no longer a qualification veto, and copy execution no longer
-    # supports a hard-threshold stop. Purge their old rows so stale databases cannot expose or restore them.
+    # Retired policies: raw profile score, stacked rolling win/PF/Top2 gates and the hard-threshold stop are
+    # no longer qualification controls. Purge old rows so stale databases cannot expose or restore them.
     db.execute(
         "DELETE FROM params WHERE key IN "
         "('MIN_ACTIVE_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT','HARVEST_WEEK_VLM_MAX',"
@@ -390,7 +358,13 @@ def seed_params(db):
         "'CANDIDATE_MAX_RECHECK_DAYS','WALLET_HWM_FREEZE_DD_PCT',"
         "'WALLET_HWM_REDUCE_DD_PCT','WALLET_HWM_EXIT_DD_PCT',"
         "'WALLET_HWM_RELEASE_DD_PCT','WALLET_HWM_EXIT_COOLDOWN_DAYS',"
-        "'WALLET_FORWARD_LOSS_FREEZE_PCT')"
+        "'WALLET_FORWARD_LOSS_FREEZE_PCT','CORE_COPY_SAMPLE_FLOORS',"
+        "'CORE_COPY_WIN_RATE_FLOORS','CORE_COPY_WIN_RATE_LCB','CORE_COPY_RECENT_BODY',"
+        "'CORE_COPY_CAMPAIGN_FLOORS','CHALLENGER_MIN_COPY_RETURN_30D',"
+        "'CORE_MIN_COPY_RETURN_7D','CORE_STRONG_COPY_RETURN_30D',"
+        "'CORE_COPY_WIN_RATE_30D_MIN','CORE_RETENTION_WIN_RATE_30D_MIN',"
+        "'CORE_COPY_WIN_RATE_LCB_30D_MIN','CORE_RETENTION_WIN_RATE_LCB_30D_MIN',"
+        "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)

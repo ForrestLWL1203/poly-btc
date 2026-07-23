@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import threading
 
 from hyper import config, params, storage
-from hyper.discovery import scanner
+from hyper.discovery import frozen_audit, scanner
 from hyper.discovery import shadow_scan
 from hyper.ops import paper_reset, procman
 from hyper.util import now_iso
@@ -278,8 +278,21 @@ def main() -> int:
     shadow.add_argument("--week-pnl-min", type=float)
     shadow.add_argument("--month-pnl-min", type=float)
     shadow.add_argument("--all-pnl-min", type=float)
+    audit = sub.add_parser("audit-pipeline", help="read-only frozen generation waterfall; no network")
+    audit.add_argument("--report", required=True, help="0600 redacted JSON report path")
+    audit.add_argument("--generation")
+    audit.add_argument("--stamp")
 
     args = ap.parse_args()
+    if args.cmd == "audit-pipeline":
+        result = frozen_audit.build(
+            args.db, args.report, generation=args.generation, stamp=args.stamp,
+        )
+        print(json.dumps({
+            "status": "ok", "report": args.report, "generation": result["generation"]["id"],
+            "funnel": result["funnel"],
+        }, sort_keys=True))
+        return 0
     if args.cmd == "shadow-scan":
         ns = _scan_ns()
         ns.scan_interval, ns.max_pages, ns.workers = args.scan_interval, args.max_pages, args.workers

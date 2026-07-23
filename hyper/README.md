@@ -32,11 +32,11 @@ The current runtime turns the public Hyperliquid leaderboard into a live, paper-
 Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
-    ↓ account ≥ $5k, 7d notional volume ≥ $250k, 7d PnL ≥ $250 and 30d PnL ≥ $1,000
+    ↓ account ≥ $5k, 7d notional volume ≥ $250k, positive 7d/30d PnL, 30d ROI ≥ 20%
 30d Perp prefilter + sector-isolated structure filter
     ↓ cached 37-day profile (30-day evidence + 7-day warm-up)
-Canonical Copy replay: Research → Challenger → personal Core
-    ↓ campaign economics, path risk, cost/tail/capacity stress
+Canonical Copy replay: Challenger evidence → personal Core
+    ↓ 10 Campaigns, non-overlapping stability, path/cost/outlier/capacity stress
 Shared-account smart Core search
     ↓ explicit follow_selection publication
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
@@ -51,29 +51,31 @@ final new-entry membership once an explicit selection generation exists.
 
 Wallet quality and funded-account membership are separate decisions.
 
-- Leaderboard ROI is a ranking/audit signal, not a hard admission threshold. Profile hard gates remove invalid
+- Thirty-day Leaderboard ROI ≥20% is a recall gate; 7-day ROI ≥10% is ranking/audit only. Profile hard gates remove invalid
   data and systematic uncopyable structures; HFT needs at least ten complete rounds, Grid needs at least five
   complete rounds with a strict majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
-- Strict Copy evidence has three roles: positive 30-day economics are Research-only; at least 5% with seven
-  closes, five independent campaigns/days, positive 1.5x-cost stress and positive profit after removing the two
-  largest campaigns is Challenger; new Core requires at least 10% plus the campaign/sample/risk gates.
+- Any positive 30-day strict-Copy result remains visible as Challenger. Missing samples, stale activity, cost
+  stress, or outlier evidence block Core but do not turn profit into rejection. New Core requires at least 10%,
+  ten independent Campaigns, and the non-overlapping stability/execution/risk surface.
 - The final copy-follow score ranks wallets that passed those gates. It combines raw profile quality and copy
   evidence; it is displayed on a 0–100 scale while stored natively in `[0, 1]`.
 - The Core selector evaluates one shared simulated account using empty-forward, all-backward, and current-Core
   starts, then repeatedly checks add/remove/swap/pair-add moves under strict K-line replay. Score orders the
   candidate pool; it does not force a score prefix or fixed base count.
-- Final moves must improve portfolio economics and pass non-overlapping ten-day folds, a recent holdout, and
-  1.5x transaction-cost stress without adding a stress liquidation. Normal replacement/reordering is weekly;
-  daily evidence refresh still removes a wallet immediately for a hard failure. While Core has fewer than ten
+- Final moves must improve portfolio economics and pass at least two evaluable/profitable non-overlapping
+  ten-day folds plus 1.5x transaction-cost stress. Normal replacement/reordering is weekly;
+  daily evidence refresh still removes a wallet immediately for a hard failure. While Core has fewer than eight
   wallets, a daily run may add independently qualified, portfolio-safe wallets without evicting incumbents.
+  New promotions require two complete qualifying generations at least 24 hours apart; ordinary soft churn is
+  suppressed for a Core wallet's first 14 days.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
   search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
   the work without publishing a timed-out partial result.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
-- A complete scan may legally publish zero Core. This activates an empty strategy revision, converts old Core
-  rows to exit-only, and never rolls back to an economically disqualified prior wallet.
+- Core targets 8–10 wallets when hard-qualified supply exists. A complete scan may still publish fewer (including
+  zero) when hard data/risk/economic evidence genuinely cannot support the service target.
 
 ## Daily complete candidate reevaluation
 
@@ -85,11 +87,9 @@ Profiles are not re-downloaded from zero on every daily run.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
 - Leaderboard candidates require at least `$5,000` account value, `$250,000` leveraged 7-day notional volume,
-  at least `$250` 7-day PnL and at least `$1,000` 30-day PnL. Both recent PnL floors must pass; there is no
-  ROI magnitude gate or volume cap.
-  The cheap Portfolio precheck reserves deep history replay for wallets whose 7-day, 30-day and lifetime
-  windows all clear their absolute Perp PnL floors and an 80% Perp-profit share. Official ROI remains audit
-  only; these three executable-market checks form the high-quality `AND` admission surface.
+  positive 7-day and 30-day PnL, and 30-day ROI ≥20%. The 7-day ROI ≥10% reference is audit/ranking only.
+  The cheap Portfolio precheck then requires positive 30-day Perp PnL and at least 60% Perp-profit share;
+  its 7-day/all-time windows are diagnostic rather than duplicate AND gates.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
   is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
@@ -117,23 +117,25 @@ python3 -m hyper.cli.discover --db /path/to/production.db shadow-scan \
 The source database is opened read-only, all mutations stay in a mode-0600 temporary database, and the temporary
 database is removed after a redacted JSON report is written.
 
+For a network-free, mutation-free waterfall over one already frozen generation:
+
+```bash
+python3 -m hyper.cli.discover --db /path/to/production.db audit-pipeline \
+  --generation GENERATION_ID --report /private/funnel.json
+```
+
 ## Copy replay and automatic tuning
 
 The replay uses the same copyable-fill normalization and shared execution state used by the Observer. It models
 shared available balance, isolated margin, volatility-tier sizing, leverage caps, deployment and per-coin caps,
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
-Core win rate is computed from independent campaigns: overlapping positions from the same source wallet, market
-board, and direction are collapsed into one directional bet before win-rate/Wilson tests. New Core requires
-`12/5/5` closes, ten 30-day campaigns, 60% campaign win rate, an 80% one-sided Wilson lower bound of 50%,
-PF ≥ 1.25, at least 3% return after removing the two largest campaigns, and positive 1.5x-cost stress. Retention
-uses 7% return, 55% win rate and a 45% Wilson lower bound; soft failures need two distinct complete scans, while
-hard risk exits immediately.
-
-A narrow Strong-sparse alternative restores high-confidence low-frequency wallets without lowering risk lines:
-30-day strict-Copy return must be at least 20%, with ten closes/ten campaigns, seven evidence days, five recent
-closes, at least 75% 30-day and 7-day campaign wins, and the normal Wilson, PF, tail, cost, capacity and path-risk
-checks. Shared-account tuning receives only wallets that already pass one of these individual Core surfaces.
+Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
+Campaign. Core needs ten Campaigns and three adjacent 10-day folds; a fold is evaluable with at least two
+Campaigns, at least two folds must be evaluable and profitable, and a losing fold cannot exceed 25% of 30-day
+profit. Thin folds are unknown evidence, never synthetic losses. Rolling 7/14-day ROI, PF, Wilson and win rate
+remain diagnostics/ranking signals rather than repeated admission gates. The single outlier stress removes the
+largest winning Campaign and requires the remainder positive; 1.5x cost stress remains separate.
 
 The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
 time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is

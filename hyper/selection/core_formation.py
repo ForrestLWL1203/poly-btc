@@ -1,9 +1,9 @@
 """Quality-first Core formation.
 
-Each bounded binary prefix node may own an independently tuned sizing surface.  This preserves the intended
-16 -> 8 -> 12 search: wallet count and capital sizing are evaluated together instead of measuring every count
-with parameters fitted only to the incumbent Core.  A later strict leave-one-out pass may remove a non-tail
-member only when its actual presence lowers funded shared-account net economics.
+Each bounded prefix node may own an independently tuned sizing surface.  Wallet count and capital sizing are
+evaluated together across the 8-10 service range instead of measuring every count with parameters fitted only
+to the incumbent Core.  A later strict leave-one-out pass may remove a non-tail member only when its actual
+presence lowers funded shared-account net economics.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ class PrefixEvaluation:
         return (
             self.net_pnl > 0
             and self.stress_net_pnl > 0
-            and self.max_drawdown < 1.0
+            and self.max_drawdown <= float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
             and self.actionable_open_rate >= 0.70
             and self.capacity_fit >= float(config.SELECTION_MIN_CAPACITY_FIT)
         )
@@ -69,31 +69,40 @@ def validate_final_membership(
     min_relative_utility_gain: float = 0.05,
     min_net_return_gain: float = 0.02,
     tail_after_top1: float | None = None,
-    tail_after_top2: float | None = None,
-    min_tail_return: float = 0.05,
-    top_wallet_normal_net: float | None = None,
-    top_wallet_stress_net: float | None = None,
-    all_members_strong: bool = False,
 ) -> dict:
     """Final, expensive membership guard shared by production formation and tests.
 
     Parameter tuning already validates its chosen surface.  This separate check validates the *wallet set*
-    on three disjoint regimes, cost stress, tail concentration and dominant-wallet removal.  It deliberately
-    has no clock or multi-generation hysteresis: a currently unqualified old member is outside the baseline.
+    on three disjoint regimes, cost stress and one-Campaign removal. It deliberately has no clock or
+    multi-generation hysteresis: a currently unqualified old member is outside the baseline.
     """
     reasons = []
     if len(candidate_folds) != 3:
         reasons.append("membership_folds_unavailable")
     else:
+        evaluable_folds = [
+            fold for fold in candidate_folds
+            if int(fold.payload.get("campaignClosedN") or 0)
+            >= int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD)
+        ]
         if any(
             fold.actionable_open_rate < 0.70
             or fold.capacity_fit < float(config.SELECTION_MIN_CAPACITY_FIT)
-            or fold.max_drawdown >= 1.0
-            for fold in candidate_folds
+            or fold.max_drawdown > float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
+            for fold in evaluable_folds
         ):
             reasons.append("membership_fold_infeasible")
-        if candidate_folds[-1].net_pnl <= 0.0:
-            reasons.append("membership_latest_fold_not_profitable")
+        if len(evaluable_folds) < int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS):
+            reasons.append("membership_fold_evidence_insufficient")
+        if sum(fold.net_pnl > 0.0 for fold in evaluable_folds) < int(
+            config.COPY_STABILITY_MIN_PROFITABLE_FOLDS
+        ):
+            reasons.append("membership_fewer_than_two_profitable_folds")
+        losing = [abs(fold.net_pnl) for fold in evaluable_folds if fold.net_pnl < 0.0]
+        if losing and max(losing) > max(1.0, candidate.net_pnl) * float(
+            config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT
+        ):
+            reasons.append("membership_fold_loss_too_large")
     if candidate.net_pnl <= 0.0 or candidate.stress_net_pnl <= 0.0 or cost_stress_net <= 0.0:
         reasons.append("membership_cost_stress_not_profitable")
 
@@ -104,11 +113,13 @@ def validate_final_membership(
         fold_deltas = [
             candidate_fold.net_pnl - baseline_fold.net_pnl
             for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds)
+            if int(candidate_fold.payload.get("campaignClosedN") or 0)
+            >= int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD)
+            and int(baseline_fold.payload.get("campaignClosedN") or 0)
+            >= int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD)
         ]
-        if sum(delta > 0.0 for delta in fold_deltas) < 2:
+        if len(fold_deltas) >= 2 and sum(delta > 0.0 for delta in fold_deltas) < 2:
             reasons.append("membership_fewer_than_two_fold_wins")
-        if fold_deltas[-1] < 0.0:
-            reasons.append("membership_latest_fold_degraded")
     elif compare_folds:
         reasons.append("membership_baseline_folds_unavailable")
 
@@ -127,20 +138,13 @@ def validate_final_membership(
         if candidate.net_pnl - baseline.net_pnl + 1e-9 < absolute_net_floor:
             reasons.append("membership_net_gain_below_2pct_equity")
 
-    tail_floor = max(0.0, initial_margin_equity) * max(0.0, min_tail_return)
-    if tail_after_top1 is None or tail_after_top2 is None:
+    # One and only one outlier stress: remove the largest winning Campaign and require the remainder positive.
+    # Top-two, body-after-top-three and top-wallet removal were correlated repetitions that over-pruned Core.
+    if tail_after_top1 is None:
         reasons.append("membership_tail_metrics_missing")
-    elif tail_after_top1 < tail_floor or tail_after_top2 < tail_floor:
-        reasons.append("membership_tail_profit_weak")
-
+    elif tail_after_top1 <= 0.0:
+        reasons.append("membership_single_campaign_dependency")
     dependency_warning = False
-    if top_wallet_normal_net is None or top_wallet_stress_net is None:
-        reasons.append("membership_top_wallet_stress_missing")
-    elif top_wallet_normal_net <= 0.0 or top_wallet_stress_net <= 0.0:
-        if all_members_strong:
-            dependency_warning = True
-        else:
-            reasons.append("membership_single_wallet_dependency")
     return {
         "eligible": not reasons,
         "reasons": reasons,
@@ -150,7 +154,9 @@ def validate_final_membership(
     }
 
 
-def search_quality_membership(candidates, evaluate, *, initial=(), required=(), exhaustive_below: int = 8):
+def search_quality_membership(
+    candidates, evaluate, *, initial=(), required=(), exhaustive_below: int = 8, min_count: int = 1,
+):
     """Find a feasible quality subset without letting one congested wallet block every later wallet.
 
     Small Core-ready pools are exhaustively evaluated.  Larger pools start from the count search's winning
@@ -164,6 +170,7 @@ def search_quality_membership(candidates, evaluate, *, initial=(), required=(), 
     if not required_set.issubset(set(ordered)):
         raise ValueError("required wallets must be present in candidates")
     cache = {}
+    min_count = max(1, min(len(ordered), int(min_count)))
 
     def get(addrs):
         key = tuple(sorted(dict.fromkeys(addrs)))
@@ -180,7 +187,7 @@ def search_quality_membership(candidates, evaluate, *, initial=(), required=(), 
 
     if len(ordered) <= max(1, int(exhaustive_below)):
         states = []
-        for count in range(max(1, len(required_set)), len(ordered) + 1):
+        for count in range(max(min_count, len(required_set)), len(ordered) + 1):
             for addrs in itertools.combinations(ordered, count):
                 if not required_set.issubset(addrs):
                     continue
@@ -193,15 +200,20 @@ def search_quality_membership(candidates, evaluate, *, initial=(), required=(), 
         return MembershipSearchResult(selected, metrics, len(cache), "exhaustive_subset")
 
     selected = tuple(sorted(set(dict.fromkeys(initial)) | required_set))
+    if len(selected) < min_count:
+        selected = tuple(sorted(set(selected) | set(ordered[:min_count])))
     current = get(selected) if selected else None
     if current is None or not current.feasible:
         base = tuple(sorted(required_set))
         seeds = []
         if base:
-            seeds.append(base)
-            seeds.extend(tuple(sorted((*base, addr))) for addr in ordered if addr not in required_set)
+            seed = tuple(sorted(set(base) | set(ordered[:min_count])))
+            seeds.append(seed)
+            seeds.extend(
+                tuple(sorted(set(seed) | {addr})) for addr in ordered if addr not in set(seed)
+            )
         else:
-            seeds.extend((addr,) for addr in ordered)
+            seeds.append(tuple(sorted(ordered[:min_count])))
         feasible = [(seed, get(seed)) for seed in seeds if get(seed).feasible]
         if not feasible:
             raise RuntimeError("no_feasible_quality_membership")
@@ -322,7 +334,7 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     else:
         # Capital contention can make the full high-quality set infeasible.  Feasibility is monotone in
         # the useful direction: removing a low-quality suffix releases capacity.  Find the largest feasible
-        # prefix, then compare its neighbours.  This is the same 16 -> 8 -> 12 search direction.
+        # prefix, then compare its neighbours within the configured service range.
         first = get(min_count)
         if not first.feasible:
             raise RuntimeError("no_feasible_quality_prefix")

@@ -12,7 +12,6 @@ import math
 from typing import Mapping
 
 from hyper import config
-from .copy_backtest import ADD_BLOCKED_OUTCOMES, ADD_METRICS_VERSION, ADD_OUTCOMES
 from .copy_data import is_copyable_coin
 from .copy_policy import load_copy_policy
 
@@ -95,7 +94,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     """Admit only positive, Challenger-grade sectors into wallet-level aggregation.
 
     Sector isolation prevents a profitable Crypto side from masking a losing Stock side. It must not repeat
-    the complete Core sample/win/Wilson surface per sector, however: the wallet aggregate owns that proof.
+    wallet-level Campaign/stability gates per sector: the aggregate of safe sectors owns that proof.
     Requiring every side to be a standalone Core was the main sector-level false-negative cliff.
     """
     policy = load_copy_policy()
@@ -143,27 +142,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "qualificationEquity": equity,
     }
 
-    # Seven-day performance has no fixed positive-return gate. It becomes an immediate hard collapse only
-    # once five independent campaigns exist, their win rate is below 40%, and the slice is net negative.
-    if campaigns[7] >= policy.core_min_campaigns_7d and (
-        win_rate[7] < policy.core_min_win_rate_7d and pnl[7] < min_net
-    ):
-        return {
-            **base,
-            "allow": False,
-            "status": "sector_recent_collapse",
-            "reason": "板块7日已有5个Campaign、胜率低于40%且净收益为负",
-            "watch": False,
-        }
-    recent14 = results[14]
     recent = results[7]
-    body_floor = policy.core_recent_body_min_closed
-    recent_body_negative = bool(
-        _int(recent14.get("body_after_top3_n")) >= body_floor
-        and _int(recent.get("body_after_top3_n")) >= body_floor
-        and _num(recent14.get("body_after_top3_net_pnl")) < 0.0
-        and _num(recent.get("body_after_top3_net_pnl")) < 0.0
-    )
     hard_checks = (
         (
             _int(primary.get("liquidations")) > policy.core_max_liquidations_30d,
@@ -174,11 +153,6 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             _int(recent.get("liquidations")) > 0 and pnl[7] < min_net,
             "sector_recent_liquidation",
             "板块7日亏损中发生爆仓，判定近期硬风险",
-        ),
-        (
-            recent_body_negative,
-            "sector_recent_body_negative",
-            "板块7日与14日移除前三大盈利后的交易主体持续为负",
         ),
         (
             primary.get("valuation_status") is not None
@@ -209,16 +183,13 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
                 **base, "allow": False, "status": status, "reason": reason, "watch": False,
                 "hardRisk": True,
             }
-    if return30 < policy.challenger_min_return_30d:
+    if return30 <= 0.0:
         return {
             **base,
             "allow": False,
-            "status": "sector_challenger_return_watch",
-            "reason": (
-                f"板块30天严格Copy收益率{return30 * 100:.1f}%低于"
-                f"{policy.challenger_min_return_30d * 100:.0f}%板块聚合线"
-            ),
-            "watch": challenger_watch,
+            "status": "sector_not_profitable",
+            "reason": "板块30天严格Copy净收益不为正",
+            "watch": False,
         }
     if (
         closed[30] < policy.min_closed_30d
@@ -235,18 +206,6 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
 
     checks = (
         (
-            primary.get("profit_factor") is not None
-            and _num(primary.get("profit_factor")) <= 0.0,
-            "sector_no_profit_factor",
-            "板块严格Copy没有可验证的正向盈亏结构",
-        ),
-        (
-            primary.get("campaign_net_after_top2") is None
-            or _num(primary.get("campaign_net_after_top2")) <= min_net,
-            "sector_campaign_tail_weak",
-            "板块30天移除最大两个独立方向批次后不盈利",
-        ),
-        (
             primary.get("cost_stress_net_pnl") is None
             or _num(primary.get("cost_stress_net_pnl")) <= min_net,
             "sector_cost_stress_weak",
@@ -260,14 +219,14 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
                 "allow": False,
                 "status": status,
                 "reason": reason,
-                "watch": False,
-                "hardRisk": True,
+                "watch": challenger_watch,
+                "hardRisk": False,
             }
     return {
         **base,
         "allow": True,
         "status": "allowed",
-        "reason": "板块达到Challenger经济证据且无硬风险，纳入钱包级Core聚合",
+        "reason": "板块严格Copy净盈利、成本压力为正且无硬风险，纳入钱包级Core聚合",
         "watch": False,
     }
 
@@ -565,147 +524,6 @@ def evaluate_sector_policy(
     if structural_policy.get("source"):
         policy["specializationSource"] = structural_policy.get("source")
     return policy
-
-
-def _aggregate_window(copy_json: Mapping, allowed: set[str], days: int) -> dict | None:
-    total = {
-        "copy_net_pnl": 0.0,
-        "closed_n": 0,
-        "wins": 0,
-        "target_open_events": 0,
-        "opened_n": 0,
-        "liquidations": 0,
-        "fee_drag": 0.0,
-        "unrealized_pnl": 0.0,
-        "valuation_status": "complete",
-        "gross_profit": 0.0,
-        "gross_loss": 0.0,
-        "positive_episode_n": 0,
-        "negative_episode_n": 0,
-        "cost_stress_net_pnl": 0.0,
-        "initial_margin_equity": 0.0,
-        "path_completion_weighted": 0.0,
-        "entry_gap_weight": 0.0,
-        "entry_gap_sigma_weighted_sum": 0.0,
-        "entry_gap_pct_weighted_sum": 0.0,
-        "add_episode_count": 0,
-    }
-    add_counts = {key: 0 for key in ADD_OUTCOMES}
-    top_positive_pnls = []
-    sigma_samples = []
-    pct_samples = []
-    seen = False
-    for sector in allowed:
-        result = _window_result(copy_json.get(sector) or {}, days)
-        if not result:
-            continue
-        seen = True
-        total["copy_net_pnl"] += _num(result.get("copy_net_pnl"))
-        total["closed_n"] += _int(result.get("closed_n"))
-        total["wins"] += _int(result.get("wins"))
-        total["target_open_events"] += _int(result.get("target_open_events"))
-        total["opened_n"] += _int(result.get("opened_n"))
-        total["liquidations"] += _int(result.get("liquidations"))
-        total["fee_drag"] += _num(result.get("fee_drag"))
-        total["unrealized_pnl"] += _num(result.get("unrealized_pnl"))
-        total["gross_profit"] += _num(result.get("gross_profit"))
-        total["gross_loss"] += _num(result.get("gross_loss"))
-        total["positive_episode_n"] += _int(result.get("positive_episode_n"))
-        total["negative_episode_n"] += _int(result.get("negative_episode_n"))
-        total["cost_stress_net_pnl"] += _num(result.get("cost_stress_net_pnl"))
-        total["initial_margin_equity"] = max(
-            total["initial_margin_equity"], _num(result.get("initial_margin_equity"))
-        )
-        total["path_completion_weighted"] += (
-            _num(result.get("path_completion_rate"), 1.0) * max(0, _int(result.get("closed_n")))
-        )
-        for key in ADD_OUTCOMES:
-            add_counts[key] += _int((result.get("add_outcome_counts") or {}).get(key))
-        total["add_episode_count"] += _int(result.get("add_episode_count"))
-        total["entry_gap_weight"] += _num(result.get("entry_gap_weight"))
-        total["entry_gap_sigma_weighted_sum"] += _num(result.get("entry_gap_sigma_weighted_sum"))
-        total["entry_gap_pct_weighted_sum"] += _num(result.get("entry_gap_pct_weighted_sum"))
-        top_positive_pnls.extend(_num(value) for value in (result.get("top_positive_pnls") or []))
-        sigma_samples.extend(_num(value) for value in (result.get("entry_gap_sigma_samples") or []))
-        pct_samples.extend(_num(value) for value in (result.get("entry_gap_pct_samples") or []))
-        if str(result.get("valuation_status") or "complete") != "complete":
-            total["valuation_status"] = "missing_marks"
-    if not seen:
-        return None
-    target_open = total["target_open_events"]
-    total["open_fill_rate"] = (total["opened_n"] / target_open) if target_open else None
-    total["actionable_open_rate"] = total["open_fill_rate"] if target_open else 1.0
-    total_closed = total["closed_n"]
-    total["path_completion_rate"] = (
-        total.pop("path_completion_weighted") / total_closed if total_closed else 1.0
-    )
-    gross_profit = total["gross_profit"]
-    gross_loss = total["gross_loss"]
-    avg_win = gross_profit / total["positive_episode_n"] if total["positive_episode_n"] else 0.0
-    avg_loss = gross_loss / total["negative_episode_n"] if total["negative_episode_n"] else 0.0
-    top_positive_pnls.sort(reverse=True)
-    total.update({
-        "profit_factor": gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0),
-        "payoff_ratio": avg_win / avg_loss if avg_loss > 0 else (999.0 if avg_win > 0 else 0.0),
-        "top_positive_pnls": top_positive_pnls[:3],
-        "top1_profit_share": top_positive_pnls[0] / gross_profit if gross_profit > 0 and top_positive_pnls else 0.0,
-        "top3_profit_share": sum(top_positive_pnls[:3]) / gross_profit if gross_profit > 0 else 0.0,
-        "net_after_top1": total["copy_net_pnl"] - sum(top_positive_pnls[:1]),
-        "net_after_top2": total["copy_net_pnl"] - sum(top_positive_pnls[:2]),
-    })
-    target_adds = sum(add_counts.values())
-    followed = add_counts["followed"]
-    noise = add_counts["noise_merged"]
-    blocked = sum(add_counts[key] for key in ADD_BLOCKED_OUTCOMES)
-    actionable_adds = followed + blocked
-    entry_weight = total["entry_gap_weight"]
-    weighted_sigma = total["entry_gap_sigma_weighted_sum"] / entry_weight if entry_weight else 0.0
-    weighted_pct = total["entry_gap_pct_weighted_sum"] / entry_weight if entry_weight else 0.0
-
-    def percentile(values, quantile):
-        rows = sorted(values)
-        if not rows:
-            return 0.0
-        return rows[max(0, min(len(rows) - 1, int(math.ceil(len(rows) * quantile)) - 1))]
-
-    p90_sigma = percentile(sigma_samples, 0.90)
-    p90_pct = percentile(pct_samples, 0.90)
-    alignment = max(0.0, min(1.0, 1.0 - 0.5 * weighted_sigma - 0.5 * p90_sigma))
-    execution = 1.0 - (blocked / actionable_adds if actionable_adds else 0.0)
-    fidelity = 0.8 * alignment + 0.2 * execution
-    applied = total["add_episode_count"] >= 5
-    total.update({
-        "add_metrics_version": ADD_METRICS_VERSION,
-        "add_outcome_counts": add_counts,
-        "target_adds": target_adds,
-        "followed_adds": followed,
-        "missed_adds": max(0, target_adds - followed),
-        "missed_add_rate": (target_adds - followed) / target_adds if target_adds else 0.0,
-        "raw_add_order_follow_rate": followed / target_adds if target_adds else 1.0,
-        "noise_merged_adds": noise,
-        "blocked_adds": blocked,
-        "actionable_add_orders": actionable_adds,
-        "actionable_add_capture_rate": followed / actionable_adds if actionable_adds else 1.0,
-        "true_blocked_add_rate": blocked / actionable_adds if actionable_adds else 0.0,
-        "entry_gap_sigma_weighted": weighted_sigma,
-        "entry_gap_sigma_p90": p90_sigma,
-        "entry_gap_pct_weighted": weighted_pct,
-        "entry_gap_pct_p90": p90_pct,
-        "entry_gap_sigma_samples": sigma_samples,
-        "entry_gap_pct_samples": pct_samples,
-        "entry_alignment": alignment,
-        "add_execution": execution,
-        "add_fidelity": fidelity,
-        "add_fidelity_applied": applied,
-        "effective_add_fidelity": fidelity if applied else 1.0,
-    })
-    behavior_v2 = max(
-        0.0,
-        min(1.0, total["actionable_open_rate"] * total["path_completion_rate"] * total["effective_add_fidelity"]),
-    )
-    total["behavior_replication_rate"] = behavior_v2
-    total["behavior_replication_v2"] = behavior_v2
-    return total
 
 
 def _evidence_window(copy_json: Mapping, evidence_sectors: set[str], days: int) -> dict | None:

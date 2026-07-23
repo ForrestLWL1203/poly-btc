@@ -25,7 +25,7 @@ from hyper.copy.copy_data import (
     out_of_scope_fills,
 )
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
-from hyper.copy.copy_evidence import summarize_copy_evidence
+from hyper.copy.copy_evidence import summarize_campaign_stability, summarize_copy_evidence
 from hyper.copy.sector import (
     SECTORS,
     apply_allowed_sector_copy_metrics,
@@ -97,12 +97,10 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
         ok, reason = metrics.gates_structural(current, p)
         raw_payoff = float(current.get("payoff_ratio") or 0.0)
         raw_closed = int(current.get("n_trades") or 0)
-        if (
-            ok
-            and raw_closed >= load_copy_policy().min_closed_30d
+        payoff_warning = bool(
+            raw_closed >= load_copy_policy().min_closed_30d
             and raw_payoff < load_copy_policy().min_raw_payoff_ratio
-        ):
-            ok, reason = False, "weak_payoff_structure"
+        )
         complete = [episode for episode in episodes if episode.get("open_complete", True)]
         heavy_limit = int(getattr(p, "max_single_adds", config.MAX_SINGLE_ADDS_PER_EP))
         heavy_count = sum(1 for episode in complete if int(episode.get("n_adds") or 0) > heavy_limit)
@@ -122,6 +120,7 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
                 "maxAdds": int(current.get("max_adds_per_ep") or 0),
                 "medianAdds": int(current.get("median_adds_per_ep") or 0),
                 "rawPayoffRatio": raw_payoff,
+                "payoffWarning": payoff_warning,
                 "rawClosed": raw_closed,
             }
         else:
@@ -134,6 +133,7 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
                 "medianAdds": int(current.get("median_adds_per_ep") or 0),
                 "maxConcurrent": int(current.get("max_concurrent") or 0),
                 "rawPayoffRatio": raw_payoff,
+                "payoffWarning": payoff_warning,
                 "rawClosed": raw_closed,
             }
     out["allowed"] = [sector for sector in SECTORS if (out.get(sector) or {}).get("allow")]
@@ -509,7 +509,6 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
             and wk_vlm >= vlm_min
             and week_positive
             and month_positive
-            and week_roi >= roi_min["week"]
             and month_roi >= roi_min["month"]
         )
         r["fetched_at"] = fetched_at
@@ -596,7 +595,6 @@ def _official_roi_audit(db, generation_id, stamp, p):
     ).fetchall()
     names = ("addr", "is_candidate", "accountValue", "weekVlm", "weekPnl", "weekRoi",
              "monthPnl", "monthRoi", "allPnl", "allRoi")
-    rejected_counts = {}
     for rank, row in enumerate(rows, 1):
         item = dict(zip(names, row))
         passed = bool(item.pop("is_candidate"))
@@ -615,28 +613,20 @@ def _official_roi_audit(db, generation_id, stamp, p):
             "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
             "week_pnl_below_floor": not week_positive,
             "month_pnl_below_floor": not month_positive,
-            "week_roi_below_floor": diagnostics["week_roi_below_reference"],
             "month_roi_below_floor": diagnostics["month_roi_below_reference"],
         }
         failed_checks = [reason for reason, failed in checks.items() if failed]
         item["roiWindowsPassed"] = roi_windows_passed
-        item["requiredRoiWindows"] = ["week", "month"]
+        item["requiredRoiWindows"] = ["month"]
         item["roiMagnitudeGateEnabled"] = True
         item["roiDiagnostics"] = [reason for reason, failed in diagnostics.items() if failed]
         item["failedChecks"] = failed_checks
         addr = item.pop("addr")
         reason = failed_checks[0] if failed_checks else "discovery_recall_below_floor"
-        if passed:
-            pipeline_audit._insert_event(
-                db, stamp=stamp, source="scan", stage="official_roi", addr=addr, rank=rank,
-                status="passed", reason="discovery_recall_passed", payload=item,
-            )
-        else:
-            rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
-    for reason, count in sorted(rejected_counts.items()):
         pipeline_audit._insert_event(
-            db, stamp=stamp, source="scan", stage="official_roi", status="rejected",
-            reason=reason, payload={"count": count},
+            db, stamp=stamp, source="scan", stage="official_roi", addr=addr, rank=rank,
+            status="passed" if passed else "rejected",
+            reason="discovery_recall_passed" if passed else reason, payload=item,
         )
     db.commit()
 
@@ -813,6 +803,23 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         seed=f"{addr}:{getattr(p, 'scan_generation', '')}:{primary_days}",
         now_ms=now_ms,
     )
+    policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
+    stability = summarize_campaign_stability(
+        positions,
+        now_ms=int(now_ms or 0),
+        fold_days=policy.stability_fold_days,
+        fold_count=policy.stability_fold_count,
+        min_campaigns=policy.stability_min_campaigns_per_fold,
+        min_evaluable=policy.stability_min_evaluable_folds,
+        min_profitable=policy.stability_min_profitable_folds,
+        max_loss_ratio=policy.stability_max_loss_to_30d_profit,
+    )
+    try:
+        policy_json = json.loads(m.get("sector_policy_json") or "{}")
+    except (TypeError, ValueError):
+        policy_json = {}
+    policy_json["stability"] = stability
+    m["sector_policy_json"] = json.dumps(policy_json, separators=(",", ":"), sort_keys=True)
     dd = max(0.0, f(primary.get("max_drawdown")))
     worst_return = min(
         (f(pos.get("net_pnl")) / f(pos.get("margin")) for pos in positions if f(pos.get("margin")) > 0),
@@ -875,24 +882,15 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
             ),
             margin_equity_pct=getattr(p, "margin_equity_pct", config.MARGIN_EQUITY_PCT),
             policy_values=getattr(p, "copy_bt_overrides", None),
+            as_of_ms=now_ms,
         )
         if not result.get("eligible"):
             if result.get("deferred"):
                 return True, "copy_backtest_deferred_data_error"
             return False, result.get("status") or "copy_unqualified"
-    last_open = int(m.get("last_copyable_open_ms") or 0)
-    max_age_ms = int(getattr(p, "inactive_days", config.INACTIVE_DAYS) * 86_400_000)
-    if not last_open or now_ms - last_open > max_age_ms:
-        # A mirrored swing episode that is still open is not an inactive wallet.  The target has no
-        # reason to emit another flat->open event while it is deliberately carrying the position, and
-        # demoting it here would make long-hold winners churn out of Core for precisely following their
-        # strategy.  This flag is attached only when the fresh target snapshot still has a material open
-        # position, the target's open book is net-profitable, AND our forward-only copy book is also
-        # net-profitable for the same wallet. A carried loser must never earn an activity exemption.
-        # Economics, recent-loss, structure, valuation and data-integrity gates above remain authoritative.
-        if m.get("open_copy_activity_bypass"):
-            return True, "ok" if copy_gate_enabled else "copy_gate_disabled"
-        return False, "inactive_copyable_open"
+    # Activity is a Core permission, not a Profile deletion rule.  The eligibility evaluator records stale
+    # or missing flat->open activity as a Challenger reason, so its evidence remains visible and a later
+    # actionable signal can restore Core candidacy without rebuilding the wallet from scratch.
     return True, "ok" if copy_gate_enabled else "copy_gate_disabled"
 
 
@@ -1507,6 +1505,56 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
     return len(rows)
 
 
+def _core_membership_hysteresis(db, profiles, previous_roles, *, now_ms: int) -> tuple[set, set]:
+    """Return promotion-ready new wallets and soft-tenure-protected incumbents.
+
+    Promotion needs today's Core qualification plus a distinct prior complete-generation qualification at
+    least 24 hours old.  A Core younger than 14 days is protected from ordinary rank/portfolio churn, while
+    individual hard/data/risk failures still remove it through ``core_ok`` in the transition.
+    """
+    previous_core = {
+        (addr or "").lower() for addr, role in previous_roles.items() if role == selection.CORE
+    }
+    promotion_ready = set(previous_core)
+    for row in profiles:
+        addr = (row.get("addr") or "").lower()
+        if not addr or addr in previous_core or not (row.get("follow_qualification") or {}).get("coreEligible"):
+            continue
+        prior = db.execute(
+            "SELECT pa.created_at,pa.payload_json FROM pipeline_audit pa "
+            "JOIN scan_generation sg "
+            "ON sg.generation=json_extract(pa.payload_json,'$.qualification.profileGeneration') "
+            "WHERE pa.source='scan' AND pa.stage='profile' AND lower(pa.addr)=? "
+            "AND sg.complete=1 ORDER BY pa.id DESC LIMIT 10", (addr,),
+        ).fetchall()
+        for created_at, raw in prior:
+            try:
+                payload = json.loads(raw or "{}")
+                qualified = bool((payload.get("followEligibility") or {}).get("coreEligible"))
+                created_s = calendar.timegm(time.strptime(str(created_at), "%Y-%m-%dT%H:%M:%SZ"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            age_h = (float(now_ms) / 1000.0 - created_s) / 3600.0
+            if qualified and age_h >= float(config.CORE_PROMOTION_MIN_HOURS):
+                promotion_ready.add(addr)
+                break
+    tenure_protected = set()
+    if previous_core:
+        marks = ",".join("?" for _ in previous_core)
+        for addr, first_followed_at in db.execute(
+            f"SELECT lower(addr),first_followed_at FROM follow_history WHERE lower(addr) IN ({marks})",
+            tuple(sorted(previous_core)),
+        ).fetchall():
+            try:
+                first_s = calendar.timegm(time.strptime(str(first_followed_at), "%Y-%m-%dT%H:%M:%SZ"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            age_days = (float(now_ms) / 1000.0 - first_s) / 86400.0
+            if age_days < float(config.CORE_SOFT_MIN_TENURE_DAYS):
+                tenure_protected.add(addr)
+    return promotion_ready, tenure_protected
+
+
 def _quality_first_core_transition(
     profiles,
     *,
@@ -1517,11 +1565,14 @@ def _quality_first_core_transition(
     strict_evaluate,
     robust_allowed_memberships=None,
     pinned_order=(),
+    promotion_ready=None,
+    tenure_protected=(),
 ):
-    """Publish the current strict result without entry/exit hysteresis.
+    """Publish strict membership with promotion confirmation and soft-tenure protection.
 
-    Profile/data errors and wallets that no longer clear the individual Core gate cannot originate new
-    positions.  Open copies are handled by the caller as Exit-only; they never justify stale Core authority.
+    Profile/data errors and wallets that no longer clear the individual Core gate after the explicit
+    soft-failure grace cannot originate new positions. Open copies are handled by the caller as Exit-only;
+    they never justify stale Core authority.
     """
     rows = {(row.get("addr") or "").lower(): row for row in profiles}
     previous_core = {
@@ -1530,6 +1581,12 @@ def _quality_first_core_transition(
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
     pinned = tuple(dict.fromkeys((addr or "").lower() for addr in pinned_order if addr))
     pinned_set = set(pinned)
+    promotion_ready = (
+        set(desired) | pinned_set
+        if promotion_ready is None
+        else {(addr or "").lower() for addr in promotion_ready if addr}
+    )
+    tenure_protected = {(addr or "").lower() for addr in tenure_protected if addr}
     selected = []
     reasons = {}
     hard_removed = set()
@@ -1543,12 +1600,14 @@ def _quality_first_core_transition(
             and bool(qualification.get("coreEligible"))
             and data_valid and enabled
         )
-        nominated = data_valid and enabled and (addr in pinned_set or (core_ok and addr in desired))
+        new_core_ready = addr in previous_core or addr in promotion_ready
+        nominated = data_valid and enabled and core_ok and new_core_ready and (
+            addr in pinned_set or addr in desired or addr in tenure_protected
+        )
         if nominated:
             selected.append(addr)
             reasons[addr] = (
                 "operator_starred_core" if addr in pinned_set
-                else "core_strong_evidence" if qualification.get("strongEntry")
                 else "core_quality_selected"
             )
         elif addr in previous_core:
@@ -1558,7 +1617,11 @@ def _quality_first_core_transition(
                 else qualification.get("status") or row.get("reason") or "core_not_selected"
             )
         elif row.get("status") in {"active", "qualified"}:
-            reasons[addr] = qualification.get("status") or "portfolio_not_selected"
+            reasons[addr] = (
+                "core_promotion_confirmation_pending"
+                if core_ok and addr in desired and addr not in promotion_ready
+                else qualification.get("status") or "portfolio_not_selected"
+            )
 
     # Remove only a wallet whose *actual conditional presence* lowers the funded account's net result.
     # Coin overlap is deliberately irrelevant here: profitable consensus remains because taking any owner
@@ -1706,43 +1769,7 @@ def _selection_prefetch_candidates(db, limit=None) -> list[str]:
     ]
 
 
-def _is_parameter_return_probe(row, margin_equity_pct: float) -> bool:
-    """Whether a below-floor wallet is close enough to inform cold-start sizing without being published.
-
-    The public Challenger line is 5%.  This internal set exists only to break the circular dependency
-    where a low seeded margin rejects a strong wallet before the tuner can test the larger safe margin that
-    would make it qualify.  Final replay must still clear the real line before the wallet can be published.
-    """
-    if str(row.get("reason") or "") not in {
-        "copy_value_below_challenger_floor", "research_copy_positive", "research_insufficient_evidence",
-    }:
-        return False
-    policy = load_copy_policy()
-    scoped = apply_allowed_sector_copy_metrics(row)
-    qualification_equity = max(1.0, float(config.INITIAL_BALANCE))
-    pnl30 = f(scoped.get("copy_bt_net_pnl"))
-    pnl7 = f(scoped.get("copy_bt_7d_net_pnl"))
-    try:
-        sector_policy = json.loads(row.get("sector_policy_json") or "{}")
-    except (TypeError, ValueError):
-        sector_policy = {}
-    return bool(
-        sector_policy.get("allowed")
-        and str(scoped.get("copy_bt_valuation_status") or "complete") == "complete"
-        and int(scoped.get("copy_bt_closed_n") or 0) >= policy.min_closed_30d
-        and int(scoped.get("copy_bt_7d_closed_n") or 0) >= policy.min_closed_7d
-        and int(row.get("copy_evidence_days") or 0) >= min(5, policy.min_closed_30d)
-        and pnl30 >= qualification_equity * float(
-            getattr(config, "CORE_TUNE_PROBE_MIN_RETURN_30D", 0.05)
-        )
-        and pnl7 >= qualification_equity * policy.challenger_min_return_7d
-        and f(row.get("copy_expected_return")) >= policy.min_expected_margin_return
-        and f(row.get("actionable_open_rate")) >= policy.min_actionable_open_rate
-        and f(row.get("capacity_fit")) >= policy.min_capacity_fit
-    )
-
-
-def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
+def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) -> list[dict]:
     """Current-generation follow-quality profiles in immutable quality order.
 
     ``core_only=False`` returns the bounded Core+Challenger workset needed for final-parameter
@@ -1809,20 +1836,18 @@ def _quality_core_profiles(db, generation_id, *, core_only=True) -> list[dict]:
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values)
+        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms)
         qualified = (
             row.get("status") in {"active", "qualified"}
             and (row.get("follow_qualification") or {}).get(
                 "coreEligible" if core_only else "eligible"
             )
         )
-        probe = bool(not core_only and _is_parameter_return_probe(row, margin_equity_pct))
         if (
-            (qualified or probe or addr in pinned)
+            (qualified or addr in pinned)
             and (row.get("data_status") or "valid") == "valid"
             and controls.get(addr, True)
         ):
-            row["formation_probe"] = probe
             rows.append(row)
     present = {row["addr"] for row in rows}
     missing_pinned = [addr for addr in pinned_order if addr not in present]
@@ -1935,6 +1960,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         margin_equity_pct=replay_ctx.margin_equity_pct,
         policy_values=follow,
         retention=bool(retention),
+        as_of_ms=now_ms,
     )
     # The replay already contains only sectors allowed by the sealed policy.  Do not let the scan-time
     # sector aggregate overwrite these final-parameter metrics while recomputing rank.
@@ -1974,7 +2000,6 @@ def _apply_core_soft_failure_grace(db, addr, generation_id, qualification, polic
             result.update({
                 "eligible": True,
                 "coreEligible": True,
-                "strongEntry": False,
                 "status": "core_retained_soft_grace",
                 "role": "core_eligible",
                 "softFailureCount": count,
@@ -2058,10 +2083,9 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
 def _formation_tune_candidate(row) -> bool:
     """Whether an individually executable wallet may influence Core sizing.
 
-    The tuner optimizes the shared Core account; feeding it Challenger/Research wallets can produce a
-    profitable fifteen-wallet prefix that the admission layer immediately collapses back to two.  Candidate
-    discovery may still retain parameter probes for audit, but they cannot determine the Core count or
-    execution surface until an exact individual replay has made them Core-eligible.
+    The tuner optimizes the shared Core account; feeding it Challenger wallets can produce an attractive
+    surface which the admission layer cannot publish. Challenger evidence remains available for audit, but it
+    cannot determine the Core count or execution surface until exact individual replay is Core-eligible.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     return bool(qualification.get("eligible") and qualification.get("coreEligible"))
@@ -2115,11 +2139,7 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
             if addr in required:
                 raise RuntimeError(f"pinned_core_replay_invalid:{addr}")
             continue
-        parameter_probe = bool(
-            row.get("formation_probe")
-            and qualification.get("status") == "copy_value_below_challenger_floor"
-        )
-        if not qualification.get("eligible") and not parameter_probe and addr not in required:
+        if not qualification.get("eligible") and addr not in required:
             continue
         ranked.append({
             **row,
@@ -2189,7 +2209,7 @@ def _core_rebalance_due(db, current_core, *, now_ms: int, interval_days: int) ->
 def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -> dict:
     """Seal a zero-Core result when strict portfolio evidence is unavailable.
 
-    Individual profile evidence may still be useful for Research/Challenger classification, but it is not
+    Individual profile evidence may still be useful for Challenger classification, but it is not
     sufficient to fund a shared Core without a replayable portfolio fill surface.  Returning an explicit
     empty formation lets the normal atomic publication path turn every old Core into Exit-only instead of
     failing the whole generation and silently retaining stale risk.
@@ -2238,7 +2258,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         force_entry_requalification=False) -> dict:
     """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
     now_ms = int(now_ms or time.time() * 1000)
-    ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False)
+    ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False, now_ms=now_ms)
     base_follow = params.load_follow(db)
     scanner_values = params.load_category(db, "scanner")
     base_follow.update({
@@ -2273,12 +2293,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     )
     upper = max(1, len(pinned_order), min(
         int(config.MAX_TARGETS),
+        int(getattr(config, "CORE_TARGET_MAX_N", 10)),
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
     ))
     # Tune only the wallets already proven individually executable on this exact active replay surface.
-    # Otherwise the count optimizer can report a fifteen-wallet winner while final admission has only two
-    # legal members.  Parameter-sensitive Challenger probes remain visible in Research/Challenger but do not
-    # own the Core surface.
+    # Otherwise the count optimizer can report a profitable surface which final admission cannot publish.
+    # Challenger evidence stays visible for audit but does not own the Core surface.
     tune_ranked = [
         row for row in surface_ranked
         if row.get("addr") in pinned or _formation_tune_candidate(row)
@@ -2310,8 +2330,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     winning_count = len(tune_ordered)
     retention = _core_prefix_retention()
     if retune:
-        # Wallet count and sizing are coupled: a 16-wallet account needs more conservative margins than an
-        # 8-wallet account. Keep the bounded 16→8→boundary prefix search, but use a deliberately sparse grid
+        # Wallet count and sizing are coupled: a 10-wallet account may need more conservative margins than an
+        # 8-wallet account. Keep the bounded N→N/2→boundary prefix search, but use a deliberately sparse grid
         # for those exploratory nodes. Only the winning count receives the complete leverage/margin/deploy/
         # Add grid and full finalist validation. This preserves count-specific economics without paying for
         # five complete tuners or forcing the smaller prefix to inherit the congested full-pool surface.
@@ -2591,13 +2611,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-        min_count=max(1, len(effective_pinned_order)),
+        min_count=max(1, len(effective_pinned_order), min(target_min, len(ordered))),
     )
     membership_search = core_formation.search_quality_membership(
         ordered, evaluate_members,
         initial=ordered[:prefix_search.selected.count],
         required=effective_pinned_order,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
+        min_count=max(1, len(effective_pinned_order), min(target_min, len(ordered))),
     )
     chosen = membership_search.metrics
     chosen_addrs = tuple(membership_search.selected)
@@ -2651,7 +2672,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 actionable_open_rate=1.0 if open_rate is None else f(open_rate),
                 capacity_fit=1.0 if capacity is None else f(capacity),
                 liquidations=int(result.get("liquidations") or 0), params=tuned_params,
-                payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
+                payload={
+                    "initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
+                    "campaignClosedN": int(result.get("campaign_closed_n") or 0),
+                },
             ))
         holdout_start = now_ms - 10 * 86_400_000
         holdout_rows = [
@@ -2707,9 +2731,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             top_stress = without_value.stress_net_pnl
         else:
             top_normal = top_stress = 0.0
-        all_strong = bool(key) and all(
-            (effective_qualifications.get(addr) or {}).get("strongEntry") for addr in key
-        )
         membership_changed = bool(previous_qualified and set(key) != set(previous_qualified))
         # Only removing/replacing an otherwise qualified incumbent pays the anti-churn replacement hurdle.
         # A pure addition is judged by positive marginal net plus the same fold/holdout/stress safeguards.
@@ -2724,19 +2745,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             initial_margin_equity=initial_margin_equity,
             min_relative_utility_gain=float(config.SELECTION_MIN_RELATIVE_GAIN),
             min_net_return_gain=float(getattr(config, "CORE_REPLACEMENT_MIN_NET_RETURN", 0.02)),
-            tail_after_top1=primary.get("net_after_top1"),
-            tail_after_top2=primary.get("net_after_top2"),
-            min_tail_return=float(load_copy_policy().min_tail_return_30d),
-            top_wallet_normal_net=top_normal,
-            top_wallet_stress_net=top_stress,
-            all_members_strong=all_strong,
+            tail_after_top1=primary.get("campaign_net_after_top1"),
         )
         check.update({
             "addrs": list(key), "netPnl": value.net_pnl, "utility": value.utility,
             "costStressNetPnl": cost_stress, "topWallet": top_wallet,
             "topWalletRemovalNetPnl": top_normal,
             "topWalletRemovalStressNetPnl": top_stress,
-            "tailAfterTop1": primary.get("net_after_top1"),
+            "tailAfterTop1": primary.get("campaign_net_after_top1"),
             "tailAfterTop2": primary.get("net_after_top2"),
             "profitConcentration": primary.get("pnl_concentration") or {},
         })
@@ -2824,7 +2840,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         if outgoing in effective_pinned:
             continue
         smaller = tuple(addr for addr in chosen_addrs if addr != outgoing)
-        if smaller:
+        if len(smaller) >= min(target_min, len(ordered)):
             check = validate_members(smaller)
             robust_audit.append(check)
             if check.get("eligible"):
@@ -3089,6 +3105,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         def strict_evaluate(addrs):
             return _portfolio_selection_metrics({}, selected_n=0)
 
+    promotion_ready, tenure_protected = _core_membership_hysteresis(
+        db, profiles, previous_roles, now_ms=int(now_ms),
+    )
     transition = _quality_first_core_transition(
         profiles,
         generation_id=generation_id,
@@ -3098,6 +3117,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         strict_evaluate=strict_evaluate,
         robust_allowed_memberships=(formation_meta or {}).get("robustAllowedMemberships") or (),
         pinned_order=effective_pinned_order,
+        promotion_ready=promotion_ready,
+        tenure_protected=tenure_protected,
     )
     selected_enabled_set = set(transition["selected"])
     core_order = effective_pinned_order + tuple(
@@ -3288,7 +3309,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values)
+        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms)
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -3308,9 +3329,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             effective_policies=effective_policies,
         )
     if selection_mode == "auto":
-        # Active means the wallet itself is structurally/economically copyable.  Score orders the bounded
-        # candidate pool; the shared-account replay then keeps candidates whose added net profit exceeds
-        # their added max-drawdown dollars. Individual sample/win/Wilson/recent-body/liquidation gates have
+        # Active means the wallet itself is structurally/economically copyable. Score orders the bounded
+        # candidate pool; shared-account replay then keeps candidates whose added net profit exceeds their
+        # added drawdown dollars. Individual Campaign/fold, path, outlier, cost and liquidation checks have
         # already run before this shared-account membership stage.
         ranked_candidates = [
             (row.get("addr") or "").lower() for row in profiles
@@ -3837,6 +3858,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             pinned_order = tuple(
                 item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
             )
+            promotion_ready, tenure_protected = _core_membership_hysteresis(
+                db, profiles, previous_roles, now_ms=int(now_ms),
+            )
             transition = _quality_first_core_transition(
                 profiles,
                 generation_id=generation_id,
@@ -3845,6 +3869,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 desired_order=(*pinned_order, *desired_marginal.selected),
                 strict_evaluate=effective_evaluate,
                 pinned_order=pinned_order,
+                promotion_ready=promotion_ready,
+                tenure_protected=tenure_protected,
             )
             selected_set = set(transition["selected"])
             core_rank = {
@@ -5285,7 +5311,7 @@ def scan(db, p) -> None:
                 ).fetchall()}
                 manual_core_ok = {
                     row["addr"] for row in _quality_core_profiles(
-                        db, generation_id, core_only=True,
+                        db, generation_id, core_only=True, now_ms=now_ms,
                     )
                 }
                 profile_gate = {
