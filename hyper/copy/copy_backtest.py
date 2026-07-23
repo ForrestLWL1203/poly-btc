@@ -414,10 +414,21 @@ def _row_price(row: dict, *keys: str) -> float:
     return 0.0
 
 
+class PreparedPricePath(list):
+    """Normalized, sorted candle events that are safe to reuse across replay candidates.
+
+    ``run_backtest`` used to rebuild and sort a fresh dictionary for every candle on every parameter or
+    membership candidate.  A 37-day, hundred-market surface contains roughly 400k candles, so the conversion
+    itself dominated the optimizer and produced hundreds of megabytes of short-lived objects.
+    """
+
+
 def _price_events(price_path) -> list[dict]:
     """Normalize optional tick/candle path data into per-coin high/low events."""
     if not price_path:
         return []
+    if isinstance(price_path, PreparedPricePath):
+        return price_path
     rows = []
     if isinstance(price_path, dict):
         for coin, coin_rows in price_path.items():
@@ -452,6 +463,31 @@ def _price_events(price_path) -> list[dict]:
         })
     out.sort(key=lambda x: x["time"])
     return out
+
+
+def prepare_price_path(price_path) -> PreparedPricePath:
+    """Normalize a candle surface once for reuse by many strict replays."""
+    if isinstance(price_path, PreparedPricePath):
+        return price_path
+    return PreparedPricePath(_price_events(price_path))
+
+
+def subset_price_path(price_path, fills, *, start_ms=None, end_ms=None) -> PreparedPricePath:
+    """Return only the reusable path events relevant to one fill set and optional time range."""
+    prepared = prepare_price_path(price_path)
+    if not prepared or not fills:
+        return PreparedPricePath()
+    coins = {row.get("coin") for row in fills if row.get("coin")}
+    if not coins:
+        return PreparedPricePath()
+    lower = None if start_ms is None else int(start_ms)
+    upper = None if end_ms is None else int(end_ms)
+    return PreparedPricePath(
+        row for row in prepared
+        if row.get("coin") in coins
+        and (lower is None or int(row.get("close_time") or row.get("time") or 0) >= lower)
+        and (upper is None or int(row.get("open_time") or row.get("time") or 0) <= upper)
+    )
 
 
 class Backtest:
@@ -798,7 +834,7 @@ class Backtest:
             fills,
             addr=None if self.addr == "portfolio" else self.addr,
         )
-        path_events = _price_events(price_path)
+        path_events = prepare_price_path(price_path)
         self.price_path_points = len(path_events)
         self.track_price_path = bool(path_events)
         if not path_events:
@@ -811,11 +847,12 @@ class Backtest:
             fill_times.setdefault(row.get("coin"), []).append(int(row.get("time") or 0))
         for times in fill_times.values():
             times.sort()
+        path_has_fill_events = []
         for row in path_events:
             times = fill_times.get(row.get("coin")) or []
             lo = bisect.bisect_left(times, int(row.get("open_time") or row["time"]))
             hi = bisect.bisect_right(times, int(row.get("close_time") or row["time"]))
-            row["has_fill_events"] = hi > lo
+            path_has_fill_events.append(hi > lo)
         # Both streams are already sorted. A linear merge avoids allocating and sorting hundreds of
         # thousands of candle/fill tuples for every tuner candidate.
         path_i = fill_i = 0
@@ -823,7 +860,9 @@ class Backtest:
             path_time = path_events[path_i]["time"] if path_i < len(path_events) else None
             fill_time = int(fills[fill_i].get("time") or 0) if fill_i < len(fills) else None
             if path_time is not None and (fill_time is None or path_time <= fill_time):
-                self.process_price(path_events[path_i])
+                self.process_price(
+                    path_events[path_i], has_fill_events=path_has_fill_events[path_i],
+                )
                 path_i += 1
             else:
                 self.process_fill(fills[fill_i])
@@ -890,7 +929,7 @@ class Backtest:
         else:
             self._apply_reduce(addr, coin, px, signed, pos1, closing=abs(pos1) < config.FLAT, t=x.get("time"))
 
-    def process_price(self, x):
+    def process_price(self, x, *, has_fill_events=None):
         coin = x.get("coin")
         if not coin:
             return
@@ -907,7 +946,11 @@ class Backtest:
             and x.get("open_time") is not None
             and int(ep.get("opened_at") or 0) > int(x.get("open_time") or 0)
         ]
-        ambiguous_candle = bool(x.get("has_fill_events")) or bool(boundary_positions)
+        has_fill_events = (
+            bool(x.get("has_fill_events"))
+            if has_fill_events is None else bool(has_fill_events)
+        )
+        ambiguous_candle = has_fill_events or bool(boundary_positions)
         # Capture the candle's adverse account-equity extreme without assuming high/low order. The close
         # sample below is the state carried into elapsed-time deep-bag calculations. If a fill occurred
         # inside this candle, its high/low may predate the changed position. Never let that unresolved range
@@ -920,7 +963,7 @@ class Backtest:
         self.path_mark_coins.add(coin)
         self._mark_liquidations_range(
             coin, lo, hi, x.get("time"), candle_open_time=x.get("open_time"),
-            ambiguous=bool(x.get("has_fill_events")), candle_close_time=x.get("close_time"),
+            ambiguous=has_fill_events, candle_close_time=x.get("close_time"),
         )
         # Candle close is always after its favorable extreme, so it is safe to update the high-water from
         # high/low and evaluate giveback at close without inventing an intra-candle high/low ordering.

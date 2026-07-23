@@ -1,7 +1,13 @@
 import unittest
 
 from hyper.copy.copy_backtest import (
-    campaign_structure_metrics, path_risk_metrics, profit_structure_metrics, run_backtest,
+    PreparedPricePath,
+    campaign_structure_metrics,
+    path_risk_metrics,
+    prepare_price_path,
+    profit_structure_metrics,
+    run_backtest,
+    subset_price_path,
 )
 
 
@@ -583,6 +589,34 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(1, best["ambiguous_liquidations"])
         self.assertEqual(1, worst["liquidations"])
         self.assertLess(worst["copy_net_pnl"], best["copy_net_pnl"])
+
+    def test_prepared_price_path_is_reusable_without_mutating_candles(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 60),
+            fill(3_000, "BTC", "A", 100, 100, 101.0, 61),
+        ]
+        prepared = prepare_price_path([
+            {"coin": "BTC", "time": 2_000, "open_time": 1, "close_time": 2_000,
+             "low": 95.0, "high": 101.0, "close": 100.0},
+            {"coin": "ETH", "time": 2_000, "open_time": 1, "close_time": 2_000,
+             "low": 90.0, "high": 110.0, "close": 100.0},
+        ])
+        subset = subset_price_path(prepared, fills, start_ms=0, end_ms=4_000)
+
+        self.assertIsInstance(prepared, PreparedPricePath)
+        self.assertIs(prepare_price_path(prepared), prepared)
+        self.assertEqual([row["coin"] for row in subset], ["BTC"])
+        first = run_backtest(
+            "0xabc", fills, sigmas={"BTC": 0.04},
+            overrides={"AMBIGUOUS_PATH_MODE": "liquidate"}, price_path=subset,
+        )
+        second = run_backtest(
+            "0xabc", fills, sigmas={"BTC": 0.04},
+            overrides={"AMBIGUOUS_PATH_MODE": "liquidate"}, price_path=subset,
+        )
+        self.assertEqual(first["copy_net_pnl"], second["copy_net_pnl"])
+        self.assertEqual(first["liquidations"], second["liquidations"])
+        self.assertNotIn("has_fill_events", subset[0])
 
     def test_long_to_short_flip_closes_old_position_and_opens_new_one(self):
         fills = [

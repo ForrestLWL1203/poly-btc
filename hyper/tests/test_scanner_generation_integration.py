@@ -137,6 +137,22 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("except TimeoutError as exc", source)
         self.assertIn("full_tune_timeout_using_coarse", source)
 
+    def test_normal_scan_does_not_block_publication_on_parameter_grid(self):
+        scan_source = inspect.getsource(scanner.scan)
+        optimize_source = inspect.getsource(scanner.optimize_published_generation)
+        formation_source = inspect.getsource(scanner.form_quality_prefix)
+        publication_source = inspect.getsource(scanner._build_forced_prefix_selection)
+
+        self.assertIn(
+            "form_quality_prefix(\n                    db, generation_id, stamp, now_ms, retune=False,",
+            scan_source,
+        )
+        self.assertIn("retune_formation=True", optimize_source)
+        self.assertIn("path_rows=None, path_meta=None", formation_source)
+        self.assertNotIn("shared_path = price_path.load_refined", formation_source)
+        self.assertEqual(publication_source.count("evaluate_portfolio_window("), 1)
+        self.assertIn("final_strict_copy_failed:", publication_source)
+
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -740,7 +756,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     scanner.price_path, "coverage", return_value={"coverage": 1.0},
             ), patch.object(
                     scanner, "_quality_first_core_transition", return_value=transition,
-            ):
+            ), patch.object(
+                    scanner.auto_tune, "evaluate_portfolio_window",
+                    return_value={
+                        "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
+                        "capacity_open_fit": .95, "max_drawdown": .01,
+                        "liquidations": 0, "price_path_coverage": 1.0,
+                        "maintenance_margin_coverage": 1.0,
+                        "initial_margin_equity": 1000,
+                    },
+            ) as final_replay:
                 rows, _marginal = scanner._build_forced_prefix_selection(
                     db, "g1", "now", 1,
                     profiles=[profile], previous_roles={}, controls={"0xaaa": True}, held=set(),
@@ -755,6 +780,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "core")])
             self.assertEqual(json.loads(rows[0].sector_policy_json)["allowed"], ["crypto"])
             self.assertTrue(window_fills.call_args.kwargs["include_watch"])
+            final_replay.assert_called_once()
+            self.assertEqual(final_replay.call_args.kwargs["days"], 30)
+            self.assertIsNotNone(final_replay.call_args.kwargs["path_rows"])
 
     def test_star_cannot_bypass_final_win_gate_and_held_position_becomes_exit_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -952,7 +980,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT generation FROM scan_generation ORDER BY id DESC LIMIT 1)"
             ).fetchone()[0], 1)
 
-    def test_cold_paper_bootstrap_stages_first_qualified_wallet_as_challenger(self):
+    def test_cold_paper_bootstrap_can_seed_first_strict_core(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
 
@@ -1046,6 +1074,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_windows), \
+                    patch.object(scanner.auto_tune, "evaluate_portfolio_window",
+                                 return_value={
+                                     **strict_windows[30], "liquidations": 0,
+                                     "price_path_coverage": 1.0,
+                                     "initial_margin_equity": 1000,
+                                 }), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
 
@@ -1055,11 +1089,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             row = db.execute(
                 "SELECT addr,role FROM follow_selection WHERE generation=?", (current,)
             ).fetchone()
-            self.assertEqual(row, ("0xaaa", "challenger"))
+            self.assertEqual(row, ("0xaaa", "core"))
             registry = db.execute(
                 "SELECT state,current_role FROM wallet_registry WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(registry, ("challenger", "challenger"))
+            self.assertEqual(registry, ("core", "core"))
 
 
     def test_repair_empty_published_selection_uses_cached_generation_and_launches_tuner(self):

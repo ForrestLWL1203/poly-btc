@@ -16,7 +16,13 @@ import time
 from types import SimpleNamespace
 
 from hyper import config, params, storage
-from hyper.copy.copy_backtest import ADD_METRICS_VERSION, run_backtest, slice_backtest_result
+from hyper.copy.copy_backtest import (
+    ADD_METRICS_VERSION,
+    prepare_price_path,
+    run_backtest,
+    slice_backtest_result,
+    subset_price_path,
+)
 from hyper.copy.fills import build_episodes
 from hyper.copy.copy_data import (
     is_copyable_coin,
@@ -1864,11 +1870,11 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
 
 def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuation_marks,
                              sigmas=None, market_ctx=None, retention=False) -> dict:
-    """Replay one wallet under the final parameter surface without mutating its scan-time profile.
+    """Replay one wallet under an explicit parameter surface without mutating its scan-time profile.
 
-    Formation first tunes the shared account.  This second, cache-only pass is the authoritative individual
-    profitability check for that tuned surface.  One shared mark snapshot is supplied by the caller, so the
-    check adds CPU work but no per-wallet network request.
+    This path-complete, cache-only pass is the authoritative individual liquidation/profitability check before
+    a wallet may enter formation. One shared mark snapshot is supplied by the caller, so it adds CPU work but
+    no per-wallet network request.
     """
     addr = (row.get("addr") or "").lower()
     replay_ctx = SimpleNamespace(
@@ -1905,9 +1911,9 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     path_start = int(now_ms) - (
         int(config.COPY_BT_DAYS) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
     ) * 86_400_000
-    replay_ctx.copy_bt_price_path = price_path.load_refined(
+    replay_ctx.copy_bt_price_path = prepare_price_path(price_path.load_refined(
         db, evidence_fills, path_start, int(now_ms),
-    )
+    ))
     replay_ctx.copy_bt_price_path_meta = price_path.coverage(
         db, evidence_fills, path_start, int(now_ms),
     )
@@ -2093,7 +2099,8 @@ def _formation_tune_candidate(row) -> bool:
 
 def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, follow,
                                            valuation_marks, sigmas, market_ctx,
-                                           required_order=(), retention_addrs=()) -> list[dict]:
+                                           required_order=(), retention_addrs=(),
+                                           replay_cache=None) -> list[dict]:
     """Re-rank the bounded quality pool under the exact active parameter surface.
 
     Profile Copy columns are immutable scan-time evidence and may have been produced before the latest
@@ -2111,19 +2118,28 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
     current_core = {
         (addr or "").lower() for addr in (retention_addrs or ()) if addr
     }
+    surface_key = hashlib.sha256(json.dumps(
+        {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
+        sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()
     for row in rows:
         # Never mutate the generation profile row while exploring an effective surface.  A failed replay can
         # legitimately return an empty sector policy; writing that transient policy back used to turn the
         # next authoritative pass into the misleading label ``effective_sector_policy_missing`` and hid the
         # actual economic/sector failure.
         row = dict(row)
-        effective = _effective_follow_replay(
-            db, row, now_ms, generation_id=generation_id, follow=follow,
-            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-            retention=(row.get("addr") or "").lower() in current_core,
-        )
-        qualification = dict(effective.get("qualification") or {})
         addr = (row.get("addr") or "").lower()
+        replay_key = (addr, surface_key, addr in current_core)
+        effective = (replay_cache or {}).get(replay_key)
+        if effective is None:
+            effective = _effective_follow_replay(
+                db, row, now_ms, generation_id=generation_id, follow=follow,
+                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                retention=addr in current_core,
+            )
+            if replay_cache is not None:
+                replay_cache[replay_key] = effective
+        qualification = dict(effective.get("qualification") or {})
         if addr in current_core:
             qualification = _apply_core_soft_failure_grace(
                 db, addr, generation_id, qualification, policy_values=follow,
@@ -2256,7 +2272,7 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
 
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         force_entry_requalification=False) -> dict:
-    """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
+    """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
     ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False, now_ms=now_ms)
     # Path prefetch and exact effective-surface replay must own the same bounded quality universe. Replaying
@@ -2290,10 +2306,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # Daily scans still refresh evidence and can immediately remove a hard-risk failure. Parameter/membership
     # optimization only runs weekly, except while the Core is below its minimum target and needs safe additions.
     retune = bool(retune and (rebalance_due or len(current_core) < target_min))
+    individual_replay_cache = {}
     surface_ranked = _rank_formation_candidates_for_surface(
         db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
         valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
         required_order=pinned_order, retention_addrs=current_core,
+        replay_cache=individual_replay_cache,
     )
     upper = max(1, len(pinned_order), min(
         int(config.MAX_TARGETS),
@@ -2437,20 +2455,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         )
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
 
-    # Parameter tuning changes leverage, initial margin and add behaviour.  Replaying only the portfolio
-    # after that change is insufficient: every potential owner must still clear the percentage-based
-    # individual profit floors under the exact surface that will be sealed for Observer.
-    base_core_count = sum(
-        1 for row in surface_ranked
-        if (row.get("follow_qualification") or {}).get("coreEligible")
-    )
+    # Individual Core qualification is sealed once on the active surface before parameter search. The tuner
+    # optimizes only that qualified pool from fills; it must not rescan every wallet's candle path at every
+    # proposal. The actual tuned membership receives one final path-complete 30-day portfolio replay during
+    # publication.
     active_tune_surface = {
         key: f(base_follow.get(key)) for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
     }
-    tune_surface_changed = any(
-        abs(f(tuned_params.get(key)) - value) > 1e-12
-        for key, value in active_tune_surface.items()
-    )
 
     def replay_effective_surface(follow_surface):
         qualifications = {}
@@ -2459,12 +2470,20 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         qualified_rows = []
         audit = []
         rejected = []
+        surface_key = hashlib.sha256(json.dumps(
+            {**follow_surface, "AMBIGUOUS_PATH_MODE": "liquidate"},
+            sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
         for row in ranked_candidates:
-            effective = _effective_follow_replay(
-                db, row, now_ms, generation_id=generation_id, follow=follow_surface,
-                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-                retention=row["addr"] in set(current_core),
-            )
+            replay_key = (row["addr"], surface_key, row["addr"] in set(current_core))
+            effective = individual_replay_cache.get(replay_key)
+            if effective is None:
+                effective = _effective_follow_replay(
+                    db, row, now_ms, generation_id=generation_id, follow=follow_surface,
+                    valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                    retention=row["addr"] in set(current_core),
+                )
+                individual_replay_cache[replay_key] = effective
             qualification = dict(effective.get("qualification") or {})
             addr = row["addr"]
             if addr in set(current_core):
@@ -2500,19 +2519,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 rejected.append(addr)
         return qualifications, scores, policies, qualified_rows, audit, rejected
 
+    qualification_follow = {
+        **base_follow, **active_tune_surface, "AMBIGUOUS_PATH_MODE": "liquidate",
+    }
     (effective_qualifications, effective_scores, effective_policies, effective_ranked,
-     admission_audit, qualification_rejected) = replay_effective_surface(fixed_follow)
+     admission_audit, qualification_rejected) = replay_effective_surface(
+        qualification_follow
+    )
     tune_coverage_fallback = False
-    # Parameters serve the qualified pool. They may improve shared-account dollars, but may not win by
-    # shrinking today's individually Core-qualified coverage. Membership search owns capital contention.
-    if tune_surface_changed and len(effective_ranked) < base_core_count:
-        tuned_params = dict(active_tune_surface)
-        fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
-        (effective_qualifications, effective_scores, effective_policies, effective_ranked,
-         admission_audit, qualification_rejected) = replay_effective_surface(fixed_follow)
-        tune_coverage_fallback = True
-        tune_eligible = False
-        tune_reason = "qualified_wallet_coverage_regressed"
     effective_pinned_order = tuple(
         addr for addr in pinned_order
         if (effective_qualifications.get(addr) or {}).get("coreEligible")
@@ -2560,13 +2574,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     )
     if window_fills is None or not any(window_fills.values()):
         raise RuntimeError("core_prefix_replay_unavailable")
-    all_fills = list(window_fills.get(max(window_fills)) or [])
-    path_start = now_ms - (
-        max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
-    ) * 86_400_000
-    shared_path = price_path.load_refined(db, all_fills, path_start, now_ms)
-    shared_meta = price_path.coverage(db, all_fills, path_start, now_ms)
-
     membership_eval_cache = {}
     membership_replay_cache = {}
 
@@ -2581,20 +2588,38 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         windows = auto_tune._candidate_windows(
             db, list(key), sigmas, fixed_follow, now_ms,
             window_fills=filtered, market_ctx=market_ctx,
-            path_rows=shared_path, path_meta=shared_meta,
+            path_rows=None, path_meta=None,
         )
+        metrics_ = _portfolio_selection_metrics(windows, selected_n=len(key))
+        primary = windows.get(30) or windows.get(max(windows)) or {}
+        contributions = {}
+        for position in list(primary.get("positions") or ()) + list(
+            primary.get("open_positions") or ()
+        ):
+            owner = (position.get("addr") or "").lower()
+            pnl = f(position.get("net_pnl"))
+            if position.get("status") == "open":
+                pnl += f(position.get("unrealized_pnl"))
+            contributions[owner] = contributions.get(owner, 0.0) + pnl
+        replay_summary = {
+            "contributions": contributions,
+            "campaignNetAfterTop1": primary.get("campaign_net_after_top1"),
+            "netAfterTop2": primary.get("net_after_top2"),
+            "pnlConcentration": primary.get("pnl_concentration") or {},
+        }
+        del windows
         stressed = auto_tune._candidate_windows(
             db, list(key), sigmas, {**fixed_follow, "REPLAY_COST_MULT": 1.5}, now_ms,
             window_fills=filtered, market_ctx=market_ctx,
-            path_rows=shared_path, path_meta=shared_meta,
+            path_rows=None, path_meta=None,
         )
-        metrics_ = _portfolio_selection_metrics(windows, selected_n=len(key))
         stress_net = min(
             (f(result.get("copy_net_pnl")) for result in stressed.values()), default=-1e12,
         )
         stress_liquidations = max(
             (int(result.get("liquidations") or 0) for result in stressed.values()), default=0,
         )
+        del stressed
         value = core_formation.PrefixEvaluation(
             count=len(key), net_pnl=f(metrics_.net_pnl), stress_net_pnl=stress_net,
             max_drawdown=f(metrics_.max_drawdown),
@@ -2605,7 +2630,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
         )
         membership_eval_cache[key] = value
-        membership_replay_cache[key] = (windows, stressed)
+        # The optimizer may inspect dozens of sets. Retaining six complete replay results per set (positions,
+        # open positions and equity curves) exhausted the 1GB production host. Robust validation needs only
+        # these contribution/outlier summaries; all ranking metrics already live in ``value``.
+        membership_replay_cache[key] = replay_summary
         return value
 
     def evaluate(count):
@@ -2656,15 +2684,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 row for row in all_rows
                 if lo - warmup_ms <= int(row.get("time") or 0) < hi
             ]
-            replay_path = [
-                row for row in shared_path
-                if int(row.get("close_time") or row.get("time") or 0) >= lo - warmup_ms
-                and int(row.get("open_time") or row.get("time") or 0) < hi
-            ]
             warm = run_backtest(
                 "portfolio", rows, sigmas=sigmas,
                 overrides={**fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
-                market_ctx=market_ctx, price_path=replay_path, price_path_meta=shared_meta,
+                market_ctx=market_ctx,
             )
             result = slice_backtest_result(warm, lo, window_days=10)
             open_rate = result.get("actionable_open_rate", result.get("open_fill_rate"))
@@ -2686,16 +2709,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             row for row in all_rows
             if int(row.get("time") or 0) >= holdout_start - warmup_ms
         ]
-        holdout_path = [
-            row for row in shared_path
-            if int(row.get("close_time") or row.get("time") or 0) >= holdout_start - warmup_ms
-        ]
         stress_warm = run_backtest(
             "portfolio", holdout_rows, sigmas=sigmas,
             overrides={
                 **fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate", "REPLAY_COST_MULT": 1.5,
             },
-            market_ctx=market_ctx, price_path=holdout_path, price_path_meta=shared_meta,
+            market_ctx=market_ctx,
         )
         stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
         fold_cache[key] = (folds, f(stress.get("copy_net_pnl")))
@@ -2718,15 +2737,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             return robust_cache[key]
         value = evaluate_members(key)
         folds, cost_stress = fold_replays(key)
-        windows, stressed = membership_replay_cache[key]
-        primary = windows.get(30) or windows.get(max(windows)) or {}
-        contributions = {}
-        for position in list(primary.get("positions") or ()) + list(primary.get("open_positions") or ()):
-            addr = (position.get("addr") or "").lower()
-            pnl = f(position.get("net_pnl"))
-            if position.get("status") == "open":
-                pnl += f(position.get("unrealized_pnl"))
-            contributions[addr] = contributions.get(addr, 0.0) + pnl
+        replay_summary = membership_replay_cache[key]
+        contributions = replay_summary["contributions"]
         top_wallet = max(contributions, key=contributions.get) if contributions else None
         without_top = tuple(addr for addr in key if addr != top_wallet)
         if without_top:
@@ -2749,16 +2761,16 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             initial_margin_equity=initial_margin_equity,
             min_relative_utility_gain=float(config.SELECTION_MIN_RELATIVE_GAIN),
             min_net_return_gain=float(getattr(config, "CORE_REPLACEMENT_MIN_NET_RETURN", 0.02)),
-            tail_after_top1=primary.get("campaign_net_after_top1"),
+            tail_after_top1=replay_summary.get("campaignNetAfterTop1"),
         )
         check.update({
             "addrs": list(key), "netPnl": value.net_pnl, "utility": value.utility,
             "costStressNetPnl": cost_stress, "topWallet": top_wallet,
             "topWalletRemovalNetPnl": top_normal,
             "topWalletRemovalStressNetPnl": top_stress,
-            "tailAfterTop1": primary.get("campaign_net_after_top1"),
-            "tailAfterTop2": primary.get("net_after_top2"),
-            "profitConcentration": primary.get("pnl_concentration") or {},
+            "tailAfterTop1": replay_summary.get("campaignNetAfterTop1"),
+            "tailAfterTop2": replay_summary.get("netAfterTop2"),
+            "profitConcentration": replay_summary.get("pnlConcentration") or {},
         })
         robust_cache[key] = check
         return check
@@ -3040,7 +3052,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    desired_order, formation_meta,
                                    effective_qualifications=None, effective_scores=None,
                                    effective_policies=None):
-    """Materialize the jointly tuned, skip-aware quality membership selected during formation."""
+    """Materialize the fill-searched membership after one final strict 30-day portfolio replay."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
     by_addr = {(row.get("addr") or "").lower(): row for row in profiles}
@@ -3093,6 +3105,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         raise RuntimeError(f"quality_prefix_contains_ineligible_wallets:{len(invalid)}")
 
     eval_cache = {}
+    final_strict_validation = {
+        "status": "empty", "selectedCount": 0, "expectedReturn30d": 0.0,
+    }
     if desired:
         window_fills = auto_tune._portfolio_window_fills(
             db, list(desired), int(now_ms), include_watch=True,
@@ -3104,12 +3119,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
         sigmas = auto_tune._load_sigmas(db, generation_id)
         market_ctx = auto_tune._load_market_ctx(db, generation_id)
-        all_fills = list(window_fills.get(max(window_fills)) or [])
-        path_start = int(now_ms) - (
-            max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
-        ) * 86_400_000
-        shared_path = price_path.load_refined(db, all_fills, path_start, int(now_ms))
-        shared_meta = price_path.coverage(db, all_fills, path_start, int(now_ms))
 
         def strict_evaluate(addrs):
             key = tuple(sorted(addrs))
@@ -3123,7 +3132,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                     db, list(key), sigmas,
                     {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, int(now_ms),
                     window_fills=filtered, market_ctx=market_ctx,
-                    path_rows=shared_path, path_meta=shared_meta,
+                    path_rows=None, path_meta=None,
                 )
                 value = _portfolio_selection_metrics(windows, selected_n=len(key))
             eval_cache[key] = value
@@ -3135,6 +3144,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     promotion_ready, tenure_protected = _core_membership_hysteresis(
         db, profiles, previous_roles, now_ms=int(now_ms),
     )
+    # The first funded generation has no older generation to confirm against. Requiring a prior 24-hour
+    # qualification here makes a clean factory reset mathematically incapable of ever bootstrapping Core.
+    if not previous_roles:
+        promotion_ready.update(desired)
     transition = _quality_first_core_transition(
         profiles,
         generation_id=generation_id,
@@ -3147,6 +3160,72 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         promotion_ready=promotion_ready,
         tenure_protected=tenure_protected,
     )
+    final_addrs = tuple(transition["selected"])
+    if final_addrs:
+        final_fills_by_window = auto_tune._filter_window_fills_by_addr(
+            window_fills, final_addrs,
+        )
+        final_fills = list(final_fills_by_window.get(30) or [])
+        path_start = int(now_ms) - (
+            30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+        ) * 86_400_000
+        final_path = prepare_price_path(
+            price_path.load_refined(db, final_fills, path_start, int(now_ms))
+        )
+        final_path_meta = price_path.coverage(
+            db, final_fills, path_start, int(now_ms),
+        )
+        final_result = auto_tune.evaluate_portfolio_window(
+            db, list(final_addrs), sigmas,
+            {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, int(now_ms),
+            window_fills={30: final_fills}, days=30, market_ctx=market_ctx,
+            path_rows=final_path, path_meta=final_path_meta,
+        )
+        final_metrics = _portfolio_selection_metrics(
+            {30: final_result}, selected_n=len(final_addrs),
+        )
+        initial_equity = f(
+            final_result.get("initial_margin_equity")
+            or follow.get("INITIAL_BALANCE")
+            or config.INITIAL_BALANCE
+        )
+        failures = []
+        if final_metrics.net_pnl <= 0.0:
+            failures.append("net_not_positive")
+        if final_metrics.max_drawdown > float(config.CORE_PORTFOLIO_MAX_DRAWDOWN):
+            failures.append("drawdown")
+        if final_metrics.actionable_open_rate < float(config.SELECTION_MIN_ACTIONABLE_RATE):
+            failures.append("open_rate")
+        if final_metrics.capacity_fit < float(config.SELECTION_MIN_CAPACITY_FIT):
+            failures.append("capacity")
+        if f(final_result.get("price_path_coverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
+            failures.append("path_coverage")
+        if f(final_result.get("maintenance_margin_coverage")) < float(
+            config.CORE_MAINTENANCE_META_MIN_COVERAGE
+        ):
+            failures.append("maintenance_coverage")
+        final_strict_validation = {
+            "status": "failed" if failures else "passed",
+            "selectedCount": len(final_addrs),
+            "netPnl30d": f(final_metrics.net_pnl),
+            "expectedReturn30d": (
+                f(final_metrics.net_pnl) / initial_equity if initial_equity > 0 else None
+            ),
+            "maxDrawdown30d": f(final_metrics.max_drawdown),
+            "liquidations30d": int(final_metrics.liquidations),
+            "actionableOpenRate30d": f(final_metrics.actionable_open_rate),
+            "capacityFit30d": f(final_metrics.capacity_fit),
+            "pricePathCoverage30d": f(final_result.get("price_path_coverage")),
+            "maintenanceMarginCoverage30d": f(
+                final_result.get("maintenance_margin_coverage")
+            ),
+            "failures": failures,
+        }
+        if failures:
+            raise RuntimeError(
+                "final_strict_copy_failed:" + ",".join(failures)
+            )
+        transition["metrics"] = final_metrics
     selected_enabled_set = set(transition["selected"])
     core_order = effective_pinned_order + tuple(
         addr for addr in transition["selected"] if addr not in set(effective_pinned_order)
@@ -3165,6 +3244,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         evaluated=len(eval_cache),
         search_meta={
             **dict(formation_meta or {}),
+            "finalStrictCopy": final_strict_validation,
             "membershipPolicy": "quality-prefix-current-evidence-loo-v3",
             "desiredOrder": desired,
             "contributionOrder": transition["selected"],
@@ -3429,9 +3509,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                 ) * 86_400_000
                 all_selection_fills = list(window_fills.get(30) or [])
                 shared_path_rows = (
-                    price_path.load_refined(
+                    prepare_price_path(price_path.load_refined(
                         db, all_selection_fills, path_start, now_ms,
-                    ) if validate_price_path else []
+                    )) if validate_price_path else []
                 )
 
                 def evaluate(addrs):
@@ -4197,9 +4277,9 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
         path_start = now_ms - (
             int(config.COPY_BT_DAYS) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
         ) * 86_400_000
-        replay_ctx.copy_bt_price_path = price_path.load_refined(
+        replay_ctx.copy_bt_price_path = prepare_price_path(price_path.load_refined(
             db, evidence_fills, path_start, now_ms,
-        )
+        ))
         replay_ctx.copy_bt_price_path_meta = price_path.coverage(
             db, evidence_fills, path_start, now_ms,
         )
@@ -4240,7 +4320,7 @@ def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -
 
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
-                               retune_formation=True, force_entry_requalification=False):
+                               retune_formation=False, force_entry_requalification=False):
     """Rebuild selection from the current complete generation without re-fetching wallet profiles/fills.
 
     This is intentionally narrow: it may incrementally complete the bounded shared K-line cache, but never
@@ -4410,7 +4490,7 @@ def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
     stamp = stamp or now_iso()
     selection_result = repair_published_selection(
         db, generation_id, stamp=stamp, replace_existing=True,
-        force_entry_requalification=True,
+        retune_formation=True, force_entry_requalification=True,
     )
     return {
         "status": "ok" if selection_result.get("status") == "repaired" else selection_result.get("status"),
@@ -5323,7 +5403,12 @@ def scan(db, p) -> None:
             _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             formation = None
             if selection_mode == "auto":
-                formation = form_quality_prefix(db, generation_id, stamp, now_ms)
+                # Discovery proves wallets against the currently active execution surface. Parameter search
+                # is an explicit ``optimize`` job: coupling its large grid to every cold/daily publication
+                # made a completed strict scan wait another hour and could OOM before any Core was sealed.
+                formation = form_quality_prefix(
+                    db, generation_id, stamp, now_ms, retune=False,
+                )
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),
                 candidates_total=len(workset),

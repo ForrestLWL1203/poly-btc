@@ -232,33 +232,27 @@ parameter retuning, and leave-one-out reshuffling run only after seven days sinc
 change. Daily evidence still removes liquidation, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
-1. Rank the current generation under one exact active replay surface, then admit only individually Core-eligible
-   wallets to shared-account tuning. Challenger evidence remains visible for audit but may not determine the
-   Core count or parameter surface.
-2. Jointly search wallet count and parameters without making a smaller Core inherit the conservative surface
-   required by a crowded full pool. The bounded `N → N/2 → boundary` prefix nodes use a sparse coarse grid
-   (one leverage value per tier shortlist, two sizing finalists, no Add polish and no coordinate-closure rounds).
-   Only the winning count receives one complete fine-grid tune. Coarse nodes have a ten-minute budget and the
-   winning fine tune has a thirty-minute budget; a fine timeout may use its already-validated coarse surface,
-   but no individual/path/cost/capacity/membership hard gate is skipped.
-3. Re-run every candidate's canonical individual replay under the winning parameters, the same refined intratrade
-   price path used by shared replay, and one valuation snapshot.
-   Anyone no longer Core-eligible is removed before shared-account membership.
-   The explicit `optimize` repair command treats incumbents as new entries so a policy correction cannot preserve
-   an incorrectly published Core through the normal two-scan soft-retention grace; scheduled scans keep that grace.
-4. With that fixed surface, `search_quality_membership` evaluates every subset for pools of at most eight.
-   Larger pools start from the winning prefix and run bounded add/swap closure so one congested wallet cannot
-   block stronger wallets behind it.
-5. Validate bounded final membership candidates on three non-overlapping ten-day folds. At least two must each
-   contain two Campaigns and be profitable; any losing fold is bounded to 25% of 30-day profit. Also require
-   1.5x-cost stress, no more than 15% portfolio drawdown, at least 70% actionable opens and 75% capacity fit. A replacement
-   of still-qualified old Core also needs at least two improving folds, at least
-   5% risk-adjusted utility gain and net gain of 2% of `initial_margin_equity`. Current qualification or recent
-   risk failure still removes immediately without that replacement hurdle.
-6. Apply one outlier gate only: remove the largest winning independent Campaign and require remaining net
+1. Run each bounded candidate's canonical individual Copy replay once with the refined 15-minute path (and finer
+   candles only for ambiguous risk ranges). This is the authoritative liquidation/drawdown qualification pass.
+   Only individually Core-eligible wallets may enter formation; Challenger evidence remains visible for audit.
+2. On the currently active parameter surface, search wallet count and membership from the cached target fills.
+   The fast replay still models shared cash, margin, deployment, coin caps, fees, open capture and 1.5x cost
+   stress, but does not rescan the candle path inside every prefix/add/swap candidate.
+3. The explicit `optimize` operation runs only after a qualified pool exists. Its parameter grid and independent
+   folds are likewise fill-driven. It may propose higher-return sizing/Add parameters, but it cannot publish them
+   by itself.
+4. After parameters and actual publishable membership are fixed, run exactly one final path-complete 30-day
+   portfolio Copy replay. Require positive net, at most 15% drawdown, at least 70% actionable opens, 75% capacity
+   fit and complete price-path coverage. A failed final replay rolls back the proposal/publication; it must not
+   restart a path-heavy parameter search.
+5. The explicit `optimize` command treats incumbents as new entries so a policy correction cannot preserve an
+   incorrectly published Core through normal soft-retention grace; scheduled scans keep that grace. The first
+   funded generation is the sole exception to two-generation promotion confirmation because no earlier complete
+   generation can exist after a clean factory reset.
+6. Apply one individual outlier gate only: remove the largest winning independent Campaign and require remaining net
    positive. Top-two/body/top-wallet removals are diagnostic. Persist wallet/coin/day/side concentration.
-7. On a scheduled rebalance, repeatedly apply strict leave-one-out elimination only when removing a member raises
-   funded net PnL by at least `$1` and the smaller set already passed the same membership robustness checks.
+7. On a scheduled rebalance, repeatedly apply fill-driven leave-one-out elimination only when removing a member
+   raises funded net PnL by at least `$1` and the smaller set passed the same membership robustness checks.
    Between rebalances, publish only hard-failure removals and validated additions toward the service target.
 
 An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag
@@ -292,18 +286,25 @@ rows into the next generation and leaves membership operator-owned; it does not 
 ### 6. Atomic publication and tuning
 
 The scanner prefetches only the bounded candidate market path outside the final SQLite publication transaction.
-Formation and tuning are synchronous. The winning surface, current-generation eligibility, explicit selection,
-generation publication, follow history and immutable strategy revision are then sealed as one atomic decision.
-Observer receives one `reload_params` command for the activated revision. Post-publication work only materializes
-the effective portfolio and per-selection replay summaries used by the Dashboard; it is not a second async tuner.
+Normal cold/daily formation does not run a parameter grid. It strictly replays individual and shared-account
+membership on the currently active execution surface, then seals eligibility, explicit selection, generation,
+follow history and its immutable strategy revision as one atomic decision. Parameter search is the explicit
+`optimize` operation; if it succeeds, its newly tuned surface and requalified membership are likewise sealed
+atomically. A slow or failed optimizer must never delay an otherwise complete discovery generation or leave the
+system with zero Core merely because no parameter proposal finished.
+
+Repeated strict replays must reuse one normalized price path, filter it to the candidate's actual markets/time
+range, and retain only compact portfolio summaries between membership candidates. Do not cache full position and
+equity-curve results for every explored set: the production host is intentionally small and must fail boundedly
+rather than reach the OOM killer.
 
 The compact portfolio tuner searches all three volatility-tier upper margins and leverage caps,
 `DEPLOY_FULL_PCT`, and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
 not tune the three lower margins, per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
-or stop/risk-owner settings. Candidate finalists run three non-overlapping ten-day folds, the latest fold as a
-positive holdout, a 1.5x-cost stress replay, open/capacity checks, maintenance metadata and bounded price-path
-coverage. Cold start additionally probes a few absolute margins at 50/75/100% of the four-add-safe ceiling;
-it does not restore the old large Cartesian grid.
+or stop/risk-owner settings. Candidate finalists run three non-overlapping fill-driven ten-day folds, the latest
+fold as a positive holdout, plus 1.5x-cost stress and open/capacity checks. Price-path and maintenance-risk
+validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
+few absolute margins at 50/75/100% of the four-add-safe ceiling; it does not restore the old large Cartesian grid.
 
 Current Paper defaults deliberately allow the full closed loop:
 

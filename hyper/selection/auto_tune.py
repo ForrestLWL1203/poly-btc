@@ -16,7 +16,12 @@ from datetime import datetime
 from typing import Iterable
 
 from hyper import config, params
-from hyper.copy.copy_backtest import run_backtest, slice_backtest_result
+from hyper.copy.copy_backtest import (
+    prepare_price_path,
+    run_backtest,
+    slice_backtest_result,
+    subset_price_path,
+)
 from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import parse_json_obj
@@ -746,11 +751,9 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
         if path_rows and fills:
             first_fill = min(int(row.get("time") or 0) for row in fills)
             last_fill = max(int(row.get("time") or 0) for row in fills)
-            replay_path = [
-                row for row in path_rows
-                if int(row.get("close_time") or row.get("time") or 0) >= first_fill
-                and int(row.get("open_time") or row.get("time") or 0) <= last_fill
-            ]
+            replay_path = subset_price_path(
+                path_rows, fills, start_ms=first_fill, end_ms=last_fill,
+            )
         warm_result = run_backtest(
             "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {},
             price_path=replay_path, price_path_meta=path_meta,
@@ -816,6 +819,7 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
         db, all_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
         market_ctx=market_ctx, immutable_market_ctx=True,
     )
+    path_rows = prepare_price_path(path_rows)
     windows = _candidate_windows(
         db, addrs, sigmas, follow, now_ms, window_fills=window_fills,
         market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
@@ -1098,11 +1102,14 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         lo = now_ms - older * 86400_000
         hi = now_ms - newer * 86400_000 if newer else now_ms + 1
         fold_fills = [row for row in fills if lo - warmup_ms <= int(row.get("time") or 0) < hi]
+        fold_path = subset_price_path(
+            path_rows, fold_fills, start_ms=lo - warmup_ms, end_ms=hi,
+        )
         baseline_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=base_overrides,
-                                     market_ctx=market_ctx, price_path=path_rows,
+                                     market_ctx=market_ctx, price_path=fold_path,
                                      price_path_meta=path_meta)
         challenger_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=proposal_overrides,
-                                       market_ctx=market_ctx, price_path=path_rows,
+                                       market_ctx=market_ctx, price_path=fold_path,
                                        price_path_meta=path_meta)
         baseline = slice_backtest_result(baseline_warm, lo, window_days=10)
         challenger = slice_backtest_result(challenger_warm, lo, window_days=10)
@@ -1110,13 +1117,16 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         folds.append({"baseline": baseline, "challenger": challenger, "fills": in_window_n})
     holdout_start = now_ms - 10 * 86400_000
     holdout_fills = [row for row in fills if int(row.get("time") or 0) >= holdout_start - warmup_ms]
+    holdout_path = subset_price_path(
+        path_rows, holdout_fills, start_ms=holdout_start - warmup_ms, end_ms=now_ms,
+    )
     stress_warm = run_backtest(
         "portfolio",
         holdout_fills,
         sigmas=sigmas,
         overrides={**proposal_overrides, "REPLAY_COST_MULT": 1.5},
         market_ctx=market_ctx,
-        price_path=path_rows,
+        price_path=holdout_path,
         price_path_meta=path_meta,
     )
     stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
@@ -1126,7 +1136,7 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         sigmas=sigmas,
         overrides={**base_overrides, "REPLAY_COST_MULT": 1.5},
         market_ctx=market_ctx,
-        price_path=path_rows,
+        price_path=holdout_path,
         price_path_meta=path_meta,
     )
     baseline_stress = slice_backtest_result(baseline_stress_warm, holdout_start, window_days=10)
@@ -1591,13 +1601,22 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                         generation_id=expected_generation)
         db.commit()
         return result
-    path_fills = list(window_fills.get(max(window_fills)) or [])
-    path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
     market_ctx = _load_market_ctx(db, market_generation)
-    path_rows, path_meta = prepare_refined_price_path(
-        db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
-        market_ctx=market_ctx, immutable_market_ctx=bool(market_generation),
-    )
+    if formation_admission:
+        # Formation first searches the return/capacity surface from target fills. Replaying hundreds of
+        # thousands of candles inside every grid point does not improve the optimizer's ranking; the caller
+        # runs one path-complete 30-day Copy validation after parameters and membership are fixed.
+        path_rows, path_meta = None, {}
+    else:
+        path_fills = list(window_fills.get(max(window_fills)) or [])
+        path_start = now_ms - (
+            max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+        ) * 86_400_000
+        path_rows, path_meta = prepare_refined_price_path(
+            db, path_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
+            market_ctx=market_ctx, immutable_market_ctx=bool(market_generation),
+        )
+        path_rows = prepare_price_path(path_rows)
     # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
     # for a full leverage Cartesian grid.
