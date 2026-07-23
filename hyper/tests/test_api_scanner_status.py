@@ -10,14 +10,17 @@ from dashboard.api import discovery as api_discovery
 from hyper import params, storage
 
 
-class DiscoveryGuardedDb:
+class CompactDiscoveryDb:
+    """Reject the retired full-table aggregations from the polling endpoint."""
+
     def __init__(self, db):
         self.db = db
 
     def execute(self, sql, args=()):
-        normalized = " ".join(sql.split())
-        if normalized == "SELECT score FROM profile WHERE score IS NOT NULL AND score>0":
-            raise AssertionError("discovery histogram should aggregate score bins in SQL, not fetch every score")
+        normalized = " ".join(sql.lower().split())
+        forbidden = ("pipeline_audit", "status='rejected'", "score*?")
+        if any(token in normalized for token in forbidden):
+            raise AssertionError(f"retired discovery aggregation: {normalized}")
         return self.db.execute(sql, args)
 
 
@@ -89,7 +92,7 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertTrue(callable(api_discovery.ep_score_dist))
         self.assertTrue(callable(api_discovery.ep_pipeline_summary))
 
-    def test_discovery_score_histogram_aggregates_bins_in_sql(self):
+    def test_discovery_returns_only_the_compact_funnel_contract(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
@@ -102,14 +105,19 @@ class ApiScannerStatusTests(unittest.TestCase):
             db.execute("INSERT INTO watchlist (rank,addr,score,updated_at) VALUES (1,'0x2',0.50,'now')")
             db.commit()
 
-            res = api_discovery.ep_discovery(DiscoveryGuardedDb(db))
+            res = api_discovery.ep_discovery(CompactDiscoveryDb(db))
 
-        bins = res["scoreHistogram"]["bins"]
-        self.assertEqual(sum(bins), 3)
-        self.assertEqual(bins[0], 1)
-        self.assertEqual(bins[8], 1)
-        self.assertEqual(bins[15], 1)
-        self.assertNotIn("followLineBinIndex", res["scoreHistogram"])
+        self.assertEqual(
+            set(res["funnel"]),
+            {"leaderboard", "candidates", "perpPrefilter", "challenger",
+             "core", "finalCore", "watchlist"},
+        )
+        self.assertEqual(res["funnel"]["leaderboard"], 1)
+        self.assertEqual(res["funnel"]["candidates"], 1)
+        self.assertNotIn("funnelStages", res)
+        self.assertNotIn("failureCategories", res)
+        self.assertNotIn("rejectReasons", res)
+        self.assertNotIn("scoreHistogram", res)
 
     def test_scan_runs_exposes_profiled_count_not_legacy_probed_new_name(self):
         with tempfile.TemporaryDirectory() as td:

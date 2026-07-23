@@ -113,48 +113,6 @@ class PipelineAuditTests(unittest.TestCase):
         self.assertEqual(rejected["reason"], "copy_bt_loss")
         self.assertEqual(json.loads(rejected["payload_json"])["copyBt"]["14dNetPnl"], -120)
 
-    def test_funnel_audit_separates_failure_categories_and_economic_roles(self):
-        db = self._db()
-        stamp = "2026-07-07T00:00:00Z"
-        events = (
-            ("official_roi", "rejected", "week_volume_below_floor", {"count": 7}),
-            ("perp_prefilter", "rejected", "month_perp_not_profitable", {}),
-            ("profile", "rejected", "grid_dca", {
-                "followEligibility": {"role": "rejected"},
-                "decisionAudit": {"stage": "structure_filter", "failureCategory": "business_reject"},
-            }),
-            ("profile", "rejected", "research_copy_positive", {
-                "followEligibility": {"role": "research", "status": "research_copy_positive"},
-                "decisionAudit": {"stage": "copy_qualification", "failureCategory": "business_reject"},
-            }),
-            ("profile", "active", "ok", {
-                "followEligibility": {"role": "challenger", "status": "challenger_return_watch"},
-                "decisionAudit": {"stage": "copy_qualification", "failureCategory": "soft_retention_failure"},
-            }),
-            ("profile", "active", "ok", {
-                "followEligibility": {"role": "core_eligible", "status": "core_eligible"},
-                "decisionAudit": {"stage": "personal_core", "failureCategory": "passed"},
-            }),
-            ("selection", "challenger", "portfolio_not_selected", {}),
-        )
-        for stage, status, reason, payload in events:
-            pipeline_audit._insert_event(
-                db, stamp=stamp, source="scan", stage=stage,
-                status=status, reason=reason, payload=payload,
-            )
-        db.commit()
-
-        roles, reasons, categories, structure_passed = api_discovery._latest_funnel_audit(db, stamp)
-
-        self.assertEqual(roles["research"], 1)
-        self.assertEqual(roles["challenger"], 1)
-        self.assertEqual(roles["core_eligible"], 1)
-        self.assertEqual(structure_passed, 3)
-        self.assertEqual(reasons["structure"][0]["reason"], "grid_dca")
-        self.assertEqual(reasons["challenger"][0]["reason"], "research_copy_positive")
-        self.assertEqual(reasons["personalCore"][0]["category"], "soft_retention_failure")
-        self.assertIn("business_reject", {row["category"] for row in categories})
-
     def test_refresh_watchlist_does_not_publish_legacy_score_line_membership(self):
         db = self._db()
         params.seed_params(db)

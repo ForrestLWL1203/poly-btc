@@ -490,23 +490,6 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .funnel-complete { gap: 8px; overflow-x: auto; padding-bottom: 4px; }
 .funnel-complete .funnel-stage { min-width: 104px; padding: 14px 8px; }
 .funnel-complete .funnel-stage .fn { font-size: 22px; }
-.failure-legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
-.failure-tag { font-size: 11px; border-radius: 999px; padding: 4px 8px; background: rgba(255,255,255,.05); color: var(--t2); }
-.failure-tag.data_error, .reason-dot.data_error { color: var(--blue-l); }
-.failure-tag.business_reject, .reason-dot.business_reject { color: var(--t2); }
-.failure-tag.soft_retention_failure, .reason-dot.soft_retention_failure { color: var(--amber); }
-.failure-tag.hard_risk_exit, .reason-dot.hard_risk_exit { color: var(--red-l); }
-.funnel-reasons { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: 10px; margin-top: 14px; }
-.funnel-reason-stage { display: flex; flex-direction: column; gap: 5px; padding: 10px; border-radius: 10px; background: rgba(255,255,255,.025); min-width: 0; }
-.funnel-reason-stage b { font-size: 12px; color: var(--t1); }
-.funnel-reason-stage span { font-size: 11px; color: var(--t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reason-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; background: currentColor; }
-
-.histo { display: flex; align-items: flex-end; gap: 4px; height: 150px; padding-top: 10px; position: relative; }
-.histo .hb { flex: 1; background: linear-gradient(180deg, var(--accent), rgba(255,61,46,.5)); border-radius: 4px 4px 0 0; min-height: 2px; }
-.histo .hb.below { background: rgba(255,255,255,.1); }
-.histo-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--green); }
-.histo-line .lbl { position: absolute; top: -2px; left: 6px; font-size: 10px; color: var(--green-l); white-space: nowrap; }
 /* ---------- scan mask ---------- */
 .mask { position: fixed; inset: 0; z-index: 60; background: rgba(8,8,10,.86); backdrop-filter: blur(8px);
   display: flex; flex-direction: column; align-items: center; justify-content: center; animation: fade .3s; }
@@ -789,8 +772,6 @@ th.sortable:hover .sort-ind { opacity: .85; }
   .bar-row .bv { width: 48px; }
   .funnel { flex-direction: column; }
   .funnel-arrow { justify-content: center; transform: rotate(90deg); height: 10px; }
-  .histo { height: 120px; }
-
   .tabs {
     overflow-x: auto;
     overflow-y: hidden;

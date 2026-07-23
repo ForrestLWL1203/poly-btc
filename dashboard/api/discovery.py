@@ -2,7 +2,6 @@
 
 import json
 import time
-from collections import Counter
 
 from .common import iso_epoch, q1, qall, score100
 
@@ -58,132 +57,18 @@ def followed_count(db, line=None):
     return (r["cnt"] if r else 0)
 
 
-# gate reason -> the 4 UI buckets (kept here so it's tweakable in one place)
-_REJECT_BUCKETS = [
-    ("样本 / 开仓活跃不足", {
-        "inactive", "inactive_copyable_open", "thin_independent_evidence",
-        "normalized_evidence_missing", "no_copy_evidence", "low_quality",
-    }),
-    ("净Edge不足 / 近期亏损", {
-        "thin_edge", "thin_copy_edge", "recent_copy_loss", "copy_return_lcb_low",
-        "positive_probability_low", "not_profitable", "copy_value_below_challenger_floor",
-        "copy_recent_value_below_challenger_floor", "recent_copy_collapse",
-    }),
-    ("执行结构 / 容量不可跟", {
-        "spot_dominant", "bot_frequency", "hft_uncopyable", "hft_turnover", "grid_dca",
-        "heavy_dca", "too_many_concurrent", "low_fill_rate", "capacity_fit_low",
-    }),
-    ("爆仓 / 灾难风险", {"blowup_loss", "copy_liquidation"}),
-]
-
-
-def _audit_count(row, payload):
-    try:
-        return max(0, int((payload or {}).get("count", 1)))
-    except (TypeError, ValueError):
-        return 1
-
-
-def _reason_category(reason, status="", payload=None):
-    decision = (payload or {}).get("decisionAudit") or {}
-    if decision.get("failureCategory"):
-        return decision["failureCategory"]
-    value = str(reason or "unknown").lower()
-    state = str(status or "").lower()
-    if state in {"deferred_data_error", "quarantine"} or any(
-            token in value for token in ("unavailable", "data_error", "invalid", "missing_path")):
-        return "data_error"
-    if any(token in value for token in (
-        "deep_loss", "liquidation", "recent_copy_collapse", "high_water", "cost_stress_weak",
-        "campaign_tail_weak",
-    )):
-        return "hard_risk_exit"
-    if value.startswith("challenger_"):
-        return "soft_retention_failure"
-    return "business_reject"
-
-
-def _latest_funnel_audit(db, stamp):
-    """Return stage-local top reasons and role counts for the latest complete decision."""
-    if not stamp:
-        return {}, {}, [], 0
-    roles = Counter()
-    structure_passed = 0
-    reason_counts = {}
-    category_counts = Counter()
-    rows = _dict_rows(db.execute(
-        "SELECT stage,status,reason,payload_json FROM pipeline_audit "
-        "WHERE stamp=? AND source='scan' "
-        "AND stage IN ('official_roi','perp_prefilter','profile','selection')",
-        (stamp,),
-    ))
-    for row in rows:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except (TypeError, ValueError):
-            payload = {}
-        stage = row["stage"]
-        status = row["status"] or "unknown"
-        reason = row["reason"] or "unknown"
-        count = _audit_count(row, payload)
-        reason_stage = stage
-        if stage == "profile":
-            qualification = payload.get("followEligibility") or {}
-            role = qualification.get("role")
-            decision = payload.get("decisionAudit") or {}
-            if decision.get("stage") == "structure_filter":
-                reason_stage = "structure"
-            elif role == "research":
-                reason_stage = "challenger"
-            elif role == "challenger":
-                reason_stage = "personalCore"
-            elif role in {"rejected", "quarantine", "exit_only"}:
-                reason_stage = "personalCore" if qualification.get("hardRisk") else "research"
-        elif stage == "selection":
-            reason_stage = "finalCore"
-        failed = status not in {"passed", "active", "qualified", "core", "core_eligible"}
-        if stage == "profile":
-            failed = role != "core_eligible"
-        if failed:
-            category = _reason_category(reason, status, payload)
-            reason_counts.setdefault(reason_stage, Counter())[(reason, category)] += count
-            category_counts[category] += count
-        if stage == "profile":
-            role = qualification.get("role")
-            if role:
-                roles[role] += count
-            if decision.get("stage") not in {"data_validation", "structure_filter"}:
-                structure_passed += count
-    top_reasons = {
-        stage: [
-            {"reason": reason, "category": category, "count": count}
-            for (reason, category), count in counts.most_common(5)
-        ]
-        for stage, counts in reason_counts.items()
-    }
-    categories = [
-        {"category": key, "count": value}
-        for key, value in category_counts.most_common()
-    ]
-    return dict(roles), top_reasons, categories, structure_passed
-
-
 def ep_discovery(db):
     leaderboard = (q1(db, "SELECT COUNT(*) c FROM leaderboard") or {"c": 0})["c"]
     candidates = (q1(db, "SELECT COUNT(*) c FROM leaderboard WHERE is_candidate=1") or {"c": 0})["c"]
-    active = (q1(db, "SELECT COUNT(*) c FROM profile WHERE status='active'") or {"c": 0})["c"]
     watchlist = followed_count(db)
     generation = q1(
         db,
-        "SELECT generation,published_at,leaderboard_valid,profile_complete,workset_mode,fill_mode,"
-        "workset_n,deferred_n,metrics_json FROM scan_generation "
+        "SELECT generation,metrics_json FROM scan_generation "
         "WHERE status='published' AND complete=1 AND is_current=1 ORDER BY id DESC LIMIT 1",
     )
-    qualified = active
     challenger = 0
     core = watchlist
-    generation_out = None
-    audit_stamp = None
+    performance = {}
     if generation:
         roles = qall(
             db,
@@ -193,91 +78,22 @@ def ep_discovery(db):
         role_counts = {r["role"]: r["n"] for r in roles}
         challenger = role_counts.get("challenger", 0)
         core = role_counts.get("core", 0)
-        qualified_row = q1(
-            db,
-            "SELECT COUNT(*) c FROM profile WHERE profile_generation=? AND data_status='valid'",
-            (generation["generation"],),
-        )
-        qualified = (qualified_row["c"] if qualified_row else 0) or 0
         try:
-            perf = json.loads(generation["metrics_json"] or "{}")
+            performance = json.loads(generation["metrics_json"] or "{}")
         except (TypeError, ValueError):
-            perf = {}
-        generation_out = {
-            "generation": generation["generation"],
-            "publishedAt": generation["published_at"],
-            "leaderboardValid": bool(generation["leaderboard_valid"]),
-            "profileComplete": bool(generation["profile_complete"]),
-            "worksetMode": generation["workset_mode"],
-            "fillMode": generation["fill_mode"],
-            "profiled": generation["workset_n"] or 0,
-            "deferred": generation["deferred_n"] or 0,
-            "performance": perf,
-        }
-        audit_row = q1(
-            db,
-            "SELECT stamp FROM pipeline_audit WHERE source='scan' AND stage='selection_summary' "
-            "ORDER BY id DESC LIMIT 1",
-        )
-        audit_stamp = audit_row["stamp"] if audit_row else None
-    audit_roles, stage_reasons, category_counts, structure_passed = _latest_funnel_audit(
-        db, audit_stamp,
-    ) if audit_stamp else ({}, {}, [], 0)
-    research = sum(audit_roles.get(role, 0) for role in ("research", "challenger", "core_eligible"))
-    challenger_evidence = sum(audit_roles.get(role, 0) for role in ("challenger", "core_eligible"))
-    personal_core = audit_roles.get("core_eligible", 0)
-    reason_rows = qall(db, "SELECT reason,COUNT(*) n FROM profile WHERE status='rejected' GROUP BY reason")
-    counts = {row["reason"]: row["n"] for row in reason_rows}
-    total_rej = sum(counts.values()) or 0
-    buckets, used = [], set()
-    for label, keys in _REJECT_BUCKETS:
-        n = sum(counts.get(k, 0) for k in keys)
-        used |= keys
-        buckets.append([label, n])
-    other = sum(v for k, v in counts.items() if k not in used)
-    buckets.append(["其他", other])
-    reject_reasons = [{"label": lbl, "pct": round(n / total_rej * 100) if total_rej else 0}
-                      for lbl, n in buckets]
-
-    nbins = 16
-    bins = [0] * nbins
-    for row in qall(db,
-        "SELECT CASE WHEN score*?>=? THEN ? ELSE CAST(score*? AS INTEGER) END idx,COUNT(*) n "
-        "FROM profile WHERE score IS NOT NULL AND score>0 GROUP BY idx",
-        (nbins, nbins - 1, nbins - 1, nbins)):
-        idx = int(row["idx"])
-        if 0 <= idx < nbins:
-            bins[idx] = row["n"]
+            performance = {}
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
-    funnel = {"leaderboard": leaderboard, "candidates": candidates, "qualified": qualified,
-                        "officialRoi": (generation_out or {}).get("performance", {}).get("officialRoiPassed", candidates),
-                        "perpPrefilter": (generation_out or {}).get("performance", {}).get("perpPrefilterPassed", candidates),
-                        "structureFilter": structure_passed,
-                        "research": research, "challengerEvidence": challenger_evidence,
-                        "personalCore": personal_core,
-                        "challenger": challenger, "core": core, "finalCore": core,
-                        "active": active, "watchlist": watchlist}
-    stage_values = (
-        ("leaderboard", "Leaderboard", funnel["leaderboard"], []),
-        ("coarse", "粗筛", funnel["candidates"], stage_reasons.get("official_roi", [])),
-        ("perp", "Perp预筛", funnel["perpPrefilter"], stage_reasons.get("perp_prefilter", [])),
-        ("structure", "结构过滤", funnel["structureFilter"], stage_reasons.get("structure", [])),
-        ("research", "Research", funnel["research"], stage_reasons.get("research", [])),
-        ("challenger", "Challenger", funnel["challengerEvidence"], stage_reasons.get("challenger", [])),
-        ("personalCore", "个人Core", funnel["personalCore"], stage_reasons.get("personalCore", [])),
-        ("finalCore", "最终Core", funnel["finalCore"], stage_reasons.get("finalCore", [])),
-    )
-    funnel_stages = [
-        {"key": key, "label": label, "count": count, "topReasons": reasons}
-        for key, label, count, reasons in stage_values
-    ]
+    funnel = {
+        "leaderboard": leaderboard,
+        "candidates": candidates,
+        "perpPrefilter": performance.get("perpPrefilterPassed", candidates),
+        "challenger": challenger,
+        "core": core,
+        "finalCore": core,
+        "watchlist": watchlist,
+    }
     return {"funnel": funnel,
-            "funnelStages": funnel_stages,
-            "failureCategories": category_counts,
-            "rejectReasons": reject_reasons,
-            "scoreHistogram": {"bins": bins},
             "scanner": scanner_status(db),
-            "generation": generation_out,
             "lastScanAt": (last_scan["m"] if last_scan else None)}
 
 

@@ -39,13 +39,7 @@ export function Discovery({ scanning, startRescan, confirm }) {
     <div className="content">
       <ScanControls busy={busy} doRescan={doRescan} />
       <ScanStatusCard discovery={d} scanning={scanning} />
-      <DiscoveryFunnel
-        funnel={d.funnel}
-        stages={d.funnelStages}
-        failureCategories={d.failureCategories}
-        scoreHistogram={d.scoreHistogram}
-        rejectReasons={d.rejectReasons}
-      />
+      <DiscoveryFunnel funnel={d.funnel} />
 
       <ScanHistoryTable runs={runs} />
     </div>
