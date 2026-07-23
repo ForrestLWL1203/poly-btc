@@ -91,6 +91,39 @@ class ScannerCopyBacktestSafetyTests(unittest.TestCase):
         self.assertEqual(windows[30]["closed_n"], 1)
         self.assertGreater(windows[30]["copy_net_pnl"], 0)
 
+    def test_recent_windows_keep_profit_compounded_before_their_boundary(self):
+        day = 86_400_000
+        now = 40 * day
+        addr = "0xabc"
+        fills = [
+            {"user": addr, "time": now - 29 * day, "tid": 1, "coin": "BTC", "side": "B",
+             "sz": "10000", "startPosition": "0", "px": "100", "oid": 1, "crossed": True},
+            {"user": addr, "time": now - 28 * day, "tid": 2, "coin": "BTC", "side": "A",
+             "sz": "10000", "startPosition": "10000", "px": "200", "oid": 2, "crossed": True},
+            {"user": addr, "time": now - 6 * day, "tid": 3, "coin": "ETH", "side": "B",
+             "sz": "10000", "startPosition": "0", "px": "100", "oid": 3, "crossed": True},
+            {"user": addr, "time": now - 5 * day, "tid": 4, "coin": "ETH", "side": "A",
+             "sz": "10000", "startPosition": "10000", "px": "110", "oid": 4, "crossed": True},
+        ]
+        p = self._params()
+        p.copy_bt_sigmas = {"BTC": .04, "ETH": .04}
+        p.copy_bt_overrides = {
+            "STABLE_MARGIN_PCT": .03,
+            "STABLE_MARGIN_MIN_PCT": .03,
+            "STABLE_LEV_CAP": 10,
+            "STABLE_MIN_NOTIONAL": 0.0,
+        }
+
+        with patch.object(
+            scanner_copy_bt, "run_backtest", wraps=scanner_copy_bt.run_backtest,
+        ) as replay:
+            windows = scanner_copy_bt.copy_bt_results(addr, fills, now, p)
+
+        self.assertEqual(replay.call_count, 1)
+        self.assertGreater(windows[7]["window_start_equity"], 10_000.0)
+        self.assertGreater(windows[7]["positions"][0]["margin"], 300.0)
+        self.assertEqual(windows[7]["target_open_events"], 1)
+
     def test_open_position_terminal_mark_is_included_in_every_economic_window(self):
         day = 86_400_000
         now = 40 * day

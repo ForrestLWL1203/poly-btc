@@ -109,6 +109,39 @@ class AutoTuneTests(unittest.TestCase):
         self.assertGreater(starts[2], starts[1])
         self.assertGreater(starts[3], starts[2])
 
+    def test_recent_tune_windows_slice_one_compounding_account(self):
+        day = 86_400_000
+
+        def row(user, stamp, coin, side, size, start, price, oid):
+            return {
+                "user": user, "time": stamp, "tid": stamp, "coin": coin,
+                "side": side, "sz": str(size), "startPosition": str(start),
+                "px": str(price), "oid": oid, "crossed": True,
+            }
+
+        fills = [
+            row("0xaaa", 1 * day, "BTC", "B", 10_000, 0, 100, 1),
+            row("0xaaa", 2 * day, "BTC", "A", 10_000, 10_000, 200, 2),
+            row("0xaaa", 25 * day, "ETH", "B", 10_000, 0, 100, 3),
+            row("0xaaa", 26 * day, "ETH", "A", 10_000, 10_000, 110, 4),
+        ]
+        overrides = {
+            "STABLE_MARGIN_PCT": .03,
+            "STABLE_MARGIN_MIN_PCT": .03,
+            "STABLE_LEV_CAP": 10,
+            "STABLE_MIN_NOTIONAL": 0.0,
+        }
+        windows = auto_tune._candidate_windows(
+            None, ["0xaaa"], {"BTC": .04, "ETH": .04}, overrides, 30 * day,
+            window_fills={30: fills, 14: fills[2:], 7: fills[2:]},
+            market_ctx={},
+        )
+
+        self.assertGreater(windows[7]["window_start_equity"], 10_000.0)
+        self.assertGreater(windows[7]["positions"][0]["margin"], 300.0)
+        self.assertEqual(windows[7]["target_open_events"], 1)
+        self.assertEqual(windows[7]["continuous_replay_days"], 30)
+
     def test_candidate_can_improve_a_baseline_already_below_absolute_open_floor(self):
         baseline = {
             "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},

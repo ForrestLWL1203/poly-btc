@@ -117,6 +117,9 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   tolerated only at the coarse-harvest layer.
 - A fresh candidate profile fetch covers `PROFILE_FETCH_DAYS` (currently 37 days: 30-day scoring window plus
   seven warm-up days). Reported copy evidence remains 30/14/7 days.
+- Canonical 30/14/7 Copy evidence is one 37-day warm replay sliced at each reporting boundary, never three
+  independently funded accounts. Timestamped open, capacity-block, add and deploy evidence is sliced with the
+  same continuous capital path, so recent-window congestion uses the equity actually banked before that window.
 - With no published generation, every scan request is forcibly upgraded to `cold_full`: it harvests a new
   Leaderboard, profiles the complete candidate workset, bootstraps each new wallet's 37-day history, and
   rebuilds sector specialization.

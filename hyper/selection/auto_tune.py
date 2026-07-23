@@ -276,20 +276,32 @@ def _candidate_execution_priority(candidate: dict) -> tuple:
 def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     windows = candidate.get("windows") or {}
     weighted_net = _candidate_score(candidate)
-    max_drawdown = max(
-        (float(result.get("max_drawdown") or 0.0) for result in windows.values()),
+    drawdown_dollars = max(
+        (
+            float(result.get("max_drawdown") or 0.0)
+            * float(
+                result.get("window_start_equity")
+                or result.get("initial_margin_equity")
+                or config.INITIAL_BALANCE
+            )
+            for result in windows.values()
+        ),
         default=0.0,
     )
-    # Compare profit and drawdown in the same dollars. A profitable candidate
-    # is not rejected merely because drawdown rises by an arbitrary percentage
-    # point; the extra downside must be paid for by extra net profit.
-    risk_adjusted_utility = weighted_net - max_drawdown * float(config.INITIAL_BALANCE)
+    # Compare profit and drawdown in the same dollars on the capital that actually entered each continuous
+    # slice.  Multiplying every later drawdown by the original $10k underprices risk after compounding.
+    risk_adjusted_utility = weighted_net - drawdown_dollars
     liquidations = _candidate_liquidations(candidate)
     primary = windows.get(30) or (windows.get(max(windows)) if windows else {})
     primary_net = _result_pnl(primary)
+    primary_equity = float(
+        primary.get("window_start_equity")
+        or primary.get("initial_margin_equity")
+        or config.INITIAL_BALANCE
+    )
     liquidation_penalty = (
         liquidations
-        * float(config.INITIAL_BALANCE)
+        * primary_equity
         * float(getattr(config, "AUTO_TUNE_LIQUIDATION_PENALTY_PCT", 0.05))
     )
     risk_ordered_net = weighted_net - liquidation_penalty
@@ -828,30 +840,45 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
                        window_fills: dict[int, list[dict]] | None = None,
                        market_ctx: dict | None = None, path_rows: list[dict] | None = None,
                        path_meta: dict | None = None) -> dict:
+    """Return 30/14/7 views sliced from one continuously compounding account.
+
+    Replaying every window independently reset the recent views to ``INITIAL_BALANCE``.  A strategy that had
+    already grown to $30k could therefore be rejected as congested by a synthetic $10k 14-day account.  Run
+    the longest warm surface once; ``slice_backtest_result`` now slices both economics and timestamped
+    open/capacity outcomes without changing historical position sizes.
+    """
     market_ctx = _load_market_ctx(db) if market_ctx is None else market_ctx
-    windows = {}
-    for days in _tune_days():
-        fills = list((window_fills or {}).get(days) or [])
-        if window_fills is None:
-            start_ms = now_ms - int(days) * 86400_000
-            fills = _load_portfolio_fills(db, addrs, start_ms)
-        replay_path = path_rows
-        if path_rows and fills:
-            first_fill = min(int(row.get("time") or 0) for row in fills)
-            last_fill = max(int(row.get("time") or 0) for row in fills)
-            replay_path = subset_price_path(
-                path_rows, fills, start_ms=first_fill, end_ms=last_fill,
-            )
-        warm_result = run_backtest(
-            "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {},
-            price_path=replay_path, price_path_meta=path_meta,
+    days_values = _tune_days()
+    max_days = max(days_values)
+    fills = list((window_fills or {}).get(max_days) or [])
+    if window_fills is None:
+        warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+        fills = _load_portfolio_fills(
+            db, addrs, now_ms - (max_days + warmup_days) * 86_400_000,
         )
+    replay_path = path_rows
+    if path_rows and fills:
+        first_fill = min(int(row.get("time") or 0) for row in fills)
+        last_fill = max(int(row.get("time") or 0) for row in fills)
+        replay_path = subset_price_path(
+            path_rows, fills, start_ms=first_fill, end_ms=last_fill,
+        )
+    warm_result = run_backtest(
+        "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {},
+        price_path=replay_path, price_path_meta=path_meta,
+    )
+    windows = {}
+    for days in days_values:
         result = slice_backtest_result(
             warm_result,
             now_ms - int(days) * 86_400_000,
             window_days=int(days),
         )
-        result["fills"] = len(fills)
+        result["fills"] = sum(
+            int(row.get("time") or 0) >= now_ms - int(days) * 86_400_000
+            for row in fills
+        )
+        result["continuous_replay_days"] = int(max_days)
         windows[int(days)] = result
     return windows
 
@@ -1111,7 +1138,7 @@ def _compact_backtest(result: dict) -> dict:
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
         "ambiguous_liquidations", "price_path_boundary_skips",
-        "weekly_stability",
+        "weekly_stability", "continuous_replay_days",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}

@@ -166,32 +166,14 @@ def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None,
 
     out = {}
     for days in days_list:
-        direct = copy_bt_result(
-            addr, fills, now_ms, p, days=days, valuation_marks=valuation_marks,
-            sigmas=sigmas, market_ctx=market_ctx,
-        )
         sliced = slice_backtest_result(
             warm,
             now_ms - int(days) * 86_400_000,
             window_days=int(days),
         )
-        # Activity/fillability belongs to the requested window. PnL and samples
-        # come from the warm replay so boundary-spanning positions are retained.
-        for key in (
-            "target_open_events", "opened_n", "open_fill_rate", "actionable_open_rate",
-            "execution_fill_rate", "capacity_open_fit", "target_adds", "followed_adds",
-            "missed_adds", "missed_add_rate", "skip_reasons", "add_metrics_version",
-            "add_outcome_counts", "raw_add_order_follow_rate", "noise_merged_adds",
-            "blocked_adds", "actionable_add_orders", "actionable_add_capture_rate",
-            "true_blocked_add_rate", "add_episode_count", "entry_gap_sigma_weighted",
-            "entry_gap_sigma_p90", "entry_gap_pct_weighted", "entry_gap_pct_p90",
-            "entry_gap_sigma_samples", "entry_gap_pct_samples", "entry_gap_weight",
-            "entry_gap_sigma_weighted_sum", "entry_gap_pct_weighted_sum",
-            "entry_alignment", "add_execution", "add_fidelity", "add_fidelity_applied",
-            "effective_add_fidelity",
-        ):
-            if key in direct:
-                sliced[key] = direct[key]
+        # Economics, opens, capacity blocks and add outcomes all come from this one warm continuous account.
+        # The previous "direct" recent replay restarted $10k for 14d/7d and overwrote the correct sliced
+        # execution evidence, falsely reporting congestion after earlier profits had already grown capital.
         open_rate = float(sliced.get("actionable_open_rate") or 0.0)
         if sliced.get("actionable_open_rate") is None:
             open_rate = 1.0
@@ -204,8 +186,8 @@ def copy_bt_results(addr, fills, now_ms, p, *, valuation_marks=None,
         behavior_v2 = max(0.0, min(1.0, open_rate * path_rate * add_fidelity))
         sliced["behavior_replication_rate"] = behavior_v2
         sliced["behavior_replication_v2"] = behavior_v2
-        sliced["valid"] = bool(direct.get("valid", True))
-        sliced["data_status"] = direct.get("data_status", "valid")
+        sliced["valid"] = bool(warm.get("valid", True))
+        sliced["data_status"] = warm.get("data_status", "valid")
         sliced["has_evidence"] = bool(
             int(sliced.get("target_open_events") or 0)
             or int(sliced.get("closed_n") or 0)

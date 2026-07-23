@@ -507,10 +507,17 @@ class Backtest:
         self.copy_peak_concurrent = 0
         self.target_open_events = 0
         self.opened_n = 0
+        # Keep the timestamped outcome of every target flat->open/flip.  Aggregate counters alone cannot be
+        # sliced into recent windows: a 30-day compounding replay used to leak its whole-period open/capacity
+        # rates into 14/7-day views, while replaying those windows independently incorrectly reset capital to
+        # $10k.  The event stream lets recent diagnostics preserve the one real capital path.
+        self.open_events = []
         self.followed_adds = 0
         self.missed_adds = 0
         self.target_adds = 0
         self.add_outcome_counts = Counter()
+        self.add_events = []
+        self.add_event_by_order = {}
         self.fee_drag = 0.0
         self.gross_pnl = 0.0
         self.stable_sigma_max = overrides.get("STABLE_SIGMA_MAX", config.STABLE_SIGMA_MAX)
@@ -873,7 +880,7 @@ class Backtest:
         ep = self.open.get(key)
         if ep is None:
             if transition in ("open", "flip") and abs(pos1) >= config.FLAT:
-                self._open_position(addr, coin, x.get("time"), px, pos1, oid, x)
+                self._attempt_open(addr, coin, x.get("time"), px, pos1, oid, x)
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
@@ -883,7 +890,7 @@ class Backtest:
         if transition == "flip":
             ep["master_peak"] = max(ep["master_peak"], abs(pos0))
             self._apply_reduce(addr, coin, px, -pos0, 0.0, closing=True, t=x.get("time"))
-            self._open_position(addr, coin, x.get("time"), px, pos1, oid, x)
+            self._attempt_open(addr, coin, x.get("time"), px, pos1, oid, x)
             return
 
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
@@ -900,6 +907,21 @@ class Backtest:
                 ep["seen_oids"].add(oid)
         else:
             self._apply_reduce(addr, coin, px, signed, pos1, closing=abs(pos1) < config.FLAT, t=x.get("time"))
+
+    def _attempt_open(self, addr, coin, t, px, pos1, oid, fill=None):
+        """Open once and retain the time-local outcome for continuous-window slicing."""
+        opened_before = self.opened_n
+        skips_before = Counter(self.skip_reasons)
+        self._open_position(addr, coin, t, px, pos1, oid, fill)
+        if self.opened_n > opened_before:
+            outcome = "opened"
+        else:
+            changed = [
+                key for key, value in self.skip_reasons.items()
+                if int(value) > int(skips_before.get(key, 0))
+            ]
+            outcome = changed[-1] if changed else "skip_unknown_open"
+        self.open_events.append({"time": int(f(t)), "outcome": outcome})
 
     def process_price(self, x, *, has_fill_events=None):
         coin = x.get("coin")
@@ -1092,7 +1114,7 @@ class Backtest:
         self.copy_peak_concurrent = max(self.copy_peak_concurrent, len(self.open))
         self._sample_deploy(t)
 
-    def _record_add_outcome(self, ep, oid, outcome):
+    def _record_add_outcome(self, ep, oid, outcome, *, t=None):
         """Assign one final outcome to a distinct target add order.
 
         A same-oid order can first look like noise and become actionable after later fill slices move its
@@ -1124,10 +1146,29 @@ class Backtest:
         else:
             ep["missed_adds"] += 1
             self.missed_adds += 1
+        event_key = None
+        if oid is not None:
+            event_key = (
+                str(ep.get("addr") or "").lower(),
+                str(ep.get("coin") or ""),
+                str(oid),
+            )
+        event = self.add_event_by_order.get(event_key) if event_key is not None else None
+        if event is None:
+            event = {"time": int(f(t)), "outcome": outcome}
+            self.add_events.append(event)
+            if event_key is not None:
+                self.add_event_by_order[event_key] = event
+        else:
+            # A later slice of the same target order may turn initial noise into one followed add.  Attribute
+            # the final decision to the latest decisive slice so a recent-window view does not inherit an old
+            # classification or count the same order twice.
+            event["time"] = int(f(t))
+            event["outcome"] = outcome
         return outcome == "followed"
 
-    def _observe_add(self, ep, oid=None, reason="noise_merged"):
-        self._record_add_outcome(ep, oid, reason)
+    def _observe_add(self, ep, oid=None, reason="noise_merged", *, t=None):
+        self._record_add_outcome(ep, oid, reason, t=t)
         return False
 
     def _apply_add(self, addr, coin, px, signed, pos1, oid, t=None):
@@ -1164,13 +1205,13 @@ class Backtest:
 
         if self._liquidation_freeze_active(addr, coin, t):
             self.skip_reasons["skip_liquidation_cooldown_add"] += 1
-            return self._observe_add(ep, oid, "liquidation_cooldown_blocked")
+            return self._observe_add(ep, oid, "liquidation_cooldown_blocked", t=t)
 
         # Once our first proactive profit cut has executed, the released exposure stays released.  Target
         # re-adds are observed for source state but never rebuild the protected position.
         if self.smart_tp_enable and int(ep.get("smart_tp_stage") or 0) > 0:
             self.skip_reasons["skip_smart_tp_readd"] += 1
-            return self._observe_add(ep, oid, "noise_merged")
+            return self._observe_add(ep, oid, "noise_merged", t=t)
 
         sigma = self.sigma(coin)
         tier = self.tier(sigma, coin)
@@ -1199,7 +1240,7 @@ class Backtest:
         )
         coin_room = max(0.0, self.coin_cap_pct(tier) * risk_equity - existing)
         if self.liquidity_block_reason(coin):
-            return self._observe_add(ep, oid, "liquidity_blocked")
+            return self._observe_add(ep, oid, "liquidity_blocked", t=t)
         if self.add_strategy == "smart":
             last = ep.get("last_target_add_px") or ep["master_open_px"]
             adv = (((last - decision_px) if is_buy else (decision_px - last)) / last) if last else 0.0
@@ -1214,9 +1255,9 @@ class Backtest:
                 elif adv < 0 and self.follow_pos_add and abs(adv) >= pos_threshold:
                     pass
                 else:
-                    return self._observe_add(ep, oid, "noise_merged")
+                    return self._observe_add(ep, oid, "noise_merged", t=t)
                 if ep["add_count"] >= self.add_max_hard:
-                    return self._observe_add(ep, oid, "hard_cap_blocked")
+                    return self._observe_add(ep, oid, "hard_cap_blocked", t=t)
             ratio = target_order_notl / ep["master_first_notl"] if ep["master_first_notl"] else self.add_frac
             followed_margin = order["followed_margin"] if order else 0.0
             desired_remaining = max(
@@ -1247,11 +1288,11 @@ class Backtest:
                     reason = "cash_blocked"
                 else:
                     reason = "min_margin_blocked"
-                return self._observe_add(ep, oid, reason)
+                return self._observe_add(ep, oid, reason, t=t)
         else:
             max_adds = self.tier_max_adds[tier]
             if ep["add_count"] >= max_adds:
-                return self._observe_add(ep, oid, "hard_cap_blocked")
+                return self._observe_add(ep, oid, "hard_cap_blocked", t=t)
             add_margin = max(0.0, min(
                 ep["first_margin"] * self.add_frac,
                 coin_room,
@@ -1267,7 +1308,7 @@ class Backtest:
                     reason = "wallet_cap_blocked"
                 else:
                     reason = "coin_cap_blocked" if coin_room <= risk_available else "cash_blocked"
-                return self._observe_add(ep, oid, reason)
+                return self._observe_add(ep, oid, reason, t=t)
 
         add_size = (add_margin * ep["leverage"] / px) if px else 0.0
         new_size = ep["rem_size"] + add_size
@@ -1284,7 +1325,7 @@ class Backtest:
         first_copy_for_order = not (order and order["counted"])
         if first_copy_for_order:
             ep["add_count"] += 1
-            self._record_add_outcome(ep, oid, "followed")
+            self._record_add_outcome(ep, oid, "followed", t=t)
         ep["last_target_add_px"] = decision_px
         ep["reduce_anchor"] = None
         # A followed add changes both size and average entry.  Before the first proactive cut it starts a
@@ -1655,8 +1696,10 @@ class Backtest:
             "valuation_missing_coins": sorted(set(missing_mark_coins)),
             "valuation_asof_ms": self.valuation_asof_ms,
             "fee_drag": self.fee_drag,
+            "add_events": list(self.add_events),
             "target_open_events": self.target_open_events,
             "opened_n": self.opened_n,
+            "open_events": list(self.open_events),
             "open_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
             "add_dependency": add_notl / initial_notl if initial_notl else 0.0,
             "target_peak_concurrent": self.target_peak_concurrent,
@@ -1674,6 +1717,10 @@ class Backtest:
             "cvar95": cvar95,
             "peak_deploy_pct": peak_deploy_pct,
             "avg_deploy_pct": avg_deploy_pct,
+            "deploy_samples": [
+                {"time": int(stamp), "pct": float(value)}
+                for stamp, value in self.deploy_samples
+            ],
             "fee_slippage_drag": self.fee_drag,
             "pnl_concentration": {
                 "wallet": concentration(lambda p: p.get("addr")),
@@ -1807,10 +1854,64 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     tail_profit_closes = sum(1 for position in positions if position.get("status") == "tail_closed")
     natural_closes = max(0, len(positions) - liquidations)
     path_completion_rate = natural_closes / len(positions) if positions else 1.0
-    open_rate = f(out.get("actionable_open_rate")) if out.get("actionable_open_rate") is not None else 1.0
+    all_open_events = list(out.get("open_events") or ())
+    window_open_events = [
+        dict(event) for event in all_open_events
+        if int(event.get("time") or 0) >= int(start_ms)
+    ]
+    if all_open_events:
+        opened_n = sum(event.get("outcome") == "opened" for event in window_open_events)
+        target_open_events = len(window_open_events)
+        open_rate = opened_n / target_open_events if target_open_events else 1.0
+        capacity_outcomes = {
+            "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
+            "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
+            "skip_wallet_stock_side_position_cap",
+        }
+        capacity_skips = sum(
+            event.get("outcome") in capacity_outcomes for event in window_open_events
+        )
+        capacity_fit = (
+            opened_n / (opened_n + capacity_skips)
+            if (opened_n + capacity_skips) else 1.0
+        )
+        sliced_skip_reasons = dict(out.get("skip_reasons") or {})
+        logged_outcomes = {
+            str(event.get("outcome") or "")
+            for event in all_open_events
+            if event.get("outcome") != "opened"
+        }
+        window_outcomes = Counter(
+            str(event.get("outcome") or "")
+            for event in window_open_events
+            if event.get("outcome") != "opened"
+        )
+        for outcome in logged_outcomes:
+            sliced_skip_reasons[outcome] = int(window_outcomes.get(outcome, 0))
+    else:
+        opened_n = int(out.get("opened_n") or 0)
+        target_open_events = int(out.get("target_open_events") or 0)
+        open_rate = (
+            f(out.get("actionable_open_rate"))
+            if out.get("actionable_open_rate") is not None else 1.0
+        )
+        capacity_fit = (
+            f(out.get("capacity_open_fit"))
+            if out.get("capacity_open_fit") is not None else open_rate
+        )
+        sliced_skip_reasons = dict(out.get("skip_reasons") or {})
+    all_add_events = list(out.get("add_events") or ())
+    window_add_events = [
+        dict(event) for event in all_add_events
+        if int(event.get("time") or 0) >= int(start_ms)
+    ]
+    window_add_counts = (
+        Counter(str(event.get("outcome") or "") for event in window_add_events)
+        if all_add_events else out.get("add_outcome_counts")
+    )
     add_metrics = add_fidelity_metrics(
         positions + open_positions,
-        out.get("add_outcome_counts"),
+        window_add_counts,
     )
     behavior_v2 = _clamp01(
         open_rate
@@ -1885,6 +1986,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     )
     if str(out.get("path_risk_status") or "") != "complete":
         path_risk["path_risk_status"] = str(out.get("path_risk_status") or "missing")
+    deploy_samples = [
+        dict(row) for row in (out.get("deploy_samples") or ())
+        if int(row.get("time") or 0) >= int(start_ms)
+    ]
+    deploy_values = [f(row.get("pct")) for row in deploy_samples]
     out.update({
         "closed_n": len(positions),
         "wins": wins,
@@ -1898,6 +2004,15 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "behavior_replication_rate_legacy": _clamp01(
             open_rate * legacy_capture * path_completion_rate
         ),
+        "target_open_events": target_open_events,
+        "opened_n": opened_n,
+        "open_events": window_open_events,
+        "open_fill_rate": open_rate,
+        "actionable_open_rate": open_rate,
+        "execution_fill_rate": open_rate,
+        "capacity_open_fit": capacity_fit,
+        "skip_reasons": sliced_skip_reasons,
+        "add_events": window_add_events,
         "ambiguous_liquidations": len(ambiguous_ranges),
         "ambiguous_path_ranges": ambiguous_ranges,
         "path_equity_samples": path_samples,
@@ -1917,6 +2032,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "max_drawdown": max_drawdown,
         "worst_day": min(daily_values, default=0.0),
         "cvar95": sum(daily_values[:tail_n]) / tail_n if tail_n else 0.0,
+        "peak_deploy_pct": max(deploy_values, default=0.0),
+        "avg_deploy_pct": (
+            sum(deploy_values) / len(deploy_values) if deploy_values else 0.0
+        ),
+        "deploy_samples": deploy_samples,
         "positions": positions,
         "open_positions": open_positions,
         "pnl_concentration": {

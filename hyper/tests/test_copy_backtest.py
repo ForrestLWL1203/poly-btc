@@ -7,6 +7,7 @@ from hyper.copy.copy_backtest import (
     prepare_price_path,
     profit_structure_metrics,
     run_backtest,
+    slice_backtest_result,
     subset_price_path,
 )
 
@@ -241,6 +242,35 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertAlmostEqual(
             second["margin"] / first["margin"], expected_scale, places=6,
         )
+
+    def test_recent_slice_uses_time_local_open_and_capacity_events(self):
+        day = 86_400_000
+        fills = [
+            fill(1 * day, "BTC", "B", 1_000, 0, 100.0, 1),
+            # This simultaneous second open is blocked by the 3% aggregate deploy cap.
+            fill(1 * day + 1, "ETH", "B", 1_000, 0, 100.0, 2),
+            fill(2 * day, "BTC", "A", 1_000, 1_000, 101.0, 3),
+            fill(25 * day, "SOL", "B", 1_000, 0, 100.0, 4),
+            fill(26 * day, "SOL", "A", 1_000, 1_000, 101.0, 5),
+        ]
+        result = run_backtest(
+            "0xabc", fills, sigmas={"BTC": .04, "ETH": .04, "SOL": .04},
+            overrides={
+                "MAX_DEPLOY_PCT": .03,
+                "STABLE_MARGIN_PCT": .03,
+                "STABLE_MARGIN_MIN_PCT": .03,
+                "STABLE_MIN_NOTIONAL": 0.0,
+            },
+        )
+        recent = slice_backtest_result(result, 23 * day, window_days=7)
+
+        self.assertEqual(result["target_open_events"], 3)
+        self.assertEqual(result["opened_n"], 2)
+        self.assertLess(result["capacity_open_fit"], 1.0)
+        self.assertEqual(recent["target_open_events"], 1)
+        self.assertEqual(recent["opened_n"], 1)
+        self.assertEqual(recent["capacity_open_fit"], 1.0)
+        self.assertEqual(recent["skip_reasons"].get("skip_deploy_cap"), 0)
 
     def test_low_liquidity_crypto_open_is_skipped(self):
         fills = [

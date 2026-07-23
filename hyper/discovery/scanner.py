@@ -1760,7 +1760,17 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
         / max(1.0, abs(f(row[1].get("copy_gross_pnl"))))
         for row in usable
     )
-    drawdown_dollars = max_dd * float(config.INITIAL_BALANCE)
+    drawdown_dollars = max(
+        (
+            num(result.get("max_drawdown"), 0.0)
+            * num(
+                result.get("window_start_equity"),
+                num(result.get("initial_margin_equity"), float(config.INITIAL_BALANCE)),
+            )
+            for _days, result in usable
+        ),
+        default=0.0,
+    )
     risk_adjusted_utility = net_pnl - drawdown_dollars
     return selection.PortfolioMetrics(
         net_pnl, stress_net, liquidations, actionable, capacity, max_dd, peak_deploy,
@@ -1992,7 +2002,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     score, _detail = follow_score.compute_follow_score({
         **row, **effective, "sector_copy_json": None,
         "margin_equity_pct": replay_ctx.margin_equity_pct,
-    })
+    }, policy_values=follow)
     qualification = follow_score.evaluate_follow_eligibility(
         {
             **effective,
@@ -2088,7 +2098,10 @@ def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
             actionable_open_rate=open_rate, capacity_fit=capacity,
             liquidations=liquidations, params=dict(proposal or {}),
             payload={
-                "initialBalance": float(initial_balance),
+                "initialBalance": float(
+                    (folds[0].get(f"{prefix}StartEquity") if folds else None)
+                    or initial_balance
+                ),
                 # Congestion selects wallet count here only. Individual/final admission prices missed opens
                 # into PnL and must not reject the same execution friction a second time.
                 "requireCongestionFit": True,
@@ -2720,6 +2733,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         )
         metrics_ = _portfolio_selection_metrics(windows, selected_n=len(key))
         primary = windows.get(30) or windows.get(max(windows)) or {}
+        start_equity = f(
+            primary.get("window_start_equity")
+            or primary.get("initial_margin_equity")
+            or base_follow.get("INITIAL_BALANCE")
+            or config.INITIAL_BALANCE
+        )
         contributions = {}
         for position in list(primary.get("positions") or ()) + list(
             primary.get("open_positions") or ()
@@ -2755,7 +2774,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             capacity_fit=f(metrics_.capacity_fit),
             liquidations=max(int(metrics_.liquidations), stress_liquidations),
             params=tuned_params,
-            payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
+            payload={"initialBalance": start_equity},
         )
         membership_eval_cache[key] = value
         # The optimizer may inspect dozens of sets. Retaining six complete replay results per set (positions,
@@ -2886,7 +2905,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     )
     baseline_eval = evaluate_members(previous_qualified) if previous_qualified else None
     baseline_folds, _baseline_cost_stress = fold_replays(previous_qualified)
-    initial_margin_equity = float(config.INITIAL_BALANCE)
     robust_cache = {}
 
     def validate_members(addrs):
@@ -2916,7 +2934,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             baseline=baseline_eval, baseline_folds=baseline_folds,
             membership_changed=membership_changed,
             replacing_qualified_core=replacing,
-            initial_margin_equity=initial_margin_equity,
+            initial_margin_equity=f(
+                value.payload.get("initialBalance") or config.INITIAL_BALANCE
+            ),
             min_relative_utility_gain=float(config.SELECTION_MIN_RELATIVE_GAIN),
             min_net_return_gain=float(getattr(config, "CORE_REPLACEMENT_MIN_NET_RETURN", 0.02)),
             tail_after_top1=replay_summary.get("campaignNetAfterTop1"),
