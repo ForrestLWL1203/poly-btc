@@ -226,6 +226,29 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
             ).fetchone()[0]), 15.0)
 
+    def test_seed_params_migrates_untouched_copy_7d_floor_but_preserves_operator_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute(
+                "UPDATE params SET value='5',default_value='5' WHERE key='CORE_MIN_COPY_RETURN_7D'"
+            )
+            db.commit()
+
+            params.seed_params(db)
+
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_7D'"
+            ).fetchone()[0]), 3.0)
+            db.execute(
+                "UPDATE params SET value='4',default_value='3' WHERE key='CORE_MIN_COPY_RETURN_7D'"
+            )
+            db.commit()
+            params.seed_params(db)
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_7D'"
+            ).fetchone()[0]), 4.0)
+
     def test_seed_params_removes_obsolete_rows_but_restores_current_copy_return_gate(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

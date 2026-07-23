@@ -72,7 +72,7 @@ COPY_STABILITY_MIN_EVALUABLE_FOLDS = 4
 COPY_STABILITY_MIN_PROFITABLE_FOLDS = 3
 COPY_STABILITY_MIN_RETURN = 0.05  # Official Portfolio: source wallet must earn at least 5% in every fold.
 CORE_MIN_COPY_RETURN_30D = 0.10   # Strict follower replay: at least +$1,000 on the $10k model account.
-CORE_MIN_COPY_RETURN_7D = 0.05    # Strict follower replay: latest rolling 7d at least +$500.
+CORE_MIN_COPY_RETURN_7D = 0.03    # Strict follower replay: latest rolling 7d at least +$300.
 # Strict Copy's four folds verify timing stability rather than repeating the two magnitude gates above:
 # all four folds need Campaign evidence, at least three must be profitable, and the one permitted losing fold
 # cannot exceed 25% of total 30d profit. Per-close edge remains a ranking diagnostic, not a second hard gate.
@@ -385,10 +385,10 @@ COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不�
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 
 # Core repeatability uses independent Campaigns and the non-overlapping folds above.
-CORE_COPY_MIN_CAMPAIGNS_30D = 10
+CORE_COPY_MIN_CAMPAIGNS_30D = 8
 # A profitable low-win trend system is not automatically gambling: payoff and outlier evidence still matter.
-# Core nevertheless needs enough winning Campaigns, including after the three largest trade-level winners are
-# removed, that joining at an arbitrary point is not excessively dependent on catching a rare payoff.
+# Core nevertheless needs enough winning Campaigns that joining at an arbitrary point is not excessively
+# dependent on catching a rare payoff. Body-after-top-three remains a score diagnostic, not another hard gate.
 CORE_COPY_MIN_CAMPAIGN_WIN_RATE = 0.45
 CORE_COPY_MIN_BODY_WIN_RATE = 0.40
 # One isolated 30d replay liquidation is already fully charged to PnL/drawdown and may coexist with a high-

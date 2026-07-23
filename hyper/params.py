@@ -81,7 +81,7 @@ PARAM_SPEC = [
         config.CORE_MIN_COPY_RETURN_7D * 100, "Core严格Copy最近7日收益", ""),
     ("CORE_COPY_CAMPAIGN_FLOOR", "scanner", "black", "display", "rescan",
         f"≥ {config.CORE_COPY_MIN_CAMPAIGNS_30D} 批",
-        "独立Campaign证据", "Core要求30日至少10个独立Campaign；证据不足保留Challenger"),
+        "独立Campaign证据", "Core要求30日至少8个独立Campaign；证据不足保留Challenger"),
     ("CORE_COPY_MIN_CAMPAIGN_WIN_RATE", "scanner", "black", "pct", "rescan",
         config.CORE_COPY_MIN_CAMPAIGN_WIN_RATE * 100,
         "Core Campaign最低胜率", "防止随机跟入时过度依赖少数高盈亏比赢家；低胜率钱包仍保留Challenger研究证据"),
@@ -97,7 +97,7 @@ PARAM_SPEC = [
         f"最近7d≥{config.CORE_MIN_COPY_RETURN_7D * 100:g}%",
         "目标与跟单双重盈利硬闸",
         "官方Portfolio验证目标钱包四个非重叠7日段均≥5%；严格Copy要求30日≥10%、"
-        "最近7日≥5%，四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
+        "最近7日≥3%，四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
@@ -374,6 +374,15 @@ def seed_params(db):
             db.execute(
                 "UPDATE params SET value=? WHERE key=? AND value IN ('10','10.0') "
                 "AND default_value IN ('10','10.0') AND value=default_value",
+                (dv, key),
+            )
+        # Approved 2026-07 Core simplification: strict Copy already needs +10% over 30d and three profitable
+        # non-overlapping folds, so move the untouched +5% latest-7d default to +3%. Preserve any operator
+        # override, including a value that happens to equal another historical threshold.
+        if key == "CORE_MIN_COPY_RETURN_7D":
+            db.execute(
+                "UPDATE params SET value=? WHERE key=? AND value IN ('5','5.0') "
+                "AND default_value IN ('5','5.0') AND value=default_value",
                 (dv, key),
             )
         # Approved harvest-policy migration. Move only previously approved default surfaces, including the

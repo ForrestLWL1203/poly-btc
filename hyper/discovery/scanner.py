@@ -817,7 +817,10 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         min_return=policy.copy_weekly_min_return,
         initial_equity=f(primary.get("initial_margin_equity")) or config.INITIAL_BALANCE,
         path_equity_samples=primary.get("path_equity_samples") or (),
-        require_cost_stress=True,
+        # Individual qualification already requires material 30d/latest-7d returns. Extra cost stress is
+        # certified once on the funded final portfolio; hard-gating it here and again during membership
+        # validation triple-counts the same execution-cost uncertainty.
+        require_cost_stress=False,
         min_net_per_closed_return=policy.copy_weekly_min_net_per_closed_return,
         max_loss_to_total_profit=policy.stability_max_loss_to_30d_profit,
     )
@@ -827,7 +830,8 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         policy_json = {}
     # Official Portfolio owns the 5% target-wallet floor. Strict Copy owns rolling 7d/30d magnitude and
     # uses these non-overlapping folds only to reject unstable timing: four evidence-complete folds, at
-    # least three profitable, with the one permitted loss bounded against total follower profit.
+    # least three profitable, with the one permitted loss bounded against total follower profit. Extra
+    # cost stress remains diagnostic here and is a hard gate on the final funded portfolio.
     policy_json.pop("stability", None)
     policy_json["copyWeeklyProfitability"] = copy_weekly
     m["sector_policy_json"] = json.dumps(policy_json, separators=(",", ":"), sort_keys=True)
@@ -2152,15 +2156,10 @@ def _formation_prepath_candidate(row) -> bool:
         "strictCopy30dReturn",
         "strictCopyRolling7dReturn",
         "strictCopyWeeklyPositive",
-        "tenIndependentCampaigns",
+        "independentCampaignEvidence",
         "campaignWinRate",
-        "repeatableBodyWinRate",
-        "repeatableBodyPositive",
         "activityWithin72h",
         "oneWinnerRemovalPositive",
-        "costStressPositive",
-        "openExecution",
-        "capacity",
         "valuationComplete",
         "sectorExecutable",
         "expectedEdge",

@@ -60,8 +60,10 @@ def evaluate_follow_eligibility(
     liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
     The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
     owned by the official Portfolio front gate. Core separately requires at least 10% strict-Copy return in
-    30d, at least 5% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
-    least three are profitable and the one permitted losing fold is bounded.
+    30d, at least 3% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
+    least three are profitable and the one permitted losing fold is bounded. Body-after-top-three,
+    per-wallet cost stress, open-fill rate and capacity remain score diagnostics; making them hard gates as
+    well as score/final-portfolio inputs repeatedly charged the same evidence.
     """
     del min_closed14, min_closed7, margin_equity_pct
     policy = load_copy_policy(policy_values)
@@ -146,7 +148,7 @@ def evaluate_follow_eligibility(
         "strictCopy30dReturn": return30 >= policy.core_min_copy_return_30d,
         "strictCopyRolling7dReturn": return7 >= policy.core_min_copy_return_7d,
         "strictCopyWeeklyPositive": copy_weekly_positive,
-        "tenIndependentCampaigns": campaigns >= policy.core_min_campaigns_30d,
+        "independentCampaignEvidence": campaigns >= policy.core_min_campaigns_30d,
         "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
         "repeatableBodyWinRate": (
             body_n > 0 and body_win_rate >= policy.core_min_body_win_rate
@@ -228,10 +230,8 @@ def evaluate_follow_eligibility(
     core_eligible = bool(
         sample_ok and checks["strictCopy30dReturn"] and checks["strictCopyRolling7dReturn"]
         and copy_weekly_positive and activity_ok
-        and checks["campaignWinRate"] and checks["repeatableBodyWinRate"]
-        and checks["repeatableBodyPositive"] and checks["coreFollowScore"]
-        and checks["oneWinnerRemovalPositive"] and checks["costStressPositive"]
-        and checks["openExecution"] and checks["capacity"] and checks["valuationComplete"]
+        and checks["campaignWinRate"] and checks["coreFollowScore"]
+        and checks["oneWinnerRemovalPositive"] and checks["valuationComplete"]
         and checks["pathRiskComplete"] and checks["pathDrawdownWithinCore"]
         and checks["sectorExecutable"] and checks["expectedEdge"]
         and checks["noForwardLiquidation"] and not bool(policy_json.get("coreBlocked"))
@@ -250,7 +250,7 @@ def evaluate_follow_eligibility(
     elif not checks["strictCopyRolling7dReturn"]:
         status, reason = (
             "challenger_recent_return_watch",
-            "最近7天严格Copy收益未达到5%，近期盈利能力暂不足以进入Core",
+            "最近7天严格Copy收益未达到3%，近期盈利能力暂不足以进入Core",
         )
     elif not copy_weekly_sufficient:
         status, reason = (
@@ -266,20 +266,15 @@ def evaluate_follow_eligibility(
         status, reason = "challenger_campaign_evidence_building", "独立Campaign或证据日不足，继续积累"
     elif not activity_ok:
         status, reason = "challenger_activity_watch", "最近72小时没有新的可执行flat→open信号"
-    elif (
-        not checks["campaignWinRate"] or not checks["repeatableBodyWinRate"]
-        or not checks["repeatableBodyPositive"]
-    ):
+    elif not checks["campaignWinRate"]:
         status, reason = (
             "challenger_repeatability_watch",
-            "Campaign或去除前三大赢家后的主体胜率/收益不足，暂不承担随机入场时点风险",
+            "Campaign胜率不足，暂不承担随机入场时点风险",
         )
     elif not checks["coreFollowScore"]:
         status, reason = "challenger_score_watch", "综合质量分未达到Core 75分准入线"
     elif not checks["oneWinnerRemovalPositive"]:
         status, reason = "challenger_outlier_watch", "移除最大一个盈利Campaign后不再为正"
-    elif not checks["costStressPositive"]:
-        status, reason = "challenger_cost_stress_watch", "1.5倍成本压力后暂不盈利"
     elif not checks["pathRiskComplete"]:
         status, reason = "challenger_path_risk_pending", "路径风险证据尚未完整"
     elif not checks["pathDrawdownWithinCore"]:
@@ -287,7 +282,7 @@ def evaluate_follow_eligibility(
     elif not checks["sectorExecutable"]:
         status, reason = "challenger_sector_watch", "板块证据仍处于观察状态"
     else:
-        status, reason = "challenger_execution_watch", "执行、容量、估值或前向风险条件尚未全部通过"
+        status, reason = "challenger_execution_watch", "估值、板块或前向风险条件尚未全部通过"
     return {"eligible": True, "coreEligible": False, "status": status,
             "role": "challenger", "researchEligible": True, **detail, "reasons": [reason]}
 

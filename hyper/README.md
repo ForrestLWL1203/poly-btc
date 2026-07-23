@@ -60,23 +60,24 @@ Wallet quality and funded-account membership are separate decisions.
   structures; HFT needs at least ten complete rounds, Grid needs at least five complete rounds with a strict
   majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
 - Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
-  activity, cost stress, or outlier evidence block Core but do not erase that research evidence. Refined
+  activity, score, or outlier evidence block Core but do not erase that research evidence. Refined
   candle paths are fetched only for current Core and wallets that already clear every non-path business gate,
   bounded at 40 for resource safety. The provisional pre-path score is not a gate because path-risk evidence
   is itself 15% of the final score; the 75-point line is applied after that path is available. New Core requires
-  ten independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 5% over the latest
+  eight independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 3% over the latest
   rolling 7 days. All four non-overlapping 7-day folds must contain Campaign evidence, at least three must be
-  profitable, and the one permitted losing fold cannot exceed 25% of total 30-day profit. Aggregate replay
-  must remain profitable after taker fees are stressed to 1.5x. Average net per close remains a ranking
-  diagnostic rather than a second hard gate.
+  profitable, and the one permitted losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost
+  stress, body-after-top-three, open-fill rate and capacity remain score diagnostics; the funded final
+  portfolio must still remain profitable after taker fees are stressed to 1.5x and pass aggregate execution
+  capacity. Average net per close remains a ranking diagnostic rather than a second hard gate.
 - The final copy-follow score is calibrated as funded economics 30%, repeatability 25%, edge confidence 15%,
   operability 15%, and path risk 15%. Economics combines 30-day and latest-7-day follower return magnitude,
   fold timing and median per-close density; overlapping 14-day return and the legacy raw profile score
   contribute zero. Incomplete
   Campaign/fold evidence shrinks the total, so a tiny perfect streak cannot outrank mature proof. New Core
-  requires at least 75/100, at least
-  45% Campaign win rate, and at least 40% win rate plus positive net after removing the three largest winning
-  trades. The score is displayed on a 0–100 scale while stored natively in `[0, 1]`.
+  requires at least 75/100 and at least 45% Campaign win rate. Body win rate and net after removing the three
+  largest winning trades remain diagnostic score inputs. The score is displayed on a 0–100 scale while stored
+  natively in `[0, 1]`.
 - The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
   Count, add/remove/swap and parameter search then use normalized fills and the shared-account execution model;
   they do not repeatedly scan candles. The winning membership receives exactly one conservative, path-complete

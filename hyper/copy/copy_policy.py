@@ -101,7 +101,7 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_closed_30d=int(_value(values, "COPY_BT_MIN_CLOSED", 7) or 0),
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
         min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
-        core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 10) or 0),
+        core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 8) or 0),
         core_min_campaign_win_rate=float(_value(
             values, "CORE_COPY_MIN_CAMPAIGN_WIN_RATE", 0.45,
         )),
@@ -133,7 +133,7 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
             values, "COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT", 0.25,
         )),
         core_min_copy_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.10)),
-        core_min_copy_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.05)),
+        core_min_copy_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.03)),
         copy_weekly_min_campaigns_per_fold=int(_value(
             values, "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD", 1,
         ) or 1),

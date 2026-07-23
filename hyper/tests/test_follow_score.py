@@ -121,15 +121,34 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["status"], "challenger_campaign_evidence_building")
 
-    def test_core_uses_ten_campaigns_copy_weekly_profit_activity_and_stress(self):
+    def test_core_uses_campaigns_copy_weekly_profit_activity_and_score(self):
         result = judge()
         self.assertTrue(result["coreEligible"])
-        self.assertTrue(result["checks"]["tenIndependentCampaigns"])
+        self.assertTrue(result["checks"]["independentCampaignEvidence"])
         self.assertTrue(result["checks"]["strictCopyWeeklyPositive"])
         self.assertTrue(result["checks"]["activityWithin72h"])
         self.assertTrue(result["checks"]["campaignWinRate"])
         self.assertTrue(result["checks"]["repeatableBodyWinRate"])
         self.assertTrue(result["checks"]["coreFollowScore"])
+
+    def test_body_cost_and_individual_capacity_are_diagnostics_not_duplicate_hard_gates(self):
+        row = evidence(
+            copy_bt_campaign_closed_n=8,
+            copy_bt_body_after_top3_win_rate=0.0,
+            copy_bt_body_after_top3_net_pnl=-500.0,
+            copy_bt_cost_stress_net_pnl=-1.0,
+            actionable_open_rate=0.1,
+            capacity_fit=0.1,
+        )
+        result = evaluate_follow_eligibility(
+            row, as_of_ms=NOW, follow_score_value=0.80,
+        )
+        self.assertTrue(result["coreEligible"])
+        self.assertFalse(result["checks"]["repeatableBodyWinRate"])
+        self.assertFalse(result["checks"]["repeatableBodyPositive"])
+        self.assertFalse(result["checks"]["costStressPositive"])
+        self.assertFalse(result["checks"]["openExecution"])
+        self.assertFalse(result["checks"]["capacity"])
 
     def test_low_win_timing_sensitive_wallet_stays_challenger(self):
         result = judge(
@@ -236,11 +255,11 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(top1["status"], "challenger_outlier_watch")
         self.assertTrue(legacy_top2["coreEligible"])
 
-    def test_cost_stress_is_separate_core_gate(self):
+    def test_cost_stress_is_diagnostic_at_individual_layer(self):
         result = judge(copy_bt_cost_stress_net_pnl=-1.0)
         self.assertTrue(result["eligible"])
-        self.assertFalse(result["coreEligible"])
-        self.assertEqual(result["status"], "challenger_cost_stress_watch")
+        self.assertTrue(result["coreEligible"])
+        self.assertFalse(result["checks"]["costStressPositive"])
 
     def test_one_isolated_liquidation_allowed_repeat_rejected(self):
         self.assertTrue(judge(copy_bt_liquidations=1)["coreEligible"])

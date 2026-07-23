@@ -167,21 +167,24 @@ back to configured account equity × `MARGIN_EQUITY_PCT`), never a fixed `$250/$
 default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
-  outlier stress or cost stress are explicit Challenger reasons rather than economic rejection;
-- normal Core needs ten independent 30-day Campaigns, at least five evidence days, complete valuation/path
-  data, at least 10% 30-day strict-Copy return, at least 5% latest rolling 7-day strict-Copy return, and no
+  score or outlier stress are explicit Challenger reasons rather than economic rejection;
+- normal Core needs eight independent 30-day Campaigns, at least five evidence days, complete valuation/path
+  data, at least 10% 30-day strict-Copy return, at least 3% latest rolling 7-day strict-Copy return, and no
   hard risk;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
   latest 28 days, each with at least 5% return. Strict Copy uses four matching follower folds as timing
   stability evidence: all four contain a Campaign, at least three are profitable, and the one permitted
-  losing fold cannot exceed 25% of total 30-day profit. Aggregate net stays positive when already-modeled
-  taker fees are increased to 1.5x. The preferred 0.5% average net per close remains in ranking so it can
+  losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost stress is diagnostic; aggregate final
+  portfolio net stays positive when already-modeled taker fees are increased to 1.5x. The preferred 0.5%
+  average net per close remains in ranking so it can
   penalize thin/high-turnover economics without becoming a duplicate hard veto;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
 - rolling 14-day return, PF, Wilson confidence and raw payoff are ranking/diagnostic signals. Latest rolling
-  7-day return is the explicit 5% Core recency gate; Campaign/body win rates are explicit repeatability gates;
-- actionable open rate must be at least 70% and shared/individual capacity fit at least 75%;
+  7-day return is the explicit 3% Core recency gate; Campaign win rate is the hard repeatability gate while
+  body-after-top-three remains a score diagnostic;
+- actionable open rate and individual capacity fit are score diagnostics; the funded final portfolio must
+  maintain at least 70% actionable opens and 75% capacity fit;
 - expected normalized margin return has a 2% Core line; a miss remains Challenger while strict Copy stays
   profitable;
 - LCB and positive-profit probability are continuous ranking diagnostics after the sample floor, not a second
@@ -190,12 +193,12 @@ default classification is:
 Profit concentration has one hard Core stress only: remove the largest winning independent Campaign and require
 the remaining 30-day net to stay positive. Top-two, body-after-top-three and top-wallet removals are retained as
 diagnostics only because hard-gating all of them repeatedly judged the same outlier. Public replay dollars still
-include the large winner. Positive 1.5x-cost stress remains a separate Core execution check.
+include the large winner. Positive aggregate 1.5x-cost stress remains a final funded-portfolio execution check.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while
-rolling 14-day return remains diagnostic. A magnitude/fold failure, stale activity or weak stress remains
-Challenger, while current deep loss, repeated liquidation, invalid data and 30-day strict-Copy loss retain
+rolling 14-day return remains diagnostic. A magnitude/fold failure or stale activity remains Challenger,
+while current deep loss, repeated liquidation, invalid data and 30-day strict-Copy loss retain
 their explicit hard outcomes.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),

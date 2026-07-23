@@ -553,7 +553,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             key: True for key in (
                 "strictCopy30dPositive", "strictCopy30dReturn",
                 "strictCopyRolling7dReturn", "strictCopyWeeklyPositive",
-                "tenIndependentCampaigns",
+                "independentCampaignEvidence",
                 "campaignWinRate", "repeatableBodyWinRate", "repeatableBodyPositive",
                 "coreFollowScore", "activityWithin72h", "oneWinnerRemovalPositive",
                 "costStressPositive", "openExecution", "capacity", "valuationComplete",
@@ -598,7 +598,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             key: True for key in (
                 "strictCopy30dPositive", "strictCopy30dReturn",
                 "strictCopyRolling7dReturn", "strictCopyWeeklyPositive",
-                "tenIndependentCampaigns", "campaignWinRate",
+                "independentCampaignEvidence", "campaignWinRate",
                 "repeatableBodyWinRate", "repeatableBodyPositive",
                 "activityWithin72h", "oneWinnerRemovalPositive",
                 "costStressPositive", "openExecution", "capacity",
