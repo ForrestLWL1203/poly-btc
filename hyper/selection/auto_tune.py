@@ -1424,8 +1424,6 @@ def _formation_model_validation(validation: dict, policy) -> dict:
             sum(float(row.get(f"{prefix}Net") or 0.0) for row in folds) > 0.0
             and float(validation.get(stress_key) or 0.0) > 0.0
             and max(float(row.get(f"{prefix}MaxDD") or 0.0) for row in folds) < 1.0
-            and min(float(row.get(f"{prefix}OpenRate") or 0.0) for row in folds) >= 0.70
-            and min(float(row.get(f"{prefix}CapacityFit") or 0.0) for row in folds) >= policy.min_capacity_fit
         )
 
     baseline_feasible = feasible("baseline", "baselineStressNet")

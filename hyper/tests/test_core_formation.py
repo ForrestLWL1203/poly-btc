@@ -216,11 +216,11 @@ class QualityPrefixSearchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "no_feasible_quality_prefix"):
             search_quality_prefix(4, lambda count: value(count, 0, feasible=False))
 
-    def test_capacity_floor_is_seventy_five_percent(self):
+    def test_capacity_is_diagnostic_after_realized_profit(self):
         self.assertTrue(value(1, 1000, capacity_fit=.75).feasible)
-        self.assertFalse(value(1, 1000, capacity_fit=.749).feasible)
+        self.assertTrue(value(1, 1000, capacity_fit=.20).feasible)
 
-    def test_small_pool_skips_congested_wallet_and_selects_later_strong_wallet(self):
+    def test_small_pool_keeps_profitable_wallet_despite_recorded_congestion(self):
         candidates = ("0xa", "0xb", "0xc")
         utilities = {
             ("0xa",): (1000, .95),
@@ -235,7 +235,7 @@ class QualityPrefixSearchTests(unittest.TestCase):
 
         result = search_quality_membership(candidates, evaluate, exhaustive_below=8)
 
-        self.assertEqual(result.selected, ("0xa", "0xc"))
+        self.assertEqual(result.selected, ("0xa", "0xb", "0xc"))
         self.assertEqual(result.algorithm, "exhaustive_subset")
 
     def test_required_starred_wallet_survives_membership_search(self):

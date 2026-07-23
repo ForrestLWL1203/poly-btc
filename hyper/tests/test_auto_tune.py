@@ -31,16 +31,16 @@ class AutoTuneTests(unittest.TestCase):
             "stressNet": challenger_net,
         }
 
-    def test_formation_can_accept_lower_profit_surface_that_repairs_capacity(self):
+    def test_formation_does_not_treat_capacity_as_a_second_profit_veto(self):
         validation = self._formation_validation(
             baseline_capacity=.70, challenger_capacity=.80,
         )
 
         model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
 
-        self.assertTrue(model["eligible"])
-        self.assertTrue(model["admissionRepair"])
-        self.assertFalse(model["baselineFeasible"])
+        self.assertFalse(model["eligible"])
+        self.assertTrue(model["baselineFeasible"])
+        self.assertNotIn("formation_admission_still_infeasible", model["reasons"])
 
     def test_formation_keeps_normal_profit_validation_when_baseline_is_fundable(self):
         validation = self._formation_validation(

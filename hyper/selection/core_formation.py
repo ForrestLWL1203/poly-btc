@@ -37,14 +37,14 @@ class PrefixEvaluation:
         # Copy positions use isolated margin.  A liquidation loses that position's bounded margin and the
         # loss is already debited from net_pnl and reflected in max_drawdown.  Treating the count itself as
         # a veto double-charges the same loss and can let one profitable wallet collapse an otherwise valid
-        # quality prefix.  Account ruin is still impossible to admit: the portfolio must stay solvent and
-        # profitable in both the normal and stressed replays.
+        # quality prefix.  Open/capacity misses are likewise already present in the realized replay PnL:
+        # vetoing a portfolio which remains strongly profitable after those misses double-counts execution
+        # friction.  Keep those rates as tuning/congestion diagnostics; admission owns actual net, stress and
+        # drawdown.
         return (
             self.net_pnl > 0
             and self.stress_net_pnl > 0
             and self.max_drawdown <= float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
-            and self.actionable_open_rate >= 0.70
-            and self.capacity_fit >= float(config.SELECTION_MIN_CAPACITY_FIT)
         )
 
 
@@ -103,9 +103,7 @@ def validate_final_membership(
             >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
         ]
         if any(
-            fold.actionable_open_rate < 0.70
-            or fold.capacity_fit < float(config.SELECTION_MIN_CAPACITY_FIT)
-            or fold.max_drawdown > float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
+            fold.max_drawdown > float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
             for fold in evaluable_folds
         ):
             reasons.append("membership_fold_infeasible")

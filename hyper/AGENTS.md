@@ -6,7 +6,7 @@ This repository is organized as a multi-product copy-trade workspace. The active
 
 - leaderboard discovery and wallet profiling;
 - copyability scoring and canonical copy replay;
-- bounded joint Core-membership and portfolio-parameter formation;
+- quality-first Core membership followed by one unified portfolio-parameter tune;
 - a forward-only paper Observer;
 - a read-oriented Dashboard API and React dashboard;
 - local/VPS process and deployment tooling.
@@ -79,8 +79,8 @@ Repository boundaries:
 The production flow is:
 
 `Leaderboard staging → candidate workset → executable-market fill cache → per-sector structure + canonical
-30/14/7 Copy replay → individual Core/Challenger/reject classification → joint wallet-count/parameter formation →
-final-parameter requalification → shared-account membership + strict LOO → atomic generation/selection/strategy
+30/14/7 Copy replay → individual Core/Challenger/reject classification → bounded quality membership →
+one unified portfolio tune → final strict shared-account replay + strict LOO → atomic generation/selection/strategy
 revision publish → Observer reload → replay-summary materialization`
 
 ### 1. Generation safety
@@ -183,8 +183,9 @@ default classification is:
 - rolling 14-day return, PF, Wilson confidence and raw payoff are ranking/diagnostic signals. Latest rolling
   7-day return is the explicit 3% Core recency gate; Campaign win rate is the hard repeatability gate while
   body-after-top-three remains a score diagnostic;
-- actionable open rate and individual capacity fit are score diagnostics; the funded final portfolio must
-  maintain at least 70% actionable opens and 75% capacity fit;
+- actionable open rate and capacity fit are score, tuning and congestion diagnostics. Missed opens are already
+  absent from realized Copy PnL, so they are not charged a second time as admission vetoes when the actually
+  funded fills remain profitable after costs and within the drawdown limit;
 - expected normalized margin return has a 2% Core line; a miss remains Challenger while strict Copy stays
   profitable;
 - LCB and positive-profit probability are continuous ranking diagnostics after the sample floor, not a second
@@ -195,11 +196,10 @@ the remaining 30-day net to stay positive. Top-two, body-after-top-three and top
 diagnostics only because hard-gating all of them repeatedly judged the same outlier. Public replay dollars still
 include the large winner. Positive aggregate 1.5x-cost stress remains a final funded-portfolio execution check.
 
-Formation parameter discovery may admit a scan-time Core-quality wallet whose exact active-surface replay is
-positive, path-complete and free of hard risk even when that current surface misses the final return or score
-line. Never require `coreEligible` before tuning: that makes the parameters being optimized a prerequisite for
-optimization. After tuning, re-run the complete individual Core contract on the sealed winning surface before
-membership search and publication.
+Formation first builds a bounded quality pool from individual evidence and path safety, then tunes one shared
+parameter surface for that complete pool. Parameter feasibility is never allowed to choose how many wallets
+qualify for consideration; after tuning, fixed-surface membership and the final strict shared-account replay
+may still remove a wallet whose actual contribution damages net economics or risk.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while

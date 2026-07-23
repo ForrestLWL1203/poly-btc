@@ -246,7 +246,7 @@ def main() -> int:
     t = sub.add_parser("tune", help=argparse.SUPPRESS)
     t.add_argument("--generation", required=True)
     t.add_argument("--stamp")
-    opt = sub.add_parser("optimize", help="path-regate Core and jointly tune all copy parameters")
+    opt = sub.add_parser("optimize", help="qualify Core first, then tune one shared copy-parameter surface")
     opt.add_argument("--generation")
     opt.add_argument("--stamp")
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
@@ -334,8 +334,8 @@ def main() -> int:
         scanner._set_scanner_proc(db, "idle", {"last_repair_at": now_iso(), "active": n})
         print(f"watchlist {n} active")
     elif args.cmd == "tune":
-        # Keep the legacy hidden verb as a compatibility alias, but never tune only the incumbent Core.
-        # Full formation must jointly search wallet-count prefixes and their parameter surfaces.
+        # Keep the legacy hidden verb as a compatibility alias. Formation qualifies the complete bounded
+        # quality pool first and tunes that pool once; tuning no longer decides wallet count.
         result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "optimize":
