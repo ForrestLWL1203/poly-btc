@@ -1467,8 +1467,10 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
         "p.times_active, p.first_added, p.last_fill_ms, "
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
-        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+        "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,p.copy_bt_14d_window_start_equity,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.copy_bt_7d_window_start_equity,"
+        "p.sector_copy_json,p.sector_policy_json,"
         "p.profile_generation,p.evaluated_at,p.data_status,p.evidence_status,"
         "p.copy_expected_return,p.copy_return_lcb,p.copy_return_volatility,p.copy_positive_probability,"
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
@@ -1824,7 +1826,9 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
         "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
-        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,"
+        "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_window_start_equity,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_window_start_equity,"
         "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
         "FROM profile p WHERE p.profile_generation=?",
         (generation_id,),
@@ -3569,7 +3573,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "p.copy_evidence_days,p.copy_recent_return_14d,p.copy_recent_return_7d,p.copy_risk_score,"
         "p.execution_score,p.open_probability_48h,"
         "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
-        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,"
+        "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_window_start_equity,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_window_start_equity,"
         "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
         "FROM profile p"
     )
@@ -4716,8 +4722,10 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         "p.payoff_ratio,p.pf_week_vlm,"
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
-        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.sector_copy_json,p.sector_policy_json,"
+        "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,p.copy_bt_14d_window_start_equity,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_closed_n,p.copy_bt_7d_window_start_equity,"
+        "p.sector_copy_json,p.sector_policy_json,"
         "p.open_position_count,p.material_open_count "
         "FROM profile p LEFT JOIN leaderboard l ON p.addr=l.addr" + row_scope,
         row_args,
@@ -4760,8 +4768,10 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
          roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
          wkroi, moroi, alroi, pf_turn, pf_mpnl, pf_mvlm, pf_wpnl, pf_eq, pay, pf_wvlm,
          copy_net, copy_wr, copy_closed, copy_open_fill_rate, copy_liqs, copy_fee,
-         copy_unreal, copy_valuation, copy14_net, copy14_unreal, copy14_closed,
-         copy7_net, copy7_unreal, copy7_closed, sector_copy_json, sector_policy_json,
+         copy_unreal, copy_valuation, copy_initial_equity, copy30_start_equity,
+         copy14_net, copy14_unreal, copy14_closed, copy14_start_equity,
+         copy7_net, copy7_unreal, copy7_closed, copy7_start_equity,
+         sector_copy_json, sector_policy_json,
          open_position_count, material_open_count) = r
         m = {"n_trades": n_tr or 0, "n_fills": n_fills or 0, "perp_frac": perp_frac or 0.0, "last_fill_ms": last_fill or 0,
              "net_pnl": net or 0.0, "roi_equity": roi_eq or 0.0, "max_drawdown": mdd or 0.0,
@@ -4792,10 +4802,14 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              "copy_bt_closed_n": copy_closed, "copy_bt_open_fill_rate": copy_open_fill_rate,
              "copy_bt_liquidations": copy_liqs, "copy_bt_fee_drag": copy_fee,
              "copy_bt_unrealized_pnl": copy_unreal, "copy_bt_valuation_status": copy_valuation,
+             "copy_bt_initial_margin_equity": copy_initial_equity,
+             "copy_bt_window_start_equity": copy30_start_equity,
              "copy_bt_14d_net_pnl": copy14_net, "copy_bt_14d_unrealized_pnl": copy14_unreal,
              "copy_bt_14d_closed_n": copy14_closed,
+             "copy_bt_14d_window_start_equity": copy14_start_equity,
              "copy_bt_7d_net_pnl": copy7_net, "copy_bt_7d_unrealized_pnl": copy7_unreal,
              "copy_bt_7d_closed_n": copy7_closed,
+             "copy_bt_7d_window_start_equity": copy7_start_equity,
              "sector_copy_json": sector_copy_json, "sector_policy_json": sector_policy_json,
              "open_position_count": open_position_count or 0,
              "material_open_count": material_open_count or 0}
@@ -4879,8 +4893,10 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
             "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_unrealized_pnl=?,copy_bt_valuation_status=?,"
-            "copy_bt_14d_net_pnl=?,copy_bt_14d_unrealized_pnl=?,copy_bt_14d_closed_n=?,"
-            "copy_bt_7d_net_pnl=?,copy_bt_7d_unrealized_pnl=?,copy_bt_7d_closed_n=?,sector_copy_json=?,sector_policy_json=?,"
+            "copy_bt_initial_margin_equity=?,copy_bt_window_start_equity=?,"
+            "copy_bt_14d_net_pnl=?,copy_bt_14d_unrealized_pnl=?,copy_bt_14d_closed_n=?,copy_bt_14d_window_start_equity=?,"
+            "copy_bt_7d_net_pnl=?,copy_bt_7d_unrealized_pnl=?,copy_bt_7d_closed_n=?,copy_bt_7d_window_start_equity=?,"
+            "sector_copy_json=?,sector_policy_json=?,"
             "copy_expected_return=?,copy_return_lcb=?,copy_return_volatility=?,copy_positive_probability=?,"
             "copy_evidence_days=?,copy_recent_return_14d=?,copy_recent_return_7d=?,copy_risk_score=?,"
             "execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
@@ -4894,10 +4910,11 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
              m.get("copy_bt_unrealized_pnl"), m.get("copy_bt_valuation_status"),
+             m.get("copy_bt_initial_margin_equity"), m.get("copy_bt_window_start_equity"),
              m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_unrealized_pnl"),
-             m.get("copy_bt_14d_closed_n"),
+             m.get("copy_bt_14d_closed_n"), m.get("copy_bt_14d_window_start_equity"),
              m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_unrealized_pnl"),
-             m.get("copy_bt_7d_closed_n"),
+             m.get("copy_bt_7d_closed_n"), m.get("copy_bt_7d_window_start_equity"),
              m.get("sector_copy_json"), m.get("sector_policy_json"),
              m.get("copy_expected_return"), m.get("copy_return_lcb"), m.get("copy_return_volatility"),
              m.get("copy_positive_probability"), m.get("copy_evidence_days"),

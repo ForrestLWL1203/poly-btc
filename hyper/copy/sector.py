@@ -78,12 +78,19 @@ def _window_result(windows: Mapping, days: int) -> dict:
     return dict(windows.get(days) or windows.get(str(days)) or {})
 
 
-def _qualification_equity(windows: Mapping) -> float:
-    """Return the immutable replay sizing basis used by this sector."""
-    for days in (30, 14, 7):
-        value = _num(_window_result(windows, days).get("initial_margin_equity"))
+def _window_equity(windows: Mapping, days: int) -> float:
+    """Return floating account equity at one continuous replay-window boundary."""
+    result = _window_result(windows, days)
+    for key in ("window_start_equity", "initial_margin_equity"):
+        value = _num(result.get(key))
         if value > 0:
             return value
+    for fallback_days in (30, 14, 7):
+        fallback = _window_result(windows, fallback_days)
+        for key in ("window_start_equity", "initial_margin_equity"):
+            value = _num(fallback.get(key))
+            if value > 0:
+                return value
     return max(
         1.0,
         float(getattr(config, "INITIAL_BALANCE", 10_000.0)),
@@ -119,10 +126,10 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         days: wins[days] / campaigns[days] if campaigns[days] else 0.0
         for days in results
     }
-    equity = _qualification_equity(windows)
-    return30 = pnl[30] / equity
-    return14 = pnl[14] / equity
-    return7 = pnl[7] / equity
+    equities = {days: _window_equity(windows, days) for days in (30, 14, 7)}
+    return30 = pnl[30] / equities[30]
+    return14 = pnl[14] / equities[14]
+    return7 = pnl[7] / equities[7]
     primary = results[30]
     evidence_days = _int(primary.get("evidence_days"))
     if evidence_days <= 0:
@@ -139,7 +146,8 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
         "campaigns": {str(days): campaigns[days] for days in (30, 14, 7)},
         "evidenceDays": evidence_days,
-        "qualificationEquity": equity,
+        "qualificationEquity": equities[30],
+        "windowStartEquity": {str(days): equities[days] for days in (30, 14, 7)},
     }
 
     recent = results[7]
@@ -263,7 +271,7 @@ def _compact_result(result: Mapping) -> dict:
         "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
         "current_bag_hours", "campaign_max_drawdown",
         "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
-        "cost_stress_net_pnl", "initial_margin_equity",
+        "cost_stress_net_pnl", "initial_margin_equity", "window_start_equity",
     )
     return {k: result.get(k) for k in keys if k in result}
 
@@ -600,7 +608,7 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "entry_gap_sigma_weighted", "entry_gap_sigma_p90", "entry_alignment",
             "add_execution", "add_fidelity", "add_fidelity_applied",
             "behavior_replication_v2", "behavior_replication_rate",
-            "initial_margin_equity",
+            "initial_margin_equity", "window_start_equity",
             "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
             "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
             "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
@@ -612,12 +620,13 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         ):
             if key in primary:
-                # Qualification divides the allowed-sector PnL by this unprefixed canonical account basis.
-                # Prefixing it as ``copy_bt_initial_margin_equity`` left the old joint-account denominator
-                # in place while replacing only PnL, producing impossible "$2.3k profit but <10% return"
-                # classifications for a $10k replay.
-                target = "initial_margin_equity" if key == "initial_margin_equity" else f"copy_bt_{key}"
-                out[target] = primary[key]
+                # Keep the transient legacy alias for in-process callers and the prefixed field for durable
+                # Profile storage. Reloaded qualification must retain the same sector-scoped denominator.
+                if key == "initial_margin_equity":
+                    out["initial_margin_equity"] = primary[key]
+                    out["copy_bt_initial_margin_equity"] = primary[key]
+                else:
+                    out[f"copy_bt_{key}"] = primary[key]
         for source, target in (
             ("path_risk_status", "copy_path_risk_status"),
             ("intratrade_max_drawdown", "copy_intratrade_max_drawdown"),
@@ -658,6 +667,11 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
                 )
                 out[f"copy_bt_{days}d_win_rate"] = out[f"copy_bt_{days}d_campaign_win_rate"]
             out[f"copy_bt_{days}d_unrealized_pnl"] = _num(agg.get("unrealized_pnl"))
+            out[f"copy_bt_{days}d_window_start_equity"] = (
+                agg.get("window_start_equity")
+                if agg.get("window_start_equity") is not None
+                else agg.get("initial_margin_equity")
+            )
             for key in (
                 "profit_factor", "net_after_top1", "net_after_top2", "liquidations",
                 "top1_profit_share", "top3_profit_share", "cost_stress_net_pnl",

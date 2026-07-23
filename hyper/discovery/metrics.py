@@ -260,13 +260,18 @@ def score(m: dict) -> float:
     win = _clip(g("copy_bt_win_rate", g("win_rate")), 0.0, 1.0)
     # Use the exact simulated capital basis and fee-paid endpoint PnL.  The 7d/30d pair rewards recent
     # strength without ever importing spot, outcome or a disabled specialist sector.
-    _pfeq = g("initial_margin_equity")
-    if _pfeq and _pfeq > 0 and m.get("copy_bt_net_pnl") is not None:
+    _initial_equity = g(
+        "copy_bt_initial_margin_equity",
+        g("initial_margin_equity", float(getattr(config, "INITIAL_BALANCE", 10_000.0))),
+    )
+    _equity30 = g("copy_bt_window_start_equity", _initial_equity)
+    _equity7 = g("copy_bt_7d_window_start_equity", _initial_equity)
+    if _equity30 and _equity30 > 0 and _equity7 and _equity7 > 0 and m.get("copy_bt_net_pnl") is not None:
         _rp = [
             (config.ROI_W_WEEK,
-             g("copy_bt_7d_net_pnl") / _pfeq),
+             g("copy_bt_7d_net_pnl") / _equity7),
             (config.ROI_W_MON,
-             g("copy_bt_net_pnl") / _pfeq),
+             g("copy_bt_net_pnl") / _equity30),
         ]
     else:
         # Structural-only defensive path: these values were already built from the scoped fill set.

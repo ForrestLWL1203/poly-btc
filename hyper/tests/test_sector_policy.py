@@ -362,9 +362,12 @@ class SectorPolicyTests(unittest.TestCase):
             }),
             "sector_copy_json": json.dumps({
                 "crypto": {
-                    "30": {**bt(1500, 10), "initial_margin_equity": 10_000},
-                    "14": bt(700, 6),
-                    "7": bt(300, 5),
+                    "30": {
+                        **bt(1500, 10), "initial_margin_equity": 10_000,
+                        "window_start_equity": 12_000,
+                    },
+                    "14": {**bt(700, 6), "window_start_equity": 13_000},
+                    "7": {**bt(300, 5), "window_start_equity": 14_000},
                 },
                 "stock": {
                     "30": bt(-2500, 10),
@@ -383,7 +386,10 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(adjusted["copy_bt_14d_closed_n"], 6)
         self.assertEqual(adjusted["copy_bt_7d_closed_n"], 5)
         self.assertEqual(adjusted["initial_margin_equity"], 10_000)
-        self.assertNotIn("copy_bt_initial_margin_equity", adjusted)
+        self.assertEqual(adjusted["copy_bt_initial_margin_equity"], 10_000)
+        self.assertEqual(adjusted["copy_bt_window_start_equity"], 12_000)
+        self.assertEqual(adjusted["copy_bt_14d_window_start_equity"], 13_000)
+        self.assertEqual(adjusted["copy_bt_7d_window_start_equity"], 14_000)
 
     def test_mix_wallet_uses_joint_account_replay_instead_of_summing_two_accounts(self):
         metrics = {

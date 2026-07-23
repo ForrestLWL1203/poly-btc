@@ -306,6 +306,28 @@ class FollowScoreTests(unittest.TestCase):
         self.assertAlmostEqual(small, large)
         self.assertEqual(small_detail["economicReturns"], large_detail["economicReturns"])
 
+    def test_recent_roi_uses_rolling_window_start_equity(self):
+        row = evidence(
+            copy_bt_net_pnl=3000,
+            copy_bt_7d_net_pnl=600,
+            copy_bt_window_start_equity=20_000,
+            copy_bt_7d_window_start_equity=30_000,
+        )
+
+        score, detail = compute_follow_score(row)
+        result = evaluate_follow_eligibility(row, as_of_ms=NOW, follow_score_value=score)
+
+        self.assertAlmostEqual(detail["economicReturns"]["30d"], 0.15)
+        self.assertAlmostEqual(detail["economicReturns"]["7d"], 0.02)
+        self.assertEqual(
+            detail["economicEquities"],
+            {"30d": 20_000, "14d": 10_000, "7d": 30_000},
+        )
+        self.assertAlmostEqual(result["returns"]["30"], 0.15)
+        self.assertAlmostEqual(result["returns"]["7"], 0.02)
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_recent_return_watch")
+
     def test_copy_score_ignores_legacy_raw_and_14d_overlap(self):
         low, _ = compute_follow_score(evidence(
             score=.05,

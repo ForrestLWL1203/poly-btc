@@ -224,6 +224,12 @@ def record_primary_copy_bt(metrics, result):
         copy_bt_liquidations=int(result.get("liquidations") or 0),
         copy_bt_fee_drag=result.get("fee_drag"),
         initial_margin_equity=result.get("initial_margin_equity"),
+        copy_bt_initial_margin_equity=result.get("initial_margin_equity"),
+        copy_bt_window_start_equity=(
+            result.get("window_start_equity")
+            if result.get("window_start_equity") is not None
+            else result.get("initial_margin_equity")
+        ),
         copy_bt_data_status=result.get("data_status", "valid"),
         copy_bt_evidence_status=result.get("evidence_status", "observed"),
         copy_path_risk_status=result.get("path_risk_status", "missing"),
@@ -300,11 +306,21 @@ def record_recent_copy_bt(metrics, days, result):
         metrics["copy_bt_14d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_14d_closed_n"] = int(result.get("closed_n") or 0)
         metrics["copy_bt_14d_win_rate"] = result.get("copy_win_rate")
+        metrics["copy_bt_14d_window_start_equity"] = (
+            result.get("window_start_equity")
+            if result.get("window_start_equity") is not None
+            else result.get("initial_margin_equity")
+        )
     elif days == 7:
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
         metrics["copy_bt_7d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
         metrics["copy_bt_7d_win_rate"] = result.get("copy_win_rate")
+        metrics["copy_bt_7d_window_start_equity"] = (
+            result.get("window_start_equity")
+            if result.get("window_start_equity") is not None
+            else result.get("initial_margin_equity")
+        )
     prefix = f"copy_bt_{int(days)}d_"
     for key in (
         "profit_factor", "payoff_ratio", "top1_profit_share", "top3_profit_share",

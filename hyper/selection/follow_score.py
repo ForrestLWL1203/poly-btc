@@ -32,6 +32,24 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, v))
 
 
+def _replay_window_equity(metrics: Mapping, days: int) -> float:
+    """Return the floating account equity that actually funded one replay window."""
+    key = (
+        "copy_bt_window_start_equity"
+        if int(days) == 30 else f"copy_bt_{int(days)}d_window_start_equity"
+    )
+    for candidate in (
+        metrics.get(key),
+        metrics.get("copy_bt_initial_margin_equity"),
+        metrics.get("initial_margin_equity"),
+        getattr(config, "INITIAL_BALANCE", 10_000.0),
+    ):
+        value = _num(candidate)
+        if value > 0.0:
+            return value
+    return 1.0
+
+
 def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
     return any(metrics.get(k) is not None for k in (
         "copy_expected_return", "copy_return_lcb", "copy_positive_probability",
@@ -92,13 +110,12 @@ def evaluate_follow_eligibility(
         pnl30 - _num(scoped.get("copy_bt_unrealized_pnl")),
     )
     pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
-    equity = max(1.0, _num(
-        scoped.get("initial_margin_equity"), getattr(config, "INITIAL_BALANCE", 10_000.0),
-    ))
-    return30 = pnl30 / equity
-    return7 = pnl7 / equity
+    equity30 = _replay_window_equity(scoped, 30)
+    equity7 = _replay_window_equity(scoped, 7)
+    return30 = pnl30 / equity30
+    return7 = pnl7 / equity7
     average_net_per_close_return = (
-        closed_pnl30 / max(1, c30) / equity if c30 > 0 else 0.0
+        closed_pnl30 / max(1, c30) / equity30 if c30 > 0 else 0.0
     )
     evidence_days = int(_num(scoped.get("copy_evidence_days")))
     data_status = str(scoped.get("copy_bt_data_status") or "").strip().lower()
@@ -180,6 +197,7 @@ def evaluate_follow_eligibility(
     }
     detail = {
         "returns": {"30": return30, "7": return7},
+        "windowStartEquity": {"30": equity30, "7": equity7},
         "returnFloors": {
             "30": policy.core_min_copy_return_30d,
             "7": policy.core_min_copy_return_7d,
@@ -362,14 +380,13 @@ def compute_follow_score(
     pnl30 = _num(metrics.get("copy_bt_net_pnl"))
     pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
-    economic_equity = max(
-        1.0,
-        _num(metrics.get("initial_margin_equity"), float(getattr(config, "INITIAL_BALANCE", 10_000.0))),
-    )
+    economic_equities = {
+        days: _replay_window_equity(metrics, days) for days in (30, 14, 7)
+    }
     returns = {
-        "30d": pnl30 / economic_equity,
-        "14d": pnl14 / economic_equity,
-        "7d": pnl7 / economic_equity,
+        "30d": pnl30 / economic_equities[30],
+        "14d": pnl14 / economic_equities[14],
+        "7d": pnl7 / economic_equities[7],
     }
     # Explicit 30d/latest-7d magnitude and four independent timing folds share the economics pillar.
     # The overlapping 14d window remains display-only so the same profitable days are not triple-counted.
@@ -549,7 +566,12 @@ def compute_follow_score(
             "returnScore": weekly_return_score,
             "densityScore": density_score,
         },
-        "economicEquity": economic_equity,
+        "economicEquity": economic_equities[30],
+        "economicEquities": {
+            "30d": economic_equities[30],
+            "14d": economic_equities[14],
+            "7d": economic_equities[7],
+        },
         "confidence": readiness_confidence,
         "sampleConfidence": confidence,
         "copyPnl": {

@@ -167,7 +167,9 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 that every active wallet must fit into the funded Core account.
 
 Every public economic line is a percentage of the canonical replay's recorded `window_start_equity` (falling
-back to `initial_margin_equity`), never a fixed `$250/$500` dollar threshold. Current
+back to `initial_margin_equity`), never a fixed `$250/$500` dollar threshold. The continuous replay persists
+separate 30/14/7-day window-start equities on `profile`; scoring, sector aggregation and Core admission must
+divide each window's PnL by its own boundary equity after a DB reload, not by the original `$10k`. Current
 default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,

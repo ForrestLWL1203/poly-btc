@@ -193,12 +193,16 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_bt_fee_drag REAL DEFAULT 0,
     copy_bt_unrealized_pnl REAL DEFAULT 0,
     copy_bt_valuation_status TEXT DEFAULT 'complete',
+    copy_bt_initial_margin_equity REAL,    -- replay account equity before warm-up
+    copy_bt_window_start_equity REAL,     -- actual floating equity at the 30d boundary
     copy_bt_14d_net_pnl REAL,             -- recent copy replay net PnL (14d confirmation)
     copy_bt_14d_unrealized_pnl REAL DEFAULT 0,
     copy_bt_14d_closed_n INTEGER DEFAULT 0,
+    copy_bt_14d_window_start_equity REAL, -- actual floating equity at the 14d boundary
     copy_bt_7d_net_pnl REAL,              -- short-term copy replay net PnL (7d confirmation)
     copy_bt_7d_unrealized_pnl REAL DEFAULT 0,
     copy_bt_7d_closed_n INTEGER DEFAULT 0,
+    copy_bt_7d_window_start_equity REAL,  -- actual floating equity at the 7d boundary
     sector_copy_json TEXT,                -- per-sector copy replay summaries (crypto/stock windows)
     sector_policy_json TEXT,              -- per-sector allow/deny policy consumed by observer
     profile_generation TEXT,              -- last complete generation that evaluated this profile
@@ -513,8 +517,9 @@ PROFILE_COLS = (
     "net_7d,net_14d,net_30d,net_life,"
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_turnover,"
     "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,copy_bt_liquidations,copy_bt_fee_drag,"
-    "copy_bt_unrealized_pnl,copy_bt_valuation_status,copy_bt_14d_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,"
-    "copy_bt_7d_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,"
+    "copy_bt_unrealized_pnl,copy_bt_valuation_status,copy_bt_initial_margin_equity,copy_bt_window_start_equity,"
+    "copy_bt_14d_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,copy_bt_14d_window_start_equity,"
+    "copy_bt_7d_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,copy_bt_7d_window_start_equity,"
     "sector_copy_json,sector_policy_json,"
     "profile_generation,evaluated_at,data_status,evidence_status,last_copyable_open_ms,"
     "open_events_7d,open_events_30d,actionable_open_events_7d,actionable_open_events_30d,"
@@ -1162,8 +1167,12 @@ _MIGRATIONS = (
     # Canonical Copy economic PnL = closed net + terminal open-position mark-to-market.
     "ALTER TABLE profile ADD COLUMN copy_bt_unrealized_pnl REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_bt_valuation_status TEXT DEFAULT 'complete'",
+    "ALTER TABLE profile ADD COLUMN copy_bt_initial_margin_equity REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_window_start_equity REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_14d_unrealized_pnl REAL DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_14d_window_start_equity REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_7d_unrealized_pnl REAL DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_7d_window_start_equity REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_unrealized_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_valuation_status TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_unrealized_pnl REAL",
