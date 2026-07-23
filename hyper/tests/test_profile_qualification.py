@@ -24,9 +24,10 @@ def qualified(**overrides):
         "last_copyable_open_ms": NOW - 3_600_000,
         "sector_policy_json": json.dumps({
             "allowed": ["crypto"],
-            "stability": {"evidenceSufficient": True, "passed": True,
-                          "evaluableFolds": 4, "profitableFolds": 4,
-                          "qualifiedFolds": 4},
+            "copyWeeklyProfitability": {
+                "evidenceSufficient": True, "passed": True,
+                "evaluableFolds": 4, "profitableFolds": 4, "qualifiedFolds": 4,
+            },
         }),
     }
     row.update(overrides)

@@ -57,9 +57,9 @@ def evaluate_follow_eligibility(
     The old policy independently gated 7/14/30 returns, win rates, PF, tail-2 and concentration body.  Those
     checks were correlated views of the same trades and created an exclusion cascade.  V3 keeps hard data,
     liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
-    The bounded formation surface may publish that wallet as Challenger; Core additionally requires ten
-    campaigns, four non-overlapping 7-day folds each returning at least 5% on floating replay equity,
-    fresh activity, one-winner removal, cost stress and executable capacity.
+    The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
+    already owned by the official Portfolio front gate; Core adds ten campaigns, fresh activity, one-winner
+    removal, whole-window cost stress and executable capacity without repeating four weekly Copy vetoes.
     """
     del min_closed14, min_closed7, margin_equity_pct
     policy = load_copy_policy(policy_values)
@@ -74,7 +74,10 @@ def evaluate_follow_eligibility(
     source = metrics
     scoped = apply_allowed_sector_copy_metrics(metrics)
     policy_json = parse_json_obj(source.get("sector_policy_json"))
-    stability = policy_json.get("stability") if isinstance(policy_json.get("stability"), dict) else {}
+    copy_weekly = (
+        policy_json.get("copyWeeklyProfitability")
+        if isinstance(policy_json.get("copyWeeklyProfitability"), dict) else {}
+    )
     allowed = set(policy_json.get("allowed") or ())
     watched = set(policy_json.get("watch") or ())
     c30 = int(_num(scoped.get("copy_bt_closed_n")))
@@ -116,8 +119,8 @@ def evaluate_follow_eligibility(
     )
     sector_ready = bool(allowed) if "allowed" in policy_json else True
     path_complete = path_status not in {"pending", "missing", "invalid", "replay_error", "incomplete"}
-    stability_sufficient = bool(stability.get("evidenceSufficient"))
-    stability_ok = bool(stability.get("passed"))
+    copy_weekly_sufficient = bool(copy_weekly.get("evidenceSufficient"))
+    copy_weekly_positive = bool(copy_weekly.get("passed"))
     campaign_win_rate = _num(scoped.get(
         "copy_bt_campaign_win_rate", scoped.get("copy_bt_win_rate"),
     ))
@@ -133,13 +136,13 @@ def evaluate_follow_eligibility(
         "copyDataValid": not data_status or data_status in {"valid", "ok"},
         "normalizedEvidencePresent": _has_copy_evidence(scoped, c30, 0, 0),
         "strictCopy30dPositive": pnl30 > 0.0,
-        # Diagnostic/score reference only. Four independent weekly return folds own Core profitability;
-        # repeating a 30-day magnitude veto would judge the same 28-day economics twice.
+        "strictCopyWeeklyPositive": copy_weekly_positive,
+        # Diagnostic/score reference only. Official four-week Portfolio stability owns the target-wallet
+        # return floor; strict Copy owns whether our funded implementation is net profitable.
         "coreReturnReference": return30 >= (
             policy.retention_min_return_30d if retention else policy.core_min_return_30d
         ),
         "tenIndependentCampaigns": campaigns >= policy.core_min_campaigns_30d,
-        "nonoverlapStability": stability_ok,
         "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
         "repeatableBodyWinRate": (
             body_n > 0 and body_win_rate >= policy.core_min_body_win_rate
@@ -161,7 +164,7 @@ def evaluate_follow_eligibility(
     }
     detail = {
         "returns": {"30": return30}, "campaigns": {"30": campaigns},
-        "evidenceDays": evidence_days, "stability": stability,
+        "evidenceDays": evidence_days, "copyWeeklyProfitability": copy_weekly,
         "repeatability": {
             "campaignWinRate": campaign_win_rate,
             "campaignWinRateFloor": policy.core_min_campaign_win_rate,
@@ -215,7 +218,7 @@ def evaluate_follow_eligibility(
                 "role": "rejected", **detail, "reasons": ["没有盈利且可执行的Crypto/Stock板块"]}
 
     core_eligible = bool(
-        sample_ok and stability_ok and activity_ok
+        sample_ok and copy_weekly_positive and activity_ok
         and checks["campaignWinRate"] and checks["repeatableBodyWinRate"]
         and checks["repeatableBodyPositive"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["costStressPositive"]
@@ -228,12 +231,18 @@ def evaluate_follow_eligibility(
         return {"eligible": True, "coreEligible": True,
                 "status": "core_retention_eligible" if retention else "core_eligible",
                 "role": "core_eligible", **detail,
-                "reasons": ["严格Copy、可重复胜率、75分质量线、四段7日稳定收益、72小时活动及执行压力均通过"]}
+                "reasons": ["官方四段7日稳定性、严格Copy、可重复胜率、75分质量线、72小时活动及执行压力均通过"]}
 
-    if not stability_sufficient:
-        status, reason = "challenger_stability_evidence_building", "四个非重叠7日区间证据不足，继续积累而不按亏损淘汰"
-    elif not stability_ok:
-        status, reason = "challenger_stability_watch", "尚未做到四个独立7日区间均达到5%且1.5倍成本后盈利"
+    if not copy_weekly_sufficient:
+        status, reason = (
+            "challenger_copy_weekly_evidence_building",
+            "严格Copy四个非重叠7日区间证据不足，继续积累而不按亏损淘汰",
+        )
+    elif not copy_weekly_positive:
+        status, reason = (
+            "challenger_copy_weekly_loss",
+            "目标钱包官方周收益达标，但我们的严格Copy至少一个7日区间净亏损",
+        )
     elif not sample_ok:
         status, reason = "challenger_campaign_evidence_building", "独立Campaign或证据日不足，继续积累"
     elif not activity_ok:
@@ -344,21 +353,14 @@ def compute_follow_score(
     body_win_rate = _clamp(_num(metrics.get("copy_bt_body_after_top3_win_rate")))
     body_net_pnl = _num(metrics.get("copy_bt_body_after_top3_net_pnl"))
     top3_share = _clamp(_num(metrics.get("copy_bt_top3_profit_share"), 1.0))
-    policy_json = parse_json_obj(metrics.get("sector_policy_json"))
-    stability = policy_json.get("stability") if isinstance(policy_json.get("stability"), dict) else {}
-    evaluable_folds = int(_num(stability.get("evaluableFolds")))
-    profitable_folds = int(_num(stability.get("profitableFolds")))
-    qualified_folds = int(_num(stability.get("qualifiedFolds"), profitable_folds))
-    fold_quality = _clamp(qualified_folds / max(1.0, float(evaluable_folds)))
     campaign_win_quality = _clamp((campaign_win_rate - 0.30) / 0.40)
     body_win_quality = _clamp((body_win_rate - 0.30) / 0.40) if body_n > 0 else 0.0
     concentration_quality = _clamp((0.80 - top3_share) / 0.30)
     repeatability_score = (
-        0.30 * campaign_win_quality
-        + 0.25 * body_win_quality
+        0.35 * campaign_win_quality
+        + 0.30 * body_win_quality
         + 0.20 * concentration_quality
         + 0.15 * (1.0 if body_n > 0 and body_net_pnl > 0.0 else 0.0)
-        + 0.10 * fold_quality
     )
     profit_factor = max(0.0, _num(metrics.get("copy_bt_profit_factor")))
     payoff_ratio = max(0.0, _num(metrics.get("copy_bt_payoff_ratio")))
@@ -383,13 +385,10 @@ def compute_follow_score(
         0.05 * raw + 0.22 * economic_score + 0.30 * repeatability_score
         + 0.18 * edge_confidence_score + 0.13 * operability_score + 0.12 * risk_score
     )
-    fold_confidence = _clamp(
-        evaluable_folds / max(1.0, float(policy.stability_min_evaluable_folds))
-    )
     campaign_confidence = _clamp(
         campaign_n / max(1.0, float(policy.core_min_campaigns_30d))
     )
-    readiness_confidence = min(confidence, campaign_confidence, fold_confidence)
+    readiness_confidence = min(confidence, campaign_confidence)
     score *= 0.70 + 0.30 * readiness_confidence
     reasons = [
         f"预期保证金收益{expected * 100:+.1f}%",

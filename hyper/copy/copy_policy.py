@@ -25,8 +25,9 @@ COPY_POLICY_PARAM_KEYS = (
     "CORE_INTRATRADE_DD_REJECT", "CORE_DEEP_BAG_MAX_FAILED", "CORE_DEEP_BAG_MIN_RECOVERY_RATE",
     "COPY_MIN_EXPECTED_MARGIN_RETURN", "CORE_MIN_COPY_RETURN_30D", "COPY_MIN_RAW_PAYOFF_RATIO",
     "COPY_STABILITY_FOLD_DAYS", "COPY_STABILITY_FOLD_COUNT",
-    "COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD", "COPY_STABILITY_MIN_EVALUABLE_FOLDS",
-    "COPY_STABILITY_MIN_PROFITABLE_FOLDS", "COPY_STABILITY_MIN_RETURN",
+    "COPY_STABILITY_MIN_EVALUABLE_FOLDS", "COPY_STABILITY_MIN_PROFITABLE_FOLDS",
+    "COPY_STABILITY_MIN_RETURN", "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD",
+    "COPY_WEEKLY_MIN_RETURN", "COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN",
     "SELECTION_MIN_ACTIONABLE_RATE", "SELECTION_MIN_CAPACITY_FIT",
 )
 
@@ -56,10 +57,12 @@ class CopyPolicy:
     min_raw_payoff_ratio: float
     stability_fold_days: int
     stability_fold_count: int
-    stability_min_campaigns_per_fold: int
     stability_min_evaluable_folds: int
     stability_min_profitable_folds: int
     stability_min_return: float
+    copy_weekly_min_campaigns_per_fold: int
+    copy_weekly_min_return: float
+    copy_weekly_min_net_per_closed_return: float
     min_actionable_open_rate: float
     min_capacity_fit: float
     tune_min_relative_gain: float
@@ -117,9 +120,6 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_raw_payoff_ratio=float(_value(values, "COPY_MIN_RAW_PAYOFF_RATIO", 0.60)),
         stability_fold_days=int(_value(values, "COPY_STABILITY_FOLD_DAYS", 7) or 7),
         stability_fold_count=int(_value(values, "COPY_STABILITY_FOLD_COUNT", 4) or 4),
-        stability_min_campaigns_per_fold=int(_value(
-            values, "COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD", 2,
-        ) or 1),
         stability_min_evaluable_folds=int(_value(
             values, "COPY_STABILITY_MIN_EVALUABLE_FOLDS", 4,
         ) or 1),
@@ -127,6 +127,13 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
             values, "COPY_STABILITY_MIN_PROFITABLE_FOLDS", 4,
         ) or 1),
         stability_min_return=float(_value(values, "COPY_STABILITY_MIN_RETURN", 0.05)),
+        copy_weekly_min_campaigns_per_fold=int(_value(
+            values, "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD", 1,
+        ) or 1),
+        copy_weekly_min_return=float(_value(values, "COPY_WEEKLY_MIN_RETURN", 0.04)),
+        copy_weekly_min_net_per_closed_return=float(_value(
+            values, "COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN", 0.005,
+        )),
         min_actionable_open_rate=float(_value(values, "SELECTION_MIN_ACTIONABLE_RATE", 0.70)),
         min_capacity_fit=float(_value(values, "SELECTION_MIN_CAPACITY_FIT", 0.75)),
         tune_min_relative_gain=float(_value(values, "AUTO_TUNE_MIN_RELATIVE_GAIN", 0.05)),

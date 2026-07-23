@@ -70,10 +70,15 @@ CORE_MIN_FOLLOW_SCORE = 0.75
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
 COPY_STABILITY_FOLD_DAYS = 7
 COPY_STABILITY_FOLD_COUNT = 4
-COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD = 2
 COPY_STABILITY_MIN_EVALUABLE_FOLDS = 4
 COPY_STABILITY_MIN_PROFITABLE_FOLDS = 4
 COPY_STABILITY_MIN_RETURN = 0.05
+# Target-wallet magnitude and follower economics are deliberately different. Official Portfolio must show
+# 5% in each week; our strict Copy needs a smaller but material net return, enough independent Campaigns,
+# and a per-close edge buffer after modeled execution costs.
+COPY_WEEKLY_MIN_RETURN = 0.04
+COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN = 0.005
+COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD = 1
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70

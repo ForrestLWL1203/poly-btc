@@ -96,16 +96,17 @@ PARAM_SPEC = [
         config.CORE_MIN_FOLLOW_SCORE * 100,
         "Core综合质量分", "新版评分同时覆盖收益、可重复性、置信度、可执行性和风险；新进入Core至少75分"),
     ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
-        f"{config.COPY_STABILITY_FOLD_COUNT}×{config.COPY_STABILITY_FOLD_DAYS}日；"
-        f"每段≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%且1.5倍成本后盈利",
-        "四周稳定盈利硬闸",
-        "最近28日拆成4个互不重叠的7日段；每段至少2个Campaign、浮动本金收益≥5%，且1.5倍成本后仍盈利"),
+        f"官方每段≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%；"
+        f"Copy每段≥{config.COPY_WEEKLY_MIN_RETURN * 100:g}%",
+        "四周双重稳定盈利硬闸",
+        "官方Portfolio验证目标钱包每周≥5%；严格Copy验证我们每周≥4%、"
+        "平均每个平仓净收益≥周初权益0.5%，且1.5倍成本后仍盈利"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
     ("CORE_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
         config.CORE_MIN_COPY_RETURN_30D * 100, "30日收益评分参考",
-        "仅用于综合评分的30日经济强度标尺；Core准入由四个独立7日稳定收益段决定"),
+        "仅用于综合评分的30日经济强度标尺；Core另由官方5%与严格Copy 4%的四个独立7日段决定"),
     ("CORE_RETENTION_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
         config.CORE_RETENTION_MIN_COPY_RETURN_30D * 100, "旧Core·30日收益评分参考",
         "仅保留为旧revision和评分参考；不再绕过四个独立7日稳定收益硬闸"),

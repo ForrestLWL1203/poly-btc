@@ -881,14 +881,16 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
             now_ms=int(now_ms),
             fold_days=int(config.COPY_STABILITY_FOLD_DAYS),
             fold_count=int(config.COPY_STABILITY_FOLD_COUNT),
-            min_campaigns=int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD),
+            min_campaigns=int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD),
             min_evaluable=int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS),
             min_profitable=int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS),
-            min_return=float(config.COPY_STABILITY_MIN_RETURN),
+            min_return=float(config.COPY_WEEKLY_MIN_RETURN),
             initial_equity=float(
                 result.get("initial_margin_equity") or config.INITIAL_BALANCE
             ),
             path_equity_samples=result.get("path_equity_samples") or (),
+            require_cost_stress=True,
+            min_net_per_closed_return=float(config.COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN),
         )
     result["fills"] = len(fills)
     return _compact_backtest(result)

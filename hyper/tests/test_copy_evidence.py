@@ -92,6 +92,65 @@ class CopyEvidenceTests(unittest.TestCase):
         self.assertAlmostEqual(result["folds"][1]["startEquity"], 10_500)
         self.assertAlmostEqual(result["folds"][1]["return"], .05)
 
+    def test_copy_weekly_floor_is_four_percent_not_official_five_percent(self):
+        now = 28 * DAY
+        rows = []
+        equity = 10_000.0
+        for week in range(4):
+            fold_net = equity * .045
+            for offset in (2, 4):
+                day = week * 7 + offset
+                rows.append({
+                    "addr": "0xa", "coin": "BTC", "side": "long",
+                    "opened_at": day * DAY - 1_000, "closed_at": day * DAY,
+                    "status": "closed", "net_pnl": fold_net / 2, "fee_drag": 5,
+                })
+            equity += fold_net
+        result = summarize_campaign_stability(
+            rows, now_ms=now, min_return=.04, min_net_per_closed_return=.005,
+        )
+        self.assertTrue(result["passed"])
+        self.assertTrue(all(.04 <= fold["return"] < .05 for fold in result["folds"]))
+
+    def test_high_turnover_thin_week_fails_per_close_economic_density(self):
+        now = 28 * DAY
+        rows = []
+        for week in range(4):
+            for item in range(60):
+                stamp = week * 7 * DAY + DAY + item * 60_000
+                rows.append({
+                    "addr": "0xa", "coin": "BTC", "side": "long",
+                    "opened_at": stamp - 1_000, "closed_at": stamp,
+                    "status": "closed", "net_pnl": 8, "fee_drag": .25,
+                })
+        result = summarize_campaign_stability(
+            rows, now_ms=now, min_return=.04, min_net_per_closed_return=.005,
+        )
+        self.assertTrue(all(fold["return"] >= .04 for fold in result["folds"]))
+        self.assertTrue(all(not fold["economicDensityPassed"] for fold in result["folds"]))
+        self.assertFalse(result["passed"])
+
+    def test_thirty_four_closes_earning_only_fifty_six_dollars_fails(self):
+        now = 28 * DAY
+        rows = []
+        for week in range(4):
+            per_close = 50.0 if week < 3 else 56.0 / 34.0
+            for item in range(34):
+                stamp = week * 7 * DAY + DAY + item * 60_000
+                rows.append({
+                    "addr": "0xa", "coin": "BTC", "side": "long",
+                    "opened_at": stamp - 1_000, "closed_at": stamp,
+                    "status": "closed", "net_pnl": per_close, "fee_drag": .25,
+                })
+        result = summarize_campaign_stability(
+            rows, now_ms=now, min_return=.04, min_net_per_closed_return=.005,
+        )
+        latest = result["folds"][-1]
+        self.assertEqual(latest["closedPositionN"], 34)
+        self.assertAlmostEqual(latest["averageClosedNetPnl"], 56.0 / 34.0)
+        self.assertFalse(latest["economicDensityPassed"])
+        self.assertFalse(result["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

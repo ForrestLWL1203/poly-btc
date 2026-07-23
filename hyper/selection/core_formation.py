@@ -78,7 +78,7 @@ def validate_final_membership(
     """
     reasons = []
     required_fold_count = int(config.COPY_STABILITY_FOLD_COUNT)
-    min_weekly_return = float(config.COPY_STABILITY_MIN_RETURN)
+    min_weekly_return = float(config.COPY_WEEKLY_MIN_RETURN)
     weekly_rows = []
     floating_equity = max(1.0, float(initial_margin_equity))
     for fold in candidate_folds:
@@ -99,7 +99,7 @@ def validate_final_membership(
         evaluable_folds = [
             fold for fold in candidate_folds
             if int(fold.payload.get("campaignClosedN") or 0)
-            >= int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD)
+            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
         ]
         if any(
             fold.actionable_open_rate < 0.70
@@ -129,9 +129,9 @@ def validate_final_membership(
             candidate_fold.net_pnl - baseline_fold.net_pnl
             for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds)
             if int(candidate_fold.payload.get("campaignClosedN") or 0)
-            >= int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD)
+            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
             and int(baseline_fold.payload.get("campaignClosedN") or 0)
-            >= int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD)
+            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
         ]
         if len(fold_deltas) >= 2 and sum(delta > 0.0 for delta in fold_deltas) < 2:
             reasons.append("membership_fewer_than_two_fold_wins")

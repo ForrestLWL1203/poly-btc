@@ -127,24 +127,37 @@ def summarize_campaign_stability(
     min_return: float = 0.05,
     initial_equity: float = 10_000.0,
     path_equity_samples: Iterable[Mapping] = (),
+    require_cost_stress: bool = True,
+    min_net_per_closed_return: float = 0.0,
 ) -> dict:
     """Evaluate fee-paid Copy returns on adjacent, non-overlapping time folds.
 
     Returns use the continuously marked strict-replay equity path when it is available, so the denominator
     is each fold's actual starting equity and profits compound naturally.  The cache-only fallback carries
     realized Campaign PnL forward on the same capital base.  Every qualifying fold must also remain positive
-    after charging an extra half of its already-paid fees (the 1.5x cost stress).
+    after charging an extra half of its already-paid fees when ``require_cost_stress`` is enabled.
     """
     fold_days = max(1, int(fold_days))
     fold_count = max(1, int(fold_count))
-    min_campaigns = max(1, int(min_campaigns))
+    min_campaigns = max(0, int(min_campaigns))
     min_evaluable = max(1, int(min_evaluable))
     min_profitable = max(1, int(min_profitable))
     min_return = max(0.0, float(min_return))
+    min_net_per_closed_return = max(0.0, float(min_net_per_closed_return))
     initial_equity = max(1.0, _finite(initial_equity, 10_000.0))
     width = fold_days * DAY_MS
     start = int(now_ms) - fold_count * width
+    positions = list(positions or ())
     records = _closed_campaign_records(positions)
+    closed_positions = [
+        {
+            "closed_at": int(_finite(position.get("closed_at"))),
+            "net_pnl": _endpoint_pnl(position),
+        }
+        for position in positions
+        if str(position.get("status") or "open") != "open"
+        and int(_finite(position.get("closed_at"))) > 0
+    ]
     rows = [
         row for row in records
         if start <= int(row["closed_at"]) <= int(now_ms)
@@ -170,6 +183,11 @@ def summarize_campaign_stability(
             if lo <= int(row["closed_at"]) < hi
             or (index == fold_count - 1 and int(row["closed_at"]) == hi)
         ]
+        closed_values = [
+            row for row in closed_positions
+            if lo <= int(row["closed_at"]) < hi
+            or (index == fold_count - 1 and int(row["closed_at"]) == hi)
+        ]
         campaign_net = sum(float(row["net_pnl"]) for row in values)
         fee_drag = sum(float(row["fee_drag"]) for row in values)
         path_start_equity = _equity_at(path_samples, lo)
@@ -184,14 +202,36 @@ def summarize_campaign_stability(
         fold_return = net / max(1.0, float(start_equity))
         cost_stress_net = net - 0.5 * max(0.0, fee_drag)
         evaluable = len(values) >= min_campaigns
+        return_ok = fold_return > 0.0 if min_return <= 0.0 else fold_return >= min_return
+        average_closed_net = (
+            sum(float(row["net_pnl"]) for row in closed_values) / len(closed_values)
+            if closed_values else None
+        )
+        average_closed_return = (
+            average_closed_net / max(1.0, float(start_equity))
+            if average_closed_net is not None else None
+        )
+        density_ok = bool(
+            min_net_per_closed_return <= 0.0
+            or (
+                average_closed_return is not None
+                and average_closed_return >= min_net_per_closed_return
+            )
+        )
         qualified = bool(
-            evaluable and fold_return >= min_return and cost_stress_net > 0.0
+            evaluable and return_ok and density_ok
+            and (cost_stress_net > 0.0 or not require_cost_stress)
         )
         folds.append({
             "index": index + 1, "startMs": lo, "endMs": hi,
             "campaigns": len(values), "netPnl": net,
             "campaignNetPnl": campaign_net, "feeDrag": fee_drag,
             "costStressNetPnl": cost_stress_net,
+            "closedPositionN": len(closed_values),
+            "averageClosedNetPnl": average_closed_net,
+            "averageClosedNetReturn": average_closed_return,
+            "averageClosedNetReturnFloor": min_net_per_closed_return,
+            "economicDensityPassed": density_ok,
             "startEquity": float(start_equity), "endEquity": end_equity,
             "return": fold_return, "returnFloor": min_return,
             "equitySource": "marked_path" if path_complete else "realized_fallback",
@@ -214,6 +254,8 @@ def summarize_campaign_stability(
         "folds": folds, "evaluableFolds": len(evaluated),
         "profitableFolds": len(profitable), "qualifiedFolds": len(qualified),
         "requiredQualifiedFolds": fold_count, "minReturn": min_return,
+        "costStressRequiredPerFold": bool(require_cost_stress),
+        "minNetPerClosedReturn": min_net_per_closed_return,
         "allCostStressPositive": all(
             float(fold["costStressNetPnl"]) > 0.0 for fold in evaluated
         ) if evaluated else False,

@@ -480,7 +480,9 @@ def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, act
 def _prepare_leaderboard_rows(rows, p, fetched_at):
     """Attach the cheap discovery decision without mutating the live leaderboard.
 
-    New-wallet recall combines useful account size/activity, absolute recent PnL and official ROI efficiency.
+    New-wallet recall combines useful account size/activity and absolute recent PnL. Independent official
+    weekly return stability is evaluated from the dense Portfolio series immediately after this raw-row gate;
+    the Leaderboard's overlapping month ROI remains audit-only.
     Current roles/open-position owners bypass this discovery-only decision and receive retention replay.
     """
     min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
@@ -514,7 +516,6 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
             and wk_vlm >= vlm_min
             and week_positive
             and month_positive
-            and month_roi >= roi_min["month"]
         )
         r["fetched_at"] = fetched_at
         mon_vlm = f(mo.get("vlm"))
@@ -524,7 +525,7 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
 
 
 def harvest(db, p, *, generation_id=None) -> int:
-    """Leaderboard official ROI + absolute PnL screen; no leveraged-volume efficiency ratio."""
+    """Leaderboard account/activity + absolute PnL recall before official weekly Portfolio stability."""
     rows = rest.get_leaderboard()
     now = now_iso()
     prepared = _prepare_leaderboard_rows(rows, p, now)
@@ -618,12 +619,11 @@ def _official_roi_audit(db, generation_id, stamp, p):
             "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
             "week_pnl_below_floor": not week_positive,
             "month_pnl_below_floor": not month_positive,
-            "month_roi_below_floor": diagnostics["month_roi_below_reference"],
         }
         failed_checks = [reason for reason, failed in checks.items() if failed]
         item["roiWindowsPassed"] = roi_windows_passed
-        item["requiredRoiWindows"] = ["month"]
-        item["roiMagnitudeGateEnabled"] = True
+        item["requiredRoiWindows"] = []
+        item["roiMagnitudeGateEnabled"] = False
         item["roiDiagnostics"] = [reason for reason, failed in diagnostics.items() if failed]
         item["failedChecks"] = failed_checks
         addr = item.pop("addr")
@@ -637,7 +637,7 @@ def _official_roi_audit(db, generation_id, stamp, p):
 
 
 def _run_perp_prefilter(db, addrs, p, stamp):
-    """Run the authoritative Portfolio precheck for ROI survivors before history collection."""
+    """Run official weekly stability and Perp-share checks before downloading wallet history."""
     pipeline_audit._delete_stage(db, stamp, "scan", "perp_prefilter")
     # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
     # single writer slot across a batch of rate-paced Portfolio calls freezes Observer marks and commands.
@@ -648,11 +648,15 @@ def _run_perp_prefilter(db, addrs, p, stamp):
         "all": getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
     }
     share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
+    copy_policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
     cache_policy = {
-        "version": "month_only_perp_v2",
+        "version": "official_weekly_stability_perp_v3",
         "monthPerpPnlMustBePositive": True,
         "auditPnlMinima": {key: float(value) for key, value in minima.items()},
         "shareMin": float(share_min),
+        "stabilityFoldDays": int(copy_policy.stability_fold_days),
+        "stabilityFoldCount": int(copy_policy.stability_fold_count),
+        "stabilityMinReturn": float(copy_policy.stability_min_return),
     }
     addr_set = {str(addr).lower() for addr in addrs}
     cached_results = {}
@@ -697,7 +701,14 @@ def _run_perp_prefilter(db, addrs, p, stamp):
                     "deferred_data_error", f"portfolio_error:{type(exc).__name__}", {},
                 )
             else:
-                result = perp_prefilter.evaluate(payload, pnl_minima=minima, share_min=share_min)
+                result = perp_prefilter.evaluate(
+                    payload,
+                    pnl_minima=minima,
+                    share_min=share_min,
+                    stability_fold_days=copy_policy.stability_fold_days,
+                    stability_fold_count=copy_policy.stability_fold_count,
+                    stability_min_return=copy_policy.stability_min_return,
+                )
         results[addr] = result
         # Buffer audit values in memory so no write transaction remains open during the next REST call.
         pending_audit.append({
@@ -784,7 +795,7 @@ def _open_flow_metrics(fills: list, now_ms: int) -> dict:
 
 
 def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
-    """Derive non-overlapping, normalized OOS evidence from canonical replay positions."""
+    """Derive normalized OOS evidence from canonical replay positions."""
     if not isinstance(results, dict):
         results = {}
     by_days = {}
@@ -809,23 +820,28 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         now_ms=now_ms,
     )
     policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
-    stability = summarize_campaign_stability(
+    copy_weekly = summarize_campaign_stability(
         positions,
         now_ms=int(now_ms or 0),
         fold_days=policy.stability_fold_days,
         fold_count=policy.stability_fold_count,
-        min_campaigns=policy.stability_min_campaigns_per_fold,
-        min_evaluable=policy.stability_min_evaluable_folds,
-        min_profitable=policy.stability_min_profitable_folds,
-        min_return=policy.stability_min_return,
+        min_campaigns=policy.copy_weekly_min_campaigns_per_fold,
+        min_evaluable=policy.stability_fold_count,
+        min_profitable=policy.stability_fold_count,
+        min_return=policy.copy_weekly_min_return,
         initial_equity=f(primary.get("initial_margin_equity")) or config.INITIAL_BALANCE,
         path_equity_samples=primary.get("path_equity_samples") or (),
+        require_cost_stress=True,
+        min_net_per_closed_return=policy.copy_weekly_min_net_per_closed_return,
     )
     try:
         policy_json = json.loads(m.get("sector_policy_json") or "{}")
     except (TypeError, ValueError):
         policy_json = {}
-    policy_json["stability"] = stability
+    # Official Portfolio owns the 5% target-wallet floor. Copy uses a distinct 4% funded return plus per-close
+    # economic density and cost stress; it deliberately does not inherit the target's 5% magnitude.
+    policy_json.pop("stability", None)
+    policy_json["copyWeeklyProfitability"] = copy_weekly
     m["sector_policy_json"] = json.dumps(policy_json, separators=(",", ":"), sort_keys=True)
     dd = max(0.0, f(primary.get("max_drawdown")))
     worst_return = min(
@@ -2126,8 +2142,8 @@ def _formation_prepath_candidate(row) -> bool:
     checks = dict(qualification.get("checks") or {})
     required_checks = (
         "strictCopy30dPositive",
+        "strictCopyWeeklyPositive",
         "tenIndependentCampaigns",
-        "nonoverlapStability",
         "campaignWinRate",
         "repeatableBodyWinRate",
         "repeatableBodyPositive",

@@ -25,7 +25,16 @@ def leaderboard_row(addr="0xaaa"):
 
 def portfolio_rows():
     def window(pnl):
-        return {"pnlHistory": [[1, "0"], [2, str(pnl)]], "accountValueHistory": [[1, "1"], [2, "1"]]}
+        return {
+            "pnlHistory": [
+                [index * 7 * 86400_000, str(pnl * index / 4)]
+                for index in range(5)
+            ],
+            "accountValueHistory": [
+                [index * 7 * 86400_000, "1"]
+                for index in range(5)
+            ],
+        }
     return [
         ["week", window(300000)], ["month", window(500000)], ["allTime", window(900000)],
         ["perpWeek", window(280000)], ["perpMonth", window(450000)], ["perpAllTime", window(800000)],
@@ -67,7 +76,7 @@ def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
 def strict_policy_json():
     return json.dumps({
         "allowed": ["crypto"], "crypto": {"allow": True},
-        "stability": {
+        "copyWeeklyProfitability": {
             "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": True,
             "passed": True, "evaluableFolds": 4, "profitableFolds": 4,
             "qualifiedFolds": 4,
@@ -473,7 +482,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
     def test_bounded_path_pool_prioritizes_incumbent_and_prepath_core_quality(self):
         checks = {
             key: True for key in (
-                "strictCopy30dPositive", "tenIndependentCampaigns", "nonoverlapStability",
+                "strictCopy30dPositive", "strictCopyWeeklyPositive", "tenIndependentCampaigns",
                 "campaignWinRate", "repeatableBodyWinRate", "repeatableBodyPositive",
                 "coreFollowScore", "activityWithin72h", "oneWinnerRemovalPositive",
                 "costStressPositive", "openExecution", "capacity", "valuationComplete",
@@ -486,7 +495,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "addr": "0xweak", "follow_score": .99,
                 "follow_qualification": {
                     "eligible": True, "evidenceDays": 10,
-                    "checks": {**checks, "nonoverlapStability": False},
+                    "checks": {**checks, "strictCopyWeeklyPositive": False},
                 },
                 "sector_policy_json": "{}",
             },

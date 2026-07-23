@@ -100,11 +100,14 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 ### 2. Candidate workset and profiles
 
 - New-wallet Leaderboard recall requires account value `$5,000`, leveraged 7d notional volume `$250,000`,
-  positive 7d and 30d PnL, plus 30d ROI `20%`. The 7d ROI `10%` reference and all-time ROI are score/audit only;
-  nominal leveraged volume is never a profitability denominator and has no upper bound. Current Core,
-  Challenger and open-position owners bypass discovery recall and always receive retention replay. Every new
-  survivor then needs positive 30d Perp PnL and at least 60% 30d Perp PnL share; 7d/all-time Portfolio windows
-  are audit-only and never form an AND rejection.
+  and positive 7d and 30d PnL. Leaderboard ROI windows are score/audit only; nominal leveraged volume is never
+  a profitability denominator and has no upper bound. Before fill history is downloaded, the official
+  `perpMonth` PnL/account-value series must provide four adjacent 7d folds and each must return at least 5%;
+  incomplete time-series evidence is deferred, not rejected. The same Portfolio response must also show
+  positive 30d Perp PnL and at least 60% 30d Perp PnL share. Current Core, Challenger and open-position owners
+  bypass discovery recall and always receive retention replay. Fill-based strict Copy later confirms four
+  weekly follower returns of at least 4%, at least one Campaign per fold, average net of at least 0.5% of
+  weekly starting equity per closed position, and positive 1.5x-cost results on our own capital.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
@@ -165,9 +168,10 @@ default classification is:
   outlier stress or cost stress are explicit Challenger reasons rather than economic rejection;
 - normal Core needs ten independent 30-day Campaigns, at least five evidence days, complete valuation/path
   data and no hard risk. The old standalone 30-day 10% Core line is score/audit only, not a repeated veto;
-- profitability stability uses four adjacent non-overlapping 7-day folds covering the latest 28 days. Every
-  fold needs two Campaigns, at least 5% return on that fold's floating strict-replay starting equity, and
-  positive net after charging 1.5x costs. All four folds must pass;
+- target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
+  latest 28 days, each with at least 5% return. Strict Copy separately requires every matching follower fold
+  to return at least 4% on floating starting equity, contain at least one Campaign, average at least 0.5% of
+  weekly starting equity per closed position, and remain positive after charging 1.5x costs. All four pass;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
 - rolling 7/14-day returns, PF, Campaign win rate, Wilson confidence and raw payoff are ranking/diagnostic
@@ -304,7 +308,8 @@ The compact portfolio tuner searches all three volatility-tier upper margins and
 not tune the three lower margins, per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
 or stop/risk-owner settings. Parameter finalists use three non-overlapping fill-driven ten-day folds solely to
 reject overfit sizing proposals, plus 1.5x-cost stress and open/capacity checks; these tuner folds do not decide
-wallet admission. The selected wallet set must separately pass the four 7-day 5% Core stability periods.
+  wallet admission. The selected wallet set must separately pass the official four-week 5% target screen and
+  the four-week 4% strict-Copy plus 0.5%-per-close economic-density screen.
 Price-path and maintenance-risk validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
 few absolute margins at 50/75/100% of the four-add-safe ceiling; it does not restore the old large Cartesian grid.
 Leverage probes pair a lower leverage with reciprocal margin so each tier's `margin × leverage` notional stays

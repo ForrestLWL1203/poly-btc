@@ -16,7 +16,7 @@ def stability(*, passed=True, sufficient=True, profitable=4):
 
 
 def evidence(**overrides):
-    policy = {"allowed": ["crypto"], "stability": stability()}
+    policy = {"allowed": ["crypto"], "copyWeeklyProfitability": stability()}
     row = {
         "score": 0.70,
         "copy_bt_closed_n": 16,
@@ -93,11 +93,11 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["status"], "challenger_campaign_evidence_building")
 
-    def test_core_uses_ten_campaigns_nonoverlap_activity_and_stress(self):
+    def test_core_uses_ten_campaigns_copy_weekly_profit_activity_and_stress(self):
         result = judge()
         self.assertTrue(result["coreEligible"])
         self.assertTrue(result["checks"]["tenIndependentCampaigns"])
-        self.assertTrue(result["checks"]["nonoverlapStability"])
+        self.assertTrue(result["checks"]["strictCopyWeeklyPositive"])
         self.assertTrue(result["checks"]["activityWithin72h"])
         self.assertTrue(result["checks"]["campaignWinRate"])
         self.assertTrue(result["checks"]["repeatableBodyWinRate"])
@@ -162,7 +162,7 @@ class FollowScoreTests(unittest.TestCase):
             open_probability_48h=0.37,
             sector_policy_json=json.dumps({
                 "allowed": ["crypto"],
-                "stability": stability(passed=False, sufficient=False),
+                "copyWeeklyProfitability": stability(passed=False, sufficient=False),
             }),
         )
         score, _ = compute_follow_score(row)
@@ -178,13 +178,19 @@ class FollowScoreTests(unittest.TestCase):
         )
         self.assertTrue(result["coreEligible"])
 
-    def test_nonoverlap_insufficient_is_unknown_and_failed_stability_is_watch(self):
-        thin_policy = {"allowed": ["crypto"], "stability": stability(passed=False, sufficient=False)}
-        failed_policy = {"allowed": ["crypto"], "stability": stability(passed=False, profitable=3)}
+    def test_copy_weekly_insufficient_is_unknown_and_one_losing_fold_is_watch(self):
+        thin_policy = {
+            "allowed": ["crypto"],
+            "copyWeeklyProfitability": stability(passed=False, sufficient=False),
+        }
+        failed_policy = {
+            "allowed": ["crypto"],
+            "copyWeeklyProfitability": stability(passed=False, profitable=3),
+        }
         thin = judge(sector_policy_json=json.dumps(thin_policy))
         failed = judge(sector_policy_json=json.dumps(failed_policy))
-        self.assertEqual(thin["status"], "challenger_stability_evidence_building")
-        self.assertEqual(failed["status"], "challenger_stability_watch")
+        self.assertEqual(thin["status"], "challenger_copy_weekly_evidence_building")
+        self.assertEqual(failed["status"], "challenger_copy_weekly_loss")
 
     def test_activity_is_72_hour_core_permission_not_rejection(self):
         edge = judge(last_copyable_open_ms=NOW - 72 * 3_600_000)
@@ -222,7 +228,7 @@ class FollowScoreTests(unittest.TestCase):
     def test_no_copyable_sector_rejects_but_watch_sector_stays_challenger(self):
         none = judge(sector_policy_json=json.dumps({"allowed": [], "watch": []}))
         watch = judge(sector_policy_json=json.dumps({
-            "allowed": [], "watch": ["crypto"], "stability": stability(),
+            "allowed": [], "watch": ["crypto"], "copyWeeklyProfitability": stability(),
         }))
         self.assertEqual(none["status"], "no_copyable_sector")
         self.assertTrue(watch["eligible"])

@@ -32,8 +32,10 @@ The current runtime turns the public Hyperliquid leaderboard into a live, paper-
 Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
-    ↓ account ≥ $5k, 7d notional volume ≥ $250k, positive 7d/30d PnL, 30d ROI ≥ 20%
-30d Perp prefilter + sector-isolated structure filter
+    ↓ account ≥ $5k, 7d notional volume ≥ $250k, positive 7d/30d PnL
+Official Portfolio stability + 30d Perp prefilter
+    ↓ four adjacent 7d Perp-return folds ≥ 5%, positive 30d Perp PnL, Perp-profit share ≥ 60%
+Sector-isolated structure filter
     ↓ cached 37-day profile (30-day evidence + 7-day warm-up)
 Canonical Copy replay: Challenger evidence → personal Core
     ↓ 10 Campaigns, non-overlapping stability, path/cost/outlier/capacity stress
@@ -51,15 +53,19 @@ final new-entry membership once an explicit selection generation exists.
 
 Wallet quality and funded-account membership are separate decisions.
 
-- Thirty-day Leaderboard ROI ≥20% is a recall gate; 7-day ROI ≥10% is ranking/audit only. Profile hard gates remove invalid
-  data and systematic uncopyable structures; HFT needs at least ten complete rounds, Grid needs at least five
-  complete rounds with a strict majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
+- Leaderboard ROI windows are audit/ranking references rather than admission gates. Raw recall requires useful
+  account size/activity and positive 7/30-day PnL. Before any fill download, the already-required official
+  Portfolio response must show four adjacent 7-day Perp-return folds of at least 5%; incomplete history is
+  deferred rather than rejected. Profile hard gates then remove invalid data and systematic uncopyable
+  structures; HFT needs at least ten complete rounds, Grid needs at least five complete rounds with a strict
+  majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
 - Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
   activity, cost stress, or outlier evidence block Core but do not erase that research evidence. Refined
   candle paths are fetched only for current Core and wallets that already clear every non-path Core gate,
   bounded at 40 for resource safety; raw score alone cannot consume these expensive slots. New Core requires
-  ten independent Campaigns plus four non-overlapping 7-day strict-Copy periods that each return at least 5%
-  on floating starting equity and remain profitable under 1.5x costs.
+  ten independent Campaigns plus four non-overlapping 7-day strict-Copy periods that each return at least 4%
+  on floating starting equity, average at least 0.5% of weekly starting equity per closed position, and remain
+  profitable under 1.5x costs. The Copy thresholds deliberately do not copy the target's official 5% floor.
 - The final copy-follow score is calibrated as economics 22%, repeatability 30%, edge confidence 18%,
   operability 13%, path risk 12%, and raw profile prior 5%. Incomplete Campaign/fold evidence shrinks the
   total, so a tiny perfect streak cannot outrank mature proof. New Core requires at least 75/100, at least
@@ -95,9 +101,11 @@ Profiles are not re-downloaded from zero on every scheduled run.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
 - Leaderboard candidates require at least `$5,000` account value, `$250,000` leveraged 7-day notional volume,
-  positive 7-day and 30-day PnL, and 30-day ROI ≥20%. The 7-day ROI ≥10% reference is audit/ranking only.
-  The cheap Portfolio precheck then requires positive 30-day Perp PnL and at least 60% Perp-profit share;
-  its 7-day/all-time windows are diagnostic rather than duplicate AND gates.
+  and positive 7-day and 30-day PnL. Leaderboard ROI values remain audit/ranking references. The cheap
+  Portfolio precheck then splits the dense `perpMonth` PnL/account-value series into four non-overlapping
+  7-day folds, requires every fold to return at least 5%, and also requires positive 30-day Perp PnL plus at
+  least 60% Perp-profit share. Campaign independence and 1.5x Copy execution-cost stress are confirmed later
+  from fills under our `$10,000` replay rather than inferred from Portfolio.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
   is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
@@ -140,12 +148,13 @@ shared available balance, isolated margin, volatility-tier sizing, leverage caps
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
-Campaign. Core needs ten Campaigns and four adjacent non-overlapping 7-day folds covering the latest 28 days.
-Every fold needs at least two Campaigns, at least 5% return on its floating strict-replay starting equity, and
-positive net after charging 1.5x costs. All four folds must pass. The former standalone 30-day 10% Core line is
-score/audit only; the continuous 30-day strict replay still certifies portfolio profit, drawdown, liquidation,
-capacity, and expected return. Thin folds are unknown evidence, never synthetic losses. The single outlier
-stress removes the largest winning Campaign and requires the remainder positive.
+Campaign. Target-wallet stability is screened first from official Portfolio: all four adjacent 7-day folds need
+at least 5% return. Our strict Copy then evaluates the same four folds on floating replay equity: every fold needs
+at least 4% net return, at least one independent Campaign, average closed-position net of at least 0.5% of weekly
+starting equity, and positive net after charging 1.5x costs. The 30-day aggregate still needs ten Campaigns. The
+former standalone 30-day 10% Core line is score/audit only; the continuous 30-day strict replay still certifies
+portfolio profit, drawdown, liquidation, capacity, and expected return. Thin folds are unknown evidence, never
+synthetic losses. The single outlier stress removes the largest winning Campaign and requires the remainder positive.
 
 The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
 time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is

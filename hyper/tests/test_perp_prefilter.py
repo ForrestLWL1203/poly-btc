@@ -11,7 +11,28 @@ from hyper.discovery import perp_prefilter, scanner
 
 
 def _window(start, end):
-    return {"pnlHistory": [[1, str(start)], [2, str(end)]], "accountValueHistory": [[1, "1"], [2, "1"]]}
+    step = (end - start) / 4
+    return {
+        "pnlHistory": [
+            [index * 7 * 86400_000, str(start + index * step)]
+            for index in range(5)
+        ],
+        "accountValueHistory": [
+            [index * 7 * 86400_000, "1"]
+            for index in range(5)
+        ],
+    }
+
+
+def _stability_window(returns, *, equity=10_000):
+    pnl = 0.0
+    pnl_history = [[0, "0"]]
+    equity_history = [[0, str(equity)]]
+    for index, value in enumerate(returns, 1):
+        pnl += float(value) * equity
+        pnl_history.append([index * 7 * 86400_000, str(pnl)])
+        equity_history.append([index * 7 * 86400_000, str(equity)])
+    return {"pnlHistory": pnl_history, "accountValueHistory": equity_history}
 
 
 def _portfolio(*, total=(6000, 18000, 25000), perp=(5000, 15000, 20000)):
@@ -34,6 +55,7 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.windows["week"]["perpShare"], 0.8)
         self.assertEqual(result.windows["month"]["perpShare"], 0.8)
+        self.assertEqual(result.windows["officialStability"]["qualifiedFolds"], 4)
 
     def test_week_and_lifetime_are_audit_only(self):
         weak_week = perp_prefilter.evaluate(
@@ -69,6 +91,34 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(result.deferred)
         self.assertEqual(result.reason, "portfolio_window_missing:month")
 
+    def test_official_four_week_stability_rejects_one_weak_fold_before_fills(self):
+        payload = _portfolio()
+        payload = [
+            [name, _stability_window([0.06, 0.04, 0.07, 0.08])]
+            if name == "perpMonth" else row
+            for row in payload
+            for name in [row[0]]
+        ]
+        result = perp_prefilter.evaluate(payload, pnl_minima=self.minima, share_min=0.1)
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.reason, "portfolio_weekly_return_below_floor")
+        self.assertEqual(result.windows["officialStability"]["qualifiedFolds"], 3)
+
+    def test_sparse_month_history_is_evidence_deferred_not_business_rejection(self):
+        payload = _portfolio()
+        sparse = {
+            "pnlHistory": [[0, "0"], [28 * 86400_000, "4000"]],
+            "accountValueHistory": [[0, "10000"], [28 * 86400_000, "14000"]],
+        }
+        payload = [
+            [name, sparse] if name == "perpMonth" else row
+            for row in payload
+            for name in [row[0]]
+        ]
+        result = perp_prefilter.evaluate(payload, pnl_minima=self.minima, share_min=0.1)
+        self.assertTrue(result.deferred)
+        self.assertEqual(result.reason, "portfolio_weekly_stability_incomplete")
+
     def test_leveraged_volume_does_not_affect_leaderboard_decision(self):
         def row(volume):
             return {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
@@ -89,7 +139,7 @@ class PerpPrefilterTests(unittest.TestCase):
         high = scanner._prepare_leaderboard_rows([row(300000000)], P(), "now")[0]
         self.assertEqual((low["is_candidate"], high["is_candidate"]), (1, 1))
 
-    def test_month_roi_and_positive_week_month_pnl_are_recall_gates(self):
+    def test_leaderboard_roi_is_audit_only_and_positive_week_month_pnl_are_recall_gates(self):
         base = {"ethAddress": "0x1", "accountValue": 30000, "windowPerformances": [
             ("week", {"pnl": 2000, "roi": 0.15, "vlm": 300000}),
             ("month", {"pnl": 8000, "roi": 0.30, "vlm": 600000}),
@@ -105,7 +155,7 @@ class PerpPrefilterTests(unittest.TestCase):
         all_roi_miss = {**base, "windowPerformances": [
             (name, {**values, "roi": -10.0}) for name, values in base["windowPerformances"]
         ]}
-        self.assertEqual(scanner._prepare_leaderboard_rows([all_roi_miss], P(), "now")[0]["is_candidate"], 0)
+        self.assertEqual(scanner._prepare_leaderboard_rows([all_roi_miss], P(), "now")[0]["is_candidate"], 1)
         all_time_only_miss = {**base, "windowPerformances": [
             (name, {**values, "roi": -10.0}) if name == "allTime" else (name, dict(values))
             for name, values in base["windowPerformances"]
