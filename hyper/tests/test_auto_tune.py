@@ -22,13 +22,15 @@ class AutoTuneTests(unittest.TestCase):
             "challengerOpenRate": challenger_open,
             "baselineCapacityFit": baseline_capacity,
             "challengerCapacityFit": challenger_capacity,
-        } for _ in range(3)]
+        } for _ in range(4)]
         return {
             "folds": folds,
-            "foldWins": int(challenger_net > baseline_net) * 3,
+            "foldWins": int(challenger_net > baseline_net) * 4,
             "holdout": folds[-1],
             "baselineStressNet": baseline_net,
             "stressNet": challenger_net,
+            "pricePathCoverage": 1.0,
+            "maintenanceMarginCoverage": 1.0,
         }
 
     def test_formation_does_not_treat_capacity_as_a_second_profit_veto(self):
@@ -52,6 +54,23 @@ class AutoTuneTests(unittest.TestCase):
         self.assertFalse(model["eligible"])
         self.assertTrue(model["baselineFeasible"])
         self.assertIn("relative_gain_below_floor", model["reasons"])
+
+    def test_formation_rejects_surface_that_breaks_four_week_stability(self):
+        validation = self._formation_validation(
+            baseline_capacity=.90, challenger_capacity=.92,
+            baseline_net=100, challenger_net=130,
+        )
+        validation["folds"][-1]["challengerNet"] = -200
+        validation["holdout"] = validation["folds"][-1]
+        validation["stressNet"] = -210
+
+        model = auto_tune._formation_model_validation(
+            validation, auto_tune.load_copy_policy(),
+        )
+
+        self.assertFalse(model["eligible"])
+        self.assertFalse(model["challengerFeasible"])
+        self.assertIn("holdout_not_profitable", model["reasons"])
 
     def test_candidate_can_improve_a_baseline_already_below_absolute_open_floor(self):
         baseline = {
@@ -424,7 +443,10 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertLess(len(coarse), len(full))
         self.assertLessEqual(len(coarse), 7)
-        self.assertEqual(coarse[0]["params"], base)
+        self.assertEqual(
+            {key: coarse[0]["params"][key] for key in base},
+            base,
+        )
         for candidate in coarse[1:]:
             changed = sum(
                 candidate["params"][key] != base[key] for key in auto_tune.LEV_KEYS
@@ -454,6 +476,36 @@ class AutoTuneTests(unittest.TestCase):
             stable_25["STABLE_MARGIN_PCT"] * stable_25["STABLE_LEV_CAP"],
             base["STABLE_MARGIN_PCT"] * base["STABLE_LEV_CAP"],
         )
+
+    def test_congestion_grid_releases_wallet_caps_without_crossing_hard_stop(self):
+        base = {
+            key: float(getattr(auto_tune.config, key))
+            for key in auto_tune.TUNE_KEYS
+        }
+        follow = {
+            **base,
+            "MAX_TOTAL_MARGIN_PCT": auto_tune.config.MAX_TOTAL_MARGIN_PCT,
+        }
+
+        proposals = [
+            candidate["params"]
+            for candidate in auto_tune.congestion_candidates(base, follow)
+        ]
+
+        self.assertTrue(any(
+            int(item["WALLET_MAX_OPEN_POSITIONS"])
+            > int(base["WALLET_MAX_OPEN_POSITIONS"])
+            for item in proposals
+        ))
+        self.assertTrue(any(
+            item["WALLET_STOCK_SIDE_CAP_PCT"]
+            > base["WALLET_STOCK_SIDE_CAP_PCT"]
+            for item in proposals
+        ))
+        self.assertTrue(all(
+            item["MAX_DEPLOY_PCT"] <= follow["MAX_TOTAL_MARGIN_PCT"]
+            for item in proposals
+        ))
 
     def test_near_best_profit_prefers_fewer_liquidations_then_capacity(self):
         def candidate(pnl, liqs, capacity, marker):

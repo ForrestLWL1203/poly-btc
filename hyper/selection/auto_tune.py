@@ -1,9 +1,9 @@
 """Post-scan portfolio auto-tuning for copy-trading sizing.
 
 The tuner adjusts the operator-approved sizing surface: first-open margin upper
-bounds, tier leverage caps, the deployment level where new opens begin to
-shrink, and the smart-add core knobs. Lower margin bounds, per-coin caps, max
-deployment cap, and stop rules remain operator-owned risk limits.
+bounds, tier leverage caps, deployment, bounded wallet/sector congestion caps,
+and the smart-add core knobs. Lower margin bounds, per-coin caps, the total
+margin hard stop, and exit rules remain operator-owned risk limits.
 """
 from __future__ import annotations
 
@@ -34,9 +34,19 @@ MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
 COIN_CAP_KEYS = ("STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
 DEPLOY_KEYS = ("DEPLOY_FULL_PCT",)
-TUNE_KEYS = MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS
+CONGESTION_PCT_KEYS = (
+    "MAX_DEPLOY_PCT", "WALLET_MARGIN_CAP_PCT",
+    "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", "WALLET_CRYPTO_MID_SIDE_CAP_PCT",
+    "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", "WALLET_STOCK_SIDE_CAP_PCT",
+)
+CONGESTION_INT_KEYS = ("WALLET_MAX_OPEN_POSITIONS", "WALLET_STOCK_SIDE_MAX_POSITIONS")
+TUNE_KEYS = MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS + CONGESTION_PCT_KEYS + CONGESTION_INT_KEYS
 ADD_TUNE_KEYS = ("ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD")
-CAPACITY_SKIP_KEYS = ("skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small")
+CAPACITY_SKIP_KEYS = (
+    "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
+    "skip_wallet_full", "skip_wallet_sector_side_full", "skip_wallet_position_cap",
+    "skip_wallet_stock_side_position_cap",
+)
 
 
 def margin_add_capacity_ceilings(follow: dict) -> dict[str, float]:
@@ -564,7 +574,10 @@ def _unique_values(values, current=None):
 
 
 def _candidate_from_params(params_: dict, *, axis: str) -> dict:
-    params_ = {key: float(params_[key]) for key in TUNE_KEYS}
+    params_ = {
+        key: float(params_.get(key, getattr(config, key)))
+        for key in TUNE_KEYS
+    }
     return {
         "mult": None,
         "axis": axis,
@@ -758,6 +771,75 @@ def deploy_candidates(base: dict) -> list[dict]:
     ]
 
 
+def congestion_candidates(base: dict, follow: dict) -> list[dict]:
+    """One-axis probes for capacity rules which caused real missed opens.
+
+    These are bounded below the account hard-margin stop and modest per-wallet concentration ceilings.
+    Liquidity and tier minimum-notional floors are intentionally absent: the tuner must not manufacture
+    exposure in an illiquid market or turn a target wallet's dust order into a material bet.
+    """
+    max_total = float(follow.get("MAX_TOTAL_MARGIN_PCT", config.MAX_TOTAL_MARGIN_PCT))
+    wallet_cap_max = min(max_total, float(
+        getattr(config, "AUTO_TUNE_WALLET_MARGIN_CAP_MAX", 0.35)
+    ))
+    pct_axes = {
+        "MAX_DEPLOY_PCT": (
+            min(max_total, float(base["MAX_DEPLOY_PCT"]) + 0.05),
+            min(max_total, float(base["MAX_DEPLOY_PCT"]) + 0.10),
+        ),
+        "WALLET_MARGIN_CAP_PCT": (
+            min(wallet_cap_max, float(base["WALLET_MARGIN_CAP_PCT"]) + 0.05),
+            wallet_cap_max,
+        ),
+        "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT": (
+            min(wallet_cap_max, float(base["WALLET_CRYPTO_STABLE_SIDE_CAP_PCT"]) + 0.05),
+        ),
+        "WALLET_CRYPTO_MID_SIDE_CAP_PCT": (
+            min(wallet_cap_max, float(base["WALLET_CRYPTO_MID_SIDE_CAP_PCT"]) + 0.05),
+        ),
+        "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT": (
+            min(wallet_cap_max, float(base["WALLET_CRYPTO_HIGH_SIDE_CAP_PCT"]) + 0.05),
+        ),
+        "WALLET_STOCK_SIDE_CAP_PCT": (
+            min(wallet_cap_max, float(base["WALLET_STOCK_SIDE_CAP_PCT"]) + 0.05),
+            min(wallet_cap_max, float(base["WALLET_STOCK_SIDE_CAP_PCT"]) + 0.10),
+        ),
+    }
+    out = [_candidate_from_params(dict(base), axis="congestion_baseline")]
+    seen = {tuple(float(base[key]) for key in TUNE_KEYS)}
+    for key, values in pct_axes.items():
+        for value in _unique_values(values, float(base[key])):
+            proposal = {**base, key: value}
+            marker = tuple(float(proposal[name]) for name in TUNE_KEYS)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            out.append(_candidate_from_params(
+                proposal, axis=f"congestion_{key.lower()}",
+            ))
+    int_axes = {
+        "WALLET_MAX_OPEN_POSITIONS": range(
+            int(base["WALLET_MAX_OPEN_POSITIONS"]),
+            max(int(base["WALLET_MAX_OPEN_POSITIONS"]), 5) + 1,
+        ),
+        "WALLET_STOCK_SIDE_MAX_POSITIONS": range(
+            int(base["WALLET_STOCK_SIDE_MAX_POSITIONS"]),
+            max(int(base["WALLET_STOCK_SIDE_MAX_POSITIONS"]), 3) + 1,
+        ),
+    }
+    for key, values in int_axes.items():
+        for value in values:
+            proposal = {**base, key: int(value)}
+            marker = tuple(float(proposal[name]) for name in TUNE_KEYS)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            out.append(_candidate_from_params(
+                proposal, axis=f"congestion_{key.lower()}",
+            ))
+    return out
+
+
 def add_candidates_from_axes(base: dict) -> list[dict]:
     gap_ks = _unique_values(getattr(config, "AUTO_TUNE_ADD_GAP_KS", (0.04, 0.06, 0.08, 0.10, 0.12)),
                             float(base["ADD_GAP_K"]))
@@ -805,6 +887,10 @@ def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
     for key in LEV_KEYS:
         out[key] = float(params_[key])
     out["DEPLOY_FULL_PCT"] = float(params_["DEPLOY_FULL_PCT"])
+    for key in CONGESTION_PCT_KEYS:
+        out[key] = float(params_[key])
+    for key in CONGESTION_INT_KEYS:
+        out[key] = int(round(float(params_[key])))
     if "SMART_ADD" in out:
         out["ADD_STRATEGY"] = "smart" if out["SMART_ADD"] else "hardcap"
     return out
@@ -1027,8 +1113,12 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
 def _write_tune_params(db, vals: dict) -> None:
     stamp = now_iso()
     for key in TUNE_KEYS:
-        val = float(vals[key])
-        stored = val * 100.0 if key in MARGIN_KEYS or key in DEPLOY_KEYS else val
+        val = int(round(float(vals[key]))) if key in CONGESTION_INT_KEYS else float(vals[key])
+        stored = (
+            val * 100.0
+            if key in (*MARGIN_KEYS, *DEPLOY_KEYS, *CONGESTION_PCT_KEYS)
+            else val
+        )
         db.execute("UPDATE params SET value=?,updated_at=? WHERE key=?", (str(stored), stamp, key))
 
 
@@ -1147,8 +1237,14 @@ def _proposal_direction(current: dict, proposed: dict) -> tuple[int, ...]:
 
 
 def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms,
-                             path_rows=None, path_meta=None, market_ctx=None) -> dict:
-    """Reject overfit parameter proposals on 3×10d; wallet admission separately uses 4×7d."""
+                             path_rows=None, path_meta=None, market_ctx=None, *,
+                             fold_days=10, fold_count=3) -> dict:
+    """Reject overfit proposals on disjoint folds.
+
+    Ordinary post-publication tuning uses three 10-day regimes. Core formation uses the same four 7-day
+    clock as wallet qualification and supplies the cached refined price path, so an apparently attractive
+    30-day surface cannot be selected first and then destroy recent/fold profitability at publication.
+    """
     max_days = max(window_fills) if window_fills else 30
     fills = list((window_fills or {}).get(max_days) or [])
     # Current market metadata is required for max-leverage maintenance tiers. Historical liquidity snapshots
@@ -1158,7 +1254,12 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
     proposal_overrides = {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"}
     folds = []
     warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86400_000
-    for older, newer in ((30, 20), (20, 10), (10, 0)):
+    fold_days = max(1, int(fold_days))
+    fold_count = max(1, int(fold_count))
+    total_days = fold_days * fold_count
+    for index in range(fold_count):
+        older = total_days - index * fold_days
+        newer = older - fold_days
         lo = now_ms - older * 86400_000
         hi = now_ms - newer * 86400_000 if newer else now_ms + 1
         fold_fills = [row for row in fills if lo - warmup_ms <= int(row.get("time") or 0) < hi]
@@ -1171,11 +1272,11 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         challenger_warm = run_backtest("portfolio", fold_fills, sigmas=sigmas, overrides=proposal_overrides,
                                        market_ctx=market_ctx, price_path=fold_path,
                                        price_path_meta=path_meta)
-        baseline = slice_backtest_result(baseline_warm, lo, window_days=10)
-        challenger = slice_backtest_result(challenger_warm, lo, window_days=10)
+        baseline = slice_backtest_result(baseline_warm, lo, window_days=fold_days)
+        challenger = slice_backtest_result(challenger_warm, lo, window_days=fold_days)
         in_window_n = sum(lo <= int(row.get("time") or 0) < hi for row in fold_fills)
         folds.append({"baseline": baseline, "challenger": challenger, "fills": in_window_n})
-    holdout_start = now_ms - 10 * 86400_000
+    holdout_start = now_ms - fold_days * 86400_000
     holdout_fills = [row for row in fills if int(row.get("time") or 0) >= holdout_start - warmup_ms]
     holdout_path = subset_price_path(
         path_rows, holdout_fills, start_ms=holdout_start - warmup_ms, end_ms=now_ms,
@@ -1189,7 +1290,7 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         price_path=holdout_path,
         price_path_meta=path_meta,
     )
-    stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
+    stress = slice_backtest_result(stress_warm, holdout_start, window_days=fold_days)
     baseline_stress_warm = run_backtest(
         "portfolio",
         holdout_fills,
@@ -1199,7 +1300,9 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         price_path=holdout_path,
         price_path_meta=path_meta,
     )
-    baseline_stress = slice_backtest_result(baseline_stress_warm, holdout_start, window_days=10)
+    baseline_stress = slice_backtest_result(
+        baseline_stress_warm, holdout_start, window_days=fold_days,
+    )
     compact_folds = []
     wins = 0
     for index, fold in enumerate(folds):
@@ -1234,6 +1337,8 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         "masterLeverageCoverage": float(stress.get("master_leverage_coverage") or 0.0),
         "maintenanceMarginCoverage": float(stress.get("maintenance_margin_coverage") or 0.0),
         "pricePathCoverage": float(stress.get("price_path_coverage") or 0.0),
+        "foldDays": fold_days,
+        "foldCount": fold_count,
     }
 
 
@@ -1420,8 +1525,19 @@ def _formation_model_validation(validation: dict, policy) -> dict:
     def feasible(prefix, stress_key):
         if not folds:
             return False
+        nets = [float(row.get(f"{prefix}Net") or 0.0) for row in folds]
+        total_net = sum(nets)
+        worst_loss = max((abs(net) for net in nets if net < 0.0), default=0.0)
         return (
-            sum(float(row.get(f"{prefix}Net") or 0.0) for row in folds) > 0.0
+            len(folds) == int(config.COPY_STABILITY_FOLD_COUNT)
+            and sum(net > 0.0 for net in nets)
+            >= int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS)
+            and total_net > 0.0
+            and (
+                not worst_loss
+                or worst_loss / total_net
+                <= float(config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT)
+            )
             and float(validation.get(stress_key) or 0.0) > 0.0
             and max(float(row.get(f"{prefix}MaxDD") or 0.0) for row in folds) < 1.0
         )
@@ -1429,6 +1545,24 @@ def _formation_model_validation(validation: dict, policy) -> dict:
     baseline_feasible = feasible("baseline", "baselineStressNet")
     challenger_feasible = feasible("challenger", "stressNet")
     normal = _model_validation(validation, policy)
+    evidence_reasons = []
+    if float(validation.get("pricePathCoverage") or 0.0) < float(
+        config.CORE_PRICE_PATH_MIN_COVERAGE
+    ):
+        evidence_reasons.append("price_path_coverage_low")
+    if float(validation.get("maintenanceMarginCoverage") or 0.0) < float(
+        config.CORE_MAINTENANCE_META_MIN_COVERAGE
+    ):
+        evidence_reasons.append("maintenance_margin_coverage_low")
+    if evidence_reasons:
+        normal = {
+            **normal,
+            "eligible": False,
+            "reasons": list(dict.fromkeys([
+                *(normal.get("reasons") or ()), *evidence_reasons,
+            ])),
+        }
+        challenger_feasible = False
     if baseline_feasible:
         return {**normal, "baselineFeasible": True, "challengerFeasible": challenger_feasible}
     if challenger_feasible:
@@ -1705,10 +1839,20 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         return result
     market_ctx = _load_market_ctx(db, market_generation)
     if formation_admission:
-        # Formation first searches the return/capacity surface from target fills. Replaying hundreds of
-        # thousands of candles inside every grid point does not improve the optimizer's ranking; the caller
-        # runs one path-complete 30-day Copy validation after parameters and membership are fixed.
+        # Keep candles out of the broad grid, then use the already-prefetched immutable path only for the
+        # bounded walk-forward finalists. This preserves scan speed while preventing a no-path 30-day winner
+        # from turning the latest exact 7-day fold negative at publication.
         path_rows, path_meta = None, {}
+        path_fills = list(window_fills.get(max(window_fills)) or [])
+        path_start = now_ms - (
+            max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+        ) * 86_400_000
+        validation_path_rows = prepare_price_path(
+            price_path.load_refined(db, path_fills, path_start, now_ms)
+        )
+        validation_path_meta = price_path.coverage(
+            db, path_fills, path_start, now_ms,
+        )
     else:
         path_fills = list(window_fills.get(max(window_fills)) or [])
         path_start = now_ms - (
@@ -1719,6 +1863,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             market_ctx=market_ctx, immutable_market_ctx=bool(market_generation),
         )
         path_rows = prepare_price_path(path_rows)
+        validation_path_rows, validation_path_meta = path_rows, path_meta
     # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
     # for a full leverage Cartesian grid.
@@ -1848,10 +1993,57 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
             market_ctx=market_ctx,
         ))
-    selected = choose_margin_candidate(
+    selected_before_congestion = choose_margin_candidate(
         joint_candidates + margin_candidates + deploy_polish + [baseline], baseline,
     )
+    congestion_polish = []
+    congestion_rounds = []
+    congestion_params = dict(selected_before_congestion.get("params") or margin_params)
+    congestion_round_limit = 0 if coarse_search else 2
+    for round_index in range(congestion_round_limit):
+        round_candidates = []
+        for candidate in congestion_candidates(congestion_params, follow):
+            check_budget("congestion_polish")
+            round_candidates.append(evaluate_tune_candidate(
+                db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
+                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+                market_ctx=market_ctx,
+            ))
+        congestion_polish.extend(round_candidates)
+        round_baseline = next(
+            (
+                candidate for candidate in round_candidates
+                if _same_tune_values(candidate.get("params") or {}, congestion_params)
+            ),
+            round_candidates[0] if round_candidates else selected_before_congestion,
+        )
+        round_winner = choose_margin_candidate(round_candidates, round_baseline)
+        next_params = dict(round_winner.get("params") or congestion_params)
+        changed = not _same_tune_values(next_params, congestion_params)
+        congestion_rounds.append({
+            "round": round_index + 1,
+            "candidates": len(round_candidates),
+            "changed": changed,
+            "params": {
+                key: (
+                    int(round(float(next_params[key])))
+                    if key in CONGESTION_INT_KEYS else float(next_params[key])
+                )
+                for key in (*CONGESTION_PCT_KEYS, *CONGESTION_INT_KEYS)
+            },
+        })
+        congestion_params = next_params
+        if not changed:
+            break
+    selected = choose_margin_candidate(
+        [
+            *joint_candidates, *margin_candidates, *deploy_polish,
+            *congestion_polish, baseline,
+        ],
+        baseline,
+    )
     candidates = joint_candidates + margin_candidates + deploy_polish
+    candidates += congestion_polish
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
 
@@ -1945,7 +2137,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combined = {**sizing_params, **finalist_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+            path_rows=validation_path_rows, path_meta=validation_path_meta,
+            market_ctx=market_ctx,
+            fold_days=(config.COPY_STABILITY_FOLD_DAYS if formation_admission else 10),
+            fold_count=(config.COPY_STABILITY_FOLD_COUNT if formation_admission else 3),
         )
         model = (
             _formation_model_validation(validation, load_copy_policy(follow))
@@ -1975,7 +2170,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         combined = {**selected_params, **selected_add_params}
         validation = _walk_forward_validation(
             addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+            path_rows=validation_path_rows, path_meta=validation_path_meta,
+            market_ctx=market_ctx,
+            fold_days=(config.COPY_STABILITY_FOLD_DAYS if formation_admission else 10),
+            fold_count=(config.COPY_STABILITY_FOLD_COUNT if formation_admission else 3),
         )
         chosen = (selected, selected_params, selected_add_params, combined, validation)
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen
@@ -2134,6 +2332,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
         "margin_rounds": margin_rounds,
+        "congestion_rounds": congestion_rounds,
         "selection_priority": {
             "order": ["profit", "liquidations", "capacity", "open_rate", "add_fidelity"],
             "near_best_profit_rel": float(

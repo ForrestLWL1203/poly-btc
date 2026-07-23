@@ -1,8 +1,7 @@
 """Quality-first Core formation.
 
-Each bounded prefix node may own an independently tuned sizing surface. Wallet count and capital sizing are
-evaluated together without a minimum wallet quota instead of measuring every count with parameters fitted only
-to the incumbent Core. A later strict leave-one-out pass may remove a non-tail member only when its actual
+Individual quality builds one bounded membership pool without a minimum-wallet quota. That pool receives one
+shared parameter tune; a later strict leave-one-out pass may remove a non-tail member only when its actual
 presence lowers funded shared-account net economics.
 """
 from __future__ import annotations

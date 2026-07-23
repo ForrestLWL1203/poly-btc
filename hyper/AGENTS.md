@@ -199,7 +199,12 @@ include the large winner. Positive aggregate 1.5x-cost stress remains a final fu
 Formation first builds a bounded quality pool from individual evidence and path safety, then tunes one shared
 parameter surface for that complete pool. Parameter feasibility is never allowed to choose how many wallets
 qualify for consideration; after tuning, fixed-surface membership and the final strict shared-account replay
-may still remove a wallet whose actual contribution damages net economics or risk.
+may still remove a wallet whose actual contribution damages net economics or risk. The broad grid stays
+fill-only for speed, but every bounded finalist is validated on the cached refined path using the same four
+non-overlapping 7-day folds as qualification; a 30-day profit gain may not buy a newly losing recent fold.
+Alongside margin, leverage, deploy-full and smart-add knobs, tuning may cautiously raise deployment,
+per-wallet/sector concentration and simultaneous-position caps within the account's unchanged total-margin
+hard stop. Liquidity rejection and target-dust minimum-notional rejection are never tuned away.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while
