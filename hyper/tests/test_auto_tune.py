@@ -431,6 +431,112 @@ class AutoTuneTests(unittest.TestCase):
             )
             self.assertEqual(changed, 1)
 
+    def test_leverage_candidates_raise_margin_to_preserve_notional(self):
+        db = self._db()
+        params.seed_params(db)
+        follow = params.load_follow(db)
+        base = {
+            "STABLE_MARGIN_PCT": 0.035, "MID_MARGIN_PCT": 0.03,
+            "HIGH_MARGIN_PCT": 0.02, "STABLE_LEV_CAP": 35.0,
+            "MID_LEV_CAP": 10.0, "HIGH_LEV_CAP": 4.0,
+            "DEPLOY_FULL_PCT": 0.40,
+        }
+
+        candidates = auto_tune.independent_leverage_candidates(base, follow)
+        stable_25 = next(
+            row["params"] for row in candidates
+            if row["params"]["STABLE_LEV_CAP"] == 25.0
+            and row["params"]["MID_LEV_CAP"] == 10.0
+        )
+
+        self.assertAlmostEqual(stable_25["STABLE_MARGIN_PCT"], 0.049)
+        self.assertAlmostEqual(
+            stable_25["STABLE_MARGIN_PCT"] * stable_25["STABLE_LEV_CAP"],
+            base["STABLE_MARGIN_PCT"] * base["STABLE_LEV_CAP"],
+        )
+
+    def test_near_best_profit_prefers_fewer_liquidations_then_capacity(self):
+        def candidate(pnl, liqs, capacity, marker):
+            return {
+                "mult": 1.0,
+                "marker": marker,
+                "windows": {
+                    30: {
+                        "copy_net_pnl": pnl, "closed_n": 20,
+                        "open_fill_rate": capacity, "capacity_open_fit": capacity,
+                        "liquidations": liqs, "target_open_events": 20, "skip_reasons": {},
+                    },
+                    14: {
+                        "copy_net_pnl": pnl * .30, "closed_n": 10,
+                        "open_fill_rate": capacity, "capacity_open_fit": capacity,
+                        "liquidations": liqs, "target_open_events": 10, "skip_reasons": {},
+                    },
+                    7: {
+                        "copy_net_pnl": pnl * .10, "closed_n": 5,
+                        "open_fill_rate": capacity, "capacity_open_fit": capacity,
+                        "liquidations": 0, "target_open_events": 5, "skip_reasons": {},
+                    },
+                },
+            }
+
+        baseline = candidate(1000, 2, .90, "baseline")
+        absolute_profit = candidate(1060, 5, .90, "profit")
+        safer_crowded = candidate(1020, 1, .82, "safe-crowded")
+        safer_fundable = candidate(1010, 1, .94, "safe-fundable")
+
+        selected = auto_tune.choose_margin_candidate(
+            [baseline, absolute_profit, safer_crowded, safer_fundable], baseline,
+        )
+
+        self.assertEqual(selected["marker"], "safe-fundable")
+
+    def test_model_validation_allows_profit_retaining_liquidation_repair(self):
+        folds = [{
+            "baselineNet": 100.0, "challengerNet": 95.0,
+            "baselineOpenRate": .90, "challengerOpenRate": .90,
+            "baselineCapacityFit": .95, "challengerCapacityFit": .95,
+            "baselineLiquidations": 2, "challengerLiquidations": 0,
+        } for _ in range(3)]
+        validation = {
+            "folds": folds,
+            "foldWins": 0,
+            "holdout": folds[-1],
+            "baselineStressNet": 90.0,
+            "stressNet": 85.0,
+            "baselineStressLiquidations": 1,
+            "stressLiquidations": 0,
+        }
+
+        model = auto_tune._model_validation(
+            validation, auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": .05}),
+        )
+
+        self.assertTrue(model["eligible"])
+        self.assertTrue(model["safetyRepair"])
+        self.assertAlmostEqual(model["profitRetention"], .95)
+        self.assertLess(model["challengerLiquidations"], model["baselineLiquidations"])
+
+    def test_liquidation_repair_cannot_buy_safety_with_large_profit_loss(self):
+        folds = [{
+            "baselineNet": 100.0, "challengerNet": 70.0,
+            "baselineOpenRate": .90, "challengerOpenRate": .90,
+            "baselineCapacityFit": .95, "challengerCapacityFit": .95,
+            "baselineLiquidations": 2, "challengerLiquidations": 0,
+        } for _ in range(3)]
+        validation = {
+            "folds": folds, "foldWins": 0, "holdout": folds[-1],
+            "baselineStressNet": 90.0, "stressNet": 65.0,
+            "baselineStressLiquidations": 1, "stressLiquidations": 0,
+        }
+
+        model = auto_tune._model_validation(
+            validation, auto_tune.load_copy_policy({"AUTO_TUNE_MIN_RELATIVE_GAIN": .05}),
+        )
+
+        self.assertFalse(model["eligible"])
+        self.assertFalse(model["safetyRepair"])
+        self.assertIn("relative_gain_below_floor", model["reasons"])
+
 
     def test_load_portfolio_fills_filters_disallowed_wallet_sectors(self):
         db = self._db()

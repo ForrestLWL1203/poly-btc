@@ -305,6 +305,11 @@ or stop/risk-owner settings. Candidate finalists run three non-overlapping fill-
 fold as a positive holdout, plus 1.5x-cost stress and open/capacity checks. Price-path and maintenance-risk
 validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
 few absolute margins at 50/75/100% of the four-add-safe ceiling; it does not restore the old large Cartesian grid.
+Leverage probes pair a lower leverage with reciprocal margin so each tier's `margin × leverage` notional stays
+approximately constant before capacity caps. Selection is profit-led, but candidates within the configured
+near-best profit band are ordered by fewer liquidations, better capacity/open fit, then measured add fidelity.
+A proposal which retains the configured share of profit and strictly reduces liquidation evidence may apply as a
+safety repair without pretending to clear the ordinary relative-profit-gain hurdle.
 
 Current Paper defaults deliberately allow the full closed loop:
 

@@ -167,6 +167,12 @@ strict 30-day portfolio certification supplies the estimated shared-account resu
 list. Publication reuses that result; it does not synchronously recalculate every Core and Challenger for
 Dashboard enrichment.
 
+Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
+margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;
+inside the near-best profit band the tuner prefers fewer liquidations, less balance congestion, better open
+capture, and then stronger measured add fidelity. A profit-retaining proposal that strictly reduces liquidation
+evidence can be accepted as a safety repair even when it does not claim the ordinary minimum relative gain.
+
 The current Paper defaults allow automatic application after the validation gates:
 
 ```text

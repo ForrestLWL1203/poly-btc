@@ -463,6 +463,17 @@ AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08
 AUTO_TUNE_MARGIN_CAP_SKIP_FRAC = 0.05
 AUTO_TUNE_MARGIN_MIN_FOLLOWED = 1
+# Profit remains the first objective, but tiny in-sample differences must not buy materially more
+# liquidations or account congestion.  Candidates inside this near-best band are ordered by liquidation
+# count, capacity/open fit and add fidelity before their residual PnL difference.
+AUTO_TUNE_NEAR_BEST_PROFIT_REL = 0.08
+AUTO_TUNE_PREFERRED_LIQUIDATIONS_30D = 3
+# A safety repair may replace an already aggressive active surface without manufacturing a nominal
+# "relative gain", provided it retains most profit and strictly reduces liquidation evidence.
+AUTO_TUNE_SAFETY_PROFIT_RETENTION = 0.90
+# Generic finalist ordering has no knowledge of the near-best candidate set. Price each liquidation here
+# so safer leverage/margin pairs survive the bounded finalist shortlist and reach walk-forward validation.
+AUTO_TUNE_LIQUIDATION_PENALTY_PCT = 0.05
 MAX_CONCURRENT_POS = 15  # 与资金/部署模型及参数默认值一致；共享账户容量仍由严格Copy再次验证。
 #                          我们只能随机抓其中一小片(拿不到它靠全组合对冲的净正),结构上跟不了 → reject too_many_concurrent。
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。

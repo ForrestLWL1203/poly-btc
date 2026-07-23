@@ -228,9 +228,47 @@ def _candidate_distance(candidate: dict, baseline: dict) -> float:
     return sum(abs(float(params_.get(k, 0.0)) - float(base_params.get(k, 0.0))) for k in keys)
 
 
+def _candidate_liquidations(candidate: dict) -> int:
+    windows = candidate.get("windows") or {}
+    primary = windows.get(30) or (windows.get(max(windows)) if windows else {})
+    return int(primary.get("liquidations") or 0)
+
+
+def _candidate_execution_priority(candidate: dict) -> tuple:
+    """Prefer fundable opens and faithful adds after profit/liquidation risk are comparable."""
+    windows = candidate.get("windows") or {}
+    usable = list(windows.values())
+    if not usable:
+        return (0.0, 0.0, 0.0, -1.0)
+    capacity = min((_capacity_fit(result) for result in usable), default=0.0)
+    open_rate = min(
+        (
+            float(
+                result.get("actionable_open_rate")
+                if result.get("actionable_open_rate") is not None
+                else result.get("open_fill_rate") or 0.0
+            )
+            for result in usable
+        ),
+        default=0.0,
+    )
+    add_capture_values = [
+        float(result.get("actionable_add_capture_rate"))
+        for result in usable if result.get("actionable_add_capture_rate") is not None
+    ]
+    blocked_values = [
+        float(result.get("true_blocked_add_rate"))
+        for result in usable if result.get("true_blocked_add_rate") is not None
+    ]
+    # Missing add evidence is neutral. It must not outrank a measured candidate, but it also must not make
+    # sizing-only candidates invalid before an add surface has been evaluated.
+    add_capture = min(add_capture_values) if add_capture_values else 0.0
+    blocked = max(blocked_values) if blocked_values else 0.0
+    return (capacity, open_rate, add_capture, -blocked)
+
+
 def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     windows = candidate.get("windows") or {}
-    base_windows = baseline.get("windows") or {}
     weighted_net = _candidate_score(candidate)
     max_drawdown = max(
         (float(result.get("max_drawdown") or 0.0) for result in windows.values()),
@@ -240,25 +278,24 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     # is not rejected merely because drawdown rises by an arbitrary percentage
     # point; the extra downside must be paid for by extra net profit.
     risk_adjusted_utility = weighted_net - max_drawdown * float(config.INITIAL_BALANCE)
-    liquidations = max(
-        (int(result.get("liquidations") or 0) for result in windows.values()),
-        default=10**9,
-    )
+    liquidations = _candidate_liquidations(candidate)
     primary = windows.get(30) or (windows.get(max(windows)) if windows else {})
-    base_primary = base_windows.get(30) or (base_windows.get(max(base_windows)) if base_windows else {})
     primary_net = _result_pnl(primary)
-    base_net = _result_pnl(base_primary)
-    # Isolated-liquidation losses are already debited from every window's net PnL and represented in
-    # equity drawdown.  Profit is therefore the primary objective; counting liquidations ahead of PnL
-    # would double-charge the loss and systematically select near-zero-return leverage surfaces.  The raw
-    # count remains a final tie-break/audit signal when economic results are otherwise equal.
+    liquidation_penalty = (
+        liquidations
+        * float(config.INITIAL_BALANCE)
+        * float(getattr(config, "AUTO_TUNE_LIQUIDATION_PENALTY_PCT", 0.05))
+    )
+    risk_ordered_net = weighted_net - liquidation_penalty
     return (
+        risk_ordered_net,
         weighted_net,
+        -liquidations,
+        *_candidate_execution_priority(candidate),
         primary_net,
         risk_adjusted_utility,
         _result_pnl(windows.get(14, {})),
         _result_pnl(windows.get(7, {})),
-        -liquidations,
         -_candidate_distance(candidate, baseline),
     )
 
@@ -288,12 +325,35 @@ def _candidate_admission_rank_key(candidate: dict, baseline: dict) -> tuple:
 
 
 def choose_margin_candidate(candidates: list[dict], baseline: dict) -> dict:
-    """Pick the best 14d-led PnL candidate that preserves copyability."""
+    """Choose profit first, then liquidations, congestion and add quality inside a near-best band."""
     valid = [c for c in candidates if _candidate_valid(c, baseline)]
     if not valid:
         return baseline
-    best = max(valid, key=lambda c: _candidate_rank_key(c, baseline))
-    return best if _candidate_rank_key(best, baseline) >= _candidate_rank_key(baseline, baseline) else baseline
+    if not any(candidate is baseline for candidate in valid) and _candidate_valid(baseline, baseline):
+        valid.append(baseline)
+    best_profit = max(_candidate_score(candidate) for candidate in valid)
+    tolerance = abs(best_profit) * float(
+        getattr(config, "AUTO_TUNE_NEAR_BEST_PROFIT_REL", 0.08)
+    )
+    near_best = [
+        candidate for candidate in valid
+        if _candidate_score(candidate) + tolerance + 1e-9 >= best_profit
+    ]
+    preferred_liquidations = int(
+        getattr(config, "AUTO_TUNE_PREFERRED_LIQUIDATIONS_30D", 3)
+    )
+    preferred = [
+        candidate for candidate in near_best
+        if _candidate_liquidations(candidate) <= preferred_liquidations
+    ]
+    pool = preferred or near_best
+    return max(pool, key=lambda candidate: (
+        -_candidate_liquidations(candidate),
+        *_candidate_execution_priority(candidate),
+        _candidate_score(candidate),
+        _result_pnl((candidate.get("windows") or {}).get(30, {})),
+        -_candidate_distance(candidate, baseline),
+    ))
 
 
 def _diverse_sizing_candidates(candidates: list[dict], baseline: dict, limit: int) -> list[dict]:
@@ -588,8 +648,31 @@ def _same_margin_values(a: dict, b: dict, eps: float = 1e-9) -> bool:
     return all(abs(float(a.get(key, 0.0)) - float(b.get(key, 0.0))) <= eps for key in MARGIN_KEYS)
 
 
-def independent_leverage_candidates(base: dict) -> list[dict]:
-    """Coordinate-polish one leverage tier at a time around the selected joint surface."""
+def _pair_margins_for_leverage(base: dict, leverage_values: dict, follow: dict | None) -> dict:
+    """Keep tier notional approximately constant while moving leverage.
+
+    ``margin × leverage`` owns exposure.  A lower leverage candidate is only a genuine safety alternative
+    when its margin rises reciprocally; otherwise it merely shrinks the trade and wins by under-deploying.
+    """
+    proposal = {**base, **leverage_values}
+    if not follow:
+        return proposal
+    ceilings = margin_add_capacity_ceilings(follow)
+    for margin_key, leverage_key in zip(MARGIN_KEYS, LEV_KEYS):
+        old_leverage = max(1e-9, float(base[leverage_key]))
+        new_leverage = max(1e-9, float(proposal[leverage_key]))
+        floor_key = margin_key.replace("_MARGIN_PCT", "_MARGIN_MIN_PCT")
+        floor = min(float(follow.get(floor_key) or 0.0), ceilings[margin_key])
+        notional_fraction = float(base[margin_key]) * old_leverage
+        proposal[margin_key] = min(
+            ceilings[margin_key],
+            max(floor, notional_fraction / new_leverage),
+        )
+    return proposal
+
+
+def independent_leverage_candidates(base: dict, follow: dict | None = None) -> list[dict]:
+    """Coordinate-polish leverage while preserving each tier's approximate notional."""
     configured = {
         "STABLE_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_STABLE_LEV_CAPS", (35, 32, 30, 28, 25)),
         "MID_LEV_CAP": getattr(config, "AUTO_TUNE_COORD_MID_LEV_CAPS", (12, 11, 10, 9)),
@@ -602,14 +685,15 @@ def independent_leverage_candidates(base: dict) -> list[dict]:
             if abs(value - float(base[key])) <= 1e-12:
                 continue
             candidates.append(_candidate_from_params(
-                {**base, key: value}, axis=f"independent_leverage_{key.lower()}",
+                _pair_margins_for_leverage(base, {key: value}, follow),
+                axis=f"notional_paired_leverage_{key.lower()}",
             ))
     return candidates
 
 
-def coarse_leverage_candidates(base: dict) -> list[dict]:
+def coarse_leverage_candidates(base: dict, follow: dict | None = None) -> list[dict]:
     """Baseline plus only each tier's low/high endpoint for prefix-count exploration."""
-    candidates = independent_leverage_candidates(base)
+    candidates = independent_leverage_candidates(base, follow)
     out = [candidates[0]]
     for key in LEV_KEYS:
         rows = [
@@ -1209,6 +1293,10 @@ def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation
         "eligible": not reasons,
         "reasons": reasons,
         "relativeGain": relative_gain,
+        "safetyRepair": bool(model.get("safetyRepair")),
+        "baselineLiquidations": int(model.get("baselineLiquidations") or 0),
+        "challengerLiquidations": int(model.get("challengerLiquidations") or 0),
+        "profitRetention": model.get("profitRetention"),
         "shadowDays": shadow_days,
         "forwardClosed": forward_closed,
         "directionStreak": direction_streak,
@@ -1237,6 +1325,7 @@ def _model_validation(validation: dict, policy) -> dict:
     if relative_gain < policy.tune_min_relative_gain:
         reasons.append("relative_gain_below_floor")
     max_fit_drop = float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03))
+    execution_reasons = []
     for fold in folds:
         base_open = float(fold.get("baselineOpenRate") or 0.0)
         candidate_open = float(fold.get("challengerOpenRate") or 0.0)
@@ -1245,7 +1334,7 @@ def _model_validation(validation: dict, policy) -> dict:
             base_open - max_fit_drop,
         )
         if candidate_open < required_open:
-            reasons.append("open_rate_below_floor")
+            execution_reasons.append("open_rate_below_floor")
             break
     for fold in folds:
         base_capacity = float(fold.get("baselineCapacityFit") or 0.0)
@@ -1255,9 +1344,48 @@ def _model_validation(validation: dict, policy) -> dict:
             base_capacity - max_fit_drop,
         )
         if candidate_capacity < required_capacity:
-            reasons.append("capacity_fit_below_floor")
+            execution_reasons.append("capacity_fit_below_floor")
             break
-    return {"eligible": not reasons, "reasons": reasons, "relativeGain": relative_gain}
+    reasons.extend(execution_reasons)
+
+    baseline_liquidations = sum(
+        int(fold.get("baselineLiquidations") or 0) for fold in folds
+    ) + int(validation.get("baselineStressLiquidations") or 0)
+    challenger_liquidations = sum(
+        int(fold.get("challengerLiquidations") or 0) for fold in folds
+    ) + int(validation.get("stressLiquidations") or 0)
+    profit_retention = float(
+        getattr(config, "AUTO_TUNE_SAFETY_PROFIT_RETENTION", 0.90)
+    )
+    safety_repair = bool(
+        baseline_total > 0.0
+        and challenger_total >= baseline_total * profit_retention
+        and challenger_liquidations < baseline_liquidations
+        and int(validation.get("stressLiquidations") or 0)
+        <= int(validation.get("baselineStressLiquidations") or 0)
+        and sum(float(fold.get("challengerNet") or 0.0) > 0.0 for fold in folds) >= 2
+        and float(holdout.get("challengerNet") or 0.0) > 0.0
+        and float(validation.get("stressNet") or 0.0) > 0.0
+        and not execution_reasons
+    )
+    if safety_repair:
+        # A safer surface should not need to pretend it made 5% more money than the already aggressive
+        # baseline. It still must retain most profit and pass every current execution/stress invariant.
+        reasons = [
+            reason for reason in reasons
+            if reason not in {"fewer_than_two_fold_wins", "relative_gain_below_floor"}
+        ]
+    return {
+        "eligible": not reasons,
+        "reasons": reasons,
+        "relativeGain": relative_gain,
+        "safetyRepair": safety_repair,
+        "baselineLiquidations": baseline_liquidations,
+        "challengerLiquidations": challenger_liquidations,
+        "profitRetention": (
+            challenger_total / baseline_total if baseline_total > 0.0 else None
+        ),
+    }
 
 
 def _formation_model_validation(validation: dict, policy) -> dict:
@@ -1578,7 +1706,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # for a full leverage Cartesian grid.
     axis_quick = []
     leverage_axis_candidates = (
-        coarse_leverage_candidates(base) if coarse_search else independent_leverage_candidates(base)
+        coarse_leverage_candidates(base, follow)
+        if coarse_search else independent_leverage_candidates(base, follow)
     )
     for candidate in leverage_axis_candidates:
         check_budget("leverage_axes")
@@ -1602,7 +1731,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     for values in itertools.product(*(tier_values[key] for key in LEV_KEYS)):
         check_budget("leverage_combinations")
         candidate = _candidate_from_params(
-            {**base, **dict(zip(LEV_KEYS, values))}, axis="leverage_combination",
+            _pair_margins_for_leverage(base, dict(zip(LEV_KEYS, values)), follow),
+            axis="notional_paired_leverage_combination",
         )
         combo_quick.append(evaluate_tune_candidate(
             db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
@@ -1808,6 +1938,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "eligible": model["eligible"],
             "reasons": model["reasons"],
             "relativeGain": model["relativeGain"],
+            "safetyRepair": bool(model.get("safetyRepair")),
+            "baselineLiquidations": int(model.get("baselineLiquidations") or 0),
+            "challengerLiquidations": int(model.get("challengerLiquidations") or 0),
+            "profitRetention": model.get("profitRetention"),
         })
         if model["eligible"]:
             chosen = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
@@ -1847,6 +1981,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "eligible": bool(model.get("eligible")) and not no_validated_finalist,
             "reasons": validation_reasons,
             "relativeGain": float(model.get("relativeGain") or 0.0),
+            "safetyRepair": bool(model.get("safetyRepair")),
+            "baselineLiquidations": int(model.get("baselineLiquidations") or 0),
+            "challengerLiquidations": int(model.get("challengerLiquidations") or 0),
+            "profitRetention": model.get("profitRetention"),
             **walk_forward,
         }
     elif no_validated_finalist:
@@ -1857,6 +1995,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "eligible": False,
             "reasons": list(dict.fromkeys(validation_reasons)),
             "relativeGain": 0.0,
+            "safetyRepair": False,
             **walk_forward,
         }
     else:
@@ -1977,6 +2116,19 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
         "margin_rounds": margin_rounds,
+        "selection_priority": {
+            "order": ["profit", "liquidations", "capacity", "open_rate", "add_fidelity"],
+            "near_best_profit_rel": float(
+                getattr(config, "AUTO_TUNE_NEAR_BEST_PROFIT_REL", 0.08)
+            ),
+            "preferred_liquidations_30d": int(
+                getattr(config, "AUTO_TUNE_PREFERRED_LIQUIDATIONS_30D", 3)
+            ),
+            "safety_profit_retention": float(
+                getattr(config, "AUTO_TUNE_SAFETY_PROFIT_RETENTION", 0.90)
+            ),
+            "notional_paired_leverage": True,
+        },
         "formation_admission": bool(formation_admission),
         "search_profile": search_profile,
         "elapsed_s": round(time.monotonic() - tune_started, 3),
