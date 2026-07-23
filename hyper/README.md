@@ -171,15 +171,15 @@ The same 15-minute price path now records wallet and campaign intratrade drawdow
 time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is
 Challenger-only and above 15% is rejected. Current -8%, or -5% lasting 24 hours, becomes exit-only.
 
-Source-wallet profit high-water is not used as an admission or execution gate. One source may use 25% total
-effective margin. Same-direction baskets use the most conservative included tier:
-20% stable Crypto, 15% mid Crypto, 10% high-volatility Crypto, and 10% `xyz`/stock; there are at most three
-simultaneous symbols and two same-direction stock symbols. The account-wide 85% hard-margin ceiling remains.
+Source-wallet profit high-water is not used as an admission or execution gate. Static per-wallet and
+per-sector slices are also retired: wallets compete only when their positions actually overlap. New opens
+stop at the account-wide 80% deployment line; adds may use the remaining real available cash. Per-coin
+same-direction caps, liquidity checks, isolated liquidation and the global concurrency ceiling remain.
 
 An explicit optimization run starts from the already qualified wallet pool and searches:
 
-- stable/mid/high volatility margin ceilings;
-- leverage caps and full-power deployment line;
+- stable/mid/high volatility first-open margins;
+- leverage caps;
 - smart-add gap, shrink, and hard-count parameters.
 
 The search evaluates independent grid axes, finalist combinations, walk-forward folds, holdout, and stress

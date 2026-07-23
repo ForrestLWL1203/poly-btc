@@ -6,13 +6,10 @@ import {
   AUTO_TUNE_KEY,
   BLACKLIST_KEY,
   TIER_GROUPS,
-  WALLET_SIDE_CAPS,
 } from "./paramMeta.js";
 
-const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.min, g.max, g.lev, g.notl, g.cap]));
-const deployKeys = new Set(["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
-const walletCapKey = "WALLET_MARGIN_CAP_PCT";
-const walletSideKeys = new Set(WALLET_SIDE_CAPS.map(item => item.key));
+const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.max, g.lev, g.notl, g.cap]));
+const deployKeys = new Set(["MAX_DEPLOY_PCT"]);
 const marginEquityKey = "MARGIN_EQUITY_PCT";
 const tailEnableKey = "TAIL_CLOSE_ENABLE";
 const tailChildKeys = [
@@ -36,8 +33,6 @@ export function FollowSettingsPanel({
   const autoTuneParam = paramsByKey.get(AUTO_TUNE_KEY);
   const blacklistParam = paramsByKey.get(BLACKLIST_KEY);
   const marginEquityParam = paramsByKey.get(marginEquityKey);
-  const walletCapParam = paramsByKey.get(walletCapKey);
-  const walletSideParams = WALLET_SIDE_CAPS.map(item => paramsByKey.get(item.key)).filter(Boolean);
   const tailEnableParam = paramsByKey.get(tailEnableKey);
   const tailChildParams = tailChildKeys.map(key => paramsByKey.get(key)).filter(Boolean);
   const row = p => (
@@ -45,9 +40,9 @@ export function FollowSettingsPanel({
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
   const visibleTopRows = list.filter(p => !(
-    tierKeys.has(p.key) || deployKeys.has(p.key) || walletSideKeys.has(p.key)
+    tierKeys.has(p.key) || deployKeys.has(p.key)
     || ADD_KEYS.has(p.key) || tailKeys.has(p.key) || p.key === AUTO_TUNE_KEY
-    || p.key === BLACKLIST_KEY || p.key === marginEquityKey || p.key === walletCapKey
+    || p.key === BLACKLIST_KEY || p.key === marginEquityKey
   ));
 
   return (
@@ -92,16 +87,6 @@ export function FollowSettingsPanel({
         只缩小每笔新仓的保证金计算基数；未计入的权益仍是可用资金，不会被冻结。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
       </div>}
       <DeployRangeRow paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
-      {(walletCapParam || walletSideParams.length > 0) && <div className="psec-h psec-h-row">
-        <div className="psec-title-block">单钱包集中度上限
-          <span>总上限约束整个目标钱包；下列四个输入框分别约束同钱包、同板块、同方向的保证金</span>
-        </div>
-      </div>}
-      {walletCapParam && row(walletCapParam)}
-      {walletSideParams.map(row)}
-      {walletSideParams.length > 0 && <div className="param-inline-note">
-        低波/中波/高波 Crypto 与美股板块分别设置，不再使用已废弃且隐藏的旧全局值。新开与加仓受限；存量超限仓位只管理退出，不会被强平。
-      </div>}
       {validationErrors.length > 0 && (
         <div className="param-errors">
           {validationErrors.map((e, i) => <div key={i}>{e}</div>)}
@@ -117,7 +102,7 @@ export function FollowSettingsPanel({
               <span className={"pill " + group.tint}>{group.label}</span>
               <span className="muted" style={{ fontSize: 12 }}>{group.sub}</span>
               {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                保证金 {fParam(vals[group.min], "pct")}–{fParam(vals[group.max], "pct")}% · 杠杆 ≤{fParam(vals[group.lev], "x")}x · 最低 ${fParam(vals[group.notl], "usd")} · 单币上限 {fParam(vals[group.cap], "pct")}%
+                保证金 {fParam(vals[group.max], "pct")}% · 杠杆 ≤{fParam(vals[group.lev], "x")}x · 最低 ${fParam(vals[group.notl], "usd")} · 单币上限 {fParam(vals[group.cap], "pct")}%
               </span>}
             </div>
             {open && <div className="expand-body">

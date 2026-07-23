@@ -202,9 +202,13 @@ qualify for consideration; after tuning, fixed-surface membership and the final 
 may still remove a wallet whose actual contribution damages net economics or risk. The broad grid stays
 fill-only for speed, but every bounded finalist is validated on the cached refined path using the same four
 non-overlapping 7-day folds as qualification; a 30-day profit gain may not buy a newly losing recent fold.
-Alongside margin, leverage, deploy-full and smart-add knobs, tuning may cautiously raise deployment,
-per-wallet/sector concentration and simultaneous-position caps within the account's unchanged total-margin
-hard stop. Liquidity rejection and target-dust minimum-notional rejection are never tuned away.
+Alongside margin, leverage and smart-add knobs, tuning may cautiously raise aggregate deployment
+within the account's unchanged total-margin hard stop. Static per-wallet/per-sector margin slices and tiny
+per-wallet position counts are retired: actual combined timing and the aggregate replay own congestion.
+The old firepower line is retired: tuned tier margin remains constant until the aggregate new-open deploy cap.
+There is no second 85% total-margin slice: adds may use the remaining real available cash after fresh opens
+stop, while per-coin caps and isolated-margin liquidation still bound exposure.
+Liquidity rejection and target-dust minimum-notional rejection are never tuned away.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while
@@ -327,9 +331,9 @@ range, and retain only compact portfolio summaries between membership candidates
 equity-curve results for every explored set: the production host is intentionally small and must fail boundedly
 rather than reach the OOM killer.
 
-The compact portfolio tuner searches all three volatility-tier upper margins and leverage caps,
-`DEPLOY_FULL_PCT`, and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
-not tune the three lower margins, per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
+The compact portfolio tuner searches all three volatility-tier margins and leverage caps,
+and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
+not tune per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
 or stop/risk-owner settings. Parameter finalists use three non-overlapping fill-driven ten-day folds solely to
 reject overfit sizing proposals, plus 1.5x-cost stress and open/capacity checks; these tuner folds do not decide
   wallet admission. The selected wallet set must separately pass the official four-week 5% target screen,
@@ -392,9 +396,9 @@ the current published generation.
 - `MARGIN_EQUITY_PCT` is a manual-only sizing base (default 100%, UI range 10–100%). It scales each new
   position's drawdown-adjusted equity base without freezing the remainder; real cash, per-coin caps and total
   deployment still use full risk equity. Auto-tune and Core-count selection must not modify this value.
-- Below `DEPLOY_FULL_PCT`, a new open uses the tuned tier upper margin. It shrinks linearly toward the operator
-  lower margin until `MAX_DEPLOY_PCT`; new opens stop at that cap, while follow-on adds may use remaining real
-  cash because they preserve an already-entered episode.
+- A new open uses the tuned tier margin until `MAX_DEPLOY_PCT`; new opens stop at that cap, while follow-on
+  adds may use the remaining real cash because they preserve an already-entered episode. The former
+  `DEPLOY_FULL_PCT` linear-shrink line and second 85% total-margin slice are compatibility-only/retired.
 - Smart-add spacing compares target transaction prices only; our BBO price is execution/PnL, never mixed into the
   target volatility gate. Adverse and positive adds have separate sigma gaps that expand after each followed
   add. One target order can consume at most one first-margin unit, the final reserved add may fill remaining

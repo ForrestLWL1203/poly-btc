@@ -144,7 +144,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "SELECT margin,notional,size FROM copy_position WHERE addr='0xaaa'"
         ).fetchone()
         self.assertEqual(obs.margin_equity_pct, 0.5)
-        self.assertEqual(obs.wallet_sector_side_cap_pct, 0.45)
+        self.assertEqual(obs.wallet_sector_side_cap_pct, 1.0)
         self.assertEqual(obs._open_sizing_params().margin_equity_pct, 0.5)
         self.assertEqual(tuple(after), tuple(before))
 

@@ -159,7 +159,6 @@ class AutoTuneTests(unittest.TestCase):
         base = {
             "STABLE_MARGIN_PCT": 0.13, "MID_MARGIN_PCT": 0.06, "HIGH_MARGIN_PCT": 0.04,
             "STABLE_LEV_CAP": 28, "MID_LEV_CAP": 9, "HIGH_LEV_CAP": 6,
-            "DEPLOY_FULL_PCT": 0.50,
         }
 
         ceilings = auto_tune.margin_add_capacity_ceilings(follow)
@@ -189,7 +188,8 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(auto_tune.LEV_KEYS, (
             "STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP",
         ))
-        self.assertIn("DEPLOY_FULL_PCT", auto_tune.TUNE_KEYS)
+        self.assertNotIn("DEPLOY_FULL_PCT", auto_tune.TUNE_KEYS)
+        self.assertNotIn("MAX_DEPLOY_PCT", auto_tune.TUNE_KEYS)
         self.assertEqual(auto_tune.ADD_TUNE_KEYS, (
             "ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD",
         ))
@@ -214,7 +214,6 @@ class AutoTuneTests(unittest.TestCase):
             out["params"] = values
             out["margins"] = {key: values[key] for key in auto_tune.MARGIN_KEYS}
             out["lev_caps"] = {key: values[key] for key in auto_tune.LEV_KEYS}
-            out["deploy_full_pct"] = values["DEPLOY_FULL_PCT"]
             out["windows"] = {
                 days: {
                     "copy_net_pnl": 1000.0 + reward,
@@ -296,7 +295,6 @@ class AutoTuneTests(unittest.TestCase):
                 patch.object(auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
                 patch.object(auto_tune, "independent_leverage_candidates", side_effect=candidate_axis), \
                 patch.object(auto_tune, "independent_margin_candidates", side_effect=candidate_axis), \
-                patch.object(auto_tune, "deploy_candidates", side_effect=candidate_axis), \
                 patch.object(auto_tune, "evaluate_tune_candidate", side_effect=evaluate), \
                 patch.object(auto_tune, "choose_margin_candidate", side_effect=lambda rows, _base: rows[0]), \
                 patch.object(auto_tune, "add_candidates_from_axes", return_value=[]), \
@@ -418,7 +416,7 @@ class AutoTuneTests(unittest.TestCase):
         base = {
             "STABLE_MARGIN_PCT": 0.0644, "MID_MARGIN_PCT": 0.0552,
             "HIGH_MARGIN_PCT": 0.0368, "STABLE_LEV_CAP": 32.0,
-            "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0, "DEPLOY_FULL_PCT": 0.60,
+            "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0,
         }
 
         candidates = auto_tune.independent_leverage_candidates(base)
@@ -435,7 +433,7 @@ class AutoTuneTests(unittest.TestCase):
         base = {
             "STABLE_MARGIN_PCT": 0.0644, "MID_MARGIN_PCT": 0.0552,
             "HIGH_MARGIN_PCT": 0.0368, "STABLE_LEV_CAP": 32.0,
-            "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0, "DEPLOY_FULL_PCT": 0.60,
+            "MID_LEV_CAP": 12.0, "HIGH_LEV_CAP": 4.0,
         }
 
         full = auto_tune.independent_leverage_candidates(base)
@@ -461,7 +459,6 @@ class AutoTuneTests(unittest.TestCase):
             "STABLE_MARGIN_PCT": 0.035, "MID_MARGIN_PCT": 0.03,
             "HIGH_MARGIN_PCT": 0.02, "STABLE_LEV_CAP": 35.0,
             "MID_LEV_CAP": 10.0, "HIGH_LEV_CAP": 4.0,
-            "DEPLOY_FULL_PCT": 0.40,
         }
 
         candidates = auto_tune.independent_leverage_candidates(base, follow)
@@ -477,35 +474,9 @@ class AutoTuneTests(unittest.TestCase):
             base["STABLE_MARGIN_PCT"] * base["STABLE_LEV_CAP"],
         )
 
-    def test_congestion_grid_releases_wallet_caps_without_crossing_hard_stop(self):
-        base = {
-            key: float(getattr(auto_tune.config, key))
-            for key in auto_tune.TUNE_KEYS
-        }
-        follow = {
-            **base,
-            "MAX_TOTAL_MARGIN_PCT": auto_tune.config.MAX_TOTAL_MARGIN_PCT,
-        }
-
-        proposals = [
-            candidate["params"]
-            for candidate in auto_tune.congestion_candidates(base, follow)
-        ]
-
-        self.assertTrue(any(
-            int(item["WALLET_MAX_OPEN_POSITIONS"])
-            > int(base["WALLET_MAX_OPEN_POSITIONS"])
-            for item in proposals
-        ))
-        self.assertTrue(any(
-            item["WALLET_STOCK_SIDE_CAP_PCT"]
-            > base["WALLET_STOCK_SIDE_CAP_PCT"]
-            for item in proposals
-        ))
-        self.assertTrue(all(
-            item["MAX_DEPLOY_PCT"] <= follow["MAX_TOTAL_MARGIN_PCT"]
-            for item in proposals
-        ))
+    def test_deploy_cap_and_retired_total_cap_are_not_tuned(self):
+        self.assertNotIn("MAX_DEPLOY_PCT", auto_tune.TUNE_KEYS)
+        self.assertFalse(hasattr(auto_tune.config, "MAX_TOTAL_MARGIN_PCT"))
 
     def test_near_best_profit_prefers_fewer_liquidations_then_capacity(self):
         def candidate(pnl, liqs, capacity, marker):

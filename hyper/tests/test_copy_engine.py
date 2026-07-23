@@ -11,10 +11,10 @@ from hyper.copy.sizing import sizing_equity_for_drawdown
 
 class CopyEngineTests(unittest.TestCase):
     def test_dynamic_wallet_basket_caps_follow_board_and_volatility(self):
-        self.assertEqual(wallet_sector_side_cap_pct("BTC", "stable"), 0.20)
-        self.assertEqual(wallet_sector_side_cap_pct("ETH", "mid"), 0.15)
-        self.assertEqual(wallet_sector_side_cap_pct("DOGE", "high"), 0.10)
-        self.assertEqual(wallet_sector_side_cap_pct("xyz:NVDA", "stable"), 0.10)
+        self.assertEqual(wallet_sector_side_cap_pct("BTC", "stable"), 1.0)
+        self.assertEqual(wallet_sector_side_cap_pct("ETH", "mid"), 1.0)
+        self.assertEqual(wallet_sector_side_cap_pct("DOGE", "high"), 1.0)
+        self.assertEqual(wallet_sector_side_cap_pct("xyz:NVDA", "stable"), 1.0)
 
     def test_mixed_volatility_basket_uses_most_conservative_cap_regardless_of_order(self):
         existing_high = [{
@@ -29,8 +29,8 @@ class CopyEngineTests(unittest.TestCase):
         stable_then_high = wallet_sector_side_effective_cap_pct(
             existing_stable, addr="0xaaa", coin="DOGE", side="long", candidate_tier="high",
         )
-        self.assertEqual(high_then_stable, 0.10)
-        self.assertEqual(stable_then_high, 0.10)
+        self.assertEqual(high_then_stable, 1.0)
+        self.assertEqual(stable_then_high, 1.0)
 
     def test_wallet_sector_side_margin_groups_only_same_source_board_and_direction(self):
         positions = [

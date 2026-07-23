@@ -26,7 +26,7 @@ from hyper import config
 from hyper.copy.copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
-                          margin_cap_room, total_effective_margin, wallet_margin,
+                          margin_cap_room, wallet_margin,
                           wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
                           wallet_sector_side_margin_room, wallet_sector_side_position_count)
 from hyper.copy.fill_transition import classify_fill_transition
@@ -121,9 +121,7 @@ class Observer:
         self.low_liquidity_filter_enable = config.LOW_LIQUIDITY_FILTER_ENABLE
         self.min_coin_day_ntl_vlm = config.MIN_COIN_DAY_NTL_VLM
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
-        self.deploy_full_pct = config.DEPLOY_FULL_PCT        # <= this deployed margin: use tier margin upper bound
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
-        self.max_total_margin_pct = config.MAX_TOTAL_MARGIN_PCT
         self.wallet_margin_cap_pct = config.WALLET_MARGIN_CAP_PCT
         self.wallet_sector_side_cap_pct = config.WALLET_SECTOR_SIDE_CAP_PCT
         self.wallet_sector_side_caps = {
@@ -503,20 +501,7 @@ class Observer:
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
-            if f.get("DEPLOY_FULL_PCT") is not None: self.deploy_full_pct = f["DEPLOY_FULL_PCT"]
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
-            if f.get("MAX_TOTAL_MARGIN_PCT"): self.max_total_margin_pct = f["MAX_TOTAL_MARGIN_PCT"]
-            if f.get("WALLET_MARGIN_CAP_PCT") is not None: self.wallet_margin_cap_pct = f["WALLET_MARGIN_CAP_PCT"]
-            if f.get("WALLET_SECTOR_SIDE_CAP_PCT") is not None: self.wallet_sector_side_cap_pct = f["WALLET_SECTOR_SIDE_CAP_PCT"]
-            for tier, key in (
-                ("stable", "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT"),
-                ("mid", "WALLET_CRYPTO_MID_SIDE_CAP_PCT"),
-                ("high", "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT"),
-                ("stock", "WALLET_STOCK_SIDE_CAP_PCT"),
-            ):
-                if f.get(key) is not None: self.wallet_sector_side_caps[tier] = f[key]
-            if f.get("WALLET_MAX_OPEN_POSITIONS") is not None: self.wallet_max_open_positions = int(f["WALLET_MAX_OPEN_POSITIONS"])
-            if f.get("WALLET_STOCK_SIDE_MAX_POSITIONS") is not None: self.wallet_stock_side_max_positions = int(f["WALLET_STOCK_SIDE_MAX_POSITIONS"])
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
@@ -851,7 +836,7 @@ class Observer:
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
             stock_max_lev=self.stock_max_lev,
-            deploy_full_pct=self.deploy_full_pct,
+            deploy_full_pct=self.max_deploy_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
             capital_anchor=book.initial_balance,
@@ -1662,9 +1647,8 @@ class Observer:
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         sigma = self._sigma(coin)
         async with book.acct_lock:                   # serialize margin allocation across opens
-            # Dynamic equity-based sizing: below DEPLOY_FULL_PCT, use the tier's upper-bound margin; between
-            # DEPLOY_FULL_PCT and MAX_DEPLOY_PCT, linearly shrink new opens toward the lower bound. Adds still
-            # may dip into the reserve because they usually matter more to copy fidelity than fresh opens.
+            # Use the tuned tier margin until MAX_DEPLOY_PCT blocks fresh opens. Adds may still use the
+            # remaining real available cash because they matter more to copy fidelity.
             risk_equity = self._risk_equity(book)
             avail = self._risk_available(book)           # cash gate after recognizing floating losses
             # PER-COIN cap (catastrophe backstop, NOT a per-wallet tax): total margin across our open positions
@@ -1886,11 +1870,7 @@ class Observer:
                         risk_equity=risk_equity,
                         existing_margin=wallet_margin(book.open_ep.values(), addr=addr),
                     )
-                    total_room = margin_cap_room(
-                        cap_pct=self.max_total_margin_pct,
-                        risk_equity=risk_equity,
-                        existing_margin=total_effective_margin(book.open_ep.values()),
-                    )
+                    total_room = self._risk_available(book)
                     followed_margin = order["followed_margin"] if order else 0.0
                     add_margin = smart_add_order_margin(
                         first_margin=fm,
@@ -1905,8 +1885,6 @@ class Observer:
                 if add_margin < self.min_open_margin_pct * risk_equity * self.margin_equity_pct:  # 预算用尽 / 太小
                     if source_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
                         self._tally("skip_wallet_add", book)
-                    elif total_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
-                        self._tally("skip_total_margin_add", book)
                     elif group_room <= max(0.0, coin_cap - existing) + 1e-12:
                         self._tally("skip_wallet_sector_side_add", book)
                     return _observe_only()
@@ -1934,11 +1912,7 @@ class Observer:
                         risk_equity=risk_equity,
                         existing_margin=wallet_margin(book.open_ep.values(), addr=addr),
                     )
-                    total_room = margin_cap_room(
-                        cap_pct=self.max_total_margin_pct,
-                        risk_equity=risk_equity,
-                        existing_margin=total_effective_margin(book.open_ep.values()),
-                    )
+                    total_room = self._risk_available(book)
                     add_margin = max(0.0, min(
                         fm * self.add_frac,
                         coin_cap - existing,
@@ -1950,8 +1924,6 @@ class Observer:
                 if add_margin <= 0:
                     if source_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
                         self._tally("skip_wallet_add", book)
-                    elif total_room <= min(group_room, max(0.0, coin_cap - existing)) + 1e-12:
-                        self._tally("skip_total_margin_add", book)
                     elif group_room <= max(0.0, coin_cap - existing) + 1e-12:
                         self._tally("skip_wallet_sector_side_add", book)
                     return _observe_only(final=True)

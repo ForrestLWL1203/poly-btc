@@ -2,32 +2,23 @@
    只读展示(无可调目标杠杆),紧凑液态玻璃风。σ 为实采日内最高-最低振幅均值。读自正在编辑的 vals。 */
 export function SizingPreview({ vals }) {
   const [bal, setBal] = React.useState(10000);
-  const [deploy, setDeploy] = React.useState(20);
   const n = (k, d) => { const v = Number(vals[k]); return isFinite(v) && v > 0 ? v : d; };
   const hiMin = n("HIGH_SIGMA_MIN", 9);
   const MINL = Math.max(1, n("MIN_LEV", 1));
   const marginEquityPct = Math.max(10, Math.min(100, n("MARGIN_EQUITY_PCT", 100)));
   const marginEquity = bal * marginEquityPct / 100;
   const tier = (sym, s) => sym === "BTC" ? "stable" : (s >= hiMin ? "high" : "mid");
-  const TM = { stable: ["STABLE_MARGIN_MIN_PCT", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP"],
-    mid: ["MID_MARGIN_MIN_PCT", "MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_MIN_PCT", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
+  const TM = { stable: ["STABLE_MARGIN_PCT", "STABLE_LEV_CAP"],
+    mid: ["MID_MARGIN_PCT", "MID_LEV_CAP"], high: ["HIGH_MARGIN_PCT", "HIGH_LEV_CAP"] };
   const TC = { stable: "STABLE_COIN_CAP_PCT", mid: "MID_COIN_CAP_PCT", high: "HIGH_COIN_CAP_PCT" };
   const DOT = { stable: "var(--green)", mid: "var(--amber)", high: "var(--red)" };
-  const dft = { STABLE_MARGIN_MIN_PCT: 2, STABLE_MARGIN_PCT: 3.5, STABLE_LEV_CAP: 25,
-    MID_MARGIN_MIN_PCT: 2, MID_MARGIN_PCT: 3, MID_LEV_CAP: 10, HIGH_MARGIN_MIN_PCT: 1.2, HIGH_MARGIN_PCT: 2, HIGH_LEV_CAP: 4 };
+  const dft = { STABLE_MARGIN_PCT: 3.5, STABLE_LEV_CAP: 25,
+    MID_MARGIN_PCT: 3, MID_LEV_CAP: 10, HIGH_MARGIN_PCT: 2, HIGH_LEV_CAP: 4 };
   const usd = x => x >= 1000 ? "$" + (x / 1000).toFixed(x >= 10000 ? 0 : 1) + "k" : "$" + Math.round(x);
-  const marginPct = t => {
-    const lo = Math.min(n(TM[t][0], dft[TM[t][0]]), n(TM[t][1], dft[TM[t][1]])) / 100;
-    const hi = Math.max(n(TM[t][0], dft[TM[t][0]]), n(TM[t][1], dft[TM[t][1]])) / 100;
-    const full = n("DEPLOY_FULL_PCT", 40) / 100, lock = n("MAX_DEPLOY_PCT", 80) / 100;
-    const d = Math.max(0, deploy / 100);
-    if (d <= full) return hi;
-    if (d >= lock || lock <= full) return lo;
-    return lo + (hi - lo) * (lock - d) / (lock - full);
-  };
+  const marginPct = t => n(TM[t][0], dft[TM[t][0]]) / 100;
   const calc = (sym, s0) => {
     const s = Math.max(0.1, s0), t = tier(sym, s);
-    const mPct = marginPct(t), levCap = n(TM[t][2], dft[TM[t][2]]);
+    const mPct = marginPct(t), levCap = n(TM[t][1], dft[TM[t][1]]);
     const lev = Math.max(MINL, Math.floor(levCap));
     const coinCap = bal * n(TC[t], t === "stable" ? 30 : (t === "mid" ? 22 : 15)) / 100;
     const minAdd = marginEquity * n("MIN_OPEN_MARGIN_PCT", 0.5) / 100;
@@ -42,8 +33,6 @@ export function SizingPreview({ vals }) {
         <div className="sz-ttl">下单沙盘<span>· 按当前参数实时换算</span></div>
         <div className="sz-bal"><label>账户权益</label>
           <input type="number" value={bal} onChange={e => setBal(Number(e.target.value) || 0)} /></div>
-        <div className="sz-bal"><label>已占用%</label>
-          <input type="number" value={deploy} onChange={e => setDeploy(Number(e.target.value) || 0)} /></div>
         <div className="sz-bal"><label>保证金计算权益</label><b>{usd(marginEquity)} · {marginEquityPct}%</b></div>
       </div>
       <div className="sz-grid">

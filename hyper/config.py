@@ -143,10 +143,10 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
 STABLE_SIGMA_MAX = 0.05     # compatibility/audit only: BTC is always stable-tier; non-BTC never enters stable.
 HIGH_SIGMA_MIN   = 0.09     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
-STABLE_MARGIN_MIN_PCT = 0.020  # first-open margin lower bound once portfolio deployment gets crowded
+STABLE_MARGIN_MIN_PCT = 0.020  # legacy snapshot compatibility; firepower-line shrinking is retired
 MID_MARGIN_MIN_PCT    = 0.020
 HIGH_MARGIN_MIN_PCT   = 0.012
-STABLE_MARGIN_PCT = 0.035      # first-open margin upper bound when deployment is light (<= DEPLOY_FULL_PCT)
+STABLE_MARGIN_PCT = 0.035      # tuned first-open margin until the aggregate deployment cap
 MID_MARGIN_PCT    = 0.030
 HIGH_MARGIN_PCT   = 0.020
 STABLE_LEV_CAP = 25.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 25x)
@@ -227,22 +227,20 @@ MARGIN_EQUITY_PCT = 1.00    # manual sizing base: each new open uses this share 
 #                            The remainder is NOT reserved/frozen: real available cash, per-coin caps and
 #                            portfolio deployment limits still use full risk equity, so it remains usable by
 #                            other wallets, later signals and adds.  This knob is deliberately not auto-tuned.
-DEPLOY_FULL_PCT = 0.40      # <= this deployed margin: use each tier's upper-bound margin. Between this and
-#                           MAX_DEPLOY_PCT, new-open margin linearly shrinks to the tier lower bound.
+DEPLOY_FULL_PCT = 0.80      # legacy snapshot compatibility; runtime no longer applies a separate firepower line.
 MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin
 #                           reaches this fraction of equity. Equity-based sizing (每笔=权益×档位%) has no
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
 #                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
-WALLET_MARGIN_CAP_PCT = 0.25       # all open exposure copied from one source wallet, across every market/side.
-WALLET_SECTOR_SIDE_CAP_PCT = 0.15  # legacy fallback; live cap is selected by board and volatility tier below.
-WALLET_CRYPTO_STABLE_SIDE_CAP_PCT = 0.20
-WALLET_CRYPTO_MID_SIDE_CAP_PCT = 0.15
-WALLET_CRYPTO_HIGH_SIDE_CAP_PCT = 0.10
-WALLET_STOCK_SIDE_CAP_PCT = 0.10
-WALLET_MAX_OPEN_POSITIONS = 3      # a basket trader cannot occupy the account with many simultaneous symbols.
-WALLET_STOCK_SIDE_MAX_POSITIONS = 2
-MAX_TOTAL_MARGIN_PCT = 0.85        # unlike MAX_DEPLOY_PCT this also caps ADDS, preserving a hard risk buffer.
+WALLET_MARGIN_CAP_PCT = 1.00       # legacy snapshot compatibility; independent wallet slices are retired.
+WALLET_SECTOR_SIDE_CAP_PCT = 1.00
+WALLET_CRYPTO_STABLE_SIDE_CAP_PCT = 1.00
+WALLET_CRYPTO_MID_SIDE_CAP_PCT = 1.00
+WALLET_CRYPTO_HIGH_SIDE_CAP_PCT = 1.00
+WALLET_STOCK_SIDE_CAP_PCT = 1.00
+WALLET_MAX_OPEN_POSITIONS = 15     # matches the structural concurrency ceiling; no extra funded-account veto.
+WALLET_STOCK_SIDE_MAX_POSITIONS = 15
 # Retired source-wallet breaker constants remain import-compatible for old offline records only. They are not
 # included in strategy revisions and neither Observer nor canonical replay reads them.
 WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03
@@ -435,7 +433,6 @@ AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9, 8, 6)
 AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25, 20)
 AUTO_TUNE_COORD_HIGH_LEV_CAPS = (6, 4, 3)
 AUTO_TUNE_LEVERAGE_SHORTLIST = 2  # 每档保留当前/最佳代表值；组合网格最多 2^3=8，而不是 3^3=27
-AUTO_TUNE_DEPLOY_FULL_PCTS = (0.40, 0.50, 0.60)
 AUTO_TUNE_SIZING_FINALISTS = 5
 AUTO_TUNE_MARGIN_COORD_ROUNDS = 2  # bounded closure can combine two profitable tier moves without 3-D grid
 # Prefix-count discovery uses a sparse grid; the winning count receives one complete tune. Bound both modes

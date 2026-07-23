@@ -349,6 +349,7 @@ class SectorPolicyTests(unittest.TestCase):
     def test_allowed_sector_metrics_ignore_disallowed_losing_sector(self):
         metrics = {
             "score": 0.70,
+            "initial_margin_equity": 25_000,
             "copy_bt_net_pnl": -1000,
             "copy_bt_14d_net_pnl": -600,
             "copy_bt_7d_net_pnl": -250,
@@ -361,7 +362,7 @@ class SectorPolicyTests(unittest.TestCase):
             }),
             "sector_copy_json": json.dumps({
                 "crypto": {
-                    "30": bt(1500, 10),
+                    "30": {**bt(1500, 10), "initial_margin_equity": 10_000},
                     "14": bt(700, 6),
                     "7": bt(300, 5),
                 },
@@ -381,6 +382,8 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(adjusted["copy_bt_closed_n"], 10)
         self.assertEqual(adjusted["copy_bt_14d_closed_n"], 6)
         self.assertEqual(adjusted["copy_bt_7d_closed_n"], 5)
+        self.assertEqual(adjusted["initial_margin_equity"], 10_000)
+        self.assertNotIn("copy_bt_initial_margin_equity", adjusted)
 
     def test_mix_wallet_uses_joint_account_replay_instead_of_summing_two_accounts(self):
         metrics = {

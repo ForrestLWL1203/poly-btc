@@ -301,7 +301,6 @@ def _nearest_axis_candidates(base_follow: dict) -> list[tuple[str, dict]]:
 
     keep_nearest(auto_tune.independent_leverage_candidates(tune_base), auto_tune.LEV_KEYS, "lev")
     keep_nearest(auto_tune.independent_margin_candidates(tune_base, base_follow), auto_tune.MARGIN_KEYS, "margin")
-    keep_nearest(auto_tune.deploy_candidates(tune_base), auto_tune.DEPLOY_KEYS, "deploy")
     keep_nearest(auto_tune.add_candidates_from_axes(add_base), auto_tune.ADD_TUNE_KEYS, "add")
     dedup, out = set(), []
     for label, values in rows:

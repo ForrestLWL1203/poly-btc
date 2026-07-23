@@ -608,7 +608,12 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         ):
             if key in primary:
-                out[f"copy_bt_{key}"] = primary[key]
+                # Qualification divides the allowed-sector PnL by this unprefixed canonical account basis.
+                # Prefixing it as ``copy_bt_initial_margin_equity`` left the old joint-account denominator
+                # in place while replacing only PnL, producing impossible "$2.3k profit but <10% return"
+                # classifications for a $10k replay.
+                target = "initial_margin_equity" if key == "initial_margin_equity" else f"copy_bt_{key}"
+                out[target] = primary[key]
         for source, target in (
             ("path_risk_status", "copy_path_risk_status"),
             ("intratrade_max_drawdown", "copy_intratrade_max_drawdown"),

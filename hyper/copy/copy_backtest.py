@@ -17,7 +17,7 @@ from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
-                          margin_cap_room, total_effective_margin, wallet_margin,
+                          margin_cap_room, wallet_margin,
                           wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
                           wallet_sector_side_margin_room, wallet_sector_side_position_count)
 from .fill_transition import classify_fill_transition
@@ -554,45 +554,14 @@ class Backtest:
         self.add_max_hard = int(overrides.get("ADD_MAX_HARD", config.ADD_MAX_HARD))
         self.follow_pos_add = bool(overrides.get("FOLLOW_POS_ADD", config.FOLLOW_POS_ADD))
         self.add_frac = overrides.get("ADD_FRAC", config.ADD_FRAC)
-        self.deploy_full_pct = overrides.get("DEPLOY_FULL_PCT", config.DEPLOY_FULL_PCT)
         self.max_deploy_pct = overrides.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
-        self.wallet_sector_side_cap_pct = overrides.get(
-            "WALLET_SECTOR_SIDE_CAP_PCT", config.WALLET_SECTOR_SIDE_CAP_PCT,
-        )
-        dynamic_side_keys = {
-            "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", "WALLET_CRYPTO_MID_SIDE_CAP_PCT",
-            "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", "WALLET_STOCK_SIDE_CAP_PCT",
-        }
-        legacy_side_default = (
-            self.wallet_sector_side_cap_pct if not dynamic_side_keys.intersection(overrides)
-            else None
-        )
+        self.wallet_sector_side_cap_pct = 1.0
         self.wallet_sector_side_caps = {
-            "stable": overrides.get(
-                "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT",
-                config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
-            ),
-            "mid": overrides.get(
-                "WALLET_CRYPTO_MID_SIDE_CAP_PCT",
-                config.WALLET_CRYPTO_MID_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
-            ),
-            "high": overrides.get(
-                "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT",
-                config.WALLET_CRYPTO_HIGH_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
-            ),
-            "stock": overrides.get(
-                "WALLET_STOCK_SIDE_CAP_PCT",
-                config.WALLET_STOCK_SIDE_CAP_PCT if legacy_side_default is None else legacy_side_default,
-            ),
+            "stable": 1.0, "mid": 1.0, "high": 1.0, "stock": 1.0,
         }
-        self.wallet_margin_cap_pct = overrides.get("WALLET_MARGIN_CAP_PCT", config.WALLET_MARGIN_CAP_PCT)
-        self.wallet_max_open_positions = int(overrides.get(
-            "WALLET_MAX_OPEN_POSITIONS", config.WALLET_MAX_OPEN_POSITIONS,
-        ))
-        self.wallet_stock_side_max_positions = int(overrides.get(
-            "WALLET_STOCK_SIDE_MAX_POSITIONS", config.WALLET_STOCK_SIDE_MAX_POSITIONS,
-        ))
-        self.max_total_margin_pct = overrides.get("MAX_TOTAL_MARGIN_PCT", config.MAX_TOTAL_MARGIN_PCT)
+        self.wallet_margin_cap_pct = 1.0
+        self.wallet_max_open_positions = config.MAX_CONCURRENT_POS
+        self.wallet_stock_side_max_positions = config.MAX_CONCURRENT_POS
         self.liquidation_reentry_cooldown_ms = int(
             overrides.get("LIQUIDATION_REENTRY_COOLDOWN_HOURS", config.LIQUIDATION_REENTRY_COOLDOWN_HOURS)
             * 60 * 60 * 1000
@@ -676,7 +645,7 @@ class Backtest:
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
             stock_max_lev=self.stock_max_lev,
-            deploy_full_pct=self.deploy_full_pct,
+            deploy_full_pct=self.max_deploy_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
             capital_anchor=self.initial_balance,
@@ -1222,11 +1191,7 @@ class Backtest:
             risk_equity=risk_equity,
             existing_margin=wallet_margin(self.open.values(), addr=addr),
         )
-        total_room = margin_cap_room(
-            cap_pct=self.max_total_margin_pct,
-            risk_equity=risk_equity,
-            existing_margin=total_effective_margin(self.open.values()),
-        )
+        total_room = risk_available
         existing = sum(
             p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0)
             for (addr, c), p in self.open.items()
@@ -1276,8 +1241,6 @@ class Backtest:
                     reason = "wallet_sector_side_cap_blocked"
                 elif source_room + eps < desired_remaining and source_room <= min(coin_room, risk_available) + eps:
                     reason = "wallet_cap_blocked"
-                elif total_room + eps < desired_remaining and total_room <= min(coin_room, risk_available) + eps:
-                    reason = "total_margin_cap_blocked"
                 elif coin_room + eps < desired_remaining and coin_room <= risk_available + eps:
                     reason = "coin_cap_blocked"
                 elif risk_available + eps < desired_remaining and risk_available < coin_room - eps:
@@ -1302,8 +1265,6 @@ class Backtest:
                     reason = "wallet_sector_side_cap_blocked"
                 elif source_room <= min(coin_room, risk_available):
                     reason = "wallet_cap_blocked"
-                elif total_room <= min(coin_room, risk_available):
-                    reason = "total_margin_cap_blocked"
                 else:
                     reason = "coin_cap_blocked" if coin_room <= risk_available else "cash_blocked"
                 return self._observe_add(ep, oid, reason)
@@ -1682,7 +1643,6 @@ class Backtest:
             "wallet_sector_side_caps": dict(self.wallet_sector_side_caps),
             "wallet_max_open_positions": self.wallet_max_open_positions,
             "wallet_stock_side_max_positions": self.wallet_stock_side_max_positions,
-            "max_total_margin_pct": self.max_total_margin_pct,
             "liquidation_reentry_blocks": self.skip_reasons["skip_liquidation_cooldown"],
             # Qualification returns are normalized to the full Paper risk capital.
             # ``MARGIN_EQUITY_PCT`` is a sizing budget, not a smaller return denominator.

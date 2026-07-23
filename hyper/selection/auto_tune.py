@@ -1,9 +1,8 @@
 """Post-scan portfolio auto-tuning for copy-trading sizing.
 
-The tuner adjusts the operator-approved sizing surface: first-open margin upper
-bounds, tier leverage caps, deployment, bounded wallet/sector congestion caps,
-and the smart-add core knobs. Lower margin bounds, per-coin caps, the total
-margin hard stop, and exit rules remain operator-owned risk limits.
+The tuner adjusts the operator-approved sizing surface: first-open margins,
+tier leverage caps, and the smart-add core knobs. The aggregate new-open
+deployment line, per-coin caps and exit rules remain operator-owned limits.
 """
 from __future__ import annotations
 
@@ -33,13 +32,9 @@ from . import state as selection, strategy_revision
 MARGIN_KEYS = ("STABLE_MARGIN_PCT", "MID_MARGIN_PCT", "HIGH_MARGIN_PCT")
 COIN_CAP_KEYS = ("STABLE_COIN_CAP_PCT", "MID_COIN_CAP_PCT", "HIGH_COIN_CAP_PCT")
 LEV_KEYS = ("STABLE_LEV_CAP", "MID_LEV_CAP", "HIGH_LEV_CAP")
-DEPLOY_KEYS = ("DEPLOY_FULL_PCT",)
-CONGESTION_PCT_KEYS = (
-    "MAX_DEPLOY_PCT", "WALLET_MARGIN_CAP_PCT",
-    "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", "WALLET_CRYPTO_MID_SIDE_CAP_PCT",
-    "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", "WALLET_STOCK_SIDE_CAP_PCT",
-)
-CONGESTION_INT_KEYS = ("WALLET_MAX_OPEN_POSITIONS", "WALLET_STOCK_SIDE_MAX_POSITIONS")
+DEPLOY_KEYS = ()
+CONGESTION_PCT_KEYS = ()
+CONGESTION_INT_KEYS = ()
 TUNE_KEYS = MARGIN_KEYS + LEV_KEYS + DEPLOY_KEYS + CONGESTION_PCT_KEYS + CONGESTION_INT_KEYS
 ADD_TUNE_KEYS = ("ADD_GAP_K", "POS_ADD_GAP_K", "ADD_GAP_SHRINK_G", "ADD_MAX_HARD")
 CAPACITY_SKIP_KEYS = (
@@ -583,7 +578,6 @@ def _candidate_from_params(params_: dict, *, axis: str) -> dict:
         "axis": axis,
         "margins": {key: params_[key] for key in MARGIN_KEYS},
         "lev_caps": {key: params_[key] for key in LEV_KEYS},
-        "deploy_full_pct": params_["DEPLOY_FULL_PCT"],
         "params": params_,
         "windows": {},
         "score": None,
@@ -760,86 +754,6 @@ def _tier_leverage_shortlist(candidates: list[dict], baseline: dict, key: str,
     return values
 
 
-def deploy_candidates(base: dict) -> list[dict]:
-    values = _unique_values(
-        getattr(config, "AUTO_TUNE_DEPLOY_FULL_PCTS", (0.30, 0.40, 0.50)),
-        float(base["DEPLOY_FULL_PCT"]),
-    )
-    return [
-        _candidate_from_params({**base, "DEPLOY_FULL_PCT": value}, axis="deploy_full")
-        for value in values
-    ]
-
-
-def congestion_candidates(base: dict, follow: dict) -> list[dict]:
-    """One-axis probes for capacity rules which caused real missed opens.
-
-    These are bounded below the account hard-margin stop and modest per-wallet concentration ceilings.
-    Liquidity and tier minimum-notional floors are intentionally absent: the tuner must not manufacture
-    exposure in an illiquid market or turn a target wallet's dust order into a material bet.
-    """
-    max_total = float(follow.get("MAX_TOTAL_MARGIN_PCT", config.MAX_TOTAL_MARGIN_PCT))
-    wallet_cap_max = min(max_total, float(
-        getattr(config, "AUTO_TUNE_WALLET_MARGIN_CAP_MAX", 0.35)
-    ))
-    pct_axes = {
-        "MAX_DEPLOY_PCT": (
-            min(max_total, float(base["MAX_DEPLOY_PCT"]) + 0.05),
-            min(max_total, float(base["MAX_DEPLOY_PCT"]) + 0.10),
-        ),
-        "WALLET_MARGIN_CAP_PCT": (
-            min(wallet_cap_max, float(base["WALLET_MARGIN_CAP_PCT"]) + 0.05),
-            wallet_cap_max,
-        ),
-        "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT": (
-            min(wallet_cap_max, float(base["WALLET_CRYPTO_STABLE_SIDE_CAP_PCT"]) + 0.05),
-        ),
-        "WALLET_CRYPTO_MID_SIDE_CAP_PCT": (
-            min(wallet_cap_max, float(base["WALLET_CRYPTO_MID_SIDE_CAP_PCT"]) + 0.05),
-        ),
-        "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT": (
-            min(wallet_cap_max, float(base["WALLET_CRYPTO_HIGH_SIDE_CAP_PCT"]) + 0.05),
-        ),
-        "WALLET_STOCK_SIDE_CAP_PCT": (
-            min(wallet_cap_max, float(base["WALLET_STOCK_SIDE_CAP_PCT"]) + 0.05),
-            min(wallet_cap_max, float(base["WALLET_STOCK_SIDE_CAP_PCT"]) + 0.10),
-        ),
-    }
-    out = [_candidate_from_params(dict(base), axis="congestion_baseline")]
-    seen = {tuple(float(base[key]) for key in TUNE_KEYS)}
-    for key, values in pct_axes.items():
-        for value in _unique_values(values, float(base[key])):
-            proposal = {**base, key: value}
-            marker = tuple(float(proposal[name]) for name in TUNE_KEYS)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            out.append(_candidate_from_params(
-                proposal, axis=f"congestion_{key.lower()}",
-            ))
-    int_axes = {
-        "WALLET_MAX_OPEN_POSITIONS": range(
-            int(base["WALLET_MAX_OPEN_POSITIONS"]),
-            max(int(base["WALLET_MAX_OPEN_POSITIONS"]), 5) + 1,
-        ),
-        "WALLET_STOCK_SIDE_MAX_POSITIONS": range(
-            int(base["WALLET_STOCK_SIDE_MAX_POSITIONS"]),
-            max(int(base["WALLET_STOCK_SIDE_MAX_POSITIONS"]), 3) + 1,
-        ),
-    }
-    for key, values in int_axes.items():
-        for value in values:
-            proposal = {**base, key: int(value)}
-            marker = tuple(float(proposal[name]) for name in TUNE_KEYS)
-            if marker in seen:
-                continue
-            seen.add(marker)
-            out.append(_candidate_from_params(
-                proposal, axis=f"congestion_{key.lower()}",
-            ))
-    return out
-
-
 def add_candidates_from_axes(base: dict) -> list[dict]:
     gap_ks = _unique_values(getattr(config, "AUTO_TUNE_ADD_GAP_KS", (0.04, 0.06, 0.08, 0.10, 0.12)),
                             float(base["ADD_GAP_K"]))
@@ -886,9 +800,11 @@ def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
         out[key] = min(ceilings[key], max(floor, float(params_[key])))
     for key in LEV_KEYS:
         out[key] = float(params_[key])
-    out["DEPLOY_FULL_PCT"] = float(params_["DEPLOY_FULL_PCT"])
     for key in CONGESTION_PCT_KEYS:
         out[key] = float(params_[key])
+    # Compatibility-only field for old snapshots.  Equalizing it with the real
+    # deploy cap disables the retired linear firepower shrink.
+    out["DEPLOY_FULL_PCT"] = float(out.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT))
     for key in CONGESTION_INT_KEYS:
         out[key] = int(round(float(params_[key])))
     if "SMART_ADD" in out:
@@ -1013,7 +929,6 @@ def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None
         "initialMarginEquity": f(config.INITIAL_BALANCE) * f(
             follow.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
         ),
-        "deployFullPct": f(follow.get("DEPLOY_FULL_PCT")),
         "add": {key: f(follow.get(key)) for key in ADD_TUNE_KEYS},
         "smartAddCapacity": {
             "reservedAdds": int(getattr(config, "SMART_ADD_MIN_CAPACITY", 4) or 4),
@@ -1066,7 +981,6 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     out["params"] = params_
     out["margins"] = {k: params_[k] for k in MARGIN_KEYS}
     out["lev_caps"] = {k: params_[k] for k in LEV_KEYS}
-    out["deploy_full_pct"] = params_["DEPLOY_FULL_PCT"]
     # Grid search can evaluate hundreds of candidates.  Retaining every position, open-position snapshot,
     # and equity-curve point for every candidate exhausts a 512MB VPS even though ranking only consumes the
     # compact summary below.
@@ -1985,65 +1899,11 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         margin_params = next_params
         if not changed:
             break
-    deploy_polish = []
-    for candidate in deploy_candidates(margin_params):
-        check_budget("deploy_polish")
-        deploy_polish.append(evaluate_tune_candidate(
-            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            market_ctx=market_ctx,
-        ))
-    selected_before_congestion = choose_margin_candidate(
-        joint_candidates + margin_candidates + deploy_polish + [baseline], baseline,
-    )
-    congestion_polish = []
-    congestion_rounds = []
-    congestion_params = dict(selected_before_congestion.get("params") or margin_params)
-    congestion_round_limit = 0 if coarse_search else 2
-    for round_index in range(congestion_round_limit):
-        round_candidates = []
-        for candidate in congestion_candidates(congestion_params, follow):
-            check_budget("congestion_polish")
-            round_candidates.append(evaluate_tune_candidate(
-                db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-                market_ctx=market_ctx,
-            ))
-        congestion_polish.extend(round_candidates)
-        round_baseline = next(
-            (
-                candidate for candidate in round_candidates
-                if _same_tune_values(candidate.get("params") or {}, congestion_params)
-            ),
-            round_candidates[0] if round_candidates else selected_before_congestion,
-        )
-        round_winner = choose_margin_candidate(round_candidates, round_baseline)
-        next_params = dict(round_winner.get("params") or congestion_params)
-        changed = not _same_tune_values(next_params, congestion_params)
-        congestion_rounds.append({
-            "round": round_index + 1,
-            "candidates": len(round_candidates),
-            "changed": changed,
-            "params": {
-                key: (
-                    int(round(float(next_params[key])))
-                    if key in CONGESTION_INT_KEYS else float(next_params[key])
-                )
-                for key in (*CONGESTION_PCT_KEYS, *CONGESTION_INT_KEYS)
-            },
-        })
-        congestion_params = next_params
-        if not changed:
-            break
     selected = choose_margin_candidate(
-        [
-            *joint_candidates, *margin_candidates, *deploy_polish,
-            *congestion_polish, baseline,
-        ],
+        [*joint_candidates, *margin_candidates, baseline],
         baseline,
     )
-    candidates = joint_candidates + margin_candidates + deploy_polish
-    candidates += congestion_polish
+    candidates = joint_candidates + margin_candidates
     selected_params = selected.get("params") or base
     selected_margins = {k: selected_params[k] for k in MARGIN_KEYS}
 
@@ -2317,7 +2177,6 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "margin_ceilings": margin_add_capacity_ceilings(follow),
         },
         "lev_caps": selected.get("lev_caps"),
-        "deploy_full_pct": selected.get("deploy_full_pct"),
         "params": selected_params,
         "add_params": selected_add_params,
         "eligible_to_apply": bool(apply_validation.get("eligible")),
@@ -2332,7 +2191,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         "candidates": [_compact_candidate(c) for c in candidates],
         "add_candidates": [_compact_candidate(c) for c in add_candidates],
         "margin_rounds": margin_rounds,
-        "congestion_rounds": congestion_rounds,
+        "congestion_rounds": [],
         "selection_priority": {
             "order": ["profit", "liquidations", "capacity", "open_rate", "add_fidelity"],
             "near_best_profit_rel": float(

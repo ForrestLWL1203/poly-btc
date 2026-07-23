@@ -1,15 +1,12 @@
 export const PARAM_META = {
   // follow
-  STABLE_MARGIN_MIN_PCT: { name: "稳定档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
-  STABLE_MARGIN_PCT: { name: "稳定档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "2–10", up: "低频期每单更重", dn: "加仓余量更多" },
+  STABLE_MARGIN_PCT: { name: "稳定档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "2–10", up: "每单更重", dn: "加仓余量更多" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定稳定档的杠杆封顶(仍受目标/交易所上限约束)", range: "15–28", up: "放开高杠杆", dn: "压低杠杆" },
   STABLE_MIN_NOTIONAL: { name: "稳定档·最低名义额", desc: "BTC/大饼单笔名义额低于此(封顶到主力后)就不开,太小没意义", range: "$3k–8k", up: "过滤更多小单", dn: "连很小的也跟" },
-  MID_MARGIN_MIN_PCT: { name: "中档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "1–3", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
-  MID_MARGIN_PCT: { name: "中档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "2–6", up: "低频期每单更重", dn: "加仓余量更多" },
+  MID_MARGIN_PCT: { name: "中档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "2–6", up: "每单更重", dn: "加仓余量更多" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "非BTC且σ低于9%时的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MIN_NOTIONAL: { name: "中档·最低名义额", desc: "ETH/SOL等单笔名义额低于此就不开", range: "$2k–5k", up: "过滤更多小单", dn: "连很小的也跟" },
-  HIGH_MARGIN_MIN_PCT: { name: "剧烈档·保证金下限", desc: "组合占用升高后线性缩到的单笔保证金下限", range: "0.5–2", up: "拥挤时仍开得更重", dn: "拥挤时更轻" },
-  HIGH_MARGIN_PCT: { name: "剧烈档·保证金上限", desc: "组合占用低时的单笔上限；必须给至少4次加仓留出单币容量", range: "1–4", up: "低频期每单更重", dn: "加仓余量更多" },
+  HIGH_MARGIN_PCT: { name: "剧烈档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "1–4", up: "每单更重", dn: "加仓余量更多" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥9%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
   HIGH_MIN_NOTIONAL: { name: "剧烈档·最低名义额", desc: "meme/野币单笔名义额低于此就不开(σ高、仓位本就小,门槛设低)", range: "$500–1k", up: "过滤更多小单", dn: "连很小的也跟" },
   TAIL_CLOSE_ENABLE: { name: "盈利尾仓保护", desc: "智能动态止盈关闭时，目标分批减仓后按剩余仓位比例与强平风险决定是否一次性锁定利润", range: "—" },
@@ -18,14 +15,7 @@ export const PARAM_META = {
   TAIL_CLOSE_PROFIT_GIVEBACK_PCT: { name: "尾仓最大利润回吐", desc: "尾仓到强平可能吃掉当前整笔利润达到此比例时全平", range: "25–75", up: "允许更多利润回吐", dn: "更积极锁定利润" },
   SMART_TP_ENABLE: { name: "智能动态止盈", desc: "开启后接管旧尾仓保护；按波动率激活高水位并在回撤时分批止盈，保留30%尾仓", range: "默认关闭" },
   MARGIN_EQUITY_PCT: { name: "保证金权益额度", desc: "每笔新仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结", range: "10–100", up: "每个信号开得更重", dn: "单笔更轻、可容纳更多信号" },
-  DEPLOY_FULL_PCT: { name: "满火力占用线", desc: "组合保证金占用不超过此值时按各档保证金上限开新仓", range: "30–50", up: "更久保持大单", dn: "更早开始缩仓" },
   MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–85", up: "允许更多新仓", dn: "更早锁住新仓" },
-  WALLET_MARGIN_CAP_PCT: { name: "单钱包总保证金上限", desc: "同一目标钱包跨全部市场和方向最多占用此比例权益；新开与加仓受限，退出不受限", range: "15–30", up: "允许单钱包承担更多", dn: "为其他钱包保留更多资金" },
-  WALLET_CRYPTO_STABLE_SIDE_CAP_PCT: { name: "低波 Crypto 同向上限", desc: "同一目标钱包在低波 Crypto 板块同一方向的保证金上限", range: "10–20", up: "允许同向篮子更重", dn: "降低单方向集中风险" },
-  WALLET_CRYPTO_MID_SIDE_CAP_PCT: { name: "中波 Crypto 同向上限", desc: "同一目标钱包在中波 Crypto 板块同一方向的保证金上限", range: "10–20", up: "允许同向篮子更重", dn: "降低单方向集中风险" },
-  WALLET_CRYPTO_HIGH_SIDE_CAP_PCT: { name: "高波 Crypto 同向上限", desc: "同一目标钱包在高波 Crypto 板块同一方向的保证金上限", range: "5–15", up: "允许同向篮子更重", dn: "降低高波集中风险" },
-  WALLET_STOCK_SIDE_CAP_PCT: { name: "美股板块同向上限", desc: "同一目标钱包在 xyz 股票/指数/商品板块同一方向的保证金上限", range: "5–15", up: "允许同向篮子更重", dn: "降低跳空集中风险" },
-  WALLET_MAX_OPEN_POSITIONS: { name: "单钱包同时持仓上限", desc: "同一目标钱包最多同时占用的跟单品种数；超限后不再开新仓", range: "2–5", up: "允许更多篮子仓位", dn: "防止单钱包挤满账户" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
@@ -51,13 +41,6 @@ export const PARAM_META = {
 export const UNIT = { usd: "$", pct: "%", x: "×" };
 export const AUTO_TUNE_KEY = "AUTO_TUNE_MARGIN_ENABLE";
 export const BLACKLIST_KEY = "COIN_BLACKLIST";
-export const WALLET_SIDE_CAPS = [
-  { key: "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", label: "低波 Crypto 同向上限" },
-  { key: "WALLET_CRYPTO_MID_SIDE_CAP_PCT", label: "中波 Crypto 同向上限" },
-  { key: "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", label: "高波 Crypto 同向上限" },
-  { key: "WALLET_STOCK_SIDE_CAP_PCT", label: "美股板块同向上限" },
-];
-
 export const ADD_KEYS = new Set([
   "FOLLOW_POS_ADD",
   "SMART_ADD",
@@ -76,7 +59,6 @@ export const TIER_GROUPS = [
     label: "稳定档",
     sub: "BTC 固定档 · 真实 σ 只用于加仓间距与审计",
     tint: "tint-green",
-    min: "STABLE_MARGIN_MIN_PCT",
     max: "STABLE_MARGIN_PCT",
     lev: "STABLE_LEV_CAP",
     notl: "STABLE_MIN_NOTIONAL",
@@ -87,7 +69,6 @@ export const TIER_GROUPS = [
     label: "中档",
     sub: "非 BTC 且 σ < 9% · 缺历史时暂按 7%",
     tint: "tint-amber",
-    min: "MID_MARGIN_MIN_PCT",
     max: "MID_MARGIN_PCT",
     lev: "MID_LEV_CAP",
     notl: "MID_MIN_NOTIONAL",
@@ -98,7 +79,6 @@ export const TIER_GROUPS = [
     label: "剧烈档",
     sub: "σ ≥ 9% · ZEC / meme / 野币 / 高波股",
     tint: "tint-red",
-    min: "HIGH_MARGIN_MIN_PCT",
     max: "HIGH_MARGIN_PCT",
     lev: "HIGH_LEV_CAP",
     notl: "HIGH_MIN_NOTIONAL",

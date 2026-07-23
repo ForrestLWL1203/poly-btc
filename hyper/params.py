@@ -160,28 +160,28 @@ PARAM_SPEC = [
         "价格路径覆盖门槛", "真钱建议95%;Paper验证可设0"),
     ("MARGIN_EQUITY_PCT",   "follow",  "yellow", "pct",     "immediate", config.MARGIN_EQUITY_PCT * 100,
         "保证金权益额度", "单笔开仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结"),
-    ("DEPLOY_FULL_PCT",      "follow",  "yellow", "pct",     "immediate", config.DEPLOY_FULL_PCT * 100,
-        "满火力占用线", "总保证金占用≤此比例时按保证金上限开新仓;超过后线性缩到下限"),
+    ("DEPLOY_FULL_PCT",      "follow",  "hidden", "pct",     "immediate", config.DEPLOY_FULL_PCT * 100,
+        "旧满火力占用线", "兼容旧策略快照；新仓在组合部署上限前始终使用调参后的档位保证金"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,
         "稳定档·保证金上限", "稳定档低占用时每单保证金上限,占权益%"),
-    ("STABLE_MARGIN_MIN_PCT","follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_MIN_PCT * 100,
-        "稳定档·保证金下限", "稳定档拥挤时线性缩到此下限"),
+    ("STABLE_MARGIN_MIN_PCT","follow",  "hidden", "pct",     "immediate", config.STABLE_MARGIN_MIN_PCT * 100,
+        "旧稳定档·保证金下限", "兼容旧策略快照；满火力线退役后不再参与新仓计算"),
     ("STABLE_LEV_CAP",       "follow",  "yellow", "x",       "immediate", config.STABLE_LEV_CAP,
         "稳定档·杠杆上限", "稳定档杠杆封顶"),
     ("STABLE_MIN_NOTIONAL",  "follow",  "yellow", "usd",     "immediate", config.STABLE_MIN_NOTIONAL,
         "稳定档·最低名义额", "稳定档(BTC/大饼)单笔名义额低于此(封顶到主力名义额后)就不开,太小没意义"),
     ("MID_MARGIN_PCT",       "follow",  "yellow", "pct",     "immediate", config.MID_MARGIN_PCT * 100,
         "中档·保证金上限", "中档低占用时每单保证金上限,占权益%"),
-    ("MID_MARGIN_MIN_PCT",   "follow",  "yellow", "pct",     "immediate", config.MID_MARGIN_MIN_PCT * 100,
-        "中档·保证金下限", "中档拥挤时线性缩到此下限"),
+    ("MID_MARGIN_MIN_PCT",   "follow",  "hidden", "pct",     "immediate", config.MID_MARGIN_MIN_PCT * 100,
+        "旧中档·保证金下限", "兼容旧策略快照；满火力线退役后不再参与新仓计算"),
     ("MID_LEV_CAP",          "follow",  "yellow", "x",       "immediate", config.MID_LEV_CAP,
         "中档·杠杆上限", "中档杠杆封顶"),
     ("MID_MIN_NOTIONAL",     "follow",  "yellow", "usd",     "immediate", config.MID_MIN_NOTIONAL,
         "中档·最低名义额", "中档(ETH/SOL等)单笔名义额低于此就不开"),
     ("HIGH_MARGIN_PCT",      "follow",  "yellow", "pct",     "immediate", config.HIGH_MARGIN_PCT * 100,
         "剧烈档·保证金上限", "剧烈档低占用时每单保证金上限,占权益%"),
-    ("HIGH_MARGIN_MIN_PCT",  "follow",  "yellow", "pct",     "immediate", config.HIGH_MARGIN_MIN_PCT * 100,
-        "剧烈档·保证金下限", "剧烈档拥挤时线性缩到此下限"),
+    ("HIGH_MARGIN_MIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.HIGH_MARGIN_MIN_PCT * 100,
+        "旧剧烈档·保证金下限", "兼容旧策略快照；满火力线退役后不再参与新仓计算"),
     ("HIGH_LEV_CAP",         "follow",  "yellow", "x",       "immediate", config.HIGH_LEV_CAP,
         "剧烈档·杠杆上限", "剧烈档杠杆封顶"),
     ("HIGH_MIN_NOTIONAL",    "follow",  "yellow", "usd",     "immediate", config.HIGH_MIN_NOTIONAL,
@@ -258,27 +258,6 @@ PARAM_SPEC = [
         "股票杠杆上限", "股票/大宗 perp(xyz:*)的硬性杠杆上限,不管 σ 落哪档、目标用多少倍。股票会跳空,平静的 σ 低估尾部风险,必须按品类一刀切"),
     ("MAX_DEPLOY_PCT",       "follow",  "yellow", "pct",     "immediate", config.MAX_DEPLOY_PCT * 100,
         "组合部署上限", "总占用保证金到此比例就停开新仓,留下(100-此)%干火药给加仓+新信号+缓冲。加仓可动用这部分储备。防权益开单一路铺满"),
-    ("MAX_TOTAL_MARGIN_PCT", "follow", "hidden", "pct", "immediate",
-        config.MAX_TOTAL_MARGIN_PCT * 100, "组合硬保证金上限", "新开与加仓都不能突破，永久保留风险缓冲"),
-    ("WALLET_MARGIN_CAP_PCT", "follow", "yellow", "pct", "immediate",
-        config.WALLET_MARGIN_CAP_PCT * 100, "单钱包总保证金上限",
-        "同一目标钱包跨全部市场和方向的有效保证金总和最多占权益此比例"),
-    ("WALLET_SECTOR_SIDE_CAP_PCT", "follow", "hidden", "pct", "immediate",
-        config.WALLET_SECTOR_SIDE_CAP_PCT * 100, "单钱包同板块同向上限",
-        "旧版本全局值，仅用于迁移没有动态分档参数的历史revision"),
-    ("WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", "follow", "yellow", "pct", "immediate",
-        config.WALLET_CRYPTO_STABLE_SIDE_CAP_PCT * 100, "单钱包·低波Crypto同向上限", "新开和加仓共用；个人/组合回放与Observer读取同一revision"),
-    ("WALLET_CRYPTO_MID_SIDE_CAP_PCT", "follow", "yellow", "pct", "immediate",
-        config.WALLET_CRYPTO_MID_SIDE_CAP_PCT * 100, "单钱包·中波Crypto同向上限", "同钱包同方向篮子的有效保证金上限"),
-    ("WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", "follow", "yellow", "pct", "immediate",
-        config.WALLET_CRYPTO_HIGH_SIDE_CAP_PCT * 100, "单钱包·高波Crypto同向上限", "高波资产降低同方向篮子集中度"),
-    ("WALLET_STOCK_SIDE_CAP_PCT", "follow", "yellow", "pct", "immediate",
-        config.WALLET_STOCK_SIDE_CAP_PCT * 100, "单钱包·美股同向上限", "xyz股票/指数/商品同方向篮子硬上限"),
-    ("WALLET_MAX_OPEN_POSITIONS", "follow", "yellow", "int", "immediate",
-        config.WALLET_MAX_OPEN_POSITIONS, "单钱包同时持仓上限",
-        "同一目标钱包最多同时占用的跟单品种数；已有仓位照常退出，超限后不再新开"),
-    ("WALLET_STOCK_SIDE_MAX_POSITIONS", "follow", "yellow", "int", "immediate",
-        config.WALLET_STOCK_SIDE_MAX_POSITIONS, "单钱包·美股同向持仓数", "同一来源钱包在xyz同方向最多同时复制的标的数"),
     ("MIN_OPEN_MARGIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100, "单笔最小开仓额", ""),
     ("MAX_ENTRY_CHASE_PCT",  "follow",  "hidden", "nullable","immediate",
         (config.MAX_ENTRY_CHASE_PCT * 100) if config.MAX_ENTRY_CHASE_PCT is not None else None, "追价保护阈值", ""),
@@ -303,8 +282,7 @@ _HARVEST_PREVIOUS_DEFAULTS = {
 }
 
 _RISK_PREVIOUS_DEFAULTS = {
-    "WALLET_SECTOR_SIDE_CAP_PCT": ("60", "60.0"),
-    "WALLET_MARGIN_CAP_PCT": ("20", "20.0"),
+    "DEPLOY_FULL_PCT": ("30", "30.0", "40", "40.0", "50", "50.0", "60", "60.0"),
     "MAX_CONCURRENT_POS": ("15", "15.0"),
 }
 
@@ -360,7 +338,11 @@ def seed_params(db):
         "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS',"
         "'CORE_RETENTION_MIN_COPY_RETURN_30D',"
         "'HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
-        "'HARVEST_ROI_WINDOWS_MIN_PASS')"
+        "'HARVEST_ROI_WINDOWS_MIN_PASS','MAX_TOTAL_MARGIN_PCT',"
+        "'WALLET_MARGIN_CAP_PCT','WALLET_SECTOR_SIDE_CAP_PCT',"
+        "'WALLET_CRYPTO_STABLE_SIDE_CAP_PCT','WALLET_CRYPTO_MID_SIDE_CAP_PCT',"
+        "'WALLET_CRYPTO_HIGH_SIDE_CAP_PCT','WALLET_STOCK_SIDE_CAP_PCT',"
+        "'WALLET_MAX_OPEN_POSITIONS','WALLET_STOCK_SIDE_MAX_POSITIONS')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
