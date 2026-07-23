@@ -642,6 +642,7 @@ class Backtest:
         self.min_coin_oi_notional = overrides.get("MIN_COIN_OI_NOTIONAL", config.MIN_COIN_OI_NOTIONAL)
         self.market_ctx = market_ctx or {}
         self.replay_cost_mult = max(1.0, f(overrides.get("REPLAY_COST_MULT", 1.0)))
+        self.path_refinement_probe = bool(overrides.get("_PATH_REFINEMENT_PROBE", False))
         self.price_path_points = 0
         self.path_mark_coins = set()
         self.price_path_meta = price_path_meta or {}
@@ -736,7 +737,7 @@ class Backtest:
         return self.balance + unrealized
 
     def _sample_path_equity(self, stamp):
-        if not self.track_price_path:
+        if not self.track_price_path or self.path_refinement_probe:
             return
         stamp = int(f(stamp))
         if stamp <= 0:
@@ -754,6 +755,8 @@ class Backtest:
 
     def _sample_campaign_risk(self):
         """Mark every currently overlapping source/sector/direction basket on the same price path."""
+        if self.path_refinement_probe:
+            return
         grouped = {}
         for position in self.open.values():
             key = self._campaign_key(position)

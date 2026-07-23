@@ -618,6 +618,24 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(first["liquidations"], second["liquidations"])
         self.assertNotIn("has_fill_events", subset[0])
 
+    def test_refinement_probe_keeps_ambiguity_without_equity_curve_allocation(self):
+        fills = [
+            fill(1_000, "BTC", "B", 100, 0, 100.0, 60),
+            fill(3_000, "BTC", "A", 100, 100, 101.0, 61),
+        ]
+        path = prepare_price_path([
+            {"coin": "BTC", "time": 2_000, "open_time": 1, "close_time": 2_000,
+             "low": 95.0, "high": 101.0, "close": 100.0},
+        ])
+
+        result = run_backtest(
+            "0xabc", fills, sigmas={"BTC": 0.04},
+            overrides={"_PATH_REFINEMENT_PROBE": True}, price_path=path,
+        )
+
+        self.assertTrue(result["ambiguous_path_ranges"])
+        self.assertEqual(result["path_equity_samples"], [])
+
     def test_long_to_short_flip_closes_old_position_and_opens_new_one(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 70),

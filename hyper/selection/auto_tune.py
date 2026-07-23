@@ -88,8 +88,9 @@ def prepare_refined_price_path(db, fills: list[dict], start_ms: int, end_ms: int
     rows = price_path.load_refined(db, fills, start_ms, end_ms)
     for interval in price_path.REFINEMENT_INTERVALS:
         probe = run_backtest(
-            "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx,
-            price_path=rows, price_path_meta=meta,
+            "portfolio", fills, sigmas=sigmas,
+            overrides={**overrides, "_PATH_REFINEMENT_PROBE": True},
+            market_ctx=market_ctx, price_path=prepare_price_path(rows), price_path_meta=meta,
         )
         refinement = price_path.refinement_fills(
             probe.get("ambiguous_path_ranges") or [], end_ms, interval,
