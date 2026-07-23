@@ -436,6 +436,59 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
 
+    def test_selection_path_prefetch_excludes_disabled_and_watch_only_sectors(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,sector_policy_json) VALUES (?,?,?)",
+                (
+                    "0xsector", "active",
+                    json.dumps({
+                        "allowed": ["crypto"], "watch": ["stock"],
+                        "crypto": {"allow": True},
+                        "stock": {"allow": False, "watch": True},
+                    }),
+                ),
+            )
+            db.commit()
+            fills = [
+                {"user": "0xsector", "coin": "BTC", "time": 1},
+                {"user": "0xsector", "coin": "xyz:ZM", "time": 2},
+            ]
+            with patch.object(scanner, "load_copyable_fills", return_value=fills), \
+                    patch.object(scanner.params, "load_follow", return_value={}), \
+                    patch.object(scanner.auto_tune, "_load_sigmas", return_value={"BTC": .05}), \
+                    patch.object(scanner.auto_tune, "_load_market_ctx", return_value={
+                        "BTC": {"max_leverage": 20},
+                    }), patch.object(
+                        scanner.auto_tune, "prepare_refined_price_path",
+                        return_value=([{"coin": "BTC"}], {"coverage": 1.0}),
+                    ) as prepare:
+                result = scanner._prefetch_selection_paths(
+                    db, ["0xsector"], 40 * 86_400_000, "g1",
+                )
+
+        self.assertEqual(
+            [row["coin"] for row in prepare.call_args.args[1]],
+            ["BTC"],
+        )
+        self.assertEqual(result["fills"], 1)
+        self.assertEqual(result["coverage"], 1.0)
+
+    def test_path_prefetch_and_formation_share_bounded_candidate_pool(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+
+        self.assertIn(
+            "ranked_candidates = ranked_candidates[:max(0, int(config.MAX_TARGETS))]",
+            source,
+        )
+
+    def test_scan_does_not_publish_after_selection_path_prefetch_failure(self):
+        source = inspect.getsource(scanner.scan)
+
+        self.assertIn("selection_price_path_prefetch_failed:", source)
+        self.assertIn("if path_prefetch_error is not None:", source)
+
     def test_quality_prefix_uses_allowed_sector_copy_evidence(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

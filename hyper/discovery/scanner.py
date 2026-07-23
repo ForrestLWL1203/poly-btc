@@ -2259,6 +2259,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     """Jointly tune binary quality-prefix counts, then seal one final internally consistent surface."""
     now_ms = int(now_ms or time.time() * 1000)
     ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False, now_ms=now_ms)
+    # Path prefetch and exact effective-surface replay must own the same bounded quality universe. Replaying
+    # every retained Challenger after fetching paths for only MAX_TARGETS creates artificial
+    # ``challenger_path_risk_pending`` results outside the candidate pool.
+    ranked_candidates = ranked_candidates[:max(0, int(config.MAX_TARGETS))]
     base_follow = params.load_follow(db)
     scanner_values = params.load_category(db, "scanner")
     base_follow.update({
@@ -2990,6 +2994,29 @@ def _prefetch_selection_paths(db, candidates, now_ms, generation_id) -> dict:
         30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
     ) * 86_400_000
     fills = load_copyable_fills(db, candidates, path_start)
+    # Match the exact sector boundary consumed by ``_effective_follow_replay``. Candidate fill caches retain
+    # every executable Crypto/stock contract for audit, including a wallet's currently disabled specialty.
+    # Passing those disabled rows into the immutable generation validator can make one irrelevant market
+    # (which was correctly never resolved into the generation snapshot) abort the whole bounded path batch.
+    marks = ",".join("?" for _ in candidates)
+    policy_by_addr = {}
+    if marks:
+        for addr, raw_policy in db.execute(
+            f"SELECT lower(addr),sector_policy_json FROM profile WHERE lower(addr) IN ({marks})",
+            tuple(candidates),
+        ).fetchall():
+            try:
+                policy = json.loads(raw_policy or "{}")
+            except (TypeError, ValueError):
+                policy = {}
+            allowed = set(policy.get("allowed") or ()) if isinstance(policy, dict) else set()
+            watched = set(policy.get("watch") or ()) if isinstance(policy, dict) else set()
+            policy_by_addr[(addr or "").lower()] = allowed or watched
+    fills = [
+        row for row in fills
+        if classify_coin(row.get("coin"))
+        in policy_by_addr.get((row.get("user") or "").lower(), set())
+    ]
     follow = params.load_follow(db)
     if "SMART_ADD" in follow:
         follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
@@ -5260,6 +5287,7 @@ def scan(db, p) -> None:
         selection_mode = str(
             params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
         ).lower()
+        path_prefetch_error = None
         # Build only the bounded candidate universe in a rolled-back staging pass, then fetch its shared
         # market path before the atomic publication transaction.  The old flow ran a complete fills-only
         # selection here and repeated it during final publication merely to discover which paths to fetch.
@@ -5283,10 +5311,15 @@ def scan(db, p) -> None:
                         candidates_scanned=len(workset), candidates_total=len(workset),
                     )
                     _prefetch_selection_paths(db, preview_candidates, now_ms, generation_id)
-            except Exception as exc:  # noqa: BLE001 - final pass safely retains prior Core without coverage
+            except Exception as exc:  # noqa: BLE001 - publication guard below preserves the prior generation
                 db.rollback()
                 print(f"selection price-path prefetch unavailable: {exc}", flush=True)
+                path_prefetch_error = exc
         try:
+            if path_prefetch_error is not None:
+                raise RuntimeError(
+                    f"selection_price_path_prefetch_failed:{path_prefetch_error}"
+                ) from path_prefetch_error
             _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             formation = None
             if selection_mode == "auto":

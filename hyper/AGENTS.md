@@ -147,6 +147,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   per generation: closed-candle sigma as of generation start plus the generation's bulk Crypto/`xyz` context,
   max leverage and Crypto liquidity. An API failure defers affected wallets as a true data error; a valid market
   with fewer than five closed daily candles uses the explicit 7% `insufficient_history_default`.
+- Selection price-path prefetch must apply each wallet's effective `allowed` sectors, or its `watch` sectors only
+  when no sector is allowed, before validating against the sealed generation snapshot. A disabled specialty's
+  cached fills may not require unrelated generation metadata or abort the whole bounded candidate batch. Path
+  prefetch failure is a resumable generation data failure, never permission to publish a valid empty Core.
 
 ### 4. Quality gates and scores
 
