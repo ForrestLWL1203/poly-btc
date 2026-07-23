@@ -1,4 +1,4 @@
-import { TIER_GROUPS } from "./paramMeta.js";
+import { TIER_GROUPS, WALLET_SIDE_CAPS } from "./paramMeta.js";
 
 export function validateFollowParams(vals) {
   const badKeys = new Set();
@@ -45,13 +45,15 @@ export function validateFollowParams(vals) {
   const okFull = validatePct("满火力占用线", "DEPLOY_FULL_PCT");
   const okLock = validatePct("组合部署上限", "MAX_DEPLOY_PCT");
   const okWallet = validatePct("单钱包总保证金上限", "WALLET_MARGIN_CAP_PCT");
-  const okWalletSide = validatePct("单钱包同板块同向上限", "WALLET_SECTOR_SIDE_CAP_PCT");
   if (okFull && okLock && numVal("DEPLOY_FULL_PCT") >= numVal("MAX_DEPLOY_PCT")) {
     markErr("满火力占用线必须低于组合部署上限", ["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
   }
-  if (okWallet && okWalletSide && numVal("WALLET_SECTOR_SIDE_CAP_PCT") > numVal("WALLET_MARGIN_CAP_PCT")) {
-    markErr("单钱包同板块同向上限不能高于单钱包总上限", ["WALLET_SECTOR_SIDE_CAP_PCT", "WALLET_MARGIN_CAP_PCT"]);
-  }
+  WALLET_SIDE_CAPS.forEach(({ key, label }) => {
+    const okSide = validatePct(label, key);
+    if (okWallet && okSide && numVal(key) > numVal("WALLET_MARGIN_CAP_PCT")) {
+      markErr(`${label}不能高于单钱包总保证金上限`, [key, "WALLET_MARGIN_CAP_PCT"]);
+    }
+  });
   const walletPositions = numVal("WALLET_MAX_OPEN_POSITIONS");
   if (!Number.isInteger(walletPositions) || walletPositions < 1 || walletPositions > 20) {
     markErr("单钱包同时持仓上限必须是 1–20 的整数", ["WALLET_MAX_OPEN_POSITIONS"]);

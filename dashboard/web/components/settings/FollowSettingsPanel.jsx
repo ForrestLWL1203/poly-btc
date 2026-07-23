@@ -6,11 +6,13 @@ import {
   AUTO_TUNE_KEY,
   BLACKLIST_KEY,
   TIER_GROUPS,
+  WALLET_SIDE_CAPS,
 } from "./paramMeta.js";
 
 const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.min, g.max, g.lev, g.notl, g.cap]));
 const deployKeys = new Set(["DEPLOY_FULL_PCT", "MAX_DEPLOY_PCT"]);
-const walletSectorSideKey = "WALLET_SECTOR_SIDE_CAP_PCT";
+const walletCapKey = "WALLET_MARGIN_CAP_PCT";
+const walletSideKeys = new Set(WALLET_SIDE_CAPS.map(item => item.key));
 const marginEquityKey = "MARGIN_EQUITY_PCT";
 const tailEnableKey = "TAIL_CLOSE_ENABLE";
 const tailChildKeys = [
@@ -34,14 +36,19 @@ export function FollowSettingsPanel({
   const autoTuneParam = paramsByKey.get(AUTO_TUNE_KEY);
   const blacklistParam = paramsByKey.get(BLACKLIST_KEY);
   const marginEquityParam = paramsByKey.get(marginEquityKey);
-  const walletSectorSideParam = paramsByKey.get(walletSectorSideKey);
+  const walletCapParam = paramsByKey.get(walletCapKey);
+  const walletSideParams = WALLET_SIDE_CAPS.map(item => paramsByKey.get(item.key)).filter(Boolean);
   const tailEnableParam = paramsByKey.get(tailEnableKey);
   const tailChildParams = tailChildKeys.map(key => paramsByKey.get(key)).filter(Boolean);
   const row = p => (
     <ParamRow key={p.key} param={p} value={vals[p.key]} dirty={dirty[p.key]}
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
-  const visibleTopRows = list.filter(p => !(tierKeys.has(p.key) || deployKeys.has(p.key) || ADD_KEYS.has(p.key) || tailKeys.has(p.key) || p.key === AUTO_TUNE_KEY || p.key === BLACKLIST_KEY || p.key === marginEquityKey || p.key === walletSectorSideKey));
+  const visibleTopRows = list.filter(p => !(
+    tierKeys.has(p.key) || deployKeys.has(p.key) || walletSideKeys.has(p.key)
+    || ADD_KEYS.has(p.key) || tailKeys.has(p.key) || p.key === AUTO_TUNE_KEY
+    || p.key === BLACKLIST_KEY || p.key === marginEquityKey || p.key === walletCapKey
+  ));
 
   return (
     <React.Fragment>
@@ -85,9 +92,15 @@ export function FollowSettingsPanel({
         只缩小每笔新仓的保证金计算基数；未计入的权益仍是可用资金，不会被冻结。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
       </div>}
       <DeployRangeRow paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
-      {walletSectorSideParam && row(walletSectorSideParam)}
-      {walletSectorSideParam && <div className="param-inline-note">
-        按目标钱包 × Crypto/xyz板块 × 多/空方向分别计算有效保证金。单钱包与组合Copy回放同步使用该参数；存量超限仓位不会被强平，只会停止继续开仓和加仓。
+      {(walletCapParam || walletSideParams.length > 0) && <div className="psec-h psec-h-row">
+        <div className="psec-title-block">单钱包集中度上限
+          <span>总上限约束整个目标钱包；下列四个输入框分别约束同钱包、同板块、同方向的保证金</span>
+        </div>
+      </div>}
+      {walletCapParam && row(walletCapParam)}
+      {walletSideParams.map(row)}
+      {walletSideParams.length > 0 && <div className="param-inline-note">
+        低波/中波/高波 Crypto 与美股板块分别设置，不再使用已废弃且隐藏的旧全局值。新开与加仓受限；存量超限仓位只管理退出，不会被强平。
       </div>}
       {validationErrors.length > 0 && (
         <div className="param-errors">

@@ -21,7 +21,10 @@ export const PARAM_META = {
   DEPLOY_FULL_PCT: { name: "满火力占用线", desc: "组合保证金占用不超过此值时按各档保证金上限开新仓", range: "30–50", up: "更久保持大单", dn: "更早开始缩仓" },
   MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–85", up: "允许更多新仓", dn: "更早锁住新仓" },
   WALLET_MARGIN_CAP_PCT: { name: "单钱包总保证金上限", desc: "同一目标钱包跨全部市场和方向最多占用此比例权益；新开与加仓受限，退出不受限", range: "15–30", up: "允许单钱包承担更多", dn: "为其他钱包保留更多资金" },
-  WALLET_SECTOR_SIDE_CAP_PCT: { name: "单钱包同板块同向上限", desc: "同一目标钱包在Crypto或xyz板块的同一方向最多占用此比例权益；新开与加仓受限，退出不受限", range: "10–20", up: "允许同向篮子更重", dn: "降低单方向集中风险" },
+  WALLET_CRYPTO_STABLE_SIDE_CAP_PCT: { name: "低波 Crypto 同向上限", desc: "同一目标钱包在低波 Crypto 板块同一方向的保证金上限", range: "10–20", up: "允许同向篮子更重", dn: "降低单方向集中风险" },
+  WALLET_CRYPTO_MID_SIDE_CAP_PCT: { name: "中波 Crypto 同向上限", desc: "同一目标钱包在中波 Crypto 板块同一方向的保证金上限", range: "10–20", up: "允许同向篮子更重", dn: "降低单方向集中风险" },
+  WALLET_CRYPTO_HIGH_SIDE_CAP_PCT: { name: "高波 Crypto 同向上限", desc: "同一目标钱包在高波 Crypto 板块同一方向的保证金上限", range: "5–15", up: "允许同向篮子更重", dn: "降低高波集中风险" },
+  WALLET_STOCK_SIDE_CAP_PCT: { name: "美股板块同向上限", desc: "同一目标钱包在 xyz 股票/指数/商品板块同一方向的保证金上限", range: "5–15", up: "允许同向篮子更重", dn: "降低跳空集中风险" },
   WALLET_MAX_OPEN_POSITIONS: { name: "单钱包同时持仓上限", desc: "同一目标钱包最多同时占用的跟单品种数；超限后不再开新仓", range: "2–5", up: "允许更多篮子仓位", dn: "防止单钱包挤满账户" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
@@ -51,6 +54,12 @@ export const PARAM_META = {
 export const UNIT = { usd: "$", pct: "%", x: "×" };
 export const AUTO_TUNE_KEY = "AUTO_TUNE_MARGIN_ENABLE";
 export const BLACKLIST_KEY = "COIN_BLACKLIST";
+export const WALLET_SIDE_CAPS = [
+  { key: "WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", label: "低波 Crypto 同向上限" },
+  { key: "WALLET_CRYPTO_MID_SIDE_CAP_PCT", label: "中波 Crypto 同向上限" },
+  { key: "WALLET_CRYPTO_HIGH_SIDE_CAP_PCT", label: "高波 Crypto 同向上限" },
+  { key: "WALLET_STOCK_SIDE_CAP_PCT", label: "美股板块同向上限" },
+];
 
 export const ADD_KEYS = new Set([
   "FOLLOW_POS_ADD",
