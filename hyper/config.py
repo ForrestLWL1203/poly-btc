@@ -67,6 +67,7 @@ FOLLOW_SELECTION_MODE = "auto"       # auto | manual
 CORE_MIN_COPY_RETURN_30D = 0.10
 CORE_RETENTION_MIN_COPY_RETURN_30D = 0.07
 CORE_SOFT_FAIL_CONFIRMATIONS = 2
+CORE_MIN_FOLLOW_SCORE = 0.75
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
 COPY_STABILITY_FOLD_DAYS = 10
 COPY_STABILITY_FOLD_COUNT = 3
@@ -388,6 +389,11 @@ COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 
 
 # Core repeatability uses independent Campaigns and the non-overlapping folds above.
 CORE_COPY_MIN_CAMPAIGNS_30D = 10
+# A profitable low-win trend system is not automatically gambling: payoff and outlier evidence still matter.
+# Core nevertheless needs enough winning Campaigns, including after the three largest trade-level winners are
+# removed, that joining at an arbitrary point is not excessively dependent on catching a rare payoff.
+CORE_COPY_MIN_CAMPAIGN_WIN_RATE = 0.45
+CORE_COPY_MIN_BODY_WIN_RATE = 0.40
 # One isolated 30d replay liquidation is already fully charged to PnL/drawdown and may coexist with a high-
 # win, profitable surface. Repetition is path-dependent gambling and is rejected as a hard risk.
 CORE_COPY_MAX_LIQUIDATIONS_30D = 1

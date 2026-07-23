@@ -92,6 +92,15 @@ PARAM_SPEC = [
     ("CORE_COPY_CAMPAIGN_FLOOR", "scanner", "black", "display", "rescan",
         f"≥ {config.CORE_COPY_MIN_CAMPAIGNS_30D} 批",
         "独立Campaign证据", "Core要求30日至少10个独立Campaign；证据不足保留Challenger"),
+    ("CORE_COPY_MIN_CAMPAIGN_WIN_RATE", "scanner", "black", "pct", "rescan",
+        config.CORE_COPY_MIN_CAMPAIGN_WIN_RATE * 100,
+        "Core Campaign最低胜率", "防止随机跟入时过度依赖少数高盈亏比赢家；低胜率钱包仍保留Challenger研究证据"),
+    ("CORE_COPY_MIN_BODY_WIN_RATE", "scanner", "black", "pct", "rescan",
+        config.CORE_COPY_MIN_BODY_WIN_RATE * 100,
+        "Core主体最低胜率", "移除前三大盈利交易后，剩余主体必须盈利且达到此胜率"),
+    ("CORE_MIN_FOLLOW_SCORE", "scanner", "black", "pct", "rescan",
+        config.CORE_MIN_FOLLOW_SCORE * 100,
+        "Core综合质量分", "新版评分同时覆盖收益、可重复性、置信度、可执行性和风险；新进入Core至少75分"),
     ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
         f"{config.COPY_STABILITY_FOLD_COUNT}×{config.COPY_STABILITY_FOLD_DAYS}日；"
         f"≥{config.COPY_STABILITY_MIN_EVALUABLE_FOLDS}段可评估/"

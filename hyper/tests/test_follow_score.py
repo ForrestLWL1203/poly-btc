@@ -21,6 +21,13 @@ def evidence(**overrides):
         "score": 0.70,
         "copy_bt_closed_n": 16,
         "copy_bt_campaign_closed_n": 12,
+        "copy_bt_campaign_win_rate": 0.75,
+        "copy_bt_profit_factor": 3.0,
+        "copy_bt_payoff_ratio": 1.5,
+        "copy_bt_top3_profit_share": 0.45,
+        "copy_bt_body_after_top3_n": 13,
+        "copy_bt_body_after_top3_win_rate": 0.69,
+        "copy_bt_body_after_top3_net_pnl": 650.0,
         "copy_bt_net_pnl": 1800.0,
         "copy_bt_14d_net_pnl": 900.0,
         "copy_bt_7d_net_pnl": 600.0,
@@ -92,11 +99,81 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(result["checks"]["tenIndependentCampaigns"])
         self.assertTrue(result["checks"]["nonoverlapStability"])
         self.assertTrue(result["checks"]["activityWithin72h"])
+        self.assertTrue(result["checks"]["campaignWinRate"])
+        self.assertTrue(result["checks"]["repeatableBodyWinRate"])
+        self.assertTrue(result["checks"]["coreFollowScore"])
+
+    def test_low_win_timing_sensitive_wallet_stays_challenger(self):
+        result = judge(
+            copy_bt_campaign_win_rate=0.41,
+            copy_bt_body_after_top3_win_rate=0.37,
+            copy_bt_payoff_ratio=3.0,
+            copy_bt_profit_factor=2.1,
+        )
+        self.assertTrue(result["eligible"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_repeatability_watch")
+
+    def test_asymmetric_wallet_can_pass_with_repeatable_body(self):
+        result = judge(
+            copy_bt_campaign_closed_n=50,
+            copy_bt_closed_n=100,
+            copy_bt_campaign_win_rate=0.48,
+            copy_bt_body_after_top3_n=97,
+            copy_bt_body_after_top3_win_rate=0.49,
+            copy_bt_body_after_top3_net_pnl=800.0,
+            copy_bt_payoff_ratio=2.47,
+            copy_bt_profit_factor=2.52,
+            copy_bt_net_pnl=2100.0,
+            copy_bt_14d_net_pnl=1480.0,
+            copy_bt_7d_net_pnl=1020.0,
+            copy_expected_return=0.04,
+            copy_return_lcb=0.008,
+            copy_positive_probability=0.975,
+            copy_evidence_days=20,
+            copy_risk_score=0.69,
+            open_probability_48h=0.999,
+        )
+        self.assertTrue(result["coreEligible"])
+        self.assertGreaterEqual(result["followScore"], 0.75)
+
+    def test_perfect_small_sample_is_shrunk_below_core_score(self):
+        row = evidence(
+            copy_bt_closed_n=7,
+            copy_bt_campaign_closed_n=6,
+            copy_bt_campaign_win_rate=1.0,
+            copy_bt_body_after_top3_n=4,
+            copy_bt_body_after_top3_win_rate=1.0,
+            copy_bt_body_after_top3_net_pnl=189.0,
+            copy_bt_top3_profit_share=0.82,
+            copy_bt_profit_factor=999.0,
+            copy_bt_payoff_ratio=999.0,
+            copy_bt_net_pnl=1041.0,
+            copy_bt_14d_net_pnl=958.0,
+            copy_bt_7d_net_pnl=958.0,
+            copy_expected_return=0.147,
+            copy_return_lcb=0.067,
+            copy_positive_probability=0.999,
+            copy_evidence_days=6,
+            copy_risk_score=1.0,
+            execution_score=1.0,
+            actionable_open_rate=1.0,
+            capacity_fit=1.0,
+            open_probability_48h=0.37,
+            sector_policy_json=json.dumps({
+                "allowed": ["crypto"],
+                "stability": stability(passed=False, sufficient=False),
+            }),
+        )
+        score, _ = compute_follow_score(row)
+        result = evaluate_follow_eligibility(row, as_of_ms=NOW)
+        self.assertLess(score, 0.75)
+        self.assertFalse(result["coreEligible"])
 
     def test_rolling_7d_and_14d_results_do_not_repeat_core_gate(self):
         result = judge(
             copy_bt_14d_closed_n=0, copy_bt_7d_closed_n=0,
-            copy_bt_14d_net_pnl=-999.0, copy_bt_7d_net_pnl=-999.0,
+            copy_bt_14d_net_pnl=-10.0, copy_bt_7d_net_pnl=-10.0,
             copy_bt_campaign_wins=1, copy_bt_profit_factor=0.2,
         )
         self.assertTrue(result["coreEligible"])

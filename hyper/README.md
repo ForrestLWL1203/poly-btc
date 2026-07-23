@@ -59,17 +59,21 @@ Wallet quality and funded-account membership are separate decisions.
   bounded top-40, path-certified formation surface is published as operational Challenger/Core, preventing
   hundreds of merely positive wallets from becoming daily retention work. New Core requires at least 10%,
   ten independent Campaigns, and the non-overlapping stability/execution/risk surface.
-- The final copy-follow score ranks wallets that passed those gates. It combines raw profile quality and copy
-  evidence; it is displayed on a 0–100 scale while stored natively in `[0, 1]`.
+- The final copy-follow score is calibrated as economics 22%, repeatability 30%, edge confidence 18%,
+  operability 13%, path risk 12%, and raw profile prior 5%. Incomplete Campaign/fold evidence shrinks the
+  total, so a tiny perfect streak cannot outrank mature proof. New Core requires at least 75/100, at least
+  45% Campaign win rate, and at least 40% win rate plus positive net after removing the three largest winning
+  trades. The score is displayed on a 0–100 scale while stored natively in `[0, 1]`.
 - The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
   Count, add/remove/swap and parameter search then use normalized fills and the shared-account execution model;
   they do not repeatedly scan candles. The winning membership receives exactly one conservative, path-complete
   30-day strict-Copy certification before publication. Score orders the candidate pool; it does not force a
   score prefix or fixed base count.
 - Final moves must improve portfolio economics and pass at least two evaluable/profitable non-overlapping
-  ten-day folds plus 1.5x transaction-cost stress. Normal replacement/reordering is weekly;
-  daily evidence refresh still removes a wallet immediately for a hard failure. While Core has fewer than eight
-  wallets, a daily run may add independently qualified, portfolio-safe wallets without evicting incumbents.
+  ten-day folds plus 1.5x transaction-cost stress. Normal replacement/reordering is weekly. Production evidence
+  refresh runs Monday and Thursday (alternating three/four-day gaps); each refresh still removes a wallet
+  immediately for a hard failure. While Core has fewer than eight wallets, a scheduled run may add independently
+  qualified, portfolio-safe wallets without evicting incumbents.
   New promotions require two complete qualifying generations at least 24 hours apart; ordinary soft churn is
   suppressed for a Core wallet's first 14 days.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
@@ -81,9 +85,9 @@ Wallet quality and funded-account membership are separate decisions.
 - Core targets 8–10 wallets when hard-qualified supply exists. A complete scan may still publish fewer (including
   zero) when hard data/risk/economic evidence genuinely cannot support the service target.
 
-## Daily complete candidate reevaluation
+## Scheduled complete candidate reevaluation
 
-Profiles are not re-downloaded from zero on every daily run.
+Profiles are not re-downloaded from zero on every scheduled run.
 
 - New candidates get a full configured profile window.
 - Existing candidates use `candidate_fills` cursors and fetch only new fills, merging them into the 37-day

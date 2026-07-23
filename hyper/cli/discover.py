@@ -66,7 +66,7 @@ def _start_adaptive_pace(db_path, slow_interval):
     threading.Thread(target=_tick, daemon=True).start()
 
 
-AUTO_SCAN_EVERY_H = 24.0          # self-scheduled cadence (no systemd timer); reference = last scan_runs
+AUTO_SCAN_EVERY_H = 72.0          # local daemon fallback; VPS uses the Monday/Thursday systemd timer
 
 
 def _scan_ns():
@@ -100,7 +100,7 @@ def _configure_scan_cadence(db, ns, *, manual: bool):
     ns.no_harvest = False
     if not published:
         return "cold_full"
-    return "manual_complete" if manual else "daily_complete"
+    return "manual_complete" if manual else "scheduled_complete"
 
 
 def _serve_observer_cmds(db):
@@ -153,7 +153,7 @@ def _serve_rescan(db):
             if (pend or due) and not scanning:
                 ns = params.apply_scanner_params(db, _scan_ns())
                 cadence = _configure_scan_cadence(db, ns, manual=bool(pend))
-                why = f"command #{pend[0]}" if pend else "auto daily complete candidate reevaluation"
+                why = f"command #{pend[0]}" if pend else "auto 72h complete candidate reevaluation"
                 print(f"-> running scan [{why}]", flush=True)
                 scanner.scan(db, ns)                 # consumes pending rescan(s) + writes progress/status
         except Exception as exc:  # noqa: BLE001

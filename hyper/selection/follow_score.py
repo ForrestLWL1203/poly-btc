@@ -119,6 +119,13 @@ def evaluate_follow_eligibility(
     path_complete = path_status not in {"pending", "missing", "invalid", "replay_error", "incomplete"}
     stability_sufficient = bool(stability.get("evidenceSufficient"))
     stability_ok = bool(stability.get("passed"))
+    campaign_win_rate = _num(scoped.get(
+        "copy_bt_campaign_win_rate", scoped.get("copy_bt_win_rate"),
+    ))
+    body_n = int(_num(scoped.get("copy_bt_body_after_top3_n")))
+    body_win_rate = _num(scoped.get("copy_bt_body_after_top3_win_rate"))
+    body_net_pnl = scoped.get("copy_bt_body_after_top3_net_pnl")
+    follow_score_value = compute_follow_score(scoped, policy_values=policy_values)[0]
     sample_ok = bool(
         c30 >= min_closed30 and campaigns >= policy.core_min_campaigns_30d
         and evidence_days >= min_evidence_days
@@ -132,6 +139,12 @@ def evaluate_follow_eligibility(
         ),
         "tenIndependentCampaigns": campaigns >= policy.core_min_campaigns_30d,
         "nonoverlapStability": stability_ok,
+        "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
+        "repeatableBodyWinRate": (
+            body_n > 0 and body_win_rate >= policy.core_min_body_win_rate
+        ),
+        "repeatableBodyPositive": body_net_pnl is not None and _num(body_net_pnl) > 0.0,
+        "coreFollowScore": follow_score_value >= policy.core_min_follow_score,
         "activityWithin72h": activity_ok,
         "oneWinnerRemovalPositive": top1 is not None and _num(top1) > 0.0,
         "costStressPositive": cost_stress is not None and _num(cost_stress) > 0.0,
@@ -148,6 +161,16 @@ def evaluate_follow_eligibility(
     detail = {
         "returns": {"30": return30}, "campaigns": {"30": campaigns},
         "evidenceDays": evidence_days, "stability": stability,
+        "repeatability": {
+            "campaignWinRate": campaign_win_rate,
+            "campaignWinRateFloor": policy.core_min_campaign_win_rate,
+            "bodyAfterTop3N": body_n,
+            "bodyAfterTop3WinRate": body_win_rate if body_n > 0 else None,
+            "bodyWinRateFloor": policy.core_min_body_win_rate,
+            "bodyAfterTop3NetPnl": _num(body_net_pnl) if body_net_pnl is not None else None,
+        },
+        "followScore": follow_score_value,
+        "coreFollowScoreFloor": policy.core_min_follow_score,
         "activityAgeHours": activity_age_ms / 3_600_000 if activity_age_ms is not None else None,
         "campaignNetAfterTop1": _num(top1) if top1 is not None else None,
         "costStressNetPnl": _num(cost_stress) if cost_stress is not None else None,
@@ -192,6 +215,8 @@ def evaluate_follow_eligibility(
 
     core_eligible = bool(
         checks["coreReturn"] and sample_ok and stability_ok and activity_ok
+        and checks["campaignWinRate"] and checks["repeatableBodyWinRate"]
+        and checks["repeatableBodyPositive"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["costStressPositive"]
         and checks["openExecution"] and checks["capacity"] and checks["valuationComplete"]
         and checks["pathRiskComplete"] and checks["pathDrawdownWithinCore"]
@@ -202,7 +227,7 @@ def evaluate_follow_eligibility(
         return {"eligible": True, "coreEligible": True,
                 "status": "core_retention_eligible" if retention else "core_eligible",
                 "role": "core_eligible", **detail,
-                "reasons": ["严格Copy、10个Campaign、非重叠稳定性、72小时活动及执行压力均通过"]}
+                "reasons": ["严格Copy、可重复胜率、75分质量线、非重叠稳定性、72小时活动及执行压力均通过"]}
 
     if not stability_sufficient:
         status, reason = "challenger_stability_evidence_building", "非重叠10日折叠证据不足，继续积累而不按亏损淘汰"
@@ -214,6 +239,16 @@ def evaluate_follow_eligibility(
         status, reason = "challenger_activity_watch", "最近72小时没有新的可执行flat→open信号"
     elif not checks["coreReturn"]:
         status, reason = "challenger_return_watch", "严格Copy盈利但未达到Core收益线"
+    elif (
+        not checks["campaignWinRate"] or not checks["repeatableBodyWinRate"]
+        or not checks["repeatableBodyPositive"]
+    ):
+        status, reason = (
+            "challenger_repeatability_watch",
+            "Campaign或去除前三大赢家后的主体胜率/收益不足，暂不承担随机入场时点风险",
+        )
+    elif not checks["coreFollowScore"]:
+        status, reason = "challenger_score_watch", "综合质量分未达到Core 75分准入线"
     elif not checks["oneWinnerRemovalPositive"]:
         status, reason = "challenger_outlier_watch", "移除最大一个盈利Campaign后不再为正"
     elif not checks["costStressPositive"]:
@@ -230,8 +265,16 @@ def evaluate_follow_eligibility(
             "role": "challenger", "researchEligible": True, **detail, "reasons": [reason]}
 
 
-def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
-    """Rank copyability, repeatability and account-normalized strict Copy economics."""
+def compute_follow_score(
+    metrics: Mapping, *, policy_values: Mapping | None = None,
+) -> tuple[float, dict]:
+    """Score five non-duplicated properties on a calibrated 0–100 quality scale.
+
+    Economics answers whether our canonical account made enough money. Repeatability answers whether that
+    money survives an arbitrary follow start rather than depending on a rare winner. Edge confidence,
+    operability and path risk retain their separate meanings. Evidence completeness shrinks the total score;
+    it no longer lets a six-Campaign perfect streak masquerade as Core-grade proof.
+    """
     metrics = apply_allowed_sector_copy_metrics(metrics)
     raw = _clamp(_num(metrics.get("score")))
     c30 = int(_num(metrics.get("copy_bt_closed_n")))
@@ -263,7 +306,7 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         # the metric; only capacity/liquidity blocks and entry-path divergence can lower this component.
         execution = _clamp((execution + _num(metrics.get("copy_bt_add_fidelity"), 1.0)) / 2.0)
     evidence_days = int(_num(metrics.get("copy_evidence_days")))
-    policy = load_copy_policy()
+    policy = load_copy_policy(policy_values)
     # Qualification already defines seven 30d closes and five independent days as sufficient evidence.
     # Continuing to shrink a qualified wallet toward a neutral 0.5 until 20 closes/10 days silently ranks
     # a five-close +30% week behind a much thinner but older wallet.  Saturate at the actual evidence floors;
@@ -271,18 +314,12 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
     closed_confidence = _clamp(c30 / max(1.0, float(policy.min_closed_30d)))
     day_confidence = _clamp(evidence_days / max(1.0, float(min(5, policy.min_closed_30d))))
     confidence = min(closed_confidence, day_confidence)
-    edge_score = _clamp(0.5 + 0.5 * math.tanh(expected / 0.05))
+    edge_score = _clamp(0.5 + 0.5 * math.tanh((expected - 0.02) / 0.05))
     lcb_score = _clamp(0.5 + 0.5 * math.tanh(lcb / 0.03))
-    probability_score = _clamp((probability - 0.5) / 0.5)
-    copy_score = (
-        0.25 * edge_score + 0.25 * lcb_score + 0.20 * probability_score
-        + 0.15 * risk + 0.15 * execution
-    )
-    shrunk_copy = 0.5 + confidence * (copy_score - 0.5)
+    probability_score = _clamp((probability - 0.90) / 0.10)
     pnl30 = _num(metrics.get("copy_bt_net_pnl"))
     pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
-    margin_equity_pct = _clamp(_num(metrics.get("margin_equity_pct"), config.MARGIN_EQUITY_PCT))
     economic_equity = max(
         1.0,
         _num(metrics.get("initial_margin_equity"), float(getattr(config, "INITIAL_BALANCE", 10_000.0))),
@@ -293,50 +330,89 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "7d": pnl7 / economic_equity,
     }
     # These are saturating percentage scales, not fixed dollar bonuses.  A future $20k/$30k account with
-    # proportionally scaled replay PnL therefore receives the same economic score.  Confidence shrinkage
-    # prevents a three-trade windfall from outranking a repeatable wallet solely on one large episode.
+    # proportionally scaled replay PnL therefore receives the same economic score.  The final evidence
+    # shrinkage prevents a three-trade windfall from outranking mature proof solely on one large episode.
     economic_score = (
-        0.50 * _clamp(returns["30d"] / 0.60)
-        + 0.30 * _clamp(returns["14d"] / 0.40)
-        + 0.20 * _clamp(returns["7d"] / 0.25)
+        0.60 * _clamp(0.5 + (returns["30d"] - policy.core_min_return_30d) / 0.10)
+        + 0.25 * _clamp(0.5 + 0.5 * math.tanh(returns["14d"] / 0.05))
+        + 0.15 * _clamp(0.5 + 0.5 * math.tanh(returns["7d"] / 0.05))
     )
-    shrunk_economics = 0.5 + confidence * (economic_score - 0.5)
+    campaign_n = int(_num(metrics.get("copy_bt_campaign_closed_n"), c30))
+    campaign_win_rate = _clamp(_num(
+        metrics.get("copy_bt_campaign_win_rate", metrics.get("copy_bt_win_rate")),
+    ))
+    body_n = int(_num(metrics.get("copy_bt_body_after_top3_n")))
+    body_win_rate = _clamp(_num(metrics.get("copy_bt_body_after_top3_win_rate")))
+    body_net_pnl = _num(metrics.get("copy_bt_body_after_top3_net_pnl"))
+    top3_share = _clamp(_num(metrics.get("copy_bt_top3_profit_share"), 1.0))
+    policy_json = parse_json_obj(metrics.get("sector_policy_json"))
+    stability = policy_json.get("stability") if isinstance(policy_json.get("stability"), dict) else {}
+    evaluable_folds = int(_num(stability.get("evaluableFolds")))
+    profitable_folds = int(_num(stability.get("profitableFolds")))
+    fold_quality = _clamp(profitable_folds / max(1.0, float(evaluable_folds)))
+    campaign_win_quality = _clamp((campaign_win_rate - 0.30) / 0.40)
+    body_win_quality = _clamp((body_win_rate - 0.30) / 0.40) if body_n > 0 else 0.0
+    concentration_quality = _clamp((0.80 - top3_share) / 0.30)
+    repeatability_score = (
+        0.30 * campaign_win_quality
+        + 0.25 * body_win_quality
+        + 0.20 * concentration_quality
+        + 0.15 * (1.0 if body_n > 0 and body_net_pnl > 0.0 else 0.0)
+        + 0.10 * fold_quality
+    )
+    profit_factor = max(0.0, _num(metrics.get("copy_bt_profit_factor")))
+    payoff_ratio = max(0.0, _num(metrics.get("copy_bt_payoff_ratio")))
+    profit_factor_quality = _clamp(math.log(max(1.0, profit_factor)) / math.log(5.0))
+    payoff_quality = _clamp(payoff_ratio / 2.0)
+    edge_confidence_score = (
+        0.25 * edge_score + 0.25 * lcb_score + 0.20 * probability_score
+        + 0.15 * profit_factor_quality + 0.15 * payoff_quality
+    )
     activity = _clamp(_num(metrics.get("open_probability_48h"), 0.0))
-    score = 0.10 * raw + 0.40 * shrunk_copy + 0.40 * shrunk_economics + 0.10 * activity
+    actionable_rate = _clamp(_num(
+        metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")),
+    ))
+    capacity_fit = _clamp(_num(metrics.get("capacity_fit")))
+    operability_score = (
+        0.45 * execution + 0.20 * actionable_rate + 0.15 * capacity_fit + 0.20 * activity
+    )
+    liqs = int(_num(metrics.get("copy_bt_liquidations")))
+    liquidation_cleanliness = 1.0 - _clamp(liqs / max(1.0, float(campaign_n)))
+    risk_score = 0.75 * risk + 0.25 * liquidation_cleanliness
+    score = (
+        0.05 * raw + 0.22 * economic_score + 0.30 * repeatability_score
+        + 0.18 * edge_confidence_score + 0.13 * operability_score + 0.12 * risk_score
+    )
+    fold_confidence = _clamp(
+        evaluable_folds / max(1.0, float(policy.stability_min_evaluable_folds))
+    )
+    campaign_confidence = _clamp(
+        campaign_n / max(1.0, float(policy.core_min_campaigns_30d))
+    )
+    readiness_confidence = min(confidence, campaign_confidence, fold_confidence)
+    score *= 0.70 + 0.30 * readiness_confidence
     reasons = [
         f"预期保证金收益{expected * 100:+.1f}%",
         f"LCB {lcb * 100:+.1f}%",
         f"盈利概率{probability * 100:.0f}%",
         f"独立证据{evidence_days}天/{c30}笔",
     ]
-    recent14 = metrics.get("copy_recent_return_14d")
-    recent7 = metrics.get("copy_recent_return_7d")
-    if recent14 is not None and _num(recent14) < 0:
-        score -= min(0.08, abs(_num(recent14)) * 0.5)
-        reasons.append("14天归一化收益为负")
-    if recent7 is not None and _num(recent7) < 0:
-        score -= min(0.06, abs(_num(recent7)) * 0.4)
-        reasons.append("7天归一化收益为负")
-    liqs = int(_num(metrics.get("copy_bt_liquidations")))
     liquidation_rate = liqs / c30 if c30 > 0 else 0.0
-    # The monetary loss is already present in PnL/drawdown, so never charge a fixed amount per event or use
-    # a zero-liquidation veto.  Frequency is separate repeatability evidence, however: recurring isolated
-    # liquidations rank below an equally profitable wallet with a cleaner path.  Keep the continuous penalty
-    # bounded so a thick post-loss net edge can still win.
     if liqs > 0:
-        liquidation_frequency_penalty = min(0.10, liquidation_rate * 0.50)
-        score -= liquidation_frequency_penalty
-        reasons.append(
-            f"copy爆仓{liqs}次/{c30}回合（损失已计收益，频率扣分{liquidation_frequency_penalty:.3f}）"
-        )
+        reasons.append(f"copy爆仓{liqs}次/{c30}回合（按Campaign频率进入风险柱）")
     score = _clamp(score)
     return score, {
         "rawScore": raw,
-        "copyScore": copy_score,
+        "copyScore": edge_confidence_score,
         "economicScore": economic_score,
+        "repeatabilityScore": repeatability_score,
+        "edgeConfidenceScore": edge_confidence_score,
+        "operabilityScore": operability_score,
+        "calibratedRiskScore": risk_score,
         "economicReturns": returns,
         "economicEquity": economic_equity,
-        "confidence": confidence,
+        "confidence": readiness_confidence,
+        "sampleConfidence": confidence,
         "copyPnl": {
             "30d": metrics.get("copy_bt_net_pnl"),
             "14d": metrics.get("copy_bt_14d_net_pnl"),
@@ -349,8 +425,8 @@ def compute_follow_score(metrics: Mapping) -> tuple[float, dict]:
         "evidenceDays": evidence_days,
         "riskScore": risk,
         "executionScore": execution,
-        "profitFactor": metrics.get("copy_bt_profit_factor"),
-        "payoffRatio": metrics.get("copy_bt_payoff_ratio"),
+        "profitFactor": profit_factor,
+        "payoffRatio": payoff_ratio,
         "netAfterTop1": metrics.get("copy_bt_net_after_top1"),
         "netAfterTop2": metrics.get("copy_bt_net_after_top2"),
         "top1ProfitShare": metrics.get("copy_bt_top1_profit_share"),

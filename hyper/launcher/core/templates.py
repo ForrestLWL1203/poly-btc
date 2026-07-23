@@ -5,7 +5,7 @@ parameterized). Keeping them here as templates — not shell heredocs buried in 
 deployed system auditable and lets `ops.update` diff/re-push a unit without touching the pipeline.
 """
 
-# The three long-lived services + the daily scan (oneshot) and its timer. `observe` is the copy
+# The three long-lived services + the twice-weekly scan (oneshot) and its timer. `observe` is the copy
 # engine — enabled but NOT started at deploy (the operator starts copy-trading from the dashboard).
 UNITS = ("hl-dashboard", "hl-observe", "hl-scan.service", "hl-scan.timer")
 
@@ -61,9 +61,9 @@ ExecStopPost={py} -m hyper.cli.discover --db {db} repair-watchlist
 """
 
 
-def scan_timer(on_calendar="*-*-* 04:00:00"):
+def scan_timer(on_calendar="Mon,Thu *-*-* 04:00:00"):
     return f"""[Unit]
-Description=Run HL scanner daily (incremental; weekly candidate refresh selected by scanner)
+Description=Run HL scanner twice weekly (alternating 3/4-day evidence refresh)
 
 [Timer]
 OnCalendar={on_calendar}

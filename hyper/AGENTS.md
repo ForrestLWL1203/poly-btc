@@ -121,7 +121,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
   missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
   continuation cursor; it must not restart from the 37-day boundary on the next run.
-- Every daily generation refreshes the complete Leaderboard and evaluates every official-ROI + Perp-precheck
+- Every scheduled generation refreshes the complete Leaderboard and evaluates every official-ROI + Perp-precheck
   survivor. Core, Challenger and open-position owners are also evaluated for safe removal/exit. There is no
   300-wallet budget, rotation/recovery/exploration allocation, deferred tail, seven-day shard or weekly full
   refresh. Workset and fill transport remain separate: the workset is always `all`, while fills are `delta`,
@@ -227,9 +227,9 @@ The user-facing roles are:
 
 `CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 10. `CORE_TARGET_MIN_N` defaults to 8. This 8–10 range
 is a service target, never a permission to weaken individual
-quality gates: while below it, a daily generation may make portfolio-safe additions. Normal ranking replacement,
+quality gates: while below it, a scheduled generation may make portfolio-safe additions. Normal ranking replacement,
 parameter retuning, and leave-one-out reshuffling run only after seven days since the last actual membership
-change. Daily evidence still removes liquidation, Forward-loss, campaign-structure, or other individual hard
+change. Scheduled evidence refresh still removes liquidation, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
 1. Run each bounded candidate's canonical individual Copy replay once with the refined 15-minute path (and finer

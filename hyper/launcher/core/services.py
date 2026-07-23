@@ -1,6 +1,6 @@
 """Service supervision — one interface, two backends.
 
-VPS  (SystemdServices): dashboard常开 / scan.timer每日 / observe安装但禁用开机自启.
+VPS  (SystemdServices): dashboard常开 / scan.timer周一周四 / observe安装但禁用开机自启.
 Local (LocalServices):  the launcher directly runs only the DASHBOARD (detached, pidfile). The
 observer + scan are driven from inside the dashboard by its own procman, which — since the earlier
 procman change — spawns them locally when systemd is absent. So locally the launcher owns the
@@ -36,7 +36,7 @@ class SystemdServices:
         self.sync_units(emit)
         emit("启用 + 启动 dashboard(常开)…")
         self.ex.run("systemctl enable --now hl-dashboard.service", on_line=emit)
-        emit("启用 scan 定时器(每日 04:00)…")
+        emit("启用 scan 定时器(每周一/四 04:00，间隔3/4天)…")
         self.ex.run("systemctl enable --now hl-scan.timer", on_line=emit)
         emit("禁用 observe 开机自启(仍可由 dashboard 手动启动)…")
         self.ex.run("systemctl disable hl-observe.service", on_line=emit)

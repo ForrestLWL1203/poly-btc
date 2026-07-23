@@ -17,6 +17,8 @@ from hyper import config
 COPY_POLICY_PARAM_KEYS = (
     "COPY_BT_DAYS", "COPY_BT_RECENT_DAYS", "COPY_BT_MIN_CLOSED", "COPY_BT_MIN_CLOSED_14D",
     "COPY_BT_MIN_CLOSED_7D", "CORE_COPY_MIN_CAMPAIGNS_30D",
+    "CORE_COPY_MIN_CAMPAIGN_WIN_RATE", "CORE_COPY_MIN_BODY_WIN_RATE",
+    "CORE_MIN_FOLLOW_SCORE",
     "CORE_RETENTION_MIN_COPY_RETURN_30D", "CORE_SOFT_FAIL_CONFIRMATIONS",
     "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
     "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS", "CORE_INTRATRADE_DD_MAX",
@@ -36,6 +38,9 @@ class CopyPolicy:
     min_closed_14d: int
     min_closed_7d: int
     core_min_campaigns_30d: int
+    core_min_campaign_win_rate: float
+    core_min_body_win_rate: float
+    core_min_follow_score: float
     retention_min_return_30d: float
     soft_fail_confirmations: int
     core_max_liquidations_30d: int
@@ -90,6 +95,11 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
         min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
         core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 10) or 0),
+        core_min_campaign_win_rate=float(_value(
+            values, "CORE_COPY_MIN_CAMPAIGN_WIN_RATE", 0.45,
+        )),
+        core_min_body_win_rate=float(_value(values, "CORE_COPY_MIN_BODY_WIN_RATE", 0.40)),
+        core_min_follow_score=float(_value(values, "CORE_MIN_FOLLOW_SCORE", 0.75)),
         retention_min_return_30d=float(_value(values, "CORE_RETENTION_MIN_COPY_RETURN_30D", 0.07)),
         soft_fail_confirmations=int(_value(values, "CORE_SOFT_FAIL_CONFIRMATIONS", 2) or 1),
         core_max_liquidations_30d=int(_value(
