@@ -620,7 +620,7 @@ def _leaderboard_recall_audit(db, generation_id, stamp, p):
     db.commit()
 
 
-def _run_perp_prefilter(db, addrs, p, stamp):
+def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True):
     """Run official weekly stability and Perp-share checks before downloading wallet history."""
     pipeline_audit._delete_stage(db, stamp, "scan", "perp_prefilter")
     # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
@@ -647,24 +647,26 @@ def _run_perp_prefilter(db, addrs, p, stamp):
     # A deployment/restart starts a new generation but does not make Portfolio evidence fetched minutes ago
     # stale. Reuse only exact-policy business decisions inside a short TTL; deferred transport failures are
     # deliberately retried. Every cache hit is copied into the new stamp's audit surface below.
-    for addr, status, reason, payload_json in db.execute(
-        "SELECT addr,status,reason,payload_json FROM pipeline_audit "
-        "WHERE source='scan' AND stage='perp_prefilter' AND addr IS NOT NULL "
-        "AND strftime('%s',created_at)>=strftime('%s','now')-? ORDER BY id DESC",
-        (int(config.PERP_PREFILTER_CACHE_TTL_S),),
-    ).fetchall():
-        addr = str(addr or "").lower()
-        if addr not in addr_set or addr in cached_results or status not in {"passed", "rejected"}:
-            continue
-        try:
-            cached_payload = json.loads(payload_json or "{}")
-        except (TypeError, ValueError):
-            continue
-        if cached_payload.get("policy") != cache_policy:
-            continue
-        cached_results[addr] = perp_prefilter.Result(
-            str(status), str(reason or "perp_prefilter_cached"), dict(cached_payload.get("windows") or {}),
-        )
+    if allow_cache:
+        for addr, status, reason, payload_json in db.execute(
+            "SELECT addr,status,reason,payload_json FROM pipeline_audit "
+            "WHERE source='scan' AND stage='perp_prefilter' AND addr IS NOT NULL "
+            "AND strftime('%s',created_at)>=strftime('%s','now')-? ORDER BY id DESC",
+            (int(config.PERP_PREFILTER_CACHE_TTL_S),),
+        ).fetchall():
+            addr = str(addr or "").lower()
+            if addr not in addr_set or addr in cached_results or status not in {"passed", "rejected"}:
+                continue
+            try:
+                cached_payload = json.loads(payload_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            if cached_payload.get("policy") != cache_policy:
+                continue
+            cached_results[addr] = perp_prefilter.Result(
+                str(status), str(reason or "perp_prefilter_cached"),
+                dict(cached_payload.get("windows") or {}),
+            )
     results = {}
     pending_audit = []
 
@@ -2134,7 +2136,11 @@ def _formation_tune_candidate(row) -> bool:
 
 
 def _formation_prepath_candidate(row) -> bool:
-    """Whether a wallet clears every Core gate that does not require refined candle paths."""
+    """Whether a wallet clears every Core business gate available before refined candle paths.
+
+    The final score deliberately is not required here because path risk owns 15% of that score. Requiring
+    75 before fetching the evidence needed to compute it creates a circular gate and can force Core to zero.
+    """
     qualification = dict((row or {}).get("follow_qualification") or {})
     if not qualification.get("eligible"):
         return False
@@ -2150,7 +2156,6 @@ def _formation_prepath_candidate(row) -> bool:
         "campaignWinRate",
         "repeatableBodyWinRate",
         "repeatableBodyPositive",
-        "coreFollowScore",
         "activityWithin72h",
         "oneWinnerRemovalPositive",
         "costStressPositive",
@@ -3174,8 +3179,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         row["rank"] = rank
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
     # ``eligible`` is deliberately broad: any profitable, non-hard-risk profile remains researchable.
-    # Only the bounded, path-certified formation surface belongs in the operational Challenger set. Keeping
-    # every positive profile in follow_selection made hundreds of research wallets daily retention targets.
+    # Operational Challenger is the bounded near-Core pool: wallets that already clear the 30d follower
+    # magnitude line stay visible while recent/fold/sample/path proof matures. Publishing only the path
+    # formation surface made Challenger collapse to zero whenever Core did; publishing every positive
+    # research profile previously created hundreds of retention targets.
     operational_candidate_set = set(desired)
     operational_candidate_set.update(
         (addr or "").lower() for addr in dict(effective_qualifications or {}) if addr
@@ -3184,6 +3191,18 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         (item.get("addr") or "").lower()
         for item in (formation_meta or {}).get("admission") or ()
         if isinstance(item, dict) and item.get("addr")
+    )
+    operational_candidate_set.update(
+        (row.get("addr") or "").lower()
+        for row in [
+            item for item in profiles
+            if item.get("profile_generation") == generation_id
+            and item.get("status") in {"active", "qualified"}
+            and (item.get("follow_qualification") or {}).get("eligible")
+            and (
+                (item.get("follow_qualification") or {}).get("checks") or {}
+            ).get("strictCopy30dReturn")
+        ][:int(config.MAX_TARGETS)]
     )
     declared_effective_pins = tuple(
         (addr or "").lower()
@@ -5158,7 +5177,12 @@ def scan(db, p) -> None:
     prefilter_started_at = time.time()
     _set_scan_progress(db, stage="perp_prefilter", candidates_scanned=0,
                        candidates_total=len(recall_cand))
-    perp_results = _run_perp_prefilter(db, recall_cand, p, stamp)
+    # A complete production scan means a real Portfolio refresh, not merely a complete workset fed by the
+    # two-hour restart cache. Direct recovery/test callers may still opt into exact-policy cache reuse.
+    perp_results = _run_perp_prefilter(
+        db, recall_cand, p, stamp,
+        allow_cache=not bool(getattr(p, "full_scan", False)),
+    )
     prefilter_done_at = time.time()
     prefilter_api_stats = rest.request_stats()
     cand = [addr for addr in recall_cand if perp_results[addr].passed]

@@ -206,6 +206,16 @@ class PerpPrefilterTests(unittest.TestCase):
                 scanner._run_perp_prefilter(db, ["0xabc"], changed, "scan-three")
             refetch.assert_called_once_with("0xabc")
 
+            with mock.patch.object(scanner.rest, "portfolio", return_value=payload) as full_refetch:
+                scanner._run_perp_prefilter(
+                    db, ["0xabc"], policy, "scan-full", allow_cache=False,
+                )
+            full_refetch.assert_called_once_with("0xabc")
+            full_audit = json.loads(db.execute(
+                "SELECT payload_json FROM pipeline_audit WHERE stamp='scan-full' AND addr='0xabc'"
+            ).fetchone()[0])
+            self.assertFalse(full_audit["cacheHit"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -212,8 +212,9 @@ sector whose loss includes liquidation is still a hard recent failure, and Heavy
 rule.
 
 `profile.score` is a discovery-only prior when Copy evidence is absent. Once canonical Copy exists,
-`watchlist.score` uses 30% independent weekly funded economics, 25% repeatability, 15% edge confidence,
-15% operability, and 15% path risk. Overlapping 30/14/7 returns and the legacy raw score contribute zero.
+`watchlist.score` uses 30% funded economics, 25% repeatability, 15% edge confidence, 15% operability, and
+15% path risk. Funded economics combines explicit 30d and latest-7d return magnitude with non-overlapping
+fold timing and median per-close density; overlapping 14d return and the legacy raw score contribute zero.
 The sample-confidence factor saturates at the actual qualification floors. New Core must score at least
 75/100 after all binary hard gates pass; score then orders those survivors and cannot compensate for a failed
 weekly, win-rate, execution, capacity, valuation, or risk gate.
@@ -232,7 +233,9 @@ The persistent `wallet_registry` retains identity, roles, good/bad confirmations
 The user-facing roles are:
 
 - **Core** (`role=core`): Observer may open new copy positions.
-- **Challenger** (`role=challenger`): qualified candidate, no new copy opens.
+- **Challenger** (`role=challenger`): a bounded near-Core wallet that already clears the 30d strict-Copy
+  return line but is still waiting on recent return, fold/sample/path/score or shared-portfolio proof; no new
+  copy opens. Evidence-incomplete wallets stay here rather than being labeled as economic failures.
 - **Exit-only** (`role=exit_only`): no new opens, but existing copies are managed to exit.
 - **Rejected**: business value/structure is below the observation line and is not shown as Challenger.
 - **Quarantine**: collection/cache/replay/valuation/strategy data is invalid and is not a new-entry target.
@@ -458,8 +461,9 @@ python3 dashboard/web/dev/mock_consumer.py data/hl_mock.db
 DASH_PASSWORD=mock123 python3 -m dashboard.server --db data/hl_mock.db --static dashboard/web --host 127.0.0.1 --port 8810
 ```
 
-`scan --full` means a full candidate-universe harvest and evaluation. It does not re-download a complete
-wallet cache; only new or incomplete wallets fetch the 37-day bootstrap window. Except for the forced
+`scan --full` means a full candidate-universe harvest and evaluation and bypasses the short-lived official
+Portfolio prefilter cache. It does not re-download a complete wallet fill cache; only new or incomplete
+wallets fetch the 37-day bootstrap window. Except for the forced
 first-generation `cold_full`, a Dashboard manual rescan is incremental unless its command payload requests
 `full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
 and jointly tunes the current published generation without wallet fill refetch; `finalize-profiled` retries an

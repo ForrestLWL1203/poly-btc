@@ -254,13 +254,13 @@ def evaluate_follow_eligibility(
         )
     elif not copy_weekly_sufficient:
         status, reason = (
-            "challenger_copy_weekly_evidence_building",
-            "严格Copy四个非重叠7日区间证据不足，继续积累而不按亏损淘汰",
+            "challenger_copy_fold_evidence_building",
+            "严格Copy四个非重叠7日段证据尚未完整；保留Challenger继续积累，不按亏损淘汰",
         )
     elif not copy_weekly_positive:
         status, reason = (
-            "challenger_copy_weekly_loss",
-            "目标钱包官方周收益达标，但我们的严格Copy至少一个7日区间净亏损",
+            "challenger_copy_timing_instability",
+            "四段证据完整，但少于三段盈利或唯一亏损段超过30日总利润的25%",
         )
     elif not sample_ok:
         status, reason = "challenger_campaign_evidence_building", "独立Campaign或证据日不足，继续积累"
@@ -358,8 +358,8 @@ def compute_follow_score(
         "14d": pnl14 / economic_equity,
         "7d": pnl7 / economic_equity,
     }
-    # Four independent funded weeks own economics. Overlapping 30/14/7 windows remain display diagnostics
-    # and can no longer triple-count the same profitable days.
+    # Explicit 30d/latest-7d magnitude and four independent timing folds share the economics pillar.
+    # The overlapping 14d window remains display-only so the same profitable days are not triple-counted.
     policy_json = parse_json_obj(metrics.get("sector_policy_json"))
     copy_weekly = (
         policy_json.get("copyWeeklyProfitability")
@@ -374,9 +374,7 @@ def compute_follow_score(
         _num(fold.get("averageClosedNetReturn"))
         for fold in weekly_folds if fold.get("averageClosedNetReturn") is not None
     ]
-    weekly_floor = max(
-        1e-9, policy.copy_weekly_score_return_target,
-    )
+    weekly_floor = max(1e-9, policy.copy_weekly_score_return_target)
     density_floor = max(
         1e-9,
         _num(
@@ -398,19 +396,50 @@ def compute_follow_score(
             else (rows[middle - 1] + rows[middle]) / 2.0
         )
 
-    if len(weekly_returns) == policy.stability_fold_count and len(density_returns) == len(weekly_returns):
+    return30_quality = floor_quality(
+        returns["30d"], policy.core_min_copy_return_30d, 0.20,
+    )
+    return7_quality = floor_quality(
+        returns["7d"], policy.core_min_copy_return_7d, 0.10,
+    )
+    if weekly_returns:
         min_weekly = min(weekly_returns)
         median_weekly = median(weekly_returns)
-        min_density = min(density_returns)
-        weekly_return_score = (
-            0.65 * floor_quality(min_weekly, weekly_floor, 0.08)
-            + 0.35 * floor_quality(median_weekly, weekly_floor, 0.08)
+        min_density = min(density_returns) if density_returns else None
+        median_density = median(density_returns) if density_returns else None
+        evidence_ratio = _clamp(len(weekly_returns) / max(1.0, float(policy.stability_fold_count)))
+        profitable_ratio = _clamp(
+            sum(value > 0.0 for value in weekly_returns)
+            / max(1.0, float(policy.stability_fold_count))
         )
-        density_score = floor_quality(min_density, density_floor, 0.02)
-        economic_score = 0.75 * weekly_return_score + 0.25 * density_score
+        loss_ratio = copy_weekly.get("worstLossToTotalProfit")
+        if all(value >= 0.0 for value in weekly_returns):
+            loss_quality = 1.0
+        elif loss_ratio is None:
+            loss_quality = 0.0
+        else:
+            loss_quality = _clamp(
+                1.0 - _num(loss_ratio)
+                / max(1e-9, policy.stability_max_loss_to_30d_profit)
+            )
+        weekly_magnitude = floor_quality(median_weekly, weekly_floor, 0.08)
+        weekly_return_score = evidence_ratio * (
+            0.50 * profitable_ratio + 0.30 * loss_quality + 0.20 * weekly_magnitude
+        )
+        density_score = (
+            floor_quality(median_density, density_floor, 0.02)
+            if median_density is not None else 0.0
+        )
     else:
-        min_weekly = median_weekly = min_density = None
-        weekly_return_score = density_score = economic_score = 0.0
+        min_weekly = median_weekly = min_density = median_density = None
+        profitable_ratio = loss_quality = 0.0
+        weekly_return_score = density_score = 0.0
+    economic_score = (
+        0.35 * return30_quality
+        + 0.25 * return7_quality
+        + 0.25 * weekly_return_score
+        + 0.15 * density_score
+    )
     campaign_n = int(_num(metrics.get("copy_bt_campaign_closed_n"), c30))
     campaign_win_rate = _clamp(_num(
         metrics.get("copy_bt_campaign_win_rate", metrics.get("copy_bt_win_rate")),
@@ -496,9 +525,14 @@ def compute_follow_score(
             "densityReturns": density_returns,
             "returnFloor": weekly_floor,
             "densityFloor": density_floor,
+            "return30Score": return30_quality,
+            "return7Score": return7_quality,
             "minimumReturn": min_weekly,
             "medianReturn": median_weekly,
             "minimumNetPerClosedReturn": min_density,
+            "medianNetPerClosedReturn": median_density,
+            "profitableRatio": profitable_ratio,
+            "lossBoundScore": loss_quality,
             "returnScore": weekly_return_score,
             "densityScore": density_score,
         },

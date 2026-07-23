@@ -61,16 +61,18 @@ Wallet quality and funded-account membership are separate decisions.
   majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
 - Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
   activity, cost stress, or outlier evidence block Core but do not erase that research evidence. Refined
-  candle paths are fetched only for current Core and wallets that already clear every non-path Core gate,
-  bounded at 40 for resource safety; raw score alone cannot consume these expensive slots. New Core requires
+  candle paths are fetched only for current Core and wallets that already clear every non-path business gate,
+  bounded at 40 for resource safety. The provisional pre-path score is not a gate because path-risk evidence
+  is itself 15% of the final score; the 75-point line is applied after that path is available. New Core requires
   ten independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 5% over the latest
   rolling 7 days. All four non-overlapping 7-day folds must contain Campaign evidence, at least three must be
   profitable, and the one permitted losing fold cannot exceed 25% of total 30-day profit. Aggregate replay
   must remain profitable after taker fees are stressed to 1.5x. Average net per close remains a ranking
   diagnostic rather than a second hard gate.
-- The final copy-follow score is calibrated as independent weekly funded economics 30%, repeatability 25%,
-  edge confidence 15%, operability 15%, and path risk 15%. Once Copy evidence exists, overlapping 30/14/7
-  returns and the legacy raw profile score contribute zero; they remain diagnostics only. Incomplete
+- The final copy-follow score is calibrated as funded economics 30%, repeatability 25%, edge confidence 15%,
+  operability 15%, and path risk 15%. Economics combines 30-day and latest-7-day follower return magnitude,
+  fold timing and median per-close density; overlapping 14-day return and the legacy raw profile score
+  contribute zero. Incomplete
   Campaign/fold evidence shrinks the total, so a tiny perfect streak cannot outrank mature proof. New Core
   requires at least 75/100, at least
   45% Campaign win rate, and at least 40% win rate plus positive net after removing the three largest winning
@@ -287,6 +289,7 @@ the local mock dashboard and inspect the rendered result.
 - Do not restart `hl-scan.service` to deploy code: it starts a real scan when activated. Restart only the
   affected long-running service, normally `hl-dashboard.service` and/or `hl-observe.service`.
 - Before diagnosing a manual “full” scan, verify the command payload has `full=true`, the CLI used `--full`, or
-  the completed run records `full=1`; a manual workset scan can still use incremental cached fills.
+  the completed run records `full=1`; explicit full bypasses the two-hour Portfolio decision cache but still
+  uses incremental fills for wallets whose complete 37-day history is already present.
 - Never commit `data/`, `secret/`, `hyper/launcher/data/keys/`, `hyper/launcher/data/targets.json`, or live database
   snapshots. Keep private deployment details in local ignored notes.

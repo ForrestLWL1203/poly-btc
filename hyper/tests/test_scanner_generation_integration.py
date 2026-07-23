@@ -262,6 +262,35 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertFalse(rows[0].enabled)
             self.assertIn("no_robust_core", rows[0].reason)
 
+    def test_strong_30d_research_wallet_remains_visible_as_challenger(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            profile = {
+                "addr": "0xnear", "status": "active", "reason": "ok",
+                "profile_generation": "g2", "data_status": "valid",
+                "evidence_status": "qualified", "follow_score": .72,
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": False,
+                    "status": "challenger_recent_return_watch",
+                    "checks": {
+                        "strictCopy30dReturn": True,
+                        "strictCopyRolling7dReturn": False,
+                    },
+                },
+            }
+
+            rows, _marginal = scanner._build_forced_prefix_selection(
+                db, "g2", "now", 1,
+                profiles=[profile], previous_roles={}, controls={"0xnear": True},
+                held=set(), desired_order=(),
+                formation_meta={"explicitEmptyCore": True},
+            )
+
+            self.assertEqual([(row.addr, row.role) for row in rows], [
+                ("0xnear", scanner.selection.CHALLENGER),
+            ])
+
     def test_core_soft_failure_needs_two_distinct_complete_generations(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -318,7 +347,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             weekly_loss = {
                 "eligible": True, "coreEligible": False, "role": "challenger",
-                "status": "challenger_copy_weekly_loss",
+                "status": "challenger_copy_timing_instability",
                 "checks": {
                     "strictCopy30dPositive": True,
                     "strictCopy30dReturn": True,
@@ -564,6 +593,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             ["0xincumbent", "0xready"],
         )
 
+    def test_prepath_candidate_does_not_require_score_before_path_risk_exists(self):
+        checks = {
+            key: True for key in (
+                "strictCopy30dPositive", "strictCopy30dReturn",
+                "strictCopyRolling7dReturn", "strictCopyWeeklyPositive",
+                "tenIndependentCampaigns", "campaignWinRate",
+                "repeatableBodyWinRate", "repeatableBodyPositive",
+                "activityWithin72h", "oneWinnerRemovalPositive",
+                "costStressPositive", "openExecution", "capacity",
+                "valuationComplete", "sectorExecutable", "expectedEdge",
+                "noRepeatedLiquidation", "noForwardLiquidation",
+            )
+        }
+        row = {
+            "follow_qualification": {
+                "eligible": True, "evidenceDays": 10,
+                "checks": {**checks, "coreFollowScore": False, "pathRiskComplete": False},
+            },
+            "sector_policy_json": "{}",
+        }
+
+        self.assertTrue(scanner._formation_prepath_candidate(row))
+
     def test_selection_path_prefetch_excludes_disabled_and_watch_only_sectors(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -801,10 +853,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(marginal.selected, ())
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
                 ("0xaaa", "challenger", "challenger_weekly_return_watch"),
+                ("0xbbb", "challenger", "challenger_copy_fold_evidence_building"),
             ])
             self.assertEqual(db.execute(
                 "SELECT state,current_role FROM wallet_registry WHERE addr='0xbbb'"
-            ).fetchone(), ("qualified", None))
+            ).fetchone(), ("challenger", "challenger"))
 
     def test_final_parameter_policy_promotes_watch_sector_for_selected_core(self):
         with tempfile.TemporaryDirectory() as td:
