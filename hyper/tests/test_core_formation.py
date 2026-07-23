@@ -23,11 +23,11 @@ def value(count, utility, *, feasible=True, liquidations=0, capacity_fit=.95):
 
 
 class QualityPrefixSearchTests(unittest.TestCase):
-    def test_final_membership_requires_two_fold_wins_latest_profit_and_replacement_hurdle(self):
+    def test_final_membership_requires_four_stable_weeks_and_replacement_hurdle(self):
         baseline = value(2, 1000)
         candidate = value(3, 1300)
-        base_folds = [value(2, 100), value(2, 100), value(2, 100)]
-        good_folds = [value(3, 120), value(3, 120), value(3, 110)]
+        base_folds = [value(2, 400)] * 4
+        good_folds = [value(3, 420)] * 4
 
         result = validate_final_membership(
             candidate, good_folds, cost_stress_net=100,
@@ -37,14 +37,15 @@ class QualityPrefixSearchTests(unittest.TestCase):
         )
 
         self.assertTrue(result["eligible"])
-        self.assertEqual(result["foldWins"], 3)
+        self.assertEqual(result["foldWins"], 4)
+        self.assertTrue(all(row["return"] >= .05 for row in result["weeklyFolds"]))
 
     def test_pure_addition_needs_positive_net_and_folds_but_not_replacement_hurdle(self):
         baseline = value(2, 1000)
         # Only +$10: deliberately below the replacement 2%-of-equity hurdle, but still a real addition.
         candidate = value(3, 1010)
-        base_folds = [value(2, 100), value(2, 100), value(2, 100)]
-        good_folds = [value(3, 110), value(3, 105), value(3, 102)]
+        base_folds = [value(2, 400)] * 4
+        good_folds = [value(3, 420)] * 4
 
         result = validate_final_membership(
             candidate, good_folds, cost_stress_net=100,
@@ -60,15 +61,15 @@ class QualityPrefixSearchTests(unittest.TestCase):
 
     def test_final_membership_uses_one_campaign_outlier_stress_only(self):
         candidate = value(2, 1000)
-        folds = [value(2, 100), value(2, 100), value(2, 100)]
+        folds = [value(2, 400)] * 4
         rejected = validate_final_membership(
             candidate, folds, cost_stress_net=100,
-            baseline=None, baseline_folds=[value(0, 0)] * 3,
+            baseline=None, baseline_folds=[value(0, -200)] * 4,
             tail_after_top1=-1,
         )
         warned = validate_final_membership(
             candidate, folds, cost_stress_net=100,
-            baseline=None, baseline_folds=[value(0, 0)] * 3,
+            baseline=None, baseline_folds=[value(0, -200)] * 4,
             tail_after_top1=700,
         )
 
@@ -114,17 +115,15 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertEqual(sorted(calls), list(range(1, 8)))
         self.assertEqual(result.selected.count, 5)
 
-    def test_service_minimum_prevents_healthy_search_collapsing_below_eight(self):
+    def test_membership_search_has_no_service_minimum(self):
         candidates = tuple(f"0x{i}" for i in range(10))
         result = search_quality_membership(
             candidates,
             lambda addrs: value(len(addrs), 1000 - len(addrs)),
             initial=candidates,
             exhaustive_below=12,
-            min_count=8,
         )
-        self.assertGreaterEqual(len(result.selected), 8)
-        self.assertLessEqual(len(result.selected), 10)
+        self.assertEqual(len(result.selected), 1)
 
     def test_prefix_search_never_evaluates_below_required_starred_count(self):
         calls = []
@@ -133,7 +132,7 @@ class QualityPrefixSearchTests(unittest.TestCase):
             lambda count: calls.append(count) or value(count, 1000 - count),
             tie_tolerance=0,
             exhaustive_below=8,
-            min_count=3,
+            required_count=3,
         )
 
         self.assertEqual(sorted(calls), list(range(3, 8)))

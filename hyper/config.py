@@ -48,9 +48,8 @@ SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running —
 MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
 # Every complete generation starts from the highest-quality individually Core-ready wallets.  Portfolio
 # tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
-CORE_INITIAL_MAX_N = 10
-CORE_TARGET_MIN_N = 8            # service target: form 8-10 Core wallets when hard-risk-qualified supply exists.
-CORE_TARGET_MAX_N = 10
+CORE_INITIAL_MAX_N = 16
+CORE_TARGET_MAX_N = 16
 CORE_REBALANCE_INTERVAL_DAYS = 7 # normal rank/portfolio reshuffles are weekly; hard risk failures remain immediate.
 CORE_PROMOTION_MIN_HOURS = 24
 CORE_SOFT_MIN_TENURE_DAYS = 14
@@ -69,12 +68,12 @@ CORE_RETENTION_MIN_COPY_RETURN_30D = 0.07
 CORE_SOFT_FAIL_CONFIRMATIONS = 2
 CORE_MIN_FOLLOW_SCORE = 0.75
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
-COPY_STABILITY_FOLD_DAYS = 10
-COPY_STABILITY_FOLD_COUNT = 3
+COPY_STABILITY_FOLD_DAYS = 7
+COPY_STABILITY_FOLD_COUNT = 4
 COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD = 2
-COPY_STABILITY_MIN_EVALUABLE_FOLDS = 2
-COPY_STABILITY_MIN_PROFITABLE_FOLDS = 2
-COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT = 0.25
+COPY_STABILITY_MIN_EVALUABLE_FOLDS = 4
+COPY_STABILITY_MIN_PROFITABLE_FOLDS = 4
+COPY_STABILITY_MIN_RETURN = 0.05
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
@@ -292,9 +291,9 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
 # Stage-1 leaderboard recall (UI-tunable). The cheap hard surface proves $5k equity, $250k leveraged 7d
-# notional activity, positive 7d/30d PnL, and stable capital efficiency in both recent windows: at least
-# 10% 7d ROI and 20% 30d ROI. All-time ROI is audit/ranking only. Incumbent roles and open-position owners
-# bypass recall and still receive their mandatory retention replay.
+# notional activity, positive 7d/30d PnL, and at least 20% official 30d ROI. The 7d 10% and all-time ROI
+# lines are audit references only. Incumbent roles and open-position owners bypass recall and still receive
+# their mandatory retention replay.
 # This official ROI gate is discovery-only; scoped Perp evidence and strict-Copy replay decide executable roles.
 HARVEST_MIN_ACCT = 5_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
@@ -359,11 +358,6 @@ PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet ov
 GATE_LOSS_PAIN_MAX   = 1.0
 GATE_HOLD_SKEW_MAX   = 1.5
 GATE_PROFIT_CONC_MAX = 0.8
-# v7 PORTFOLIO copyability gates (from HL portfolio: net-of-fees, deposit-adjusted; only when pf data present).
-PORTFOLIO_MAX_TURNOVER = 80.0      # 换手率上限 = 周成交量/权益. >this = HFT bot (unreplicable at our latency +
-#                                  fee-drag we can't outrun). Full-pop dist: p75=39x (trend), p90=126x (bots).
-PORTFOLIO_MIN_EDGE_BPS = 10.0     # 边际硬底线 = 30d 净利/成交量 ×1e4. v10: 20→10 = 手续费打平点(<此我们结构性净亏 →
-#                                  gate). 10bp 以上的"厚度"不再硬砍,交给 score 的 g_edge 平滑降分(避免误杀好钱包)。
 # --- v9 strict-gate additions: every wallet that survives to the watchlist must be genuinely copyable ---
 # (MIN_PAYOFF removed v10 — small_win_big_loss hard gate gone; 盈亏比 is now the g_payoff factor in score, ref = SCORE_PAYOFF_REF)
 WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
@@ -485,12 +479,12 @@ MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行
 # replay warm-up; reported/scored windows remain 30/14/7d.
 PROFILE_FETCH_DAYS = COPY_BT_DAYS + COPY_BT_WARMUP_DAYS
 
-# INCREMENTAL scan (2026-07-01): the daily re-scan fetches only the fills SINCE our per-candidate cursor
+# INCREMENTAL scan (2026-07-01): each scheduled re-scan fetches only the fills SINCE our per-candidate cursor
 # (max stored fill time) and merges them onto the stored PROFILE_FETCH_DAYS window — instead of re-pulling
 # the whole 30d for every candidate every day (re-fetching 29 unchanged days = wasted API/time). Fills are
 # cached in candidate_fills. A NEW/incomplete candidate still does one full-window fetch; a delta that hits
 # the page cap falls back to a full fetch. A confirmed complete cache is never periodically re-downloaded:
-# daily shard rotation refreshes its delta and re-scores the cached rolling window. The live open-position
+# each scheduled refresh updates its delta and re-scores the cached rolling window. The live open-position
 # snapshot is unaffected.
 INCREMENTAL_SCAN = True     # False = always full-fetch (the old stateless behaviour)
 # Daily discovery budget. Core/held/challenger wallets are outside the discovery cap; the

@@ -47,7 +47,6 @@ def evaluate_follow_eligibility(
     min_open_fill_rate: float | None = None,
     min_expected_return: float | None = None,
     min_evidence_days: int | None = None,
-    min_pnl_per_closed=None,
     margin_equity_pct: float | None = None,
     retention: bool = False,
     policy_values: Mapping | None = None,
@@ -59,10 +58,10 @@ def evaluate_follow_eligibility(
     checks were correlated views of the same trades and created an exclusion cascade.  V3 keeps hard data,
     liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
     The bounded formation surface may publish that wallet as Challenger; Core additionally requires ten
-    campaigns, three non-overlapping 10-day folds, fresh activity, one-winner removal, cost stress and
-    executable capacity.
+    campaigns, four non-overlapping 7-day folds each returning at least 5% on floating replay equity,
+    fresh activity, one-winner removal, cost stress and executable capacity.
     """
-    del min_closed14, min_closed7, min_pnl_per_closed, margin_equity_pct
+    del min_closed14, min_closed7, margin_equity_pct
     policy = load_copy_policy(policy_values)
     min_closed30 = policy.min_closed_30d if min_closed30 is None else int(min_closed30)
     min_evidence_days = min(5, min_closed30) if min_evidence_days is None else int(min_evidence_days)
@@ -134,7 +133,9 @@ def evaluate_follow_eligibility(
         "copyDataValid": not data_status or data_status in {"valid", "ok"},
         "normalizedEvidencePresent": _has_copy_evidence(scoped, c30, 0, 0),
         "strictCopy30dPositive": pnl30 > 0.0,
-        "coreReturn": return30 >= (
+        # Diagnostic/score reference only. Four independent weekly return folds own Core profitability;
+        # repeating a 30-day magnitude veto would judge the same 28-day economics twice.
+        "coreReturnReference": return30 >= (
             policy.retention_min_return_30d if retention else policy.core_min_return_30d
         ),
         "tenIndependentCampaigns": campaigns >= policy.core_min_campaigns_30d,
@@ -214,7 +215,7 @@ def evaluate_follow_eligibility(
                 "role": "rejected", **detail, "reasons": ["没有盈利且可执行的Crypto/Stock板块"]}
 
     core_eligible = bool(
-        checks["coreReturn"] and sample_ok and stability_ok and activity_ok
+        sample_ok and stability_ok and activity_ok
         and checks["campaignWinRate"] and checks["repeatableBodyWinRate"]
         and checks["repeatableBodyPositive"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["costStressPositive"]
@@ -227,18 +228,16 @@ def evaluate_follow_eligibility(
         return {"eligible": True, "coreEligible": True,
                 "status": "core_retention_eligible" if retention else "core_eligible",
                 "role": "core_eligible", **detail,
-                "reasons": ["严格Copy、可重复胜率、75分质量线、非重叠稳定性、72小时活动及执行压力均通过"]}
+                "reasons": ["严格Copy、可重复胜率、75分质量线、四段7日稳定收益、72小时活动及执行压力均通过"]}
 
     if not stability_sufficient:
-        status, reason = "challenger_stability_evidence_building", "非重叠10日折叠证据不足，继续积累而不按亏损淘汰"
+        status, reason = "challenger_stability_evidence_building", "四个非重叠7日区间证据不足，继续积累而不按亏损淘汰"
     elif not stability_ok:
-        status, reason = "challenger_stability_watch", "非重叠10日折叠尚未达到至少两个盈利区间"
+        status, reason = "challenger_stability_watch", "尚未做到四个独立7日区间均达到5%且1.5倍成本后盈利"
     elif not sample_ok:
         status, reason = "challenger_campaign_evidence_building", "独立Campaign或证据日不足，继续积累"
     elif not activity_ok:
         status, reason = "challenger_activity_watch", "最近72小时没有新的可执行flat→open信号"
-    elif not checks["coreReturn"]:
-        status, reason = "challenger_return_watch", "严格Copy盈利但未达到Core收益线"
     elif (
         not checks["campaignWinRate"] or not checks["repeatableBodyWinRate"]
         or not checks["repeatableBodyPositive"]
@@ -349,7 +348,8 @@ def compute_follow_score(
     stability = policy_json.get("stability") if isinstance(policy_json.get("stability"), dict) else {}
     evaluable_folds = int(_num(stability.get("evaluableFolds")))
     profitable_folds = int(_num(stability.get("profitableFolds")))
-    fold_quality = _clamp(profitable_folds / max(1.0, float(evaluable_folds)))
+    qualified_folds = int(_num(stability.get("qualifiedFolds"), profitable_folds))
+    fold_quality = _clamp(qualified_folds / max(1.0, float(evaluable_folds)))
     campaign_win_quality = _clamp((campaign_win_rate - 0.30) / 0.40)
     body_win_quality = _clamp((body_win_rate - 0.30) / 0.40) if body_n > 0 else 0.0
     concentration_quality = _clamp((0.80 - top3_share) / 0.30)

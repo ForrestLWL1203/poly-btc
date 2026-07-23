@@ -22,6 +22,7 @@ from hyper.copy.copy_backtest import (
     slice_backtest_result,
     subset_price_path,
 )
+from hyper.copy.copy_evidence import summarize_campaign_stability
 from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import parse_json_obj
@@ -874,6 +875,21 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
         now_ms - days * 86_400_000,
         window_days=days,
     )
+    if days >= int(config.COPY_STABILITY_FOLD_DAYS * config.COPY_STABILITY_FOLD_COUNT):
+        result["weekly_stability"] = summarize_campaign_stability(
+            result.get("positions") or (),
+            now_ms=int(now_ms),
+            fold_days=int(config.COPY_STABILITY_FOLD_DAYS),
+            fold_count=int(config.COPY_STABILITY_FOLD_COUNT),
+            min_campaigns=int(config.COPY_STABILITY_MIN_CAMPAIGNS_PER_FOLD),
+            min_evaluable=int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS),
+            min_profitable=int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS),
+            min_return=float(config.COPY_STABILITY_MIN_RETURN),
+            initial_equity=float(
+                result.get("initial_margin_equity") or config.INITIAL_BALANCE
+            ),
+            path_equity_samples=result.get("path_equity_samples") or (),
+        )
     result["fills"] = len(fills)
     return _compact_backtest(result)
 
@@ -1085,6 +1101,7 @@ def _compact_backtest(result: dict) -> dict:
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
         "ambiguous_liquidations", "price_path_boundary_skips",
+        "weekly_stability",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}
@@ -1128,7 +1145,7 @@ def _proposal_direction(current: dict, proposed: dict) -> tuple[int, ...]:
 
 def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms,
                              path_rows=None, path_meta=None, market_ctx=None) -> dict:
-    """Three non-overlapping ten-day folds plus a conservative cost-stress holdout."""
+    """Reject overfit parameter proposals on 3×10d; wallet admission separately uses 4×7d."""
     max_days = max(window_fills) if window_fills else 30
     fills = list((window_fills or {}).get(max_days) or [])
     # Current market metadata is required for max-leverage maintenance tiers. Historical liquidity snapshots

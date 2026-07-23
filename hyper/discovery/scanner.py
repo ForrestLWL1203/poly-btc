@@ -817,7 +817,9 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         min_campaigns=policy.stability_min_campaigns_per_fold,
         min_evaluable=policy.stability_min_evaluable_folds,
         min_profitable=policy.stability_min_profitable_folds,
-        max_loss_ratio=policy.stability_max_loss_to_30d_profit,
+        min_return=policy.stability_min_return,
+        initial_equity=f(primary.get("initial_margin_equity")) or config.INITIAL_BALANCE,
+        path_equity_samples=primary.get("path_equity_samples") or (),
     )
     try:
         policy_json = json.loads(m.get("sector_policy_json") or "{}")
@@ -1755,11 +1757,24 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     )
 
 
-def _selection_prefetch_candidates(db, limit=None) -> list[str]:
+def _selection_prefetch_candidates(db, generation_id=None, now_ms=None, limit=None) -> list[str]:
     """Return the bounded qualified universe needed for path prefetch without running selection."""
     limit = max(0, int(config.MAX_TARGETS if limit is None else limit))
     if not limit:
         return []
+    if generation_id:
+        rows = _quality_core_profiles(
+            db, generation_id, core_only=False, now_ms=now_ms,
+        )
+        pinned_order = tuple(
+            item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
+        )
+        current_core = tuple(selection.published_core_addrs(db) or ())
+        return [
+            row["addr"] for row in _bounded_formation_candidates(
+                rows, (*pinned_order, *current_core), limit,
+            )
+        ]
     return [
         (row[0] or "").lower() for row in db.execute(
             "SELECT p.addr FROM profile p "
@@ -1804,6 +1819,10 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
     previous_selection = {
         row.addr: row for row in selection.current_selection_rows(db)
     }
+    incumbent_core = {
+        addr for addr, row in previous_selection.items()
+        if row.role == selection.CORE and row.enabled
+    }
     forward_risk = {
         (addr or "").lower(): {
             "forward_net_pnl": f(net_pnl),
@@ -1827,7 +1846,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         addr = (row.get("addr") or "").lower()
         row["addr"] = addr
         row.update(forward_risk.get(addr) or {})
-        if addr in pinned:
+        if addr in pinned or addr in incumbent_core:
             try:
                 current_policy = json.loads(row.get("sector_policy_json") or "{}")
             except (TypeError, ValueError):
@@ -1848,8 +1867,9 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
                 "coreEligible" if core_only else "eligible"
             )
         )
+        incumbent_replay = bool(not core_only and addr in incumbent_core)
         if (
-            (qualified or addr in pinned)
+            (qualified or addr in pinned or incumbent_replay)
             and (row.get("data_status") or "valid") == "valid"
             and controls.get(addr, True)
         ):
@@ -2096,6 +2116,60 @@ def _formation_tune_candidate(row) -> bool:
     return bool(qualification.get("eligible") and qualification.get("coreEligible"))
 
 
+def _formation_prepath_candidate(row) -> bool:
+    """Whether a wallet clears every Core gate that does not require refined candle paths."""
+    qualification = dict((row or {}).get("follow_qualification") or {})
+    if not qualification.get("eligible"):
+        return False
+    if qualification.get("coreEligible"):
+        return True
+    checks = dict(qualification.get("checks") or {})
+    required_checks = (
+        "strictCopy30dPositive",
+        "tenIndependentCampaigns",
+        "nonoverlapStability",
+        "campaignWinRate",
+        "repeatableBodyWinRate",
+        "repeatableBodyPositive",
+        "coreFollowScore",
+        "activityWithin72h",
+        "oneWinnerRemovalPositive",
+        "costStressPositive",
+        "openExecution",
+        "capacity",
+        "valuationComplete",
+        "sectorExecutable",
+        "expectedEdge",
+        "noRepeatedLiquidation",
+        "noForwardLiquidation",
+    )
+    if not all(bool(checks.get(key)) for key in required_checks):
+        return False
+    if int(qualification.get("evidenceDays") or 0) < int(config.EVIDENCE_MIN_DAYS):
+        return False
+    try:
+        policy = json.loads((row or {}).get("sector_policy_json") or "{}")
+    except (TypeError, ValueError):
+        policy = {}
+    return not bool(policy.get("coreBlocked"))
+
+
+def _bounded_formation_candidates(rows, required_order, limit) -> list[dict]:
+    """Keep explicit/current Core first, then only wallets awaiting refined path certification."""
+    rows = list(rows or ())
+    by_addr = {row["addr"]: row for row in rows}
+    required_order = tuple(dict.fromkeys(
+        (addr or "").lower() for addr in required_order if addr
+    ))
+    selected = [by_addr[addr] for addr in required_order if addr in by_addr]
+    included = {row["addr"] for row in selected}
+    selected.extend(
+        row for row in rows
+        if row["addr"] not in included and _formation_prepath_candidate(row)
+    )
+    return selected[:max(0, int(limit))]
+
+
 def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, follow,
                                            valuation_marks, sigmas, market_ctx,
                                            required_order=(), retention_addrs=(),
@@ -2185,7 +2259,7 @@ def _core_prefix_retention() -> dict:
 def _core_rebalance_due(db, current_core, *, now_ms: int, interval_days: int) -> tuple:
     """Age the current membership, not the daily evidence snapshot.
 
-    Daily scans publish a fresh generation even when the Core set is unchanged.  Walking back through the
+    Scheduled evidence refreshes publish a fresh generation even when the Core set is unchanged. Walking back through the
     consecutive generations with the same membership keeps those evidence refreshes from resetting the weekly
     rebalance clock.  Hard qualification failures still bypass this normal-cycle decision in formation.
     """
@@ -2273,11 +2347,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                         force_entry_requalification=False) -> dict:
     """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
-    ranked_candidates = _quality_core_profiles(db, generation_id, core_only=False, now_ms=now_ms)
-    # Path prefetch and exact effective-surface replay must own the same bounded quality universe. Replaying
-    # every retained Challenger after fetching paths for only MAX_TARGETS creates artificial
-    # ``challenger_path_risk_pending`` results outside the candidate pool.
-    ranked_candidates = ranked_candidates[:max(0, int(config.MAX_TARGETS))]
     base_follow = params.load_follow(db)
     scanner_values = params.load_category(db, "scanner")
     base_follow.update({
@@ -2295,16 +2364,27 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     current_core = (
         () if force_entry_requalification else tuple(selection.published_core_addrs(db) or ())
     )
-    target_min = max(1, int(params.get(db, "CORE_TARGET_MIN_N", config.CORE_TARGET_MIN_N) or 1))
+    all_ranked_candidates = _quality_core_profiles(
+        db, generation_id, core_only=False, now_ms=now_ms,
+    )
+    # Refined candle paths are needed only after every cheaper Core gate passes. The old raw score Top-40
+    # let evidence-incomplete Challengers consume expensive path slots and could exclude a true near-Core
+    # wallet ranked just below them. Incumbents and explicit pins remain first so current risk is always
+    # re-certified; remaining slots contain only wallets whose sole unresolved Core proof is path risk.
+    ranked_candidates = _bounded_formation_candidates(
+        all_ranked_candidates,
+        (*pinned_order, *current_core),
+        int(config.MAX_TARGETS),
+    )
     rebalance_interval = max(1, int(params.get(
         db, "CORE_REBALANCE_INTERVAL_DAYS", config.CORE_REBALANCE_INTERVAL_DAYS,
     ) or 1))
     rebalance_due, core_age_days = _core_rebalance_due(
         db, current_core, now_ms=now_ms, interval_days=rebalance_interval,
     )
-    # Daily scans still refresh evidence and can immediately remove a hard-risk failure. Parameter/membership
-    # optimization only runs weekly, except while the Core is below its minimum target and needs safe additions.
-    retune = bool(retune and (rebalance_due or len(current_core) < target_min))
+    # Scheduled scans still refresh evidence and can immediately remove a hard-risk failure.
+    # Parameter/membership optimization runs only on the weekly cycle; there is no minimum Core quota.
+    retune = bool(retune and rebalance_due)
     individual_replay_cache = {}
     surface_ranked = _rank_formation_candidates_for_surface(
         db, ranked_candidates, now_ms, generation_id=generation_id, follow=base_follow,
@@ -2312,11 +2392,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         required_order=pinned_order, retention_addrs=current_core,
         replay_cache=individual_replay_cache,
     )
-    upper = max(1, len(pinned_order), min(
+    upper = max(1, min(
         int(config.MAX_TARGETS),
-        int(getattr(config, "CORE_TARGET_MAX_N", 10)),
+        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
         int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N) or config.CORE_INITIAL_MAX_N),
     ))
+    if len(pinned_order) > upper:
+        raise RuntimeError("pinned_core_count_exceeds_upper_bound")
     # Tune only the wallets already proven individually executable on this exact active replay surface.
     # Otherwise the count optimizer can report a profitable surface which final admission cannot publish.
     # Challenger evidence stays visible for audit but does not own the Core surface.
@@ -2398,16 +2480,15 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 len(tune_ordered), coarse_tune_evaluate, retention_kwargs=retention,
                 tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
                 exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-                min_count=max(1, len(pinned_order)),
+                required_count=len(pinned_order),
             )
             winning_count = int(tune_search.selected.count)
         except RuntimeError as exc:
             if str(exc) != "no_feasible_quality_prefix" or not timed_out_counts:
                 raise
-            # Every sparse node that mattered timed out. The later fixed-surface membership search still
-            # owns the actual count, so run one complete tune at the service target instead of discarding
-            # the already-profiled generation.
-            winning_count = min(len(tune_ordered), max(1, target_min, len(pinned_order)))
+            # Every sparse node that mattered timed out. Tune the complete individually qualified pool once;
+            # the later fixed-surface membership search still owns the actual count.
+            winning_count = len(tune_ordered)
             tune_reason = "coarse_prefix_timeout_fallback"
 
         coarse_winner = tune_runs.get(winning_count) or {}
@@ -2642,14 +2723,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         len(ordered), evaluate, retention_kwargs=retention,
         tie_tolerance=float(config.CORE_PREFIX_TIE_TOLERANCE),
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-        min_count=max(1, len(effective_pinned_order), min(target_min, len(ordered))),
+        required_count=len(effective_pinned_order),
     )
     membership_search = core_formation.search_quality_membership(
         ordered, evaluate_members,
         initial=ordered[:prefix_search.selected.count],
         required=effective_pinned_order,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-        min_count=max(1, len(effective_pinned_order), min(target_min, len(ordered))),
     )
     chosen = membership_search.metrics
     chosen_addrs = tuple(membership_search.selected)
@@ -2670,13 +2750,22 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 params=tuned_params,
                 payload={"initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE)},
             )
-            fold_cache[key] = ([zero, zero, zero], 0.0)
+            fold_cache[key] = (
+                [zero] * int(config.COPY_STABILITY_FOLD_COUNT),
+                0.0,
+            )
             return fold_cache[key]
         filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
         all_rows = list(filtered.get(max(filtered)) or [])
         warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86_400_000
         folds = []
-        for older, newer in ((30, 20), (20, 10), (10, 0)):
+        fold_days = int(config.COPY_STABILITY_FOLD_DAYS)
+        fold_count = int(config.COPY_STABILITY_FOLD_COUNT)
+        total_days = fold_days * fold_count
+        fold_cost_stress = []
+        for index in range(fold_count):
+            older = total_days - index * fold_days
+            newer = older - fold_days
             lo = now_ms - older * 86_400_000
             hi = now_ms - newer * 86_400_000 if newer else now_ms + 1
             rows = [
@@ -2688,7 +2777,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 overrides={**fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
                 market_ctx=market_ctx,
             )
-            result = slice_backtest_result(warm, lo, window_days=10)
+            result = slice_backtest_result(warm, lo, window_days=fold_days)
+            stress_warm = run_backtest(
+                "portfolio", rows, sigmas=sigmas,
+                overrides={
+                    **fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate",
+                    "REPLAY_COST_MULT": 1.5,
+                },
+                market_ctx=market_ctx,
+            )
+            stress_result = slice_backtest_result(
+                stress_warm, lo, window_days=fold_days,
+            )
+            fold_cost_stress.append(f(stress_result.get("copy_net_pnl")))
             open_rate = result.get("actionable_open_rate", result.get("open_fill_rate"))
             capacity = result.get("capacity_open_fit")
             folds.append(core_formation.PrefixEvaluation(
@@ -2701,22 +2802,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 payload={
                     "initialBalance": f(base_follow.get("INITIAL_BALANCE") or config.INITIAL_BALANCE),
                     "campaignClosedN": int(result.get("campaign_closed_n") or 0),
+                    "costStressNetPnl": f(stress_result.get("copy_net_pnl")),
                 },
             ))
-        holdout_start = now_ms - 10 * 86_400_000
-        holdout_rows = [
-            row for row in all_rows
-            if int(row.get("time") or 0) >= holdout_start - warmup_ms
-        ]
-        stress_warm = run_backtest(
-            "portfolio", holdout_rows, sigmas=sigmas,
-            overrides={
-                **fixed_follow, "AMBIGUOUS_PATH_MODE": "liquidate", "REPLAY_COST_MULT": 1.5,
-            },
-            market_ctx=market_ctx,
-        )
-        stress = slice_backtest_result(stress_warm, holdout_start, window_days=10)
-        fold_cache[key] = (folds, f(stress.get("copy_net_pnl")))
+        fold_cache[key] = (folds, min(fold_cost_stress, default=0.0))
         return fold_cache[key]
 
     previous_qualified = tuple(
@@ -2819,30 +2908,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     else:
         chosen_addrs, chosen, robust_check = robust_winner
     stability_applied = False
-    stable_additions = []
     if not rebalance_due and previous_qualified:
         # Between weekly rebalances, preserve every incumbent which still clears today's individual hard
         # gates.  A liquidation/forward-loss/campaign failure is removed immediately, but it must not give
-        # the optimizer permission to churn the other sound incumbents during the same daily refresh.
+        # the optimizer permission to churn the other sound incumbents during the same evidence refresh.
         stable = [addr for addr in current_core if addr in set(previous_qualified)]
         hard_removed = [addr for addr in current_core if addr not in set(previous_qualified)]
-        if len(stable) < target_min:
-            for candidate in tuple(chosen_addrs) + tuple(ordered):
-                if candidate in stable:
-                    continue
-                trial = tuple(stable + [candidate])
-                if validate_members(trial).get("eligible"):
-                    stable.append(candidate)
-                    stable_additions.append(candidate)
-                if len(stable) >= min(target_min, upper):
-                    break
         chosen_addrs = tuple(stable)
         chosen = evaluate_members(chosen_addrs)
         robust_check = {
             "eligible": True,
             "stableRetention": True,
             "reason": (
-                "daily_hard_failures_removed" if hard_removed
+                "scheduled_hard_failures_removed" if hard_removed
                 else "weekly_rebalance_not_due"
             ),
             "hardRemoved": hard_removed,
@@ -2855,7 +2933,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         if outgoing in effective_pinned:
             continue
         smaller = tuple(addr for addr in chosen_addrs if addr != outgoing)
-        if len(smaller) >= min(target_min, len(ordered)):
+        if len(smaller) >= max(1, len(effective_pinned_order)):
             check = validate_members(smaller)
             robust_audit.append(check)
             if check.get("eligible"):
@@ -2904,9 +2982,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "rebalanceDue": rebalance_due,
             "coreAgeDays": core_age_days,
             "rebalanceIntervalDays": rebalance_interval,
-            "targetMinCount": target_min,
             "stableRetentionApplied": stability_applied,
-            "stableAdditions": stable_additions,
             "operatorStarred": list(pinned_order),
             "effectiveStarred": list(effective_pinned_order),
             "tunePoolCount": len(tune_ordered),
@@ -3215,6 +3291,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             config.CORE_MAINTENANCE_META_MIN_COVERAGE
         ):
             failures.append("maintenance_coverage")
+        weekly_stability = dict(final_result.get("weekly_stability") or {})
+        if not weekly_stability.get("passed"):
+            failures.append("weekly_return_stability")
         final_strict_validation = {
             "status": "failed" if failures else "passed",
             "selectedCount": len(final_addrs),
@@ -3230,6 +3309,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             "maintenanceMarginCoverage30d": f(
                 final_result.get("maintenance_margin_coverage")
             ),
+            "weeklyStability": weekly_stability,
             "failures": failures,
         }
         if failures:
@@ -4314,7 +4394,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         leaderboard_generation=generation_id,
         commit=False,
     )
-    prefetch_candidates = _selection_prefetch_candidates(db)
+    prefetch_candidates = _selection_prefetch_candidates(
+        db, generation_id, repair_now_ms,
+    )
     db.rollback()
     _prefetch_selection_paths(db, prefetch_candidates, repair_now_ms, generation_id)
     formation = form_quality_prefix(
@@ -4525,8 +4607,8 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,median_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
         "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
         "l.week_roi,l.mon_roi,l.all_roi,"                      # HL return-on-capital windows for the ROI pillar
-        "p.pf_turnover,p.pf_mon_pnl,p.pf_mon_vlm,p.pf_week_pnl,p.pf_equity,"   # v7 portfolio net metrics (gates + ROI)
-        "p.payoff_ratio,p.pf_week_vlm,"   # v9: needed so regate applies the SAME payoff + edge-decay gates as a scan
+        "p.pf_turnover,p.pf_mon_pnl,p.pf_mon_vlm,p.pf_week_pnl,p.pf_equity,"   # account-wide audit metrics
+        "p.payoff_ratio,p.pf_week_vlm,"
         "p.copy_bt_net_pnl,p.copy_bt_win_rate,p.copy_bt_closed_n,p.copy_bt_open_fill_rate,"
         "p.copy_bt_liquidations,p.copy_bt_fee_drag,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
         "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_closed_n,"
@@ -4596,11 +4678,10 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              "net_30d": net30, "net_life": netlife,
              # HL return-on-capital windows (from leaderboard join) → score() ROI pillar. None → weight-renormalized.
              "week_roi": wkroi, "mon_roi": moroi, "all_roi": alroi,
-             # v7 portfolio net metrics → turnover/edge gates + net-ROI pillar (None on profiles scanned pre-v7 → skip)
+             # Account-wide portfolio metrics are audit context only; executable-scope strict Copy owns admission.
              "pf_turnover": pf_turn, "pf_mon_pnl": pf_mpnl, "pf_mon_vlm": pf_mvlm,
              "pf_week_pnl": pf_wpnl, "pf_equity": pf_eq,
-             # v9: payoff (大亏小赚 gate) + week vlm (edge-decay gate) — MUST be here or regate skips both
-             # gates the scan applies, silently re-activating wallets the scan rejected (the 128 vs 165 bug).
+             # Payoff remains a smooth score factor. Weekly volume is retained for audit/backward compatibility.
              "payoff_ratio": pay, "pf_week_vlm": pf_wvlm,
              "copy_bt_net_pnl": copy_net, "copy_bt_win_rate": copy_wr,
              "copy_bt_closed_n": copy_closed, "copy_bt_open_fill_rate": copy_open_fill_rate,
@@ -4842,7 +4923,8 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         db, stamp, leaderboard_generation=generation_id, commit=False,
     )
     preview = _selection_prefetch_candidates(
-        db, limit=int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N)),
+        db, generation_id, now_ms,
+        limit=int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N)),
     )
     db.rollback()
     if preview:
@@ -4969,7 +5051,7 @@ def scan(db, p) -> None:
     for _, pj in rescan_rows:
         if _payload_requests_full(pj):
             p.full_scan = True
-    # MANUAL (dashboard button → pending rescan command) vs AUTO (24h schedule, no command). The frontend
+    # MANUAL (dashboard button → pending rescan command) vs AUTO (timer schedule, no command). The frontend
     # locks the page ONLY for manual scans; the auto scan runs SILENTLY in the background (it must be slow
     # since the observer owns the rate budget, so locking the UI for its full duration is unacceptable).
     manual = bool(rescan_ids)
@@ -5304,8 +5386,8 @@ def scan(db, p) -> None:
         # Build only the bounded candidate universe in a rolled-back staging pass, then fetch its shared
         # market path before the atomic publication transaction.  The old flow ran a complete fills-only
         # selection here and repeated it during final publication merely to discover which paths to fetch.
-        # Querying the same quality-qualified top-40 universe removes that duplicate search while keeping
-        # network I/O outside the Dashboard/Observer SQLite writer lock.
+        # Querying the same bounded near-Core universe removes that duplicate search while keeping network I/O
+        # outside the Dashboard/Observer SQLite writer lock.
         if selection_mode == "auto":
             try:
                 _set_scan_progress(
@@ -5316,7 +5398,9 @@ def scan(db, p) -> None:
                     db, stamp,
                     leaderboard_generation=generation_id, commit=False,
                 )
-                preview_candidates = _selection_prefetch_candidates(db)
+                preview_candidates = _selection_prefetch_candidates(
+                    db, generation_id, now_ms,
+                )
                 db.rollback()
                 if preview_candidates:
                     _set_scan_progress(
@@ -5337,7 +5421,7 @@ def scan(db, p) -> None:
             formation = None
             if selection_mode == "auto":
                 # Discovery proves wallets against the currently active execution surface. Parameter search
-                # is an explicit ``optimize`` job: coupling its large grid to every cold/daily publication
+                # is an explicit ``optimize`` job: coupling its large grid to every cold/scheduled publication
                 # made a completed strict scan wait another hour and could OOM before any Core was sealed.
                 formation = form_quality_prefix(
                     db, generation_id, stamp, now_ms, retune=False,

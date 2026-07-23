@@ -25,7 +25,8 @@ def qualified(**overrides):
         "sector_policy_json": json.dumps({
             "allowed": ["crypto"],
             "stability": {"evidenceSufficient": True, "passed": True,
-                          "evaluableFolds": 3, "profitableFolds": 3},
+                          "evaluableFolds": 4, "profitableFolds": 4,
+                          "qualifiedFolds": 4},
         }),
     }
     row.update(overrides)

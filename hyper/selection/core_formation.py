@@ -1,8 +1,8 @@
 """Quality-first Core formation.
 
-Each bounded prefix node may own an independently tuned sizing surface.  Wallet count and capital sizing are
-evaluated together across the 8-10 service range instead of measuring every count with parameters fitted only
-to the incumbent Core.  A later strict leave-one-out pass may remove a non-tail member only when its actual
+Each bounded prefix node may own an independently tuned sizing surface. Wallet count and capital sizing are
+evaluated together without a minimum wallet quota instead of measuring every count with parameters fitted only
+to the incumbent Core. A later strict leave-one-out pass may remove a non-tail member only when its actual
 presence lowers funded shared-account net economics.
 """
 from __future__ import annotations
@@ -77,7 +77,23 @@ def validate_final_membership(
     multi-generation hysteresis: a currently unqualified old member is outside the baseline.
     """
     reasons = []
-    if len(candidate_folds) != 3:
+    required_fold_count = int(config.COPY_STABILITY_FOLD_COUNT)
+    min_weekly_return = float(config.COPY_STABILITY_MIN_RETURN)
+    weekly_rows = []
+    floating_equity = max(1.0, float(initial_margin_equity))
+    for fold in candidate_folds:
+        net = float(fold.net_pnl)
+        fold_return = net / floating_equity
+        cost_stress = float(fold.payload.get("costStressNetPnl", fold.stress_net_pnl))
+        weekly_rows.append({
+            "return": fold_return,
+            "startEquity": floating_equity,
+            "netPnl": net,
+            "costStressNetPnl": cost_stress,
+            "campaignClosedN": int(fold.payload.get("campaignClosedN") or 0),
+        })
+        floating_equity = max(1.0, floating_equity + net)
+    if len(candidate_folds) != required_fold_count:
         reasons.append("membership_folds_unavailable")
     else:
         evaluable_folds = [
@@ -94,22 +110,21 @@ def validate_final_membership(
             reasons.append("membership_fold_infeasible")
         if len(evaluable_folds) < int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS):
             reasons.append("membership_fold_evidence_insufficient")
-        if sum(fold.net_pnl > 0.0 for fold in evaluable_folds) < int(
-            config.COPY_STABILITY_MIN_PROFITABLE_FOLDS
+        if any(
+            row["return"] < min_weekly_return or row["costStressNetPnl"] <= 0.0
+            for row in weekly_rows
         ):
-            reasons.append("membership_fewer_than_two_profitable_folds")
-        losing = [abs(fold.net_pnl) for fold in evaluable_folds if fold.net_pnl < 0.0]
-        if losing and max(losing) > max(1.0, candidate.net_pnl) * float(
-            config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT
-        ):
-            reasons.append("membership_fold_loss_too_large")
+            reasons.append("membership_weekly_return_stability")
     if candidate.net_pnl <= 0.0 or candidate.stress_net_pnl <= 0.0 or cost_stress_net <= 0.0:
         reasons.append("membership_cost_stress_not_profitable")
 
     baseline_folds = list(baseline_folds or [])
     fold_deltas = []
     compare_folds = membership_changed or replacing_qualified_core or baseline is None
-    if compare_folds and len(candidate_folds) == len(baseline_folds) == 3:
+    if (
+        compare_folds
+        and len(candidate_folds) == len(baseline_folds) == required_fold_count
+    ):
         fold_deltas = [
             candidate_fold.net_pnl - baseline_fold.net_pnl
             for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds)
@@ -150,12 +165,14 @@ def validate_final_membership(
         "reasons": reasons,
         "foldWins": sum(delta > 0.0 for delta in fold_deltas),
         "foldDeltas": fold_deltas,
+        "weeklyFolds": weekly_rows,
+        "weeklyReturnFloor": min_weekly_return,
         "singleWalletDependencyWarning": dependency_warning,
     }
 
 
 def search_quality_membership(
-    candidates, evaluate, *, initial=(), required=(), exhaustive_below: int = 8, min_count: int = 1,
+    candidates, evaluate, *, initial=(), required=(), exhaustive_below: int = 8,
 ):
     """Find a feasible quality subset without letting one congested wallet block every later wallet.
 
@@ -170,7 +187,7 @@ def search_quality_membership(
     if not required_set.issubset(set(ordered)):
         raise ValueError("required wallets must be present in candidates")
     cache = {}
-    min_count = max(1, min(len(ordered), int(min_count)))
+    minimum_size = max(1, len(required_set))
 
     def get(addrs):
         key = tuple(sorted(dict.fromkeys(addrs)))
@@ -187,7 +204,7 @@ def search_quality_membership(
 
     if len(ordered) <= max(1, int(exhaustive_below)):
         states = []
-        for count in range(max(min_count, len(required_set)), len(ordered) + 1):
+        for count in range(minimum_size, len(ordered) + 1):
             for addrs in itertools.combinations(ordered, count):
                 if not required_set.issubset(addrs):
                     continue
@@ -200,20 +217,20 @@ def search_quality_membership(
         return MembershipSearchResult(selected, metrics, len(cache), "exhaustive_subset")
 
     selected = tuple(sorted(set(dict.fromkeys(initial)) | required_set))
-    if len(selected) < min_count:
-        selected = tuple(sorted(set(selected) | set(ordered[:min_count])))
+    if len(selected) < minimum_size:
+        selected = tuple(sorted(set(selected) | set(ordered[:minimum_size])))
     current = get(selected) if selected else None
     if current is None or not current.feasible:
         base = tuple(sorted(required_set))
         seeds = []
         if base:
-            seed = tuple(sorted(set(base) | set(ordered[:min_count])))
+            seed = tuple(sorted(set(base) | set(ordered[:minimum_size])))
             seeds.append(seed)
             seeds.extend(
                 tuple(sorted(set(seed) | {addr})) for addr in ordered if addr not in set(seed)
             )
         else:
-            seeds.append(tuple(sorted(ordered[:min_count])))
+            seeds.append(tuple(sorted(ordered[:minimum_size])))
         feasible = [(seed, get(seed)) for seed in seeds if get(seed).feasible]
         if not feasible:
             raise RuntimeError("no_feasible_quality_membership")
@@ -284,7 +301,7 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
                           retention_kwargs: Mapping[str, float] | None = None,
                           tie_tolerance: float = .02,
                           exhaustive_below: int = 0,
-                          min_count: int = 1) -> PrefixSearchResult:
+                          required_count: int = 0) -> PrefixSearchResult:
     """Evaluate quality prefixes and return the best safe economic state.
 
     Small pools are cheap enough to search exhaustively.  Larger pools use the original bounded binary
@@ -294,13 +311,14 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     initial_count = int(initial_count)
     if initial_count < 1:
         raise ValueError("initial_count must be positive")
-    min_count = int(min_count)
-    if min_count < 1 or min_count > initial_count:
-        raise ValueError("min_count must be between one and initial_count")
+    required_count = int(required_count)
+    if required_count < 0 or required_count > initial_count:
+        raise ValueError("required_count must be between zero and initial_count")
+    minimum_size = max(1, required_count)
     cache: dict[int, PrefixEvaluation] = {}
 
     def get(count: int) -> PrefixEvaluation:
-        count = max(min_count, min(initial_count, int(count)))
+        count = max(minimum_size, min(initial_count, int(count)))
         if count not in cache:
             value = evaluate(count)
             if int(value.count) != count:
@@ -310,9 +328,9 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
 
     reference = get(initial_count)
     retain_args = dict(retention_kwargs or {})
-    lo, hi = min_count, initial_count
+    lo, hi = minimum_size, initial_count
     if initial_count <= max(0, int(exhaustive_below)):
-        for count in range(min_count, initial_count + 1):
+        for count in range(minimum_size, initial_count + 1):
             get(count)
         if reference.feasible:
             retained = [
@@ -334,8 +352,8 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
     else:
         # Capital contention can make the full high-quality set infeasible.  Feasibility is monotone in
         # the useful direction: removing a low-quality suffix releases capacity.  Find the largest feasible
-        # prefix, then compare its neighbours within the configured service range.
-        first = get(min_count)
+        # prefix, then compare its neighbours within the bounded quality range.
+        first = get(minimum_size)
         if not first.feasible:
             raise RuntimeError("no_feasible_quality_prefix")
         while lo < hi:
@@ -346,7 +364,7 @@ def search_quality_prefix(initial_count: int, evaluate: Callable[[int], PrefixEv
                 hi = mid - 1
         boundary = lo
     for count in {boundary - 1, boundary, boundary + 1, initial_count}:
-        if min_count <= count <= initial_count:
+        if minimum_size <= count <= initial_count:
             get(count)
     feasible = [value for value in cache.values() if value.feasible]
     if not feasible:

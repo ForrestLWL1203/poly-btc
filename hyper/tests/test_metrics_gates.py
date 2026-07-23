@@ -41,8 +41,6 @@ def state_params(**overrides):
     base = {
         "inactive_days": 3,
         "min_activity": 0.21,
-        "portfolio_max_turnover": 80,
-        "portfolio_min_edge_bps": 10,
         "windfall_conc": 0.8,
         "windfall_win_max": 0.6,
     }

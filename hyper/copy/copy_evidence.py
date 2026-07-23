@@ -46,8 +46,8 @@ def _endpoint_pnl(position: Mapping) -> float:
     return _finite(position.get("unrealized_pnl"))
 
 
-def _closed_campaign_rows(positions: Iterable[Mapping]) -> list[tuple[int, float]]:
-    """Return independent campaign ``(close_ms, pnl)`` rows.
+def _closed_campaign_records(positions: Iterable[Mapping]) -> list[dict]:
+    """Return independent closed Campaign records.
 
     Campaign identity deliberately matches ``copy_backtest.campaign_structure_metrics``: overlapping
     positions on the same wallet, market board and direction are one economic decision, not several votes.
@@ -66,78 +66,158 @@ def _closed_campaign_rows(positions: Iterable[Mapping]) -> list[tuple[int, float
         )
         grouped.setdefault(key, []).append((opened, end, position, is_open))
 
-    out: list[tuple[int, float]] = []
+    out: list[dict] = []
     for rows in grouped.values():
         rows.sort(key=lambda row: (row[0], row[1]))
         current = None
         for opened, end, position, is_open in rows:
             if current is None or opened > current["end"]:
                 if current is not None and current["closed"]:
-                    out.append((int(current["end"]), float(current["pnl"])))
-                current = {"end": end, "closed": not is_open, "pnl": _endpoint_pnl(position)}
+                    out.append({
+                        "closed_at": int(current["end"]),
+                        "net_pnl": float(current["pnl"]),
+                        "fee_drag": float(current["fees"]),
+                    })
+                current = {
+                    "end": end,
+                    "closed": not is_open,
+                    "pnl": _endpoint_pnl(position),
+                    "fees": max(0.0, _finite(position.get("fee_drag"))),
+                }
             else:
                 current["end"] = max(current["end"], end)
                 current["closed"] = bool(current["closed"] and not is_open)
                 current["pnl"] += _endpoint_pnl(position)
+                current["fees"] += max(0.0, _finite(position.get("fee_drag")))
         if current is not None and current["closed"]:
-            out.append((int(current["end"]), float(current["pnl"])))
-    return sorted(out)
+            out.append({
+                "closed_at": int(current["end"]),
+                "net_pnl": float(current["pnl"]),
+                "fee_drag": float(current["fees"]),
+            })
+    return sorted(out, key=lambda row: row["closed_at"])
+
+
+def _closed_campaign_rows(positions: Iterable[Mapping]) -> list[tuple[int, float]]:
+    return [
+        (int(row["closed_at"]), float(row["net_pnl"]))
+        for row in _closed_campaign_records(positions)
+    ]
+
+
+def _equity_at(samples: list[tuple[int, float]], stamp: int) -> float | None:
+    """Last marked equity at or before ``stamp`` on one continuous strict replay path."""
+    value = None
+    for sample_stamp, equity in samples:
+        if sample_stamp > stamp:
+            break
+        value = equity
+    return value
 
 
 def summarize_campaign_stability(
     positions: Iterable[Mapping],
     *,
     now_ms: int,
-    fold_days: int = 10,
-    fold_count: int = 3,
+    fold_days: int = 7,
+    fold_count: int = 4,
     min_campaigns: int = 2,
-    min_evaluable: int = 2,
-    min_profitable: int = 2,
-    max_loss_ratio: float = 0.25,
+    min_evaluable: int = 4,
+    min_profitable: int = 4,
+    min_return: float = 0.05,
+    initial_equity: float = 10_000.0,
+    path_equity_samples: Iterable[Mapping] = (),
 ) -> dict:
-    """Evaluate repeatability on adjacent, non-overlapping time folds.
+    """Evaluate fee-paid Copy returns on adjacent, non-overlapping time folds.
 
-    A fold with too few independent campaigns is unknown rather than a synthetic loss.  This is the
-    replacement for overlapping 7/14/30 ROI gates, which repeatedly judged the same trades.
+    Returns use the continuously marked strict-replay equity path when it is available, so the denominator
+    is each fold's actual starting equity and profits compound naturally.  The cache-only fallback carries
+    realized Campaign PnL forward on the same capital base.  Every qualifying fold must also remain positive
+    after charging an extra half of its already-paid fees (the 1.5x cost stress).
     """
     fold_days = max(1, int(fold_days))
     fold_count = max(1, int(fold_count))
     min_campaigns = max(1, int(min_campaigns))
+    min_evaluable = max(1, int(min_evaluable))
+    min_profitable = max(1, int(min_profitable))
+    min_return = max(0.0, float(min_return))
+    initial_equity = max(1.0, _finite(initial_equity, 10_000.0))
     width = fold_days * DAY_MS
     start = int(now_ms) - fold_count * width
-    rows = [(closed, pnl) for closed, pnl in _closed_campaign_rows(positions) if start <= closed <= now_ms]
+    records = _closed_campaign_records(positions)
+    rows = [
+        row for row in records
+        if start <= int(row["closed_at"]) <= int(now_ms)
+    ]
+    path_samples = sorted(
+        (
+            (int(_finite(row.get("time"))), _finite(row.get("equity")))
+            for row in path_equity_samples or ()
+            if int(_finite(row.get("time"))) >= 0 and _finite(row.get("equity")) > 0.0
+        ),
+        key=lambda row: row[0],
+    )
+    realized_before_start = sum(
+        float(row["net_pnl"]) for row in records if int(row["closed_at"]) < start
+    )
+    carried_equity = max(1.0, initial_equity + realized_before_start)
     folds = []
     for index in range(fold_count):
         lo = start + index * width
         hi = lo + width
-        values = [pnl for closed, pnl in rows if lo <= closed < hi or (index == fold_count - 1 and closed == hi)]
+        values = [
+            row for row in rows
+            if lo <= int(row["closed_at"]) < hi
+            or (index == fold_count - 1 and int(row["closed_at"]) == hi)
+        ]
+        campaign_net = sum(float(row["net_pnl"]) for row in values)
+        fee_drag = sum(float(row["fee_drag"]) for row in values)
+        path_start_equity = _equity_at(path_samples, lo)
+        path_end_equity = _equity_at(path_samples, hi)
+        path_complete = bool(path_start_equity is not None and path_end_equity is not None)
+        start_equity = path_start_equity if path_complete else carried_equity
+        net = (
+            float(path_end_equity) - float(path_start_equity)
+            if path_complete else campaign_net
+        )
+        end_equity = max(1.0, float(start_equity) + net)
+        fold_return = net / max(1.0, float(start_equity))
+        cost_stress_net = net - 0.5 * max(0.0, fee_drag)
         evaluable = len(values) >= min_campaigns
-        net = sum(values)
+        qualified = bool(
+            evaluable and fold_return >= min_return and cost_stress_net > 0.0
+        )
         folds.append({
             "index": index + 1, "startMs": lo, "endMs": hi,
             "campaigns": len(values), "netPnl": net,
+            "campaignNetPnl": campaign_net, "feeDrag": fee_drag,
+            "costStressNetPnl": cost_stress_net,
+            "startEquity": float(start_equity), "endEquity": end_equity,
+            "return": fold_return, "returnFloor": min_return,
+            "equitySource": "marked_path" if path_complete else "realized_fallback",
             "evaluable": evaluable, "profitable": bool(evaluable and net > 0.0),
+            "qualified": qualified,
         })
+        carried_equity = end_equity
     evaluated = [fold for fold in folds if fold["evaluable"]]
     profitable = [fold for fold in evaluated if fold["profitable"]]
-    total_net = sum(pnl for _closed, pnl in rows)
-    losing = [abs(float(fold["netPnl"])) for fold in evaluated if float(fold["netPnl"]) < 0.0]
-    worst_loss_ratio = max(losing, default=0.0) / max(1.0, total_net)
-    loss_ok = not losing or (total_net > 0.0 and worst_loss_ratio <= max_loss_ratio)
-    latest = evaluated[-1] if evaluated else None
-    latest_hard_collapse = bool(
-        latest and float(latest["netPnl"]) < 0.0
-        and abs(float(latest["netPnl"])) / max(1.0, total_net) > max_loss_ratio
-    )
+    qualified = [fold for fold in evaluated if fold["qualified"]]
+    total_net = sum(float(fold["netPnl"]) for fold in folds)
     sufficient = len(evaluated) >= min_evaluable
     passed = bool(
-        sufficient and len(profitable) >= min_profitable and loss_ok and not latest_hard_collapse
+        sufficient
+        and len(profitable) >= min_profitable
+        and len(qualified) == fold_count
     )
     return {
-        "version": "nonoverlap-campaign-v1", "foldDays": fold_days,
+        "version": "nonoverlap-weekly-return-v2", "foldDays": fold_days,
         "folds": folds, "evaluableFolds": len(evaluated),
-        "profitableFolds": len(profitable), "totalNetPnl": total_net,
-        "worstLossTo30dProfit": worst_loss_ratio, "latestHardCollapse": latest_hard_collapse,
+        "profitableFolds": len(profitable), "qualifiedFolds": len(qualified),
+        "requiredQualifiedFolds": fold_count, "minReturn": min_return,
+        "allCostStressPositive": all(
+            float(fold["costStressNetPnl"]) > 0.0 for fold in evaluated
+        ) if evaluated else False,
+        "totalNetPnl": total_net,
         "evidenceSufficient": sufficient, "passed": passed,
     }
 

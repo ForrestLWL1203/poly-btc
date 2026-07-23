@@ -38,31 +38,59 @@ class CopyEvidenceTests(unittest.TestCase):
         self.assertGreater(result.positive_probability, 0.90)
         self.assertGreater(result.return_lcb, 0.0)
 
-    def test_nonoverlap_stability_needs_two_evaluable_profitable_folds(self):
-        now = 30 * DAY
+    def test_four_nonoverlap_weeks_each_need_five_percent_and_cost_stress(self):
+        now = 28 * DAY
         rows = []
-        for day, pnl in ((2, 100), (4, 100), (12, 100), (14, 100), (22, -10), (24, 30)):
+        for day, pnl in (
+            (2, 300), (4, 300), (9, 300), (11, 300),
+            (16, 300), (18, 300), (23, 300), (25, 300),
+        ):
             rows.append({
                 "addr": "0xa", "coin": "BTC", "side": "long",
                 "opened_at": day * DAY - 1_000, "closed_at": day * DAY,
-                "status": "closed", "net_pnl": pnl,
+                "status": "closed", "net_pnl": pnl, "fee_drag": 20,
             })
         result = summarize_campaign_stability(rows, now_ms=now)
-        self.assertEqual(result["evaluableFolds"], 3)
-        self.assertEqual(result["profitableFolds"], 3)
+        self.assertEqual(result["evaluableFolds"], 4)
+        self.assertEqual(result["qualifiedFolds"], 4)
         self.assertTrue(result["passed"])
+        self.assertTrue(all(fold["return"] >= .05 for fold in result["folds"]))
+        self.assertTrue(result["allCostStressPositive"])
 
-    def test_thin_fold_is_unknown_not_a_loss(self):
-        now = 30 * DAY
+    def test_thin_week_is_unknown_and_cannot_enter_core(self):
+        now = 28 * DAY
         rows = [
             {"addr": "0xa", "coin": "BTC", "side": "long", "opened_at": day * DAY - 1_000,
-             "closed_at": day * DAY, "status": "closed", "net_pnl": 100}
-            for day in (2, 12, 14, 22, 24)
+             "closed_at": day * DAY, "status": "closed", "net_pnl": 300}
+            for day in (2, 9, 11, 16, 18, 23, 25)
         ]
         result = summarize_campaign_stability(rows, now_ms=now)
-        self.assertEqual(result["evaluableFolds"], 2)
-        self.assertTrue(result["passed"])
+        self.assertEqual(result["evaluableFolds"], 3)
+        self.assertFalse(result["passed"])
         self.assertFalse(result["folds"][0]["evaluable"])
+
+    def test_marked_path_uses_floating_starting_equity(self):
+        now = 28 * DAY
+        rows = []
+        for day in (2, 4, 9, 11, 16, 18, 23, 25):
+            rows.append({
+                "addr": "0xa", "coin": "BTC", "side": "long",
+                "opened_at": day * DAY - 1_000, "closed_at": day * DAY,
+                "status": "closed", "net_pnl": 1, "fee_drag": 0,
+            })
+        equities = [
+            {"time": 0, "equity": 10_000},
+            {"time": 7 * DAY, "equity": 10_500},
+            {"time": 14 * DAY, "equity": 11_025},
+            {"time": 21 * DAY, "equity": 11_576.25},
+            {"time": 28 * DAY, "equity": 12_155.0625},
+        ]
+        result = summarize_campaign_stability(
+            rows, now_ms=now, path_equity_samples=equities,
+        )
+        self.assertTrue(result["passed"])
+        self.assertAlmostEqual(result["folds"][1]["startEquity"], 10_500)
+        self.assertAlmostEqual(result["folds"][1]["return"], .05)
 
 
 if __name__ == "__main__":

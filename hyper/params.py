@@ -26,13 +26,13 @@ PARAM_SPEC = [
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
     ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
-        "新钱包近7日 ROI 线", "7日和30日ROI必须同时达标，只限制新发现钱包"),
+        "近7日 ROI 参考线", "只用于粗筛审计，不参与淘汰；稳定盈利由四个互不重叠7日严格Copy区间判断"),
     ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
-        "新钱包近30日 ROI 线", "与7日ROI同时达标，避免单窗口暴涨冒充稳定收益"),
+        "新钱包近30日 ROI 线", "Leaderboard粗筛只对新发现钱包要求此官方30日ROI；后续以严格Copy为准"),
     ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
         "官方历史 ROI 参考线", "仅用于评分和漏斗审计，不参与新钱包硬筛"),
     ("HARVEST_ROI_WINDOWS_MIN_PASS", "scanner", "hidden", "int", "rescan",
-        config.HARVEST_ROI_WINDOWS_MIN_PASS, "旧版ROI达标窗口数", "仅兼容旧revision；当前固定要求7日和30日同时达标"),
+        config.HARVEST_ROI_WINDOWS_MIN_PASS, "旧版ROI达标窗口数", "仅兼容旧revision；当前不参与粗筛"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
         "新钱包近7日 PnL 下限", "默认0表示必须盈利；不按绝对利润偏向大账户"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
@@ -53,9 +53,7 @@ PARAM_SPEC = [
     ("SCAN_FINALIZE_RESERVE_MIN", "scanner", "hidden", "int", "rescan", config.SCAN_FINALIZE_RESERVE_MIN,
         "扫描收尾预留时间", ""),
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
-        "初始跟单上限", "每轮先取质量最优且达到Core硬标准的钱包（不足则全取），整体调参后只从质量末尾做前缀缩减"),
-    ("CORE_TARGET_MIN_N", "scanner", "green", "int", "rescan", config.CORE_TARGET_MIN_N,
-        "Core最低目标数", "低于此数量时每日可补入合格钱包；不会为了凑数放松胜率和爆仓硬门槛"),
+        "Core容量上限", "仅限制最多可发布多少个Core；不是目标数量，系统不会为了接近上限而补位"),
     ("CORE_REBALANCE_INTERVAL_DAYS", "scanner", "hidden", "int", "rescan",
         config.CORE_REBALANCE_INTERVAL_DAYS, "Core常规换榜周期", ""),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
@@ -67,10 +65,6 @@ PARAM_SPEC = [
         "重DCA判定:单回合加仓上限(超过=偶发但不可复制的重仓摊价)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
     ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
-    ("PORTFOLIO_MAX_TURNOVER","scanner", "blue",   "x",       "rescan", config.PORTFOLIO_MAX_TURNOVER,
-        "换手率上限 (x/周)", "周成交量÷账户权益。超过=高频机器人(我们延迟跟不了+手续费拖累)。趋势客一般<40x,机器人>100x"),
-    ("PORTFOLIO_MIN_EDGE_BPS","scanner", "blue",   "float",   "rescan", config.PORTFOLIO_MIN_EDGE_BPS,
-        "边际下限 (bps)", "30天净利÷成交量×1e4。低于此≈利润挡不住我们~9bp手续费+滑点,跟了净亏。用月度窗口更稳"),
     ("COPY_MIN_EXPECTED_MARGIN_RETURN", "scanner", "blue", "pct", "rescan",
         config.COPY_MIN_EXPECTED_MARGIN_RETURN * 100,
         "Copy保证金收益下限", "回放扣除费用、滑点后按占用保证金归一并向零收缩；低于此值属于薄利，资格阶段直接排除"),
@@ -103,16 +97,18 @@ PARAM_SPEC = [
         "Core综合质量分", "新版评分同时覆盖收益、可重复性、置信度、可执行性和风险；新进入Core至少75分"),
     ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
         f"{config.COPY_STABILITY_FOLD_COUNT}×{config.COPY_STABILITY_FOLD_DAYS}日；"
-        f"≥{config.COPY_STABILITY_MIN_EVALUABLE_FOLDS}段可评估/"
-        f"≥{config.COPY_STABILITY_MIN_PROFITABLE_FOLDS}段盈利",
-        "非重叠稳定性硬闸", "每段至少2个Campaign才可评估；薄段算未知，亏损段不得超过30日利润的25%"),
+        f"每段≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%且1.5倍成本后盈利",
+        "四周稳定盈利硬闸",
+        "最近28日拆成4个互不重叠的7日段；每段至少2个Campaign、浮动本金收益≥5%，且1.5倍成本后仍盈利"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
-    ("CORE_MIN_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
-        config.CORE_MIN_COPY_RETURN_30D * 100, "Core新进入·30日收益线", "新钱包进入Core的严格Copy收益率"),
-    ("CORE_RETENTION_MIN_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
-        config.CORE_RETENTION_MIN_COPY_RETURN_30D * 100, "Core保留·30日收益线", "现有Core的软保留线；连续两轮失败才降级"),
+    ("CORE_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
+        config.CORE_MIN_COPY_RETURN_30D * 100, "30日收益评分参考",
+        "仅用于综合评分的30日经济强度标尺；Core准入由四个独立7日稳定收益段决定"),
+    ("CORE_RETENTION_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
+        config.CORE_RETENTION_MIN_COPY_RETURN_30D * 100, "旧Core·30日收益评分参考",
+        "仅保留为旧revision和评分参考；不再绕过四个独立7日稳定收益硬闸"),
     ("CORE_SOFT_FAIL_CONFIRMATIONS", "scanner", "black", "int", "rescan",
         config.CORE_SOFT_FAIL_CONFIRMATIONS, "Core软失败确认轮数", "收益、胜率、样本等软条件需连续完整扫描失败才降级；硬风险即时退出"),
     ("COPY_DEEP_BAG_EVENT_PCT", "scanner", "black", "pct", "rescan",
@@ -152,7 +148,7 @@ PARAM_SPEC = [
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
     #  tier cap + master-lev cap + margin/coin/deploy limits)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
-        "自动调保证金", "每日采集刷新证据；常规每7天按当前Core组合回测调参，Core少于目标数时可为安全补位同步重算;下限/单币上限/总上限由人工控制"),
+        "自动调保证金", "证据采集与调参解耦；常规每7天仅对当时通过全部质量闸口的Core组合调参，不按数量补位；下限/单币上限/总上限由人工控制"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
         "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、压力、回撤与爆仓门槛"),
     ("AUTO_TUNE_APPLY_MIN_SHADOW_DAYS", "follow", "hidden", "int", "immediate",
@@ -373,7 +369,8 @@ def seed_params(db):
         "'CORE_MIN_COPY_RETURN_7D','CORE_STRONG_COPY_RETURN_30D',"
         "'CORE_COPY_WIN_RATE_30D_MIN','CORE_RETENTION_WIN_RATE_30D_MIN',"
         "'CORE_COPY_WIN_RATE_LCB_30D_MIN','CORE_RETENTION_WIN_RATE_LCB_30D_MIN',"
-        "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D')"
+        "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D','CORE_TARGET_MIN_N',"
+        "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
@@ -381,6 +378,14 @@ def seed_params(db):
         # strategy change, not a metadata-default refresh, so existing databases must move with the code.
         if key == "max_single_adds":
             db.execute("UPDATE params SET value=? WHERE key=? AND value='20'", (dv, key))
+        # Approved Core-count policy: 16 is an upper bound only. Move the former untouched default of 10
+        # to 16 while preserving any genuinely operator-edited limit.
+        if key == "CORE_INITIAL_MAX_N":
+            db.execute(
+                "UPDATE params SET value=? WHERE key=? AND value IN ('10','10.0') "
+                "AND default_value IN ('10','10.0') AND value=default_value",
+                (dv, key),
+            )
         # Approved ROI-policy migration. Move only previously approved default surfaces, including the
         # immediately preceding 15/20/20 + 2k/8k/0 policy,
         # to the new production default. Unrelated operator custom values remain untouched.
@@ -501,7 +506,6 @@ SCANNER_ARG_MAP = {
     "max_single_adds": "max_single_adds",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
-    "PORTFOLIO_MAX_TURNOVER": "portfolio_max_turnover", "PORTFOLIO_MIN_EDGE_BPS": "portfolio_min_edge_bps",
     "COPY_MIN_EXPECTED_MARGIN_RETURN": "copy_min_expected_margin_return",
     "COPY_BT_GATE_ENABLE": "copy_bt_gate_enable", "COPY_BT_DAYS": "copy_bt_days",
     "COPY_BT_MIN_CLOSED": "copy_bt_min_closed", "COPY_BT_MIN_NET_PNL": "copy_bt_min_net_pnl",

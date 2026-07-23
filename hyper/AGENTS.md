@@ -116,7 +116,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   rebuilds sector specialization.
   A failed first generation remains cold on the next attempt.
 - `candidate_fills` is the cache. Once `fill_cache_state` proves that the 37-day source window was completely
-  fetched, all later daily evaluations fetch only the delta after that wallet's source cursor,
+  fetched, all later scheduled evaluations fetch only the delta after that wallet's source cursor,
   merge it into the rolling window, and prune rows older than 37 days. Do not infer source completeness from
   the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
   missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
@@ -163,10 +163,11 @@ default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
   outlier stress or cost stress are explicit Challenger reasons rather than economic rejection;
-- normal Core needs 30-day return at least 10%, ten independent 30-day Campaigns, at least five evidence days,
-  complete valuation/path data and no hard risk;
-- stability uses three adjacent non-overlapping 10-day folds. A fold needs two Campaigns to be evaluable; at
-  least two folds must be evaluable and profitable. A losing fold may not exceed 25% of total 30-day profit;
+- normal Core needs ten independent 30-day Campaigns, at least five evidence days, complete valuation/path
+  data and no hard risk. The old standalone 30-day 10% Core line is score/audit only, not a repeated veto;
+- profitability stability uses four adjacent non-overlapping 7-day folds covering the latest 28 days. Every
+  fold needs two Campaigns, at least 5% return on that fold's floating strict-replay starting equity, and
+  positive net after charging 1.5x costs. All four folds must pass;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
 - rolling 7/14-day returns, PF, Campaign win rate, Wilson confidence and raw payoff are ranking/diagnostic
@@ -225,16 +226,16 @@ The user-facing roles are:
 - **Rejected**: business value/structure is below the observation line and is not shown as Challenger.
 - **Quarantine**: collection/cache/replay/valuation/strategy data is invalid and is not a new-entry target.
 
-`CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 10. `CORE_TARGET_MIN_N` defaults to 8. This 8–10 range
-is a service target, never a permission to weaken individual
-quality gates: while below it, a scheduled generation may make portfolio-safe additions. Normal ranking replacement,
+`CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count or service quota:
+zero to sixteen wallets may publish, and no scheduled generation may add a wallet merely to reach a count. Normal ranking replacement,
 parameter retuning, and leave-one-out reshuffling run only after seven days since the last actual membership
 change. Scheduled evidence refresh still removes liquidation, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
-1. Run each bounded candidate's canonical individual Copy replay once with the refined 15-minute path (and finer
-   candles only for ambiguous risk ranges). This is the authoritative liquidation/drawdown qualification pass.
-   Only individually Core-eligible wallets may enter formation; Challenger evidence remains visible for audit.
+1. First require every non-path Core gate. Then run only that bounded near-Core pool plus current Core through
+   canonical individual Copy replay once with the refined 15-minute path (and finer candles only for ambiguous
+   risk ranges). This is the authoritative liquidation/drawdown qualification pass. Only individually
+   Core-eligible wallets may enter formation; other research evidence remains visible for audit.
 2. On the currently active parameter surface, search wallet count and membership from the cached target fills.
    The fast replay still models shared cash, margin, deployment, coin caps, fees, open capture and 1.5x cost
    stress, but does not rescan the candle path inside every prefix/add/swap candidate.
@@ -253,7 +254,7 @@ failures immediately while retaining every other qualified incumbent. Production
    positive. Top-two/body/top-wallet removals are diagnostic. Persist wallet/coin/day/side concentration.
 7. On a scheduled rebalance, repeatedly apply fill-driven leave-one-out elimination only when removing a member
    raises funded net PnL by at least `$1` and the smaller set passed the same membership robustness checks.
-   Between rebalances, publish only hard-failure removals and validated additions toward the service target.
+   Between rebalances, publish only hard-failure removals; ordinary additions wait for the next rebalance.
 
 An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag
 locks ordering and retention only while the wallet still passes the current Core business gates: an enabled,
@@ -276,8 +277,8 @@ hurdles apply only when a candidate set removes or replaces a still-qualified ol
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
 per-coin limits. A high-scoring wallet can remain Challenger when it adds no funded-account value; a lower raw
 rank may enter when the final shared combination is better. Core order is conditional leave-one-out portfolio
-contribution, while Challenger order is current follow score. The service range is 8–10 when qualified supply
-exists. Promotion requires two complete generations at least 24 hours apart, ordinary changes are weekly, and
+contribution, while Challenger order is current follow score. Core has no minimum count and a maximum of sixteen.
+Promotion requires two complete generations at least 24 hours apart, ordinary changes are weekly, and
 14-day soft tenure plus two-generation soft-failure confirmation prevents daily churn; hard failures are immediate.
 
 `FOLLOW_SELECTION_MODE=auto` lets the scanner publish this selection. `manual` carries the current selection
@@ -286,7 +287,7 @@ rows into the next generation and leaves membership operator-owned; it does not 
 ### 6. Atomic publication and tuning
 
 The scanner prefetches only the bounded candidate market path outside the final SQLite publication transaction.
-Normal cold/daily formation does not run a parameter grid. It strictly replays individual and shared-account
+Normal cold/scheduled formation does not run a parameter grid. It strictly replays individual and shared-account
 membership on the currently active execution surface, then seals eligibility, explicit selection, generation,
 follow history and its immutable strategy revision as one atomic decision. Parameter search is the explicit
 `optimize` operation; if it succeeds, its newly tuned surface and requalified membership are likewise sealed
@@ -301,9 +302,10 @@ rather than reach the OOM killer.
 The compact portfolio tuner searches all three volatility-tier upper margins and leverage caps,
 `DEPLOY_FULL_PCT`, and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
 not tune the three lower margins, per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
-or stop/risk-owner settings. Candidate finalists run three non-overlapping fill-driven ten-day folds, the latest
-fold as a positive holdout, plus 1.5x-cost stress and open/capacity checks. Price-path and maintenance-risk
-validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
+or stop/risk-owner settings. Parameter finalists use three non-overlapping fill-driven ten-day folds solely to
+reject overfit sizing proposals, plus 1.5x-cost stress and open/capacity checks; these tuner folds do not decide
+wallet admission. The selected wallet set must separately pass the four 7-day 5% Core stability periods.
+Price-path and maintenance-risk validation belongs to the one final strict 30-day replay, not every parameter candidate. Cold start may probe a
 few absolute margins at 50/75/100% of the four-add-safe ceiling; it does not restore the old large Cartesian grid.
 Leverage probes pair a lower leverage with reciprocal margin so each tier's `margin × leverage` notional stays
 approximately constant before capacity caps. Selection is profit-led, but candidates within the configured

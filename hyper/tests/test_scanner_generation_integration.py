@@ -68,10 +68,22 @@ def strict_policy_json():
     return json.dumps({
         "allowed": ["crypto"], "crypto": {"allow": True},
         "stability": {
-            "version": "nonoverlap-campaign-v1", "evidenceSufficient": True,
-            "passed": True, "evaluableFolds": 3, "profitableFolds": 3,
+            "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": True,
+            "passed": True, "evaluableFolds": 4, "profitableFolds": 4,
+            "qualifiedFolds": 4,
         },
     })
+
+
+def strict_weekly_stability():
+    return {
+        "version": "nonoverlap-weekly-return-v2",
+        "evidenceSufficient": True,
+        "passed": True,
+        "evaluableFolds": 4,
+        "profitableFolds": 4,
+        "qualifiedFolds": 4,
+    }
 
 
 def scan_args():
@@ -427,7 +439,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         source = inspect.getsource(scanner.scan)
 
         self.assertEqual(source.count("_build_explicit_selection("), 1)
-        self.assertIn("_selection_prefetch_candidates(db)", source)
+        self.assertIn("_selection_prefetch_candidates(", source)
         self.assertNotIn("preview_rows", source)
 
     def test_selection_prefetch_candidates_is_bounded_ranked_and_enabled(self):
@@ -457,6 +469,49 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             candidates = scanner._selection_prefetch_candidates(db, limit=2)
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
+
+    def test_bounded_path_pool_prioritizes_incumbent_and_prepath_core_quality(self):
+        checks = {
+            key: True for key in (
+                "strictCopy30dPositive", "tenIndependentCampaigns", "nonoverlapStability",
+                "campaignWinRate", "repeatableBodyWinRate", "repeatableBodyPositive",
+                "coreFollowScore", "activityWithin72h", "oneWinnerRemovalPositive",
+                "costStressPositive", "openExecution", "capacity", "valuationComplete",
+                "sectorExecutable", "expectedEdge", "noRepeatedLiquidation",
+                "noForwardLiquidation",
+            )
+        }
+        rows = [
+            {
+                "addr": "0xweak", "follow_score": .99,
+                "follow_qualification": {
+                    "eligible": True, "evidenceDays": 10,
+                    "checks": {**checks, "nonoverlapStability": False},
+                },
+                "sector_policy_json": "{}",
+            },
+            {
+                "addr": "0xready", "follow_score": .80,
+                "follow_qualification": {
+                    "eligible": True, "evidenceDays": 10, "checks": checks,
+                },
+                "sector_policy_json": "{}",
+            },
+            {
+                "addr": "0xincumbent", "follow_score": .10,
+                "follow_qualification": {"eligible": False},
+                "sector_policy_json": "{}",
+            },
+        ]
+
+        selected = scanner._bounded_formation_candidates(
+            rows, ("0xincumbent",), 40,
+        )
+
+        self.assertEqual(
+            [row["addr"] for row in selected],
+            ["0xincumbent", "0xready"],
+        )
 
     def test_selection_path_prefetch_excludes_disabled_and_watch_only_sectors(self):
         with tempfile.TemporaryDirectory() as td:
@@ -498,12 +553,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(result["coverage"], 1.0)
 
     def test_path_prefetch_and_formation_share_bounded_candidate_pool(self):
-        source = inspect.getsource(scanner.form_quality_prefix)
+        formation_source = inspect.getsource(scanner.form_quality_prefix)
+        prefetch_source = inspect.getsource(scanner._selection_prefetch_candidates)
 
-        self.assertIn(
-            "ranked_candidates = ranked_candidates[:max(0, int(config.MAX_TARGETS))]",
-            source,
-        )
+        self.assertIn("_bounded_formation_candidates(", formation_source)
+        self.assertIn("_bounded_formation_candidates(", prefetch_source)
 
     def test_scan_does_not_publish_after_selection_path_prefetch_failure(self):
         source = inspect.getsource(scanner.scan)
@@ -753,6 +807,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                         "liquidations": 0, "price_path_coverage": 1.0,
                         "maintenance_margin_coverage": 1.0,
                         "initial_margin_equity": 1000,
+                        "weekly_stability": strict_weekly_stability(),
                     },
             ) as final_replay:
                 rows, _marginal = scanner._build_forced_prefix_selection(
@@ -1068,6 +1123,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                                      **strict_windows[30], "liquidations": 0,
                                      "price_path_coverage": 1.0,
                                      "initial_margin_equity": 1000,
+                                     "weekly_stability": strict_weekly_stability(),
                                  }), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())

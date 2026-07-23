@@ -55,10 +55,11 @@ Wallet quality and funded-account membership are separate decisions.
   data and systematic uncopyable structures; HFT needs at least ten complete rounds, Grid needs at least five
   complete rounds with a strict majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
 - Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
-  activity, cost stress, or outlier evidence block Core but do not erase that research evidence. Only the
-  bounded top-40, path-certified formation surface is published as operational Challenger/Core, preventing
-  hundreds of merely positive wallets from becoming daily retention work. New Core requires at least 10%,
-  ten independent Campaigns, and the non-overlapping stability/execution/risk surface.
+  activity, cost stress, or outlier evidence block Core but do not erase that research evidence. Refined
+  candle paths are fetched only for current Core and wallets that already clear every non-path Core gate,
+  bounded at 40 for resource safety; raw score alone cannot consume these expensive slots. New Core requires
+  ten independent Campaigns plus four non-overlapping 7-day strict-Copy periods that each return at least 5%
+  on floating starting equity and remain profitable under 1.5x costs.
 - The final copy-follow score is calibrated as economics 22%, repeatability 30%, edge confidence 18%,
   operability 13%, path risk 12%, and raw profile prior 5%. Incomplete Campaign/fold evidence shrinks the
   total, so a tiny perfect streak cannot outrank mature proof. New Core requires at least 75/100, at least
@@ -69,11 +70,10 @@ Wallet quality and funded-account membership are separate decisions.
   they do not repeatedly scan candles. The winning membership receives exactly one conservative, path-complete
   30-day strict-Copy certification before publication. Score orders the candidate pool; it does not force a
   score prefix or fixed base count.
-- Final moves must improve portfolio economics and pass at least two evaluable/profitable non-overlapping
-  ten-day folds plus 1.5x transaction-cost stress. Normal replacement/reordering is weekly. Production evidence
-  refresh runs Monday and Thursday (alternating three/four-day gaps); each refresh still removes a wallet
-  immediately for a hard failure. While Core has fewer than eight wallets, a scheduled run may add independently
-  qualified, portfolio-safe wallets without evicting incumbents.
+- Final moves must improve portfolio economics and pass all four non-overlapping 7-day return/cost-stress
+  periods. Normal replacement, addition, and reordering is weekly. Production evidence refresh runs Monday
+  and Thursday (alternating three/four-day gaps); each refresh still removes a wallet immediately for a hard
+  failure, but never adds a wallet to approach a count.
   New promotions require two complete qualifying generations at least 24 hours apart; ordinary soft churn is
   suppressed for a Core wallet's first 14 days.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
@@ -82,8 +82,8 @@ Wallet quality and funded-account membership are separate decisions.
   the work without publishing a timed-out partial result.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
-- Core targets 8–10 wallets when hard-qualified supply exists. A complete scan may still publish fewer (including
-  zero) when hard data/risk/economic evidence genuinely cannot support the service target.
+- Core has no minimum wallet quota and a maximum of sixteen. A complete scan may publish any count from zero to sixteen;
+  quality and funded shared-account contribution alone decide membership.
 
 ## Scheduled complete candidate reevaluation
 
@@ -103,9 +103,10 @@ Profiles are not re-downloaded from zero on every scheduled run.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
   cannot prune, publish, or tune.
 
-Automatic cadence is one complete candidate-universe reevaluation every day. Previously known wallets remain
-history-incremental; only genuinely new/incomplete wallets bootstrap 37 days. The Dashboard rescan button queues
-the same complete reevaluation; changing scanner settings only persists params and does not start a scan.
+Production automatically performs one complete candidate-universe evidence refresh every Monday and Thursday;
+the local daemon fallback uses a 72-hour interval. Previously known wallets remain history-incremental, and only
+genuinely new/incomplete wallets bootstrap 37 days. The Dashboard rescan button queues the same complete
+reevaluation; changing scanner settings only persists params and does not start a scan.
 
 Before production rollout, operators can run the same pipeline against an online SQLite backup:
 
@@ -139,11 +140,12 @@ shared available balance, isolated margin, volatility-tier sizing, leverage caps
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
-Campaign. Core needs ten Campaigns and three adjacent 10-day folds; a fold is evaluable with at least two
-Campaigns, at least two folds must be evaluable and profitable, and a losing fold cannot exceed 25% of 30-day
-profit. Thin folds are unknown evidence, never synthetic losses. Rolling 7/14-day ROI, PF, Wilson and win rate
-remain diagnostics/ranking signals rather than repeated admission gates. The single outlier stress removes the
-largest winning Campaign and requires the remainder positive; 1.5x cost stress remains separate.
+Campaign. Core needs ten Campaigns and four adjacent non-overlapping 7-day folds covering the latest 28 days.
+Every fold needs at least two Campaigns, at least 5% return on its floating strict-replay starting equity, and
+positive net after charging 1.5x costs. All four folds must pass. The former standalone 30-day 10% Core line is
+score/audit only; the continuous 30-day strict replay still certifies portfolio profit, drawdown, liquidation,
+capacity, and expected return. Thin folds are unknown evidence, never synthetic losses. The single outlier
+stress removes the largest winning Campaign and requires the remainder positive.
 
 The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
 time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is

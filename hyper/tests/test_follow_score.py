@@ -7,11 +7,11 @@ from hyper.selection.follow_score import compute_follow_score, evaluate_follow_e
 NOW = 2_000_000_000_000
 
 
-def stability(*, passed=True, sufficient=True, profitable=3):
+def stability(*, passed=True, sufficient=True, profitable=4):
     return {
-        "version": "nonoverlap-campaign-v1", "evidenceSufficient": sufficient,
-        "passed": passed, "evaluableFolds": 3 if sufficient else 1,
-        "profitableFolds": profitable,
+        "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": sufficient,
+        "passed": passed, "evaluableFolds": 4 if sufficient else 1,
+        "profitableFolds": profitable, "qualifiedFolds": profitable,
     }
 
 
@@ -85,7 +85,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(result["eligible"])
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["role"], "challenger")
-        self.assertEqual(result["status"], "challenger_return_watch")
+        self.assertEqual(result["status"], "challenger_score_watch")
 
     def test_insufficient_campaign_evidence_is_challenger(self):
         result = judge(copy_bt_closed_n=4, copy_bt_campaign_closed_n=3, copy_evidence_days=2)
@@ -180,7 +180,7 @@ class FollowScoreTests(unittest.TestCase):
 
     def test_nonoverlap_insufficient_is_unknown_and_failed_stability_is_watch(self):
         thin_policy = {"allowed": ["crypto"], "stability": stability(passed=False, sufficient=False)}
-        failed_policy = {"allowed": ["crypto"], "stability": stability(passed=False, profitable=1)}
+        failed_policy = {"allowed": ["crypto"], "stability": stability(passed=False, profitable=3)}
         thin = judge(sector_policy_json=json.dumps(thin_policy))
         failed = judge(sector_policy_json=json.dumps(failed_policy))
         self.assertEqual(thin["status"], "challenger_stability_evidence_building")

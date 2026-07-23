@@ -306,11 +306,10 @@ def score(m: dict) -> float:
     g_deep = _clip(1.0 - max(0.0, bag - config.SCORE_BAG_REF) / config.SCORE_BAG_SPAN, config.SCORE_DEEP_FLOOR, 1.0)
 
     # ── v10 QUALITY-MAGNITUDE factors (folded INTO score, NOT末尾 hard gates — those double-count & over-cut) ──
-    # `win_pt` remains an audit metric only. Thin-edge risk is already handled by PORTFOLIO_MIN_EDGE_BPS
-    # and by copy replay; making winning-trade thickness a hidden multiplicative penalty double-punished
-    # wallets that our own copy replay can follow profitably.
+    # `win_pt` remains an audit metric only. Thin-edge risk is handled by fee/slippage-paid strict Copy,
+    # four weekly 5% return folds and 1.5x cost stress; a second raw notional-edge penalty would double-count.
     # 盈亏比: 只罚真·大亏小赚(payoff<1); payoff≥REF(1.0) 满分 → 不误伤 payoff 1.0 的高胜率盘. 高地板(0.6)=轻推.
-    #   edge 厚度不单列因子(和 ROI 支柱重复); 手续费硬底线在闸门(10bp),ROI 支柱已奖励回报.
+    #   edge 厚度不单列因子(和 ROI 支柱重复);严格Copy和成本压力已判断净收益,ROI支柱负责奖励回报.
     g_payoff = _clip(g("payoff_ratio", 1.0) / config.SCORE_PAYOFF_REF, config.SCORE_PAYOFF_FLOOR, 1.0)
 
     # linear STRETCH → best real wallet ≈ 100, smooth decline (stable/absolute, not max-relative)
