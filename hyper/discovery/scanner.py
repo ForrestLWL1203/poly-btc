@@ -2129,14 +2129,26 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
 
 
 def _formation_tune_candidate(row) -> bool:
-    """Whether an individually executable wallet may influence Core sizing.
+    """Whether a path-certified wallet may enter parameter discovery.
 
-    The tuner optimizes the shared Core account; feeding it Challenger wallets can produce an attractive
-    surface which the admission layer cannot publish. Challenger evidence remains available for audit, but it
-    cannot determine the Core count or execution surface until exact individual replay is Core-eligible.
+    ``ranked_candidates`` already passed every non-path Core business gate on the scan-time surface. The
+    active execution surface can nevertheless turn that same wallet's exact replay from +22% into +6% through
+    leverage/margin/capacity choices. Requiring ``coreEligible`` before tuning creates a circular gate: only a
+    wallet that needs no tuning may be tuned. Admit positive, path-complete and hard-risk-safe exact replays
+    into parameter discovery, then re-run the complete Core contract on the winning sealed surface.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
-    return bool(qualification.get("eligible") and qualification.get("coreEligible"))
+    checks = dict(qualification.get("checks") or {})
+    return bool(
+        qualification.get("eligible")
+        and not qualification.get("deferred")
+        and not qualification.get("hardRisk")
+        and qualification.get("role") != "quarantine"
+        and checks.get("pathRiskComplete")
+        and checks.get("valuationComplete")
+        and checks.get("sectorExecutable")
+        and checks.get("noForwardLiquidation")
+    )
 
 
 def _formation_prepath_candidate(row) -> bool:
@@ -2422,9 +2434,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     ))
     if len(pinned_order) > upper:
         raise RuntimeError("pinned_core_count_exceeds_upper_bound")
-    # Tune only the wallets already proven individually executable on this exact active replay surface.
-    # Otherwise the count optimizer can report a profitable surface which final admission cannot publish.
-    # Challenger evidence stays visible for audit but does not own the Core surface.
+    # Parameter discovery may include an exact positive/path-safe replay that misses economic Core thresholds
+    # on the *current* surface. Requiring Core eligibility here made the current parameters a prerequisite for
+    # tuning them. The winning surface is still sealed by ``replay_effective_surface`` below, where every
+    # individual must satisfy the complete Core contract before membership search or publication.
     tune_ranked = [
         row for row in surface_ranked
         if row.get("addr") in pinned or _formation_tune_candidate(row)

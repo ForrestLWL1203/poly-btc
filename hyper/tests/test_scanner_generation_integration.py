@@ -200,6 +200,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "coreEligible": True,
                     "role": "core_eligible",
                     "status": "core_entry_qualified",
+                    "checks": {
+                        "pathRiskComplete": True, "valuationComplete": True,
+                        "sectorExecutable": True, "noForwardLiquidation": True,
+                    },
                 },
             }
             with patch.object(scanner, "_quality_core_profiles", return_value=[candidate]), \
@@ -416,14 +420,25 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(all(result.passed for result in results.values()))
             self.assertFalse(db.in_transaction)
 
-    def test_core_formation_tune_pool_contains_only_individually_core_eligible_wallets(self):
+    def test_core_formation_tune_pool_accepts_positive_path_safe_precore_wallets(self):
         self.assertTrue(scanner._formation_tune_candidate({
-            "follow_qualification": {"eligible": True, "coreEligible": True},
+            "follow_qualification": {
+                "eligible": True,
+                "coreEligible": True,
+                "checks": {
+                    "pathRiskComplete": True, "valuationComplete": True,
+                    "sectorExecutable": True, "noForwardLiquidation": True,
+                },
+            },
         }))
-        self.assertFalse(scanner._formation_tune_candidate({
+        self.assertTrue(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": True, "coreEligible": False,
-                "status": "challenger_weekly_return_watch",
+                "status": "challenger_return_watch",
+                "checks": {
+                    "pathRiskComplete": True, "valuationComplete": True,
+                    "sectorExecutable": True, "noForwardLiquidation": True,
+                },
             },
         }))
 
@@ -435,18 +450,30 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             "follow_qualification": {
                 "eligible": True, "coreEligible": False,
                 "status": "challenger_open_valuation_pending",
+                "checks": {
+                    "pathRiskComplete": True, "valuationComplete": False,
+                    "sectorExecutable": True, "noForwardLiquidation": True,
+                },
             },
         }))
-        self.assertFalse(scanner._formation_tune_candidate({
+        self.assertTrue(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": True, "coreEligible": False,
                 "status": "challenger_sample_watch",
+                "checks": {
+                    "pathRiskComplete": True, "valuationComplete": True,
+                    "sectorExecutable": True, "noForwardLiquidation": True,
+                },
             },
         }))
         self.assertFalse(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": False, "coreEligible": False,
                 "status": "copy_value_below_challenger_floor",
+                "checks": {
+                    "pathRiskComplete": True, "valuationComplete": True,
+                    "sectorExecutable": True, "noForwardLiquidation": True,
+                },
             },
         }))
 

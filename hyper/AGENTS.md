@@ -195,6 +195,12 @@ the remaining 30-day net to stay positive. Top-two, body-after-top-three and top
 diagnostics only because hard-gating all of them repeatedly judged the same outlier. Public replay dollars still
 include the large winner. Positive aggregate 1.5x-cost stress remains a final funded-portfolio execution check.
 
+Formation parameter discovery may admit a scan-time Core-quality wallet whose exact active-surface replay is
+positive, path-complete and free of hard risk even when that current surface misses the final return or score
+line. Never require `coreEligible` before tuning: that makes the parameters being optimized a prerequisite for
+optimization. After tuning, re-run the complete individual Core contract on the sealed winning surface before
+membership search and publication.
+
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by the non-overlapping folds above; rolling 7-day magnitude is a Core gate while
 rolling 14-day return remains diagnostic. A magnitude/fold failure or stale activity remains Challenger,

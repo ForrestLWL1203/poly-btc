@@ -79,10 +79,13 @@ Wallet quality and funded-account membership are separate decisions.
   largest winning trades remain diagnostic score inputs. The score is displayed on a 0–100 scale while stored
   natively in `[0, 1]`.
 - The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
-  Count, add/remove/swap and parameter search then use normalized fills and the shared-account execution model;
-  they do not repeatedly scan candles. The winning membership receives exactly one conservative, path-complete
-  30-day strict-Copy certification before publication. Score orders the candidate pool; it does not force a
-  score prefix or fixed base count.
+  A positive, path-complete and hard-risk-safe replay may enter parameter discovery even when the current
+  execution surface misses the final return/score line; requiring Core eligibility before tuning would make
+  current parameters a circular prerequisite for changing them. Count, add/remove/swap and parameter search
+  then use normalized fills and the shared-account execution model; they do not repeatedly scan candles. The
+  winning surface must requalify every individual against the complete Core contract, and the winning
+  membership receives exactly one conservative, path-complete 30-day strict-Copy certification before
+  publication. Score orders the candidate pool; it does not force a score prefix or fixed base count.
 - Final moves must improve portfolio economics and pass the same four-fold evidence/profitability/loss-bound
   contract plus aggregate cost stress. Normal replacement, addition, and reordering is weekly. Production evidence refresh runs Monday
   and Thursday (alternating three/four-day gaps); each refresh still removes a wallet immediately for a hard
