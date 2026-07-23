@@ -275,13 +275,13 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("prow level-", param_row)
         self.assertIn("resolveLevel", param_row)
 
-    def test_scanner_settings_show_official_roi_and_hide_score_tuning(self):
+    def test_scanner_settings_show_recall_controls_and_hide_retired_roi_tuning(self):
         scanner = (ROOT / "dashboard" / "web" / "components" / "settings" / "ScannerSettingsPanel.jsx").read_text(encoding="utf-8")
 
         self.assertIn("高级采集参数", scanner)
         self.assertIn("advancedRows", scanner)
         self.assertIn("HARVEST_WEEK_VLM_MIN", scanner)
-        self.assertIn("HARVEST_WEEK_ROI_MIN", scanner)
+        self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner)
         self.assertIn("HARVEST_PERP_PNL_SHARE_MIN", scanner)
         self.assertNotIn("HARVEST_WEEK_VLM_MAX", scanner)
         self.assertNotIn("SCORE_W_WIN", scanner)

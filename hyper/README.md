@@ -66,9 +66,11 @@ Wallet quality and funded-account membership are separate decisions.
   ten independent Campaigns plus four non-overlapping 7-day strict-Copy periods that each return at least 4%
   on floating starting equity, average at least 0.5% of weekly starting equity per closed position, and remain
   profitable under 1.5x costs. The Copy thresholds deliberately do not copy the target's official 5% floor.
-- The final copy-follow score is calibrated as economics 22%, repeatability 30%, edge confidence 18%,
-  operability 13%, path risk 12%, and raw profile prior 5%. Incomplete Campaign/fold evidence shrinks the
-  total, so a tiny perfect streak cannot outrank mature proof. New Core requires at least 75/100, at least
+- The final copy-follow score is calibrated as independent weekly funded economics 30%, repeatability 25%,
+  edge confidence 15%, operability 15%, and path risk 15%. Once Copy evidence exists, overlapping 30/14/7
+  returns and the legacy raw profile score contribute zero; they remain diagnostics only. Incomplete
+  Campaign/fold evidence shrinks the total, so a tiny perfect streak cannot outrank mature proof. New Core
+  requires at least 75/100, at least
   45% Campaign win rate, and at least 40% win rate plus positive net after removing the three largest winning
   trades. The score is displayed on a 0–100 scale while stored natively in `[0, 1]`.
 - The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
@@ -152,7 +154,7 @@ Campaign. Target-wallet stability is screened first from official Portfolio: all
 at least 5% return. Our strict Copy then evaluates the same four folds on floating replay equity: every fold needs
 at least 4% net return, at least one independent Campaign, average closed-position net of at least 0.5% of weekly
 starting equity, and positive net after charging 1.5x costs. The 30-day aggregate still needs ten Campaigns. The
-former standalone 30-day 10% Core line is score/audit only; the continuous 30-day strict replay still certifies
+former standalone 30-day 10% Core parameter is removed; the continuous 30-day strict replay still certifies
 portfolio profit, drawdown, liquidation, capacity, and expected return. Thin folds are unknown evidence, never
 synthetic losses. The single outlier stress removes the largest winning Campaign and requires the remainder positive.
 

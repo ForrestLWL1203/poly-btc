@@ -11,8 +11,8 @@ observer and trigger scans INDEPENDENTLY —
   停止跟单 → stop_observer()   (SIGTERM the observer's process group, immediately)
 
 There is intentionally NO in-process auto-scan in the dashboard. A brand-new local launcher install
-starts only the dashboard; the first full scan is an explicit operator action. On VPS installs, daily
-background scans belong to systemd's hl-scan.timer. The dashboard's small background ticker only
+starts only the dashboard; the first full scan is an explicit operator action. On VPS installs, scheduled
+Monday/Thursday background scans belong to systemd's hl-scan.timer. The dashboard's small background ticker only
 reconciles process status/pidfiles.
 
 Design notes:

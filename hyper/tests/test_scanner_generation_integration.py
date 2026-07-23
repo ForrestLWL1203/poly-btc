@@ -80,6 +80,14 @@ def strict_policy_json():
             "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": True,
             "passed": True, "evaluableFolds": 4, "profitableFolds": 4,
             "qualifiedFolds": 4,
+            "minReturn": .04, "minNetPerClosedReturn": .005,
+            "folds": [
+                {
+                    "evaluable": True, "return": .08,
+                    "averageClosedNetReturn": .01, "qualified": True,
+                }
+                for _ in range(4)
+            ],
         },
     })
 
@@ -1318,7 +1326,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.execute(
                 "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) "
-                "VALUES(1,'0xaaa',0.71,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
+                "VALUES(1,'0xaaa',0.80,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
             )
             db.commit()
 
@@ -1425,7 +1433,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             self.assertEqual(scanner.selection.published_core_addrs(db), ["0xold"])
 
-    def test_positive_portfolio_contribution_can_rescue_active_wallet_below_score_line(self):
+    def test_positive_portfolio_contribution_cannot_rescue_wallet_below_score_line(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -1484,10 +1492,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db, "g1", "now", 1000, validate_price_path=False,
                 )
 
-            self.assertEqual(result.selected, ())
-            self.assertEqual(result.search_meta["desiredSelectedCount"], 1)
+            self.assertIsNone(result)
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "challenger", "core_promotion_confirmation_pending"),
+                ("0xaaa", "challenger", "challenger_score_watch"),
             ])
 
     def test_daily_desired_portfolio_does_not_replace_existing_core_in_one_generation(self):

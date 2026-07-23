@@ -40,7 +40,7 @@ class ShadowScanTests(unittest.TestCase):
                     "INSERT INTO scan_generation(generation,source,status,started_at,published_at,complete,"
                     "is_current,metrics_json) VALUES ('shadow-g','scan','published',?,?,1,1,?)",
                     (stamp, stamp, json.dumps({
-                        "officialRoiPassed": 0,
+                        "coarseRecallPassed": 0,
                         "perpPrefilterPassed": 0,
                         "selectionSearch": {
                             "selected": [raw_addr],
@@ -56,9 +56,6 @@ class ShadowScanTests(unittest.TestCase):
                 report = shadow_scan.run(
                     source_path, report_path, args,
                     param_overrides={
-                        "HARVEST_WEEK_ROI_MIN": 15,
-                        "HARVEST_MONTH_ROI_MIN": 45,
-                        "HARVEST_ALL_ROI_MIN": 50,
                         "HARVEST_WEEK_PNL_MIN": 2000,
                         "HARVEST_MONTH_PNL_MIN": 8000,
                         "HARVEST_ALL_PNL_MIN": 0,
@@ -67,15 +64,11 @@ class ShadowScanTests(unittest.TestCase):
 
             self.assertEqual(Path(source_path).read_bytes(), before)
             self.assertTrue(report["sourceUnchanged"])
-            self.assertEqual(report["scanParameters"]["HARVEST_WEEK_ROI_MIN"], 0.15)
-            self.assertEqual(report["scanParameters"]["HARVEST_MONTH_ROI_MIN"], 0.45)
-            self.assertEqual(report["scanParameters"]["HARVEST_ALL_ROI_MIN"], 0.50)
             self.assertEqual(report["scanParameters"]["HARVEST_WEEK_PNL_MIN"], 2000)
             self.assertEqual(report["scanParameters"]["HARVEST_MONTH_PNL_MIN"], 8000)
             self.assertEqual(report["scanParameters"]["HARVEST_ALL_PNL_MIN"], 0)
-            self.assertEqual(seen_args[0].week_roi_min, 0.15)
-            self.assertEqual(seen_args[0].month_roi_min, 0.45)
-            self.assertEqual(seen_args[0].all_roi_min, 0.50)
+            self.assertNotIn("HARVEST_WEEK_ROI_MIN", report["scanParameters"])
+            self.assertFalse(hasattr(seen_args[0], "week_roi_min"))
             self.assertTrue(Path(report_path).exists())
             self.assertEqual(os.stat(report_path).st_mode & 0o777, 0o600)
             self.assertTrue(created)

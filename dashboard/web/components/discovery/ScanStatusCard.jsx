@@ -23,7 +23,7 @@ export function ScanStatusCard({ discovery, scanning }) {
           <span className="dot" style={{ background: scColor, animation: (scMode === "rolling" || scMode === "scanning" || scanning) ? "pulse 1.4s infinite" : "none" }} />
           {SCANNER_LABEL[scMode] || scMode}{sc.stale && scMode !== "idle" ? " · 心跳超时 ⚠" : ""}</span>
         <div><div className="muted">上次扫描</div><div className="mono" style={{ fontSize: 15, color: overdue ? "var(--red-l)" : undefined }}>{agoText(discovery.lastScanAt)}{overdue ? " ⚠超期" : ""}</div></div>
-        <div><div className="muted">采集周期</div><div className="mono" style={{ fontSize: 15 }}>每日完整重评 · 历史增量</div></div>
+        <div><div className="muted">采集周期</div><div className="mono" style={{ fontSize: 15 }}>周一/周四完整重评 · 历史增量</div></div>
         <div><div className="muted">被跟名单</div><div className="mono" style={{ fontSize: 15 }}>{fn.watchlist} 钱包</div></div>
         <div><div className="muted">心跳</div><div className="mono" style={{ fontSize: 15, color: (sc.stale && scMode !== "idle") ? "var(--red-l)" : "var(--green-l)" }}>{agoText(sc.heartbeatAt)}</div></div>
       </div>

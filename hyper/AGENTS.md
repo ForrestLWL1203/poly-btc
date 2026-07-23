@@ -167,7 +167,7 @@ default classification is:
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
   outlier stress or cost stress are explicit Challenger reasons rather than economic rejection;
 - normal Core needs ten independent 30-day Campaigns, at least five evidence days, complete valuation/path
-  data and no hard risk. The old standalone 30-day 10% Core line is score/audit only, not a repeated veto;
+  data and no hard risk. The old standalone 30-day 10% Core parameter is removed, not retained as a hidden veto;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
   latest 28 days, each with at least 5% return. Strict Copy separately requires every matching follower fold
   to return at least 4% on floating starting equity, contain at least one Campaign, average at least 0.5% of
@@ -205,11 +205,12 @@ may contain at most one isolated liquidation for Core; repetition is Challenger-
 sector whose loss includes liquidation is still a hard recent failure, and Heavy-DCA pressure has its stricter
 rule.
 
-`profile.score` is the raw profile quality score. `watchlist.score` is the final copy-follow score, combining
-10% raw quality, 40% normalized Copy quality, 40% account-normalized scalable economics and 10% activity,
-plus bounded recent/liquidation penalties. The sample-confidence factor saturates at the actual qualification
-floors. Scores order qualified candidates; neither raw score nor `MIN_FOLLOW_SCORE` is a production membership
-gate after an explicit selection exists.
+`profile.score` is a discovery-only prior when Copy evidence is absent. Once canonical Copy exists,
+`watchlist.score` uses 30% independent weekly funded economics, 25% repeatability, 15% edge confidence,
+15% operability, and 15% path risk. Overlapping 30/14/7 returns and the legacy raw score contribute zero.
+The sample-confidence factor saturates at the actual qualification floors. New Core must score at least
+75/100 after all binary hard gates pass; score then orders those survivors and cannot compensate for a failed
+weekly, win-rate, execution, capacity, valuation, or risk gate.
 
 Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
 `noise_merged`, `hard_cap_blocked`, `coin_cap_blocked`, `cash_blocked`, `min_margin_blocked`, or

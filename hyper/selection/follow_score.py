@@ -1,8 +1,8 @@
 """Copy-follow score used to rank the final watchlist.
 
-`profile.score` remains the raw profile quality score. This module blends it with
-copy-backtest evidence so the observer follows wallets that are actually copyable
-under our own sizing/add/stop rules.
+`profile.score` remains a discovery-only prior when Copy evidence is absent. Once
+canonical Copy exists, the final score is derived only from funded weekly economics,
+repeatability, edge confidence, operability, and path risk.
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ def evaluate_follow_eligibility(
     retention: bool = False,
     policy_values: Mapping | None = None,
     as_of_ms: int | None = None,
+    follow_score_value: float | None = None,
 ) -> dict:
     """Classify evidence once: positive wallets remain researchable; Core adds non-duplicated proof.
 
@@ -58,8 +59,9 @@ def evaluate_follow_eligibility(
     checks were correlated views of the same trades and created an exclusion cascade.  V3 keeps hard data,
     liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
     The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
-    already owned by the official Portfolio front gate; Core adds ten campaigns, fresh activity, one-winner
-    removal, whole-window cost stress and executable capacity without repeating four weekly Copy vetoes.
+    owned by the official Portfolio front gate; Core separately proves that our own funded strict Copy also
+    clears all four weekly folds, then adds ten campaigns, fresh activity, repeatability, cost stress and
+    executable capacity.
     """
     del min_closed14, min_closed7, margin_equity_pct
     policy = load_copy_policy(policy_values)
@@ -127,7 +129,10 @@ def evaluate_follow_eligibility(
     body_n = int(_num(scoped.get("copy_bt_body_after_top3_n")))
     body_win_rate = _num(scoped.get("copy_bt_body_after_top3_win_rate"))
     body_net_pnl = scoped.get("copy_bt_body_after_top3_net_pnl")
-    follow_score_value = compute_follow_score(scoped, policy_values=policy_values)[0]
+    if follow_score_value is None:
+        follow_score_value = compute_follow_score(scoped, policy_values=policy_values)[0]
+    else:
+        follow_score_value = _clamp(_num(follow_score_value))
     sample_ok = bool(
         c30 >= min_closed30 and campaigns >= policy.core_min_campaigns_30d
         and evidence_days >= min_evidence_days
@@ -137,11 +142,6 @@ def evaluate_follow_eligibility(
         "normalizedEvidencePresent": _has_copy_evidence(scoped, c30, 0, 0),
         "strictCopy30dPositive": pnl30 > 0.0,
         "strictCopyWeeklyPositive": copy_weekly_positive,
-        # Diagnostic/score reference only. Official four-week Portfolio stability owns the target-wallet
-        # return floor; strict Copy owns whether our funded implementation is net profitable.
-        "coreReturnReference": return30 >= (
-            policy.retention_min_return_30d if retention else policy.core_min_return_30d
-        ),
         "tenIndependentCampaigns": campaigns >= policy.core_min_campaigns_30d,
         "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
         "repeatableBodyWinRate": (
@@ -322,9 +322,11 @@ def compute_follow_score(
     closed_confidence = _clamp(c30 / max(1.0, float(policy.min_closed_30d)))
     day_confidence = _clamp(evidence_days / max(1.0, float(min(5, policy.min_closed_30d))))
     confidence = min(closed_confidence, day_confidence)
-    edge_score = _clamp(0.5 + 0.5 * math.tanh((expected - 0.02) / 0.05))
+    edge_score = _clamp(
+        0.55 + 0.45 * (expected - policy.min_expected_margin_return) / 0.08
+    )
     lcb_score = _clamp(0.5 + 0.5 * math.tanh(lcb / 0.03))
-    probability_score = _clamp((probability - 0.90) / 0.10)
+    probability_score = _clamp((probability - 0.50) / 0.45)
     pnl30 = _num(metrics.get("copy_bt_net_pnl"))
     pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
     pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
@@ -337,14 +339,59 @@ def compute_follow_score(
         "14d": pnl14 / economic_equity,
         "7d": pnl7 / economic_equity,
     }
-    # These are saturating percentage scales, not fixed dollar bonuses.  A future $20k/$30k account with
-    # proportionally scaled replay PnL therefore receives the same economic score.  The final evidence
-    # shrinkage prevents a three-trade windfall from outranking mature proof solely on one large episode.
-    economic_score = (
-        0.60 * _clamp(0.5 + (returns["30d"] - policy.core_min_return_30d) / 0.10)
-        + 0.25 * _clamp(0.5 + 0.5 * math.tanh(returns["14d"] / 0.05))
-        + 0.15 * _clamp(0.5 + 0.5 * math.tanh(returns["7d"] / 0.05))
+    # Four independent funded weeks own economics. Overlapping 30/14/7 windows remain display diagnostics
+    # and can no longer triple-count the same profitable days.
+    policy_json = parse_json_obj(metrics.get("sector_policy_json"))
+    copy_weekly = (
+        policy_json.get("copyWeeklyProfitability")
+        if isinstance(policy_json.get("copyWeeklyProfitability"), dict) else {}
     )
+    weekly_folds = [
+        fold for fold in copy_weekly.get("folds") or ()
+        if isinstance(fold, Mapping) and fold.get("evaluable")
+    ]
+    weekly_returns = [_num(fold.get("return")) for fold in weekly_folds]
+    density_returns = [
+        _num(fold.get("averageClosedNetReturn"))
+        for fold in weekly_folds if fold.get("averageClosedNetReturn") is not None
+    ]
+    weekly_floor = max(
+        1e-9, _num(copy_weekly.get("minReturn"), policy.copy_weekly_min_return),
+    )
+    density_floor = max(
+        1e-9,
+        _num(
+            copy_weekly.get("minNetPerClosedReturn"),
+            policy.copy_weekly_min_net_per_closed_return,
+        ),
+    )
+
+    def floor_quality(value, floor, span):
+        return _clamp(0.60 + 0.40 * (float(value) - float(floor)) / float(span))
+
+    def median(values):
+        rows = sorted(values)
+        if not rows:
+            return 0.0
+        middle = len(rows) // 2
+        return (
+            rows[middle] if len(rows) % 2
+            else (rows[middle - 1] + rows[middle]) / 2.0
+        )
+
+    if len(weekly_returns) == policy.stability_fold_count and len(density_returns) == len(weekly_returns):
+        min_weekly = min(weekly_returns)
+        median_weekly = median(weekly_returns)
+        min_density = min(density_returns)
+        weekly_return_score = (
+            0.65 * floor_quality(min_weekly, weekly_floor, 0.08)
+            + 0.35 * floor_quality(median_weekly, weekly_floor, 0.08)
+        )
+        density_score = floor_quality(min_density, density_floor, 0.02)
+        economic_score = 0.75 * weekly_return_score + 0.25 * density_score
+    else:
+        min_weekly = median_weekly = min_density = None
+        weekly_return_score = density_score = economic_score = 0.0
     campaign_n = int(_num(metrics.get("copy_bt_campaign_closed_n"), c30))
     campaign_win_rate = _clamp(_num(
         metrics.get("copy_bt_campaign_win_rate", metrics.get("copy_bt_win_rate")),
@@ -353,22 +400,27 @@ def compute_follow_score(
     body_win_rate = _clamp(_num(metrics.get("copy_bt_body_after_top3_win_rate")))
     body_net_pnl = _num(metrics.get("copy_bt_body_after_top3_net_pnl"))
     top3_share = _clamp(_num(metrics.get("copy_bt_top3_profit_share"), 1.0))
-    campaign_win_quality = _clamp((campaign_win_rate - 0.30) / 0.40)
-    body_win_quality = _clamp((body_win_rate - 0.30) / 0.40) if body_n > 0 else 0.0
-    concentration_quality = _clamp((0.80 - top3_share) / 0.30)
+    campaign_win_quality = floor_quality(
+        campaign_win_rate, policy.core_min_campaign_win_rate, 0.35,
+    )
+    body_win_quality = (
+        floor_quality(body_win_rate, policy.core_min_body_win_rate, 0.30)
+        if body_n > 0 else 0.0
+    )
+    concentration_quality = _clamp(0.50 + (0.65 - top3_share) / 0.50)
     repeatability_score = (
-        0.35 * campaign_win_quality
-        + 0.30 * body_win_quality
-        + 0.20 * concentration_quality
-        + 0.15 * (1.0 if body_n > 0 and body_net_pnl > 0.0 else 0.0)
+        0.40 * campaign_win_quality
+        + 0.35 * body_win_quality
+        + 0.15 * concentration_quality
+        + 0.10 * (1.0 if body_n > 0 and body_net_pnl > 0.0 else 0.0)
     )
     profit_factor = max(0.0, _num(metrics.get("copy_bt_profit_factor")))
     payoff_ratio = max(0.0, _num(metrics.get("copy_bt_payoff_ratio")))
     profit_factor_quality = _clamp(math.log(max(1.0, profit_factor)) / math.log(5.0))
     payoff_quality = _clamp(payoff_ratio / 2.0)
     edge_confidence_score = (
-        0.25 * edge_score + 0.25 * lcb_score + 0.20 * probability_score
-        + 0.15 * profit_factor_quality + 0.15 * payoff_quality
+        0.35 * edge_score + 0.25 * lcb_score + 0.20 * probability_score
+        + 0.10 * profit_factor_quality + 0.10 * payoff_quality
     )
     activity = _clamp(_num(metrics.get("open_probability_48h"), 0.0))
     actionable_rate = _clamp(_num(
@@ -376,14 +428,20 @@ def compute_follow_score(
     ))
     capacity_fit = _clamp(_num(metrics.get("capacity_fit")))
     operability_score = (
-        0.45 * execution + 0.20 * actionable_rate + 0.15 * capacity_fit + 0.20 * activity
+        0.40 * execution + 0.25 * actionable_rate + 0.20 * capacity_fit + 0.15 * activity
     )
     liqs = int(_num(metrics.get("copy_bt_liquidations")))
     liquidation_cleanliness = 1.0 - _clamp(liqs / max(1.0, float(campaign_n)))
-    risk_score = 0.75 * risk + 0.25 * liquidation_cleanliness
+    intratrade_dd = max(0.0, _num(metrics.get("copy_intratrade_max_drawdown"), 1.0))
+    drawdown_quality = 1.0 - _clamp(intratrade_dd / max(1e-9, policy.intratrade_dd_reject))
+    recovery_quality = _clamp(_num(metrics.get("copy_deep_bag_recovery_rate"), 0.0))
+    risk_score = (
+        0.45 * risk + 0.20 * liquidation_cleanliness
+        + 0.25 * drawdown_quality + 0.10 * recovery_quality
+    )
     score = (
-        0.05 * raw + 0.22 * economic_score + 0.30 * repeatability_score
-        + 0.18 * edge_confidence_score + 0.13 * operability_score + 0.12 * risk_score
+        0.30 * economic_score + 0.25 * repeatability_score
+        + 0.15 * edge_confidence_score + 0.15 * operability_score + 0.15 * risk_score
     )
     campaign_confidence = _clamp(
         campaign_n / max(1.0, float(policy.core_min_campaigns_30d))
@@ -391,6 +449,11 @@ def compute_follow_score(
     readiness_confidence = min(confidence, campaign_confidence)
     score *= 0.70 + 0.30 * readiness_confidence
     reasons = [
+        (
+            f"最弱周Copy {min_weekly * 100:+.1f}% / 每平仓{min_density * 100:+.2f}%"
+            if min_weekly is not None and min_density is not None
+            else "四周Copy经济证据不完整"
+        ),
         f"预期保证金收益{expected * 100:+.1f}%",
         f"LCB {lcb * 100:+.1f}%",
         f"盈利概率{probability * 100:.0f}%",
@@ -409,6 +472,17 @@ def compute_follow_score(
         "operabilityScore": operability_score,
         "calibratedRiskScore": risk_score,
         "economicReturns": returns,
+        "weeklyEconomics": {
+            "returns": weekly_returns,
+            "densityReturns": density_returns,
+            "returnFloor": weekly_floor,
+            "densityFloor": density_floor,
+            "minimumReturn": min_weekly,
+            "medianReturn": median_weekly,
+            "minimumNetPerClosedReturn": min_density,
+            "returnScore": weekly_return_score,
+            "densityScore": density_score,
+        },
         "economicEquity": economic_equity,
         "confidence": readiness_confidence,
         "sampleConfidence": confidence,

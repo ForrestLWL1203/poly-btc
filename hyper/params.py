@@ -25,14 +25,6 @@ PARAM_SPEC = [
         "钱包最低资金", "账户资金 ≥ 此才纳入(过滤噪音小号)"),
     ("HARVEST_WEEK_VLM_MIN", "scanner", "yellow", "usd",     "rescan", config.HARVEST_WEEK_VLM_MIN,
         "周成交量下限", "近7天成交额 ≥ 此(太冷清/囤币号排除)"),
-    ("HARVEST_WEEK_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_WEEK_ROI_MIN * 100,
-        "近7日 ROI 参考线", "只用于粗筛审计，不参与淘汰；稳定盈利由四个互不重叠7日严格Copy区间判断"),
-    ("HARVEST_MONTH_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_MONTH_ROI_MIN * 100,
-        "新钱包近30日 ROI 线", "Leaderboard粗筛只对新发现钱包要求此官方30日ROI；后续以严格Copy为准"),
-    ("HARVEST_ALL_ROI_MIN", "scanner", "yellow", "pct", "rescan", config.HARVEST_ALL_ROI_MIN * 100,
-        "官方历史 ROI 参考线", "仅用于评分和漏斗审计，不参与新钱包硬筛"),
-    ("HARVEST_ROI_WINDOWS_MIN_PASS", "scanner", "hidden", "int", "rescan",
-        config.HARVEST_ROI_WINDOWS_MIN_PASS, "旧版ROI达标窗口数", "仅兼容旧revision；当前不参与粗筛"),
     ("HARVEST_WEEK_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_WEEK_PNL_MIN,
         "新钱包近7日 PnL 下限", "默认0表示必须盈利；不按绝对利润偏向大账户"),
     ("HARVEST_MONTH_PNL_MIN", "scanner", "yellow", "usd", "rescan", config.HARVEST_MONTH_PNL_MIN,
@@ -104,12 +96,6 @@ PARAM_SPEC = [
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
-    ("CORE_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
-        config.CORE_MIN_COPY_RETURN_30D * 100, "30日收益评分参考",
-        "仅用于综合评分的30日经济强度标尺；Core另由官方5%与严格Copy 4%的四个独立7日段决定"),
-    ("CORE_RETENTION_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
-        config.CORE_RETENTION_MIN_COPY_RETURN_30D * 100, "旧Core·30日收益评分参考",
-        "仅保留为旧revision和评分参考；不再绕过四个独立7日稳定收益硬闸"),
     ("CORE_SOFT_FAIL_CONFIRMATIONS", "scanner", "black", "int", "rescan",
         config.CORE_SOFT_FAIL_CONFIRMATIONS, "Core软失败确认轮数", "收益、胜率、样本等软条件需连续完整扫描失败才降级；硬风险即时退出"),
     ("COPY_DEEP_BAG_EVENT_PCT", "scanner", "black", "pct", "rescan",
@@ -302,11 +288,6 @@ _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 _HARVEST_PREVIOUS_DEFAULTS = {
     "HARVEST_MIN_ACCT": ("10000", "10000.0", "30000", "30000.0"),
     "HARVEST_WEEK_VLM_MIN": ("50000", "50000.0", "300000", "300000.0"),
-    "HARVEST_WEEK_ROI_MIN": ("5", "5.0", "10", "10.0", "15", "15.0", "25", "25.0"),
-    "HARVEST_MONTH_ROI_MIN": (
-        "5", "5.0", "10", "10.0", "20", "20.0", "30", "30.0", "45", "45.0", "50", "50.0",
-    ),
-    "HARVEST_ALL_ROI_MIN": ("5", "5.0", "10", "10.0", "20", "20.0", "30", "30.0", "50", "50.0"),
     "HARVEST_WEEK_PNL_MIN": ("0", "0.0", "250", "250.0", "2000", "2000.0", "5000", "5000.0"),
     "HARVEST_MONTH_PNL_MIN": (
         "0", "0.0", "500", "500.0", "1000", "1000.0", "5000", "5000.0",
@@ -371,7 +352,10 @@ def seed_params(db):
         "'CORE_COPY_WIN_RATE_30D_MIN','CORE_RETENTION_WIN_RATE_30D_MIN',"
         "'CORE_COPY_WIN_RATE_LCB_30D_MIN','CORE_RETENTION_WIN_RATE_LCB_30D_MIN',"
         "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D','CORE_TARGET_MIN_N',"
-        "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS')"
+        "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS',"
+        "'CORE_MIN_COPY_RETURN_30D','CORE_RETENTION_MIN_COPY_RETURN_30D',"
+        "'HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
+        "'HARVEST_ROI_WINDOWS_MIN_PASS')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
@@ -387,7 +371,7 @@ def seed_params(db):
                 "AND default_value IN ('10','10.0') AND value=default_value",
                 (dv, key),
             )
-        # Approved ROI-policy migration. Move only previously approved default surfaces, including the
+        # Approved harvest-policy migration. Move only previously approved default surfaces, including the
         # immediately preceding 15/20/20 + 2k/8k/0 policy,
         # to the new production default. Unrelated operator custom values remain untouched.
         old_values = _HARVEST_PREVIOUS_DEFAULTS.get(key)
@@ -497,8 +481,6 @@ def load_follow(db):
 SCANNER_ARG_MAP = {
     "HARVEST_MIN_ACCT": "min_acct",
     "HARVEST_WEEK_VLM_MIN": "week_vlm_min",
-    "HARVEST_WEEK_ROI_MIN": "week_roi_min", "HARVEST_MONTH_ROI_MIN": "month_roi_min",
-    "HARVEST_ALL_ROI_MIN": "all_roi_min", "HARVEST_ROI_WINDOWS_MIN_PASS": "roi_windows_min_pass",
     "HARVEST_WEEK_PNL_MIN": "week_pnl_min",
     "HARVEST_MONTH_PNL_MIN": "month_pnl_min", "HARVEST_ALL_PNL_MIN": "all_pnl_min",
     "HARVEST_PERP_PNL_SHARE_MIN": "perp_pnl_share_min",

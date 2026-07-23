@@ -487,11 +487,6 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
     """
     min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
     vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
-    roi_min = {
-        "week": getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN),
-        "month": getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
-        "all": getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
-    }
     pnl_min = {
         "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
         "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
@@ -505,10 +500,6 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         acct = f(r.get("accountValue"))
         wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
         month_pnl, all_pnl = f(mo.get("pnl")), f(al.get("pnl"))
-        week_roi, month_roi, all_roi = f(wk.get("roi")), f(mo.get("roi")), f(al.get("roi"))
-        r["roi_windows_passed"] = sum((
-            week_roi >= roi_min["week"], month_roi >= roi_min["month"], all_roi >= roi_min["all"],
-        ))
         week_positive = wk_pnl >= pnl_min["week"] if pnl_min["week"] > 0 else wk_pnl > 0
         month_positive = month_pnl >= pnl_min["month"] if pnl_min["month"] > 0 else month_pnl > 0
         r["is_candidate"] = int(
@@ -591,8 +582,10 @@ def _stage_existing_leaderboard(db, generation_id):
     return sum(int(row.get("is_candidate") or 0) for row in rows)
 
 
-def _official_roi_audit(db, generation_id, stamp, p):
-    """Record the complete leaderboard decision surface for the generation."""
+def _leaderboard_recall_audit(db, generation_id, stamp, p):
+    """Record the complete cheap Leaderboard recall surface for the generation."""
+    # Keep this persisted stage name readable for older frozen-audit tooling and historical generations.
+    # The stage no longer contains an ROI magnitude gate.
     pipeline_audit._delete_stage(db, stamp, "scan", "official_roi")
     rows = db.execute(
         "SELECT addr,is_candidate,account_value,week_vlm,week_pnl,week_roi,mon_pnl,mon_roi,all_pnl,all_roi "
@@ -604,16 +597,10 @@ def _official_roi_audit(db, generation_id, stamp, p):
     for rank, row in enumerate(rows, 1):
         item = dict(zip(names, row))
         passed = bool(item.pop("is_candidate"))
-        diagnostics = {
-            "week_roi_below_reference": f(item["weekRoi"]) < getattr(p, "week_roi_min", config.HARVEST_WEEK_ROI_MIN),
-            "month_roi_below_reference": f(item["monthRoi"]) < getattr(p, "month_roi_min", config.HARVEST_MONTH_ROI_MIN),
-            "all_roi_below_reference": f(item["allRoi"]) < getattr(p, "all_roi_min", config.HARVEST_ALL_ROI_MIN),
-        }
         week_floor = getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN)
         month_floor = getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN)
         week_positive = f(item["weekPnl"]) >= week_floor if week_floor > 0 else f(item["weekPnl"]) > 0
         month_positive = f(item["monthPnl"]) >= month_floor if month_floor > 0 else f(item["monthPnl"]) > 0
-        roi_windows_passed = 3 - sum(bool(value) for value in diagnostics.values())
         checks = {
             "account_value_below_floor": f(item["accountValue"]) < getattr(p, "min_acct", config.HARVEST_MIN_ACCT),
             "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
@@ -621,10 +608,7 @@ def _official_roi_audit(db, generation_id, stamp, p):
             "month_pnl_below_floor": not month_positive,
         }
         failed_checks = [reason for reason, failed in checks.items() if failed]
-        item["roiWindowsPassed"] = roi_windows_passed
-        item["requiredRoiWindows"] = []
         item["roiMagnitudeGateEnabled"] = False
-        item["roiDiagnostics"] = [reason for reason, failed in diagnostics.items() if failed]
         item["failedChecks"] = failed_checks
         addr = item.pop("addr")
         reason = failed_checks[0] if failed_checks else "discovery_recall_below_floor"
@@ -1494,6 +1478,7 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
         detail = dict(detail or {})
         eligibility = follow_score.evaluate_follow_eligibility(
             r, margin_equity_pct=margin_equity_pct, policy_values=policy_values,
+            follow_score_value=score,
         )
         if not eligibility.get("eligible"):
             detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
@@ -1876,7 +1861,8 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms)
+        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms,
+            follow_score_value=row["follow_score"])
         qualified = (
             row.get("status") in {"active", "qualified"}
             and (row.get("follow_qualification") or {}).get(
@@ -1990,6 +1976,12 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     for key in ("forward_net_pnl", "forward_liquidations", "forward_closed_n"):
         if row.get(key) is not None:
             effective[key] = row[key]
+    # Compute once from the exact sealed parameter replay. Qualification and published rank must consume
+    # this same value; otherwise a hidden second score can admit a wallet whose displayed score is below 75.
+    score, _detail = follow_score.compute_follow_score({
+        **row, **effective, "sector_copy_json": None,
+        "margin_equity_pct": replay_ctx.margin_equity_pct,
+    })
     qualification = follow_score.evaluate_follow_eligibility(
         {
             **effective,
@@ -2002,13 +1994,8 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         policy_values=follow,
         retention=bool(retention),
         as_of_ms=now_ms,
+        follow_score_value=score,
     )
-    # The replay already contains only sectors allowed by the sealed policy.  Do not let the scan-time
-    # sector aggregate overwrite these final-parameter metrics while recomputing rank.
-    score, _detail = follow_score.compute_follow_score({
-        **row, **effective, "sector_copy_json": None,
-        "margin_equity_pct": replay_ctx.margin_equity_pct,
-    })
     return {
         "metrics": effective,
         "qualification": qualification,
@@ -3530,7 +3517,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms)
+        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms,
+            follow_score_value=row["follow_score"])
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -5145,21 +5133,21 @@ def scan(db, p) -> None:
     order = {"mon_roi": "mon_roi", "week_roi": "week_roi", "mon_pnl": "mon_pnl"}.get(
         getattr(p, "order", "mon_roi"), "mon_roi"
     )
-    roi_cand = [r[0] for r in db.execute(
+    recall_cand = [r[0] for r in db.execute(
         f"SELECT addr FROM leaderboard_staging WHERE generation=? AND is_candidate=1 "
         f"ORDER BY {order} DESC",
         (generation_id,),
     ).fetchall()]
-    _official_roi_audit(db, generation_id, stamp, p)
+    _leaderboard_recall_audit(db, generation_id, stamp, p)
     prefilter_started_at = time.time()
     _set_scan_progress(db, stage="perp_prefilter", candidates_scanned=0,
-                       candidates_total=len(roi_cand))
-    perp_results = _run_perp_prefilter(db, roi_cand, p, stamp)
+                       candidates_total=len(recall_cand))
+    perp_results = _run_perp_prefilter(db, recall_cand, p, stamp)
     prefilter_done_at = time.time()
     prefilter_api_stats = rest.request_stats()
-    cand = [addr for addr in roi_cand if perp_results[addr].passed]
+    cand = [addr for addr in recall_cand if perp_results[addr].passed]
     print(
-        f"  official ROI {len(roi_cand)} · Perp precheck passed {len(cand)} · "
+        f"  coarse recall {len(recall_cand)} · Portfolio/Perp precheck passed {len(cand)} · "
         f"deferred {sum(result.deferred for result in perp_results.values())}", flush=True,
     )
     profiled = {r[0] for r in db.execute("SELECT addr FROM profile").fetchall()}
@@ -5593,7 +5581,7 @@ def scan(db, p) -> None:
                 "profileDurationSec": round(profile_done_at - prefilter_done_at, 3),
                 "profileSloSec": None,
                 "profileSloMet": None,
-                "officialRoiPassed": len(roi_cand),
+                "coarseRecallPassed": len(recall_cand),
                 "perpPrefilterPassed": len(cand),
                 "perpPrefilterDeferred": sum(result.deferred for result in perp_results.values()),
                 "apiByStage": {

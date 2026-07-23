@@ -20,11 +20,13 @@ from . import scanner
 
 _REPORT_PARAM_KEYS = (
     "HARVEST_MIN_ACCT", "HARVEST_WEEK_VLM_MIN",
-    "HARVEST_WEEK_ROI_MIN", "HARVEST_MONTH_ROI_MIN", "HARVEST_ALL_ROI_MIN",
     "HARVEST_WEEK_PNL_MIN", "HARVEST_MONTH_PNL_MIN", "HARVEST_ALL_PNL_MIN",
     "HARVEST_PERP_PNL_SHARE_MIN",
 )
-_SHADOW_OVERRIDE_KEYS = frozenset(_REPORT_PARAM_KEYS[2:8])
+_SHADOW_OVERRIDE_KEYS = frozenset((
+    "HARVEST_WEEK_PNL_MIN", "HARVEST_MONTH_PNL_MIN", "HARVEST_ALL_PNL_MIN",
+    "HARVEST_PERP_PNL_SHARE_MIN",
+))
 
 
 def _mask(addr: str) -> str:
@@ -127,7 +129,7 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
         "leaderboard": db.execute(
             "SELECT COUNT(*) FROM leaderboard_staging WHERE generation=?", (generation_id,)
         ).fetchone()[0],
-        "officialRoi": db.execute(
+        "coarseRecall": db.execute(
             "SELECT COUNT(*) FROM leaderboard_staging WHERE generation=? AND is_candidate=1",
             (generation_id,),
         ).fetchone()[0],
@@ -155,7 +157,7 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
         }:
             structure_passed += 1
     funnel.update(
-        coarseRecall=funnel["officialRoi"], structureFilter=structure_passed,
+        structureFilter=structure_passed,
         research=sum(evidence_roles[role] for role in ("research", "challenger", "core_eligible")),
         challengerEvidence=sum(evidence_roles[role] for role in ("challenger", "core_eligible")),
         personalCore=evidence_roles["core_eligible"], finalCore=roles.get("core", 0),
@@ -235,7 +237,7 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
         "roles": {"core": roles.get("core", 0), "challenger": roles.get("challenger", 0),
                   "exitOnly": roles.get("exit_only", 0)},
         "rejections": {
-            "officialRoi": _audit_reasons(db, stamp, "official_roi"),
+            "coarseRecall": _audit_reasons(db, stamp, "official_roi"),
             "perpPrefilter": _audit_reasons(db, stamp, "perp_prefilter"),
             "profile": _audit_reasons(db, stamp, "profile"),
         },

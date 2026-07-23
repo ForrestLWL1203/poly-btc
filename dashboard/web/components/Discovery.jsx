@@ -27,9 +27,9 @@ export function Discovery({ scanning, startRescan, confirm }) {
   const runs = data && data.runs;
 
   const doRescan = () => confirm({
-    title: "触发每日完整候选重评",
+    title: "触发完整候选重评",
     danger: false, ok: "开始重评",
-    body: "重新拉取完整 Leaderboard，执行官方 ROI、Perp 预检和全部深度评分。已有完整历史只拉增量，新钱包才初始化 37 天。确认?",
+    body: "重新拉取完整 Leaderboard，执行官方四周稳定性、Perp 预检和全部深度评分。已有完整历史只拉增量，新钱包才初始化 37 天。确认?",
     onConfirm: () => startRescan(true),
   });
 

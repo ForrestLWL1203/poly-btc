@@ -63,8 +63,6 @@ CORE_PREFIX_ABS_STRESS_SLACK = 100.0
 CORE_PREFIX_MAX_DD_WORSEN = 0.01
 CORE_PORTFOLIO_MAX_DRAWDOWN = 0.15
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
-CORE_MIN_COPY_RETURN_30D = 0.10
-CORE_RETENTION_MIN_COPY_RETURN_30D = 0.07
 CORE_SOFT_FAIL_CONFIRMATIONS = 2
 CORE_MIN_FOLLOW_SCORE = 0.75
 COPY_MIN_RAW_PAYOFF_RATIO = 0.60
@@ -295,17 +293,13 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard recall (UI-tunable). The cheap hard surface proves $5k equity, $250k leveraged 7d
-# notional activity, positive 7d/30d PnL, and at least 20% official 30d ROI. The 7d 10% and all-time ROI
-# lines are audit references only. Incumbent roles and open-position owners bypass recall and still receive
+# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $5k equity, $250k leveraged
+# 7d notional activity, and positive 7d/30d PnL before any wallet history is downloaded. The immediately
+# following official Portfolio prefilter owns target-wallet return quality: four non-overlapping 7d folds
+# must each return at least 5%. Incumbent roles and open-position owners bypass recall and still receive
 # their mandatory retention replay.
-# This official ROI gate is discovery-only; scoped Perp evidence and strict-Copy replay decide executable roles.
 HARVEST_MIN_ACCT = 5_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
-HARVEST_WEEK_ROI_MIN = 0.10
-HARVEST_MONTH_ROI_MIN = 0.20
-HARVEST_ALL_ROI_MIN = 0.10
-HARVEST_ROI_WINDOWS_MIN_PASS = 2  # compatibility/audit; hard recall explicitly requires week + month.
 HARVEST_WEEK_PNL_MIN = 0.0
 HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0

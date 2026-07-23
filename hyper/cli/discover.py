@@ -206,15 +206,12 @@ def main() -> int:
                         help="when excluding HFT: min median hold time in MINUTES (below = HFT, rejected)")
 
     def add_harvest_args(pr):
-        # Official ROI is the return-quality gate. Nominal contract volume is activity only and never a
-        # profitability denominator because leverage makes that ratio incomparable.
+        # Nominal contract volume is activity only and never a profitability denominator because leverage
+        # makes that ratio incomparable. Official four-week return quality comes from Portfolio history.
         pr.add_argument("--min-acct", type=float, default=config.HARVEST_MIN_ACCT,
                         help="real-capital floor (we copy by pct, not $)")
         pr.add_argument("--week-vlm-min", type=float, default=config.HARVEST_WEEK_VLM_MIN,
                         help="7d VOLUME floor — genuinely trading this week")
-        pr.add_argument("--week-roi-min", type=float, default=config.HARVEST_WEEK_ROI_MIN)
-        pr.add_argument("--month-roi-min", type=float, default=config.HARVEST_MONTH_ROI_MIN)
-        pr.add_argument("--all-roi-min", type=float, default=config.HARVEST_ALL_ROI_MIN)
         pr.add_argument("--week-pnl-min", type=float, default=config.HARVEST_WEEK_PNL_MIN)
         pr.add_argument("--month-pnl-min", type=float, default=config.HARVEST_MONTH_PNL_MIN)
         pr.add_argument("--all-pnl-min", type=float, default=config.HARVEST_ALL_PNL_MIN)
@@ -270,9 +267,6 @@ def main() -> int:
     shadow.add_argument("--scan-interval", type=float, default=10.0)
     shadow.add_argument("--max-pages", type=int, default=5)
     shadow.add_argument("--workers", type=int, default=4)
-    shadow.add_argument("--week-roi-min-pct", type=float)
-    shadow.add_argument("--month-roi-min-pct", type=float)
-    shadow.add_argument("--all-roi-min-pct", type=float)
     shadow.add_argument("--week-pnl-min", type=float)
     shadow.add_argument("--month-pnl-min", type=float)
     shadow.add_argument("--all-pnl-min", type=float)
@@ -297,9 +291,6 @@ def main() -> int:
         config.MIN_POST_INTERVAL = args.scan_interval
         overrides = {
             key: value for key, value in {
-                "HARVEST_WEEK_ROI_MIN": args.week_roi_min_pct,
-                "HARVEST_MONTH_ROI_MIN": args.month_roi_min_pct,
-                "HARVEST_ALL_ROI_MIN": args.all_roi_min_pct,
                 "HARVEST_WEEK_PNL_MIN": args.week_pnl_min,
                 "HARVEST_MONTH_PNL_MIN": args.month_pnl_min,
                 "HARVEST_ALL_PNL_MIN": args.all_pnl_min,

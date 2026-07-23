@@ -12,6 +12,16 @@ def stability(*, passed=True, sufficient=True, profitable=4):
         "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": sufficient,
         "passed": passed, "evaluableFolds": 4 if sufficient else 1,
         "profitableFolds": profitable, "qualifiedFolds": profitable,
+        "minReturn": 0.04, "minNetPerClosedReturn": 0.005,
+        "folds": [
+            {
+                "evaluable": sufficient or index == 0,
+                "return": 0.08,
+                "averageClosedNetReturn": 0.01,
+                "qualified": index < profitable,
+            }
+            for index in range(4)
+        ],
     }
 
 
@@ -81,7 +91,24 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(loss["status"], "copy_not_profitable")
 
     def test_any_positive_strict_copy_stays_challenger(self):
-        result = judge(copy_bt_net_pnl=100.0)
+        floor_weekly = stability()
+        for fold in floor_weekly["folds"]:
+            fold["return"] = .041
+            fold["averageClosedNetReturn"] = .0051
+        result = judge(
+            copy_bt_net_pnl=100.0,
+            copy_expected_return=.021,
+            copy_return_lcb=0.0,
+            copy_positive_probability=.55,
+            copy_risk_score=.60,
+            execution_score=.75,
+            actionable_open_rate=.70,
+            capacity_fit=.75,
+            open_probability_48h=.50,
+            sector_policy_json=json.dumps({
+                "allowed": ["crypto"], "copyWeeklyProfitability": floor_weekly,
+            }),
+        )
         self.assertTrue(result["eligible"])
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["role"], "challenger")
@@ -245,6 +272,36 @@ class FollowScoreTests(unittest.TestCase):
         ))
         self.assertAlmostEqual(small, large)
         self.assertEqual(small_detail["economicReturns"], large_detail["economicReturns"])
+
+    def test_copy_score_ignores_legacy_raw_and_overlapping_window_pnl(self):
+        low, _ = compute_follow_score(evidence(
+            score=.05,
+            copy_bt_net_pnl=100,
+            copy_bt_14d_net_pnl=-500,
+            copy_bt_7d_net_pnl=-900,
+        ))
+        high, _ = compute_follow_score(evidence(
+            score=.99,
+            copy_bt_net_pnl=50_000,
+            copy_bt_14d_net_pnl=40_000,
+            copy_bt_7d_net_pnl=30_000,
+        ))
+        self.assertAlmostEqual(low, high)
+
+    def test_stronger_independent_weekly_economics_raise_score(self):
+        baseline = stability()
+        stronger = stability()
+        for fold in stronger["folds"]:
+            fold["return"] = .16
+            fold["averageClosedNetReturn"] = .03
+        low, low_detail = compute_follow_score(evidence(sector_policy_json=json.dumps({
+            "allowed": ["crypto"], "copyWeeklyProfitability": baseline,
+        })))
+        high, high_detail = compute_follow_score(evidence(sector_policy_json=json.dumps({
+            "allowed": ["crypto"], "copyWeeklyProfitability": stronger,
+        })))
+        self.assertGreater(high, low)
+        self.assertGreater(high_detail["economicScore"], low_detail["economicScore"])
 
 
 if __name__ == "__main__":

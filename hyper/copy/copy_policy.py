@@ -19,11 +19,11 @@ COPY_POLICY_PARAM_KEYS = (
     "COPY_BT_MIN_CLOSED_7D", "CORE_COPY_MIN_CAMPAIGNS_30D",
     "CORE_COPY_MIN_CAMPAIGN_WIN_RATE", "CORE_COPY_MIN_BODY_WIN_RATE",
     "CORE_MIN_FOLLOW_SCORE",
-    "CORE_RETENTION_MIN_COPY_RETURN_30D", "CORE_SOFT_FAIL_CONFIRMATIONS",
+    "CORE_SOFT_FAIL_CONFIRMATIONS",
     "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
     "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS", "CORE_INTRATRADE_DD_MAX",
     "CORE_INTRATRADE_DD_REJECT", "CORE_DEEP_BAG_MAX_FAILED", "CORE_DEEP_BAG_MIN_RECOVERY_RATE",
-    "COPY_MIN_EXPECTED_MARGIN_RETURN", "CORE_MIN_COPY_RETURN_30D", "COPY_MIN_RAW_PAYOFF_RATIO",
+    "COPY_MIN_EXPECTED_MARGIN_RETURN", "COPY_MIN_RAW_PAYOFF_RATIO",
     "COPY_STABILITY_FOLD_DAYS", "COPY_STABILITY_FOLD_COUNT",
     "COPY_STABILITY_MIN_EVALUABLE_FOLDS", "COPY_STABILITY_MIN_PROFITABLE_FOLDS",
     "COPY_STABILITY_MIN_RETURN", "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD",
@@ -42,7 +42,6 @@ class CopyPolicy:
     core_min_campaign_win_rate: float
     core_min_body_win_rate: float
     core_min_follow_score: float
-    retention_min_return_30d: float
     soft_fail_confirmations: int
     core_max_liquidations_30d: int
     deep_bag_event_pct: float
@@ -53,7 +52,6 @@ class CopyPolicy:
     deep_bag_max_failed: int
     deep_bag_min_recovery_rate: float
     min_expected_margin_return: float
-    core_min_return_30d: float
     min_raw_payoff_ratio: float
     stability_fold_days: int
     stability_fold_count: int
@@ -103,7 +101,6 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         )),
         core_min_body_win_rate=float(_value(values, "CORE_COPY_MIN_BODY_WIN_RATE", 0.40)),
         core_min_follow_score=float(_value(values, "CORE_MIN_FOLLOW_SCORE", 0.75)),
-        retention_min_return_30d=float(_value(values, "CORE_RETENTION_MIN_COPY_RETURN_30D", 0.07)),
         soft_fail_confirmations=int(_value(values, "CORE_SOFT_FAIL_CONFIRMATIONS", 2) or 1),
         core_max_liquidations_30d=int(_value(
             values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 1,
@@ -116,7 +113,6 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         deep_bag_max_failed=int(_value(values, "CORE_DEEP_BAG_MAX_FAILED", 1) or 0),
         deep_bag_min_recovery_rate=float(_value(values, "CORE_DEEP_BAG_MIN_RECOVERY_RATE", 0.50)),
         min_expected_margin_return=float(_value(values, "COPY_MIN_EXPECTED_MARGIN_RETURN", 0.02)),
-        core_min_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.10)),
         min_raw_payoff_ratio=float(_value(values, "COPY_MIN_RAW_PAYOFF_RATIO", 0.60)),
         stability_fold_days=int(_value(values, "COPY_STABILITY_FOLD_DAYS", 7) or 7),
         stability_fold_count=int(_value(values, "COPY_STABILITY_FOLD_COUNT", 4) or 4),

@@ -8,11 +8,12 @@ from hyper import config, params, storage
 
 
 class ScannerSettingsParamTests(unittest.TestCase):
-    def test_product_defaults_use_recent_roi_recall_and_month_only_perp_profit(self):
+    def test_product_defaults_use_cheap_recall_before_official_weekly_stability(self):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 250_000.0)
         self.assertEqual(config.HARVEST_MIN_ACCT, 5_000.0)
-        self.assertEqual((config.HARVEST_WEEK_ROI_MIN, config.HARVEST_MONTH_ROI_MIN,
-                          config.HARVEST_ALL_ROI_MIN), (0.10, 0.20, 0.10))
+        self.assertFalse(hasattr(config, "HARVEST_WEEK_ROI_MIN"))
+        self.assertFalse(hasattr(config, "HARVEST_MONTH_ROI_MIN"))
+        self.assertFalse(hasattr(config, "HARVEST_ALL_ROI_MIN"))
         self.assertEqual((config.HARVEST_WEEK_PNL_MIN, config.HARVEST_MONTH_PNL_MIN,
                           config.HARVEST_ALL_PNL_MIN), (0.0, 0.0, 0.0))
         self.assertEqual(config.HARVEST_PERP_PNL_SHARE_MIN, 0.60)
@@ -36,9 +37,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
             follow = params.load_follow(db)
             self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 250_000.0)
             self.assertEqual(scanner["HARVEST_MIN_ACCT"], 5_000.0)
-            self.assertEqual(scanner["HARVEST_WEEK_ROI_MIN"], 0.10)
-            self.assertEqual(scanner["HARVEST_MONTH_ROI_MIN"], 0.20)
-            self.assertEqual(scanner["HARVEST_ALL_ROI_MIN"], 0.10)
+            self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner)
+            self.assertNotIn("HARVEST_MONTH_ROI_MIN", scanner)
+            self.assertNotIn("HARVEST_ALL_ROI_MIN", scanner)
             self.assertEqual(scanner["HARVEST_WEEK_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_MONTH_PNL_MIN"], 0.0)
             self.assertEqual(scanner["HARVEST_ALL_PNL_MIN"], 0.0)
@@ -85,9 +86,12 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner_keys[:4], [
                 "HARVEST_MIN_ACCT",
                 "HARVEST_WEEK_VLM_MIN",
-                "HARVEST_WEEK_ROI_MIN",
-                "HARVEST_MONTH_ROI_MIN",
+                "HARVEST_WEEK_PNL_MIN",
+                "HARVEST_MONTH_PNL_MIN",
             ])
+            self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner_keys)
+            self.assertNotIn("HARVEST_MONTH_ROI_MIN", scanner_keys)
+            self.assertNotIn("HARVEST_ALL_ROI_MIN", scanner_keys)
             self.assertNotIn("HARVEST_WEEK_VLM_MAX", scanner_keys)
             self.assertNotIn("HARVEST_PNL_VOL_MIN", scanner_keys)
             self.assertNotIn("PORTFOLIO_MAX_TURNOVER", scanner_keys)
@@ -139,9 +143,6 @@ class ScannerSettingsParamTests(unittest.TestCase):
             params.seed_params(db)
             old = {
                 "HARVEST_MIN_ACCT": "30000",
-                "HARVEST_WEEK_ROI_MIN": "25",
-                "HARVEST_MONTH_ROI_MIN": "45",
-                "HARVEST_ALL_ROI_MIN": "50",
                 "HARVEST_WEEK_PNL_MIN": "5000",
                 "HARVEST_MONTH_PNL_MIN": "15000",
                 "HARVEST_ALL_PNL_MIN": "20000",
@@ -156,10 +157,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             values = dict(db.execute(
                 "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
             ).fetchall())
-            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 5_000.0)
-            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 20.0)
-            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_WEEK_VLM_MIN"]), 250_000.0)
             self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 0.0)
@@ -168,33 +166,30 @@ class ScannerSettingsParamTests(unittest.TestCase):
 
             # After this migration has installed the new default metadata, an operator may still
             # intentionally choose a former value without it being rewritten on every restart.
-            db.execute("UPDATE params SET value='45' WHERE key='HARVEST_MONTH_ROI_MIN'")
+            db.execute("UPDATE params SET value='8000' WHERE key='HARVEST_MONTH_PNL_MIN'")
             db.commit()
             params.seed_params(db)
             self.assertEqual(float(db.execute(
-                "SELECT value FROM params WHERE key='HARVEST_MONTH_ROI_MIN'"
-            ).fetchone()[0]), 45.0)
+                "SELECT value FROM params WHERE key='HARVEST_MONTH_PNL_MIN'"
+            ).fetchone()[0]), 8_000.0)
 
             # A custom value can legitimately equal some *other* historical default. Migration is allowed
             # only when value still equals that row's own default, not merely when both appear in the known
             # predecessor set.
             db.execute(
-                "UPDATE params SET value='15',default_value='5' WHERE key='HARVEST_WEEK_ROI_MIN'"
+                "UPDATE params SET value='8000',default_value='5000' WHERE key='HARVEST_MONTH_PNL_MIN'"
             )
             db.commit()
             params.seed_params(db)
             self.assertEqual(float(db.execute(
-                "SELECT value FROM params WHERE key='HARVEST_WEEK_ROI_MIN'"
-            ).fetchone()[0]), 15.0)
+                "SELECT value FROM params WHERE key='HARVEST_MONTH_PNL_MIN'"
+            ).fetchone()[0]), 8_000.0)
 
     def test_seed_params_migrates_immediately_previous_harvest_surface(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
             previous = {
-                "HARVEST_WEEK_ROI_MIN": "15",
-                "HARVEST_MONTH_ROI_MIN": "20",
-                "HARVEST_ALL_ROI_MIN": "20",
                 "HARVEST_MONTH_PNL_MIN": "8000",
                 "HARVEST_PERP_PNL_SHARE_MIN": "60",
             }
@@ -206,12 +201,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
 
             values = dict(db.execute(
                 "SELECT key,value FROM params WHERE key IN "
-                "('HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
-                "'HARVEST_MONTH_PNL_MIN','HARVEST_PERP_PNL_SHARE_MIN')"
+                "('HARVEST_MONTH_PNL_MIN','HARVEST_PERP_PNL_SHARE_MIN')"
             ).fetchall())
-            self.assertEqual(float(values["HARVEST_WEEK_ROI_MIN"]), 10.0)
-            self.assertEqual(float(values["HARVEST_MONTH_ROI_MIN"]), 20.0)
-            self.assertEqual(float(values["HARVEST_ALL_ROI_MIN"]), 10.0)
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_PERP_PNL_SHARE_MIN"]), 60.0)
 
@@ -246,13 +237,29 @@ class ScannerSettingsParamTests(unittest.TestCase):
                     ("MIN_ACTIVE_SCORE", "0.6", "0.6"),
                     ("CORE_COPY_WIN_RATE_30D_MIN", "60", "60"),
                     ("COPY_MIN_TAIL_RETURN_30D", "3", "3"),
+                    ("CORE_MIN_COPY_RETURN_30D", "10", "10"),
+                    ("CORE_RETENTION_MIN_COPY_RETURN_30D", "8", "8"),
+                    ("HARVEST_WEEK_ROI_MIN", "10", "10"),
+                    ("HARVEST_MONTH_ROI_MIN", "20", "20"),
+                    ("HARVEST_ALL_ROI_MIN", "10", "10"),
+                    ("HARVEST_ROI_WINDOWS_MIN_PASS", "2", "2"),
                 ],
             )
             db.commit()
 
             params.seed_params(db)
 
-            for key in ("MIN_ACTIVE_SCORE", "CORE_COPY_WIN_RATE_30D_MIN", "COPY_MIN_TAIL_RETURN_30D"):
+            for key in (
+                "MIN_ACTIVE_SCORE",
+                "CORE_COPY_WIN_RATE_30D_MIN",
+                "COPY_MIN_TAIL_RETURN_30D",
+                "CORE_MIN_COPY_RETURN_30D",
+                "CORE_RETENTION_MIN_COPY_RETURN_30D",
+                "HARVEST_WEEK_ROI_MIN",
+                "HARVEST_MONTH_ROI_MIN",
+                "HARVEST_ALL_ROI_MIN",
+                "HARVEST_ROI_WINDOWS_MIN_PASS",
+            ):
                 self.assertIsNone(db.execute(
                     "SELECT 1 FROM params WHERE key=?", (key,)
                 ).fetchone())
