@@ -619,54 +619,29 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT status FROM commands WHERE type='rescan'"
             ).fetchone(), ("done",))
 
-    def test_selection_replay_uses_current_params_without_mutating_profile(self):
+    def test_final_copy_summary_reuses_publication_certification(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
-            db.execute(
-                "INSERT INTO scan_generation(generation,status,complete,publishable,is_current,started_at) "
-                "VALUES('g1','published',1,1,1,'now')"
-            )
-            db.execute(
-                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at,sector_policy_json) "
-                "VALUES('g1','0xaaa','core',1,'now',?)",
-                (json.dumps({"allowed": ["crypto"]}),),
-            )
-            db.execute(
-                "INSERT INTO profile(addr,status,copy_bt_net_pnl,copy_bt_closed_n) "
-                "VALUES('0xaaa','active',100,7)"
-            )
-            db.commit()
-            self.seal_market(db, "g1")
-            windows = {
-                30: {"copy_net_pnl": 250, "copy_win_rate": 0.75, "closed_n": 8,
-                     "opened_n": 9, "target_open_events": 10, "liquidations": 0, "fee_drag": 12},
-                14: {"copy_net_pnl": 180, "closed_n": 6},
-                7: {"copy_net_pnl": 90, "closed_n": 3},
-            }
-            sectors = {"crypto": windows, "stock": {}}
-            with patch.object(scanner, "_copy_bt_cached_fills", return_value=[
-                        {"time": 1, "coin": "BTC"}, {"time": 2, "coin": "xyz:AAPL"},
-                    ]), \
-                    patch.object(scanner, "_copy_bt_results", return_value=windows) as replay_results, \
-                    patch.object(scanner, "_sector_copy_bt_results", return_value=sectors), \
-                    patch.object(scanner, "_copy_bt_overrides", return_value={"MID_MARGIN_PCT": 0.05}), \
-                    patch.object(scanner, "_copy_bt_sigmas", return_value={}), \
-                    patch.object(scanner, "_copy_bt_market_ctx", return_value={}):
-                result = scanner.refresh_selection_copy_replay(db, "g1", replayed_at="later")
+            params.seed_params(db)
+            marginal = SimpleNamespace(search_meta={"finalStrictCopy": {
+                "status": "passed", "selectedCount": 10, "netPnl30d": 2500,
+                "expectedReturn30d": .25, "maxDrawdown30d": .08,
+                "liquidations30d": 0, "actionableOpenRate30d": .91,
+                "capacityFit30d": .88, "pricePathCoverage30d": .99,
+                "maintenanceMarginCoverage30d": 1.0,
+            }})
 
-            replay = db.execute(
-                "SELECT replay_copy_bt_net_pnl,replay_copy_bt_closed_n,replay_copy_bt_7d_net_pnl,"
-                "replay_params_hash,replayed_at FROM follow_selection WHERE generation='g1' AND addr='0xaaa'"
-            ).fetchone()
-            profile = db.execute(
-                "SELECT copy_bt_net_pnl,copy_bt_closed_n FROM profile WHERE addr='0xaaa'"
-            ).fetchone()
-            self.assertEqual(result["refreshed"], 1)
-            self.assertEqual(replay[:3], (250, 8, 90))
-            self.assertTrue(replay[3])
-            self.assertEqual(replay[4], "later")
-            self.assertEqual(profile, (100, 7))
-            self.assertEqual([row["coin"] for row in replay_results.call_args.args[1]], ["BTC"])
+            portfolio, per_wallet = scanner._store_final_copy_summary(db, "g1", marginal)
+
+            persisted = json.loads(db.execute(
+                "SELECT value FROM auto_tune_state WHERE key='effective_portfolio_replay'"
+            ).fetchone()[0])
+            self.assertEqual(portfolio["netPnl30"], 2500)
+            self.assertEqual(portfolio["validationSource"], "final_strict_copy")
+            self.assertEqual(persisted["expectedReturn30d"], .25)
+            self.assertEqual(per_wallet, {
+                "status": "skipped", "reason": "portfolio_strict_only", "refreshed": 0,
+            })
 
     def test_final_parameter_qualification_overrides_scan_time_core_signal(self):
         with tempfile.TemporaryDirectory() as td:
@@ -688,6 +663,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             db.execute(
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
                 [profile.get(col) for col in cols],
+            )
+            research_profile = {**profile, "addr": "0xbbb"}
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
+                [research_profile.get(col) for col in cols],
             )
             db.execute(
                 "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(1,?,?,?,'now')",
@@ -711,6 +691,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
                 ("0xaaa", "challenger", "challenger_weekly_return_watch"),
             ])
+            self.assertEqual(db.execute(
+                "SELECT state,current_role FROM wallet_registry WHERE addr='0xbbb'"
+            ).fetchone(), ("qualified", None))
 
     def test_final_parameter_policy_promotes_watch_sector_for_selected_core(self):
         with tempfile.TemporaryDirectory() as td:

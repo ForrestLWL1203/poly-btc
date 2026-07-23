@@ -252,8 +252,6 @@ def main() -> int:
     opt = sub.add_parser("optimize", help="path-regate Core and jointly tune all copy parameters")
     opt.add_argument("--generation")
     opt.add_argument("--stamp")
-    rr = sub.add_parser("refresh-selection-replay", help=argparse.SUPPRESS)
-    rr.add_argument("--generation")
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
     rs.add_argument("--generation")
     rs.add_argument("--stamp")
@@ -351,10 +349,6 @@ def main() -> int:
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "optimize":
         result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
-        print(json.dumps(result, sort_keys=True, default=str))
-    elif args.cmd == "refresh-selection-replay":
-        generation_id = args.generation or scanner.selection.latest_published_generation(db)
-        result = scanner.refresh_selection_copy_replay(db, generation_id)
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "repair-selection":
         result = scanner.repair_published_selection(

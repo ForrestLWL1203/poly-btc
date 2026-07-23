@@ -36,7 +36,6 @@ from hyper.copy.sector import (
     SECTORS,
     apply_allowed_sector_copy_metrics,
     classify_coin,
-    compact_sector_results,
 )
 from hyper.copy.fill_transition import classify_fill_transition
 from hyper.market import generation_market, price_path, rest, volatility
@@ -3079,6 +3078,18 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
+    # ``eligible`` is deliberately broad: any profitable, non-hard-risk profile remains researchable.
+    # Only the bounded, path-certified formation surface belongs in the operational Challenger set. Keeping
+    # every positive profile in follow_selection made hundreds of research wallets daily retention targets.
+    operational_candidate_set = set(desired)
+    operational_candidate_set.update(
+        (addr or "").lower() for addr in dict(effective_qualifications or {}) if addr
+    )
+    operational_candidate_set.update(
+        (item.get("addr") or "").lower()
+        for item in (formation_meta or {}).get("admission") or ()
+        if isinstance(item, dict) and item.get("addr")
+    )
     declared_effective_pins = tuple(
         (addr or "").lower()
         for addr in (formation_meta or {}).get("effectiveStarred") or ()
@@ -3263,6 +3274,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         qualification = row.get("follow_qualification") or {}
         candidate_ok = refreshed and active and bool(qualification.get("eligible"))
         include = True
+        research_only = False
         if addr in selected_set and enabled:
             role = selection.CORE
             reason = (
@@ -3278,7 +3290,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             role = selection.QUARANTINE
             reason = "deferred_data_error" if data_status == "deferred_data_error" else "copy_data_error"
             include = False
-        elif candidate_ok:
+        elif candidate_ok and addr in operational_candidate_set:
             role = selection.CHALLENGER
             if not enabled:
                 reason = "operator_disabled"
@@ -3290,6 +3302,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 reason = f"{reason}:exit_pending"
         elif addr in held:
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
+        elif candidate_ok:
+            role, reason = selection.REJECTED, "research_pool_not_bounded"
+            include = False
+            research_only = True
         else:
             role = selection.REJECTED
             reason = qualification.get("status") or row.get("reason") or "not_qualified"
@@ -3307,9 +3323,11 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
             ))
-        lifecycle_state = role if role in {
-            selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY
-        } else "quarantine" if role == selection.QUARANTINE else "rejected"
+        lifecycle_state = (
+            "qualified" if research_only
+            else role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY}
+            else "quarantine" if role == selection.QUARANTINE else "rejected"
+        )
         upsert_wallet_registry(
             db, addr, generation=generation_id, seen_at=stamp,
             state=lifecycle_state,
@@ -4222,101 +4240,19 @@ def _selection_market_snapshot_validation(db, generation_id, rows, now_ms) -> di
     return generation_market.validate_coins(db, generation_id, coins)
 
 
-def refresh_selection_copy_replay(db, generation_id: str, *, replayed_at=None) -> dict:
-    """Refresh dashboard Copy PnL with the currently effective follow parameters.
-
-    Scan-time profile evidence remains the immutable qualification snapshot.  Auto-tune runs after list
-    publication, so its per-wallet replay belongs on the generation selection: the UI can match the live
-    sizing/add/leverage rules without a post-tune regate changing Core membership.
-    """
-    current = selection.latest_published_generation(db)
-    if not generation_id or current != generation_id:
-        return {"status": "skipped", "reason": "generation_not_current", "generation": generation_id}
-    if not generation_market.has_snapshot(db, generation_id):
-        return {
-            "status": "skipped", "reason": "market_snapshot_missing_rescan_required",
-            "generation": generation_id,
-        }
-    rows = db.execute(
-        "SELECT addr,sector_policy_json FROM follow_selection WHERE generation=? "
-        "AND role IN ('core','challenger') ORDER BY addr",
-        (generation_id,),
-    ).fetchall()
-    if not rows:
-        return {"status": "ok", "generation": generation_id, "refreshed": 0}
-
-    now_ms = int(time.time() * 1000)
-    stamp = replayed_at or now_iso()
-    overrides = {**_copy_bt_overrides(db), "AMBIGUOUS_PATH_MODE": "liquidate"}
-    replay_hash = hashlib.sha256(
-        json.dumps(overrides, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
-    ).hexdigest()[:16]
-    replay_sigmas, replay_market_ctx = generation_market.load(db, generation_id)
-    replay_ctx = SimpleNamespace(
-        copy_bt_days=int(config.COPY_BT_DAYS),
-        copy_bt_sigmas=replay_sigmas,
-        copy_bt_market_ctx=replay_market_ctx,
-        copy_bt_overrides=overrides,
-        copy_bt_valuation_marks=_current_copy_valuation_marks(),
-        scan_generation=generation_id,
-    )
-    updates = []
-    for addr, raw_policy in rows:
-        fills = _copy_bt_cached_fills(db, addr, now_ms, replay_ctx)
-        try:
-            sector_policy = json.loads(raw_policy or "{}")
-        except (TypeError, ValueError):
-            sector_policy = {}
-        evidence_sectors = set(sector_policy.get("allowed") or ()) or set(
-            sector_policy.get("watch") or ()
+def _store_final_copy_summary(db, generation_id: str, marginal) -> tuple[dict, dict]:
+    """Reuse publication certification; never replay Core or Challenger after publication."""
+    if marginal is None:
+        return (
+            {"status": "skipped", "reason": "no_automatic_final_certification"},
+            {"status": "skipped", "reason": "portfolio_strict_only", "refreshed": 0},
         )
-        evidence_fills = (
-            [fill for fill in fills if classify_coin(fill.get("coin")) in evidence_sectors]
-            if evidence_sectors else fills
-        )
-        path_start = now_ms - (
-            int(config.COPY_BT_DAYS) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
-        ) * 86_400_000
-        replay_ctx.copy_bt_price_path = prepare_price_path(price_path.load_refined(
-            db, evidence_fills, path_start, now_ms,
-        ))
-        replay_ctx.copy_bt_price_path_meta = price_path.coverage(
-            db, evidence_fills, path_start, now_ms,
-        )
-        windows = _copy_bt_results(addr, evidence_fills, now_ms, replay_ctx)
-        sectors = _sector_copy_bt_results(addr, evidence_fills, now_ms, replay_ctx)
-        primary = (windows.get(30) or windows.get(max(windows))) if windows else {}
-        recent14 = windows.get(14) or {}
-        recent7 = windows.get(7) or {}
-        opened = int(primary.get("opened_n") or 0)
-        target_open = int(primary.get("target_open_events") or 0)
-        updates.append((
-            primary.get("copy_net_pnl"), primary.get("copy_win_rate"),
-            int(primary.get("closed_n") or 0),
-            (opened / target_open) if target_open else None,
-            int(primary.get("liquidations") or 0), primary.get("fee_drag"),
-            primary.get("unrealized_pnl"), primary.get("valuation_status"),
-            recent14.get("copy_net_pnl"), recent14.get("unrealized_pnl"),
-            int(recent14.get("closed_n") or 0),
-            recent7.get("copy_net_pnl"), recent7.get("unrealized_pnl"),
-            int(recent7.get("closed_n") or 0),
-            json.dumps(compact_sector_results(sectors, joint_results=windows), sort_keys=True),
-            replay_hash, stamp, generation_id, addr,
-        ))
-    db.executemany(
-        "UPDATE follow_selection SET replay_copy_bt_net_pnl=?,replay_copy_bt_win_rate=?,"
-        "replay_copy_bt_closed_n=?,replay_copy_bt_open_fill_rate=?,replay_copy_bt_liquidations=?,"
-        "replay_copy_bt_fee_drag=?,replay_copy_bt_unrealized_pnl=?,replay_copy_bt_valuation_status=?,"
-        "replay_copy_bt_14d_net_pnl=?,replay_copy_bt_14d_unrealized_pnl=?,replay_copy_bt_14d_closed_n=?,"
-        "replay_copy_bt_7d_net_pnl=?,replay_copy_bt_7d_unrealized_pnl=?,replay_copy_bt_7d_closed_n=?,replay_sector_copy_json=?,"
-        "replay_params_hash=?,replayed_at=? WHERE generation=? AND addr=?",
-        updates,
-    )
-    db.commit()
-    return {
-        "status": "ok", "generation": generation_id, "refreshed": len(updates),
-        "paramsHash": replay_hash, "replayedAt": stamp,
+    strict = ((marginal.search_meta or {}).get("finalStrictCopy") if marginal else None)
+    portfolio = auto_tune.store_certified_portfolio_replay(db, generation_id, strict)
+    per_wallet = {
+        "status": "skipped", "reason": "portfolio_strict_only", "refreshed": 0,
     }
+    return portfolio, per_wallet
 
 
 def repair_published_selection(db, generation_id=None, stamp=None, *, replace_existing=False,
@@ -4414,7 +4350,14 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         reason="repaired_selection" if previous_core else "repaired_cold_bootstrap",
         parent_revision=expected_strategy_revision,
         expected_active_revision=expected_strategy_revision,
-        validation={"marketSnapshot": market_validation}, stamp=stamp,
+        validation={
+            **(
+                (marginal.search_meta or {}) if marginal
+                else (formation.get("search") or {})
+            ),
+            "marketSnapshot": market_validation,
+        },
+        stamp=stamp,
     )
     for row in rows:
         pipeline_audit._insert_event(
@@ -4452,14 +4395,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         },
     )
     db.commit()
-    try:
-        portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
-    except Exception as exc:  # noqa: BLE001
-        portfolio_replay = {"status": "error", "error": str(exc)[:300]}
-    try:
-        selection_replay = refresh_selection_copy_replay(db, generation_id, replayed_at=now_iso())
-    except Exception as exc:  # noqa: BLE001
-        selection_replay = {"status": "error", "error": str(exc)[:300]}
+    portfolio_replay, selection_replay = _store_final_copy_summary(
+        db, generation_id, marginal,
+    )
     tune_summary = {
         "status": "complete", "reason": "synchronous_quality_prefix_formation",
         "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,
@@ -4948,7 +4886,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         active_strategy = strategy_revision.create_revision(
             db, generation_id, source="resume_finalize", reason="quality_prefix_formation",
             validation={
-                **(formation.get("search") or {}), "marketSnapshot": market_validation,
+                **(marginal.search_meta or {}), "marketSnapshot": market_validation,
             }, stamp=publication_stamp,
         )
         for item in rows:
@@ -4985,14 +4923,9 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         _set_scan_progress(db, state="idle", stage="error")
         raise
 
-    try:
-        portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
-    except Exception as exc:  # noqa: BLE001
-        portfolio_replay = {"status": "error", "error": str(exc)[:300]}
-    try:
-        selection_replay = refresh_selection_copy_replay(db, generation_id, replayed_at=now_iso())
-    except Exception as exc:  # noqa: BLE001
-        selection_replay = {"status": "error", "error": str(exc)[:300]}
+    portfolio_replay, selection_replay = _store_final_copy_summary(
+        db, generation_id, marginal,
+    )
     auto_tune.bind_active_tune_rollback_core(db, current_core)
     _set_scan_progress(
         db, state="idle", stage="persist", candidates_scanned=profile_total,
@@ -5532,7 +5465,10 @@ def scan(db, p) -> None:
                 reason=("manual_selection_preserved" if selection_mode == "manual"
                         else "quality_prefix_formation"),
                 validation={
-                    **((formation or {}).get("search") or {}),
+                    **(
+                        (marginal.search_meta or {}) if marginal
+                        else ((formation or {}).get("search") or {})
+                    ),
                     "marketSnapshot": market_validation,
                 },
                 stamp=publication_stamp,
@@ -5646,16 +5582,9 @@ def scan(db, p) -> None:
 
     if published:
         _set_scan_progress(db, stage="materialize_replay", candidates_scanned=len(workset))
-        try:
-            portfolio_replay = auto_tune.store_effective_portfolio_replay(db, generation_id)
-        except Exception as exc:  # noqa: BLE001 - published strategy remains authoritative
-            portfolio_replay = {"status": "error", "error": str(exc)[:300]}
-        try:
-            selection_replay = refresh_selection_copy_replay(
-                db, generation_id, replayed_at=now_iso(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            selection_replay = {"status": "error", "error": str(exc)[:300]}
+        portfolio_replay, selection_replay = _store_final_copy_summary(
+            db, generation_id, marginal,
+        )
         tune_summary = {
             "status": "complete", "reason": "synchronous_quality_prefix_formation",
             "portfolioReplay": portfolio_replay, "selectionReplay": selection_replay,

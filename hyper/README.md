@@ -54,14 +54,18 @@ Wallet quality and funded-account membership are separate decisions.
 - Thirty-day Leaderboard ROI ≥20% is a recall gate; 7-day ROI ≥10% is ranking/audit only. Profile hard gates remove invalid
   data and systematic uncopyable structures; HFT needs at least ten complete rounds, Grid needs at least five
   complete rounds with a strict majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
-- Any positive 30-day strict-Copy result remains visible as Challenger. Missing samples, stale activity, cost
-  stress, or outlier evidence block Core but do not turn profit into rejection. New Core requires at least 10%,
+- Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
+  activity, cost stress, or outlier evidence block Core but do not erase that research evidence. Only the
+  bounded top-40, path-certified formation surface is published as operational Challenger/Core, preventing
+  hundreds of merely positive wallets from becoming daily retention work. New Core requires at least 10%,
   ten independent Campaigns, and the non-overlapping stability/execution/risk surface.
 - The final copy-follow score ranks wallets that passed those gates. It combines raw profile quality and copy
   evidence; it is displayed on a 0–100 scale while stored natively in `[0, 1]`.
-- The Core selector evaluates one shared simulated account using empty-forward, all-backward, and current-Core
-  starts, then repeatedly checks add/remove/swap/pair-add moves under strict K-line replay. Score orders the
-  candidate pool; it does not force a score prefix or fixed base count.
+- The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
+  Count, add/remove/swap and parameter search then use normalized fills and the shared-account execution model;
+  they do not repeatedly scan candles. The winning membership receives exactly one conservative, path-complete
+  30-day strict-Copy certification before publication. Score orders the candidate pool; it does not force a
+  score prefix or fixed base count.
 - Final moves must improve portfolio economics and pass at least two evaluable/profitable non-overlapping
   ten-day folds plus 1.5x transaction-cost stress. Normal replacement/reordering is weekly;
   daily evidence refresh still removes a wallet immediately for a hard failure. While Core has fewer than eight
@@ -146,15 +150,18 @@ effective margin. Same-direction baskets use the most conservative included tier
 20% stable Crypto, 15% mid Crypto, 10% high-volatility Crypto, and 10% `xyz`/stock; there are at most three
 simultaneous symbols and two same-direction stock symbols. The account-wide 85% hard-margin ceiling remains.
 
-After Core publication, a generation-bound tuner searches:
+An explicit optimization run starts from the already qualified wallet pool and searches:
 
 - stable/mid/high volatility margin ceilings;
 - leverage caps and full-power deployment line;
 - smart-add gap, shrink, and hard-count parameters.
 
 The search evaluates independent grid axes, finalist combinations, walk-forward folds, holdout, and stress
-scenarios. It never changes the Core membership using stale profiles. The effective 30/14/7 portfolio replay is
-stored per generation and shown above the “跟单中” list as the 30-day estimated shared-account result.
+scenarios from fills. It never changes the Core membership using stale profiles and never runs a candle replay
+for every parameter or membership proposal. After the winning parameters and membership are fixed, the one final
+strict 30-day portfolio certification supplies the estimated shared-account result shown above the “跟单中”
+list. Publication reuses that result; it does not synchronously recalculate every Core and Challenger for
+Dashboard enrichment.
 
 The current Paper defaults allow automatic application after the validation gates:
 

@@ -53,13 +53,14 @@ def evaluate_follow_eligibility(
     policy_values: Mapping | None = None,
     as_of_ms: int | None = None,
 ) -> dict:
-    """Classify evidence once: positive wallets remain Challenger; Core adds only non-duplicated proof.
+    """Classify evidence once: positive wallets remain researchable; Core adds non-duplicated proof.
 
     The old policy independently gated 7/14/30 returns, win rates, PF, tail-2 and concentration body.  Those
     checks were correlated views of the same trades and created an exclusion cascade.  V3 keeps hard data,
-    liquidation and deep-loss safety; profitability under our strict replay earns Challenger visibility;
-    Core additionally requires ten campaigns, three non-overlapping 10-day folds, fresh activity, one-winner
-    removal, cost stress and executable capacity.
+    liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
+    The bounded formation surface may publish that wallet as Challenger; Core additionally requires ten
+    campaigns, three non-overlapping 10-day folds, fresh activity, one-winner removal, cost stress and
+    executable capacity.
     """
     del min_closed14, min_closed7, min_pnl_per_closed, margin_equity_pct
     policy = load_copy_policy(policy_values)

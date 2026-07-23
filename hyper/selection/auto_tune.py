@@ -794,58 +794,29 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
     return _compact_backtest(result)
 
 
-def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | None = None) -> dict:
-    """Persist the final Core's shared-account replay under currently effective parameters."""
-    addrs = _load_followed_wallets(db, {})
-    now_ms = int(now_ms or time.time() * 1000)
-    if not addrs:
+def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None) -> dict:
+    """Persist the already-computed final strict 30-day Core replay without replaying it again."""
+    strict = dict(strict or {})
+    core_count = int(strict.get("selectedCount") or 0)
+    if not core_count:
         summary = {
             "generation": generation_id, "coreCount": 0, "replayedAt": now_iso(),
-            "status": "empty",
+            "status": "empty", "validationSource": "final_strict_copy",
         }
         _state_set(db, "effective_portfolio_replay", summary)
         db.commit()
         return summary
-    window_fills = _portfolio_window_fills(db, addrs, now_ms)
-    if window_fills is None or not any(window_fills.values()):
-        return {"generation": generation_id, "status": "unavailable", "coreCount": len(addrs)}
+    if strict.get("status") != "passed":
+        return {
+            "generation": generation_id, "coreCount": core_count,
+            "status": "unavailable", "reason": "final_strict_copy_missing",
+        }
     follow = params.load_follow(db)
     if "SMART_ADD" in follow:
         follow["ADD_STRATEGY"] = "smart" if follow["SMART_ADD"] else "hardcap"
-    all_fills = list(window_fills.get(max(window_fills)) or [])
-    path_start = now_ms - (max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))) * 86_400_000
-    sigmas = _load_sigmas(db, generation_id)
-    market_ctx = _load_market_ctx(db, generation_id)
-    path_rows, path_meta = prepare_refined_price_path(
-        db, all_fills, path_start, now_ms, sigmas=sigmas, overrides=follow,
-        market_ctx=market_ctx, immutable_market_ctx=True,
-    )
-    path_rows = prepare_price_path(path_rows)
-    windows = _candidate_windows(
-        db, addrs, sigmas, follow, now_ms, window_fills=window_fills,
-        market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
-    )
-    worst_windows = _candidate_windows(
-        db, addrs, sigmas, {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, now_ms,
-        window_fills=window_fills, market_ctx=market_ctx,
-        path_rows=path_rows, path_meta=path_meta,
-    )
     params_hash = hashlib.sha256(
         json.dumps(follow, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     ).hexdigest()[:16]
-    primary = windows.get(30) or windows.get(max(windows))
-    worst_primary = worst_windows.get(30) or worst_windows.get(max(worst_windows))
-    conservative_net30 = min(
-        f(primary.get("copy_net_pnl")), f(worst_primary.get("copy_net_pnl")),
-    )
-    conservative_liquidations30 = max(
-        int(primary.get("liquidations") or 0), int(worst_primary.get("liquidations") or 0),
-    )
-    fills_only_primary = evaluate_portfolio_window(
-        db, addrs, sigmas, follow, now_ms,
-        window_fills={30: list(window_fills.get(30) or [])}, days=30,
-        market_ctx=market_ctx,
-    )
     effective_params = {
         "leverageCaps": {key: f(follow.get(key)) for key in LEV_KEYS},
         "marginPct": {key: f(follow.get(key)) for key in MARGIN_KEYS},
@@ -863,45 +834,29 @@ def store_effective_portfolio_replay(db, generation_id: str, *, now_ms: int | No
     summary = {
         "generation": generation_id,
         "status": "ok",
-        "coreCount": len(addrs),
+        "coreCount": core_count,
         "paramsHash": params_hash,
         "replayedAt": now_iso(),
-        "netPnl30": f(primary.get("copy_net_pnl")),
-        "netPnl30Worst": conservative_net30,
-        "netPnl30AmbiguousLiquidate": f(worst_primary.get("copy_net_pnl")),
-        "fillsOnlyNetPnl30": f(fills_only_primary.get("copy_net_pnl")),
-        "closed30": int(primary.get("closed_n") or 0),
-        "maxDrawdown30": f(primary.get("max_drawdown")),
-        "openRate30": f(primary.get("open_fill_rate")),
-        "capacityFit30": f(primary.get("capacity_open_fit")),
-        "liquidations30": int(primary.get("liquidations") or 0),
-        "liquidations30Worst": conservative_liquidations30,
-        "liquidations30AmbiguousLiquidate": int(worst_primary.get("liquidations") or 0),
-        "fillsOnlyLiquidations30": int(fills_only_primary.get("liquidations") or 0),
-        "ambiguousLiquidations30": int(primary.get("ambiguous_liquidations") or 0),
-        "pricePathCoverage30": f(primary.get("price_path_coverage")),
-        "pricePathBoundarySkips30": int(primary.get("price_path_boundary_skips") or 0),
+        "netPnl30": f(strict.get("netPnl30d")),
+        # The certification replay already uses the conservative liquidate-on-ambiguity mode.
+        "netPnl30Worst": f(strict.get("netPnl30d")),
+        "netPnl30AmbiguousLiquidate": f(strict.get("netPnl30d")),
+        "expectedReturn30d": strict.get("expectedReturn30d"),
+        "maxDrawdown30": f(strict.get("maxDrawdown30d")),
+        "openRate30": f(strict.get("actionableOpenRate30d")),
+        "capacityFit30": f(strict.get("capacityFit30d")),
+        "liquidations30": int(strict.get("liquidations30d") or 0),
+        "liquidations30Worst": int(strict.get("liquidations30d") or 0),
+        "liquidations30AmbiguousLiquidate": int(strict.get("liquidations30d") or 0),
+        "pricePathCoverage30": f(strict.get("pricePathCoverage30d")),
         "pricePathStatus": (
-            "covered" if f(primary.get("price_path_coverage"))
+            "covered" if f(strict.get("pricePathCoverage30d"))
             >= float(getattr(config, "CORE_PRICE_PATH_MIN_COVERAGE", .95)) else "unverified"
         ),
         "estimateKind": "trade_ohlc_conservative_proxy",
+        "validationSource": "final_strict_copy",
         "effectiveParams": effective_params,
-        "maintenanceMarginCoverage30": f(primary.get("maintenance_margin_coverage")),
-        "addMetricsVersion": primary.get("add_metrics_version"),
-        "addOutcomeCounts30": primary.get("add_outcome_counts") or {},
-        "rawAddOrderFollowRate30": primary.get("raw_add_order_follow_rate"),
-        "actionableAddCaptureRate30": primary.get("actionable_add_capture_rate"),
-        "entryGapPctWeighted30": primary.get("entry_gap_pct_weighted"),
-        "addFidelity30": primary.get("add_fidelity"),
-        "behaviorReplication30": primary.get("behavior_replication_v2"),
-        "behaviorReplication30Worst": worst_primary.get("behavior_replication_v2"),
-        "profitFactor30": primary.get("profit_factor"),
-        "netAfterTop1": primary.get("net_after_top1"),
-        "netAfterTop2": primary.get("net_after_top2"),
-        "profitConcentration30": primary.get("pnl_concentration") or {},
-        "netPnl14": f((windows.get(14) or {}).get("copy_net_pnl")),
-        "netPnl7": f((windows.get(7) or {}).get("copy_net_pnl")),
+        "maintenanceMarginCoverage30": f(strict.get("maintenanceMarginCoverage30d")),
     }
     _state_set(db, "effective_portfolio_replay", summary)
     db.commit()
