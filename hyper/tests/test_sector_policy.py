@@ -150,6 +150,41 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertTrue(policy["crypto"]["watch"])
         self.assertEqual(policy["crypto"]["status"], "sector_sample_watch")
 
+    def test_profitable_mix_sectors_share_wallet_sample_density_once(self):
+        crypto = bt(900, 4)
+        stock = bt(800, 3)
+        crypto["positions"] = [
+            {"closed_at": day * DAY_MS} for day in (1, 2, 3, 4)
+        ]
+        stock["positions"] = [
+            {"closed_at": day * DAY_MS} for day in (5, 6, 7)
+        ]
+        sector_results = {
+            "crypto": {30: crypto, 14: crypto, 7: crypto},
+            "stock": {30: stock, 14: stock, 7: stock},
+        }
+        structure = {
+            "source": "current_generation",
+            "crypto": {"allow": True, "status": "structural_ok"},
+            "stock": {"allow": True, "status": "structural_ok"},
+        }
+
+        policy = sector.evaluate_sector_policy(
+            sector_results, structural_policy=structure,
+        )
+
+        self.assertEqual(policy["allowed"], ["crypto", "stock"])
+        self.assertEqual(
+            policy["crypto"]["status"], "allowed_by_wallet_aggregate_evidence",
+        )
+        self.assertEqual(
+            policy["stock"]["status"], "allowed_by_wallet_aggregate_evidence",
+        )
+        self.assertEqual(
+            policy["crypto"]["aggregateEvidence"],
+            {"closed": 7, "campaigns": 7, "days": 7},
+        )
+
     def test_single_heavy_dca_with_recent_loss_fails_pressure_validation(self):
         sector_results = {
             "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(-100, 5)},

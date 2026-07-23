@@ -139,6 +139,12 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertGreater(windows[7]["window_start_equity"], 10_000.0)
         self.assertGreater(windows[7]["positions"][0]["margin"], 300.0)
+        # The later ETH open is sized from the already-compounded account. A stale fixed-$10k path would
+        # leave this margin at the original default-sized amount instead of scaling with window equity.
+        self.assertGreater(
+            windows[7]["positions"][0]["margin"],
+            windows[7]["window_start_equity"] * .02,
+        )
         self.assertEqual(windows[7]["target_open_events"], 1)
         self.assertEqual(windows[7]["continuous_replay_days"], 30)
 

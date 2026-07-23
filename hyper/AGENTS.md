@@ -109,7 +109,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   individual 10% 30-day and 3% latest-7-day lines as score/watch evidence; it does not repeat them as vetoes
   immediately before the shared funded replay. Formation entry still requires positive 30-day and latest-7-day
   Copy PnL, a 0.5% average net per close, at least five closed positions/Campaigns/evidence days, a passing
-  Campaign win rate, score 75, current activity, complete valuation/path data and no hard risk. The shared
+  Campaign win rate, current activity, an executable sector, complete valuation/path data and no hard risk. The shared
   replay then owns four-fold stability, the permitted losing-fold bound, 1.5x taker-fee stress, congestion,
   membership count and final return.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
@@ -175,11 +175,11 @@ default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
   score or outlier stress are explicit Challenger reasons rather than economic rejection;
-- individual Core diagnostics retain the eight-Campaign, 10% 30-day and 3% latest-7-day lines. The actual
+- individual Core diagnostics retain the eight-Campaign, score-75, 10% 30-day and 3% latest-7-day lines. The actual
   formation-entry contract is deliberately narrower and non-duplicated: positive 30-day and latest-7-day
   strict-Copy PnL, at least five independent Campaigns/closed positions/evidence days, 0.5% average net per
-  close, a passing Campaign win rate, score at least 75, activity within 72 hours, complete valuation/path
-  evidence, executable sector policy and no hard risk. Return magnitude, full eight-Campaign confidence and
+  close, a passing Campaign win rate, activity within 72 hours, complete valuation/path evidence, executable
+  sector policy and no hard risk. Score, return magnitude, the 12% soft path line, full eight-Campaign confidence and
   individual weekly status continue to affect score/reason labels but cannot prevent the shared funded replay
   from measuring the portfolio they are meant to judge;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
@@ -245,9 +245,9 @@ rule.
 `watchlist.score` uses 30% funded economics, 25% repeatability, 15% edge confidence, 15% operability, and
 15% path risk. Funded economics combines explicit 30d and latest-7d return magnitude with non-overlapping
 fold timing and median per-close density; overlapping 14d return and the legacy raw score contribute zero.
-The sample-confidence factor saturates at the actual qualification floors. New Core must score at least
-75/100 after all formation-entry hard gates pass; score then orders those survivors and cannot compensate for
-a failed win-rate, thin-profit, current-profit, activity, valuation, path or risk gate. Weekly timing, cost
+The sample-confidence factor saturates at the actual qualification floors. The 75/100 line is a Core-quality
+diagnostic and ranking target, not a second absolute veto after the hard evidence contract. Score cannot compensate
+for a failed win-rate, thin-profit, current-profit, activity, valuation, path or risk gate. Weekly timing, cost
 stress, execution/capacity congestion and membership count are enforced once on the shared funded portfolio.
 
 Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
@@ -277,12 +277,13 @@ parameter retuning, and leave-one-out reshuffling run only after seven days sinc
 change. Scheduled evidence refresh still removes liquidation, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
-1. Require positive Copy economics, at least five closes, aggregate 0.5%-of-equity average net per close, and
-   every cheap hard-risk/data gate. Rank at most 16 pre-Core wallets plus required current/pinned members, then
+1. Require positive scan-time Copy economics, at least five closes, valid valuation and no known repeated/
+   forward liquidation hard risk. Rank at most 16 pre-Core wallets plus required current/pinned members, then
    run that bounded pool through
    canonical individual Copy replay once with the refined 15-minute path (and finer candles only for ambiguous
-   risk ranges). A positive, path-safe wallet may enter parameter discovery even if default parameters miss a
-   final return/score threshold.
+   risk ranges). A data-complete, path-safe wallet may enter parameter discovery even if default parameters
+   make its follower result thin or miss a return/score/sector threshold; those economics are rechecked on the
+   tuned surface before membership.
 2. Search wallet count and sizing together from cached fills: independently coarse-tune 16→8→12/boundary nodes,
    using continuous floating equity and congestion evidence, then full-tune only the winning count.
    The fast replay still models shared cash, margin, deployment, coin caps, fees, open capture and 1.5x cost

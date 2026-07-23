@@ -204,7 +204,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "status": "core_entry_qualified",
                     "checks": {
                         "pathRiskComplete": True, "valuationComplete": True,
-                        "sectorExecutable": True, "noForwardLiquidation": True,
+                        "sectorExecutable": True, "noRepeatedLiquidation": True,
+                        "noForwardLiquidation": True,
                     },
                 },
             }
@@ -429,7 +430,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "coreEligible": True,
                 "checks": {
                     "pathRiskComplete": True, "valuationComplete": True,
-                    "sectorExecutable": True, "noForwardLiquidation": True,
+                    "sectorExecutable": True, "noRepeatedLiquidation": True,
+                    "noForwardLiquidation": True,
                 },
             },
         }))
@@ -441,7 +443,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "pathRiskComplete": True, "valuationComplete": True,
                     # A current-surface watch sector is precisely what parameter
                     # discovery may repair; requiring it to be live already is circular.
-                    "sectorExecutable": False, "noForwardLiquidation": True,
+                    "sectorExecutable": False, "noRepeatedLiquidation": True,
+                    "noForwardLiquidation": True,
                 },
             },
         }))
@@ -484,7 +487,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             result["qualification"]["checks"]["strictCopyWeeklyPositive"]
         )
 
-    def test_formation_entry_keeps_score_and_recent_profit_as_hard_quality(self):
+    def test_formation_entry_keeps_recent_profit_hard_but_score_as_ranking(self):
         effective = {
             "copy_expected_return": .04,
             "copy_return_lcb": .01,
@@ -509,22 +512,25 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             "sector_copy_json": strict_sector_json(1800, 7, 600, 6, -1, 5),
         }, .80)
 
-        self.assertFalse(low_score["eligible"])
+        self.assertTrue(low_score["eligible"])
         self.assertFalse(low_score["checks"]["scoreAtLeastCoreFloor"])
         self.assertFalse(losing_week["eligible"])
         self.assertFalse(losing_week["checks"]["strictCopy7dPositive"])
 
     def test_manual_optimize_requalifies_incumbents_as_new_entries(self):
         source = inspect.getsource(scanner.optimize_published_generation)
+        forced_source = inspect.getsource(scanner._build_forced_prefix_selection)
 
         self.assertIn("force_entry_requalification=True", source)
+        self.assertIn("if force_promotion or not previous_roles:", forced_source)
         self.assertFalse(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": True, "coreEligible": False,
                 "status": "challenger_open_valuation_pending",
                 "checks": {
                     "pathRiskComplete": True, "valuationComplete": False,
-                    "sectorExecutable": True, "noForwardLiquidation": True,
+                    "sectorExecutable": True, "noRepeatedLiquidation": True,
+                    "noForwardLiquidation": True,
                 },
             },
         }))
@@ -534,17 +540,19 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "status": "challenger_sample_watch",
                 "checks": {
                     "pathRiskComplete": True, "valuationComplete": True,
-                    "sectorExecutable": True, "noForwardLiquidation": True,
+                    "sectorExecutable": True, "noRepeatedLiquidation": True,
+                    "noForwardLiquidation": True,
                 },
             },
         }))
-        self.assertFalse(scanner._formation_tune_candidate({
+        self.assertTrue(scanner._formation_tune_candidate({
             "follow_qualification": {
                 "eligible": False, "coreEligible": False,
                 "status": "copy_value_below_challenger_floor",
                 "checks": {
                     "pathRiskComplete": True, "valuationComplete": True,
-                    "sectorExecutable": True, "noForwardLiquidation": True,
+                    "sectorExecutable": True, "noRepeatedLiquidation": True,
+                    "noForwardLiquidation": True,
                 },
             },
         }))
@@ -595,6 +603,34 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual([row["addr"] for row in ranked], ["0xold"])
         self.assertEqual(retained, [("0xold", False)])
+
+    def test_formation_ranking_keeps_surface_economic_watch_for_tuning(self):
+        def replay(_db, _row, _now_ms, **_kwargs):
+            return {
+                "score": .40,
+                "qualification": {
+                    "eligible": False,
+                    "coreEligible": False,
+                    "hardRisk": False,
+                    "status": "copy_value_below_challenger_floor",
+                    "checks": {
+                        "pathRiskComplete": True,
+                        "valuationComplete": True,
+                        "noRepeatedLiquidation": True,
+                        "noForwardLiquidation": True,
+                    },
+                },
+            }
+
+        with patch.object(scanner, "_effective_follow_replay", side_effect=replay):
+            ranked = scanner._rank_formation_candidates_for_surface(
+                None, [{"addr": "0xwatch"}], 1000,
+                generation_id="g1", follow={}, valuation_marks={},
+                sigmas={}, market_ctx={},
+            )
+
+        self.assertEqual([row["addr"] for row in ranked], ["0xwatch"])
+        self.assertTrue(scanner._formation_tune_candidate(ranked[0]))
 
     def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):
         source = inspect.getsource(scanner.form_quality_prefix)
@@ -647,7 +683,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
 
-    def test_bounded_path_pool_prioritizes_incumbent_and_prepath_core_quality(self):
+    def test_bounded_path_pool_prioritizes_incumbent_and_allows_tuner_to_repair_thin_surface(self):
         checks = {
             key: True for key in (
                 "strictCopy30dPositive", "strictCopy30dReturn",
@@ -695,7 +731,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             [row["addr"] for row in selected],
-            ["0xincumbent", "0xready"],
+            ["0xincumbent", "0xweak", "0xready"],
         )
 
     def test_prepath_candidate_does_not_require_score_before_path_risk_exists(self):

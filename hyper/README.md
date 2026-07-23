@@ -162,8 +162,9 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
 Campaign. Target-wallet stability is screened first from official Portfolio: all four adjacent 7-day folds need
-at least 5% return. Our strict Copy separately requires at least 10% return over 30 days and at least 3% over
-the latest rolling 7 days. Its four floating-equity folds are slices of one continuous compounding replay:
+at least 5% return. The individual 10% 30-day, 3% latest-7-day and score-75 lines remain ranking diagnostics;
+live formation requires positive 30-day and latest-7-day strict Copy plus non-thin, repeatable evidence. Its four
+floating-equity folds are slices of one continuous compounding replay:
 at least three need an independent Campaign and must be profitable, and the one permitted losing fold
 cannot exceed 25% of total 30-day profit. The aggregate must remain profitable after charging taker fees at
 1.5x. Aggregate average closed-position net must reach 0.5% of starting Copy equity. The 30-day aggregate
@@ -171,8 +172,9 @@ still needs eight Campaigns. Thin folds are unknown evidence, never synthetic lo
 single outlier stress removes the largest winning Campaign and requires the remainder positive.
 
 The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
-time below -5%, deep-loss events and recovery. New Core is capped at 12% intratrade drawdown; 12–15% is
-Challenger-only and above 15% is rejected. Current -8%, or -5% lasting 24 hours, becomes exit-only.
+time below -5%, deep-loss events and recovery. The 12% individual path line is diagnostic; above 15% remains
+a hard wallet rejection and the final funded Core portfolio must remain within 15%. Current -8%, or -5%
+lasting 24 hours, becomes exit-only.
 
 Source-wallet profit high-water is not used as an admission or execution gate. Static per-wallet and
 per-sector slices are also retired: wallets compete only when their positions actually overlap. New opens

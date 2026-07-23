@@ -146,6 +146,10 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
         "campaigns": {str(days): campaigns[days] for days in (30, 14, 7)},
         "evidenceDays": evidence_days,
+        "costStressNetPnl": (
+            _num(primary.get("cost_stress_net_pnl"))
+            if primary.get("cost_stress_net_pnl") is not None else None
+        ),
         "qualificationEquity": equities[30],
         "windowStartEquity": {str(days): equities[days] for days in (30, 14, 7)},
     }
@@ -521,6 +525,76 @@ def evaluate_sector_policy(
         if not item.get("allow") and item.get("watch") and (not structural or structural.get("allow")):
             evidence_watch.append(sector)
         policy[sector] = item
+    # Sample density is a wallet-level proof, not a requirement that every specialty independently look like
+    # a complete Core wallet. A genuine Mix wallet may have four profitable Crypto Campaigns and three
+    # profitable Stock Campaigns. Requiring 7/5/5 on both sectors turns valid aggregate evidence into zero
+    # executable sectors. Promote only positive, cost-stressed, structurally clean sides with at least two
+    # closes, and only when their combined wallet evidence clears the original 7-close/5-Campaign/5-day floor.
+    aggregate_sectors = []
+    evidence_days = set()
+    fallback_evidence_days = 0
+    aggregate_closed = 0
+    aggregate_campaigns = 0
+    for sector in SECTORS:
+        item = policy.get(sector) or {}
+        structural = item.get("structural")
+        structural = structural if isinstance(structural, dict) else {}
+        closed_n = _int((item.get("closed") or {}).get("30"))
+        campaign_n = _int((item.get("campaigns") or {}).get("30"))
+        positive = _num((item.get("returns") or {}).get("30")) > 0.0
+        cost_positive = (
+            item.get("costStressNetPnl") is not None
+            and _num(item.get("costStressNetPnl")) > min_net
+        )
+        structurally_clean = (
+            (not structural or structural.get("allow"))
+            and not structural.get("watch")
+            and not item.get("hardRisk")
+        )
+        if not (
+            closed_n >= 2
+            and positive
+            and cost_positive
+            and structurally_clean
+            and (item.get("allow") or item.get("status") == "sector_sample_watch")
+        ):
+            continue
+        aggregate_sectors.append(sector)
+        aggregate_closed += closed_n
+        aggregate_campaigns += campaign_n
+        fallback_evidence_days = max(
+            fallback_evidence_days, _int(item.get("evidenceDays")),
+        )
+        primary = _window_result(sector_results.get(sector) or {}, 30)
+        evidence_days.update(
+            int(position.get("closed_at") or 0) // 86_400_000
+            for position in primary.get("positions") or ()
+            if int(position.get("closed_at") or 0) > 0
+        )
+    aggregate_evidence_days = len(evidence_days) or fallback_evidence_days
+    aggregate_sample_ok = bool(
+        aggregate_closed >= load_copy_policy().min_closed_30d
+        and aggregate_campaigns >= 5
+        and aggregate_evidence_days >= 5
+    )
+    if aggregate_sample_ok:
+        for sector in aggregate_sectors:
+            item = policy[sector]
+            if item.get("status") != "sector_sample_watch":
+                continue
+            item.update({
+                "allow": True,
+                "watch": False,
+                "status": "allowed_by_wallet_aggregate_evidence",
+                "reason": "板块自身盈利且成本压力通过；样本密度由钱包安全板块合并证明",
+                "aggregateEvidence": {
+                    "closed": aggregate_closed,
+                    "campaigns": aggregate_campaigns,
+                    "days": aggregate_evidence_days,
+                },
+            })
+            if sector not in allowed:
+                allowed.append(sector)
     # A one-off Heavy-DCA episode is already executed through bounded smart-add spacing, add-count and
     # coin-cap rules in the pressure replay. Passing that exact replay is sufficient structural proof,
     # including for a genuine Mix wallet whose other specialty is independently qualified.

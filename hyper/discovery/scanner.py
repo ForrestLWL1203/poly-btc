@@ -2158,21 +2158,20 @@ def _formation_tune_candidate(row) -> bool:
     """Whether a path-certified wallet may enter parameter discovery.
 
     ``ranked_candidates`` already passed the cheap, non-path business gates on the scan-time surface. The
-    active execution surface can nevertheless turn that same wallet's exact replay from +22% into +6% through
-    leverage/margin/capacity choices. Requiring ``coreEligible`` before tuning creates a circular gate: only a
-    wallet that needs no tuning may be tuned. Admit positive, path-complete and hard-risk-safe exact replays
-    into parameter discovery, then apply the formation-entry contract and shared funded validation on the
-    winning sealed surface.
+    active execution surface can nevertheless make that wallet lose opens or look thin through
+    leverage/margin/capacity choices. Requiring either ``eligible`` or ``coreEligible`` before tuning creates
+    a circular gate: only a wallet that needs no tuning may be tuned. Admit data-complete and hard-risk-safe
+    exact replays into parameter discovery, then apply economics on the winning sealed surface.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     checks = dict(qualification.get("checks") or {})
     return bool(
-        qualification.get("eligible")
-        and not qualification.get("deferred")
+        not qualification.get("deferred")
         and not qualification.get("hardRisk")
         and qualification.get("role") != "quarantine"
         and checks.get("pathRiskComplete")
         and checks.get("valuationComplete")
+        and checks.get("noRepeatedLiquidation")
         and checks.get("noForwardLiquidation")
     )
 
@@ -2227,8 +2226,30 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "noRepeatedLiquidation": bool(checks.get("noRepeatedLiquidation")),
         "noForwardLiquidation": bool(checks.get("noForwardLiquidation")),
     }
+    # These are the only individual vetoes before shared funded formation. Return magnitude, score,
+    # four-fold timing, path drawdown below the hard 15% reject line and portfolio congestion are measured
+    # again on the shared account. Keeping their stricter individual versions here caused the same evidence
+    # to be charged twice and reduced a healthy bounded pool to one wallet before membership was evaluated.
+    required = (
+        "dataValid",
+        "hardRiskSafe",
+        "strictCopy30dPositive",
+        "strictCopy7dPositive",
+        "notThinProfit",
+        "minimumClosedEvidence",
+        "minimumCampaignEvidence",
+        "minimumEvidenceDays",
+        "campaignWinRate",
+        "activityWithin72h",
+        "valuationComplete",
+        "pathRiskComplete",
+        "sectorExecutable",
+        "noRepeatedLiquidation",
+        "noForwardLiquidation",
+    )
     return {
-        "eligible": all(formation_checks.values()),
+        "eligible": all(bool(formation_checks.get(key)) for key in required),
+        "requiredChecks": list(required),
         "checks": formation_checks,
         "closedN": closed_n,
         "campaigns": campaigns,
@@ -2250,12 +2271,13 @@ def _formation_core_permission(qualification) -> bool:
 
 
 def _formation_prepath_candidate(row) -> bool:
-    """Whether a profitable wallet belongs in the bounded pre-Core replay pool.
+    """Whether a research-profitable wallet belongs in the bounded pre-Core replay pool.
 
-    Individual replay has already proved positive economics. Campaign density,
-    recency, score and sector-live status are formation-entry evidence, not
-    reasons to prevent a top-ranked wallet from receiving the one exact path
-    replay and shared-parameter tune which can change those metrics.
+    The pre-Core pool is where default execution parameters are repaired. A wallet must have positive
+    scan-time Copy economics, enough closed evidence to justify one exact replay, valid valuation and no
+    known liquidation/forward hard risk. Thin-profit, current-surface score, campaign win, recent return and
+    sector-live misses are not checked until after tuning because margin/leverage/capacity choices can change
+    the follower result. The winning surface still applies every live-entry gate.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     if (
@@ -2270,7 +2292,6 @@ def _formation_prepath_candidate(row) -> bool:
     checks = dict(qualification.get("checks") or {})
     required_checks = (
         "strictCopy30dPositive",
-        "averageNetPerClose",
         "valuationComplete",
         "noRepeatedLiquidation",
         "noForwardLiquidation",
@@ -2352,11 +2373,13 @@ def _rank_formation_candidates_for_surface(db, rows, now_ms, *, generation_id, f
         row["follow_score"] = f(effective.get("score"))
         if effective.get("sectorPolicyJson"):
             row["sector_policy_json"] = effective["sectorPolicyJson"]
-        if qualification.get("deferred") or qualification.get("role") == "quarantine":
+        if (
+            qualification.get("deferred")
+            or qualification.get("hardRisk")
+            or qualification.get("role") == "quarantine"
+        ):
             if addr in required:
                 raise RuntimeError(f"pinned_core_replay_invalid:{addr}")
-            continue
-        if not qualification.get("eligible") and addr not in required:
             continue
         ranked.append({
             **row,
@@ -3314,7 +3337,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    previous_roles, controls, held,
                                    desired_order, formation_meta,
                                    effective_qualifications=None, effective_scores=None,
-                                   effective_policies=None):
+                                   effective_policies=None, force_promotion=False):
     """Materialize the fill-searched membership after one final strict 30-day portfolio replay."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -3439,7 +3462,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     )
     # The first funded generation has no older generation to confirm against. Requiring a prior 24-hour
     # qualification here makes a clean factory reset mathematically incapable of ever bootstrapping Core.
-    if not previous_roles:
+    if force_promotion or not previous_roles:
         promotion_ready.update(desired)
     transition = _quality_first_core_transition(
         profiles,
@@ -3643,7 +3666,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                               validate_price_path=True, audit_stamp=None,
                               forced_core_order=None, formation_meta=None,
                               effective_qualifications=None, effective_scores=None,
-                              effective_policies=None):
+                              effective_policies=None, force_promotion=False):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -3740,6 +3763,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             effective_qualifications=effective_qualifications,
             effective_scores=effective_scores,
             effective_policies=effective_policies,
+            force_promotion=force_promotion,
         )
     if selection_mode == "auto":
         # Active means the wallet itself is structurally/economically copyable. Score orders the bounded
@@ -4626,6 +4650,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         effective_qualifications=formation.get("qualifications") or {},
         effective_scores=formation.get("scores") or {},
         effective_policies=formation.get("policies") or {},
+        force_promotion=bool(force_entry_requalification),
     )
     previous_core = set(existing_core)
     selection.replace_selection_rows(db, generation_id, rows, selected_at=stamp)
