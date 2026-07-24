@@ -232,7 +232,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(formation["qualifications"]["0xaaa"]["coreEligible"])
             tune.assert_not_called()
 
-    def test_explicit_empty_core_turns_old_core_exit_only(self):
+    def test_explicit_empty_core_keeps_profitable_old_core_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -265,9 +265,30 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0].role, scanner.selection.EXIT_ONLY)
-            self.assertFalse(rows[0].enabled)
-            self.assertIn("no_robust_core", rows[0].reason)
+            self.assertEqual(rows[0].role, scanner.selection.CHALLENGER)
+            self.assertTrue(rows[0].enabled)
+            self.assertEqual(rows[0].reason, "challenger_return_watch")
+
+    def test_recent_former_core_remains_on_recheck_surface_after_empty_generation(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selected_at) "
+                "VALUES ('gold','0xrecent','core',1,'2026-07-20T00:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selected_at) "
+                "VALUES ('gexpired','0xexpired','core',1,'2026-06-15T00:00:00Z')"
+            )
+            db.commit()
+
+            addrs = scanner._recent_former_core_addrs(
+                db, as_of="2026-07-24T00:00:00Z", recheck_days=14,
+            )
+
+            self.assertEqual(addrs, ["0xrecent"])
 
     def test_strong_30d_research_wallet_remains_visible_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:

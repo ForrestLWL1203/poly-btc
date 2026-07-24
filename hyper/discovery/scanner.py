@@ -268,6 +268,37 @@ def _copy_warmup_backfill_addrs(db, desired_start_ms):
     ).fetchall()]
 
 
+def _recent_former_core_addrs(db, *, as_of, recheck_days=None):
+    """Keep recently removed Core wallets on the evidence-refresh surface.
+
+    A legal empty-Core publication stops Observer from opening new copies. It must not also erase the
+    research lane which can prove that a still-profitable former Core has recovered. Looking only at the
+    latest empty selection would otherwise make every former member disappear before its next replay.
+    Immutable selection rows are the authority here; older registry rows may predate Core lifecycle counters.
+    """
+    days = float(
+        config.CORE_SOFT_MIN_TENURE_DAYS if recheck_days is None else recheck_days
+    )
+    if days <= 0:
+        return []
+    current_core = {
+        str(addr or "").lower()
+        for addr in (selection.published_core_addrs(db) or ())
+        if addr
+    }
+    return [
+        str(addr or "").lower()
+        for addr, _last_selected in db.execute(
+            "SELECT lower(addr),MAX(selected_at) last_selected "
+            "FROM follow_selection WHERE role='core' "
+            "AND julianday(selected_at)>=julianday(?)-? "
+            "GROUP BY lower(addr) ORDER BY last_selected DESC,lower(addr)",
+            (as_of, days),
+        ).fetchall()
+        if addr and str(addr).lower() not in current_core
+    ]
+
+
 def _incomplete_fill_cache_addrs(db, addrs, desired_start_ms):
     """Return wallets without a confirmed complete rolling-window source snapshot."""
     owners = sorted({str(addr or "").lower() for addr in addrs if addr})
@@ -3589,9 +3620,11 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 "operator_starred_core" if addr in set(effective_pinned_order)
                 else transition_reasons.get(addr, "core_quality_selected")
             )
-        elif explicit_empty_core and addr in previous_core:
-            role, reason = selection.EXIT_ONLY, "no_robust_core_latest_evidence:exit_only"
-            enabled = False
+        elif explicit_empty_core and addr in previous_core and candidate_ok:
+            # Empty Core is an execution decision, not evidence deletion. A still-profitable former Core
+            # opens nothing as Challenger but remains visible and receives the next retention replay.
+            role = selection.CHALLENGER
+            reason = qualification.get("status") or "no_robust_core_latest_evidence"
         elif addr in held and data_status != "valid":
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         elif data_status != "valid":
@@ -5419,8 +5452,13 @@ def scan(db, p) -> None:
     position_addrs = sorted(open_copy_pnl_by_addr)
     # Cheap discovery gates only control *new* expensive collection. Current executable/observed roles and
     # open-position owners always receive a fresh retention replay, even when their latest official week or
-    # Portfolio mix temporarily misses the discovery surface.
-    retention_addrs = set(core_addrs) | set(challenger_addrs) | set(position_addrs)
+    # Portfolio mix temporarily misses the discovery surface. Recently removed Core wallets also remain on
+    # this evidence lane: an empty publication must stop execution without erasing recovery proof.
+    former_core_addrs = _recent_former_core_addrs(db, as_of=stamp)
+    retention_addrs = (
+        set(core_addrs) | set(challenger_addrs)
+        | set(position_addrs) | set(former_core_addrs)
+    )
     # Freeze the open-copy PnL surface for the generation. Worker threads use it only to distinguish a
     # profitable carried mirrored episode from a dormant/losing wallet; it never bypasses economic/risk gates.
     p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
@@ -5440,7 +5478,7 @@ def scan(db, p) -> None:
     )) | set(warmup_backfill_addrs)
     workset_info = schedule_profile_workset(
         cand,
-        qualified_addrs=(),
+        qualified_addrs=former_core_addrs,
         core_addrs=core_addrs,
         challenger_addrs=challenger_addrs,
         warmup_backfill_addrs=warmup_backfill_addrs,
@@ -5469,6 +5507,7 @@ def scan(db, p) -> None:
         "estimatedProfileSec": estimated_profile_s,
         "warmupBackfillDue": len(warmup_backfill_addrs),
         "warmupBackfillScheduled": len(migration_backfill),
+        "formerCoreRecheck": len(former_core_addrs),
         "marginEquityPct": float(p.margin_equity_pct),
         "initialMarginEquity": float(config.INITIAL_BALANCE),
     }

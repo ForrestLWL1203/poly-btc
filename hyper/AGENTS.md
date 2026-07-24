@@ -104,8 +104,11 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   a profitability denominator and has no upper bound. Before fill history is downloaded, the official
   `perpMonth` PnL/account-value series must provide four adjacent 7d folds and each must return at least 5%;
   incomplete time-series evidence is deferred, not rejected. The same Portfolio response must also show
-  positive 30d Perp PnL and at least 60% 30d Perp PnL share. Current Core, Challenger and open-position owners
-  bypass discovery recall and always receive retention replay. Fill-based strict Copy later records the
+  positive 30d Perp PnL and at least 60% 30d Perp PnL share. Current Core, Challenger, open-position owners
+  and recently removed Core wallets inside the 14-day recheck horizon bypass discovery recall and always
+  receive retention replay. An empty Core publication stops execution but keeps a still-profitable former
+  Core as Challenger evidence; it may not erase that wallet before its next strict requalification.
+  Fill-based strict Copy later records the
   individual 10% 30-day and 3% latest-7-day lines as score/watch evidence; it does not repeat them as vetoes
   immediately before the shared funded replay. Formation entry still requires positive 30-day and latest-7-day
   Copy PnL, a 0.5% average net per close, at least five closed positions/Campaigns/evidence days, a passing
