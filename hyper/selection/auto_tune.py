@@ -276,21 +276,6 @@ def _candidate_execution_priority(candidate: dict) -> tuple:
 def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
     windows = candidate.get("windows") or {}
     weighted_net = _candidate_score(candidate)
-    drawdown_dollars = max(
-        (
-            float(result.get("max_drawdown") or 0.0)
-            * float(
-                result.get("window_start_equity")
-                or result.get("initial_margin_equity")
-                or config.INITIAL_BALANCE
-            )
-            for result in windows.values()
-        ),
-        default=0.0,
-    )
-    # Compare profit and drawdown in the same dollars on the capital that actually entered each continuous
-    # slice.  Multiplying every later drawdown by the original $10k underprices risk after compounding.
-    risk_adjusted_utility = weighted_net - drawdown_dollars
     liquidations = _candidate_liquidations(candidate)
     primary = windows.get(30) or (windows.get(max(windows)) if windows else {})
     primary_net = _result_pnl(primary)
@@ -311,7 +296,6 @@ def _candidate_rank_key(candidate: dict, baseline: dict) -> tuple:
         -liquidations,
         *_candidate_execution_priority(candidate),
         primary_net,
-        risk_adjusted_utility,
         _result_pnl(windows.get(14, {})),
         _result_pnl(windows.get(7, {})),
         -_candidate_distance(candidate, baseline),
@@ -1509,8 +1493,9 @@ def _formation_model_validation(validation: dict, policy) -> dict:
 
     Wallet admission and final publication already own four-week stability and exact candle-path safety.
     Requiring both again for every tuning finalist triple-counted the same evidence and made the grid pay
-    K-line cost hundreds of times.  Formation tuning therefore owns aggregate profit, cost stress and
-    portfolio drawdown; the chosen count/surface receives one exact strict replay before publication.
+    K-line cost hundreds of times. Formation tuning therefore owns aggregate profit and cost stress; the
+    chosen count/surface receives one exact strict replay before publication. Maximum drawdown is telemetry,
+    not a tuning gate or score.
     """
     folds = list(validation.get("folds") or ())
 
@@ -1523,8 +1508,6 @@ def _formation_model_validation(validation: dict, policy) -> dict:
             len(folds) == int(config.COPY_STABILITY_FOLD_COUNT)
             and total_net > 0.0
             and float(validation.get(stress_key) or 0.0) > 0.0
-            and max(float(row.get(f"{prefix}MaxDD") or 0.0) for row in folds)
-            <= float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
         )
 
     baseline_feasible = feasible("baseline", "baselineStressNet")
@@ -1807,10 +1790,22 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     market_ctx = _load_market_ctx(db, market_generation)
     if formation_admission:
         # Parameter search is fills-only.  Loading/refining K-lines for every grid finalist made formation
-        # slower than the scan itself and repeated the publication guard.  The one winning count/surface is
-        # still sealed by the exact path-complete strict replay in scanner publication.
+        # slower than the scan itself. The full run nevertheless validates its small finalist set against
+        # the already-prefetched immutable path cache, so lowering leverage/moving margin can actually repair
+        # proxy liquidations before final wallet admission. Coarse count probes remain fills-only.
         path_rows, path_meta = None, {}
         validation_path_rows, validation_path_meta = None, {}
+        if not coarse_search:
+            path_fills = list(window_fills.get(max(window_fills)) or [])
+            path_start = now_ms - (
+                max(window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7))
+            ) * 86_400_000
+            validation_path_rows = prepare_price_path(price_path.load_refined(
+                db, path_fills, path_start, now_ms,
+            ))
+            validation_path_meta = price_path.coverage(
+                db, path_fills, path_start, now_ms,
+            )
     else:
         path_fills = list(window_fills.get(max(window_fills)) or [])
         path_start = now_ms - (
@@ -2035,6 +2030,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )[:max(1, finalist_limit)]
     finalist_results = []
     chosen = None
+    eligible_choices = []
     for _rank, _sizing_rank, _add_rank, sizing_candidate, finalist_add_params in combined_options:
         check_budget("walk_forward")
         sizing_params = sizing_candidate.get("params") or base
@@ -2061,8 +2057,44 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             "profitRetention": model.get("profitRetention"),
         })
         if model["eligible"]:
-            chosen = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
-            break
+            choice = (sizing_candidate, sizing_params, finalist_add_params, combined, validation)
+            if not formation_admission:
+                chosen = choice
+                break
+            eligible_choices.append(choice)
+    if formation_admission and eligible_choices:
+        def path_profit(choice):
+            validation = choice[4]
+            return sum(
+                float(row.get("challengerNet") or 0.0)
+                for row in (validation.get("folds") or ())
+            )
+
+        best_profit = max(path_profit(choice) for choice in eligible_choices)
+        tolerance = abs(best_profit) * float(
+            getattr(config, "AUTO_TUNE_NEAR_BEST_PROFIT_REL", 0.08)
+        )
+        near_best = [
+            choice for choice in eligible_choices
+            if path_profit(choice) + tolerance + 1e-9 >= best_profit
+        ]
+
+        def path_rank(choice):
+            sizing_candidate, _sizing, _adds, _combined, validation = choice
+            liquidations = sum(
+                int(row.get("challengerLiquidations") or 0)
+                for row in (validation.get("folds") or ())
+            ) + int(validation.get("stressLiquidations") or 0)
+            return (
+                -liquidations,
+                *_candidate_execution_priority(sizing_candidate),
+                path_profit(choice),
+                float(validation.get("stressNet") or 0.0),
+            )
+
+        # Profit defines the near-best band; inside it, prefer the fewest path liquidations, then execution
+        # fit and residual profit. Zero is not required—the final wallet contract explicitly allows <=3.
+        chosen = max(near_best, key=path_rank)
     no_validated_finalist = chosen is None
     if no_validated_finalist:
         # No proposal passed folds/holdout/stress. Return the exact active baseline for audit, never an

@@ -69,6 +69,75 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertTrue(restarted.paused)
         self.assertEqual(restarted._proc_state, "paused")
 
+    def test_portfolio_drawdown_stop_pauses_flattens_and_survives_restart(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs._load_account()
+            obs.taker.open_ep[("0xrisk", "BTC")] = self._live_ep(1, "long", 100, 100)
+            obs.mark_mid["BTC"] = 84.9
+
+            with patch.object(obs, "_cmd_close_all", new=AsyncMock(return_value={"count": 1})) as close_all:
+                result = await obs._check_portfolio_drawdown_stop()
+
+            self.assertTrue(result["active"])
+            self.assertGreater(result["drawdown"], 0.15)
+            self.assertTrue(obs.paused)
+            close_all.assert_awaited_once()
+            state = db.execute(
+                "SELECT equity_high_water,drawdown_stop_active,drawdown_stopped_at "
+                "FROM copy_account WHERE id=1"
+            ).fetchone()
+            self.assertEqual(state["equity_high_water"], 10_000)
+            self.assertEqual(state["drawdown_stop_active"], 1)
+            self.assertTrue(state["drawdown_stopped_at"])
+
+            restarted = Observer(db, [], {})
+            restarted._load_account()
+            self.assertTrue(restarted.paused)
+            self.assertTrue(restarted.taker.drawdown_stop_active)
+
+        asyncio.run(run())
+
+    def test_manual_resume_rebases_portfolio_drawdown_high_water(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs._load_account()
+            obs.taker.balance = 8_000
+            obs.taker.equity_high_water = 10_000
+            obs.taker.drawdown_stop_active = True
+            obs.paused = True
+            obs._save_portfolio_risk_state(force=True)
+
+            result = await obs._dispatch_command("resume", {})
+
+            self.assertFalse(result["paused"])
+            self.assertFalse(obs.taker.drawdown_stop_active)
+            self.assertEqual(obs.taker.equity_high_water, 8_000)
+
+            restarted = Observer(db, [], {})
+            restarted._load_account()
+            self.assertEqual(restarted.taker.equity_high_water, 8_000)
+
+        asyncio.run(run())
+
+    def test_normal_pause_resume_keeps_existing_high_water(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs._load_account()
+            obs.taker.balance = 8_000
+            obs.taker.equity_high_water = 12_000
+            obs.paused = True
+            obs._save_portfolio_risk_state(force=True)
+
+            await obs._dispatch_command("resume", {})
+
+            self.assertEqual(obs.taker.equity_high_water, 12_000)
+
+        asyncio.run(run())
+
     def test_null_sigma_placeholder_is_not_loaded_as_warm_cache(self):
         db = self._db()
         db.execute(

@@ -283,12 +283,9 @@ def score(m: dict) -> float:
     _rw = sum(w for w, v in _rp if v is not None)
     roi = (sum(w * _clip(v, config.ROI_CLIP_LO, config.ROI_CLIP_HI) for w, v in _rp if v is not None) / _rw
            if _rw else 0.0)
-    notl = max(g("avg_notional"), config.ROI_NOTL_FLOOR)                    # 仅用于把回撤归一成 dd_eq
-    # OOS drawdown is from the same scoped Copy replay; fall back to scoped target episodes only.
-    copy_dd = g("oos_max_drawdown", None)
-    dd_eq = max(0.0, copy_dd) if copy_dd is not None else g("max_drawdown") / notl
-    roi_adj = max(0.0, roi) / (1.0 + config.SCORE_DD_AVERSION * dd_eq)     # 回撤惩罚后的有效 edge
-    roi_s = 1.0 - math.exp(-roi_adj / config.SCORE_ROI_SCALE)             # 平滑饱和 [0,1)
+    # Historical maximum drawdown is reconstructed at our leverage ceiling because source margin/leverage
+    # is unavailable. Keep it as telemetry; it must not lower even the legacy discovery score.
+    roi_s = 1.0 - math.exp(-max(0.0, roi) / config.SCORE_ROI_SCALE)        # 平滑饱和 [0,1)
     # Open-position evidence uses all real positions, never only losing bags (which created a reverse
     # incentive where carrying more losses raised the quality score).
     open_n = g("open_position_count")

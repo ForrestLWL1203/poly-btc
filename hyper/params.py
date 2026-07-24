@@ -100,7 +100,7 @@ PARAM_SPEC = [
         "最近7日≥3%，四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
-        "最终回放爆仓上限", "最终参数30日严格回放超过此次数作为重复爆仓硬拒绝"),
+        "最终回放爆仓上限", "使用我们最大杠杆的代理回放允许至多3次；调参在保留盈利前提下优先减少，第四次才拒绝"),
     ("CORE_SOFT_FAIL_CONFIRMATIONS", "scanner", "black", "int", "rescan",
         config.CORE_SOFT_FAIL_CONFIRMATIONS, "Core软失败确认轮数", "收益、胜率、样本等软条件需连续完整扫描失败才降级；硬风险即时退出"),
     ("COPY_DEEP_BAG_EVENT_PCT", "scanner", "black", "pct", "rescan",
@@ -109,14 +109,6 @@ PARAM_SPEC = [
         config.COPY_DEEP_BAG_EVENT_MIN_HOURS, "深亏事件最短时长", "达到深亏比例后持续至少此小时数才形成事件"),
     ("COPY_DEEP_BAG_LONG_HOURS", "scanner", "blue", "float", "rescan",
         config.COPY_DEEP_BAG_LONG_HOURS, "长时间深亏时长", "已恢复但持续达到此时长最多只允许Challenger"),
-    ("CORE_INTRATRADE_DD_MAX", "scanner", "black", "pct", "rescan",
-        config.CORE_INTRATRADE_DD_MAX * 100, "Core盘中回撤上限", "超过只允许Challenger"),
-    ("CORE_INTRATRADE_DD_REJECT", "scanner", "black", "pct", "rescan",
-        config.CORE_INTRATRADE_DD_REJECT * 100, "盘中回撤拒绝线", "超过直接拒绝，不参与两轮软失败宽限"),
-    ("CORE_DEEP_BAG_MAX_FAILED", "scanner", "blue", "int", "rescan",
-        config.CORE_DEEP_BAG_MAX_FAILED, "失败深亏事件上限", "超过此数量直接拒绝；默认允许至多一次，第二次拒绝"),
-    ("CORE_DEEP_BAG_MIN_RECOVERY_RATE", "scanner", "blue", "pct", "rescan",
-        config.CORE_DEEP_BAG_MIN_RECOVERY_RATE * 100, "深亏最低恢复率", "至少两个深亏事件后，恢复率低于此值直接拒绝"),
     ("WINDFALL_CONC",        "scanner", "hidden", "pct",     "rescan", config.WINDFALL_CONC * 100,
         "单日利润集中度上限", "单日≥此比例毛利且胜率<下条=靠一笔偶然大赚撑着(亏损未覆盖),排除"),
     ("WINDFALL_WIN_MAX",     "scanner", "hidden", "pct",     "rescan", config.WINDFALL_WIN_MAX * 100,
@@ -125,6 +117,12 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("FOLLOW_SELECTION_MODE", "follow", "hidden", "text", "immediate", config.FOLLOW_SELECTION_MODE,
         "跟单集合模式", "auto使用已发布Core集合;manual保留人工集合"),
+    ("PORTFOLIO_DRAWDOWN_STOP_ENABLE", "follow", "black", "bool", "immediate",
+        config.PORTFOLIO_DRAWDOWN_STOP_ENABLE,
+        "总体权益回撤止损", "开启后按我们账户权益高水位监控；触线立即暂停新开仓并平掉全部持仓"),
+    ("PORTFOLIO_DRAWDOWN_STOP_PCT", "follow", "black", "pct", "immediate",
+        config.PORTFOLIO_DRAWDOWN_STOP_PCT * 100,
+        "总体权益回撤止损线", "达到此回撤比例时主动止损；手动恢复会按当时账户权益重设高水位"),
     ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
         "币种黑名单", "命中的币种不再新开仓;已有仓位仍继续跟随减仓/平仓。建议从持仓行一键加入,避免符号别名写错"),
     ("BLOCK_KOREAN_STOCKS",  "follow",  "green",  "bool",    "immediate", config.BLOCK_KOREAN_STOCKS,
@@ -142,7 +140,7 @@ PARAM_SPEC = [
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
         "自动调保证金", "证据采集与调参解耦；常规每7天仅对当时通过全部质量闸口的Core组合调参，不按数量补位；下限/单币上限/总上限由人工控制"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
-        "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、压力、回撤与爆仓门槛"),
+        "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、盈利压力与最终爆仓≤3规则"),
     ("AUTO_TUNE_APPLY_MIN_SHADOW_DAYS", "follow", "hidden", "int", "immediate",
         config.AUTO_TUNE_APPLY_MIN_SHADOW_DAYS,
         "调参最短影子天数", "真钱建议14;Paper完整闭环验证可设0"),
@@ -342,7 +340,9 @@ def seed_params(db):
         "'WALLET_MARGIN_CAP_PCT','WALLET_SECTOR_SIDE_CAP_PCT',"
         "'WALLET_CRYPTO_STABLE_SIDE_CAP_PCT','WALLET_CRYPTO_MID_SIDE_CAP_PCT',"
         "'WALLET_CRYPTO_HIGH_SIDE_CAP_PCT','WALLET_STOCK_SIDE_CAP_PCT',"
-        "'WALLET_MAX_OPEN_POSITIONS','WALLET_STOCK_SIDE_MAX_POSITIONS')"
+        "'WALLET_MAX_OPEN_POSITIONS','WALLET_STOCK_SIDE_MAX_POSITIONS',"
+        "'CORE_INTRATRADE_DD_MAX','CORE_INTRATRADE_DD_REJECT',"
+        "'CORE_DEEP_BAG_MAX_FAILED','CORE_DEEP_BAG_MIN_RECOVERY_RATE')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)

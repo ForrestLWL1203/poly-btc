@@ -60,8 +60,6 @@ CORE_PREFIX_TIE_TOLERANCE = 0.02
 CORE_PREFIX_ABS_UTILITY_SLACK = 50.0
 CORE_PREFIX_ABS_NET_SLACK = 100.0
 CORE_PREFIX_ABS_STRESS_SLACK = 100.0
-CORE_PREFIX_MAX_DD_WORSEN = 0.01
-CORE_PORTFOLIO_MAX_DRAWDOWN = 0.15
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
 CORE_SOFT_FAIL_CONFIRMATIONS = 2
 CORE_MIN_FOLLOW_SCORE = 0.75
@@ -234,6 +232,8 @@ MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positio
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
 #                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
+PORTFOLIO_DRAWDOWN_STOP_ENABLE = True
+PORTFOLIO_DRAWDOWN_STOP_PCT = 0.15  # live account HWM stop: pause + flatten; manual resume rebases.
 WALLET_MARGIN_CAP_PCT = 1.00       # legacy snapshot compatibility; independent wallet slices are retired.
 WALLET_SECTOR_SIDE_CAP_PCT = 1.00
 WALLET_CRYPTO_STABLE_SIDE_CAP_PCT = 1.00
@@ -324,8 +324,6 @@ SCORE_W_WIN  = 0.35    # 胜率权重
 SCORE_W_ACT  = 0.30    # 活跃度权重(成交数 + 活跃天数,升为核心项) —— W_* 之和自动归一
 SCORE_W_ROI  = 0.35    # ROI 权重(收敛后;ROI 本身就把"小赚大亏"量化为低分)
 SCORE_STRETCH = 1.227  # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。改评分公式时由代码重标
-ROI_NOTL_FLOOR    = 1000.0 # 名义额下限(仅用于把 max_drawdown 归一成 dd_eq;防除零/噪音)
-SCORE_DD_AVERSION = 3.0   # roi_adj = max(0,roi)/(1 + 此×回撤dd_eq):回撤越大有效edge越低(回撤按名义额归一)
 SCORE_ROI_SCALE   = 0.35  # roiS = 1 − exp(−roi_adj/此):综合ROI 分布~0.05–1.5,此值让有效区拉得开(0.3→0.58,0.5→0.76,1.0→0.94)
 # ROI 支柱口径 = HL 官方 return-on-capital(净利/本金,已按出入金调整、含杠杆资本效率),取代旧的 net/名义
 # (net/名义 ≡ 真实收益率 ÷ 杠杆,把杠杆红利除没了,系统性埋没大体量 BTC 波段客)。
@@ -390,18 +388,17 @@ CORE_COPY_MIN_CAMPAIGNS_30D = 8
 # dependent on catching a rare payoff. Body-after-top-three remains a score diagnostic, not another hard gate.
 CORE_COPY_MIN_CAMPAIGN_WIN_RATE = 0.45
 CORE_COPY_MIN_BODY_WIN_RATE = 0.40
-# One isolated 30d replay liquidation is already fully charged to PnL/drawdown and may coexist with a high-
-# win, profitable surface. Repetition is path-dependent gambling and is rejected as a hard risk.
-CORE_COPY_MAX_LIQUIDATIONS_30D = 1
+# Historical fills do not expose the source order's actual margin/leverage. Strict Copy deliberately
+# simulates our configured leverage ceiling, so a small number of proxy liquidations is a sizing signal,
+# not proof that the source wallet itself liquidated. Admit up to three and let the portfolio tuner prefer
+# fewer while preserving profit; the fourth remains a final-surface rejection.
+CORE_COPY_MAX_LIQUIDATIONS_30D = 3
 
-# Intratrade path risk.  These percentages are normalized to the replay/member-epoch risk base.
+# Intratrade path evidence is retained for diagnostics only. Historical maximum drawdown is not a wallet,
+# sector, score, tuning or Core admission input: live account drawdown protection belongs in Observer.
 COPY_DEEP_BAG_EVENT_PCT = 0.08
 COPY_DEEP_BAG_EVENT_MIN_HOURS = 4.0
 COPY_DEEP_BAG_LONG_HOURS = 24.0
-CORE_INTRATRADE_DD_MAX = 0.12
-CORE_INTRATRADE_DD_REJECT = 0.15
-CORE_DEEP_BAG_MAX_FAILED = 1
-CORE_DEEP_BAG_MIN_RECOVERY_RATE = 0.50
 
 # Daily post-scan portfolio tuner. It moves the sizing surface approved by the operator and the smart-add
 # core knobs. Lower bounds, per-coin caps, max deploy cap, and stop settings remain operator-controlled

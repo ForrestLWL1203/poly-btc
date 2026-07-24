@@ -80,7 +80,7 @@ Wallet quality and funded-account membership are separate decisions.
   largest winning trades remain diagnostic score inputs. The score is displayed on a 0–100 scale while stored
   natively in `[0, 1]`.
 - The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
-  A positive, path-complete and hard-risk-safe replay may enter parameter discovery even when the current
+  A positive, path-complete and structurally safe replay may enter parameter discovery even when the current
   execution surface misses the final return/score line; requiring Core eligibility before tuning would make
   current parameters a circular prerequisite for changing them. Wallet count and parameters are tuned together:
   sparse count-specific nodes follow 16→8→12/boundary search and only the winning count receives the full grid.
@@ -171,10 +171,11 @@ cannot exceed 25% of total 30-day profit. The aggregate must remain profitable a
 still needs eight Campaigns. Thin folds are unknown evidence, never synthetic losses. The
 single outlier stress removes the largest winning Campaign and requires the remainder positive.
 
-The same 15-minute price path now records wallet and campaign intratrade drawdown, underwater duration,
-time below -5%, deep-loss events and recovery. The 12% individual path line is diagnostic; above 15% remains
-a hard wallet rejection and the final funded Core portfolio must remain within 15%. Current -8%, or -5%
-lasting 24 hours, becomes exit-only.
+The same 15-minute price path records wallet and campaign intratrade drawdown, underwater duration, time below
+-5%, deep-loss events, recovery and conservative proxy liquidations at our leverage ceiling. Historical maximum
+drawdown is diagnostic only. A wallet may enter tuning with proxy liquidation evidence, then the final tuned
+30-day strict replay permits at most three proxy liquidations per Core wallet. Live account loss is controlled
+separately by the global equity high-water stop (15% by default), which pauses and flattens the account.
 
 Source-wallet profit high-water is not used as an admission or execution gate. Static per-wallet and
 per-sector slices are also retired: wallets compete only when their positions actually overlap. New opens

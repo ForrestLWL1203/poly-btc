@@ -62,12 +62,12 @@ class ProfileQualificationTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "copy_not_profitable")
 
-    def test_hard_deep_loss_is_rejected(self):
+    def test_historical_max_drawdown_does_not_reject_profile(self):
         ok, reason = scanner._profile_copy_qualification(
             qualified(copy_intratrade_max_drawdown=.16), NOW, self.params,
         )
-        self.assertFalse(ok)
-        self.assertEqual(reason, "hard_copy_risk")
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
 
     def test_raw_quality_score_is_ranking_only(self):
         row = qualified()

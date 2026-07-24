@@ -338,7 +338,7 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(policy["watch"], [])
         self.assertEqual(policy["stock"]["status"], "allowed")
 
-    def test_sector_liquidation_is_hard_but_recent_top3_body_is_diagnostic(self):
+    def test_sector_proxy_liquidation_and_recent_top3_body_are_diagnostic(self):
         liquidated = {
             30: {**bt(2400, 20, wins=15), "liquidations": 6},
             14: bt(1200, 10, wins=7),
@@ -359,12 +359,15 @@ class SectorPolicyTests(unittest.TestCase):
         liq_policy = sector.evaluate_sector_policy({"crypto": liquidated})
         body_policy = sector.evaluate_sector_policy({"crypto": body})
 
-        self.assertEqual(liq_policy["crypto"]["status"], "sector_liquidation_limit")
-        self.assertEqual(liq_policy["watch"], [])
+        self.assertEqual(liq_policy["crypto"]["status"], "allowed")
+        self.assertEqual(
+            liq_policy["crypto"]["simulatedPathRisk"]["liquidations30d"], 6,
+        )
+        self.assertEqual(liq_policy["allowed"], ["crypto"])
         self.assertEqual(body_policy["crypto"]["status"], "allowed")
         self.assertEqual(body_policy["allowed"], ["crypto"])
 
-    def test_recent_liquidation_has_no_grace(self):
+    def test_recent_proxy_liquidation_is_diagnostic_at_sector_layer(self):
         now_ms = 100 * DAY_MS
         sector_results = {
             "crypto": {
@@ -378,7 +381,7 @@ class SectorPolicyTests(unittest.TestCase):
 
         policy = sector.evaluate_sector_policy(sector_results, previous_policy=previous)
 
-        self.assertFalse(policy["crypto"]["allow"])
+        self.assertTrue(policy["crypto"]["allow"])
         self.assertEqual(policy["crypto"]["recent"]["classification"], "liquidation")
 
     def test_allowed_sector_metrics_ignore_disallowed_losing_sector(self):

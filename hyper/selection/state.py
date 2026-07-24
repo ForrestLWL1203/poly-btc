@@ -310,7 +310,6 @@ class SelectionConstraints:
     min_relative_lcb_improvement: float = 0.05
     min_actionable_open_rate: float = 0.70
     min_capacity_fit: float = 0.75
-    max_drawdown_worsening: float = 0.01
     max_deploy_pct: float = 0.80
     max_cost_drag_ratio: float = 0.25
     max_targets: int = 40
@@ -333,22 +332,16 @@ class MarginalSelectionResult:
 
 def portfolio_economic_rejection_reason(base: PortfolioMetrics, trial: PortfolioMetrics,
                                         c: SelectionConstraints) -> str:
-    """Explain the actual-dollar net/drawdown rule used by production selection."""
+    """Explain the actual-dollar net-profit and execution-fit rule used by production selection."""
     base_net = base.net_pnl if base.net_pnl is not None else base.net_lcb
     trial_net = trial.net_pnl if trial.net_pnl is not None else trial.net_lcb
-    base_utility = (
-        base.risk_adjusted_utility if base.risk_adjusted_utility is not None else base.net_lcb
-    )
-    trial_utility = (
-        trial.risk_adjusted_utility if trial.risk_adjusted_utility is not None else trial.net_lcb
-    )
     if trial_net <= 0 or trial_net <= base_net:
         return "portfolio_no_profit_improvement"
-    relative_utility_floor = base_utility + abs(base_utility) * max(
+    relative_net_floor = base_net + abs(base_net) * max(
         0.0, c.min_relative_lcb_improvement,
     )
-    if trial_utility + 1e-12 < relative_utility_floor:
-        return "portfolio_risk_adjusted_gain_low"
+    if trial_net + 1e-12 < relative_net_floor:
+        return "portfolio_gain_below_floor"
     if trial_net - base_net + 1e-12 < max(0.0, c.min_absolute_net_gain):
         return "portfolio_absolute_net_gain_low"
     if trial.actionable_open_rate < c.min_actionable_open_rate:

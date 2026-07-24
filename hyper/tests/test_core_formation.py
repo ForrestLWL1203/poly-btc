@@ -160,8 +160,8 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertEqual(result.selected.count, 3)
 
     def test_inferior_full_prefix_cannot_force_the_sixteenth_wallet_into_core(self):
-        # Production-shaped regression: removing the quality-tail wallet improves normal PnL, stressed PnL,
-        # and risk-adjusted utility.  The old implementation nevertheless forced 16 because 15 had a little
+        # Production-shaped regression: removing the quality-tail wallet improves normal and stressed PnL.
+        # The old implementation nevertheless forced 16 because 15 had a little
         # more drawdown than the full-size reference and therefore failed the reference-retention predicate.
         metrics = {
             16: PrefixEvaluation(16, 55_405, 25_829, .1111, .90, .95, 0, {}, {"initialBalance": 10_000}),
@@ -177,7 +177,7 @@ class QualityPrefixSearchTests(unittest.TestCase):
 
         result = search_quality_prefix(16, evaluate, tie_tolerance=0)
 
-        self.assertFalse(retains_reference(result.reference, metrics[15], max_dd_worsen=.01))
+        self.assertTrue(retains_reference(result.reference, metrics[15]))
         self.assertEqual(result.selected.count, 15)
         self.assertGreater(result.selected.net_pnl, result.reference.net_pnl)
         self.assertGreater(result.selected.stress_net_pnl, result.reference.stress_net_pnl)
@@ -193,8 +193,8 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertEqual(result.selected.count, 1)
 
     def test_profitable_isolated_liquidations_do_not_veto_a_prefix(self):
-        # The loss from each isolated liquidation is already present in net PnL and drawdown.  The full
-        # portfolio remains the economic reference, and the more profitable/risk-adjusted 9-wallet prefix
+        # The loss from each isolated liquidation is already present in net PnL. The full portfolio remains
+        # the economic reference, and the more profitable 9-wallet prefix
         # is allowed to win instead of forcing the search down to a zero-liquidation 2-wallet prefix.
         metrics = {
             16: value(16, 27_287, liquidations=14),

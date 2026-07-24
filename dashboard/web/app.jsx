@@ -11,6 +11,7 @@ import { Wallets } from "./components/Wallets.jsx";
 import {
   SCANNER_LABEL,
   cls,
+  fNum,
   fPct,
   fSign,
   fUsd,
@@ -139,6 +140,11 @@ function Dashboard({ onLogout }) {
               <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
               {streamOk ? "实时" : "轮询"}</span>
             <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
+            {ov && ov.system && ov.system.portfolioDrawdownStop?.active &&
+              <span className="pill" style={{ background: "rgba(255,82,82,.14)", color: "var(--red-l)" }}
+                title={`权益高水位回撤 ${fNum(ov.system.portfolioDrawdownStop.drawdownPct, 1)}%，已暂停并执行全平`}>
+                <span className="dot" style={{ background: "var(--red)" }} /> 总体回撤止损已触发
+              </span>}
             {/* fixed-width control (minWidth 150, centered) so changing the label never resizes the button.
                 stopped → 启动跟单(restart) · paused → 恢复开单或彻底停止 · running → 暂停开单或彻底停止。
                 两种存活状态都保留 in-button checkbox，避免 paused 后失去停止进程入口。 */}

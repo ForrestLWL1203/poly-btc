@@ -55,9 +55,10 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertIn("COPY_POLICY_VERSION", active["params"])
         self.assertEqual(active["params"]["CORE_MIN_COPY_RETURN_30D"], 0.10)
         self.assertEqual(active["params"]["CORE_MIN_COPY_RETURN_7D"], 0.03)
-        self.assertEqual(active["params"]["CORE_INTRATRADE_DD_MAX"], .12)
         self.assertEqual(active["params"]["COPY_DEEP_BAG_EVENT_MIN_HOURS"], 4.0)
-        self.assertEqual(active["params"]["CORE_DEEP_BAG_MIN_RECOVERY_RATE"], .50)
+        self.assertEqual(active["params"]["CORE_COPY_MAX_LIQUIDATIONS_30D"], 3)
+        self.assertNotIn("CORE_INTRATRADE_DD_MAX", active["params"])
+        self.assertNotIn("CORE_DEEP_BAG_MIN_RECOVERY_RATE", active["params"])
         self.assertNotIn("WALLET_HWM_EXIT_DD_PCT", active["params"])
         self.assertNotIn("WALLET_STOCK_SIDE_CAP_PCT", active["params"])
 

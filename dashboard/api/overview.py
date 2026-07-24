@@ -45,7 +45,11 @@ def _gross_traded(db):
 
 def ep_overview(db):
     # LIVE-DERIVE from copy_position + copy_account so cards are not delayed by account_stats snapshots.
-    acct = q1(db, "SELECT initial_balance, balance FROM copy_account WHERE id=1")
+    acct = q1(
+        db,
+        "SELECT initial_balance,balance,equity_high_water,drawdown_stop_active,drawdown_stopped_at "
+        "FROM copy_account WHERE id=1",
+    )
     closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
                     "FROM copy_position WHERE status!='open'") or {"n": 0, "wins": 0}
     closed_n = closed["n"] or 0
@@ -124,6 +128,12 @@ def ep_overview(db):
         "WHERE s.id=1",
     )
     active_strategy = strategy_revision.load_active(db)
+    stop_high = (acct["equity_high_water"] if acct else None)
+    stop_high = float(stop_high) if stop_high is not None else None
+    stop_drawdown = (
+        max(0.0, (stop_high - float(base["equity"])) / stop_high) * 100
+        if stop_high and stop_high > 0 else 0.0
+    )
     base["system"] = {
         "observer": obs_state,
         "observerStale": _stale(obs),
@@ -146,6 +156,12 @@ def ep_overview(db):
         "strategySource": (active_strategy or {}).get("source"),
         "strategyActivatedAt": (active_strategy or {}).get("activatedAt"),
         "strategyParamsHash": (active_strategy or {}).get("paramsHash"),
+        "portfolioDrawdownStop": {
+            "active": bool(acct and acct["drawdown_stop_active"]),
+            "highWater": stop_high,
+            "drawdownPct": stop_drawdown,
+            "stoppedAt": (acct["drawdown_stopped_at"] if acct else None),
+        },
     }
     return base
 

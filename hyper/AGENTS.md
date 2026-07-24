@@ -114,7 +114,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   individual 10% 30-day and 3% latest-7-day lines as score/watch evidence; it does not repeat them as vetoes
   immediately before the shared funded replay. Formation entry still requires positive 30-day and latest-7-day
   Copy PnL, a 0.5% average net per close, at least five closed positions/Campaigns/evidence days, a passing
-  Campaign win rate, current activity, an executable sector, complete valuation/path data and no hard risk. The shared
+  Campaign win rate, current activity, an executable sector, complete valuation/path data and no structural hard failure. The shared
   replay then owns four-fold stability, the permitted losing-fold bound, 1.5x taker-fee stress, congestion,
   membership count and final return.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
@@ -149,7 +149,8 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   audit continuity only, never to preserve a current-generation weak sector's live permission.
 - A wallet may be Crypto-only, Stock-only, or genuine Mix. A side with positive strict-Copy economics may remain
   `watch` while samples grow; live permission requires sufficient sector evidence, positive 1.5x cost stress,
-  and no structural/deep-loss/liquidation hard risk. Ten-Campaign, non-overlapping stability, activity,
+  and no structural hard failure. Path drawdown and proxy liquidation evidence remain available to the wallet-level
+  tuner rather than vetoing a sector before sizing can be repaired. Ten-Campaign, non-overlapping stability, activity,
   execution and capacity proof is applied once to the aggregate of safe sectors. This keeps a bad side from
   contaminating a good side without requiring every side to be a standalone Core.
 - A profitable sector with too few closed samples is `watch` evidence for Challenger ranking, not live-trading
@@ -184,7 +185,7 @@ default classification is:
   formation-entry contract is deliberately narrower and non-duplicated: positive 30-day and latest-7-day
   strict-Copy PnL, at least five independent Campaigns/closed positions/evidence days, 0.5% average net per
   close, a passing Campaign win rate, activity within 72 hours, complete valuation/path evidence, executable
-  sector policy and no hard risk. Score, return magnitude, the 12% soft path line, full eight-Campaign confidence and
+  sector policy and no structural hard failure. Score, return magnitude, path telemetry, full eight-Campaign confidence and
   individual weekly status continue to affect score/reason labels but cannot prevent the shared funded replay
   from measuring the portfolio they are meant to judge;
 - target-wallet stability uses official Portfolio for four adjacent non-overlapping 7-day folds covering the
@@ -201,7 +202,7 @@ default classification is:
   now; Campaign win rate is the hard repeatability gate while body-after-top-three remains a score diagnostic;
 - actionable open rate and capacity fit are score, tuning and congestion diagnostics. Missed opens are already
   absent from realized Copy PnL, so they are not charged a second time as admission vetoes when the actually
-  funded fills remain profitable after costs and within the drawdown limit;
+  funded fills remain profitable after costs and the final tuned wallet surface stays within the proxy-liquidation limit;
 - expected normalized margin return has a 2% Core line; a miss remains Challenger while strict Copy stays
   profitable;
 - LCB and positive-profit probability are continuous ranking diagnostics after the sample floor, not a second
@@ -212,7 +213,7 @@ the remaining 30-day net to stay positive. Top-two, body-after-top-three and top
 diagnostics only because hard-gating all of them repeatedly judged the same outlier. Public replay dollars still
 include the large winner. Positive aggregate 1.5x-cost stress remains a final funded-portfolio execution check.
 
-Formation first ranks at most 16 profitable, sample-dense, hard-risk-safe wallets. Wallet count and sizing are
+Formation first ranks at most 16 profitable, sample-dense, structurally safe wallets. Wallet count and sizing are
 coupled, so sparse count-specific tuning follows the bounded 16→8→12 direction and considers open/capacity
 congestion at that layer only; the winning count receives the full grid. The grid and its four folds are
 fills-only and run on one continuous compounding account, never four fresh `$10k` accounts. After tuning,
@@ -230,8 +231,9 @@ Qualification includes both realized and marked open PnL from one canonical valu
 repeatability is judged by the shared-account non-overlapping folds above; rolling 7-day magnitude remains
 diagnostic while positive latest-7-day PnL and current activity are formation-entry gates. Individual
 magnitude/fold/eight-Campaign failures remain explicit Challenger evidence but are not replayed as a second
-pre-portfolio veto. Current latest-7-day loss, repeated liquidation, invalid data and 30-day strict-Copy loss
-retain their explicit hard outcomes.
+pre-portfolio veto. Current latest-7-day loss, invalid data and 30-day strict-Copy loss retain their explicit
+hard outcomes. Four or more proxy liquidations on the final tuned 30-day surface remain Challenger evidence;
+the active pre-tune surface cannot reject a wallet that parameter optimization may repair.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
 and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only
@@ -240,11 +242,12 @@ complete Heavy-DCA outlier may enter the exact capped smart-add pressure replay.
 sector still clears sample, PnL, recent, 70% open-rate and 75% capacity checks with no pressure-replay
 liquidation; repeated/heavier failure remains rejected.
 
-There is no lifetime zero-liquidation gate. Isolated liquidation losses already reduce net PnL and increase
-drawdown, while liquidation frequency receives a bounded score penalty. Final-parameter 30-day strict replay
-may contain at most one isolated liquidation for Core; repetition is Challenger-only. A currently losing 7-day
-sector whose loss includes liquidation is still a hard recent failure, and Heavy-DCA pressure has its stricter
-rule.
+There is no zero-liquidation rule and no historical maximum-drawdown admission threshold. Source fills do not
+disclose their true margin/leverage, so both values are conservative reconstructions at our leverage ceiling.
+The active surface may enter tuning with any proxy count; the final tuned 30-day strict replay permits at most
+three isolated proxy liquidations per Core wallet. Four or more remain Challenger-only. Liquidation losses still
+reduce net PnL and receive a bounded score penalty; path drawdown remains visible for diagnostics only.
+Heavy-DCA pressure keeps its separate structural rule.
 
 `profile.score` is a discovery-only prior when Copy evidence is absent. Once canonical Copy exists,
 `watchlist.score` uses 30% funded economics, 25% repeatability, 15% edge confidence, 15% operability, and
@@ -252,7 +255,7 @@ rule.
 fold timing and median per-close density; overlapping 14d return and the legacy raw score contribute zero.
 The sample-confidence factor saturates at the actual qualification floors. The 75/100 line is a Core-quality
 diagnostic and ranking target, not a second absolute veto after the hard evidence contract. Score cannot compensate
-for a failed win-rate, thin-profit, current-profit, activity, valuation, path or risk gate. Weekly timing, cost
+for a failed win-rate, thin-profit, current-profit, activity, valuation, path-data or final proxy-liquidation gate. Weekly timing, cost
 stress, execution/capacity congestion and membership count are enforced once on the shared funded portfolio.
 
 Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
@@ -279,14 +282,14 @@ The user-facing roles are:
 `CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count or service quota:
 zero to sixteen wallets may publish, and no scheduled generation may add a wallet merely to reach a count. Normal ranking replacement,
 parameter retuning, and leave-one-out reshuffling run only after seven days since the last actual membership
-change. Scheduled evidence refresh still removes liquidation, Forward-loss, campaign-structure, or other individual hard
+change. Scheduled evidence refresh still removes final-surface proxy liquidation above three, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
-1. Require positive scan-time Copy economics, at least five closes, valid valuation and no known repeated/
-   forward liquidation hard risk. Rank at most 16 pre-Core wallets plus required current/pinned members, then
+1. Require positive scan-time Copy economics, at least five closes, valid valuation and no structural hard
+   failure. Rank at most 16 pre-Core wallets plus required current/pinned members, then
    run that bounded pool through
    canonical individual Copy replay once with the refined 15-minute path (and finer candles only for ambiguous
-   risk ranges). A data-complete, path-safe wallet may enter parameter discovery even if default parameters
+   risk ranges). A data-complete, path-certified wallet may enter parameter discovery even if default parameters
    make its follower result thin or miss a return/score/sector threshold; those economics are rechecked on the
    tuned surface before membership.
 2. Search wallet count and sizing together from cached fills: independently coarse-tune 16→8→12/boundary nodes,
@@ -297,8 +300,10 @@ failures immediately while retaining every other qualified incumbent. Production
    same continuously compounded 28-day replay; later folds inherit prior realized profit and contemporaneous
    deploy/capacity room. There is no minimum Core count.
 4. After parameters and actual publishable membership are fixed, run exactly one final path-complete 30-day
-   portfolio Copy replay. Require positive net, at most 15% drawdown, weekly stability and complete price-path
-   coverage; the count search separately enforces 70% actionable opens and 75% capacity fit. A failed final
+   portfolio Copy replay. Require positive net, weekly stability and complete price-path coverage; every member
+   has already passed the final-surface limit of at most three proxy liquidations. Historical maximum drawdown
+   is persisted as telemetry, never a publication threshold. The count search separately enforces 70% actionable
+   opens and 75% capacity fit. A failed final
    replay rolls back the proposal/publication; it must not
    restart a path-heavy parameter search.
 5. The explicit `optimize` command treats incumbents as new entries so a policy correction cannot preserve an
@@ -407,7 +412,7 @@ the current published generation.
   PnL plus unrealized PnL for open rows.
 - The source-wallet membership high-water breaker is retired. Observer and canonical replay do not freeze,
   reduce or exit a wallet merely because it gave back prior profit; historical `wallet_risk_state` rows and
-  `WALLET_HWM_*` values are migration-only and cannot affect qualification or execution. Deep-loss path risk,
+  `WALLET_HWM_*` values are migration-only and cannot affect qualification or execution. Path-risk telemetry,
   liquidation cooldowns, mirrored exits and portfolio/margin caps remain active.
 - Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
   through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
@@ -441,7 +446,10 @@ the current published generation.
 - A manual 100% close creates a 24-hour same-wallet/same-coin cooldown only when the realized episode is losing.
   A profitable/breakeven full close has no cooldown. Any partial manual close keeps the episode live so later
   target adds, reductions and close remain actionable.
-- Copy execution has no hard-threshold stop-loss. Risk is bounded by selection, sizing, isolated margin,
+- Copy execution has no per-position hard-threshold stop-loss. The Paper account has a separate global
+  high-water equity stop (`PORTFOLIO_DRAWDOWN_STOP_PCT`, default 15%): once hit, Observer pauses new opens,
+  persists the trip and repeatedly flattens all remaining positions. A manual resume clears the trip and
+  rebases the high-water to current equity. Risk is otherwise bounded by selection, sizing, isolated margin,
   leverage/deployment caps, mirrored exits, and liquidation accounting.
 - Core/strategy reloads are command-driven (`reload_params`) and do not copy historical fills or retroactively
   rescale existing positions.

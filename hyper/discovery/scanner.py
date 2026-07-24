@@ -869,7 +869,6 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
     policy_json.pop("stability", None)
     policy_json["copyWeeklyProfitability"] = copy_weekly
     m["sector_policy_json"] = json.dumps(policy_json, separators=(",", ":"), sort_keys=True)
-    dd = max(0.0, f(primary.get("max_drawdown")))
     worst_return = min(
         (f(pos.get("net_pnl")) / f(pos.get("margin")) for pos in positions if f(pos.get("margin")) > 0),
         default=0.0,
@@ -897,7 +896,9 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
         copy_evidence_days=evidence_summary.evidence_days,
         copy_recent_return_14d=evidence_summary.recent_return_14d,
         copy_recent_return_7d=evidence_summary.recent_return_7d,
-        copy_risk_score=max(0.0, min(1.0, 1.0 - max(dd, abs(min(0.0, worst_return))))),
+        # Historical maximum drawdown is generated with our leverage ceiling, not the source order's
+        # unknown leverage. Keep it in replay evidence, but do not feed it back into wallet scoring.
+        copy_risk_score=max(0.0, min(1.0, 1.0 - abs(min(0.0, worst_return)))),
         execution_score=(
             (f(actionable_rate) + f(capacity_fit)) / 2.0
             if actionable_rate is not None and capacity_fit is not None else None
@@ -1708,11 +1709,10 @@ def _quality_first_core_transition(
                 )
             )
             if feasible and net_gain >= min_net_gain:
-                utility_gain = f(without.risk_adjusted_utility) - f(base.risk_adjusted_utility)
-                trials.append((net_gain, utility_gain, stress_gain, -desired.index(addr), addr))
+                trials.append((net_gain, stress_gain, -desired.index(addr), addr))
         if not trials:
             break
-        _net_gain, _utility_gain, _stress_gain, _rank, outgoing = max(trials)
+        _net_gain, _stress_gain, _rank, outgoing = max(trials)
         published.remove(outgoing)
         removed_by_loo.append(outgoing)
         reasons[outgoing] = "portfolio_negative_incremental_net"
@@ -1722,16 +1722,14 @@ def _quality_first_core_transition(
     # Conditional contribution under the final set remains the operator-facing Core rank.
     final_metrics = strict_evaluate(tuple(sorted(published)))
     base_utility = f(
-        final_metrics.risk_adjusted_utility
-        if final_metrics.risk_adjusted_utility is not None else final_metrics.net_lcb
+        final_metrics.net_pnl if final_metrics.net_pnl is not None else final_metrics.net_lcb
     )
     contribution_rows = []
     desired_rank = {addr: rank for rank, addr in enumerate(desired)}
     for addr in published:
         without = strict_evaluate(tuple(sorted(published - {addr})))
         without_utility = f(
-            without.risk_adjusted_utility
-            if without.risk_adjusted_utility is not None else without.net_lcb
+            without.net_pnl if without.net_pnl is not None else without.net_lcb
         )
         contribution_rows.append((base_utility - without_utility, -desired_rank.get(addr, 999999), addr))
     contribution_rows.sort(reverse=True)
@@ -1753,10 +1751,9 @@ def _quality_first_core_transition(
 def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     """Compact shared-account replay into actual-dollar selection economics.
 
-    Isolated liquidations already lose their full allocated margin in ``copy_net_pnl`` and equity drawdown.
-    Risk-adjusted utility subtracts max drawdown dollars once more, so a wallet passes only when its added
-    net profit more than compensates for any added drawdown. Individual final replay already limits Core to
-    five 30-day liquidations; the shared portfolio layer does not charge the same event a third time.
+    Isolated liquidations already lose their full allocated margin in ``copy_net_pnl``. Historical maximum
+    drawdown remains telemetry only and does not reduce utility or veto membership. Individual final replay
+    limits Core to three 30-day proxy liquidations.
     """
     usable = []
     for days, result in (windows or {}).items():
@@ -1806,7 +1803,8 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
         ),
         default=0.0,
     )
-    risk_adjusted_utility = net_pnl - drawdown_dollars
+    # Keep the legacy field populated for schema/API compatibility, but it now aliases net profit.
+    risk_adjusted_utility = net_pnl
     return selection.PortfolioMetrics(
         net_pnl, stress_net, liquidations, actionable, capacity, max_dd, peak_deploy,
         cost_drag, net_pnl=net_pnl, stress_net_pnl=stress_net,
@@ -2191,29 +2189,26 @@ def _formation_tune_candidate(row) -> bool:
     ``ranked_candidates`` already passed the cheap, non-path business gates on the scan-time surface. The
     active execution surface can nevertheless make that wallet lose opens or look thin through
     leverage/margin/capacity choices. Requiring either ``eligible`` or ``coreEligible`` before tuning creates
-    a circular gate: only a wallet that needs no tuning may be tuned. Admit data-complete and hard-risk-safe
-    exact replays into parameter discovery, then apply economics on the winning sealed surface.
+    a circular gate: only a wallet that needs no tuning may be tuned. Admit every data/path-complete exact
+    replay into parameter discovery even when the active leverage surface produces proxy liquidations; the
+    winning sealed surface applies the final ``<=3`` liquidation rule.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     checks = dict(qualification.get("checks") or {})
     return bool(
         not qualification.get("deferred")
-        and not qualification.get("hardRisk")
         and qualification.get("role") != "quarantine"
         and checks.get("pathRiskComplete")
         and checks.get("valuationComplete")
-        and checks.get("noRepeatedLiquidation")
-        and checks.get("noForwardLiquidation")
     )
 
 
 def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dict:
     """Apply the non-duplicated individual contract before shared Core formation.
 
-    Individual replay owns data validity, minimum evidence, non-scalping economics and hard wallet risk.
-    The shared funded replay owns return magnitude, weekly timing/cost stress, congestion and membership
-    count. Requiring the complete individual Core contract here made those portfolio checks unreachable:
-    every candidate was discarded before the first shared replay.
+    Individual replay owns data validity, minimum evidence, non-scalping economics and the final tuned
+    surface's ``<=3`` liquidation rule. Historical maximum drawdown is diagnostic only. The shared funded
+    replay owns return magnitude, weekly timing/cost stress, congestion and membership count.
     """
     metrics_ = apply_allowed_sector_copy_metrics(dict(effective or {}))
     qualification = follow_score.evaluate_follow_eligibility(
@@ -2240,7 +2235,6 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "researchEligible": bool(qualification.get("eligible")),
         "dataValid": not bool(qualification.get("deferred"))
             and qualification.get("role") != "quarantine",
-        "hardRiskSafe": not bool(qualification.get("hardRisk")),
         "strictCopy30dPositive": bool(checks.get("strictCopy30dPositive")),
         "strictCopy7dPositive": pnl7 > 0.0,
         "notThinProfit": bool(checks.get("averageNetPerClose")),
@@ -2252,18 +2246,16 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "activityWithin72h": bool(checks.get("activityWithin72h")),
         "valuationComplete": bool(checks.get("valuationComplete")),
         "pathRiskComplete": bool(checks.get("pathRiskComplete")),
-        "pathDrawdownWithinCore": bool(checks.get("pathDrawdownWithinCore")),
         "sectorExecutable": bool(checks.get("sectorExecutable")),
         "noRepeatedLiquidation": bool(checks.get("noRepeatedLiquidation")),
         "noForwardLiquidation": bool(checks.get("noForwardLiquidation")),
     }
     # These are the only individual vetoes before shared funded formation. Return magnitude, score,
-    # four-fold timing, path drawdown below the hard 15% reject line and portfolio congestion are measured
-    # again on the shared account. Keeping their stricter individual versions here caused the same evidence
-    # to be charged twice and reduced a healthy bounded pool to one wallet before membership was evaluated.
+    # four-fold timing and portfolio congestion are measured again on the shared account. Historical maximum
+    # drawdown stays diagnostic only; keeping it as another veto charged an unknowable source-leverage proxy
+    # twice and reduced a healthy bounded pool before membership was evaluated.
     required = (
         "dataValid",
-        "hardRiskSafe",
         "strictCopy30dPositive",
         "strictCopy7dPositive",
         "notThinProfit",
@@ -2306,15 +2298,14 @@ def _formation_prepath_candidate(row) -> bool:
 
     The pre-Core pool is where default execution parameters are repaired. A wallet must have positive
     scan-time Copy economics, enough closed evidence to justify one exact replay, valid valuation and no
-    known liquidation/forward hard risk. Thin-profit, current-surface score, campaign win, recent return and
-    sector-live misses are not checked until after tuning because margin/leverage/capacity choices can change
-    the follower result. The winning surface still applies every live-entry gate.
+    known data failure. Thin-profit, current-surface score, campaign win, recent return and simulated
+    liquidation evidence are not checked until after tuning because margin/leverage/capacity choices can
+    change the follower result. The winning surface still applies the final ``<=3`` liquidation rule.
     """
     qualification = dict((row or {}).get("follow_qualification") or {})
     if (
         not qualification.get("eligible")
         or qualification.get("deferred")
-        or qualification.get("hardRisk")
         or qualification.get("role") == "quarantine"
     ):
         return False
@@ -2324,8 +2315,6 @@ def _formation_prepath_candidate(row) -> bool:
     required_checks = (
         "strictCopy30dPositive",
         "valuationComplete",
-        "noRepeatedLiquidation",
-        "noForwardLiquidation",
     )
     if not all(bool(checks.get(key)) for key in required_checks):
         return False
@@ -2434,7 +2423,6 @@ def _core_prefix_retention() -> dict:
         "utility_slack": float(config.CORE_PREFIX_ABS_UTILITY_SLACK),
         "net_slack": float(config.CORE_PREFIX_ABS_NET_SLACK),
         "stress_slack": float(config.CORE_PREFIX_ABS_STRESS_SLACK),
-        "max_dd_worsen": float(config.CORE_PREFIX_MAX_DD_WORSEN),
     }
 
 
@@ -2584,7 +2572,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         required_order=pinned_order, retention_addrs=current_core,
         replay_cache=individual_replay_cache,
     )
-    # Parameter discovery may include an exact positive/path-safe replay that misses economic Core thresholds
+    # Parameter discovery may include an exact positive/path-complete replay that misses economic Core thresholds
     # on the *current* surface. Requiring Core eligibility here made the current parameters a prerequisite for
     # tuning them. The winning surface is still sealed by ``replay_effective_surface`` below, where every
     # individual must satisfy the complete Core contract before membership search or publication.
@@ -3521,8 +3509,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         failures = []
         if final_metrics.net_pnl <= 0.0:
             failures.append("net_not_positive")
-        if final_metrics.max_drawdown > float(config.CORE_PORTFOLIO_MAX_DRAWDOWN):
-            failures.append("drawdown")
         if f(final_result.get("price_path_coverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
             failures.append("path_coverage")
         if f(final_result.get("maintenance_margin_coverage")) < float(
@@ -3781,8 +3767,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         )
     if selection_mode == "auto":
         # Active means the wallet itself is structurally/economically copyable. Score orders the bounded
-        # candidate pool; shared-account replay then keeps candidates whose added net profit exceeds their
-        # added drawdown dollars. Individual Campaign/fold, path, outlier, cost and liquidation checks have
+        # candidate pool; shared-account replay then keeps candidates whose added net profit improves the
+        # funded account. Individual Campaign/fold, path, outlier, cost and liquidation checks have
         # already run before this shared-account membership stage.
         ranked_candidates = [
             (row.get("addr") or "").lower() for row in profiles
@@ -4036,7 +4022,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     min_relative_lcb_improvement=float(config.SELECTION_MIN_RELATIVE_GAIN),
                     min_actionable_open_rate=copy_policy.min_actionable_open_rate,
                     min_capacity_fit=copy_policy.min_capacity_fit,
-                    max_drawdown_worsening=1.0,
                     max_deploy_pct=float(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
                     max_cost_drag_ratio=1.0,
                     max_targets=int(config.MAX_TARGETS),
@@ -4122,8 +4107,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     without = tuple(a for a in robust_selected if a != addr)
                     without_metrics = validate(without)
                     contributions.append((
-                        f(robust_metrics.risk_adjusted_utility)
-                        - f(without_metrics.risk_adjusted_utility),
                         f(robust_metrics.net_pnl) - f(without_metrics.net_pnl),
                         -portfolio_candidates.index(addr), addr,
                     ))
@@ -4250,8 +4233,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                     prefix.append(addr)
                     current_metrics = effective_evaluate(tuple(sorted(prefix)))
                     portfolio_utilities[addr] = (
-                        f(current_metrics.risk_adjusted_utility)
-                        - f(prefix_metrics.risk_adjusted_utility)
+                        f(current_metrics.net_pnl) - f(prefix_metrics.net_pnl)
                     )
                     prefix_metrics = current_metrics
                 for addr in portfolio_candidates:

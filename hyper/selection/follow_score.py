@@ -74,8 +74,9 @@ def evaluate_follow_eligibility(
     """Classify evidence once: positive wallets remain researchable; Core adds non-duplicated proof.
 
     The old policy independently gated 7/14/30 returns, win rates, PF, tail-2 and concentration body.  Those
-    checks were correlated views of the same trades and created an exclusion cascade.  V3 keeps hard data,
-    liquidation and deep-loss safety; profitability under canonical replay retains research eligibility.
+    checks were correlated views of the same trades and created an exclusion cascade. V3 keeps hard data,
+    structural safety and final-surface proxy-liquidation limits; profitable canonical replay retains research
+    eligibility.
     The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
     owned by the official Portfolio front gate. Core separately requires at least 10% strict-Copy return in
     30d, at least 3% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
@@ -189,11 +190,10 @@ def evaluate_follow_eligibility(
         "capacity": capacity is None or _num(capacity) >= policy.min_capacity_fit,
         "valuationComplete": valuation_status == "complete",
         "pathRiskComplete": path_complete,
-        "pathDrawdownWithinCore": intratrade_dd <= policy.intratrade_dd_core_max,
         "sectorExecutable": sector_ready,
         "expectedEdge": expected is None or _num(expected) >= min_expected_return,
         "noRepeatedLiquidation": liquidations <= policy.core_max_liquidations_30d,
-        "noForwardLiquidation": forward_liquidations == 0,
+        "noForwardLiquidation": forward_liquidations <= policy.core_max_liquidations_30d,
     }
     detail = {
         "returns": {"30": return30, "7": return7},
@@ -218,6 +218,17 @@ def evaluate_follow_eligibility(
         "activityAgeHours": activity_age_ms / 3_600_000 if activity_age_ms is not None else None,
         "campaignNetAfterTop1": _num(top1) if top1 is not None else None,
         "costStressNetPnl": _num(cost_stress) if cost_stress is not None else None,
+        "simulatedPathRisk": {
+            "intratradeMaxDrawdown": intratrade_dd,
+            "deepBagEvents": deep_events,
+            "failedDeepBagEvents": failed_deep,
+            "deepBagRecoveryRate": recovery_rate,
+            "currentOpenLossFrac": current_loss,
+            "currentBagHours": current_bag_hours,
+            "liquidations30d": liquidations,
+            "forwardLiquidations30d": forward_liquidations,
+            "liquidationLimit30d": policy.core_max_liquidations_30d,
+        },
         "checks": checks, "retentionSurface": bool(retention),
         "softFailConfirmationsRequired": policy.soft_fail_confirmations,
     }
@@ -229,23 +240,6 @@ def evaluate_follow_eligibility(
     if evidence_status in {"no_evidence", "no_fills", "no_open_events"}:
         return {"eligible": False, "coreEligible": False, "status": "no_copy_evidence",
                 "role": "rejected", **detail, "reasons": ["没有可执行flat→open事件，无法进行跟单"]}
-    current_deep_risk = bool(
-        current_loss >= policy.deep_bag_event_pct
-        or (current_loss >= 0.05 and current_bag_hours >= policy.deep_bag_long_hours)
-    )
-    if current_deep_risk:
-        return {"eligible": False, "coreEligible": False, "status": "current_deep_loss_freeze",
-                "role": "exit_only", "hardRisk": True, **detail,
-                "reasons": ["当前深度浮亏触发硬风险，仅允许退出"]}
-    deep_reject = bool(
-        intratrade_dd > policy.intratrade_dd_reject
-        or failed_deep > policy.deep_bag_max_failed
-        or (deep_events >= 2 and recovery_rate < policy.deep_bag_min_recovery_rate)
-    )
-    if deep_reject or liquidations > policy.core_max_liquidations_30d:
-        return {"eligible": False, "coreEligible": False, "status": "hard_copy_risk",
-                "role": "rejected", "hardRisk": True, **detail,
-                "reasons": ["严格Copy存在重复爆仓或不可接受的历史深亏"]}
     if pnl30 <= 0.0:
         return {"eligible": False, "coreEligible": False, "status": "copy_not_profitable",
                 "role": "rejected", **detail, "reasons": ["30天严格Copy净收益不为正"]}
@@ -263,15 +257,16 @@ def evaluate_follow_eligibility(
         and copy_weekly_positive and activity_ok
         and checks["campaignWinRate"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["valuationComplete"]
-        and checks["pathRiskComplete"] and checks["pathDrawdownWithinCore"]
+        and checks["pathRiskComplete"]
         and checks["sectorExecutable"] and checks["expectedEdge"]
-        and checks["noForwardLiquidation"] and not bool(policy_json.get("coreBlocked"))
+        and checks["noRepeatedLiquidation"] and checks["noForwardLiquidation"]
+        and not bool(policy_json.get("coreBlocked"))
     )
     if core_eligible:
         return {"eligible": True, "coreEligible": True,
                 "status": "core_retention_eligible" if retention else "core_eligible",
                 "role": "core_eligible", **detail,
-                "reasons": ["官方四段周收益、严格Copy 30d/最近7d盈利、四段时序稳定性、可重复性及执行风险均通过"]}
+                "reasons": ["官方四段周收益、严格Copy 30d/最近7d盈利、四段时序稳定性、可重复性及爆仓≤3均通过"]}
 
     if not checks["strictCopy30dReturn"]:
         status, reason = (
@@ -313,8 +308,10 @@ def evaluate_follow_eligibility(
         status, reason = "challenger_outlier_watch", "移除最大一个盈利Campaign后不再为正"
     elif not checks["pathRiskComplete"]:
         status, reason = "challenger_path_risk_pending", "路径风险证据尚未完整"
-    elif not checks["pathDrawdownWithinCore"]:
-        status, reason = "challenger_intratrade_drawdown", "盘中回撤高于Core线但未触发淘汰线"
+    elif not checks["noRepeatedLiquidation"]:
+        status, reason = "challenger_liquidation_tuning", "当前参数回放爆仓超过3次，等待降低杠杆/调整保证金"
+    elif not checks["noForwardLiquidation"]:
+        status, reason = "challenger_forward_liquidation_watch", "实跟近30日爆仓超过3次，暂不进入Core"
     elif not checks["sectorExecutable"]:
         status, reason = "challenger_sector_watch", "板块证据仍处于观察状态"
     else:
@@ -510,13 +507,12 @@ def compute_follow_score(
     )
     liqs = int(_num(metrics.get("copy_bt_liquidations")))
     liquidation_cleanliness = 1.0 - _clamp(liqs / max(1.0, float(campaign_n)))
-    intratrade_dd = max(0.0, _num(metrics.get("copy_intratrade_max_drawdown"), 1.0))
-    drawdown_quality = 1.0 - _clamp(intratrade_dd / max(1e-9, policy.intratrade_dd_reject))
-    recovery_quality = _clamp(_num(metrics.get("copy_deep_bag_recovery_rate"), 0.0))
-    risk_score = (
-        0.45 * risk + 0.20 * liquidation_cleanliness
-        + 0.25 * drawdown_quality + 0.10 * recovery_quality
-    )
+    # Historical fills do not expose the source order's true margin/leverage. Maximum drawdown reconstructed
+    # with our leverage ceiling remains an audit/tuning metric, not a hidden score penalty that can recreate
+    # the deleted drawdown gate through the 75-point Core floor.
+    # Cap the pillar at .90 because historical leverage coverage can never prove perfect path safety.
+    # This preserves the established 75-point calibration without reintroducing drawdown as a score input.
+    risk_score = 0.75 * risk + 0.15 * liquidation_cleanliness
     score = (
         0.30 * economic_score + 0.25 * repeatability_score
         + 0.15 * edge_confidence_score + 0.15 * operability_score + 0.15 * risk_score

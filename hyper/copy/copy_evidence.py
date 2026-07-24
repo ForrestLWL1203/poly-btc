@@ -324,7 +324,7 @@ def _episode_rows(positions: Iterable[Mapping]) -> list[tuple[int, float]]:
         value = _finite(position.get("net_pnl")) / margin
         # A malformed replay row must not dominate the entire model.  Values
         # outside +/-100% of occupied isolated margin are clipped for evidence;
-        # liquidation remains a separate hard risk signal.
+        # proxy liquidation remains a separate final-surface risk metric.
         rows.append((closed_at, max(-1.0, min(1.0, value))))
     return rows
 

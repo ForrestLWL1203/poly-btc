@@ -150,50 +150,34 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             _num(primary.get("cost_stress_net_pnl"))
             if primary.get("cost_stress_net_pnl") is not None else None
         ),
+        "simulatedPathRisk": {
+            "liquidations30d": _int(primary.get("liquidations")),
+            "liquidations7d": _int(results[7].get("liquidations")),
+            "intratradeMaxDrawdown": _num(primary.get("intratrade_max_drawdown")),
+            "deepBagEvents": _int(primary.get("deep_bag_event_n")),
+            "failedDeepBagEvents": _int(primary.get("failed_deep_bag_n")),
+            "deepBagRecoveryRate": _num(primary.get("deep_bag_recovery_rate"), 1.0),
+        },
         "qualificationEquity": equities[30],
         "windowStartEquity": {str(days): equities[days] for days in (30, 14, 7)},
     }
 
-    recent = results[7]
+    # Path drawdown and proxy liquidations are produced with our configured maximum leverage because source
+    # fills do not disclose their historical margin/leverage. Drawdown stays diagnostic; proxy liquidations
+    # remain a sizing/tuning input. Neither suppresses a profitable sector before tuning can repair sizing.
     hard_checks = (
-        (
-            _int(primary.get("liquidations")) > policy.core_max_liquidations_30d,
-            "sector_liquidation_limit",
-            f"板块30日最终回放爆仓超过{policy.core_max_liquidations_30d}次",
-        ),
-        (
-            _int(recent.get("liquidations")) > 0 and pnl[7] < min_net,
-            "sector_recent_liquidation",
-            "板块7日亏损中发生爆仓，判定近期硬风险",
-        ),
         (
             primary.get("valuation_status") is not None
             and str(primary.get("valuation_status") or "").strip().lower() != "complete",
             "sector_valuation_pending",
             "板块持仓末端估值不完整",
         ),
-        (
-            _num(primary.get("intratrade_max_drawdown")) > policy.intratrade_dd_reject,
-            "sector_intratrade_drawdown_reject",
-            "板块30日盘中回撤超过15%硬风险线",
-        ),
-        (
-            _int(primary.get("failed_deep_bag_n")) > policy.deep_bag_max_failed,
-            "sector_failed_deep_loss_reject",
-            "板块失败深亏事件超过硬风险上限",
-        ),
-        (
-            _int(primary.get("deep_bag_event_n")) >= 2
-            and _num(primary.get("deep_bag_recovery_rate"), 1.0) < policy.deep_bag_min_recovery_rate,
-            "sector_deep_loss_recovery_reject",
-            "板块多次深亏且恢复率不足50%",
-        ),
     )
     for failed, status, reason in hard_checks:
         if failed:
             return {
                 **base, "allow": False, "status": status, "reason": reason, "watch": False,
-                "hardRisk": True,
+                "hardRisk": False,
             }
     if return30 <= 0.0:
         return {
@@ -238,7 +222,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         **base,
         "allow": True,
         "status": "allowed",
-        "reason": "板块严格Copy净盈利、成本压力为正且无硬风险，纳入钱包级Core聚合",
+        "reason": "板块严格Copy净盈利且成本压力为正；路径风险交由最终参数与爆仓≤3规则处理",
         "watch": False,
     }
 
@@ -482,7 +466,6 @@ def evaluate_sector_policy(
                 item.get("allow")
                 and _int(primary.get("closed_n")) >= _min_closed_for_days(30)
                 and _num(primary.get("copy_net_pnl")) > min_net
-                and _int(primary.get("liquidations")) == 0
                 and _num(primary.get("open_fill_rate"), 1.0)
                     >= load_copy_policy().min_actionable_open_rate
                 and _num(primary.get("capacity_open_fit"), 1.0)

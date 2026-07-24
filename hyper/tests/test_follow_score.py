@@ -272,18 +272,20 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(result["coreEligible"])
         self.assertFalse(result["checks"]["costStressPositive"])
 
-    def test_one_isolated_liquidation_allowed_repeat_rejected(self):
-        self.assertTrue(judge(copy_bt_liquidations=1)["coreEligible"])
-        repeat = judge(copy_bt_liquidations=2)
-        self.assertFalse(repeat["eligible"])
-        self.assertTrue(repeat["hardRisk"])
+    def test_up_to_three_proxy_liquidations_allowed_fourth_waits_for_retune(self):
+        self.assertTrue(judge(copy_bt_liquidations=3)["coreEligible"])
+        repeat = judge(copy_bt_liquidations=4)
+        self.assertTrue(repeat["eligible"])
+        self.assertFalse(repeat["coreEligible"])
+        self.assertEqual(repeat["status"], "challenger_liquidation_tuning")
+        self.assertNotIn("hardRisk", repeat)
 
-    def test_path_risk_downgrades_then_rejects(self):
-        challenger = judge(copy_intratrade_max_drawdown=0.13)
-        rejected = judge(copy_intratrade_max_drawdown=0.151)
-        self.assertEqual(challenger["status"], "challenger_intratrade_drawdown")
-        self.assertEqual(rejected["role"], "rejected")
-        self.assertTrue(rejected["hardRisk"])
+    def test_historical_max_drawdown_is_diagnostic_not_admission(self):
+        result = judge(copy_intratrade_max_drawdown=0.80)
+        self.assertTrue(result["coreEligible"])
+        self.assertEqual(
+            result["simulatedPathRisk"]["intratradeMaxDrawdown"], 0.80,
+        )
 
     def test_no_copyable_sector_rejects_but_watch_sector_stays_challenger(self):
         none = judge(sector_policy_json=json.dumps({"allowed": [], "watch": []}))

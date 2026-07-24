@@ -22,7 +22,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(policy.copy_weekly_min_return, 0.0)
         self.assertEqual(policy.copy_weekly_score_return_target, 0.04)
         self.assertEqual(policy.copy_weekly_min_net_per_closed_return, 0.005)
-        self.assertEqual(policy.core_max_liquidations_30d, 1)
+        self.assertEqual(policy.core_max_liquidations_30d, 3)
         self.assertGreaterEqual(policy.min_actionable_open_rate, 0.7)
         self.assertGreaterEqual(policy.min_capacity_fit, 0.75)
         self.assertTrue(policy.version.startswith("copy-policy-"))

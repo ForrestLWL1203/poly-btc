@@ -27,9 +27,8 @@ class PrefixEvaluation:
 
     @property
     def utility(self) -> float:
-        # max_drawdown is an account-equity fraction.  The caller supplies the account anchor in payload.
-        anchor = float(self.payload.get("initialBalance") or 10_000.0)
-        return float(self.net_pnl) - float(self.max_drawdown) * anchor
+        # Historical maximum drawdown is telemetry, not a membership score or gate.
+        return float(self.net_pnl)
 
     @property
     def feasible(self) -> bool:
@@ -49,7 +48,6 @@ class PrefixEvaluation:
         return (
             self.net_pnl > 0
             and self.stress_net_pnl > 0
-            and self.max_drawdown <= float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
             and congestion_ok
         )
 
@@ -115,11 +113,6 @@ def validate_final_membership(
             if int(fold.payload.get("campaignClosedN") or 0)
             >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
         ]
-        if any(
-            fold.max_drawdown > float(config.CORE_PORTFOLIO_MAX_DRAWDOWN)
-            for fold in evaluable_folds
-        ):
-            reasons.append("membership_fold_infeasible")
         if len(evaluable_folds) < int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS):
             reasons.append("membership_fold_evidence_insufficient")
         evaluable_rows = [
@@ -227,7 +220,7 @@ def search_quality_membership(
 
     def rank(item):
         addrs, value = item
-        return (value.utility, value.net_pnl, value.stress_net_pnl, -value.max_drawdown, -len(addrs), addrs)
+        return (value.net_pnl, value.stress_net_pnl, -len(addrs), addrs)
 
     if len(ordered) <= max(1, int(exhaustive_below)):
         states = []
@@ -300,8 +293,7 @@ class PrefixSearchResult:
 def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, *,
                       utility_retention: float = .97, net_retention: float = .95,
                       stress_retention: float = .90, utility_slack: float = 50.0,
-                      net_slack: float = 100.0, stress_slack: float = 100.0,
-                      max_dd_worsen: float = .01) -> bool:
+                      net_slack: float = 100.0, stress_slack: float = 100.0) -> bool:
     """Whether a smaller quality prefix preserves the full-prefix portfolio.
 
     Absolute slack keeps the predicate stable near zero; relative retention governs meaningful portfolios.
@@ -320,7 +312,6 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
         candidate.utility >= utility_floor
         and candidate.net_pnl >= net_floor
         and candidate.stress_net_pnl >= stress_floor
-        and candidate.max_drawdown <= reference.max_drawdown + max_dd_worsen
     )
 
 

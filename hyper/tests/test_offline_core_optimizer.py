@@ -90,7 +90,7 @@ class OfflineCoreOptimizerTests(unittest.TestCase):
         self.assertEqual(selected, ("0xa", "0xstrong"))
         self.assertEqual(result.net_pnl, 30)
 
-    def test_risk_adjusted_utility_blocks_raw_profit_only_move(self):
+    def test_historical_drawdown_utility_does_not_block_profitable_move(self):
         values = {
             ("0xa",): metrics(20, utility=18),
             ("0xa", "0xrisky"): metrics(30, utility=15),
@@ -102,7 +102,7 @@ class OfflineCoreOptimizerTests(unittest.TestCase):
             self.constraints,
         )
 
-        self.assertEqual(selected, ("0xa",))
+        self.assertEqual(selected, ("0xa", "0xrisky"))
 
     def test_robust_gate_requires_continuous_and_two_fold_improvement(self):
         base = metrics(100, utility=90)

@@ -28,10 +28,7 @@ def _net(metrics: selection.PortfolioMetrics) -> float:
 
 
 def _utility(metrics: selection.PortfolioMetrics) -> float:
-    return f(
-        metrics.risk_adjusted_utility
-        if metrics.risk_adjusted_utility is not None else _net(metrics)
-    )
+    return _net(metrics)
 
 
 def conservative_metrics(first: selection.PortfolioMetrics,
@@ -40,7 +37,7 @@ def conservative_metrics(first: selection.PortfolioMetrics,
     net = min(_net(first), _net(second))
     stress = min(f(first.stress_net_pnl), f(second.stress_net_pnl))
     drawdown = max(f(first.drawdown_dollars), f(second.drawdown_dollars))
-    utility = min(_utility(first), _utility(second), net - drawdown)
+    utility = net
     return selection.PortfolioMetrics(
         net_lcb=net,
         stress_net_lcb=stress,
@@ -62,8 +59,7 @@ def conservative_metrics(first: selection.PortfolioMetrics,
 def _rank(item: tuple[tuple[str, ...], selection.PortfolioMetrics]) -> tuple:
     addrs, metrics = item
     return (
-        _utility(metrics), _net(metrics), f(metrics.stress_net_pnl),
-        -f(metrics.drawdown_dollars), f(metrics.capacity_fit),
+        _net(metrics), f(metrics.stress_net_pnl), f(metrics.capacity_fit),
         f(metrics.actionable_open_rate), -len(addrs), addrs,
     )
 
@@ -72,7 +68,6 @@ def _feasible(metrics: selection.PortfolioMetrics,
               constraints: selection.SelectionConstraints) -> bool:
     return (
         _net(metrics) > 0
-        and _utility(metrics) > 0
         and f(metrics.stress_net_pnl) > 0
         and f(metrics.actionable_open_rate) >= f(constraints.min_actionable_open_rate)
         and f(metrics.capacity_fit) >= f(constraints.min_capacity_fit)

@@ -40,10 +40,7 @@ def _metric_net(metrics: selection.PortfolioMetrics) -> float:
 
 
 def _metric_utility(metrics: selection.PortfolioMetrics) -> float:
-    return f(
-        metrics.risk_adjusted_utility
-        if metrics.risk_adjusted_utility is not None else _metric_net(metrics)
-    )
+    return _metric_net(metrics)
 
 
 def _combine_conservative(normal: selection.PortfolioMetrics,
@@ -51,7 +48,7 @@ def _combine_conservative(normal: selection.PortfolioMetrics,
     net = min(_metric_net(normal), _metric_net(liquidate))
     stress = min(f(normal.stress_net_pnl), f(liquidate.stress_net_pnl))
     drawdown = max(f(normal.drawdown_dollars), f(liquidate.drawdown_dollars))
-    utility = min(_metric_utility(normal), _metric_utility(liquidate), net - drawdown)
+    utility = net
     return selection.PortfolioMetrics(
         net_lcb=net,
         stress_net_lcb=stress,
@@ -314,8 +311,7 @@ def _nearest_axis_candidates(base_follow: dict) -> list[tuple[str, dict]]:
 def _better(item):
     _label, _surface, metrics = item
     return (
-        _metric_utility(metrics), _metric_net(metrics), f(metrics.stress_net_pnl),
-        -f(metrics.drawdown_dollars),
+        _metric_net(metrics), f(metrics.stress_net_pnl),
     )
 
 
@@ -367,7 +363,6 @@ def main() -> int:
         min_relative_lcb_improvement=0,
         min_actionable_open_rate=float(getattr(config, "MIN_ACTIONABLE_OPEN_RATE", .70)),
         min_capacity_fit=float(getattr(config, "MIN_CAPACITY_FIT", .85)),
-        max_drawdown_worsening=1,
         max_deploy_pct=f(params.get(db, "MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)),
         max_cost_drag_ratio=1,
         max_targets=len(candidates),

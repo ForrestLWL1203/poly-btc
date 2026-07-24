@@ -364,7 +364,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             hard = {
                 "eligible": False, "coreEligible": False, "role": "exit_only",
-                "status": "current_deep_loss_freeze", "hardRisk": True,
+                "status": "structural_uncopyable", "hardRisk": True,
             }
 
             result = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", hard)

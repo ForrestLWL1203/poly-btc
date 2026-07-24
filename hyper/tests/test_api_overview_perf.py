@@ -101,6 +101,25 @@ class ApiOverviewPerfTests(unittest.TestCase):
             overview = api_overview.ep_overview(GuardedDb(db))
 
         self.assertEqual(overview["winRatePct"], 50.0)
+        self.assertFalse(overview["system"]["portfolioDrawdownStop"]["active"])
+
+    def test_overview_exposes_portfolio_drawdown_stop(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO copy_account "
+                "(id,initial_balance,balance,equity_high_water,drawdown_stop_active,drawdown_stopped_at,updated_at) "
+                "VALUES (1,10000,8400,10000,1,'2026-01-01T00:00:00Z','now')"
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        stop = overview["system"]["portfolioDrawdownStop"]
+        self.assertTrue(stop["active"])
+        self.assertEqual(stop["highWater"], 10_000)
+        self.assertAlmostEqual(stop["drawdownPct"], 16.0)
 
     def test_overview_aggregates_open_risk_in_sql(self):
         with tempfile.TemporaryDirectory() as td:
