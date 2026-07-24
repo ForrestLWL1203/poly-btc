@@ -47,7 +47,7 @@ PARAM_SPEC = [
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
         "Core容量上限", "仅限制最多可发布多少个Core；不是目标数量，系统不会为了接近上限而补位"),
     ("CORE_REBALANCE_INTERVAL_DAYS", "scanner", "hidden", "int", "rescan",
-        config.CORE_REBALANCE_INTERVAL_DAYS, "Core常规换榜周期", ""),
+        config.CORE_REBALANCE_INTERVAL_DAYS, "Core参数重调周期", "只限制昂贵参数网格；当前严格回放可更新成员"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),

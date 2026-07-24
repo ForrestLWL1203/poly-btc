@@ -43,9 +43,11 @@ Repository boundaries:
   builder namespaces are out of scope.
 - Settings saves must not start a scan. A scan starts from the explicit Dashboard action or the configured
   automatic cadence.
-- Normal automatic promotion requires two qualifying complete generations at least 24 hours apart. Ordinary
-  membership/rank changes are weekly and a new Core has 14 days of soft minimum tenure; hard data/risk failures
-  still act immediately and two consecutive generations confirm other soft failures.
+- Normal automatic promotion requires two qualifying complete generations at least 24 hours apart. Every
+  complete strict replay may publish its proven membership; the weekly cadence limits only the expensive
+  parameter grid and may not overwrite that membership with the old Core. A new Core has 14 days of soft
+  minimum tenure; hard data/risk failures still act immediately and two consecutive generations confirm
+  other soft failures.
 - Dashboard business failures are not data errors. Reserve “数据异常” for collection, cache, replay, valuation-
   pipeline, or immutable-strategy integrity failures; an incomplete open-position mark is the explicit
   “开放仓位估值待确认” observation state, not a generic data-error badge.

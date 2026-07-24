@@ -190,6 +190,14 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(publication_source.count("evaluate_portfolio_window("), 1)
         self.assertIn("final_strict_copy_failed:", publication_source)
 
+    def test_scheduled_formation_never_overwrites_verified_membership_with_old_core(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+
+        self.assertNotIn("stableRetentionApplied", source)
+        self.assertNotIn("weekly_rebalance_not_due", source)
+        self.assertNotIn("chosen_addrs = tuple(stable)", source)
+        self.assertIn("retune = bool(retune and rebalance_due)", source)
+
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)

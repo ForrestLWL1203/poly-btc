@@ -50,7 +50,7 @@ MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load eve
 # tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
 CORE_INITIAL_MAX_N = 16
 CORE_TARGET_MAX_N = 16
-CORE_REBALANCE_INTERVAL_DAYS = 7 # normal rank/portfolio reshuffles are weekly; hard risk failures remain immediate.
+CORE_REBALANCE_INTERVAL_DAYS = 7 # expensive parameter-grid cadence; each complete strict replay may update membership.
 CORE_PROMOTION_MIN_HOURS = 24
 CORE_SOFT_MIN_TENURE_DAYS = 14
 CORE_PREFIX_UTILITY_RETENTION = 0.97

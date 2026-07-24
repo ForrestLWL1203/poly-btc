@@ -2573,8 +2573,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     rebalance_due, core_age_days = _core_rebalance_due(
         db, current_core, now_ms=now_ms, interval_days=rebalance_interval,
     )
-    # Scheduled scans still refresh evidence and can immediately remove a hard-risk failure.
-    # Parameter/membership optimization runs only on the weekly cycle; there is no minimum Core quota.
+    # Every complete generation may publish the membership proven by its current strict replay. The expensive
+    # parameter grid remains periodic; it must not also freeze wallet membership or overwrite a newly proven
+    # set with the previous Core merely because the parameter-retune interval has not elapsed.
     retune = bool(retune and rebalance_due)
     individual_replay_cache = {}
     surface_ranked = _rank_formation_candidates_for_surface(
@@ -3148,25 +3149,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         previous_qualified = ()
     else:
         chosen_addrs, chosen, robust_check = robust_winner
-    stability_applied = False
-    if not rebalance_due and previous_qualified:
-        # Between weekly rebalances, preserve every incumbent which still clears today's individual hard
-        # gates.  A liquidation/forward-loss/campaign failure is removed immediately, but it must not give
-        # the optimizer permission to churn the other sound incumbents during the same evidence refresh.
-        stable = [addr for addr in current_core if addr in set(previous_qualified)]
-        hard_removed = [addr for addr in current_core if addr not in set(previous_qualified)]
-        chosen_addrs = tuple(stable)
-        chosen = evaluate_members(chosen_addrs)
-        robust_check = {
-            "eligible": True,
-            "stableRetention": True,
-            "reason": (
-                "scheduled_hard_failures_removed" if hard_removed
-                else "weekly_rebalance_not_due"
-            ),
-            "hardRemoved": hard_removed,
-        }
-        stability_applied = True
     # Pre-validate any strict LOO result. Publication may remove a negative incremental member only when
     # the resulting set has passed these same membership stress rules.
     robust_allowed = {tuple(sorted(chosen_addrs))}
@@ -3223,7 +3205,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "rebalanceDue": rebalance_due,
             "coreAgeDays": core_age_days,
             "rebalanceIntervalDays": rebalance_interval,
-            "stableRetentionApplied": stability_applied,
             "operatorStarred": list(pinned_order),
             "effectiveStarred": list(effective_pinned_order),
             "tunePoolCount": len(tune_ordered),
