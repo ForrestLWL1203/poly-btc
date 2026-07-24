@@ -17,7 +17,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(policy.stability_min_return, 0.05)
         self.assertEqual(policy.stability_max_loss_to_30d_profit, 0.25)
         self.assertEqual(policy.core_min_copy_return_30d, 0.10)
-        self.assertEqual(policy.core_min_copy_return_7d, 0.03)
+        self.assertEqual(policy.core_min_copy_return_7d, 0.04)
         self.assertEqual(policy.copy_weekly_min_campaigns_per_fold, 1)
         self.assertEqual(policy.copy_weekly_min_return, 0.0)
         self.assertEqual(policy.copy_weekly_score_return_target, 0.04)

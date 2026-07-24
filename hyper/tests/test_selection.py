@@ -207,6 +207,35 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(set(consensus["selected"]), {"0xa", "0xb"})
         self.assertEqual(consensus["looRemoved"], ())
 
+    def test_quality_first_transition_ranks_core_by_score_not_contribution(self):
+        profiles = [
+            {
+                "addr": "0xhigh", "status": "active", "profile_generation": "g2",
+                "data_status": "valid", "follow_score": .91,
+                "follow_qualification": {"coreEligible": True},
+            },
+            {
+                "addr": "0xlow", "status": "active", "profile_generation": "g2",
+                "data_status": "valid", "follow_score": .78,
+                "follow_qualification": {"coreEligible": True},
+            },
+        ]
+        metrics = {
+            (): self._transition_metrics(0),
+            ("0xhigh",): self._transition_metrics(100),
+            ("0xlow",): self._transition_metrics(500),
+            ("0xhigh", "0xlow"): self._transition_metrics(700),
+        }
+
+        result = scanner._quality_first_core_transition(
+            profiles, generation_id="g2", previous_roles={}, controls={},
+            desired_order=("0xhigh", "0xlow"),
+            strict_evaluate=lambda addrs: metrics[tuple(sorted(addrs))],
+        )
+
+        self.assertEqual(result["selected"], ("0xhigh", "0xlow"))
+        self.assertGreater(result["utilities"]["0xlow"], result["utilities"]["0xhigh"])
+
     def test_quality_first_transition_does_not_keep_drag_to_minimize_drawdown_alone(self):
         profiles = [
             {

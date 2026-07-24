@@ -250,7 +250,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
 
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_7D'"
-            ).fetchone()[0]), 3.0)
+            ).fetchone()[0]), 4.0)
             db.execute(
                 "UPDATE params SET value='4',default_value='3' WHERE key='CORE_MIN_COPY_RETURN_7D'"
             )

@@ -155,7 +155,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         source = inspect.getsource(scanner.form_quality_prefix)
         failure_branch = source[
             source.index("if robust_winner is None:"):
-            source.index("chosen_addrs, chosen, robust_check = robust_winner")
+            source.index("robust_key, chosen, robust_check = robust_winner")
         ]
 
         self.assertNotIn('raise RuntimeError("no_robust_quality_membership")', failure_branch)
@@ -478,7 +478,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             },
         }))
 
-    def test_formation_entry_moves_magnitude_and_weekly_gates_to_shared_replay(self):
+    def test_formation_entry_requires_recent_return_before_shared_replay(self):
         policy = json.loads(strict_policy_json())
         policy["copyWeeklyProfitability"]["evidenceSufficient"] = False
         policy["copyWeeklyProfitability"]["passed"] = False
@@ -504,7 +504,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         result = scanner._formation_entry_eligibility(effective, .80)
 
-        self.assertTrue(result["eligible"])
+        self.assertFalse(result["eligible"])
         self.assertFalse(result["individualCoreEligible"])
         self.assertFalse(
             result["qualification"]["checks"]["strictCopy30dReturn"]
@@ -516,7 +516,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             result["qualification"]["checks"]["strictCopyWeeklyPositive"]
         )
 
-    def test_formation_entry_keeps_recent_profit_hard_but_score_as_ranking(self):
+    def test_formation_entry_keeps_recent_profit_and_score_as_hard_quality_gates(self):
         effective = {
             "copy_expected_return": .04,
             "copy_return_lcb": .01,
@@ -541,10 +541,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             "sector_copy_json": strict_sector_json(1800, 7, 600, 6, -1, 5),
         }, .80)
 
-        self.assertTrue(low_score["eligible"])
+        self.assertFalse(low_score["eligible"])
         self.assertFalse(low_score["checks"]["scoreAtLeastCoreFloor"])
         self.assertFalse(losing_week["eligible"])
-        self.assertFalse(losing_week["checks"]["strictCopy7dPositive"])
+        self.assertFalse(losing_week["checks"]["strictCopyRolling7dReturn"])
 
     def test_manual_optimize_requalifies_incumbents_as_new_entries(self):
         source = inspect.getsource(scanner.optimize_published_generation)
@@ -1095,10 +1095,30 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     effective_qualifications={"0xaaa": final_qualification},
                     effective_scores={"0xaaa": .95},
                     effective_policies={"0xaaa": final_policy},
+                    effective_metrics={"0xaaa": {
+                        "copy_bt_net_pnl": 4321.0,
+                        "copy_bt_win_rate": .80,
+                        "copy_bt_closed_n": 10,
+                        "copy_bt_7d_net_pnl": 777.0,
+                        "copy_bt_7d_closed_n": 3,
+                        "sector_copy_json": strict_sector_json(),
+                    }},
+                    effective_score_details={"0xaaa": {
+                        "economicScore": .88,
+                        "reasons": ["最终参数评分证据"],
+                    }},
+                    effective_replay_params_hash="sealed-hash",
                 )
 
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "core")])
             self.assertEqual(json.loads(rows[0].sector_policy_json)["allowed"], ["crypto"])
+            self.assertEqual(rows[0].replay_copy_bt_net_pnl, 4321.0)
+            self.assertEqual(rows[0].replay_copy_bt_7d_net_pnl, 777.0)
+            self.assertEqual(rows[0].replay_params_hash, "sealed-hash")
+            self.assertEqual(
+                json.loads(rows[0].replay_score_detail_json)["economicScore"], .88,
+            )
+            self.assertEqual(rows[0].replayed_at, "now")
             self.assertTrue(window_fills.call_args.kwargs["include_watch"])
             final_replay.assert_called_once()
             self.assertEqual(final_replay.call_args.kwargs["days"], 30)

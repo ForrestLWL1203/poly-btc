@@ -1623,13 +1623,15 @@ def _quality_first_core_transition(
     promotion_ready=None,
     tenure_protected=(),
 ):
-    """Publish strict membership with promotion confirmation and soft-tenure protection.
+    """Publish a score-ordered Core prefix with promotion confirmation.
 
     Profile/data errors and wallets that no longer clear the individual Core gate after the explicit
     soft-failure grace cannot originate new positions. Open copies are handled by the caller as Exit-only;
-    they never justify stale Core authority.
+    they never justify stale Core authority. Portfolio checks may shorten only the low-score suffix; they
+    cannot reorder Core by marginal contribution or retain a lower-score wallet after removing a higher one.
     """
     rows = {(row.get("addr") or "").lower(): row for row in profiles}
+    quality_order = tuple(rows)
     previous_core = {
         (addr or "").lower() for addr, role in previous_roles.items() if role == selection.CORE
     }
@@ -1678,9 +1680,8 @@ def _quality_first_core_transition(
                 else qualification.get("status") or "portfolio_not_selected"
             )
 
-    # Remove only a wallet whose *actual conditional presence* lowers the funded account's net result.
-    # Coin overlap is deliberately irrelevant here: profitable consensus remains because taking any owner
-    # out would reduce net PnL; redundant fee/drawdown drag can be removed regardless of quality rank.
+    # A final conditional check may shorten only the low-quality suffix. Testing every member and deleting
+    # an arbitrary middle row silently converted a score-ranked quality prefix into a profit-ranked subset.
     published = set(selected)
     max_removals = max(0, int(getattr(config, "CORE_LOO_MAX_REMOVALS", 2) or 0))
     min_net_gain = float(getattr(config, "CORE_LOO_MIN_NET_GAIN", 1.0) or 0.0)
@@ -1691,35 +1692,34 @@ def _quality_first_core_transition(
     }
     while len(published) > 1 and len(removed_by_loo) < max_removals:
         base = strict_evaluate(tuple(sorted(published)))
-        trials = []
-        for addr in published:
-            if addr in pinned_set:
-                continue
-            without = strict_evaluate(tuple(sorted(published - {addr})))
-            net_gain = f(without.net_pnl) - f(base.net_pnl)
-            stress_gain = f(without.stress_net_pnl) - f(base.stress_net_pnl)
-            feasible = (
-                f(without.net_pnl) > 0.0
-                and f(without.stress_net_pnl) > 0.0
-                and f(without.actionable_open_rate) >= load_copy_policy().min_actionable_open_rate
-                and f(without.capacity_fit) >= load_copy_policy().min_capacity_fit
-                and (
-                    not robust_allowed
-                    or tuple(sorted(published - {addr})) in robust_allowed
-                )
-            )
-            if feasible and net_gain >= min_net_gain:
-                trials.append((net_gain, stress_gain, -desired.index(addr), addr))
-        if not trials:
+        score_order = tuple(addr for addr in quality_order if addr in published)
+        removable = next(
+            (addr for addr in reversed(score_order) if addr not in pinned_set),
+            None,
+        )
+        if removable is None:
             break
-        _net_gain, _stress_gain, _rank, outgoing = max(trials)
-        published.remove(outgoing)
-        removed_by_loo.append(outgoing)
-        reasons[outgoing] = "portfolio_negative_incremental_net"
-        if outgoing in previous_core:
-            hard_removed.add(outgoing)
+        without = strict_evaluate(tuple(sorted(published - {removable})))
+        net_gain = f(without.net_pnl) - f(base.net_pnl)
+        feasible = (
+            f(without.net_pnl) > 0.0
+            and f(without.stress_net_pnl) > 0.0
+            and f(without.actionable_open_rate) >= load_copy_policy().min_actionable_open_rate
+            and f(without.capacity_fit) >= load_copy_policy().min_capacity_fit
+            and (
+                not robust_allowed
+                or tuple(sorted(published - {removable})) in robust_allowed
+            )
+        )
+        if not feasible or net_gain < min_net_gain:
+            break
+        published.remove(removable)
+        removed_by_loo.append(removable)
+        reasons[removable] = "portfolio_negative_incremental_net"
+        if removable in previous_core:
+            hard_removed.add(removable)
 
-    # Conditional contribution under the final set remains the operator-facing Core rank.
+    # Conditional contribution remains telemetry; the operator-facing Core rank is the immutable score order.
     final_metrics = strict_evaluate(tuple(sorted(published)))
     base_utility = f(
         final_metrics.net_pnl if final_metrics.net_pnl is not None else final_metrics.net_lcb
@@ -1732,10 +1732,8 @@ def _quality_first_core_transition(
             without.net_pnl if without.net_pnl is not None else without.net_lcb
         )
         contribution_rows.append((base_utility - without_utility, -desired_rank.get(addr, 999999), addr))
-    contribution_rows.sort(reverse=True)
-    contribution_order = tuple(row[-1] for row in contribution_rows)
     final_order = tuple(addr for addr in pinned if addr in published) + tuple(
-        addr for addr in contribution_order if addr not in pinned_set
+        addr for addr in quality_order if addr in published and addr not in pinned_set
     )
     return {
         "selected": final_order,
@@ -1824,10 +1822,9 @@ def _selection_prefetch_candidates(db, generation_id=None, now_ms=None, limit=No
         pinned_order = tuple(
             item["addr"] for item in selection.pinned_core_controls(db, enabled_only=True)
         )
-        current_core = tuple(selection.published_core_addrs(db) or ())
         return [
             row["addr"] for row in _bounded_formation_candidates(
-                rows, (*pinned_order, *current_core), limit,
+                rows, pinned_order, limit,
             )
         ]
     return [
@@ -2056,6 +2053,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         "metrics": effective,
         "qualification": qualification,
         "score": score,
+        "scoreDetail": _detail,
         "sectorPolicyJson": effective.get("sector_policy_json"),
     }
 
@@ -2229,15 +2227,16 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
     closed_n = int(f(metrics_.get("copy_bt_closed_n")))
     campaigns = int(f(metrics_.get("copy_bt_campaign_closed_n") or closed_n))
     evidence_days = int(f(metrics_.get("copy_evidence_days")))
-    pnl7 = f(metrics_.get("copy_bt_7d_net_pnl"))
     minimum_evidence = min(5, int(policy.core_min_campaigns_30d))
     formation_checks = {
         "researchEligible": bool(qualification.get("eligible")),
         "dataValid": not bool(qualification.get("deferred"))
             and qualification.get("role") != "quarantine",
         "strictCopy30dPositive": bool(checks.get("strictCopy30dPositive")),
-        "strictCopy7dPositive": pnl7 > 0.0,
+        "strictCopy30dReturn": bool(checks.get("strictCopy30dReturn")),
+        "strictCopyRolling7dReturn": bool(checks.get("strictCopyRolling7dReturn")),
         "notThinProfit": bool(checks.get("averageNetPerClose")),
+        "notRecentThinProfit": bool(checks.get("averageNetPerClose7d")),
         "minimumClosedEvidence": closed_n >= minimum_evidence,
         "minimumCampaignEvidence": campaigns >= minimum_evidence,
         "minimumEvidenceDays": evidence_days >= min(5, minimum_evidence),
@@ -2250,19 +2249,19 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "noRepeatedLiquidation": bool(checks.get("noRepeatedLiquidation")),
         "noForwardLiquidation": bool(checks.get("noForwardLiquidation")),
     }
-    # These are the only individual vetoes before shared funded formation. Return magnitude, score,
-    # four-fold timing and portfolio congestion are measured again on the shared account. Historical maximum
-    # drawdown stays diagnostic only; keeping it as another veto charged an unknowable source-leverage proxy
-    # twice and reduced a healthy bounded pool before membership was evaluated.
+    # These are the individual quality vetoes before shared funded formation. Historical maximum drawdown
+    # stays diagnostic only; the final tuned surface owns the explicit <=3 proxy-liquidation contract.
     required = (
         "dataValid",
-        "strictCopy30dPositive",
-        "strictCopy7dPositive",
+        "strictCopy30dReturn",
+        "strictCopyRolling7dReturn",
         "notThinProfit",
+        "notRecentThinProfit",
         "minimumClosedEvidence",
         "minimumCampaignEvidence",
         "minimumEvidenceDays",
         "campaignWinRate",
+        "scoreAtLeastCoreFloor",
         "activityWithin72h",
         "valuationComplete",
         "pathRiskComplete",
@@ -2546,13 +2545,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     all_ranked_candidates = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
     )
-    # Refined candle paths are needed only after every cheaper Core gate passes. The old raw score Top-40
-    # let evidence-incomplete Challengers consume expensive path slots and could exclude a true near-Core
-    # wallet ranked just below them. Incumbents and explicit pins remain first so current risk is always
-    # re-certified; remaining slots contain only wallets whose sole unresolved Core proof is path risk.
+    # Refined candle paths are needed only after every cheaper Core gate passes. Explicit operator pins are
+    # the sole priority exception; incumbent status must not move a lower-score wallet ahead of the current
+    # score order or consume one of the bounded quality slots.
     ranked_candidates = _bounded_formation_candidates(
         all_ranked_candidates,
-        (*pinned_order, *current_core),
+        pinned_order,
         upper,
     )
     rebalance_interval = max(1, int(params.get(
@@ -2732,7 +2730,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     def replay_effective_surface(follow_surface):
         qualifications = {}
         scores = {}
+        score_details = {}
         policies = {}
+        metrics = {}
         qualified_rows = []
         audit = []
         rejected = []
@@ -2775,6 +2775,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             }
             qualifications[addr] = qualification
             scores[addr] = f(effective.get("score"))
+            score_details[addr] = dict(effective.get("scoreDetail") or {})
+            metrics[addr] = dict(effective.get("metrics") or {})
             if effective.get("sectorPolicyJson"):
                 policies[addr] = effective["sectorPolicyJson"]
             replay_invalid = bool(
@@ -2802,14 +2804,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 qualified_rows.append(row)
             else:
                 rejected.append(addr)
-        return qualifications, scores, policies, qualified_rows, audit, rejected
+        return (
+            qualifications, scores, score_details, policies, metrics, qualified_rows,
+            audit, rejected, surface_key,
+        )
 
     # The active/default surface is only a discovery baseline.  Core eligibility must be measured on the
     # count-specific winning surface; otherwise a wallet is rejected for needing the very tuning step that
     # just succeeded.
     qualification_follow = fixed_follow
-    (effective_qualifications, effective_scores, effective_policies, effective_ranked,
-     admission_audit, qualification_rejected) = replay_effective_surface(
+    (effective_qualifications, effective_scores, effective_score_details,
+     effective_policies, effective_metrics, effective_ranked,
+     admission_audit, qualification_rejected,
+     effective_surface_hash) = replay_effective_surface(
         qualification_follow
     )
     tune_coverage_fallback = False
@@ -2819,12 +2826,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     )
     effective_pinned = set(effective_pinned_order)
     pin_rank = {addr: rank for rank, addr in enumerate(pinned_order)}
-    current_rank = {addr: rank for rank, addr in enumerate(current_core)}
     effective_ranked.sort(key=lambda row: (
         0 if row["addr"] in pinned else 1,
-        0 if row["addr"] in current_rank else 1,
         pin_rank.get(row["addr"], 999999),
-        current_rank.get(row["addr"], 999999),
         -effective_scores.get(row["addr"], 0.0), row["addr"],
     ))
     ordered = tuple(row["addr"] for row in effective_ranked[:upper])
@@ -2833,7 +2837,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
             "qualifications": effective_qualifications,
             "scores": effective_scores,
+            "scoreDetails": effective_score_details,
             "policies": effective_policies,
+            "walletMetrics": effective_metrics,
+            "replayParamsHash": effective_surface_hash,
             "search": {
                 "algorithm": "quality_first_then_unified_tune_v6", "initialCount": 0,
                 "selectedCount": 0,
@@ -2933,14 +2940,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
         required_count=len(effective_pinned_order),
     )
-    membership_search = core_formation.search_quality_membership(
-        ordered, evaluate_members,
-        initial=ordered[:prefix_search.selected.count],
-        required=effective_pinned_order,
-        exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
-    )
-    chosen = membership_search.metrics
-    chosen_addrs = tuple(membership_search.selected)
+    # Core membership is a strict prefix of final-surface score order. An arbitrary add/swap search could
+    # replace a higher-score wallet with a lower-score wallet merely because the latter improved in-sample
+    # portfolio PnL, contradicting the quality-first contract.
+    chosen = prefix_search.selected
+    chosen_addrs = tuple(ordered[:chosen.count])
+    membership_algorithm = "strict_score_prefix"
+    membership_evaluated = len(membership_eval_cache)
 
     # Membership selection now receives its own independent-regime validation. Parameter candidates have
     # already passed the tuner's walk-forward check, but that says nothing about swapping wallet owners on
@@ -3094,13 +3100,14 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         return check
 
     finalist_limit = max(1, int(getattr(config, "CORE_SEARCH_ROBUST_FINALISTS", 12) or 12))
+    prefix_keys = {
+        tuple(sorted(ordered[:value.count])) for value in prefix_search.evaluated
+    }
     finalist_pool = {
         key: value for key, value in membership_eval_cache.items()
-        if key and value.feasible and effective_pinned.issubset(key)
+        if key in prefix_keys and value.feasible and effective_pinned.issubset(key)
     }
-    # A bounded add/swap search can return a winner which was not retained in the generic replay cache's
-    # highest-utility slice.  Include it in the same ordering, but never give it artificial priority over a
-    # better robust finalist merely because it was the search algorithm's terminal node.
+    # Always include the count search's chosen score prefix in the bounded robust finalist set.
     chosen_key = tuple(sorted(chosen_addrs))
     finalist_pool[chosen_key] = chosen
     finalist_states = sorted(
@@ -3136,13 +3143,17 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         }
         previous_qualified = ()
     else:
-        chosen_addrs, chosen, robust_check = robust_winner
+        robust_key, chosen, robust_check = robust_winner
+        robust_members = set(robust_key)
+        chosen_addrs = tuple(addr for addr in ordered if addr in robust_members)
     # Pre-validate any strict LOO result. Publication may remove a negative incremental member only when
-    # the resulting set has passed these same membership stress rules.
+    # the resulting set has passed these same membership stress rules. Only the score suffix is removable.
     robust_allowed = {tuple(sorted(chosen_addrs))}
-    for outgoing in chosen_addrs:
-        if outgoing in effective_pinned:
-            continue
+    outgoing = next(
+        (addr for addr in reversed(chosen_addrs) if addr not in effective_pinned),
+        None,
+    )
+    if outgoing is not None:
         smaller = tuple(addr for addr in chosen_addrs if addr != outgoing)
         if len(smaller) >= max(1, len(effective_pinned_order)):
             check = validate_members(smaller)
@@ -3175,14 +3186,16 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "selected": chosen_addrs, "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,
         "qualifications": effective_qualifications, "scores": effective_scores,
-        "policies": effective_policies,
+        "scoreDetails": effective_score_details,
+        "policies": effective_policies, "walletMetrics": effective_metrics,
+        "replayParamsHash": effective_surface_hash,
         "search": {
             "algorithm": "adaptive_count_continuous_equity_v7", "initialCount": len(ordered),
             "selectedCount": len(chosen_addrs), "boundary": prefix_search.boundary,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
-            "membershipAlgorithm": membership_search.algorithm,
-            "membershipEvaluated": membership_search.evaluated,
+            "membershipAlgorithm": membership_algorithm,
+            "membershipEvaluated": membership_evaluated,
             "membershipSelected": list(chosen_addrs),
             "membershipRobustAudit": robust_audit,
             "explicitEmptyCore": bool(robust_check.get("explicitEmptyCore")),
@@ -3337,7 +3350,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    previous_roles, controls, held,
                                    desired_order, formation_meta,
                                    effective_qualifications=None, effective_scores=None,
-                                   effective_policies=None, force_promotion=False):
+                                   effective_policies=None, effective_metrics=None,
+                                   effective_score_details=None,
+                                   effective_replay_params_hash=None,
+                                   force_promotion=False):
     """Materialize the fill-searched membership after one final strict 30-day portfolio replay."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -3361,6 +3377,16 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         addr = (addr or "").lower()
         if addr in by_addr and policy_json:
             by_addr[addr]["sector_policy_json"] = policy_json
+    replay_by_addr = {
+        (addr or "").lower(): dict(metrics or {})
+        for addr, metrics in dict(effective_metrics or {}).items()
+        if addr and metrics
+    }
+    score_detail_by_addr = {
+        (addr or "").lower(): dict(detail or {})
+        for addr, detail in dict(effective_score_details or {}).items()
+        if addr and detail
+    }
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -3464,6 +3490,10 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     # qualification here makes a clean factory reset mathematically incapable of ever bootstrapping Core.
     if force_promotion or not previous_roles:
         promotion_ready.update(desired)
+    if force_promotion:
+        # Explicit optimize/requalification rebuilds the Core from the current score surface. Soft tenure
+        # must not smuggle an old, lower-score wallet into that manually requested rebuild.
+        tenure_protected.clear()
     transition = _quality_first_core_transition(
         profiles,
         generation_id=generation_id,
@@ -3562,9 +3592,9 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         search_meta={
             **dict(formation_meta or {}),
             "finalStrictCopy": final_strict_validation,
-            "membershipPolicy": "quality-prefix-current-evidence-loo-v3",
+            "membershipPolicy": "strict-score-prefix-v1",
             "desiredOrder": desired,
-            "contributionOrder": transition["selected"],
+            "scoreOrder": transition["selected"],
             "looRemoved": list(transition.get("looRemoved") or ()),
         },
     )
@@ -3619,6 +3649,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             reason = qualification.get("status") or row.get("reason") or "not_qualified"
             include = False
         if include:
+            replay = replay_by_addr.get(addr) or {}
             rows.append(selection.SelectionRow(
                 addr=addr, role=role, enabled=enabled, reason=reason,
                 utility=transition.get("utilities", {}).get(addr, f(row.get("follow_score"))),
@@ -3630,6 +3661,38 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 policy_version=copy_policy.version,
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
+                replay_copy_bt_net_pnl=replay.get("copy_bt_net_pnl"),
+                replay_copy_bt_win_rate=replay.get("copy_bt_win_rate"),
+                replay_copy_bt_closed_n=replay.get("copy_bt_closed_n"),
+                replay_copy_bt_open_fill_rate=replay.get(
+                    "copy_bt_open_fill_rate", replay.get("actionable_open_rate")
+                ),
+                replay_copy_bt_liquidations=replay.get("copy_bt_liquidations"),
+                replay_copy_bt_fee_drag=replay.get("copy_bt_fee_drag"),
+                replay_copy_bt_unrealized_pnl=replay.get("copy_bt_unrealized_pnl"),
+                replay_copy_bt_valuation_status=replay.get("copy_bt_valuation_status"),
+                replay_copy_bt_14d_net_pnl=replay.get("copy_bt_14d_net_pnl"),
+                replay_copy_bt_14d_unrealized_pnl=replay.get(
+                    "copy_bt_14d_unrealized_pnl"
+                ),
+                replay_copy_bt_14d_closed_n=replay.get("copy_bt_14d_closed_n"),
+                replay_copy_bt_7d_net_pnl=replay.get("copy_bt_7d_net_pnl"),
+                replay_copy_bt_7d_unrealized_pnl=replay.get(
+                    "copy_bt_7d_unrealized_pnl"
+                ),
+                replay_copy_bt_7d_closed_n=replay.get("copy_bt_7d_closed_n"),
+                replay_sector_copy_json=replay.get("sector_copy_json"),
+                replay_params_hash=(
+                    effective_replay_params_hash if replay else None
+                ),
+                replay_score_detail_json=(
+                    json.dumps(
+                        score_detail_by_addr[addr],
+                        sort_keys=True, separators=(",", ":"), default=str,
+                    )
+                    if addr in score_detail_by_addr else None
+                ),
+                replayed_at=stamp if replay else None,
             ))
         lifecycle_state = (
             "qualified" if research_only
@@ -3666,7 +3729,10 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                               validate_price_path=True, audit_stamp=None,
                               forced_core_order=None, formation_meta=None,
                               effective_qualifications=None, effective_scores=None,
-                              effective_policies=None, force_promotion=False):
+                              effective_policies=None, effective_metrics=None,
+                              effective_score_details=None,
+                              effective_replay_params_hash=None,
+                              force_promotion=False):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -3763,6 +3829,9 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             effective_qualifications=effective_qualifications,
             effective_scores=effective_scores,
             effective_policies=effective_policies,
+            effective_metrics=effective_metrics,
+            effective_score_details=effective_score_details,
+            effective_replay_params_hash=effective_replay_params_hash,
             force_promotion=force_promotion,
         )
     if selection_mode == "auto":
@@ -4646,6 +4715,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         effective_qualifications=formation.get("qualifications") or {},
         effective_scores=formation.get("scores") or {},
         effective_policies=formation.get("policies") or {},
+        effective_metrics=formation.get("walletMetrics") or {},
+        effective_score_details=formation.get("scoreDetails") or {},
+        effective_replay_params_hash=formation.get("replayParamsHash"),
         force_promotion=bool(force_entry_requalification),
     )
     previous_core = set(existing_core)
@@ -5186,6 +5258,9 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
             effective_qualifications=formation.get("qualifications") or {},
             effective_scores=formation.get("scores") or {},
             effective_policies=formation.get("policies") or {},
+            effective_metrics=formation.get("walletMetrics") or {},
+            effective_score_details=formation.get("scoreDetails") or {},
+            effective_replay_params_hash=formation.get("replayParamsHash"),
             audit_stamp=stamp,
         )
         _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
@@ -5730,6 +5805,9 @@ def scan(db, p) -> None:
                     effective_qualifications=(formation or {}).get("qualifications") or {},
                     effective_scores=(formation or {}).get("scores") or {},
                     effective_policies=(formation or {}).get("policies") or {},
+                    effective_metrics=(formation or {}).get("walletMetrics") or {},
+                    effective_score_details=(formation or {}).get("scoreDetails") or {},
+                    effective_replay_params_hash=(formation or {}).get("replayParamsHash"),
                 )
             _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             # Publication timestamps describe when the complete decision became visible, not when the

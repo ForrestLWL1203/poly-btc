@@ -111,9 +111,9 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   receive retention replay. An empty Core publication stops execution but keeps a still-profitable former
   Core as Challenger evidence; it may not erase that wallet before its next strict requalification.
   Fill-based strict Copy later records the
-  individual 10% 30-day and 3% latest-7-day lines as score/watch evidence; it does not repeat them as vetoes
-  immediately before the shared funded replay. Formation entry still requires positive 30-day and latest-7-day
-  Copy PnL, a 0.5% average net per close, at least five closed positions/Campaigns/evidence days, a passing
+  individual 10% 30-day, 4% latest-7-day and score-75 lines as final-surface Core gates.
+  Formation entry also requires at least 0.5% average realized net per close over both 30 days and the latest
+  7 days, at least five closed positions/Campaigns/evidence days, a passing
   Campaign win rate, current activity, an executable sector, complete valuation/path data and no structural hard failure. The shared
   replay then owns four-fold stability, the permitted losing-fold bound, 1.5x taker-fee stress, congestion,
   membership count and final return.
@@ -181,9 +181,9 @@ default classification is:
 
 - any positive 30-day strict-Copy result remains Challenger; insufficient samples, fold evidence, activity,
   score or outlier stress are explicit Challenger reasons rather than economic rejection;
-- individual Core diagnostics retain the eight-Campaign, score-75, 10% 30-day and 3% latest-7-day lines. The actual
-  formation-entry contract is deliberately narrower and non-duplicated: positive 30-day and latest-7-day
-  strict-Copy PnL, at least five independent Campaigns/closed positions/evidence days, 0.5% average net per
+- individual Core admission requires score 75, 10% strict-Copy return over 30 days and 4% over the latest
+  rolling 7 days. It also requires at least five independent Campaigns/closed positions/evidence days and
+  0.5% average realized net per
   close, a passing Campaign win rate, activity within 72 hours, complete valuation/path evidence, executable
   sector policy and no structural hard failure. Score, return magnitude, path telemetry, full eight-Campaign confidence and
   individual weekly status continue to affect score/reason labels but cannot prevent the shared funded replay
@@ -197,9 +197,9 @@ default classification is:
   stronger density continuously;
 - the latest true flat-to-open signal must be within 72 hours for Core. Older wallets remain Challenger and
   existing copied positions remain managed exit-only;
-- rolling 14-day return, PF, Wilson confidence, raw payoff and the 10%/3% individual return lines are
-  ranking/diagnostic signals. Positive latest rolling 7-day Copy PnL prevents admitting a wallet already losing
-  now; Campaign win rate is the hard repeatability gate while body-after-top-three remains a score diagnostic;
+- rolling 14-day return, PF, Wilson confidence and raw payoff are ranking/diagnostic signals. The 10%/4%
+  individual return lines and 30d/latest-7d per-close density are hard Core gates; Campaign win rate is the
+  hard repeatability gate while body-after-top-three remains a score diagnostic;
 - actionable open rate and capacity fit are score, tuning and congestion diagnostics. Missed opens are already
   absent from realized Copy PnL, so they are not charged a second time as admission vetoes when the actually
   funded fills remain profitable after costs and the final tuned wallet surface stays within the proxy-liquidation limit;
@@ -228,11 +228,9 @@ stop, while per-coin caps and isolated-margin liquidation still bound exposure.
 Liquidity rejection and target-dust minimum-notional rejection are never tuned away.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
-repeatability is judged by the shared-account non-overlapping folds above; rolling 7-day magnitude remains
-diagnostic while positive latest-7-day PnL and current activity are formation-entry gates. Individual
-magnitude/fold/eight-Campaign failures remain explicit Challenger evidence but are not replayed as a second
-pre-portfolio veto. Current latest-7-day loss, invalid data and 30-day strict-Copy loss retain their explicit
-hard outcomes. Four or more proxy liquidations on the final tuned 30-day surface remain Challenger evidence;
+repeatability is judged by the shared-account non-overlapping folds above; rolling 7-day magnitude, 7-day
+per-close density and current activity are formation-entry gates. Individual failures remain explicit
+Challenger evidence. Four or more proxy liquidations on the final tuned 30-day surface remain Challenger evidence;
 the active pre-tune surface cannot reject a wallet that parameter optimization may repair.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
@@ -253,8 +251,8 @@ Heavy-DCA pressure keeps its separate structural rule.
 `watchlist.score` uses 30% funded economics, 25% repeatability, 15% edge confidence, 15% operability, and
 15% path risk. Funded economics combines explicit 30d and latest-7d return magnitude with non-overlapping
 fold timing and median per-close density; overlapping 14d return and the legacy raw score contribute zero.
-The sample-confidence factor saturates at the actual qualification floors. The 75/100 line is a Core-quality
-diagnostic and ranking target, not a second absolute veto after the hard evidence contract. Score cannot compensate
+The sample-confidence factor saturates at the actual qualification floors. The 75/100 line is a final
+Core-quality veto as well as the ranking boundary. Score cannot compensate
 for a failed win-rate, thin-profit, current-profit, activity, valuation, path-data or final proxy-liquidation gate. Weekly timing, cost
 stress, execution/capacity congestion and membership count are enforced once on the shared funded portfolio.
 
@@ -280,13 +278,14 @@ The user-facing roles are:
 - **Quarantine**: collection/cache/replay/valuation/strategy data is invalid and is not a new-entry target.
 
 `CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count or service quota:
-zero to sixteen wallets may publish, and no scheduled generation may add a wallet merely to reach a count. Normal ranking replacement,
-parameter retuning, and leave-one-out reshuffling run only after seven days since the last actual membership
+zero to sixteen wallets may publish, and no scheduled generation may add a wallet merely to reach a count. Normal ranking replacement
+and parameter retuning run only after seven days since the last actual membership
 change. Scheduled evidence refresh still removes final-surface proxy liquidation above three, Forward-loss, campaign-structure, or other individual hard
 failures immediately while retaining every other qualified incumbent. Production automatic formation is:
 
 1. Require positive scan-time Copy economics, at least five closes, valid valuation and no structural hard
-   failure. Rank at most 16 pre-Core wallets plus required current/pinned members, then
+   failure. Rank at most 16 pre-Core wallets strictly by final Copy score (explicit user pins are the only
+   priority exception), then
    run that bounded pool through
    canonical individual Copy replay once with the refined 15-minute path (and finer candles only for ambiguous
    risk ranges). A data-complete, path-certified wallet may enter parameter discovery even if default parameters
@@ -295,8 +294,10 @@ failures immediately while retaining every other qualified incumbent. Production
 2. Search wallet count and sizing together from cached fills: independently coarse-tune 16→8→12/boundary nodes,
    using continuous floating equity and congestion evidence, then full-tune only the winning count.
    The fast replay still models shared cash, margin, deployment, coin caps, fees, open capture and 1.5x cost
-   stress, but does not rescan the candle path inside every prefix/add/swap candidate.
-3. Recompute individual qualification and membership on the tuned surface. Four 7-day folds are slices of the
+   stress, but does not rescan the candle path inside every prefix candidate.
+3. Recompute individual qualification and membership on the tuned surface. Only a score-ordered prefix may
+   form Core; portfolio economics can shorten the low-score suffix but cannot substitute a lower-score wallet
+   for a higher-score one. Four 7-day folds are slices of the
    same continuously compounded 28-day replay; later folds inherit prior realized profit and contemporaneous
    deploy/capacity room. There is no minimum Core count.
 4. After parameters and actual publishable membership are fixed, run exactly one final path-complete 30-day
@@ -312,8 +313,8 @@ failures immediately while retaining every other qualified incumbent. Production
    generation can exist after a clean factory reset.
 6. Apply one individual outlier gate only: remove the largest winning independent Campaign and require remaining net
    positive. Top-two/body/top-wallet removals are diagnostic. Persist wallet/coin/day/side concentration.
-7. On a scheduled rebalance, repeatedly apply fill-driven leave-one-out elimination only when removing a member
-   raises funded net PnL by at least `$1` and the smaller set passed the same membership robustness checks.
+7. On a scheduled rebalance, a final conditional check may remove only the current lowest-score suffix wallet
+   when removal raises funded net PnL by at least `$1` and the smaller prefix passed the same robustness checks.
    Between rebalances, publish only hard-failure removals; ordinary additions wait for the next rebalance.
 
 An operator may star a current Core wallet through the Dashboard. The durable `target_controls.pinned` flag

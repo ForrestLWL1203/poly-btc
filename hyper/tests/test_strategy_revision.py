@@ -54,7 +54,7 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(active["targets"][0]["seedCoins"], ["BTC"])
         self.assertIn("COPY_POLICY_VERSION", active["params"])
         self.assertEqual(active["params"]["CORE_MIN_COPY_RETURN_30D"], 0.10)
-        self.assertEqual(active["params"]["CORE_MIN_COPY_RETURN_7D"], 0.03)
+        self.assertEqual(active["params"]["CORE_MIN_COPY_RETURN_7D"], 0.04)
         self.assertEqual(active["params"]["COPY_DEEP_BAG_EVENT_MIN_HOURS"], 4.0)
         self.assertEqual(active["params"]["CORE_COPY_MAX_LIQUIDATIONS_30D"], 3)
         self.assertNotIn("CORE_INTRATRADE_DD_MAX", active["params"])

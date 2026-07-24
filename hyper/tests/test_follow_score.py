@@ -31,6 +31,8 @@ def evidence(**overrides):
     row = {
         "score": 0.70,
         "copy_bt_closed_n": 16,
+        "copy_bt_14d_closed_n": 9,
+        "copy_bt_7d_closed_n": 6,
         "copy_bt_campaign_closed_n": 12,
         "copy_bt_campaign_win_rate": 0.75,
         "copy_bt_profit_factor": 3.0,
@@ -42,6 +44,7 @@ def evidence(**overrides):
         "copy_bt_net_pnl": 1800.0,
         "copy_bt_14d_net_pnl": 900.0,
         "copy_bt_7d_net_pnl": 600.0,
+        "copy_bt_7d_unrealized_pnl": 0.0,
         "copy_bt_campaign_net_after_top1": 500.0,
         "copy_bt_cost_stress_net_pnl": 1200.0,
         "copy_expected_return": 0.045,
@@ -125,6 +128,18 @@ class FollowScoreTests(unittest.TestCase):
         self.assertFalse(result["checks"]["averageNetPerClose"])
         self.assertFalse(result["coreEligible"])
         self.assertEqual(result["status"], "challenger_thin_profit_watch")
+
+    def test_recent_high_turnover_thin_profit_cannot_enter_core(self):
+        result = judge(
+            copy_bt_7d_net_pnl=400.0,
+            copy_bt_7d_closed_n=100,
+            copy_bt_7d_window_start_equity=10_000.0,
+        )
+
+        self.assertTrue(result["checks"]["strictCopyRolling7dReturn"])
+        self.assertFalse(result["checks"]["averageNetPerClose7d"])
+        self.assertFalse(result["coreEligible"])
+        self.assertEqual(result["status"], "challenger_recent_thin_profit_watch")
 
     def test_insufficient_campaign_evidence_is_challenger(self):
         result = judge(copy_bt_closed_n=4, copy_bt_campaign_closed_n=3, copy_evidence_days=2)

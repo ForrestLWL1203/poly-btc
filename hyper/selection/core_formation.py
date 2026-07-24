@@ -1,13 +1,11 @@
 """Quality-first Core formation.
 
-Individual quality builds one bounded membership pool without a minimum-wallet quota. That pool receives one
-shared parameter tune; a later strict leave-one-out pass may remove a non-tail member only when its actual
-presence lowers funded shared-account net economics.
+Individual quality builds one bounded score-ordered pool without a minimum-wallet quota. That pool receives one
+shared parameter tune; portfolio economics may shorten only its low-score suffix.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-import itertools
 from typing import Callable, Mapping
 
 from hyper import config
@@ -50,14 +48,6 @@ class PrefixEvaluation:
             and self.stress_net_pnl > 0
             and congestion_ok
         )
-
-
-@dataclass(frozen=True)
-class MembershipSearchResult:
-    selected: tuple[str, ...]
-    metrics: PrefixEvaluation
-    evaluated: int
-    algorithm: str
 
 
 def validate_final_membership(
@@ -189,97 +179,6 @@ def validate_final_membership(
         "maxLossToTotalProfit": max_loss_to_total_profit,
         "singleWalletDependencyWarning": dependency_warning,
     }
-
-
-def search_quality_membership(
-    candidates, evaluate, *, initial=(), required=(), exhaustive_below: int = 8,
-):
-    """Find a feasible quality subset without letting one congested wallet block every later wallet.
-
-    Small Core-ready pools are exhaustively evaluated.  Larger pools start from the count search's winning
-    prefix and apply bounded best-add/best-swap closure.  The evaluator owns the shared-account parameter
-    surface; membership only compares complete portfolio replays on that one surface.
-    """
-    ordered = tuple(dict.fromkeys(str(addr).lower() for addr in candidates if addr))
-    if not ordered:
-        raise ValueError("candidates must not be empty")
-    required_set = {str(addr).lower() for addr in required if addr}
-    if not required_set.issubset(set(ordered)):
-        raise ValueError("required wallets must be present in candidates")
-    cache = {}
-    minimum_size = max(1, len(required_set))
-
-    def get(addrs):
-        key = tuple(sorted(dict.fromkeys(addrs)))
-        if key not in cache:
-            value = evaluate(key)
-            if int(value.count) != len(key):
-                raise ValueError("membership evaluation count mismatch")
-            cache[key] = value
-        return cache[key]
-
-    def rank(item):
-        addrs, value = item
-        return (value.net_pnl, value.stress_net_pnl, -len(addrs), addrs)
-
-    if len(ordered) <= max(1, int(exhaustive_below)):
-        states = []
-        for count in range(minimum_size, len(ordered) + 1):
-            for addrs in itertools.combinations(ordered, count):
-                if not required_set.issubset(addrs):
-                    continue
-                value = get(addrs)
-                if value.feasible:
-                    states.append((tuple(sorted(addrs)), value))
-        if not states:
-            raise RuntimeError("no_feasible_quality_membership")
-        selected, metrics = max(states, key=rank)
-        return MembershipSearchResult(selected, metrics, len(cache), "exhaustive_subset")
-
-    selected = tuple(sorted(set(dict.fromkeys(initial)) | required_set))
-    if len(selected) < minimum_size:
-        selected = tuple(sorted(set(selected) | set(ordered[:minimum_size])))
-    current = get(selected) if selected else None
-    if current is None or not current.feasible:
-        base = tuple(sorted(required_set))
-        seeds = []
-        if base:
-            seed = tuple(sorted(set(base) | set(ordered[:minimum_size])))
-            seeds.append(seed)
-            seeds.extend(
-                tuple(sorted(set(seed) | {addr})) for addr in ordered if addr not in set(seed)
-            )
-        else:
-            seeds.append(tuple(sorted(ordered[:minimum_size])))
-        feasible = [(seed, get(seed)) for seed in seeds if get(seed).feasible]
-        if not feasible:
-            raise RuntimeError("no_feasible_quality_membership")
-        selected, current = max(feasible, key=rank)
-    seen = {selected}
-    for _ in range(len(ordered) * 2):
-        selected_set = set(selected)
-        outside = [addr for addr in ordered if addr not in selected_set]
-        trials = []
-        for incoming in outside:
-            addrs = tuple(sorted((*selected, incoming)))
-            value = get(addrs)
-            if value.feasible and value.utility > current.utility:
-                trials.append((addrs, value))
-            for outgoing in selected:
-                if outgoing in required_set:
-                    continue
-                swapped = tuple(sorted((selected_set - {outgoing}) | {incoming}))
-                value = get(swapped)
-                if value.feasible and value.utility > current.utility:
-                    trials.append((swapped, value))
-        if not trials:
-            break
-        next_selected, next_metrics = max(trials, key=rank)
-        if next_selected in seen:
-            break
-        seen.add(next_selected)
-        selected, current = next_selected, next_metrics
-    return MembershipSearchResult(selected, current, len(cache), "bounded_add_swap")
 
 
 @dataclass(frozen=True)

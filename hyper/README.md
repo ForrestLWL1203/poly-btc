@@ -64,13 +64,13 @@ Wallet quality and funded-account membership are separate decisions.
   candle paths are fetched only for current Core and profitable/sample-dense wallets that clear cheap hard
   data/risk gates, bounded at 16 for resource safety. The provisional pre-path score is not a gate because path-risk evidence
   is itself 15% of the final score; the 75-point line is applied after that path is available. New Core requires
-  eight independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 3% over the latest
+  eight independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 4% over the latest
   rolling 7 days. At least three of four non-overlapping 7-day folds must contain Campaign evidence and be
   profitable; the one permitted losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost
   stress, body-after-top-three, open-fill rate and capacity remain score diagnostics; the funded final
   portfolio must still remain profitable after taker fees are stressed to 1.5x and pass aggregate execution
-  capacity. Aggregate average net per close must be at least 0.5% of starting Copy equity before expensive
-  path/tuning work; stronger density remains a continuous score input.
+  capacity. Average realized net per close over both 30 days and the latest rolling 7 days must be at least
+  0.5% of the respective window-start equity; stronger density remains a continuous score input.
 - The final copy-follow score is calibrated as funded economics 30%, repeatability 25%, edge confidence 15%,
   operability 15%, and path risk 15%. Economics combines 30-day and latest-7-day follower return magnitude,
   fold timing and median per-close density; overlapping 14-day return and the legacy raw profile score
@@ -84,11 +84,12 @@ Wallet quality and funded-account membership are separate decisions.
   execution surface misses the final return/score line; requiring Core eligibility before tuning would make
   current parameters a circular prerequisite for changing them. Wallet count and parameters are tuned together:
   sparse count-specific nodes follow 16→8→12/boundary search and only the winning count receives the full grid.
-  Count, add/remove/swap and parameter search use normalized fills and the shared-account execution model; they
+  Count-prefix and parameter search use normalized fills and the shared-account execution model; they
   do not repeatedly scan candles. The
   winning surface must requalify every individual against the complete Core contract, and the winning
   membership receives exactly one conservative, path-complete 30-day strict-Copy certification before
-  publication. Score orders the candidate pool; it does not force a score prefix or fixed base count.
+  publication. Core is always a prefix of final-surface score order; portfolio economics may shorten only
+  the low-score suffix. There is no fixed base count.
 - Final moves must improve portfolio economics and pass the same four-fold evidence/profitability/loss-bound
   contract plus aggregate cost stress. Normal replacement, addition, and reordering is weekly. Production evidence refresh runs Monday
   and Thursday (alternating three/four-day gaps); each refresh still removes a wallet immediately for a hard
@@ -102,7 +103,7 @@ Wallet quality and funded-account membership are separate decisions.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
 - Core has no minimum wallet quota and a maximum of sixteen. A complete scan may publish any count from zero to sixteen;
-  quality and funded shared-account contribution alone decide membership.
+  final score/evidence and funded shared-account economics decide membership.
 
 ## Scheduled complete candidate reevaluation
 
@@ -162,12 +163,12 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
 Campaign. Target-wallet stability is screened first from official Portfolio: all four adjacent 7-day folds need
-at least 5% return. The individual 10% 30-day, 3% latest-7-day and score-75 lines remain ranking diagnostics;
-live formation requires positive 30-day and latest-7-day strict Copy plus non-thin, repeatable evidence. Its four
+at least 5% return. Individual 10% 30-day, 4% latest-7-day and score-75 lines are final Core gates.
+Live formation also requires at least 0.5% realized net per close in both windows plus repeatable evidence. Its four
 floating-equity folds are slices of one continuous compounding replay:
 at least three need an independent Campaign and must be profitable, and the one permitted losing fold
 cannot exceed 25% of total 30-day profit. The aggregate must remain profitable after charging taker fees at
-1.5x. Aggregate average closed-position net must reach 0.5% of starting Copy equity. The 30-day aggregate
+1.5x. The 30-day aggregate
 still needs eight Campaigns. Thin folds are unknown evidence, never synthetic losses. The
 single outlier stress removes the largest winning Campaign and requires the remainder positive.
 
@@ -195,8 +196,8 @@ inherits parameters fitted to a congested 16-wallet account. It never changes Co
 profiles and never runs a candle replay for every parameter or membership proposal. After the winning parameters
 and membership are fixed, the one final
 strict 30-day portfolio certification supplies the estimated shared-account result shown above the “跟单中”
-list. Publication reuses that result; it does not synchronously recalculate every Core and Challenger for
-Dashboard enrichment.
+list. Publication also persists the exact final-surface individual 30/14/7 replay fields used for score and
+admission, so Dashboard score and wallet economics never fall back to a different parameter surface.
 
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
 margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;

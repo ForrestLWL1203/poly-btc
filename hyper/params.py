@@ -94,10 +94,12 @@ PARAM_SPEC = [
     ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
         f"官方4周各≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%；"
         f"Copy 30d≥{config.CORE_MIN_COPY_RETURN_30D * 100:g}% / "
-        f"最近7d≥{config.CORE_MIN_COPY_RETURN_7D * 100:g}%",
+        f"最近7d≥{config.CORE_MIN_COPY_RETURN_7D * 100:g}%；30d/7d每平仓≥"
+        f"{config.CORE_MIN_AVG_NET_PER_CLOSE_RETURN * 100:g}%",
         "目标与跟单双重盈利硬闸",
         "官方Portfolio验证目标钱包四个非重叠7日段均≥5%；严格Copy要求30日≥10%、"
-        "最近7日≥3%，四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
+        "最近7日≥4%，且30日与最近7日平均每个平仓均≥本金0.5%；"
+        "四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "使用我们最大杠杆的代理回放允许至多3次；调参在保留盈利前提下优先减少，第四次才拒绝"),
@@ -358,13 +360,12 @@ def seed_params(db):
                 "AND default_value IN ('10','10.0') AND value=default_value",
                 (dv, key),
             )
-        # Approved 2026-07 Core simplification: strict Copy already needs +10% over 30d and three profitable
-        # non-overlapping folds, so move the untouched +5% latest-7d default to +3%. Preserve any operator
-        # override, including a value that happens to equal another historical threshold.
+        # Approved Core recent-profit policy: migrate untouched historical 5% and 3% defaults to 4%.
+        # Preserve any operator override, including a value that happens to equal another old threshold.
         if key == "CORE_MIN_COPY_RETURN_7D":
             db.execute(
-                "UPDATE params SET value=? WHERE key=? AND value IN ('5','5.0') "
-                "AND default_value IN ('5','5.0') AND value=default_value",
+                "UPDATE params SET value=? WHERE key=? AND value IN ('3','3.0','5','5.0') "
+                "AND default_value IN ('3','3.0','5','5.0') AND value=default_value",
                 (dv, key),
             )
         # Approved harvest-policy migration. Move only previously approved default surfaces, including the

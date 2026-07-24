@@ -448,10 +448,16 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "INSERT INTO follow_selection(generation,addr,role,enabled,reason,"
                 "replay_copy_bt_net_pnl,replay_copy_bt_win_rate,replay_copy_bt_closed_n,replay_copy_bt_14d_net_pnl,"
                 "replay_copy_bt_14d_closed_n,replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_closed_n,"
-                "replay_sector_copy_json,replay_params_hash,replayed_at,selected_at) "
+                "replay_sector_copy_json,replay_params_hash,replay_score_detail_json,replayed_at,selected_at) "
                 "VALUES('g1','0xaaa','core',1,'above_follow_line',999,0.75,99,888,88,777,77,"
-                "?,'current123','2026-01-02T00:00:00Z','now')",
-                (sectors,),
+                "?,'current123',?,'2026-01-02T00:00:00Z','now')",
+                (sectors, json.dumps({
+                    "economicScore": .91,
+                    "economicReturns": {"30d": .30, "14d": .20, "7d": .10},
+                    "copyPnl": {"30d": 307, "14d": 293, "7d": 171},
+                    "closedN": {"30d": 11, "14d": 9, "7d": 6},
+                    "reasons": ["sealed final surface"],
+                })),
             )
             db.execute(
                 "INSERT INTO profile(addr,status,score,copy_bt_net_pnl,copy_bt_closed_n,"
@@ -467,11 +473,14 @@ class ApiWalletsPerfTests(unittest.TestCase):
             db.commit()
 
             wallet = api_wallets.ep_wallets(db, {"tab": ["followed"]})["wallets"][0]
+            detail = api_wallets.ep_wallet_detail(db, "0xaaa")
 
         self.assertEqual(wallet["copyBacktestNetPnl"], 307)
         self.assertEqual(wallet["copyBacktestClosedN"], 11)
         self.assertEqual(wallet["copyBacktest7dNetPnl"], 171)
         self.assertEqual(wallet["winRatePct"], 75.0)
+        self.assertEqual(detail["scoreBreakdown"]["economicScore"], 91.0)
+        self.assertEqual(detail["scoreBreakdown"]["reasons"], ["sealed final surface"])
         self.assertNotIn("copyBacktest14dNetPnl", wallet)
         self.assertNotIn("copyReplayParamsHash", wallet)
         self.assertEqual(wallet["selectionReasonText"], "达到跟单线")

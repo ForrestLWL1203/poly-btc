@@ -70,8 +70,8 @@ COPY_STABILITY_MIN_EVALUABLE_FOLDS = 3
 COPY_STABILITY_MIN_PROFITABLE_FOLDS = 3
 COPY_STABILITY_MIN_RETURN = 0.05  # Official Portfolio: source wallet must earn at least 5% in every fold.
 CORE_MIN_COPY_RETURN_30D = 0.10   # Strict follower replay: at least +$1,000 on the $10k model account.
-CORE_MIN_COPY_RETURN_7D = 0.03    # Strict follower replay: latest rolling 7d at least +$300.
-CORE_MIN_AVG_NET_PER_CLOSE_RETURN = 0.005  # One aggregate anti-thin-profit gate: avg ≥$50/close on $10k.
+CORE_MIN_COPY_RETURN_7D = 0.04    # Strict follower replay: latest rolling 7d at least 4% of boundary equity.
+CORE_MIN_AVG_NET_PER_CLOSE_RETURN = 0.005  # 30d and latest-7d avg realized net ≥0.5%/close.
 # Strict Copy's four folds verify timing stability rather than repeating the two magnitude gates above:
 # at least three folds need Campaign evidence and profit; one missing/losing fold is tolerated only within
 # the 25%-of-total-profit loss bound. Aggregate average realized net per close has one anti-thin-profit gate.
@@ -85,8 +85,8 @@ CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means too many fundable opens were skipped
 CORE_SEARCH_TIME_BUDGET_SEC = 0    # 0 = no wall-clock cutoff; the finite search graph remains bounded.
-# Production multi-start search: fast discovery -> strict finalists -> repeated
-# add/remove/swap/pair-add closure -> non-overlapping fold/cost-stress gate.
+# Production score-prefix search: fast discovery -> strict finalists ->
+# non-overlapping fold/cost-stress gate.
 CORE_SEARCH_VALIDATION_FINALISTS = 12
 CORE_SEARCH_STRICT_MOVE_SHORTLIST = 8
 CORE_SEARCH_MAX_STRICT_MOVES = MAX_TARGETS

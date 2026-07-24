@@ -79,7 +79,7 @@ def evaluate_follow_eligibility(
     eligibility.
     The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
     owned by the official Portfolio front gate. Core separately requires at least 10% strict-Copy return in
-    30d, at least 3% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
+    30d, at least 4% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
     least three are profitable and the one permitted losing fold is bounded. Body-after-top-three,
     per-wallet cost stress, open-fill rate and capacity remain score diagnostics; making them hard gates as
     well as score/final-portfolio inputs repeatedly charged the same evidence.
@@ -104,6 +104,7 @@ def evaluate_follow_eligibility(
     allowed = set(policy_json.get("allowed") or ())
     watched = set(policy_json.get("watch") or ())
     c30 = int(_num(scoped.get("copy_bt_closed_n")))
+    c7 = int(_num(scoped.get("copy_bt_7d_closed_n")))
     campaigns = int(_num(scoped.get("copy_bt_campaign_closed_n"), c30))
     pnl30 = _num(scoped.get("copy_bt_net_pnl"))
     closed_pnl30 = _num(
@@ -111,12 +112,16 @@ def evaluate_follow_eligibility(
         pnl30 - _num(scoped.get("copy_bt_unrealized_pnl")),
     )
     pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
+    closed_pnl7 = pnl7 - _num(scoped.get("copy_bt_7d_unrealized_pnl"))
     equity30 = _replay_window_equity(scoped, 30)
     equity7 = _replay_window_equity(scoped, 7)
     return30 = pnl30 / equity30
     return7 = pnl7 / equity7
     average_net_per_close_return = (
         closed_pnl30 / max(1, c30) / equity30 if c30 > 0 else 0.0
+    )
+    average_net_per_close_return_7d = (
+        closed_pnl7 / max(1, c7) / equity7 if c7 > 0 else 0.0
     )
     evidence_days = int(_num(scoped.get("copy_evidence_days")))
     data_status = str(scoped.get("copy_bt_data_status") or "").strip().lower()
@@ -175,6 +180,10 @@ def evaluate_follow_eligibility(
         "averageNetPerClose": (
             average_net_per_close_return >= policy.core_min_avg_net_per_close_return
         ),
+        "averageNetPerClose7d": (
+            average_net_per_close_return_7d
+            >= policy.core_min_avg_net_per_close_return
+        ),
         "strictCopyWeeklyPositive": copy_weekly_positive,
         "independentCampaignEvidence": campaigns >= policy.core_min_campaigns_30d,
         "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
@@ -203,6 +212,7 @@ def evaluate_follow_eligibility(
             "7": policy.core_min_copy_return_7d,
         },
         "averageNetPerCloseReturn": average_net_per_close_return,
+        "averageNetPerCloseReturn7d": average_net_per_close_return_7d,
         "averageNetPerCloseReturnFloor": policy.core_min_avg_net_per_close_return,
         "evidenceDays": evidence_days, "copyWeeklyProfitability": copy_weekly,
         "repeatability": {
@@ -253,7 +263,7 @@ def evaluate_follow_eligibility(
 
     core_eligible = bool(
         sample_ok and checks["strictCopy30dReturn"] and checks["strictCopyRolling7dReturn"]
-        and checks["averageNetPerClose"]
+        and checks["averageNetPerClose"] and checks["averageNetPerClose7d"]
         and copy_weekly_positive and activity_ok
         and checks["campaignWinRate"] and checks["coreFollowScore"]
         and checks["oneWinnerRemovalPositive"] and checks["valuationComplete"]
@@ -276,12 +286,18 @@ def evaluate_follow_eligibility(
     elif not checks["strictCopyRolling7dReturn"]:
         status, reason = (
             "challenger_recent_return_watch",
-            "最近7天严格Copy收益未达到3%，近期盈利能力暂不足以进入Core",
+            f"最近7天严格Copy收益未达到{policy.core_min_copy_return_7d * 100:g}%，"
+            "近期盈利能力暂不足以进入Core",
         )
     elif not checks["averageNetPerClose"]:
         status, reason = (
             "challenger_thin_profit_watch",
             "30天平均每个平仓的净收益低于本金0.5%，属于薄利高周转，不进入Core",
+        )
+    elif not checks["averageNetPerClose7d"]:
+        status, reason = (
+            "challenger_recent_thin_profit_watch",
+            "最近7天平均每个平仓的净收益低于该窗口起始权益0.5%，近期利润过薄，不进入Core",
         )
     elif not copy_weekly_sufficient:
         status, reason = (

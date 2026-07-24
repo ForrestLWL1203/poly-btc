@@ -2,8 +2,7 @@ import unittest
 from dataclasses import replace
 
 from hyper.selection.core_formation import (
-    PrefixEvaluation, retains_reference, search_quality_membership, search_quality_prefix,
-    validate_final_membership,
+    PrefixEvaluation, retains_reference, search_quality_prefix, validate_final_membership,
 )
 
 
@@ -136,16 +135,6 @@ class QualityPrefixSearchTests(unittest.TestCase):
         self.assertEqual(sorted(calls), list(range(1, 8)))
         self.assertEqual(result.selected.count, 5)
 
-    def test_membership_search_has_no_service_minimum(self):
-        candidates = tuple(f"0x{i}" for i in range(10))
-        result = search_quality_membership(
-            candidates,
-            lambda addrs: value(len(addrs), 1000 - len(addrs)),
-            initial=candidates,
-            exhaustive_below=12,
-        )
-        self.assertEqual(len(result.selected), 1)
-
     def test_prefix_search_never_evaluates_below_required_starred_count(self):
         calls = []
         result = search_quality_prefix(
@@ -224,46 +213,6 @@ class QualityPrefixSearchTests(unittest.TestCase):
             payload={"initialBalance": 10_000, "requireCongestionFit": True},
         )
         self.assertFalse(adaptive.feasible)
-
-    def test_small_pool_keeps_profitable_wallet_despite_recorded_congestion(self):
-        candidates = ("0xa", "0xb", "0xc")
-        utilities = {
-            ("0xa",): (1000, .95),
-            ("0xa", "0xb"): (1300, .70),
-            ("0xa", "0xc"): (1800, .80),
-            ("0xa", "0xb", "0xc"): (2000, .72),
-        }
-
-        def evaluate(addrs):
-            utility, capacity = utilities.get(tuple(sorted(addrs)), (100, .90))
-            return value(len(addrs), utility, capacity_fit=capacity)
-
-        result = search_quality_membership(candidates, evaluate, exhaustive_below=8)
-
-        self.assertEqual(result.selected, ("0xa", "0xb", "0xc"))
-        self.assertEqual(result.algorithm, "exhaustive_subset")
-
-    def test_required_starred_wallet_survives_membership_search(self):
-        candidates = ("0xstar", "0xbest", "0xtail")
-        utilities = {
-            ("0xbest",): 5000,
-            ("0xbest", "0xstar"): 4500,
-            ("0xstar",): 1000,
-            ("0xstar", "0xtail"): 1100,
-            ("0xbest", "0xstar", "0xtail"): 4400,
-        }
-
-        def evaluate(addrs):
-            key = tuple(sorted(addrs))
-            return value(len(key), utilities.get(key, 100))
-
-        result = search_quality_membership(
-            candidates, evaluate, required=("0xstar",), exhaustive_below=8,
-        )
-
-        self.assertIn("0xstar", result.selected)
-        self.assertEqual(set(result.selected), {"0xstar", "0xbest"})
-
 
 if __name__ == "__main__":
     unittest.main()

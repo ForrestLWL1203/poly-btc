@@ -126,7 +126,7 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
             values, "COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT", 0.25,
         )),
         core_min_copy_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.10)),
-        core_min_copy_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.03)),
+        core_min_copy_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.04)),
         core_min_avg_net_per_close_return=float(_value(
             values, "CORE_MIN_AVG_NET_PER_CLOSE_RETURN", 0.005,
         )),

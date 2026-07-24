@@ -109,11 +109,12 @@ def published_core_addrs(db, limit: Optional[int] = None) -> Optional[list]:
         return None
 
     enabled_sql = " AND COALESCE(enabled,1)=1" if "enabled" in cols else ""
-    utility = "COALESCE(utility,-1e999) DESC," if "utility" in cols else ""
+    rank = "COALESCE(selection_rank,999999)," if "selection_rank" in cols else ""
+    score = "COALESCE(follow_score,-1e999) DESC," if "follow_score" in cols else ""
     rows = db.execute(
         "SELECT addr FROM follow_selection WHERE generation=? "
         "AND lower(role)='core'" + enabled_sql
-        + f" ORDER BY {utility} lower(addr),addr",
+        + f" ORDER BY {rank}{score} lower(addr),addr",
         (generation,),
     ).fetchall()
     addrs = []
@@ -173,6 +174,24 @@ def current_selection_rows(db) -> list:
         + expr("policy_version", "''")
         + "," + expr("acct_value", "NULL")
         + "," + expr("sector_policy_json", "NULL")
+        + "," + expr("replay_copy_bt_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_win_rate", "NULL")
+        + "," + expr("replay_copy_bt_closed_n", "NULL")
+        + "," + expr("replay_copy_bt_open_fill_rate", "NULL")
+        + "," + expr("replay_copy_bt_liquidations", "NULL")
+        + "," + expr("replay_copy_bt_fee_drag", "NULL")
+        + "," + expr("replay_copy_bt_unrealized_pnl", "NULL")
+        + "," + expr("replay_copy_bt_valuation_status", "NULL")
+        + "," + expr("replay_copy_bt_14d_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_14d_unrealized_pnl", "NULL")
+        + "," + expr("replay_copy_bt_14d_closed_n", "NULL")
+        + "," + expr("replay_copy_bt_7d_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_7d_unrealized_pnl", "NULL")
+        + "," + expr("replay_copy_bt_7d_closed_n", "NULL")
+        + "," + expr("replay_sector_copy_json", "NULL")
+        + "," + expr("replay_params_hash", "NULL")
+        + "," + expr("replay_score_detail_json", "NULL")
+        + "," + expr("replayed_at", "NULL")
         + " FROM follow_selection WHERE generation=? ORDER BY addr",
         (generation,),
     ).fetchall()
@@ -182,6 +201,15 @@ def current_selection_rows(db) -> list:
             utility=row[4], follow_score=row[5], selection_rank=row[6], data_status=row[7] or "valid",
             evidence_status=row[8] or "", model_version=row[9] or "", policy_version=row[10] or "",
             acct_value=row[11], sector_policy_json=row[12],
+            replay_copy_bt_net_pnl=row[13], replay_copy_bt_win_rate=row[14],
+            replay_copy_bt_closed_n=row[15], replay_copy_bt_open_fill_rate=row[16],
+            replay_copy_bt_liquidations=row[17], replay_copy_bt_fee_drag=row[18],
+            replay_copy_bt_unrealized_pnl=row[19], replay_copy_bt_valuation_status=row[20],
+            replay_copy_bt_14d_net_pnl=row[21], replay_copy_bt_14d_unrealized_pnl=row[22],
+            replay_copy_bt_14d_closed_n=row[23], replay_copy_bt_7d_net_pnl=row[24],
+            replay_copy_bt_7d_unrealized_pnl=row[25], replay_copy_bt_7d_closed_n=row[26],
+            replay_sector_copy_json=row[27], replay_params_hash=row[28],
+            replay_score_detail_json=row[29], replayed_at=row[30],
         )
         for row in rows
     ]
@@ -202,6 +230,24 @@ class SelectionRow:
     policy_version: str = ""
     acct_value: Optional[float] = None
     sector_policy_json: Optional[str] = None
+    replay_copy_bt_net_pnl: Optional[float] = None
+    replay_copy_bt_win_rate: Optional[float] = None
+    replay_copy_bt_closed_n: Optional[int] = None
+    replay_copy_bt_open_fill_rate: Optional[float] = None
+    replay_copy_bt_liquidations: Optional[int] = None
+    replay_copy_bt_fee_drag: Optional[float] = None
+    replay_copy_bt_unrealized_pnl: Optional[float] = None
+    replay_copy_bt_valuation_status: Optional[str] = None
+    replay_copy_bt_14d_net_pnl: Optional[float] = None
+    replay_copy_bt_14d_unrealized_pnl: Optional[float] = None
+    replay_copy_bt_14d_closed_n: Optional[int] = None
+    replay_copy_bt_7d_net_pnl: Optional[float] = None
+    replay_copy_bt_7d_unrealized_pnl: Optional[float] = None
+    replay_copy_bt_7d_closed_n: Optional[int] = None
+    replay_sector_copy_json: Optional[str] = None
+    replay_params_hash: Optional[str] = None
+    replay_score_detail_json: Optional[str] = None
+    replayed_at: Optional[str] = None
 
 
 def _coerce_selection_row(value) -> SelectionRow:
@@ -259,6 +305,24 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("policy_version", lambda r: r.policy_version),
         ("acct_value", lambda r: r.acct_value),
         ("sector_policy_json", lambda r: r.sector_policy_json),
+        ("replay_copy_bt_net_pnl", lambda r: r.replay_copy_bt_net_pnl),
+        ("replay_copy_bt_win_rate", lambda r: r.replay_copy_bt_win_rate),
+        ("replay_copy_bt_closed_n", lambda r: r.replay_copy_bt_closed_n),
+        ("replay_copy_bt_open_fill_rate", lambda r: r.replay_copy_bt_open_fill_rate),
+        ("replay_copy_bt_liquidations", lambda r: r.replay_copy_bt_liquidations),
+        ("replay_copy_bt_fee_drag", lambda r: r.replay_copy_bt_fee_drag),
+        ("replay_copy_bt_unrealized_pnl", lambda r: r.replay_copy_bt_unrealized_pnl),
+        ("replay_copy_bt_valuation_status", lambda r: r.replay_copy_bt_valuation_status),
+        ("replay_copy_bt_14d_net_pnl", lambda r: r.replay_copy_bt_14d_net_pnl),
+        ("replay_copy_bt_14d_unrealized_pnl", lambda r: r.replay_copy_bt_14d_unrealized_pnl),
+        ("replay_copy_bt_14d_closed_n", lambda r: r.replay_copy_bt_14d_closed_n),
+        ("replay_copy_bt_7d_net_pnl", lambda r: r.replay_copy_bt_7d_net_pnl),
+        ("replay_copy_bt_7d_unrealized_pnl", lambda r: r.replay_copy_bt_7d_unrealized_pnl),
+        ("replay_copy_bt_7d_closed_n", lambda r: r.replay_copy_bt_7d_closed_n),
+        ("replay_sector_copy_json", lambda r: r.replay_sector_copy_json),
+        ("replay_params_hash", lambda r: r.replay_params_hash),
+        ("replay_score_detail_json", lambda r: r.replay_score_detail_json),
+        ("replayed_at", lambda r: r.replayed_at),
         ("selected_at", lambda r: selected_at),
     )
     fields = [(name, getter) for name, getter in field_values if name in cols]

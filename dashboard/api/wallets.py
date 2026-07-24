@@ -158,37 +158,39 @@ def _market_type_from_sector_policy(row):
 
 
 def _score_breakdown(row):
-    _score, detail = follow_score.compute_follow_score({
-        "score": _col(row, "raw_score", _col(row, "profile_score", _col(row, "score"))),
-        "copy_bt_net_pnl": _col(row, "copy_bt_net_pnl"),
-        "copy_bt_win_rate": _col(row, "copy_bt_win_rate"),
-        "copy_bt_closed_n": _col(row, "copy_bt_closed_n"),
-        "copy_bt_open_fill_rate": _col(row, "copy_bt_open_fill_rate"),
-        "copy_bt_liquidations": _col(row, "copy_bt_liquidations"),
-        "copy_bt_fee_drag": _col(row, "copy_bt_fee_drag"),
-        "copy_bt_unrealized_pnl": _col(row, "copy_bt_unrealized_pnl"),
-        "copy_bt_valuation_status": _col(row, "copy_bt_valuation_status"),
-        "copy_bt_14d_net_pnl": _col(row, "copy_bt_14d_net_pnl"),
-        "copy_bt_14d_unrealized_pnl": _col(row, "copy_bt_14d_unrealized_pnl"),
-        "copy_bt_14d_closed_n": _col(row, "copy_bt_14d_closed_n"),
-        "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
-        "copy_bt_7d_unrealized_pnl": _col(row, "copy_bt_7d_unrealized_pnl"),
-        "copy_bt_7d_closed_n": _col(row, "copy_bt_7d_closed_n"),
-        "copy_expected_return": _col(row, "copy_expected_return"),
-        "copy_return_lcb": _col(row, "copy_return_lcb"),
-        "copy_return_volatility": _col(row, "copy_return_volatility"),
-        "copy_positive_probability": _col(row, "copy_positive_probability"),
-        "copy_evidence_days": _col(row, "copy_evidence_days"),
-        "copy_recent_return_14d": _col(row, "copy_recent_return_14d"),
-        "copy_recent_return_7d": _col(row, "copy_recent_return_7d"),
-        "copy_risk_score": _col(row, "copy_risk_score"),
-        "execution_score": _col(row, "execution_score"),
-        "actionable_open_rate": _col(row, "actionable_open_rate"),
-        "capacity_fit": _col(row, "capacity_fit"),
-        "open_probability_48h": _col(row, "open_probability_48h"),
-        "sector_policy_json": _col(row, "sector_policy_json"),
-        "sector_copy_json": _col(row, "sector_copy_json"),
-    })
+    detail = _json_obj(_col(row, "replay_score_detail_json"))
+    if not detail:
+        _score, detail = follow_score.compute_follow_score({
+            "score": _col(row, "raw_score", _col(row, "profile_score", _col(row, "score"))),
+            "copy_bt_net_pnl": _col(row, "copy_bt_net_pnl"),
+            "copy_bt_win_rate": _col(row, "copy_bt_win_rate"),
+            "copy_bt_closed_n": _col(row, "copy_bt_closed_n"),
+            "copy_bt_open_fill_rate": _col(row, "copy_bt_open_fill_rate"),
+            "copy_bt_liquidations": _col(row, "copy_bt_liquidations"),
+            "copy_bt_fee_drag": _col(row, "copy_bt_fee_drag"),
+            "copy_bt_unrealized_pnl": _col(row, "copy_bt_unrealized_pnl"),
+            "copy_bt_valuation_status": _col(row, "copy_bt_valuation_status"),
+            "copy_bt_14d_net_pnl": _col(row, "copy_bt_14d_net_pnl"),
+            "copy_bt_14d_unrealized_pnl": _col(row, "copy_bt_14d_unrealized_pnl"),
+            "copy_bt_14d_closed_n": _col(row, "copy_bt_14d_closed_n"),
+            "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
+            "copy_bt_7d_unrealized_pnl": _col(row, "copy_bt_7d_unrealized_pnl"),
+            "copy_bt_7d_closed_n": _col(row, "copy_bt_7d_closed_n"),
+            "copy_expected_return": _col(row, "copy_expected_return"),
+            "copy_return_lcb": _col(row, "copy_return_lcb"),
+            "copy_return_volatility": _col(row, "copy_return_volatility"),
+            "copy_positive_probability": _col(row, "copy_positive_probability"),
+            "copy_evidence_days": _col(row, "copy_evidence_days"),
+            "copy_recent_return_14d": _col(row, "copy_recent_return_14d"),
+            "copy_recent_return_7d": _col(row, "copy_recent_return_7d"),
+            "copy_risk_score": _col(row, "copy_risk_score"),
+            "execution_score": _col(row, "execution_score"),
+            "actionable_open_rate": _col(row, "actionable_open_rate"),
+            "capacity_fit": _col(row, "capacity_fit"),
+            "open_probability_48h": _col(row, "open_probability_48h"),
+            "sector_policy_json": _col(row, "sector_policy_json"),
+            "sector_copy_json": _col(row, "sector_copy_json"),
+        })
     return {
         "rawScore": score100(detail.get("rawScore")),
         "copyScore": score100(detail.get("copyScore")) if detail.get("copyScore") is not None else None,
@@ -530,7 +532,7 @@ def ep_wallet_detail(db, addr, qs=None):
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
             "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"
             "fh.last_followed_score,fh.last_followed_generation,"
-            "fs.replay_params_hash,fs.replayed_at "
+            "fs.replay_params_hash,fs.replay_score_detail_json,fs.replayed_at "
             "FROM profile p LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=p.addr "
             "LEFT JOIN follow_history fh ON fh.addr=p.addr "
             "WHERE p.addr=?", (selection_generation, addr))
