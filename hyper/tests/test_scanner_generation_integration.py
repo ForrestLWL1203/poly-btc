@@ -546,6 +546,35 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertFalse(losing_week["eligible"])
         self.assertFalse(losing_week["checks"]["strictCopyRolling7dReturn"])
 
+    def test_formation_entry_requires_final_surface_weekly_stability(self):
+        policy = json.loads(strict_policy_json())
+        policy["copyWeeklyProfitability"]["evidenceSufficient"] = True
+        policy["copyWeeklyProfitability"]["passed"] = False
+        effective = {
+            "copy_expected_return": .04,
+            "copy_return_lcb": .01,
+            "copy_positive_probability": .8,
+            "copy_evidence_days": 7,
+            "copy_risk_score": .9,
+            "execution_score": .9,
+            "actionable_open_rate": .9,
+            "capacity_fit": 1.0,
+            "open_probability_48h": .8,
+            "last_copyable_open_ms": int(time.time() * 1000),
+            "data_status": "valid",
+            "evidence_status": "qualified",
+            "sector_policy_json": json.dumps(policy),
+            "sector_copy_json": strict_sector_json(1800, 7, 600, 6, 500, 5),
+            "forward_liquidations": 0,
+        }
+
+        result = scanner._formation_entry_eligibility(effective, .80)
+
+        self.assertFalse(result["eligible"])
+        self.assertTrue(result["checks"]["strictCopyWeeklyEvidence"])
+        self.assertFalse(result["checks"]["strictCopyWeeklyPositive"])
+        self.assertIn("strictCopyWeeklyPositive", result["requiredChecks"])
+
     def test_manual_optimize_requalifies_incumbents_as_new_entries(self):
         source = inspect.getsource(scanner.optimize_published_generation)
         forced_source = inspect.getsource(scanner._build_forced_prefix_selection)

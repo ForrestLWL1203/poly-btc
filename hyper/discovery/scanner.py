@@ -2205,8 +2205,9 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
     """Apply the non-duplicated individual contract before shared Core formation.
 
     Individual replay owns data validity, minimum evidence, non-scalping economics and the final tuned
-    surface's ``<=3`` liquidation rule. Historical maximum drawdown is diagnostic only. The shared funded
-    replay owns return magnitude, weekly timing/cost stress, congestion and membership count.
+    surface's ``<=3`` liquidation rule. Historical maximum drawdown is diagnostic only. Each wallet must
+    clear its own final-surface weekly timing test; the shared funded replay independently owns aggregate
+    weekly timing/cost stress, congestion and membership count.
     """
     metrics_ = apply_allowed_sector_copy_metrics(dict(effective or {}))
     qualification = follow_score.evaluate_follow_eligibility(
@@ -2223,6 +2224,7 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         follow_score_value=f(score),
     )
     checks = dict(qualification.get("checks") or {})
+    copy_weekly = dict(qualification.get("copyWeeklyProfitability") or {})
     policy = load_copy_policy(policy_values)
     closed_n = int(f(metrics_.get("copy_bt_closed_n")))
     campaigns = int(f(metrics_.get("copy_bt_campaign_closed_n") or closed_n))
@@ -2235,6 +2237,8 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "strictCopy30dPositive": bool(checks.get("strictCopy30dPositive")),
         "strictCopy30dReturn": bool(checks.get("strictCopy30dReturn")),
         "strictCopyRolling7dReturn": bool(checks.get("strictCopyRolling7dReturn")),
+        "strictCopyWeeklyEvidence": bool(copy_weekly.get("evidenceSufficient")),
+        "strictCopyWeeklyPositive": bool(checks.get("strictCopyWeeklyPositive")),
         "notThinProfit": bool(checks.get("averageNetPerClose")),
         "notRecentThinProfit": bool(checks.get("averageNetPerClose7d")),
         "minimumClosedEvidence": closed_n >= minimum_evidence,
@@ -2255,6 +2259,8 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "dataValid",
         "strictCopy30dReturn",
         "strictCopyRolling7dReturn",
+        "strictCopyWeeklyEvidence",
+        "strictCopyWeeklyPositive",
         "notThinProfit",
         "notRecentThinProfit",
         "minimumClosedEvidence",
