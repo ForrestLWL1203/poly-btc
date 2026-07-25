@@ -2241,6 +2241,187 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
     return tuned, eligible, reason
 
 
+_FORMATION_PREPATH_CHECKS = (
+    "copyDataValid",
+    "officialPerpPassed",
+    "sourceQualityPassed",
+    "minimumClosedEvidence",
+    "copy30dReturn",
+    "copy7dReturn",
+    "copyWinRate",
+    "openExecution",
+    "activityWithin72h",
+    "valuationComplete",
+    "sectorExecutable",
+)
+
+
+def _select_formation_finalist_surface(
+    db, tune_result, candidate_rows, *, base_follow, generation_id, now_ms,
+    valuation_marks, sigmas, market_ctx, window_fills,
+) -> tuple[dict, list[dict]]:
+    """Choose parameters by the portfolio that remains after individual admission.
+
+    The tuner ranks fills-only portfolio surfaces before the final per-wallet contract.  Selecting its raw
+    all-wallet winner can therefore maximize profit from wallets which the next step immediately removes.
+    Re-score the bounded finalists using the same individual 10%/3%, win-rate, execution and evidence
+    checks, then compare the surviving shared portfolios.  Path completeness and proxy liquidations stay in
+    the one final K-line replay; this pass remains fills-only.
+    """
+    tune_result = dict(tune_result or {})
+    candidates = []
+    selected = {}
+    selected.update(tune_result.get("params") or {})
+    selected.update(tune_result.get("add_params") or {})
+    selected.update(tune_result.get("proposal") or {})
+    if selected:
+        candidates.append({
+            "source": "tuner_winner",
+            "params": selected,
+            "liquidations": int(
+                ((tune_result.get("validation") or {}).get("challengerLiquidations") or 0)
+            ),
+        })
+    for index, item in enumerate(tune_result.get("finalists") or (), 1):
+        if not isinstance(item, dict) or item.get("eligible") is False:
+            continue
+        proposal = dict(item.get("params") or {})
+        if not proposal:
+            continue
+        candidates.append({
+            "source": f"finalist_{index}",
+            "params": proposal,
+            "liquidations": int(item.get("challengerLiquidations") or 0),
+        })
+    unique = []
+    seen = set()
+    for item in candidates:
+        surface = {
+            key: f(item["params"].get(key, base_follow.get(key)))
+            for key in (*auto_tune.TUNE_KEYS, *auto_tune.ADD_TUNE_KEYS)
+        }
+        key = json.dumps(surface, sort_keys=True, separators=(",", ":"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append({**item, "params": surface})
+    if len(unique) <= 1 or not candidate_rows:
+        return (unique[0]["params"] if unique else selected), []
+
+    policy = load_copy_policy(base_follow)
+    audits = []
+    for item in unique:
+        follow = {
+            **base_follow, **item["params"], "AMBIGUOUS_PATH_MODE": "liquidate",
+        }
+        qualified = []
+        individual_net = 0.0
+        failure_counts = {}
+        for row in candidate_rows:
+            replay = _effective_follow_replay(
+                db, row, now_ms, generation_id=generation_id, follow=follow,
+                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                strict_path=False, qualification_stage="strict",
+            )
+            qualification = dict(replay.get("qualification") or {})
+            checks = dict(qualification.get("checks") or {})
+            passed = all(bool(checks.get(key)) for key in _FORMATION_PREPATH_CHECKS)
+            if passed:
+                qualified.append(row["addr"])
+                individual_net += f(
+                    (replay.get("metrics") or {}).get("copy_bt_net_pnl")
+                )
+            else:
+                reason = str(
+                    qualification.get("firstFailure")
+                    or qualification.get("status")
+                    or "prepath_not_qualified"
+                )
+                failure_counts[reason] = failure_counts.get(reason, 0) + 1
+
+        portfolio_net = 0.0
+        return_30d = return_7d = float("-inf")
+        open_rate = capacity_fit = 0.0
+        feasible = False
+        if qualified:
+            filtered = auto_tune._filter_window_fills_by_addr(
+                window_fills, qualified,
+            )
+            windows = auto_tune._candidate_windows(
+                db, qualified, sigmas, follow, now_ms,
+                window_fills=filtered, market_ctx=market_ctx,
+                path_rows=None, path_meta=None,
+            )
+            primary = windows.get(30) or windows.get(max(windows)) or {}
+            recent = windows.get(7) or {}
+            portfolio_metrics = _portfolio_selection_metrics(
+                windows, selected_n=len(qualified),
+            )
+            start_30d = f(
+                primary.get("window_start_equity")
+                or primary.get("initial_margin_equity")
+                or base_follow.get("INITIAL_BALANCE")
+                or config.INITIAL_BALANCE
+            )
+            start_7d = f(
+                recent.get("window_start_equity")
+                or recent.get("initial_margin_equity")
+            )
+            portfolio_net = f(primary.get("copy_net_pnl"))
+            recent_net = f(recent.get("copy_net_pnl"))
+            return_30d = (
+                portfolio_net / start_30d if start_30d > 0.0 else float("-inf")
+            )
+            return_7d = (
+                recent_net / start_7d if start_7d > 0.0 else float("-inf")
+            )
+            open_rate = f(portfolio_metrics.actionable_open_rate)
+            capacity_fit = f(portfolio_metrics.capacity_fit)
+            feasible = bool(
+                portfolio_net > 0.0
+                and recent_net > 0.0
+                and return_30d >= policy.portfolio_min_return_30d
+                and return_7d >= policy.portfolio_min_return_7d
+                and open_rate >= policy.min_actionable_open_rate
+            )
+            del windows
+        audits.append({
+            "source": item["source"],
+            "params": item["params"],
+            "qualifiedCount": len(qualified),
+            "individualNetPnl": individual_net,
+            "portfolioNetPnl": portfolio_net,
+            "return30d": return_30d,
+            "return7d": return_7d,
+            "openRate": open_rate,
+            "capacityFit": capacity_fit,
+            "liquidations": int(item["liquidations"]),
+            "feasible": feasible,
+            "failureCounts": failure_counts,
+        })
+
+    feasible = [item for item in audits if item["feasible"]]
+    if not feasible:
+        return unique[0]["params"], audits
+    best_net = max(item["portfolioNetPnl"] for item in feasible)
+    near_best = [
+        item for item in feasible
+        if item["portfolioNetPnl"] >= best_net - max(
+            1.0, abs(best_net) * float(config.AUTO_TUNE_NEAR_BEST_PROFIT_REL),
+        )
+    ]
+    winner = min(
+        near_best,
+        key=lambda item: (
+            item["liquidations"],
+            -item["portfolioNetPnl"],
+            -item["qualifiedCount"],
+            item["source"],
+        ),
+    )
+    return dict(winner["params"]), audits
+
+
 def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dict:
     """Apply the final path-complete individual contract before shared formation."""
     metrics_ = apply_allowed_sector_copy_metrics(dict(effective or {}))
@@ -2499,6 +2680,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     tune_runs = {}
     chosen_run = {}
     winning_count = len(tune_ordered)
+    finalist_admission_audit = []
     retention = _core_prefix_retention()
     if retune:
         # Wallet count and sizing are coupled. Search 16 -> 8 -> 12 (plus the bounded neighbours) with a
@@ -2590,8 +2772,17 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                     "core_full_tune_failed:"
                     + str(full_run.get("reason") or full_run.get("status"))
                 )
-            chosen_run = full_run
             db.commit()
+            finalist_surface, finalist_admission_audit = (
+                _select_formation_finalist_surface(
+                    db, full_run, tune_ranked[:winning_count],
+                    base_follow=base_follow, generation_id=generation_id,
+                    now_ms=now_ms, valuation_marks=valuation_marks,
+                    sigmas=sigmas, market_ctx=market_ctx,
+                    window_fills=tune_window_fills,
+                )
+            )
+            chosen_run = {**full_run, "proposal": finalist_surface}
             tuned_params, tune_eligible, tune_reason = _formation_param_surface(
                 base_follow, chosen_run, retune=True,
             )
@@ -2724,6 +2915,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "tuneCoverageFallback": tune_coverage_fallback,
                 "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
                 "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
+                "formationFinalistAdmission": finalist_admission_audit,
                 "qualificationRejected": qualification_rejected,
                 "admission": admission_audit,
             },
@@ -2985,6 +3177,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "tuneCoverageFallback": tune_coverage_fallback,
             "formationTuneFinalists": list(chosen_run.get("finalists") or ()),
             "formationMarginRounds": list(chosen_run.get("margin_rounds") or ()),
+            "formationFinalistAdmission": finalist_admission_audit,
             "qualificationRejected": qualification_rejected,
             "admission": admission_audit,
         },

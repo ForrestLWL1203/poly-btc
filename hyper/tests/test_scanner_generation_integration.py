@@ -419,6 +419,89 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn('"sector_copy_json": None', source)
         self.assertIn("**scoring_metrics", source)
 
+    def test_finalist_surface_optimizes_the_individually_qualified_portfolio(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            base = params.load_follow(db)
+            winner = {
+                key: base[key]
+                for key in (*scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS)
+            }
+            finalist = {
+                **winner,
+                "STABLE_MARGIN_PCT": float(winner["STABLE_MARGIN_PCT"]) + 0.01,
+            }
+            rows = [{"addr": "0xaaa"}, {"addr": "0xbbb"}]
+
+            def replay(_db, row, _now, **kwargs):
+                is_finalist = (
+                    float(kwargs["follow"]["STABLE_MARGIN_PCT"])
+                    == float(finalist["STABLE_MARGIN_PCT"])
+                )
+                checks = {key: True for key in scanner._FORMATION_PREPATH_CHECKS}
+                if row["addr"] == "0xbbb" and not is_finalist:
+                    checks["copy30dReturn"] = False
+                passed = all(checks.values())
+                return {
+                    "qualification": {
+                        "checks": checks,
+                        "status": "strict_copy_qualified" if passed else
+                                  "strict_copy_30d_return_below_floor",
+                        "firstFailure": None if passed else
+                                        "strict_copy_30d_return_below_floor",
+                    },
+                    "metrics": {"copy_bt_net_pnl": 1_000 if passed else 100},
+                }
+
+            def windows(_db, addrs, _sigmas, overrides, _now, **_kwargs):
+                better = (
+                    float(overrides["STABLE_MARGIN_PCT"])
+                    == float(finalist["STABLE_MARGIN_PCT"])
+                )
+                return {
+                    30: {
+                        "copy_net_pnl": 3_000 if better else 1_500,
+                        "window_start_equity": 10_000,
+                    },
+                    7: {
+                        "copy_net_pnl": 700 if better else 500,
+                        "window_start_equity": 10_000,
+                    },
+                }
+
+            tune = {
+                "params": winner,
+                "proposal": winner,
+                "finalists": [
+                    {"eligible": True, "params": winner, "challengerLiquidations": 0},
+                    {"eligible": True, "params": finalist, "challengerLiquidations": 0},
+                ],
+            }
+            metrics = SimpleNamespace(actionable_open_rate=.9, capacity_fit=1.0)
+            with patch.object(scanner, "_effective_follow_replay", side_effect=replay), \
+                    patch.object(
+                        scanner.auto_tune, "_filter_window_fills_by_addr",
+                        return_value={30: [], 7: []},
+                    ), \
+                    patch.object(
+                        scanner.auto_tune, "_candidate_windows", side_effect=windows,
+                    ), \
+                    patch.object(
+                        scanner, "_portfolio_selection_metrics", return_value=metrics,
+                    ):
+                chosen, audit = scanner._select_formation_finalist_surface(
+                    db, tune, rows, base_follow=base, generation_id="g1",
+                    now_ms=1, valuation_marks={}, sigmas={}, market_ctx={},
+                    window_fills={30: [], 7: []},
+                )
+
+            self.assertEqual(
+                chosen["STABLE_MARGIN_PCT"], finalist["STABLE_MARGIN_PCT"],
+            )
+            self.assertEqual(
+                sorted(item["qualifiedCount"] for item in audit), [1, 2],
+            )
+
     def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
