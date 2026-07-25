@@ -21,7 +21,6 @@ from hyper.copy.copy_backtest import (
     slice_backtest_result,
     subset_price_path,
 )
-from hyper.copy.copy_evidence import summarize_campaign_stability
 from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import parse_json_obj
@@ -823,7 +822,8 @@ def follow_overrides_for_add_candidate(follow: dict, candidate: dict) -> dict:
 def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
                        window_fills: dict[int, list[dict]] | None = None,
                        market_ctx: dict | None = None, path_rows: list[dict] | None = None,
-                       path_meta: dict | None = None) -> dict:
+                       path_meta: dict | None = None,
+                       initial_balance: float | None = None) -> dict:
     """Return 30/14/7 views sliced from one continuously compounding account.
 
     Replaying every window independently reset the recent views to ``INITIAL_BALANCE``.  A strategy that had
@@ -850,6 +850,7 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
     warm_result = run_backtest(
         "portfolio", fills, sigmas=sigmas, overrides=overrides, market_ctx=market_ctx or {},
         price_path=replay_path, price_path_meta=path_meta,
+        initial_balance=initial_balance,
     )
     windows = {}
     for days in days_values:
@@ -888,26 +889,6 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
         now_ms - days * 86_400_000,
         window_days=days,
     )
-    if days >= int(config.COPY_STABILITY_FOLD_DAYS * config.COPY_STABILITY_FOLD_COUNT):
-        result["weekly_stability"] = summarize_campaign_stability(
-            result.get("positions") or (),
-            now_ms=int(now_ms),
-            fold_days=int(config.COPY_STABILITY_FOLD_DAYS),
-            fold_count=int(config.COPY_STABILITY_FOLD_COUNT),
-            min_campaigns=int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD),
-            min_evaluable=int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS),
-            min_profitable=int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS),
-            min_return=float(config.COPY_WEEKLY_MIN_RETURN),
-            initial_equity=float(
-                result.get("window_start_equity")
-                or result.get("initial_margin_equity")
-                or config.INITIAL_BALANCE
-            ),
-            path_equity_samples=result.get("path_equity_samples") or (),
-            require_cost_stress=True,
-            min_net_per_closed_return=float(config.COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN),
-            max_loss_to_total_profit=float(config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT),
-        )
     result["fills"] = len(fills)
     return _compact_backtest(result)
 
@@ -958,7 +939,15 @@ def store_certified_portfolio_replay(db, generation_id: str, strict: dict | None
         # The certification replay already uses the conservative liquidate-on-ambiguity mode.
         "netPnl30Worst": f(strict.get("netPnl30d")),
         "netPnl30AmbiguousLiquidate": f(strict.get("netPnl30d")),
-        "expectedReturn30d": strict.get("expectedReturn30d"),
+        "startEquity30": f(strict.get("startEquity30d")),
+        "endEquity30": f(strict.get("endEquity30d")),
+        "dynamicReturn30d": strict.get("dynamicReturn30d"),
+        "netPnl7": f(strict.get("netPnl7d")),
+        "startEquity7": f(strict.get("startEquity7d")),
+        "endEquity7": f(strict.get("endEquity7d")),
+        "dynamicReturn7d": strict.get("dynamicReturn7d"),
+        "standardizedAccount": dict(strict.get("standardizedAccount") or {}),
+        "paperAccount": dict(strict.get("paperAccount") or {}),
         "maxDrawdown30": f(strict.get("maxDrawdown30d")),
         "openRate30": f(strict.get("actionableOpenRate30d")),
         "capacityFit30": f(strict.get("capacityFit30d")),
@@ -1110,7 +1099,7 @@ def _compact_backtest(result: dict) -> dict:
         "entry_gap_pct_p90", "entry_alignment", "add_execution", "add_fidelity",
         "add_fidelity_applied", "behavior_replication_v2", "behavior_replication_rate",
         "profit_factor", "payoff_ratio", "net_after_top1", "net_after_top2",
-        "top1_profit_share", "top3_profit_share", "cost_stress_net_pnl",
+        "top1_profit_share", "top3_profit_share",
         "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
         "body_after_top3_win_rate", "body_after_top3_net_pnl",
         "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
@@ -1121,8 +1110,7 @@ def _compact_backtest(result: dict) -> dict:
         "maintenance_margin_coverage", "maintenance_margin_known", "maintenance_margin_missing",
         "worst_day", "cvar95", "peak_deploy_pct", "avg_deploy_pct", "actionable_open_rate",
         "execution_fill_rate", "fee_slippage_drag", "pnl_concentration", "fallback_reasons", "fills",
-        "ambiguous_liquidations", "price_path_boundary_skips",
-        "weekly_stability", "continuous_replay_days",
+        "ambiguous_liquidations", "price_path_boundary_skips", "continuous_replay_days",
     )
     out = {k: result.get(k) for k in keys if k in result}
     out["skip_reasons"] = result.get("skip_reasons") or {}
@@ -1202,22 +1190,8 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
 
     baseline = replay(base_overrides)
     challenger = replay(proposal_overrides)
-    baseline_stress = replay({**base_overrides, "REPLAY_COST_MULT": 1.5})
-    stress = replay({**proposal_overrides, "REPLAY_COST_MULT": 1.5})
 
     def continuous_folds(result):
-        stability = summarize_campaign_stability(
-            result.get("positions") or (),
-            now_ms=int(now_ms), fold_days=fold_days, fold_count=fold_count,
-            min_campaigns=0, min_evaluable=1, min_profitable=1, min_return=0.0,
-            initial_equity=float(
-                result.get("window_start_equity")
-                or result.get("initial_margin_equity")
-                or config.INITIAL_BALANCE
-            ),
-            path_equity_samples=result.get("path_equity_samples") or (),
-            require_cost_stress=False,
-        )
         positions = list(result.get("positions") or ())
         path_samples = sorted(
             (
@@ -1227,23 +1201,42 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
             ),
             key=lambda row: row[0],
         )
+        initial_equity = float(
+            result.get("window_start_equity")
+            or result.get("initial_margin_equity")
+            or config.INITIAL_BALANCE
+        )
+
+        def equity_at(stamp, *, fallback):
+            value = fallback
+            for sample_stamp, equity in path_samples:
+                if sample_stamp > stamp:
+                    break
+                value = equity
+            return value
+
         rows = []
-        for fold in stability.get("folds") or ():
-            lo, hi = int(fold["startMs"]), int(fold["endMs"])
-            start_equity = max(1.0, float(fold.get("startEquity") or 0.0))
+        carried_equity = initial_equity
+        for index in range(fold_count):
+            lo = start_ms + index * fold_days * 86_400_000
+            hi = lo + fold_days * 86_400_000
+            start_equity = max(1.0, equity_at(lo, fallback=carried_equity))
+            end_equity = max(1.0, equity_at(hi, fallback=start_equity))
+            fold_positions = sorted(
+                (
+                    position for position in positions
+                    if lo <= int(position.get("closed_at") or 0) < hi
+                ),
+                key=lambda position: int(position.get("closed_at") or 0),
+            )
             points = [start_equity]
-            points.extend(equity for stamp, equity in path_samples if lo <= stamp <= hi)
+            points.extend(equity for stamp, equity in path_samples if lo < stamp <= hi)
             if len(points) == 1:
                 running = start_equity
-                for position in sorted(
-                    (
-                        position for position in positions
-                        if lo <= int(position.get("closed_at") or 0) < hi
-                    ),
-                    key=lambda position: int(position.get("closed_at") or 0),
-                ):
+                for position in fold_positions:
                     running += float(position.get("net_pnl") or 0.0)
                     points.append(running)
+                end_equity = running
             peak = points[0]
             max_drawdown = 0.0
             for equity in points:
@@ -1251,13 +1244,17 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
                 max_drawdown = max(
                     max_drawdown, (peak - equity) / peak if peak > 0 else 0.0,
                 )
+            carried_equity = end_equity
             rows.append({
-                **fold,
+                "startMs": lo,
+                "endMs": hi,
+                "startEquity": start_equity,
+                "endEquity": end_equity,
+                "netPnl": end_equity - start_equity,
                 "maxDrawdown": max_drawdown,
                 "liquidations": sum(
-                    1 for position in positions
+                    1 for position in fold_positions
                     if position.get("status") == "liquidated"
-                    and lo <= int(position.get("closed_at") or 0) < hi
                 ),
             })
         return rows
@@ -1305,13 +1302,11 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         "folds": compact_folds,
         "foldWins": wins,
         "holdout": compact_folds[-1] if compact_folds else {},
-        "baselineStressNet": float(baseline_stress.get("copy_net_pnl") or 0.0),
-        "baselineStressLiquidations": int(baseline_stress.get("liquidations") or 0),
-        "stressNet": float(stress.get("copy_net_pnl") or 0.0),
-        "stressLiquidations": int(stress.get("liquidations") or 0),
-        "masterLeverageCoverage": float(stress.get("master_leverage_coverage") or 0.0),
-        "maintenanceMarginCoverage": float(stress.get("maintenance_margin_coverage") or 0.0),
-        "pricePathCoverage": float(stress.get("price_path_coverage") or 0.0),
+        "masterLeverageCoverage": float(challenger.get("master_leverage_coverage") or 0.0),
+        "maintenanceMarginCoverage": float(
+            challenger.get("maintenance_margin_coverage") or 0.0
+        ),
+        "pricePathCoverage": float(challenger.get("price_path_coverage") or 0.0),
         "foldDays": fold_days,
         "foldCount": fold_count,
     }
@@ -1420,8 +1415,6 @@ def _model_validation(validation: dict, policy) -> dict:
     # be independently profitable; a proposal cannot buy older-window gains with a currently losing surface.
     if float(holdout.get("challengerNet") or 0.0) <= 0.0:
         reasons.append("holdout_not_profitable")
-    if validation.get("stressNet", 0.0) <= 0:
-        reasons.append("stress_not_profitable")
     if relative_gain < policy.tune_min_relative_gain:
         reasons.append("relative_gain_below_floor")
     max_fit_drop = float(getattr(config, "AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP", 0.03))
@@ -1450,10 +1443,10 @@ def _model_validation(validation: dict, policy) -> dict:
 
     baseline_liquidations = sum(
         int(fold.get("baselineLiquidations") or 0) for fold in folds
-    ) + int(validation.get("baselineStressLiquidations") or 0)
+    )
     challenger_liquidations = sum(
         int(fold.get("challengerLiquidations") or 0) for fold in folds
-    ) + int(validation.get("stressLiquidations") or 0)
+    )
     profit_retention = float(
         getattr(config, "AUTO_TUNE_SAFETY_PROFIT_RETENTION", 0.90)
     )
@@ -1461,16 +1454,13 @@ def _model_validation(validation: dict, policy) -> dict:
         baseline_total > 0.0
         and challenger_total >= baseline_total * profit_retention
         and challenger_liquidations < baseline_liquidations
-        and int(validation.get("stressLiquidations") or 0)
-        <= int(validation.get("baselineStressLiquidations") or 0)
         and sum(float(fold.get("challengerNet") or 0.0) > 0.0 for fold in folds) >= 2
         and float(holdout.get("challengerNet") or 0.0) > 0.0
-        and float(validation.get("stressNet") or 0.0) > 0.0
         and not execution_reasons
     )
     if safety_repair:
         # A safer surface should not need to pretend it made 5% more money than the already aggressive
-        # baseline. It still must retain most profit and pass every current execution/stress invariant.
+        # baseline. It still must retain most profit and pass every current execution invariant.
         reasons = [
             reason for reason in reasons
             if reason not in {"fewer_than_two_fold_wins", "relative_gain_below_floor"}
@@ -1491,28 +1481,40 @@ def _model_validation(validation: dict, policy) -> dict:
 def _formation_model_validation(validation: dict, policy) -> dict:
     """Validate one count-specific tuning proposal before the final strict replay.
 
-    Wallet admission and final publication already own four-week stability and exact candle-path safety.
-    Requiring both again for every tuning finalist triple-counted the same evidence and made the grid pay
-    K-line cost hundreds of times. Formation tuning therefore owns aggregate profit and cost stress; the
-    chosen count/surface receives one exact strict replay before publication. Maximum drawdown is telemetry,
-    not a tuning gate or score.
+    Formation tuning ranks aggregate continuously compounded profit. Wallet admission and final publication
+    own quality and exact 30d/7d candle-path safety, so tuning folds are diagnostics rather than another
+    wallet-admission gate.
     """
     folds = list(validation.get("folds") or ())
 
-    def feasible(prefix, stress_key):
+    def feasible(prefix):
         if not folds:
             return False
         nets = [float(row.get(f"{prefix}Net") or 0.0) for row in folds]
-        total_net = sum(nets)
-        return (
-            len(folds) == int(config.COPY_STABILITY_FOLD_COUNT)
-            and total_net > 0.0
-            and float(validation.get(stress_key) or 0.0) > 0.0
-        )
+        return sum(nets) > 0.0
 
-    baseline_feasible = feasible("baseline", "baselineStressNet")
-    challenger_feasible = feasible("challenger", "stressNet")
-    normal = _model_validation(validation, policy)
+    baseline_feasible = feasible("baseline")
+    challenger_feasible = feasible("challenger")
+    baseline_total = sum(float(row.get("baselineNet") or 0.0) for row in folds)
+    challenger_total = sum(float(row.get("challengerNet") or 0.0) for row in folds)
+    relative_gain = (
+        (challenger_total - baseline_total) / max(1.0, abs(baseline_total))
+    )
+    normal = {
+        "eligible": challenger_feasible,
+        "reasons": [] if challenger_feasible else ["formation_profit_not_positive"],
+        "relativeGain": relative_gain,
+        "safetyRepair": False,
+        "baselineLiquidations": sum(
+            int(row.get("baselineLiquidations") or 0) for row in folds
+        ),
+        "challengerLiquidations": sum(
+            int(row.get("challengerLiquidations") or 0) for row in folds
+        ),
+        "profitRetention": (
+            challenger_total / baseline_total if baseline_total > 0.0 else None
+        ),
+    }
     if baseline_feasible:
         return {**normal, "baselineFeasible": True, "challengerFeasible": challenger_feasible}
     if challenger_feasible:
@@ -2039,8 +2041,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             addrs, follow, combined, sigmas, window_fills, now_ms,
             path_rows=validation_path_rows, path_meta=validation_path_meta,
             market_ctx=market_ctx,
-            fold_days=(config.COPY_STABILITY_FOLD_DAYS if formation_admission else 10),
-            fold_count=(config.COPY_STABILITY_FOLD_COUNT if formation_admission else 3),
+            fold_days=10,
+            fold_count=3,
         )
         model = (
             _formation_model_validation(validation, load_copy_policy(follow))
@@ -2084,12 +2086,11 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             liquidations = sum(
                 int(row.get("challengerLiquidations") or 0)
                 for row in (validation.get("folds") or ())
-            ) + int(validation.get("stressLiquidations") or 0)
+            )
             return (
                 -liquidations,
                 *_candidate_execution_priority(sizing_candidate),
                 path_profit(choice),
-                float(validation.get("stressNet") or 0.0),
             )
 
         # Profit defines the near-best band; inside it, prefer the fewest path liquidations, then execution
@@ -2097,7 +2098,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         chosen = max(near_best, key=path_rank)
     no_validated_finalist = chosen is None
     if no_validated_finalist:
-        # No proposal passed folds/holdout/stress. Return the exact active baseline for audit, never an
+        # No proposal passed the tuning diagnostics. Return the exact active baseline for audit, never an
         # attractive but invalid in-sample fallback. Callers may safely retain it while publishing a Core
         # formed under current parameters.
         selected = baseline
@@ -2108,8 +2109,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             addrs, follow, combined, sigmas, window_fills, now_ms,
             path_rows=validation_path_rows, path_meta=validation_path_meta,
             market_ctx=market_ctx,
-            fold_days=(config.COPY_STABILITY_FOLD_DAYS if formation_admission else 10),
-            fold_count=(config.COPY_STABILITY_FOLD_COUNT if formation_admission else 3),
+            fold_days=10,
+            fold_count=3,
         )
         chosen = (selected, selected_params, selected_add_params, combined, validation)
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen

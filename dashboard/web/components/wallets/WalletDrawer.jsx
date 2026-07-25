@@ -12,12 +12,12 @@ const marketLabel = (m) => ({ crypto: "加密", stock: "美股/指数", mixed: "
 
 const copyWindowRows = (breakdown) => {
   const pnl = breakdown.copyPnl || {};
-  const open = breakdown.copyUnrealizedPnl || {};
   const closed = breakdown.closedN || {};
+  const returns = breakdown.economicReturnsPct || {};
+  const equities = breakdown.windowStartEquity || {};
   return [
-    ["30 天", pnl["30d"], closed["30d"], open["30d"]],
-    ["14 天", pnl["14d"], closed["14d"], open["14d"]],
-    ["7 天", pnl["7d"], closed["7d"], open["7d"]],
+    ["30 天", pnl["30d"], closed["30d"], returns["30d"], equities["30d"]],
+    ["7 天", pnl["7d"], closed["7d"], returns["7d"], equities["7d"]],
   ].filter((row) => Number(row[2] || 0) > 0 || Math.abs(Number(row[1] || 0)) > 0);
 };
 
@@ -51,9 +51,8 @@ export function WalletDrawer({ address, onClose }) {
     ? d.forwardWinRatePct - d.scoredWinRatePct
     : null;
   const scoreBreakdown = (d && d.scoreBreakdown) || {};
-  const profitStructure = scoreBreakdown.profitStructure || {};
-  const addMetrics = scoreBreakdown.addMetrics || {};
-  const addReasons = addMetrics.outcomeCounts || {};
+  const scoreComponents = scoreBreakdown.components || {};
+  const sourceQuality = (d && d.sourceQuality) || {};
   const copyRows = copyWindowRows(scoreBreakdown);
   const copy30 = copyRows.find(([label]) => label === "30 天");
   const roleView = !d ? null : d.role === "core"
@@ -101,44 +100,40 @@ export function WalletDrawer({ address, onClose }) {
             </div>
 
             <div className="wallet-decision-grid">
-              <DecisionCard title="当前参数回放" tone={copyRows.length ? "good" : "muted"}>
+              <DecisionCard title={d.copyReplayStage === "strict" ? "最终严格 Copy" : "粗略 fills-only Copy"} tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
                   <div className="score-window-grid">
-                    {copyRows.map(([label, pnl, n, openPnl]) => (
+                    {copyRows.map(([label, pnl, n, returnPct, startEquity]) => (
                       <div className="score-window" key={label}>
                         <span>{label}</span>
                         <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
-                        <small>{n || 0} 笔{openPnl != null && Math.abs(openPnl) >= 0.5 ? ` · ${openPnl < 0 ? "持仓亏损" : "持仓盈利"} ${fSign(openPnl, 0)}` : ""}</small>
+                        <small>{returnPct != null ? `${fSign(returnPct, 1)}% · ` : ""}{n || 0} 回合{startEquity != null ? ` · 期初 $${fNum(startEquity, 0)}` : ""}</small>
                       </div>
                     ))}
                   </div>
                 ) : <p>暂无可用 copy 回测窗口，先按历史评分和实盘记录观察。</p>}
               </DecisionCard>
 
-              {profitStructure.profitFactor != null && (
-                <DecisionCard title="盈利结构" tone={profitStructure.profitFactor >= 1.3 ? "good" : "warn"}>
+              {sourceQuality.episodeN30d != null && (
+                <DecisionCard title="源钱包质量" tone={(sourceQuality.winRate30dPct || 0) >= 70 ? "good" : "warn"}>
                   <div className="wallet-risk-list">
-                    <div className="wallet-risk"><span>严格 Copy PF</span><b>{fNum(profitStructure.profitFactor, 2)}</b></div>
-                    <div className="wallet-risk"><span>原始板块盈亏比</span><b>{profitStructure.payoffRatio != null ? fNum(profitStructure.payoffRatio, 2) : "—"}</b></div>
-                    <div className="wallet-risk"><span>去最大一笔</span><b className={cls(profitStructure.netAfterTop1)}>{profitStructure.netAfterTop1 != null ? fSign(profitStructure.netAfterTop1, 0) : "—"}</b></div>
-                    <div className="wallet-risk"><span>去最大两笔</span><b className={cls(profitStructure.netAfterTop2)}>{profitStructure.netAfterTop2 != null ? fSign(profitStructure.netAfterTop2, 0) : "—"}</b></div>
-                    <div className="wallet-risk"><span>最大 / 前三盈利贡献</span><b>{profitStructure.top1ProfitSharePct != null ? `${fNum(profitStructure.top1ProfitSharePct, 0)}% / ${fNum(profitStructure.top3ProfitSharePct, 0)}%` : "—"}</b></div>
-                    <div className="wallet-risk"><span>去前三后主体</span><b>{profitStructure.bodyAfterTop3?.episodes != null ? `${profitStructure.bodyAfterTop3.wins || 0}胜 / ${profitStructure.bodyAfterTop3.losses || 0}负 · ${fSign(profitStructure.bodyAfterTop3.netPnl || 0, 0)}` : "—"}</b></div>
-                    <div className="wallet-risk"><span>主体胜率 / PF</span><b>{profitStructure.bodyAfterTop3?.winRate != null ? `${fNum(profitStructure.bodyAfterTop3.winRate * 100, 0)}% / ${fNum(profitStructure.bodyAfterTop3.profitFactor, 2)}` : "—"}</b></div>
-                    <div className="wallet-risk"><span>1.5× 成本压力</span><b className={cls(profitStructure.costStressNetPnl)}>{profitStructure.costStressNetPnl != null ? fSign(profitStructure.costStressNetPnl, 0) : "—"}</b></div>
+                    <div className="wallet-risk"><span>官方 Perp 30日 ROI</span><b>{d.officialPerpReturn30dPct != null ? fNum(d.officialPerpReturn30dPct, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>30日完整回合 / 胜率</span><b>{sourceQuality.episodeN30d} / {sourceQuality.winRate30dPct != null ? fNum(sourceQuality.winRate30dPct, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>最近7日回合 / 胜率</span><b>{sourceQuality.episodeN7d ?? "—"} / {sourceQuality.winRate7dPct != null ? fNum(sourceQuality.winRate7dPct, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>源钱包30日 / 7日净利</span><b>{fSign(sourceQuality.netPnl30d, 0)} / {fSign(sourceQuality.netPnl7d, 0)}</b></div>
+                    <div className="wallet-risk"><span>前三大赢家占毛利</span><b>{sourceQuality.top3ProfitSharePct != null ? fNum(sourceQuality.top3ProfitSharePct, 1) + "%" : "—"}</b></div>
+                    {sourceQuality.top3ProfitSharePct >= 70 && <div className="wallet-risk"><span>去前三后胜率 / 净利</span><b>{sourceQuality.bodyAfterTop3WinRatePct != null ? fNum(sourceQuality.bodyAfterTop3WinRatePct, 1) + "%" : "—"} / {fSign(sourceQuality.bodyAfterTop3NetPnl, 0)}</b></div>}
                   </div>
                 </DecisionCard>
               )}
 
-              {addMetrics.version && (
-                <DecisionCard title="加仓复制 V2" tone={(addMetrics.addFidelity || 1) >= 0.8 ? "good" : "warn"}>
+              {Object.keys(scoreComponents).length > 0 && (
+                <DecisionCard title="综合评分构成" tone="neutral">
                   <div className="wallet-risk-list">
-                    <div className="wallet-risk"><span>原始订单跟随</span><b>{addMetrics.rawAddOrderFollowRate != null ? fNum(addMetrics.rawAddOrderFollowRate * 100, 1) + "%" : "—"}</b></div>
-                    <div className="wallet-risk"><span>主动合并</span><b>{addReasons.noise_merged || 0}</b></div>
-                    <div className="wallet-risk"><span>次数上限 / 单币容量</span><b>{addReasons.hard_cap_blocked || 0} / {addReasons.coin_cap_blocked || 0}</b></div>
-                    <div className="wallet-risk"><span>账户资金 / 最小保证金</span><b>{addReasons.cash_blocked || 0} / {addReasons.min_margin_blocked || 0}</b></div>
-                    <div className="wallet-risk"><span>可执行加仓捕获</span><b>{addMetrics.actionableAddCaptureRate != null ? fNum(addMetrics.actionableAddCaptureRate * 100, 1) + "%" : "—"}</b></div>
-                    <div className="wallet-risk"><span>最终均价偏差</span><b>{addMetrics.entryGapPctWeighted != null ? fNum(addMetrics.entryGapPctWeighted * 100, 3) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>官方 / Copy 30日 / Copy 7日</span><b>{fNum(scoreComponents.officialPerp30d, 1)} / {fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
+                    <div className="wallet-risk"><span>源胜率 / Copy胜率</span><b>{fNum(scoreComponents.sourceWinRate, 1)} / {fNum(scoreComponents.copyWinRate, 1)}</b></div>
+                    <div className="wallet-risk"><span>开仓跟随 / 行为复制</span><b>{fNum(scoreComponents.openFollowRate, 1)} / {fNum(scoreComponents.behaviorReplication, 1)}</b></div>
+                    <div className="wallet-risk"><span>活跃度 / 独立开仓</span><b>{fNum(scoreComponents.activityRecency, 1)} / {fNum(scoreComponents.independentOpens, 1)}</b></div>
                   </div>
                 </DecisionCard>
               )}

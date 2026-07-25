@@ -362,7 +362,12 @@ class ApiWalletsPerfTests(unittest.TestCase):
                     "INSERT INTO follow_selection "
                     "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,selected_at) "
                     "VALUES ('g1',?,?,1,?,?,'valid','qualified','2026-01-01T01:00:00Z')",
-                    (addr, role, "core_entry" if role == "core" else "challenger_evidence", utility),
+                    (
+                        addr, role,
+                        "core_quality_selected" if role == "core"
+                        else "copy_episode_evidence_insufficient",
+                        utility,
+                    ),
                 )
                 db.execute(
                     "INSERT INTO profile "
@@ -391,8 +396,8 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(core["wallets"][0]["copyBacktestClosedN"], 9)
         self.assertNotIn("role", core["wallets"][0])
         self.assertNotIn("selectionMarginalUtility", challenger["wallets"][0])
-        self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
-        self.assertEqual(challenger_detail["selectionReasonText"], "近7日有效Copy仅4笔（门槛5笔）")
+        self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "Copy完整已平回合少于7个")
+        self.assertEqual(challenger_detail["selectionReasonText"], "Copy完整已平回合少于7个")
 
     def test_published_selection_scores_do_not_follow_in_progress_profile_mutations(self):
         with tempfile.TemporaryDirectory() as td:
@@ -449,10 +454,11 @@ class ApiWalletsPerfTests(unittest.TestCase):
                 "replay_copy_bt_net_pnl,replay_copy_bt_win_rate,replay_copy_bt_closed_n,replay_copy_bt_14d_net_pnl,"
                 "replay_copy_bt_14d_closed_n,replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_closed_n,"
                 "replay_sector_copy_json,replay_params_hash,replay_score_detail_json,replayed_at,selected_at) "
-                "VALUES('g1','0xaaa','core',1,'above_follow_line',999,0.75,99,888,88,777,77,"
+                "VALUES('g1','0xaaa','core',1,'core_quality_selected',999,0.75,99,888,88,777,77,"
                 "?,'current123',?,'2026-01-02T00:00:00Z','now')",
                 (sectors, json.dumps({
-                    "economicScore": .91,
+                    "stage": "strict",
+                    "components": {"copy30d": .91},
                     "economicReturns": {"30d": .30, "14d": .20, "7d": .10},
                     "copyPnl": {"30d": 307, "14d": 293, "7d": 171},
                     "closedN": {"30d": 11, "14d": 9, "7d": 6},
@@ -478,12 +484,12 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["copyBacktestNetPnl"], 307)
         self.assertEqual(wallet["copyBacktestClosedN"], 11)
         self.assertEqual(wallet["copyBacktest7dNetPnl"], 171)
-        self.assertEqual(wallet["winRatePct"], 75.0)
-        self.assertEqual(detail["scoreBreakdown"]["economicScore"], 91.0)
+        self.assertAlmostEqual(wallet["winRatePct"], 6 / 11 * 100)
+        self.assertEqual(detail["scoreBreakdown"]["components"]["copy30d"], 91.0)
         self.assertEqual(detail["scoreBreakdown"]["reasons"], ["sealed final surface"])
         self.assertNotIn("copyBacktest14dNetPnl", wallet)
         self.assertNotIn("copyReplayParamsHash", wallet)
-        self.assertEqual(wallet["selectionReasonText"], "达到跟单线")
+        self.assertEqual(wallet["selectionReasonText"], "个人资格与共享账户组合均已通过")
 
     def test_published_zero_core_selection_does_not_fall_back_to_score_line(self):
         with tempfile.TemporaryDirectory() as td:
@@ -557,9 +563,9 @@ class ApiWalletsPerfTests(unittest.TestCase):
             res = api_wallets.ep_wallet_detail(WalletDetailGuardedDb(db), "0xaaa")
 
         self.assertEqual(res["score"], 89.0)
-        self.assertEqual(res["scoreBreakdown"]["rawScore"], 65.0)
+        self.assertEqual(res["scoreBreakdown"]["components"], {})
 
-    def test_starred_core_wallets_sort_first_by_star_time(self):
+    def test_starred_core_wallets_keep_strict_selection_rank(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
@@ -590,9 +596,9 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
         self.assertEqual(
             [row["address"] for row in result["wallets"]],
-            ["0xearly", "0xlate", "0xnormal"],
+            ["0xnormal", "0xlate", "0xearly"],
         )
-        self.assertEqual([row["starred"] for row in result["wallets"]], [True, True, False])
+        self.assertEqual([row["starred"] for row in result["wallets"]], [False, True, True])
 
 
 if __name__ == "__main__":

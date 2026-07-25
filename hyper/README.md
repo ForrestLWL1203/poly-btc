@@ -33,14 +33,14 @@ Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
     ↓ account ≥ $20k, 7d notional volume ≥ $250k, positive 7d/30d PnL
-Official Portfolio stability + 30d Perp prefilter
-    ↓ four adjacent 7d Perp-return folds ≥ 5%, positive 30d Perp PnL, Perp-profit share ≥ 60%
-Sector-isolated structure filter
-    ↓ cached 37-day profile (30-day evidence + 7-day warm-up)
-Canonical Copy replay: Challenger evidence → personal Core
-    ↓ 8 Campaigns, non-overlapping stability, path/cost/outlier/capacity stress
-Shared-account smart Core search
-    ↓ at most 16 pre-Core; count-specific 16→8→12 tuning; no minimum quota
+Official Portfolio 30d Perp prefilter
+    ↓ Perp ROI ≥ 20%, positive Perp PnL, Perp-profit share ≥ 60%
+Deep fills source quality
+    ↓ complete Episodes, source win rate ≥ 70%, activity and structural copyability; Top40
+Fills-only rough Copy
+    ↓ dynamic 30d/7d ≥ 15%/5%, Copy wins ≥ 60%, open follow ≥ 70%
+Composite score → unified tuning → strict K-line Copy
+    ↓ score-ordered Top16 only; final individual 10%/3%, shared 10%/3%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ forward-only Observer
 Paper copy positions, PnL, and execution audit
@@ -53,49 +53,28 @@ final new-entry membership once an explicit selection generation exists.
 
 Wallet quality and funded-account membership are separate decisions.
 
-- Leaderboard ROI windows are audit/ranking references rather than admission gates. Raw recall requires useful
-  account size/activity and positive 7/30-day PnL. Before any fill download, the already-required official
-  Portfolio response must show four adjacent 7-day Perp-return folds of at least 5%; incomplete history is
-  deferred rather than rejected. Profile hard gates then remove invalid data and systematic uncopyable
-  structures; HFT needs at least ten complete rounds, Grid needs at least five complete rounds with a strict
-  majority of repeated adds, and a one-off Heavy-DCA round is pressure-replayed.
-- Any positive 30-day canonical-Copy result remains in the research Profile pool. Missing samples, stale
-  activity, score, or outlier evidence block Core but do not erase that research evidence. Refined
-  candle paths are fetched only for current Core and profitable/sample-dense wallets that clear cheap hard
-  data/risk gates, bounded at 16 for resource safety. The provisional pre-path score is not a gate because path-risk evidence
-  is itself 15% of the final score; the 75-point line is applied after that path is available. New Core requires
-  eight independent Campaigns, at least 10% strict-Copy return over 30 days, and at least 4% over the latest
-  rolling 7 days. At least three of four non-overlapping 7-day folds must contain Campaign evidence and be
-  profitable; the one permitted losing fold cannot exceed 25% of total 30-day profit. Per-wallet cost
-  stress, body-after-top-three, open-fill rate and capacity remain score diagnostics; the funded final
-  portfolio must still remain profitable after taker fees are stressed to 1.5x and pass aggregate execution
-  capacity. Average realized net per close over both 30 days and the latest rolling 7 days must be at least
-  0.5% of the respective window-start equity; stronger density remains a continuous score input.
-- The final copy-follow score is calibrated as funded economics 30%, repeatability 25%, edge confidence 15%,
-  operability 15%, and path risk 15%. Economics combines 30-day and latest-7-day follower return magnitude,
-  fold timing and median per-close density; overlapping 14-day return and the legacy raw profile score
-  contribute zero. Incomplete
-  Campaign/fold evidence shrinks the total, so a tiny perfect streak cannot outrank mature proof. New Core
-  requires at least 75/100 and at least 45% Campaign win rate. Body win rate and net after removing the three
-  largest winning trades remain diagnostic score inputs. The score is displayed on a 0–100 scale while stored
-  natively in `[0, 1]`.
-- The bounded Core pool receives one per-wallet K-line certification for liquidation and path-risk evidence.
-  A positive, path-complete and structurally safe replay may enter parameter discovery even when the current
-  execution surface misses the final return/score line; requiring Core eligibility before tuning would make
-  current parameters a circular prerequisite for changing them. Wallet count and parameters are tuned together:
-  sparse count-specific nodes follow 16→8→12/boundary search and only the winning count receives the full grid.
-  Count-prefix and parameter search use normalized fills and the shared-account execution model; they
-  do not repeatedly scan candles. The
-  winning surface must requalify every individual against the complete Core contract, and the winning
-  membership receives exactly one conservative, path-complete 30-day strict-Copy certification before
-  publication. Core is always a prefix of final-surface score order; portfolio economics may shorten only
-  the low-score suffix. There is no fixed base count.
-- Final moves must improve portfolio economics and pass the same four-fold evidence/profitability/loss-bound
-  contract plus aggregate cost stress. Normal replacement, addition, and reordering is weekly. Production evidence refresh runs Monday
-  and Thursday (alternating three/four-day gaps); each refresh still removes a wallet immediately for a hard
-  failure, but never adds a wallet to approach a count.
-  New promotions require two complete qualifying generations at least 24 hours apart; ordinary soft churn is
-  suppressed for a Core wallet's first 14 days.
+- Raw recall requires useful account size/activity and positive 7/30-day PnL. Before fill download, official
+  Portfolio requires positive 30-day Perp PnL, at least 60% Perp-profit share and at least 20% dynamic Perp
+  return. Incomplete official history is Challenger evidence, never a fabricated return failure.
+- Deep fills provide the source-wallet contract: at least ten complete 30-day Episodes, at least 70% source
+  wins, a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
+  at 70% of gross profit; then the remaining body must still win at least 70% and not lose money. At most the
+  best 40 source wallets receive rough replay.
+- Rough Copy uses one continuously compounded `$10,000` comparison account and requires dynamic 30d/7d returns
+  of 15%/5%, seven closed Copy Episodes, 60% Copy wins, 70% open follow and complete valuation.
+- The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
+  activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a
+  strict failure is removed without taking a replacement below rank 16.
+- Final individual strict replay requires dynamic 30d/7d returns of 10%/3%, 60% Copy wins, 70% open follow,
+  complete data/path evidence and at most three proxy liquidations. Final shared replay requires 10%/3% and
+  70% open follow on both standardized and actual Paper capital. Campaign, weekly-fold, per-close, cost-multiple,
+  maximum-drawdown and 75-point gates do not exist.
+- Wallet count and parameters are tuned together over score prefixes. The winning surface requalifies every
+  individual and receives exactly one conservative path-complete shared replay before publication.
+- Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
+  Production evidence refresh runs Monday and Thursday (alternating three/four-day gaps), but parameter search
+  is explicit rather than an automatic side effect. There is no promotion delay, tenure, old-Core retention,
+  star priority or minimum count.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
   search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
@@ -115,11 +94,9 @@ Profiles are not re-downloaded from zero on every scheduled run.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
 - Leaderboard candidates require at least `$20,000` account value, `$250,000` leveraged 7-day notional volume,
-  and positive 7-day and 30-day PnL. Leaderboard ROI values remain audit/ranking references. The cheap
-  Portfolio precheck then splits the dense `perpMonth` PnL/account-value series into four non-overlapping
-  7-day folds, requires every fold to return at least 5%, and also requires positive 30-day Perp PnL plus at
-  least 60% Perp-profit share. Campaign independence and 1.5x Copy execution-cost stress are confirmed later
-  from fills under our `$10,000` replay rather than inferred from Portfolio.
+  and positive 7-day and 30-day PnL. The cheap Portfolio precheck requires positive 30-day Perp PnL, at least
+  60% Perp-profit share and at least 20% dynamic 30-day Perp return. Source quality and follower profitability
+  are confirmed later from fills under a standardized `$10,000` starting equity with continuous compounding.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
   is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
@@ -155,24 +132,30 @@ python3 -m hyper.cli.discover --db /path/to/production.db audit-pipeline \
   --generation GENERATION_ID --report /private/funnel.json
 ```
 
+To rebuild source Episode quality and run the at-most-40 fills-only rough-Copy stage directly from a cached
+published generation:
+
+```bash
+python3 -m hyper.cli.core_lab --db /path/to/production.db --max-rough 40
+```
+
+`core_lab` opens the database with SQLite `mode=ro` plus `query_only`, emits anonymous wallet labels, and never
+migrates or writes the source database. A legacy generation without the new official Perp 30-day return may be
+used only for an explicitly marked economic preview; it always reports that a new Portfolio scan is required
+before publication.
+
 ## Copy replay and automatic tuning
 
 The replay uses the same copyable-fill normalization and shared execution state used by the Observer. It models
 shared available balance, isolated margin, volatility-tier sizing, leverage caps, deployment and per-coin caps,
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
-Overlapping positions from the same source wallet, market board, and direction are collapsed into one independent
-Campaign. Target-wallet stability is screened first from official Portfolio: all four adjacent 7-day folds need
-at least 5% return. Individual 10% 30-day, 4% latest-7-day and score-75 lines are final Core gates.
-Live formation also requires at least 0.5% realized net per close in both windows plus repeatable evidence. Its four
-floating-equity folds are slices of one continuous compounding replay:
-at least three need an independent Campaign and must be profitable, and the one permitted losing fold
-cannot exceed 25% of total 30-day profit. The aggregate must remain profitable after charging taker fees at
-1.5x. The 30-day aggregate
-still needs eight Campaigns. Thin folds are unknown evidence, never synthetic losses. The
-single outlier stress removes the largest winning Campaign and requires the remainder positive.
+A replay starts with standardized `$10,000` equity and continuously compounds it; dynamic return divides net PnL
+by the applicable window-start floating equity. Rough replay uses fills only and is capped at 40 source-quality
+wallets. Strict replay loads K-line paths only for the score-ordered Top16 and uses the final tuned parameters.
+There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
 
-The same 15-minute price path records wallet and campaign intratrade drawdown, underwater duration, time below
+The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
 -5%, deep-loss events, recovery and conservative proxy liquidations at our leverage ceiling. Historical maximum
 drawdown is diagnostic only. A wallet may enter tuning with proxy liquidation evidence, then the final tuned
 30-day strict replay permits at most three proxy liquidations per Core wallet. Live account loss is controlled

@@ -1,7 +1,6 @@
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from hyper.discovery import scanner
 
@@ -11,24 +10,31 @@ NOW = 2_000_000_000_000
 
 def qualified(**overrides):
     row = {
-        "data_status": "valid", "evidence_status": "qualified",
-        "copy_bt_closed_n": 16, "copy_bt_campaign_closed_n": 12,
-        "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
-        "copy_expected_return": 0.045, "copy_return_lcb": 0.01,
-        "copy_positive_probability": 0.82, "copy_evidence_days": 10,
-        "actionable_open_rate": 0.90, "capacity_fit": 0.90,
-        "copy_bt_liquidations": 0, "copy_bt_campaign_net_after_top1": 400,
-        "copy_bt_cost_stress_net_pnl": 1200,
-        "copy_path_risk_status": "complete", "copy_intratrade_max_drawdown": .08,
-        "copy_deep_bag_recovery_rate": 1.0, "initial_margin_equity": 10_000,
+        "official_perp_status": "passed",
+        "official_perp_reason": "perp_prefilter_passed",
+        "official_perp_return_30d": .40,
+        "source_episode_n_30d": 20,
+        "source_win_rate_30d": .80,
+        "source_top3_profit_share": .50,
+        "source_body_after_top3_n": 17,
+        "source_body_after_top3_win_rate": .75,
+        "source_body_after_top3_net_pnl": 500,
+        "data_status": "valid",
+        "evidence_status": "qualified",
+        "copy_bt_closed_n": 16,
+        "copy_bt_win_rate": .75,
+        "copy_bt_net_pnl": 1_800,
+        "copy_bt_7d_net_pnl": 600,
+        "copy_bt_window_start_equity": 10_000,
+        "copy_bt_7d_window_start_equity": 10_000,
+        "copy_bt_open_fill_rate": .90,
+        "actionable_open_rate": .90,
+        "copy_bt_liquidations": 0,
+        "copy_bt_valuation_status": "complete",
+        "copy_path_risk_status": "complete",
         "last_copyable_open_ms": NOW - 3_600_000,
-        "sector_policy_json": json.dumps({
-            "allowed": ["crypto"],
-            "copyWeeklyProfitability": {
-                "evidenceSufficient": True, "passed": True,
-                "evaluableFolds": 4, "profitableFolds": 4, "qualifiedFolds": 4,
-            },
-        }),
+        "open_events_30d": 20,
+        "sector_policy_json": json.dumps({"allowed": ["crypto"]}),
     }
     row.update(overrides)
     return row
@@ -36,59 +42,56 @@ def qualified(**overrides):
 
 class ProfileQualificationTests(unittest.TestCase):
     def setUp(self):
-        self.params = SimpleNamespace(copy_min_expected_margin_return=0.02)
+        self.params = SimpleNamespace(
+            copy_bt_gate_enable=True,
+            evidence_min_trades=7,
+            evidence_min_days=0,
+            margin_equity_pct=1.0,
+        )
 
-    def test_core_quality_profile_remains_active(self):
-        self.assertEqual(scanner._profile_copy_qualification(qualified(), NOW, self.params), (True, "ok"))
+    def test_rough_copy_qualified_profile_remains_active(self):
+        self.assertEqual(
+            scanner._profile_copy_qualification(qualified(), NOW, self.params),
+            (True, "rough_copy_qualified"),
+        )
 
-    def test_positive_thin_sample_remains_active_challenger(self):
+    def test_rough_failures_remain_active_challengers(self):
+        cases = (
+            ({"copy_bt_closed_n": 6}, "copy_episode_evidence_insufficient"),
+            ({"copy_bt_net_pnl": -1}, "rough_copy_30d_return_below_floor"),
+            (
+                {"last_copyable_open_ms": NOW - 90 * 3_600_000},
+                "source_activity_stale",
+            ),
+            ({"copy_bt_win_rate": .59}, "rough_copy_win_rate_below_floor"),
+        )
+        for overrides, expected in cases:
+            with self.subTest(expected=expected):
+                ok, reason = scanner._profile_copy_qualification(
+                    qualified(**overrides), NOW, self.params,
+                )
+                self.assertTrue(ok)
+                self.assertEqual(reason, expected)
+
+    def test_historical_max_drawdown_is_audit_only(self):
         ok, reason = scanner._profile_copy_qualification(
-            qualified(copy_evidence_days=2, copy_bt_campaign_closed_n=3), NOW, self.params,
+            qualified(copy_intratrade_max_drawdown=.90), NOW, self.params,
         )
         self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
+        self.assertEqual(reason, "rough_copy_qualified")
 
-    def test_stale_activity_does_not_delete_profile(self):
-        ok, reason = scanner._profile_copy_qualification(
-            qualified(last_copyable_open_ms=NOW - 90 * 3_600_000), NOW, self.params,
-        )
-        self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
-
-    def test_losing_strict_copy_is_rejected(self):
-        ok, reason = scanner._profile_copy_qualification(
-            qualified(copy_bt_net_pnl=-1), NOW, self.params,
-        )
-        self.assertFalse(ok)
-        self.assertEqual(reason, "copy_not_profitable")
-
-    def test_historical_max_drawdown_does_not_reject_profile(self):
-        ok, reason = scanner._profile_copy_qualification(
-            qualified(copy_intratrade_max_drawdown=.16), NOW, self.params,
-        )
-        self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
-
-    def test_raw_quality_score_is_ranking_only(self):
+    def test_source_prescore_is_ranking_only(self):
         row = qualified()
-        with patch.object(scanner.metrics, "score", return_value=0.581):
-            ok, reason, score = scanner._finalize_profile_qualification(row, True, "ok")
+        ok, reason, score = scanner._finalize_profile_qualification(row, True, "ok")
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")
-        self.assertEqual(score, 0.581)
-
-    def test_thin_normalized_edge_remains_challenger_profile(self):
-        ok, reason = scanner._profile_copy_qualification(
-            qualified(copy_expected_return=0.005), NOW, self.params,
-        )
-        self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
+        self.assertGreater(score, 0)
 
     def test_copy_gate_switch_keeps_structurally_valid_profile(self):
         params = SimpleNamespace(copy_bt_gate_enable=False, inactive_days=1)
         self.assertEqual(
             scanner._profile_copy_qualification(
-                qualified(copy_expected_return=-1, last_copyable_open_ms=NOW - 10 * 86_400_000), NOW, params,
+                qualified(copy_bt_net_pnl=-1), NOW, params,
             ),
             (True, "copy_gate_disabled"),
         )

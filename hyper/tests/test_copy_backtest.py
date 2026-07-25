@@ -2,7 +2,6 @@ import unittest
 
 from hyper.copy.copy_backtest import (
     PreparedPricePath,
-    campaign_structure_metrics,
     path_risk_metrics,
     prepare_price_path,
     profit_structure_metrics,
@@ -114,43 +113,6 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["path_risk_status"], "missing")
         self.assertIsNone(result["intratrade_max_drawdown"])
 
-    def test_overlapping_same_direction_basket_is_one_independent_campaign(self):
-        positions = [
-            {
-                "addr": "0xaaa", "coin": f"xyz:C{i}", "side": "short", "status": "closed",
-                "opened_at": 1_000 + i, "closed_at": 5_000 + i, "net_pnl": 10.0,
-            }
-            for i in range(10)
-        ]
-
-        metrics = campaign_structure_metrics(positions)
-
-        self.assertEqual(metrics["campaign_closed_n"], 1)
-        self.assertEqual(metrics["campaign_wins"], 1)
-        self.assertEqual(metrics["campaign_max_positions"], 10)
-
-    def test_campaign_drawdown_keeps_its_own_profit_high_water(self):
-        fills = [
-            fill(1_000, "BTC", "B", 100, 0, 100, 1),
-            fill(3_000, "BTC", "A", 100, 100, 100, 2),
-        ]
-        path = [{
-            "coin": "BTC", "time": 2_000, "open_time": 1_500, "close_time": 2_000,
-            "low": 200, "high": 200, "close": 200,
-        }]
-        result = run_backtest(
-            "0xabc", fills, sigmas={"BTC": 0.04}, price_path=path,
-            price_path_meta={"coverage": 1},
-            overrides={
-                "WALLET_HWM_FREEZE_DD_PCT": 2,
-                "WALLET_HWM_REDUCE_DD_PCT": 3,
-                "WALLET_HWM_EXIT_DD_PCT": 4,
-            },
-        )
-
-        self.assertLess(abs(result["copy_net_pnl"]), 0.01 * 10_000)
-        self.assertGreater(result["campaign_max_drawdown"], 0.50)
-
     def test_liquidation_blocks_immediate_reentry_in_replay(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 1),
@@ -185,7 +147,7 @@ class CopyBacktestTests(unittest.TestCase):
 
         def metrics(values):
             positions = [{"status": "closed", "net_pnl": value} for value in values]
-            return profit_structure_metrics(positions, total_net=sum(values), fee_drag=0)
+            return profit_structure_metrics(positions, total_net=sum(values))
 
         good = metrics(wallet_a)
         bad = metrics(wallet_b)
@@ -271,6 +233,31 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(recent["opened_n"], 1)
         self.assertEqual(recent["capacity_open_fit"], 1.0)
         self.assertEqual(recent["skip_reasons"].get("skip_deploy_cap"), 0)
+
+    def test_recent_slice_uses_marked_boundary_not_full_cross_window_trade_pnl(self):
+        day = 86_400_000
+        result = {
+            "initial_margin_equity": 10_000.0,
+            "copy_net_pnl": 1_000.0,
+            "positions": [{
+                "addr": "0xabc", "coin": "BTC", "side": "long",
+                "opened_at": day, "closed_at": 25 * day, "status": "closed",
+                "margin": 500.0, "net_pnl": 1_000.0,
+            }],
+            "open_positions": [],
+            "path_equity_samples": [
+                {"time": 22 * day, "equity": 10_600.0},
+                {"time": 25 * day, "equity": 11_000.0},
+            ],
+            "path_risk_status": "complete",
+            "valuation_status": "complete",
+        }
+
+        recent = slice_backtest_result(result, 23 * day, window_days=7)
+
+        self.assertEqual(recent["window_start_equity"], 10_600.0)
+        self.assertEqual(recent["window_end_equity"], 11_000.0)
+        self.assertEqual(recent["copy_net_pnl"], 400.0)
 
     def test_low_liquidity_crypto_open_is_skipped(self):
         fills = [

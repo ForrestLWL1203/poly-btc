@@ -45,25 +45,20 @@ def portfolio_rows():
 def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
     def window(net, closed, rate):
         wins = int(round(closed * rate))
-        campaigns = min(closed, 12)
-        campaign_wins = int(round(campaigns * rate))
         return {
             "copy_net_pnl": net, "closed_n": closed, "wins": wins,
             "opened_n": closed, "target_open_events": closed,
+            "open_fill_rate": 1.0, "capacity_open_fit": 1.0,
             "liquidations": 0, "valuation_status": "complete",
-            "profit_factor": 2.5, "payoff_ratio": 1.5,
             "top1_profit_share": .20, "top3_profit_share": .45,
             "body_after_top3_n": max(1, closed - 3),
             "body_after_top3_wins": max(1, int(round(max(1, closed - 3) * rate))),
             "body_after_top3_win_rate": rate,
             "body_after_top3_net_pnl": net * .35,
-            "cost_stress_net_pnl": net * .7,
-            "campaign_closed_n": campaigns, "campaign_wins": campaign_wins,
-            "campaign_net_after_top1": net * .45,
-            "campaign_net_after_top2": net * .3,
             "path_risk_status": "complete", "intratrade_max_drawdown": .05,
             "deep_bag_event_n": 0, "failed_deep_bag_n": 0,
             "deep_bag_recovery_rate": 1.0, "initial_margin_equity": 10_000,
+            "window_start_equity": 10_000,
         }
     return json.dumps({
         "crypto": {
@@ -77,30 +72,29 @@ def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
 def strict_policy_json():
     return json.dumps({
         "allowed": ["crypto"], "crypto": {"allow": True},
-        "copyWeeklyProfitability": {
-            "version": "nonoverlap-weekly-return-v2", "evidenceSufficient": True,
-            "passed": True, "evaluableFolds": 4, "profitableFolds": 4,
-            "qualifiedFolds": 4,
-            "minReturn": .04, "minNetPerClosedReturn": .005,
-            "folds": [
-                {
-                    "evaluable": True, "return": .08,
-                    "averageClosedNetReturn": .01, "qualified": True,
-                }
-                for _ in range(4)
-            ],
-        },
     })
 
 
-def strict_weekly_stability():
+def qualifying_source_fields(now_ms=None):
     return {
-        "version": "nonoverlap-weekly-return-v2",
-        "evidenceSufficient": True,
-        "passed": True,
-        "evaluableFolds": 4,
-        "profitableFolds": 4,
-        "qualifiedFolds": 4,
+        "official_perp_status": "passed",
+        "official_perp_reason": "perp_prefilter_passed",
+        "official_perp_return_30d": .40,
+        "official_perp_pnl_30d": 4000,
+        "official_perp_pnl_share": .80,
+        "source_episode_n_30d": 20,
+        "source_episode_n_7d": 6,
+        "source_win_rate_30d": .80,
+        "source_win_rate_7d": .80,
+        "source_net_pnl_30d": 4000,
+        "source_net_pnl_7d": 800,
+        "source_active_days_30d": 16,
+        "source_active_days_7d": 5,
+        "source_top3_profit_share": .50,
+        "source_body_after_top3_n": 17,
+        "source_body_after_top3_win_rate": .76,
+        "source_body_after_top3_net_pnl": 900,
+        "last_copyable_open_ms": int(now_ms or time.time() * 1000),
     }
 
 
@@ -187,16 +181,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("retune_formation=True", optimize_source)
         self.assertIn("path_rows=None, path_meta=None", formation_source)
         self.assertNotIn("shared_path = price_path.load_refined", formation_source)
-        self.assertEqual(publication_source.count("evaluate_portfolio_window("), 1)
+        self.assertEqual(publication_source.count("auto_tune._candidate_windows("), 3)
+        self.assertIn("dynamicReturn30d", publication_source)
+        self.assertIn("dynamicReturn7d", publication_source)
         self.assertIn("final_strict_copy_failed:", publication_source)
 
     def test_scheduled_formation_never_overwrites_verified_membership_with_old_core(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
-        self.assertNotIn("stableRetentionApplied", source)
         self.assertNotIn("weekly_rebalance_not_due", source)
         self.assertNotIn("chosen_addrs = tuple(stable)", source)
-        self.assertIn("retune = bool(retune and rebalance_due)", source)
+        self.assertIn("retune = bool(retune and (force_retune or rebalance_due))", source)
 
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:
@@ -224,8 +219,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.selection, "pinned_core_controls", return_value=[]), \
                     patch.object(scanner.selection, "published_core_addrs", return_value=[]), \
                     patch.object(scanner, "_core_rebalance_due", return_value=(True, None)), \
-                    patch.object(scanner, "_rank_formation_candidates_for_surface",
-                                 return_value=[candidate]), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [], 14: [], 7: []}), \
                     patch.object(scanner.auto_tune, "maybe_tune_margins") as tune:
@@ -327,112 +320,17 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 ("0xnear", scanner.selection.CHALLENGER),
             ])
 
-    def test_core_soft_failure_needs_two_distinct_complete_generations(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            db.execute(
-                "INSERT INTO wallet_registry "
-                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
-                "VALUES ('0xold','core','core','now','now','now')"
-            )
-            soft = {
-                "eligible": True, "coreEligible": False, "role": "challenger",
-                "status": "challenger_return_watch", "reasons": ["soft"],
-            }
+    def test_retired_core_soft_failure_grace_is_absent(self):
+        self.assertFalse(hasattr(scanner, "_apply_core_soft_failure_grace"))
+        self.assertNotIn(
+            "core_soft_fail_count", storage.DISCOVERY_SCHEMA,
+        )
 
-            first = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", soft)
-            duplicate = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", soft)
-            second = scanner._apply_core_soft_failure_grace(db, "0xold", "g2", soft)
-
-            self.assertTrue(first["coreEligible"])
-            self.assertTrue(duplicate["coreEligible"])
-            self.assertFalse(second["coreEligible"])
-            count = db.execute(
-                "SELECT core_soft_fail_count FROM wallet_registry WHERE addr='0xold'"
-            ).fetchone()[0]
-            self.assertEqual(count, 2)
-
-    def test_core_hard_risk_bypasses_soft_failure_grace(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            db.execute(
-                "INSERT INTO wallet_registry "
-                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
-                "VALUES ('0xold','core','core','now','now','now')"
-            )
-            hard = {
-                "eligible": False, "coreEligible": False, "role": "exit_only",
-                "status": "structural_uncopyable", "hardRisk": True,
-            }
-
-            result = scanner._apply_core_soft_failure_grace(db, "0xold", "g1", hard)
-
-            self.assertFalse(result["coreEligible"])
-            self.assertEqual(result["role"], "exit_only")
-
-    def test_core_strict_entry_failure_cannot_use_soft_grace(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            db.execute(
-                "INSERT INTO wallet_registry "
-                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
-                "VALUES ('0xold','core','core','now','now','now')"
-            )
-            weekly_loss = {
-                "eligible": True, "coreEligible": False, "role": "challenger",
-                "status": "challenger_copy_timing_instability",
-                "checks": {
-                    "strictCopy30dPositive": True,
-                    "strictCopy30dReturn": True,
-                    "strictCopyRolling7dReturn": True,
-                    "strictCopyWeeklyPositive": False,
-                    "coreFollowScore": True,
-                },
-            }
-
-            result = scanner._apply_core_soft_failure_grace(
-                db, "0xold", "g1", weekly_loss,
-            )
-
-            self.assertFalse(result["coreEligible"])
-            self.assertTrue(result["strictQualificationFailure"])
-            count = db.execute(
-                "SELECT core_soft_fail_count FROM wallet_registry WHERE addr='0xold'"
-            ).fetchone()[0]
-            self.assertEqual(count, 2)
-
-    def test_new_core_promotion_needs_prior_complete_generation_at_least_24h_old(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            db.execute(
-                "INSERT INTO scan_generation "
-                "(generation,status,complete,started_at,published_at) "
-                "VALUES('old-good','published',1,'1970-01-01T00:00:00Z','1970-01-01T01:00:00Z')"
-            )
-            db.execute(
-                "INSERT INTO pipeline_audit "
-                "(stamp,source,stage,addr,status,payload_json,created_at) "
-                "VALUES('s','scan','profile','0xaaa','active',?, '1970-01-01T01:00:00Z')",
-                (json.dumps({
-                    "qualification": {"profileGeneration": "old-good"},
-                    "followEligibility": {"coreEligible": True},
-                }),),
-            )
-            db.commit()
-            profiles = [{"addr": "0xaaa", "follow_qualification": {"coreEligible": True}}]
-
-            early, _ = scanner._core_membership_hysteresis(
-                db, profiles, {}, now_ms=24 * 3_600_000,
-            )
-            ready, _ = scanner._core_membership_hysteresis(
-                db, profiles, {}, now_ms=26 * 3_600_000,
-            )
-
-            self.assertNotIn("0xaaa", early)
-            self.assertIn("0xaaa", ready)
+    def test_new_core_has_no_promotion_delay_or_tenure_bypass(self):
+        self.assertFalse(hasattr(scanner, "_core_membership_hysteresis"))
+        source = inspect.getsource(scanner._quality_first_core_transition)
+        self.assertNotIn("promotion_ready", source)
+        self.assertNotIn("tenure_protected", source)
 
     def test_perp_prefilter_never_holds_writer_transaction_during_network_calls(self):
         with tempfile.TemporaryDirectory() as td:
@@ -452,52 +350,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(all(result.passed for result in results.values()))
             self.assertFalse(db.in_transaction)
 
-    def test_core_formation_tune_pool_accepts_positive_path_safe_precore_wallets(self):
-        self.assertTrue(scanner._formation_tune_candidate({
-            "follow_qualification": {
-                "eligible": True,
-                "coreEligible": True,
-                "checks": {
-                    "pathRiskComplete": True, "valuationComplete": True,
-                    "sectorExecutable": True, "noRepeatedLiquidation": True,
-                    "noForwardLiquidation": True,
-                },
-            },
-        }))
-        self.assertTrue(scanner._formation_tune_candidate({
-            "follow_qualification": {
-                "eligible": True, "coreEligible": False,
-                "status": "challenger_return_watch",
-                "checks": {
-                    "pathRiskComplete": True, "valuationComplete": True,
-                    # A current-surface watch sector is precisely what parameter
-                    # discovery may repair; requiring it to be live already is circular.
-                    "sectorExecutable": False, "noRepeatedLiquidation": True,
-                    "noForwardLiquidation": True,
-                },
-            },
-        }))
-
     def test_formation_entry_requires_recent_return_before_shared_replay(self):
-        policy = json.loads(strict_policy_json())
-        policy["copyWeeklyProfitability"]["evidenceSufficient"] = False
-        policy["copyWeeklyProfitability"]["passed"] = False
         effective = {
-            "copy_expected_return": .04,
-            "copy_return_lcb": .01,
-            "copy_positive_probability": .8,
-            "copy_evidence_days": 7,
-            "copy_risk_score": .9,
-            "execution_score": .9,
+            **qualifying_source_fields(),
             "actionable_open_rate": .9,
             "capacity_fit": 1.0,
-            "open_probability_48h": .8,
-            "last_copyable_open_ms": int(time.time() * 1000),
             "data_status": "valid",
             "evidence_status": "qualified",
-            "sector_policy_json": json.dumps(policy),
-            # Both magnitude gates fail (9%/1%), while absolute recent/30d profit,
-            # per-close density, Campaign win rate and hard safety remain sound.
+            "sector_policy_json": strict_policy_json(),
+            # Both dynamic-return gates fail (9%/1%) while source quality,
+            # execution, valuation and path evidence remain sound.
             "sector_copy_json": strict_sector_json(900, 7, 400, 6, 100, 5),
             "forward_liquidations": 0,
         }
@@ -506,204 +368,61 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertFalse(result["eligible"])
         self.assertFalse(result["individualCoreEligible"])
-        self.assertFalse(
-            result["qualification"]["checks"]["strictCopy30dReturn"]
-        )
-        self.assertFalse(
-            result["qualification"]["checks"]["strictCopyRolling7dReturn"]
-        )
-        self.assertFalse(
-            result["qualification"]["checks"]["strictCopyWeeklyPositive"]
-        )
+        self.assertFalse(result["checks"]["strictCopy30dReturn"])
+        self.assertFalse(result["checks"]["strictCopyRolling7dReturn"])
 
-    def test_formation_entry_keeps_recent_profit_and_score_as_hard_quality_gates(self):
+    def test_formation_entry_uses_recent_return_but_not_score_as_a_hard_gate(self):
         effective = {
-            "copy_expected_return": .04,
-            "copy_return_lcb": .01,
-            "copy_positive_probability": .8,
-            "copy_evidence_days": 7,
-            "copy_risk_score": .9,
-            "execution_score": .9,
+            **qualifying_source_fields(),
             "actionable_open_rate": .9,
             "capacity_fit": 1.0,
-            "open_probability_48h": .8,
-            "last_copyable_open_ms": int(time.time() * 1000),
             "data_status": "valid",
             "evidence_status": "qualified",
             "sector_policy_json": strict_policy_json(),
-            "sector_copy_json": strict_sector_json(1800, 7, 600, 6, 300, 5),
+            "sector_copy_json": strict_sector_json(1800, 8, 600, 6, 300, 5),
             "forward_liquidations": 0,
         }
 
-        low_score = scanner._formation_entry_eligibility(effective, .749)
-        losing_week = scanner._formation_entry_eligibility({
+        low_score = scanner._formation_entry_eligibility(effective, .10)
+        weak_recent = scanner._formation_entry_eligibility({
             **effective,
-            "sector_copy_json": strict_sector_json(1800, 7, 600, 6, -1, 5),
+            "sector_copy_json": strict_sector_json(1800, 8, 600, 6, -1, 5),
         }, .80)
 
-        self.assertFalse(low_score["eligible"])
-        self.assertFalse(low_score["checks"]["scoreAtLeastCoreFloor"])
-        self.assertFalse(losing_week["eligible"])
-        self.assertFalse(losing_week["checks"]["strictCopyRolling7dReturn"])
-
-    def test_formation_entry_requires_final_surface_weekly_stability(self):
-        policy = json.loads(strict_policy_json())
-        policy["copyWeeklyProfitability"]["evidenceSufficient"] = True
-        policy["copyWeeklyProfitability"]["passed"] = False
-        effective = {
-            "copy_expected_return": .04,
-            "copy_return_lcb": .01,
-            "copy_positive_probability": .8,
-            "copy_evidence_days": 7,
-            "copy_risk_score": .9,
-            "execution_score": .9,
-            "actionable_open_rate": .9,
-            "capacity_fit": 1.0,
-            "open_probability_48h": .8,
-            "last_copyable_open_ms": int(time.time() * 1000),
-            "data_status": "valid",
-            "evidence_status": "qualified",
-            "sector_policy_json": json.dumps(policy),
-            "sector_copy_json": strict_sector_json(1800, 7, 600, 6, 500, 5),
-            "forward_liquidations": 0,
-        }
-
-        result = scanner._formation_entry_eligibility(effective, .80)
-
-        self.assertFalse(result["eligible"])
-        self.assertTrue(result["checks"]["strictCopyWeeklyEvidence"])
-        self.assertFalse(result["checks"]["strictCopyWeeklyPositive"])
-        self.assertIn("strictCopyWeeklyPositive", result["requiredChecks"])
+        self.assertTrue(low_score["eligible"])
+        self.assertNotIn("scoreAtLeastCoreFloor", low_score["checks"])
+        self.assertFalse(weak_recent["eligible"])
+        self.assertFalse(weak_recent["checks"]["strictCopyRolling7dReturn"])
 
     def test_manual_optimize_requalifies_incumbents_as_new_entries(self):
         source = inspect.getsource(scanner.optimize_published_generation)
         forced_source = inspect.getsource(scanner._build_forced_prefix_selection)
 
         self.assertIn("force_entry_requalification=True", source)
-        self.assertIn("if force_promotion or not previous_roles:", forced_source)
-        self.assertFalse(scanner._formation_tune_candidate({
-            "follow_qualification": {
-                "eligible": True, "coreEligible": False,
-                "status": "challenger_open_valuation_pending",
-                "checks": {
-                    "pathRiskComplete": True, "valuationComplete": False,
-                    "sectorExecutable": True, "noRepeatedLiquidation": True,
-                    "noForwardLiquidation": True,
-                },
-            },
-        }))
-        self.assertTrue(scanner._formation_tune_candidate({
-            "follow_qualification": {
-                "eligible": True, "coreEligible": False,
-                "status": "challenger_sample_watch",
-                "checks": {
-                    "pathRiskComplete": True, "valuationComplete": True,
-                    "sectorExecutable": True, "noRepeatedLiquidation": True,
-                    "noForwardLiquidation": True,
-                },
-            },
-        }))
-        self.assertTrue(scanner._formation_tune_candidate({
-            "follow_qualification": {
-                "eligible": False, "coreEligible": False,
-                "status": "copy_value_below_challenger_floor",
-                "checks": {
-                    "pathRiskComplete": True, "valuationComplete": True,
-                    "sectorExecutable": True, "noRepeatedLiquidation": True,
-                    "noForwardLiquidation": True,
-                },
-            },
-        }))
+        self.assertNotIn("force_promotion", forced_source)
+        self.assertNotIn("core_retention_eligible", forced_source)
 
-    def test_formation_ranking_uses_effective_surface_replay_not_scan_time_score(self):
-        rows = [
-            {"addr": "0xold", "follow_score": .95},
-            {"addr": "0xstrong", "follow_score": .50},
-        ]
+    def test_formation_replays_only_once_after_the_winning_surface_is_known(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
 
-        def replay(_db, row, _now_ms, **_kwargs):
-            return {
-                "score": .90 if row["addr"] == "0xstrong" else .40,
-                "qualification": {
-                    "eligible": True, "coreEligible": True, "status": "core_eligible",
-                },
-            }
-
-        with patch.object(scanner, "_effective_follow_replay", side_effect=replay):
-            ranked = scanner._rank_formation_candidates_for_surface(
-                None, rows, 1000, generation_id="g1", follow={}, valuation_marks={},
-                sigmas={}, market_ctx={},
-            )
-
-        self.assertEqual([row["addr"] for row in ranked], ["0xstrong", "0xold"])
-        self.assertEqual(ranked[0]["follow_score"], .90)
-
-    def test_formation_ranking_never_reloads_incumbents_during_forced_entry_replay(self):
-        retained = []
-
-        def replay(_db, row, _now_ms, **kwargs):
-            retained.append((row["addr"], kwargs["retention"]))
-            return {
-                "score": .80,
-                "qualification": {
-                    "eligible": True, "coreEligible": True, "status": "core_eligible",
-                },
-            }
-
-        with (
-            patch.object(scanner.selection, "published_core_addrs", side_effect=AssertionError),
-            patch.object(scanner, "_effective_follow_replay", side_effect=replay),
-        ):
-            ranked = scanner._rank_formation_candidates_for_surface(
-                object(), [{"addr": "0xold"}], 1000, generation_id="g1", follow={},
-                valuation_marks={}, sigmas={}, market_ctx={}, retention_addrs=(),
-            )
-
-        self.assertEqual([row["addr"] for row in ranked], ["0xold"])
-        self.assertEqual(retained, [("0xold", False)])
-
-    def test_formation_ranking_keeps_surface_economic_watch_for_tuning(self):
-        def replay(_db, _row, _now_ms, **_kwargs):
-            return {
-                "score": .40,
-                "qualification": {
-                    "eligible": False,
-                    "coreEligible": False,
-                    "hardRisk": False,
-                    "status": "copy_value_below_challenger_floor",
-                    "checks": {
-                        "pathRiskComplete": True,
-                        "valuationComplete": True,
-                        "noRepeatedLiquidation": True,
-                        "noForwardLiquidation": True,
-                    },
-                },
-            }
-
-        with patch.object(scanner, "_effective_follow_replay", side_effect=replay):
-            ranked = scanner._rank_formation_candidates_for_surface(
-                None, [{"addr": "0xwatch"}], 1000,
-                generation_id="g1", follow={}, valuation_marks={},
-                sigmas={}, market_ctx={},
-            )
-
-        self.assertEqual([row["addr"] for row in ranked], ["0xwatch"])
-        self.assertTrue(scanner._formation_tune_candidate(ranked[0]))
+        self.assertNotIn("_rank_formation_candidates_for_surface", source)
+        self.assertEqual(source.count("_effective_follow_replay("), 1)
+        self.assertIn("tune_ranked = ranked_candidates[:upper]", source)
 
     def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertNotIn('raise RuntimeError(f"effective_copy_replay_invalid:', source)
-        self.assertIn('raise RuntimeError(f"pinned_core_replay_invalid:', source)
+        self.assertNotIn("pinned_core_replay_invalid", source)
         self.assertIn("if replay_invalid:", source)
         self.assertIn("rejected.append(addr)", source)
 
 
     def test_path_validation_is_portfolio_fail_closed_not_wallet_regate(self):
-        source = inspect.getsource(scanner._build_explicit_selection)
+        source = inspect.getsource(scanner._build_forced_prefix_selection)
 
-        self.assertIn('path_reasons.append("path_net_nonpositive")', source)
-        self.assertIn('"reusedStrictReplay": True', source)
+        self.assertIn('failures.append("path_coverage")', source)
+        self.assertIn('"finalStrictCopy": final_strict_validation', source)
         self.assertNotIn("path_rejected", source)
 
     def test_scan_runs_explicit_selection_only_once(self):
@@ -741,76 +460,89 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
 
-    def test_bounded_path_pool_prioritizes_incumbent_and_allows_tuner_to_repair_thin_surface(self):
-        checks = {
-            key: True for key in (
-                "strictCopy30dPositive", "strictCopy30dReturn",
-                "averageNetPerClose",
-                "strictCopyRolling7dReturn", "strictCopyWeeklyPositive",
-                "independentCampaignEvidence",
-                "campaignWinRate", "repeatableBodyWinRate", "repeatableBodyPositive",
-                "coreFollowScore", "activityWithin72h", "oneWinnerRemovalPositive",
-                "costStressPositive", "openExecution", "capacity", "valuationComplete",
-                "sectorExecutable", "expectedEdge", "noRepeatedLiquidation",
-                "noForwardLiquidation",
-            )
-        }
+    def test_bounded_path_pool_is_strict_rough_score_order_without_incumbent_bypass(self):
         rows = [
             {
                 "addr": "0xweak", "follow_score": .99,
-                "copy_bt_closed_n": 10,
                 "follow_qualification": {
-                    "eligible": True, "evidenceDays": 10,
-                    "checks": {
-                        **checks, "strictCopyWeeklyPositive": False,
-                        "averageNetPerClose": False,
-                    },
+                    "eligible": True, "coreEligible": False, "role": "challenger",
                 },
                 "sector_policy_json": "{}",
             },
             {
                 "addr": "0xready", "follow_score": .80,
-                "copy_bt_closed_n": 10,
                 "follow_qualification": {
-                    "eligible": True, "evidenceDays": 10, "checks": checks,
+                    "eligible": True, "coreEligible": True, "role": "core_eligible",
                 },
                 "sector_policy_json": "{}",
             },
             {
                 "addr": "0xincumbent", "follow_score": .10,
-                "follow_qualification": {"eligible": False},
+                "follow_qualification": {
+                    "eligible": False, "coreEligible": False, "role": "rejected",
+                },
                 "sector_policy_json": "{}",
             },
         ]
 
-        selected = scanner._bounded_formation_candidates(
-            rows, ("0xincumbent",), 40,
-        )
+        selected = scanner._bounded_formation_candidates(rows, 16)
 
-        self.assertEqual(
-            [row["addr"] for row in selected],
-            ["0xincumbent", "0xweak", "0xready"],
-        )
+        self.assertEqual([row["addr"] for row in selected], ["0xready"])
 
-    def test_prepath_candidate_does_not_require_score_before_path_risk_exists(self):
-        checks = {
-            key: True for key in (
-                "strictCopy30dPositive", "strictCopy30dReturn",
-                "averageNetPerClose",
-                "strictCopyRolling7dReturn", "strictCopyWeeklyPositive",
-                "independentCampaignEvidence", "campaignWinRate",
-                "repeatableBodyWinRate", "repeatableBodyPositive",
-                "activityWithin72h", "oneWinnerRemovalPositive",
-                "costStressPositive", "openExecution", "capacity",
-                "valuationComplete", "sectorExecutable", "expectedEdge",
-                "noRepeatedLiquidation", "noForwardLiquidation",
+    def test_bounded_path_pool_caps_at_sixteen_without_rank_seventeen_backfill(self):
+        rows = [
+            {
+                "addr": f"0x{index:02x}",
+                "follow_score": 1.0 - index / 100,
+                "follow_qualification": {
+                    "eligible": True,
+                    "coreEligible": True,
+                    "role": "core_eligible",
+                    "deferred": False,
+                },
+            }
+            for index in range(20)
+        ]
+
+        selected = scanner._bounded_formation_candidates(rows, 16)
+
+        self.assertEqual([row["addr"] for row in selected], [
+            f"0x{index:02x}" for index in range(16)
+        ])
+        self.assertNotIn("0x10", [row["addr"] for row in selected])
+
+    def test_source_quality_pool_keeps_only_score_ordered_top_forty(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile "
+                "(addr,status,reason,source_quality_score,profile_generation,data_status,"
+                "official_perp_status) VALUES(?,?,?,?,?,?,?)",
+                [
+                    (
+                        f"0x{index:02x}", "active", "source_quality_passed",
+                        100.0 - index, "g-source", "valid", "passed",
+                    )
+                    for index in range(42)
+                ],
             )
-        }
+            db.commit()
+
+            kept, tail = scanner._source_quality_pool(db, "g-source", limit=40)
+            rejected = db.execute(
+                "SELECT COUNT(*) FROM profile "
+                "WHERE reason='source_quality_below_top40' AND status='rejected'"
+            ).fetchone()[0]
+
+        self.assertEqual(kept, [f"0x{index:02x}" for index in range(40)])
+        self.assertEqual(tail, ["0x28", "0x29"])
+        self.assertEqual(rejected, 2)
+
+    def test_prepath_candidate_uses_frozen_rough_copy_contract_only(self):
         row = {
-            "copy_bt_closed_n": 10,
             "follow_qualification": {
-                "eligible": True, "evidenceDays": 10,
-                "checks": {**checks, "coreFollowScore": False, "pathRiskComplete": False},
+                "eligible": True, "coreEligible": True, "role": "core_eligible",
+                "deferred": False,
             },
             "sector_policy_json": "{}",
         }
@@ -876,12 +608,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "INSERT INTO profile "
                 "(addr,status,reason,score,profile_generation,data_status,evidence_status,"
                 "copy_bt_net_pnl,copy_bt_closed_n,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
-                "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,copy_expected_return,copy_return_lcb,"
-                "copy_positive_probability,copy_evidence_days,actionable_open_rate,capacity_fit,"
-                "sector_policy_json,sector_copy_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,copy_evidence_days,"
+                "actionable_open_rate,capacity_fit,sector_policy_json,sector_copy_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     "0xsector", "active", "ok", .9, "g-sector", "valid", "qualified",
-                    2_000, 30, 1_000, 15, 500, 8, .05, .02, .9, 12, .9, .9,
+                    2_000, 30, 1_000, 15, 500, 8, 12, .9, .9,
                     json.dumps({"crypto": {"allow": True}, "stock": {"allow": False},
                                 "allowed": ["crypto"]}),
                     json.dumps({
@@ -989,7 +721,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             params.seed_params(db)
             marginal = SimpleNamespace(search_meta={"finalStrictCopy": {
                 "status": "passed", "selectedCount": 10, "netPnl30d": 2500,
-                "expectedReturn30d": .25, "maxDrawdown30d": .08,
+                "dynamicReturn30d": .25, "dynamicReturn7d": .08,
+                "startEquity30d": 10000, "endEquity30d": 12500,
+                "netPnl7d": 800, "startEquity7d": 10000, "endEquity7d": 10800,
+                "maxDrawdown30d": .08,
                 "liquidations30d": 0, "actionableOpenRate30d": .91,
                 "capacityFit30d": .88, "pricePathCoverage30d": .99,
                 "maintenanceMarginCoverage30d": 1.0,
@@ -1002,7 +737,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             ).fetchone()[0])
             self.assertEqual(portfolio["netPnl30"], 2500)
             self.assertEqual(portfolio["validationSource"], "final_strict_copy")
-            self.assertEqual(persisted["expectedReturn30d"], .25)
+            self.assertEqual(persisted["dynamicReturn30d"], .25)
             self.assertEqual(per_wallet, {
                 "status": "skipped", "reason": "portfolio_strict_only", "refreshed": 0,
             })
@@ -1015,11 +750,13 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": .9,
                 "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                **qualifying_source_fields(),
                 "copy_bt_net_pnl": 3000, "copy_bt_14d_net_pnl": 1200,
                 "copy_bt_7d_net_pnl": 900, "copy_bt_closed_n": 20,
                 "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 8,
-                "copy_expected_return": .06, "copy_return_lcb": .02,
-                "copy_positive_probability": .9, "copy_evidence_days": 12,
+                "copy_bt_win_rate": .75,
+                "copy_bt_window_start_equity": 10_000,
+                "copy_bt_7d_window_start_equity": 10_000,
                 "actionable_open_rate": .9, "capacity_fit": .9,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                 "sector_copy_json": strict_sector_json(3000, 20, 1200, 10, 900, 8),
@@ -1040,7 +777,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             db.commit()
             final_qualification = {
                 "eligible": True, "coreEligible": False, "role": "challenger",
-                "status": "challenger_weekly_return_watch",
+                "status": "challenger_recent_return_watch",
                 "reasons": ["最终参数7日收益低于Core百分比线"],
             }
 
@@ -1053,8 +790,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             self.assertEqual(marginal.selected, ())
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "challenger", "challenger_weekly_return_watch"),
-                ("0xbbb", "challenger", "challenger_copy_fold_evidence_building"),
+                ("0xaaa", "challenger", "challenger_recent_return_watch"),
+                ("0xbbb", "challenger", "rough_copy_qualified"),
             ])
             self.assertEqual(db.execute(
                 "SELECT state,current_role FROM wallet_registry WHERE addr='0xbbb'"
@@ -1105,14 +842,21 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             ), patch.object(
                     scanner, "_quality_first_core_transition", return_value=transition,
             ), patch.object(
-                    scanner.auto_tune, "evaluate_portfolio_window",
+                    scanner.auto_tune, "_candidate_windows",
                     return_value={
-                        "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
-                        "capacity_open_fit": .95, "max_drawdown": .01,
-                        "liquidations": 0, "price_path_coverage": 1.0,
-                        "maintenance_margin_coverage": 1.0,
-                        "initial_margin_equity": 1000,
-                        "weekly_stability": strict_weekly_stability(),
+                        30: {
+                            "copy_net_pnl": 200, "closed_n": 10,
+                            "open_fill_rate": .95, "capacity_open_fit": .95,
+                            "max_drawdown": .01, "liquidations": 0,
+                            "price_path_coverage": 1.0,
+                            "maintenance_margin_coverage": 1.0,
+                            "window_start_equity": 1000,
+                        },
+                        7: {
+                            "copy_net_pnl": 50, "closed_n": 5,
+                            "open_fill_rate": .95, "capacity_open_fit": .95,
+                            "window_start_equity": 1000,
+                        },
                     },
             ) as final_replay:
                 rows, _marginal = scanner._build_forced_prefix_selection(
@@ -1150,7 +894,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(rows[0].replayed_at, "now")
             self.assertTrue(window_fills.call_args.kwargs["include_watch"])
             final_replay.assert_called_once()
-            self.assertEqual(final_replay.call_args.kwargs["days"], 30)
             self.assertIsNotNone(final_replay.call_args.kwargs["path_rows"])
 
     def test_star_cannot_bypass_final_win_gate_and_held_position_becomes_exit_only(self):
@@ -1358,13 +1101,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "addr": addr, "status": "active", "reason": "ok", "score": 0.9,
                     "raw_quality_score": 0.9, "profile_generation": p.scan_generation,
                     "evaluated_at": stamp, "last_refreshed": stamp, "data_status": "valid",
-                    "evidence_status": "qualified", "last_copyable_open_ms": now_ms,
+                    "evidence_status": "qualified",
+                    **qualifying_source_fields(now_ms),
                     "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 8,
-                    "copy_positive_probability": 0.85, "copy_expected_return": 0.05,
-                    "copy_return_lcb": 0.015, "copy_return_volatility": 0.08,
-                    "copy_evidence_days": 10, "copy_recent_return_14d": 0.04,
-                    "copy_recent_return_7d": 0.03, "copy_risk_score": 0.85,
-                    "execution_score": 0.95, "open_probability_48h": 0.8,
+                    "copy_bt_win_rate": .75,
+                    "copy_bt_window_start_equity": 10_000,
+                    "copy_bt_7d_window_start_equity": 10_000,
                     "copy_bt_open_fill_rate": 0.95, "actionable_open_rate": 0.95,
                     "capacity_fit": 0.95, "copy_bt_net_pnl": 1800,
                     "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
@@ -1382,35 +1124,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db_.commit()
                 return "active", "ok", row, False
 
-            metrics = scanner.selection.PortfolioMetrics(
-                100.0, 80.0, 0, 0.95, 0.95, 0.05, 0.20, 0.05,
-                net_pnl=100.0, stress_net_pnl=80.0, drawdown_dollars=50.0,
-                risk_adjusted_utility=50.0,
-            )
-            staged = scanner.offline_core_optimizer.OfflineSearchResult(
-                selected=("0xaaa",), metrics=metrics, initial=(),
-                initial_metrics=scanner.selection.PortfolioMetrics(
-                    0.0, 0.0, 0, 1.0, 1.0, 0.0, 0.0, 0.0,
-                ), fast_evaluated=1, strict_evaluated=1,
-                finalists=(("0xaaa",),),
-            )
-            robust = scanner.offline_core_optimizer.RobustSelectionResult(
-                selected=("0xaaa",), metrics=metrics, comparison=None,
-                evaluated=1,
-            )
-
-            def select_after_watchlist(*args):
-                self.assertIsNotNone(db.execute(
-                    "SELECT 1 FROM watchlist WHERE addr='0xaaa'"
-                ).fetchone())
-                args[3](("0xaaa",))
-                return staged
-
             strict_windows = {
                 30: {
                     "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
                     "capacity_open_fit": .95, "max_drawdown": .01,
                     "maintenance_margin_coverage": 1.0,
+                    "price_path_coverage": 1.0, "window_start_equity": 1000,
                 },
                 14: {
                     "copy_net_pnl": 80, "closed_n": 8, "open_fill_rate": .95,
@@ -1421,6 +1140,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     "copy_net_pnl": 60, "closed_n": 7, "open_fill_rate": .95,
                     "capacity_open_fit": .95, "max_drawdown": .01,
                     "maintenance_margin_coverage": 1.0,
+                    "window_start_equity": 1000,
                 },
             }
 
@@ -1443,13 +1163,6 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
                     patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_windows), \
-                    patch.object(scanner.auto_tune, "evaluate_portfolio_window",
-                                 return_value={
-                                     **strict_windows[30], "liquidations": 0,
-                                     "price_path_coverage": 1.0,
-                                     "initial_margin_equity": 1000,
-                                     "weekly_stability": strict_weekly_stability(),
-                                 }), \
                     patch.object(scanner, "_prune_discovery_cache", return_value={}):
                 scanner.scan(db, scan_args())
 
@@ -1573,10 +1286,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             profile = {
                 "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.9,
                 "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
+                **qualifying_source_fields(1000),
                 "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
                 "copy_bt_closed_n": 12, "copy_bt_14d_closed_n": 8, "copy_bt_7d_closed_n": 5,
-                "copy_expected_return": .05, "copy_return_lcb": .01,
-                "copy_positive_probability": .8, "copy_evidence_days": 8,
+                "copy_bt_win_rate": .75, "copy_bt_window_start_equity": 10_000,
+                "copy_bt_7d_window_start_equity": 10_000, "copy_evidence_days": 8,
                 "actionable_open_rate": .9, "capacity_fit": .9,
                 "sector_policy_json": '{"allowed":["crypto"],"crypto":{"allow":true}}',
                 "sector_copy_json": strict_sector_json(1800, 12, 900, 8, 600, 5),
@@ -1594,301 +1308,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             rows, marginal = scanner._build_explicit_selection(
                 db, "g1", "2026-01-03", 1000, force_cold_bootstrap=True,
+                forced_core_order=(),
             )
 
-            self.assertIsNone(marginal)
+            self.assertEqual(marginal.selected, ())
+            self.assertEqual(marginal.search_meta["membershipPolicy"], "strict-score-prefix-v1")
             self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
-
-    def test_active_wallet_without_portfolio_replay_fails_closed(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            db.execute(
-                "INSERT INTO scan_generation "
-                "(generation,status,complete,publishable,is_current,started_at,published_at) "
-                "VALUES ('g0','published',1,1,1,'old','old')"
-            )
-            db.execute(
-                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
-                "VALUES('g0','0xold','core',1,'old')"
-            )
-            cols = storage.PROFILE_COLS.split(",")
-            profile = {
-                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.95,
-                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
-                "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 6,
-                "copy_expected_return": 0.08, "copy_return_lcb": 0.02,
-                "copy_positive_probability": 0.85, "copy_evidence_days": 10,
-                "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
-                "copy_risk_score": 0.9, "execution_score": 0.9,
-                "actionable_open_rate": 0.9, "capacity_fit": 0.9,
-                "copy_bt_net_pnl": 1800, "copy_bt_14d_net_pnl": 900,
-                "copy_bt_7d_net_pnl": 600,
-                "last_copyable_open_ms": 1000,
-                "sector_policy_json": strict_policy_json(),
-                "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 6),
-            }
-            db.execute(
-                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
-                [profile.get(col) for col in cols],
-            )
-            db.execute(
-                "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) "
-                "VALUES(1,'0xaaa',0.80,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
-            )
-            db.commit()
-
-            with self.assertRaisesRegex(
-                    RuntimeError, "selection_portfolio_replay_unavailable"):
-                scanner._build_explicit_selection(db, "g1", "2026-01-03", 1000)
-
-    def test_path_validation_failure_fails_closed(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            db.execute(
-                "INSERT INTO scan_generation "
-                "(generation,status,complete,publishable,is_current,started_at,published_at) "
-                "VALUES ('g0','published',1,1,1,'old','old')"
-            )
-            db.execute(
-                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
-                "VALUES('g0','0xold','core',1,'old')"
-            )
-            cols = storage.PROFILE_COLS.split(",")
-            for addr, score in (("0xold", .8), ("0xnew", .9)):
-                profile = {
-                    "addr": addr, "status": "active", "score": score,
-                    "profile_generation": "g1", "data_status": "valid",
-                    "evidence_status": "qualified",
-                    "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10,
-                    "copy_bt_7d_closed_n": 6, "copy_bt_net_pnl": 1800,
-                    "copy_bt_14d_net_pnl": 900, "copy_bt_7d_net_pnl": 600,
-                    "copy_expected_return": .05, "copy_return_lcb": .01,
-                    "copy_positive_probability": .85, "copy_evidence_days": 10,
-                    "actionable_open_rate": .9, "capacity_fit": .9,
-                    "last_copyable_open_ms": 10_000,
-                    "sector_policy_json": strict_policy_json(),
-                    "sector_copy_json": strict_sector_json(1800, 20, 900, 10, 600, 6),
-                }
-                db.execute(
-                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
-                    f"VALUES ({','.join('?' for _ in cols)})",
-                    [profile.get(col) for col in cols],
-                )
-                db.execute(
-                    "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(?,?,?,?, 'now')",
-                    (1 if addr == "0xnew" else 2, addr, score,
-                     '{"allowed":["crypto"],"crypto":{"allow":true}}'),
-                )
-            db.commit()
-            self.seal_market(db, "g1")
-            marginal = scanner.selection.MarginalSelectionResult(
-                selected=("0xnew",),
-                baseline=scanner.selection.PortfolioMetrics(0, 0, 0, 1, 1, 0, 0, 0),
-                metrics=scanner.selection.PortfolioMetrics(
-                    100, 100, 0, 1, 1, .01, .1, .01,
-                    net_pnl=100, drawdown_dollars=10, risk_adjusted_utility=90,
-                ),
-                action="replace", added=("0xnew",), removed=("0xold",),
-            )
-            fills = [
-                {"user": addr, "coin": "BTC", "time": 1000, "tid": index,
-                 "side": "B", "sz": "1", "startPosition": "0", "px": "100"}
-                for index, addr in enumerate(("0xold", "0xnew"), 1)
-            ]
-
-            def evaluate(_db, _addrs, _sigmas, _follow, _now_ms, **kwargs):
-                if kwargs.get("path_rows") is not None:
-                    return {
-                        "copy_net_pnl": -25, "maintenance_margin_coverage": .91,
-                        "liquidations": 2, "ambiguous_liquidations": 1,
-                        "price_path_boundary_skips": 3,
-                    }
-                return {
-                    "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
-                    "capacity_open_fit": .95, "max_drawdown": .01,
-                }
-
-            strict_window = {
-                30: {
-                    "copy_net_pnl": -25, "maintenance_margin_coverage": .91,
-                    "liquidations": 2, "ambiguous_liquidations": 1,
-                    "price_path_boundary_skips": 3, "closed_n": 10,
-                    "open_fill_rate": .95, "capacity_open_fit": .95,
-                    "max_drawdown": .01,
-                },
-            }
-
-            def search(*_args, **kwargs):
-                kwargs["validation_evaluator"](("0xnew",))
-                return marginal
-
-            with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: fills}), \
-                    patch.object(scanner.auto_tune, "evaluate_portfolio_window", side_effect=evaluate), \
-                    patch.object(scanner.auto_tune, "_candidate_windows", return_value=strict_window), \
-                    patch("hyper.market.price_path.coins_for_fills", return_value=["BTC"]), \
-                    patch("hyper.market.price_path.load_refined", return_value=[{"coin": "BTC", "time": 1000}]), \
-                    patch("hyper.market.price_path.coverage", return_value={
-                        "coverage": .90, "expected": 100, "observed": 90,
-                        "missingCoins": ["BTC"],
-                    }):
-                with self.assertRaisesRegex(
-                        RuntimeError, "selection_price_path_invalid"):
-                    scanner._build_explicit_selection(
-                        db, "g1", "published-at", 10_000, audit_stamp="scan-start",
-                    )
-
-            self.assertEqual(scanner.selection.published_core_addrs(db), ["0xold"])
-
-    def test_positive_portfolio_contribution_cannot_rescue_wallet_below_score_line(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            cols = storage.PROFILE_COLS.split(",")
-            profile = {
-                "addr": "0xaaa", "status": "active", "reason": "ok", "score": 0.8,
-                "profile_generation": "g1", "data_status": "valid", "evidence_status": "qualified",
-                "copy_bt_closed_n": 20, "copy_bt_14d_closed_n": 10, "copy_bt_7d_closed_n": 6,
-                "copy_expected_return": 0.08, "copy_return_lcb": -0.04,
-                "copy_positive_probability": 0.85, "copy_evidence_days": 10,
-                "copy_recent_return_14d": 0.05, "copy_recent_return_7d": 0.04,
-                "copy_risk_score": 0.5, "execution_score": 0.9,
-                "actionable_open_rate": 0.9, "capacity_fit": 0.9,
-                "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
-                "copy_bt_7d_net_pnl": 600,
-                "last_copyable_open_ms": 1000,
-                "sector_policy_json": strict_policy_json(),
-                "sector_copy_json": strict_sector_json(2500, 20, 900, 10, 600, 6),
-            }
-            db.execute(
-                f"INSERT INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' for _ in cols)})",
-                [profile.get(col) for col in cols],
-            )
-            db.execute(
-                "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) "
-                "VALUES(1,'0xaaa',0.65,'{\"allowed\":[\"crypto\"],\"crypto\":{\"allow\":true}}','now')"
-            )
-            db.commit()
-            self.seal_market(db, "g1")
-            baseline = scanner.selection.PortfolioMetrics(
-                0, 0, 0, 1, 1, 0, 0, 0, net_pnl=0, drawdown_dollars=0,
-                risk_adjusted_utility=0,
-            )
-            profitable = scanner.selection.PortfolioMetrics(
-                3000, 3000, 2, .9, .9, .1, .5, .1,
-                net_pnl=3000, drawdown_dollars=1000, risk_adjusted_utility=2000,
-            )
-            staged = scanner.offline_core_optimizer.OfflineSearchResult(
-                selected=("0xaaa",), metrics=profitable, initial=(),
-                initial_metrics=baseline, fast_evaluated=1, strict_evaluated=1,
-                finalists=(("0xaaa",),),
-            )
-            robust = scanner.offline_core_optimizer.RobustSelectionResult(
-                selected=("0xaaa",), metrics=profitable, comparison=None,
-                evaluated=1,
-            )
-            with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
-                    patch.object(scanner.offline_core_optimizer, "optimize_membership",
-                                 return_value=staged), \
-                    patch.object(scanner.offline_core_optimizer, "choose_robust_candidate",
-                                 return_value=robust), \
-                    patch.object(scanner, "_portfolio_selection_metrics",
-                                 side_effect=lambda _windows, baseline_n=0, selected_n=0:
-                                 profitable if selected_n else baseline):
-                rows, result = scanner._build_explicit_selection(
-                    db, "g1", "now", 1000, validate_price_path=False,
-                )
-
-            self.assertIsNone(result)
-            self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
-                ("0xaaa", "challenger", "challenger_score_watch"),
-            ])
-
-    def test_daily_desired_portfolio_does_not_replace_existing_core_in_one_generation(self):
-        with tempfile.TemporaryDirectory() as td:
-            db = self.open_db(td)
-            params.seed_params(db)
-            db.execute(
-                "INSERT INTO scan_generation "
-                "(generation,status,complete,publishable,is_current,started_at,published_at) "
-                "VALUES ('g0','published',1,1,1,'old','old')"
-            )
-            db.execute(
-                "INSERT INTO follow_selection(generation,addr,role,enabled,selected_at) "
-                "VALUES('g0','0xold','core',1,'old')"
-            )
-            db.execute(
-                "INSERT INTO wallet_registry "
-                "(addr,state,current_role,first_seen_at,last_seen_at,updated_at) "
-                "VALUES('0xold','core','core','old','old','old')"
-            )
-            db.execute(
-                "INSERT INTO follow_history "
-                "(addr,first_followed_at,last_followed_at) "
-                "VALUES('0xold','1970-01-01T00:00:00Z','1970-01-01T00:00:00Z')"
-            )
-            cols = storage.PROFILE_COLS.split(",")
-            for rank, (addr, score) in enumerate((("0xnew", .9), ("0xold", .8)), 1):
-                profile = {
-                    "addr": addr, "status": "active", "reason": "ok", "score": score,
-                    "profile_generation": "g1", "data_status": "valid",
-                    "evidence_status": "qualified", "last_copyable_open_ms": 1000,
-                    "copy_bt_closed_n": 20, "copy_bt_7d_closed_n": 9,
-                    "copy_bt_14d_closed_n": 10, "copy_positive_probability": .8,
-                    "copy_expected_return": .05, "copy_return_lcb": .01,
-                    "copy_evidence_days": 10, "actionable_open_rate": .9, "capacity_fit": .9,
-                    "copy_bt_net_pnl": 2500, "copy_bt_14d_net_pnl": 900,
-                    "copy_bt_7d_net_pnl": 600,
-                    "sector_policy_json": strict_policy_json(),
-                    "sector_copy_json": strict_sector_json(2500, 20, 900, 10, 600, 9),
-                }
-                db.execute(
-                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
-                    f"VALUES ({','.join('?' for _ in cols)})",
-                    [profile.get(col) for col in cols],
-                )
-                db.execute(
-                    "INSERT INTO watchlist(rank,addr,score,sector_policy_json,updated_at) VALUES(?,?,?,?,'now')",
-                    (rank, addr, score, '{"allowed":["crypto"],"crypto":{"allow":true}}'),
-                )
-            db.execute(
-                "INSERT INTO copy_position(addr,coin,side,status,opened_at) "
-                "VALUES('0xold','BTC','long','open','now')"
-            )
-            db.commit()
-            self.seal_market(db, "g1")
-            baseline = scanner.selection.PortfolioMetrics(
-                100, 100, 0, .95, .95, .01, .5, .05,
-                net_pnl=100, stress_net_pnl=100, drawdown_dollars=10,
-                risk_adjusted_utility=100,
-            )
-            staged = scanner.offline_core_optimizer.OfflineSearchResult(
-                selected=("0xnew",), metrics=baseline, initial=("0xold",),
-                initial_metrics=baseline, fast_evaluated=2, strict_evaluated=2,
-                finalists=(("0xnew",),),
-            )
-            robust = scanner.offline_core_optimizer.RobustSelectionResult(
-                selected=("0xnew",), metrics=baseline, comparison=None, evaluated=1,
-            )
-            with patch.object(scanner.auto_tune, "_portfolio_window_fills", return_value={30: [{}]}), \
-                    patch.object(scanner.offline_core_optimizer, "optimize_membership", return_value=staged), \
-                    patch.object(scanner.offline_core_optimizer, "choose_robust_candidate", return_value=robust), \
-                    patch.object(scanner, "_portfolio_selection_metrics", return_value=baseline):
-                rows, result = scanner._build_explicit_selection(
-                    db, "g1", "1970-01-01T00:00:01Z", 1000, validate_price_path=False,
-                )
-
-            by_addr = {row.addr: (row.role, row.reason) for row in rows}
-            self.assertEqual(result.selected, ("0xold",))
-            self.assertEqual(
-                by_addr["0xold"],
-                ("core", "core_quality_selected"),
-            )
-            self.assertEqual(
-                by_addr["0xnew"],
-                ("challenger", "core_promotion_confirmation_pending"),
-            )
 
     def test_manual_selection_mode_cannot_bypass_current_hard_gate(self):
         with tempfile.TemporaryDirectory() as td:

@@ -101,29 +101,19 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     """Admit only positive, Challenger-grade sectors into wallet-level aggregation.
 
     Sector isolation prevents a profitable Crypto side from masking a losing Stock side. It must not repeat
-    wallet-level Campaign/stability gates per sector: the aggregate of safe sectors owns that proof.
+    wallet-level source/Copy quality gates per sector: the aggregate of safe sectors owns that proof.
     Requiring every side to be a standalone Core was the main sector-level false-negative cliff.
     """
     policy = load_copy_policy()
     results = {days: _window_result(windows, days) for days in (30, 14, 7)}
     closed = {days: _int(results[days].get("closed_n")) for days in results}
     pnl = {days: _num(results[days].get("copy_net_pnl")) for days in results}
-    campaigns = {
-        days: (
-            _int(results[days].get("campaign_closed_n"))
-            if results[days].get("campaign_closed_n") is not None else closed[days]
-        )
-        for days in results
-    }
     wins = {
-        days: max(0, min(campaigns[days], _int(
-            results[days].get("campaign_wins")
-            if results[days].get("campaign_wins") is not None else results[days].get("wins")
-        )))
+        days: max(0, min(closed[days], _int(results[days].get("wins"))))
         for days in results
     }
     win_rate = {
-        days: wins[days] / campaigns[days] if campaigns[days] else 0.0
+        days: wins[days] / closed[days] if closed[days] else 0.0
         for days in results
     }
     equities = {days: _window_equity(windows, days) for days in (30, 14, 7)}
@@ -144,12 +134,7 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
         "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
         "returns": {"30": return30, "14": return14, "7": return7},
         "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
-        "campaigns": {str(days): campaigns[days] for days in (30, 14, 7)},
         "evidenceDays": evidence_days,
-        "costStressNetPnl": (
-            _num(primary.get("cost_stress_net_pnl"))
-            if primary.get("cost_stress_net_pnl") is not None else None
-        ),
         "simulatedPathRisk": {
             "liquidations30d": _int(primary.get("liquidations")),
             "liquidations7d": _int(results[7].get("liquidations")),
@@ -187,42 +172,20 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "reason": "板块30天严格Copy净收益不为正",
             "watch": False,
         }
-    if (
-        closed[30] < policy.min_closed_30d
-        or campaigns[30] < 5
-        or evidence_days < 5
-    ):
+    if closed[30] < 2:
         return {
             **base,
             "allow": False,
             "status": "sector_sample_watch",
-            "reason": "板块尚未达到7个已平回合、5个Campaign和5个独立证据日",
+            "reason": "板块完整已平回合少于2个，先保留观察证据",
             "watch": challenger_watch,
         }
 
-    checks = (
-        (
-            primary.get("cost_stress_net_pnl") is None
-            or _num(primary.get("cost_stress_net_pnl")) <= min_net,
-            "sector_cost_stress_weak",
-            "板块1.5倍成本压力后不盈利",
-        ),
-    )
-    for failed, status, reason in checks:
-        if failed:
-            return {
-                **base,
-                "allow": False,
-                "status": status,
-                "reason": reason,
-                "watch": challenger_watch,
-                "hardRisk": False,
-            }
     return {
         **base,
         "allow": True,
         "status": "allowed",
-        "reason": "板块严格Copy净盈利且成本压力为正；路径风险交由最终参数与爆仓≤3规则处理",
+        "reason": "板块严格Copy扣除执行成本后净盈利；路径风险交由最终参数与爆仓≤3规则处理",
         "watch": False,
     }
 
@@ -241,25 +204,13 @@ def _compact_result(result: Mapping) -> dict:
         "entry_gap_pct_p90", "entry_gap_sigma_samples", "entry_gap_pct_samples",
         "entry_gap_weight", "entry_gap_sigma_weighted_sum", "entry_gap_pct_weighted_sum",
         "entry_alignment", "add_execution", "add_fidelity", "add_fidelity_applied",
-        "effective_add_fidelity", "gross_profit", "gross_loss", "profit_factor",
-        "payoff_ratio", "positive_episode_n", "negative_episode_n", "top_positive_pnls",
-        "top1_profit_share", "top3_profit_share", "net_after_top1", "net_after_top2",
-        "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
-        "body_after_top3_win_rate", "body_after_top3_net_pnl",
-        "body_after_top3_gross_profit", "body_after_top3_gross_loss",
-        "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
-        "body_after_top3_median_pnl",
-        "campaign_closed_n", "campaign_open_n", "campaign_wins", "campaign_win_rate",
-        "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
-        "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
-        "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
-        "campaign_peak_positions", "campaign_peak_margin", "campaign_peak_margin_pct",
+        "effective_add_fidelity",
         "path_risk_status", "intratrade_max_drawdown", "max_underwater_hours",
         "loss_over_5_time_ratio", "deep_bag_event_n", "failed_deep_bag_n",
         "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
-        "current_bag_hours", "campaign_max_drawdown",
+        "current_bag_hours",
         "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
-        "cost_stress_net_pnl", "initial_margin_equity", "window_start_equity",
+        "initial_margin_equity", "window_start_equity",
     )
     return {k: result.get(k) for k in keys if k in result}
 
@@ -430,7 +381,6 @@ def evaluate_sector_policy(
     policy = {}
     allowed = []
     evidence_watch = []
-    structural_watch = []
     for sector in SECTORS:
         windows = sector_results.get(sector) or {}
         economic = _sector_economic_gate(windows, min_net=min_net)
@@ -450,7 +400,7 @@ def evaluate_sector_policy(
             allowed.append(sector)
         structural = structural_policy.get(sector)
         structural = structural if isinstance(structural, dict) else {}
-        if structural and not structural.get("allow"):
+        if structural and (not structural.get("allow") or structural.get("watch")):
             item = {
                 **item_base,
                 "allow": False,
@@ -460,47 +410,6 @@ def evaluate_sector_policy(
             }
             if sector in allowed:
                 allowed.remove(sector)
-        elif structural.get("watch") and item.get("allow"):
-            primary = _window_result(windows, 30)
-            pressure_ok = bool(
-                item.get("allow")
-                and _int(primary.get("closed_n")) >= _min_closed_for_days(30)
-                and _num(primary.get("copy_net_pnl")) > min_net
-                and _num(primary.get("open_fill_rate"), 1.0)
-                    >= load_copy_policy().min_actionable_open_rate
-                and _num(primary.get("capacity_open_fit"), 1.0)
-                    >= load_copy_policy().min_capacity_fit
-                and all(
-                    _int(_window_result(windows, days).get("closed_n")) < _min_closed_for_days(days)
-                    or _num(_window_result(windows, days).get("copy_net_pnl")) > min_net
-                    for days in (14, 7)
-                )
-            )
-            if pressure_ok:
-                item = {
-                    **item,
-                    "allow": True,
-                    "status": "heavy_dca_pressure_passed",
-                    "reason": "单次Heavy-DCA已通过实际跟单规则压力回放",
-                    "structural": structural,
-                    "coreBlocked": False,
-                }
-                if sector not in allowed:
-                    allowed.append(sector)
-                structural_watch.append(sector)
-            else:
-                item = {
-                    **item_base,
-                    "allow": False,
-                    "status": "heavy_dca_pressure_failed",
-                    "reason": "单次Heavy-DCA受限回放未通过额外压力验证",
-                    "structural": structural,
-                }
-                if sector in allowed:
-                    allowed.remove(sector)
-        elif structural.get("watch"):
-            # Heavy-DCA pressure validation cannot resurrect a sector that failed current economics.
-            item["structural"] = structural
         elif structural:
             item["structural"] = structural
         # Weak/thin sectors can remain observation evidence, but never live permissions. Wallet scoring
@@ -508,27 +417,18 @@ def evaluate_sector_policy(
         if not item.get("allow") and item.get("watch") and (not structural or structural.get("allow")):
             evidence_watch.append(sector)
         policy[sector] = item
-    # Sample density is a wallet-level proof, not a requirement that every specialty independently look like
-    # a complete Core wallet. A genuine Mix wallet may have four profitable Crypto Campaigns and three
-    # profitable Stock Campaigns. Requiring 7/5/5 on both sectors turns valid aggregate evidence into zero
-    # executable sectors. Promote only positive, cost-stressed, structurally clean sides with at least two
-    # closes, and only when their combined wallet evidence clears the original 7-close/5-Campaign/5-day floor.
+    # Sample density is a wallet-level proof. A genuine Mix wallet may split its complete Episodes across
+    # Crypto and Stock, so positive structurally clean sides can share the aggregate seven-close evidence.
     aggregate_sectors = []
     evidence_days = set()
     fallback_evidence_days = 0
     aggregate_closed = 0
-    aggregate_campaigns = 0
     for sector in SECTORS:
         item = policy.get(sector) or {}
         structural = item.get("structural")
         structural = structural if isinstance(structural, dict) else {}
         closed_n = _int((item.get("closed") or {}).get("30"))
-        campaign_n = _int((item.get("campaigns") or {}).get("30"))
         positive = _num((item.get("returns") or {}).get("30")) > 0.0
-        cost_positive = (
-            item.get("costStressNetPnl") is not None
-            and _num(item.get("costStressNetPnl")) > min_net
-        )
         structurally_clean = (
             (not structural or structural.get("allow"))
             and not structural.get("watch")
@@ -537,14 +437,12 @@ def evaluate_sector_policy(
         if not (
             closed_n >= 2
             and positive
-            and cost_positive
             and structurally_clean
             and (item.get("allow") or item.get("status") == "sector_sample_watch")
         ):
             continue
         aggregate_sectors.append(sector)
         aggregate_closed += closed_n
-        aggregate_campaigns += campaign_n
         fallback_evidence_days = max(
             fallback_evidence_days, _int(item.get("evidenceDays")),
         )
@@ -557,7 +455,6 @@ def evaluate_sector_policy(
     aggregate_evidence_days = len(evidence_days) or fallback_evidence_days
     aggregate_sample_ok = bool(
         aggregate_closed >= load_copy_policy().min_closed_30d
-        and aggregate_campaigns >= 5
         and aggregate_evidence_days >= 5
     )
     if aggregate_sample_ok:
@@ -569,23 +466,16 @@ def evaluate_sector_policy(
                 "allow": True,
                 "watch": False,
                 "status": "allowed_by_wallet_aggregate_evidence",
-                "reason": "板块自身盈利且成本压力通过；样本密度由钱包安全板块合并证明",
+                "reason": "板块自身扣成本后盈利；样本密度由钱包安全板块合并证明",
                 "aggregateEvidence": {
                     "closed": aggregate_closed,
-                    "campaigns": aggregate_campaigns,
                     "days": aggregate_evidence_days,
                 },
             })
             if sector not in allowed:
                 allowed.append(sector)
-    # A one-off Heavy-DCA episode is already executed through bounded smart-add spacing, add-count and
-    # coin-cap rules in the pressure replay. Passing that exact replay is sufficient structural proof,
-    # including for a genuine Mix wallet whose other specialty is independently qualified.
-    core_blocked = False
     policy["allowed"] = allowed
     policy["watch"] = [sector for sector in evidence_watch if sector not in allowed]
-    policy["structuralWatch"] = structural_watch
-    policy["coreBlocked"] = core_blocked
     if structural_policy.get("source"):
         policy["specializationSource"] = structural_policy.get("source")
     return policy
@@ -634,14 +524,6 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         out["copy_bt_wins"] = _int(primary.get("wins"))
         out["copy_bt_win_rate"] = out["copy_bt_wins"] / closed_n if closed_n else 0.0
         out["copy_bt_position_win_rate"] = out["copy_bt_win_rate"]
-        if primary.get("campaign_closed_n") is not None:
-            campaign_n = _int(primary.get("campaign_closed_n"))
-            out["copy_bt_campaign_closed_n"] = campaign_n
-            out["copy_bt_campaign_wins"] = _int(primary.get("campaign_wins"))
-            out["copy_bt_campaign_win_rate"] = (
-                out["copy_bt_campaign_wins"] / campaign_n if campaign_n else 0.0
-            )
-            out["copy_bt_win_rate"] = out["copy_bt_campaign_win_rate"]
         target_open = _int(primary.get("target_open_events"))
         out["copy_bt_open_fill_rate"] = primary.get("open_fill_rate")
         if out["copy_bt_open_fill_rate"] is None and target_open:
@@ -651,29 +533,17 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         out["copy_bt_unrealized_pnl"] = _num(primary.get("unrealized_pnl"))
         out["copy_bt_valuation_status"] = primary.get("valuation_status") or "complete"
         for key in (
-            "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
-            "positive_episode_n", "negative_episode_n",
-            "top1_profit_share", "top3_profit_share", "net_after_top1", "net_after_top2",
-            "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
-            "body_after_top3_win_rate", "body_after_top3_net_pnl",
-            "body_after_top3_gross_profit", "body_after_top3_gross_loss",
-            "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
-            "body_after_top3_median_pnl",
-            "cost_stress_net_pnl", "add_metrics_version", "add_outcome_counts",
+            "add_metrics_version", "add_outcome_counts",
             "raw_add_order_follow_rate", "noise_merged_adds", "blocked_adds",
             "actionable_add_capture_rate", "entry_gap_pct_weighted", "entry_gap_pct_p90",
             "entry_gap_sigma_weighted", "entry_gap_sigma_p90", "entry_alignment",
             "add_execution", "add_fidelity", "add_fidelity_applied",
             "behavior_replication_v2", "behavior_replication_rate",
             "initial_margin_equity", "window_start_equity",
-            "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
-            "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
-            "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
-            "campaign_peak_positions", "campaign_peak_margin", "campaign_peak_margin_pct",
             "path_risk_status", "intratrade_max_drawdown", "max_underwater_hours",
             "loss_over_5_time_ratio", "deep_bag_event_n", "failed_deep_bag_n",
             "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
-            "current_bag_hours", "campaign_max_drawdown",
+            "current_bag_hours",
             "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
         ):
             if key in primary:
@@ -695,9 +565,6 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             ("max_deep_bag_hours", "copy_max_deep_bag_hours"),
             ("current_open_loss_frac", "copy_current_open_loss_frac"),
             ("current_bag_hours", "copy_current_bag_hours"),
-            ("campaign_max_drawdown", "copy_campaign_max_drawdown"),
-            ("campaign_peak_positions", "copy_campaign_peak_positions"),
-            ("campaign_peak_margin_pct", "copy_campaign_peak_margin_pct"),
         ):
             if source in primary:
                 out[target] = primary[source]
@@ -715,32 +582,13 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
                 if _int(agg.get("closed_n")) else 0.0
             )
             out[f"copy_bt_{days}d_position_win_rate"] = out[f"copy_bt_{days}d_win_rate"]
-            if agg.get("campaign_closed_n") is not None:
-                campaign_n = _int(agg.get("campaign_closed_n"))
-                out[f"copy_bt_{days}d_campaign_closed_n"] = campaign_n
-                out[f"copy_bt_{days}d_campaign_wins"] = _int(agg.get("campaign_wins"))
-                out[f"copy_bt_{days}d_campaign_win_rate"] = (
-                    out[f"copy_bt_{days}d_campaign_wins"] / campaign_n if campaign_n else 0.0
-                )
-                out[f"copy_bt_{days}d_win_rate"] = out[f"copy_bt_{days}d_campaign_win_rate"]
             out[f"copy_bt_{days}d_unrealized_pnl"] = _num(agg.get("unrealized_pnl"))
             out[f"copy_bt_{days}d_window_start_equity"] = (
                 agg.get("window_start_equity")
                 if agg.get("window_start_equity") is not None
                 else agg.get("initial_margin_equity")
             )
-            for key in (
-                "profit_factor", "net_after_top1", "net_after_top2", "liquidations",
-                "top1_profit_share", "top3_profit_share", "cost_stress_net_pnl",
-                "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
-                "body_after_top3_win_rate", "body_after_top3_net_pnl",
-                "body_after_top3_gross_profit", "body_after_top3_gross_loss",
-                "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
-                "body_after_top3_median_pnl",
-                "campaign_net_pnl", "campaign_gross_profit", "campaign_gross_loss",
-                "campaign_profit_factor", "campaign_top1_profit_share", "campaign_top2_profit_share",
-                "campaign_net_after_top1", "campaign_net_after_top2", "campaign_max_positions",
-            ):
+            for key in ("liquidations",):
                 out[f"copy_bt_{days}d_{key}"] = agg.get(key)
     out["allowed_sectors"] = sorted(allowed)
     out["evidence_sectors"] = sorted(evidence_sectors)

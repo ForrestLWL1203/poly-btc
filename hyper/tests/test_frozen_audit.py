@@ -33,10 +33,10 @@ class FrozenAuditTests(unittest.TestCase):
                 status="active", reason="ok", payload={
                     "followEligibility": {
                         "eligible": True, "coreEligible": False,
-                        "status": "challenger_copy_fold_evidence_building",
+                        "status": "rough_copy_7d_return_below_floor",
                         "checks": {
-                            "strictCopy30dPositive": True,
-                            "strictCopyWeeklyPositive": False,
+                            "copy30dReturn": True,
+                            "copy7dReturn": False,
                         },
                     }
                 },

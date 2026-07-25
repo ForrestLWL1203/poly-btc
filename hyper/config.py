@@ -45,14 +45,14 @@ SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running —
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MAX_TARGETS = 40            # hard cap on followed wallets (bounds REST load even if many clear the score)
-# Every complete generation starts from the highest-quality individually Core-ready wallets.  Portfolio
-# tuning may remove only the low-quality suffix; it never substitutes a lower-ranked arbitrary subset.
+MAX_TARGETS = 40            # hard cap on the source-quality research pool; published Core is capped at 16
+SOURCE_QUALITY_MAX_N = 40
+# Every complete generation first caps the deep-fill source-quality pool at 40, then rough-replays those
+# wallets and sends at most the highest-scoring 16 to parameter tuning and path-complete strict replay.
 CORE_INITIAL_MAX_N = 16
 CORE_TARGET_MAX_N = 16
 CORE_REBALANCE_INTERVAL_DAYS = 7 # expensive parameter-grid cadence; each complete strict replay may update membership.
-CORE_PROMOTION_MIN_HOURS = 24
-CORE_SOFT_MIN_TENURE_DAYS = 14
+FORMER_CORE_EVIDENCE_RECHECK_DAYS = 14
 CORE_PREFIX_UTILITY_RETENTION = 0.97
 CORE_PREFIX_NET_RETENTION = 0.95
 CORE_PREFIX_STRESS_RETENTION = 0.90
@@ -61,32 +61,30 @@ CORE_PREFIX_ABS_UTILITY_SLACK = 50.0
 CORE_PREFIX_ABS_NET_SLACK = 100.0
 CORE_PREFIX_ABS_STRESS_SLACK = 100.0
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
-CORE_SOFT_FAIL_CONFIRMATIONS = 2
-CORE_MIN_FOLLOW_SCORE = 0.75
-COPY_MIN_RAW_PAYOFF_RATIO = 0.60
-COPY_STABILITY_FOLD_DAYS = 7
-COPY_STABILITY_FOLD_COUNT = 4
-COPY_STABILITY_MIN_EVALUABLE_FOLDS = 3
-COPY_STABILITY_MIN_PROFITABLE_FOLDS = 3
-COPY_STABILITY_MIN_RETURN = 0.05  # Official Portfolio: source wallet must earn at least 5% in every fold.
-CORE_MIN_COPY_RETURN_30D = 0.10   # Strict follower replay: at least +$1,000 on the $10k model account.
-CORE_MIN_COPY_RETURN_7D = 0.04    # Strict follower replay: latest rolling 7d at least 4% of boundary equity.
-CORE_MIN_AVG_NET_PER_CLOSE_RETURN = 0.005  # 30d and latest-7d avg realized net ≥0.5%/close.
-# Strict Copy's four folds verify timing stability rather than repeating the two magnitude gates above:
-# at least three folds need Campaign evidence and profit; one missing/losing fold is tolerated only within
-# the 25%-of-total-profit loss bound. Aggregate average realized net per close has one anti-thin-profit gate.
-COPY_WEEKLY_MIN_RETURN = 0.0
-COPY_WEEKLY_SCORE_RETURN_TARGET = 0.04
-COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT = 0.25
-COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN = 0.005
-COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD = 1
+OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS = 36
+OFFICIAL_PERP_MIN_RETURN_30D = 0.20
+SOURCE_MIN_EPISODES_30D = 10
+SOURCE_MIN_EPISODE_WIN_RATE = 0.70
+SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.70
+SOURCE_BODY_MIN_WIN_RATE = 0.70
+ROUGH_COPY_MIN_CLOSED_30D = 7
+ROUGH_COPY_MIN_WIN_RATE = 0.60
+ROUGH_COPY_MIN_RETURN_30D = 0.15
+ROUGH_COPY_MIN_RETURN_7D = 0.05
+# Both rough and strict Copy start with a standardized comparable balance, then size every later open from
+# the floating equity produced by the same continuous 30-day path. Latest-7d uses the day-23 boundary equity.
+CORE_MIN_DYNAMIC_COPY_RETURN_30D = 0.10
+CORE_MIN_DYNAMIC_COPY_RETURN_7D = 0.03
+CORE_COPY_MIN_WIN_RATE = 0.60
+# The shared final account, after all wallets are jointly tuned, still needs material rolling returns.
+CORE_PORTFOLIO_MIN_RETURN_30D = 0.10
+CORE_PORTFOLIO_MIN_RETURN_7D = 0.03
 SELECTION_MIN_RELATIVE_GAIN = 0.05
 CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means too many fundable opens were skipped
 CORE_SEARCH_TIME_BUDGET_SEC = 0    # 0 = no wall-clock cutoff; the finite search graph remains bounded.
-# Production score-prefix search: fast discovery -> strict finalists ->
-# non-overlapping fold/cost-stress gate.
+# Production score-prefix search: fills-only discovery -> strict finalists -> one final shared path replay.
 CORE_SEARCH_VALIDATION_FINALISTS = 12
 CORE_SEARCH_STRICT_MOVE_SHORTLIST = 8
 CORE_SEARCH_MAX_STRICT_MOVES = MAX_TARGETS
@@ -298,9 +296,8 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 
 # Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $250k leveraged
 # 7d notional activity, and positive 7d/30d PnL before any wallet history is downloaded. The immediately
-# following official Portfolio prefilter owns target-wallet return quality: four non-overlapping 7d folds
-# must each return at least 5%. Incumbent roles and open-position owners bypass recall and still receive
-# their mandatory retention replay.
+# Official Portfolio prefilter owns the cheap target-wallet return check: positive Perp PnL, at least 60%
+# Perp profit share and at least 20% dynamic 30-day Perp return. Role history never bypasses this contract.
 HARVEST_MIN_ACCT = 20_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
 HARVEST_WEEK_PNL_MIN = 0.0
@@ -309,85 +306,28 @@ HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.60
 PERP_PREFILTER_CACHE_TTL_S = 2 * 3600  # interrupted/redeployed scans reuse the same fresh Portfolio evidence
 INACTIVE_DAYS = 3.0                 # Core needs a true flat->open signal within 72h; stale wallets remain Challenger.
-# ══ SCORE v5 (2026-06-30) — SMOOTH BLENDED QUALITY (replaces the multiplicative RAR×consistency×discipline
-# that produced a 90→20 cliff). User principles: the roots are 胜率 / 风险调整ROI / 逐日稳定性 / 活跃度(样本);
-# the temp hard gates (loss_pain/hold_skew/profit_conc) are FOLDED IN as smooth factors, not vetoes:
-#   score01 = (W_WIN·win + W_ROI·roiS + W_STAB·stab) × evidence × g_frag × g_deep × survival      ∈ [0,1]
-#   display = round(score01 × 100).  Native scale is now [0,1] (was [0,3]); score100 = ×100.
-# Smooth because the core is an ADDITIVE weighted blend of [0,1] factors (no capped ratio, no power law),
-# and the guards/evidence are gentle multipliers with floors (a single flaw discounts, never zeroes).
-# v6 (2026-07-02): the THREE roots are 胜率 / 活跃度 / ROI (user). 活跃度 promoted from evidence-multiplier
-# to a CORE term; 逐日稳定性 dropped. NO 反噬/worst-loss guard — 小赚大亏 already shows as low/neg ROI
-# (net≤0 gated; low ROI → low ROI term). We copy ISOLATED + our own stop, so their single big loss doesn't
-# transfer. Only guards ROI can't see remain: 刷胜率 (fake win by holding losers) + a mild current-deep-bag.
-SCORE_W_WIN  = 0.35    # 胜率权重
-SCORE_W_ACT  = 0.30    # 活跃度权重(成交数 + 活跃天数,升为核心项) —— W_* 之和自动归一
-SCORE_W_ROI  = 0.35    # ROI 权重(收敛后;ROI 本身就把"小赚大亏"量化为低分)
-SCORE_STRETCH = 1.227  # 线性拉伸:最强真实钱包 ≈ 100,平滑下滑(便于设跟单线)。改评分公式时由代码重标
-SCORE_ROI_SCALE   = 0.35  # roiS = 1 − exp(−roi_adj/此):综合ROI 分布~0.05–1.5,此值让有效区拉得开(0.3→0.58,0.5→0.76,1.0→0.94)
-# ROI 支柱口径 = HL 官方 return-on-capital(净利/本金,已按出入金调整、含杠杆资本效率),取代旧的 net/名义
-# (net/名义 ≡ 真实收益率 ÷ 杠杆,把杠杆红利除没了,系统性埋没大体量 BTC 波段客)。
-# copy 只跟【最近表现】→ 只用近期两窗口(周+月):
-ROI_W_WEEK = 0.40         # 近期(7d)权重 —— 最近状态(copy 关注点)
-ROI_W_MON  = 0.60         # 月度(30d)权重 —— 主锚(窗口固定、噪音适中)
-ROI_CLIP_LO = -0.5        # 各窗口 ROI 先 clip 到 [此, 上]:压离群 + 防单窗口幸运带飞
-ROI_CLIP_HI = 1.0         # +100% 单窗口封顶:>100% 一律视为"优秀",避免单个月/周暴涨独撑排名(需周+月都好)
-SCORE_EV_TRADES = 20      # 活跃度:达此回合数 = 满分
-SCORE_EV_DAYS   = 10      # 活跃度:达此活跃天数 = 满分
+# Dashboard-only summary for historical/dropped rows which expose official 7d and 30d ROI separately.
+# These weights never participate in source quality, Copy qualification, ranking or Core admission.
+ROI_W_WEEK = 0.40
+ROI_W_MON = 0.60
 # 深度抗单/爆仓守卫 —— 按【显著仓位深度】不按绝对亏损金额(大户金额天然大,对我们无意义):
 # open_underwater 由 scanner 先过滤 dust 仓(仓位名义额/账户权益低于下方阈值),再取最深逆向;
 # 总账面压力仍看 open_loss_frac。这样不会让几十刀小仓把一个 copy 回测很强的钱包踢出 active。
 OPEN_RISK_MIN_POSITION_EQUITY_FRAC = 0.002  # 低于账户 0.2% 的当前仓位只算账面浮亏,不参与"最深逆向"打分
-SCORE_BAG_REF  = 0.10     # 当前单仓浮亏达账户此比例才开始轻扣(软化:10%起;isolated+有界仓位让它保持为软信号)
-SCORE_BAG_SPAN = 0.20     # 浮亏超出 BAG_REF 后再涨此幅 → g_deep 降到 DEEP_FLOOR
-SCORE_DEEP_FLOOR = 0.75   # 当前深亏守卫下限(最多扣 25%)
-SCORE_GUARD_FLOOR = 0.25  # 刷胜率守卫下限(最差也保留 25%,靠分数线压在线下,而非硬杀)
-# 刷胜率守卫(双胞胎本质)—— 高胜率 + 几乎从不兑现亏损 = 靠扛单把亏的藏成浮亏、刷出假胜率。
-# 只在【胜率≥WIN_FLOOR 且 最惨实现亏损趋近0】时触发;真会止损(最惨实现亏损≥LOSS_REF)的高胜率钱包不受影响。
-SCORE_MANUF_WIN_FLOOR = 0.95   # 胜率超过此才疑似(95% 以下完全不罚)
-SCORE_MANUF_LOSS_REF  = 0.03   # 最惨实现亏损 ≥ 此(真在止损)→ 不罚;趋近 0(从不兑现亏损)→ 满罚
-SCORE_MANUF_PEN       = 0.5    # 满罚强度(评分 ×(1−此))
 
 # Large samples with no realized loss are flagged as possible loss deferral for profile diagnostics.
 PAIN_MIN_TRADES = 15   # ≥ this many closed trades with ZERO realized losses = extreme deferrer
 PAIN_NOLOSS   = 4.0    # loss_pain assigned to a never-realized-a-loss wallet over a large sample
 
-# Retired discipline hard-gates. Kept only so old scan namespaces / stale DB refs don't break.
-# Do NOT use these as active vetoes: loss_pain / hold_skew can be high on wallets that are still
-# profitable under our actual copy rules. Copyability is now judged by COPY_BT_* replay below.
-GATE_LOSS_PAIN_MAX   = 1.0
-GATE_HOLD_SKEW_MAX   = 1.5
-GATE_PROFIT_CONC_MAX = 0.8
-# --- v9 strict-gate additions: every wallet that survives to the watchlist must be genuinely copyable ---
-# (MIN_PAYOFF removed v10 — small_win_big_loss hard gate gone; 盈亏比 is now the g_payoff factor in score, ref = SCORE_PAYOFF_REF)
-WINDFALL_CONC    = 0.80  # 单日利润集中度上限:单日 >= 此比例的毛利 且 胜率 < WINDFALL_WIN_MAX = 靠一笔偶然大赚撑着
-WINDFALL_WIN_MAX = 0.60  # (亏损尚未覆盖,ROI 此刻还正)→ reject。真·高胜率的集中不算(它靠稳定胜率不靠一把)。
-# === v10: quality magnitude lives in score() as smooth ranking factors. Qualification is decided by the
-# structural/data/evidence/strict-Copy economic gates below; raw profile score must never veto a wallet that
-# passes those authoritative checks. ===
-# Winning-trade thickness (`win_pt`) is intentionally observational only. Portfolio edge bps is the hard
-# thin-edge gate, and copy replay is the authoritative copyability check.
-SCORE_PAYOFF_REF  = 1.0   # 盈亏比≥此(1.0)=满分,只罚真·大亏小赚(payoff<1); payoff 和胜率联动,高胜率天生不需高盈亏比
-SCORE_PAYOFF_FLOOR= 0.6    # → 轻推,不双重惩罚高胜率盘(0x770493 payoff1.0/胜78% 不再被压)
-EVIDENCE_MIN_DAYS   = 5   # 有效性硬闸:14天窗口内活跃天数 < 此 → insufficient_evidence(无战绩无从评判,取消趋势豁免)
-EVIDENCE_MIN_TRADES = 7   #                已平回合 < 此 同理. 5天/7回合≈0.5单/天,砍纯持有+小样本尾巴,不误伤好钱包
 COPY_BT_GATE_ENABLE = True  # active 准入二次校验: 用历史 fills 按当前 observer 规则回放,目标赚但我们亏 → 不跟
 COPY_BT_DAYS = 30           # copy 回测窗口。用 30d 覆盖 14d 评分外的复制不稳定性,但仍是近期窗口
 COPY_BT_WARMUP_DAYS = 7     # 每个窗口额外预热7天，恢复窗口开始前已经打开的仓位
 COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数后,近期 copy 亏损也不进 active
 COPY_BT_MIN_CLOSED = 7      # copy资格最低已平样本；不足则不进入Active
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
-COPY_MIN_EXPECTED_MARGIN_RETURN = 0.02  # 回放扣成本后、向零收缩的每episode保证金收益；低于2%=薄利排除
 COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 
-# Core repeatability uses independent Campaigns and the non-overlapping folds above.
-CORE_COPY_MIN_CAMPAIGNS_30D = 8
-# A profitable low-win trend system is not automatically gambling: payoff and outlier evidence still matter.
-# Core nevertheless needs enough winning Campaigns that joining at an arbitrary point is not excessively
-# dependent on catching a rare payoff. Body-after-top-three remains a score diagnostic, not another hard gate.
-CORE_COPY_MIN_CAMPAIGN_WIN_RATE = 0.45
-CORE_COPY_MIN_BODY_WIN_RATE = 0.40
 # Historical fills do not expose the source order's actual margin/leverage. Strict Copy deliberately
 # simulates our configured leverage ceiling, so a small number of proxy liquidations is a sizing signal,
 # not proof that the source wallet itself liquidated. Admit up to three and let the portfolio tuner prefer

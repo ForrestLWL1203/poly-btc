@@ -58,72 +58,109 @@ def _history(window: dict | None, key: str) -> list[tuple[int, float]]:
     return sorted(values.items())
 
 
-def _at_or_before(series: list[tuple[int, float]], stamp: int, *, max_gap_ms: int) -> float | None:
-    """Use the last official mark at a boundary, rejecting stale/gappy evidence."""
-    selected = None
-    selected_stamp = None
-    for sample_stamp, value in series:
-        if sample_stamp > stamp:
+def _at_boundary(
+    series: list[tuple[int, float]],
+    stamp: int,
+    *,
+    max_gap_ms: int,
+    positive: bool = False,
+) -> tuple[float | None, str]:
+    """Interpolate one official mark without turning a normal daily sample gap into missing evidence."""
+    left = right = None
+    for sample in series:
+        if sample[0] <= stamp:
+            left = sample
+        if sample[0] >= stamp:
+            right = sample
             break
-        selected = value
-        selected_stamp = sample_stamp
-    if selected_stamp is None or stamp - selected_stamp > max_gap_ms:
-        return None
-    return selected
+    if left is None or right is None:
+        return None, "boundary_sample_gap"
+    if left[0] == stamp:
+        value = float(left[1])
+        return (
+            (None, "zero_start_equity")
+            if positive and value <= 0.0 else (value, "exact")
+        )
+    if right[0] == stamp:
+        value = float(right[1])
+        return (
+            (None, "zero_start_equity")
+            if positive and value <= 0.0 else (value, "exact")
+        )
+    if (
+        stamp - left[0] > max_gap_ms
+        or right[0] - stamp > max_gap_ms
+        or right[0] - left[0] > max_gap_ms
+    ):
+        return None, "boundary_sample_gap"
+    if positive and (float(left[1]) <= 0.0 or float(right[1]) <= 0.0):
+        return None, "zero_start_equity"
+    ratio = (stamp - left[0]) / max(1, right[0] - left[0])
+    value = float(left[1]) + (float(right[1]) - float(left[1])) * ratio
+    if positive and value <= 0.0:
+        return None, "zero_start_equity"
+    return value, "interpolated"
 
 
-def official_weekly_stability(
+def official_perp_month_return(
     window: dict | None,
     *,
-    fold_days: int = 7,
-    fold_count: int = 4,
-    min_return: float = 0.05,
+    max_boundary_gap_hours: float = 36.0,
 ) -> dict:
-    """Evaluate adjacent official Perp-return folds before downloading fills.
+    """Return the official ``perpMonth`` ROI from its own window endpoints.
 
-    Leaderboard exposes only one rolling week and month. The Portfolio month response already fetched by
-    this precheck contains deposit-adjusted net-PnL and account-value time series, which is the earliest
-    honest source for independent weekly returns. Campaign independence and 1.5x cost stress still require
-    fills and are confirmed by canonical strict Copy later.
+    Hyperliquid's month series can span 28–30 days depending on the sampling boundary.  Treat the
+    official window as authoritative instead of inventing a synthetic 30-day boundary outside it.
+    Interpolation is only allowed when an endpoint differs between the PnL and equity series and the
+    adjacent samples are at most 36 hours apart.
     """
-    fold_days = max(1, int(fold_days))
-    fold_count = max(1, int(fold_count))
-    min_return = max(0.0, float(min_return))
     pnl = _history(window, "pnlHistory")
     equity = _history(window, "accountValueHistory")
     if len(pnl) < 2 or len(equity) < 2:
-        return {"evidenceSufficient": False, "passed": False, "folds": []}
-
-    width = fold_days * DAY_MS
+        return {
+            "version": "official-perp-30d-return-v1",
+            "evidenceSufficient": False, "reason": "history_under_28d",
+        }
+    start_ms = max(pnl[0][0], equity[0][0])
     end_ms = min(pnl[-1][0], equity[-1][0])
-    start_ms = end_ms - fold_count * width
-    folds = []
-    for index in range(fold_count):
-        lo = start_ms + index * width
-        hi = lo + width
-        pnl_start = _at_or_before(pnl, lo, max_gap_ms=DAY_MS)
-        pnl_end = _at_or_before(pnl, hi, max_gap_ms=DAY_MS)
-        start_equity = _at_or_before(equity, lo, max_gap_ms=DAY_MS)
-        evaluable = bool(
-            pnl_start is not None and pnl_end is not None
-            and start_equity is not None and start_equity > 0.0
-        )
-        net = (pnl_end - pnl_start) if evaluable else None
-        fold_return = (net / start_equity) if evaluable else None
-        folds.append({
-            "index": index + 1, "startMs": lo, "endMs": hi,
-            "netPnl": net, "startEquity": start_equity, "return": fold_return,
-            "returnFloor": min_return, "evaluable": evaluable,
-            "qualified": bool(evaluable and fold_return >= min_return),
-        })
-    sufficient = len(folds) == fold_count and all(fold["evaluable"] for fold in folds)
+    if end_ms - start_ms < 28 * DAY_MS:
+        return {
+            "version": "official-perp-30d-return-v1",
+            "evidenceSufficient": False, "reason": "history_under_28d",
+            "startMs": start_ms, "endMs": end_ms,
+        }
+    max_gap_ms = max(1, int(float(max_boundary_gap_hours) * 3_600_000))
+    pnl_start, pnl_start_source = _at_boundary(pnl, start_ms, max_gap_ms=max_gap_ms)
+    pnl_end, pnl_end_source = _at_boundary(pnl, end_ms, max_gap_ms=max_gap_ms)
+    start_equity, equity_source = _at_boundary(
+        equity, start_ms, max_gap_ms=max_gap_ms, positive=True,
+    )
+    reason = next(
+        (
+            value for value in (pnl_start_source, pnl_end_source, equity_source)
+            if value in {"boundary_sample_gap", "zero_start_equity"}
+        ),
+        None,
+    )
+    sufficient = bool(
+        pnl_start is not None and pnl_end is not None
+        and start_equity is not None and start_equity > 0.0
+    )
+    net_pnl = (pnl_end - pnl_start) if sufficient else None
     return {
-        "version": "official-nonoverlap-weekly-return-v1",
-        "foldDays": fold_days, "foldCount": fold_count, "returnFloor": min_return,
+        "version": "official-perp-30d-return-v1",
+        "maxBoundaryGapHours": float(max_boundary_gap_hours),
         "evidenceSufficient": sufficient,
-        "qualifiedFolds": sum(bool(fold["qualified"]) for fold in folds),
-        "passed": bool(sufficient and all(fold["qualified"] for fold in folds)),
-        "folds": folds,
+        "reason": reason or ("passed" if sufficient else "boundary_sample_gap"),
+        "startMs": start_ms, "endMs": end_ms,
+        "startEquity": start_equity,
+        "netPnl": net_pnl,
+        "return": (net_pnl / start_equity) if sufficient else None,
+        "boundarySource": {
+            "pnlStart": pnl_start_source,
+            "pnlEnd": pnl_end_source,
+            "startEquity": equity_source,
+        },
     }
 
 
@@ -150,17 +187,10 @@ def evaluate(
     *,
     pnl_minima: dict[str, float],
     share_min: float,
-    stability_fold_days: int = 7,
-    stability_fold_count: int = 4,
-    stability_min_return: float = 0.05,
+    min_return_30d: float = 0.20,
+    max_boundary_gap_hours: float = 36.0,
 ) -> Result:
-    """Require profitable, Perp-led activity and early official weekly stability.
-
-    The raw Leaderboard gate owns only cheap account/activity and positive 7/30-day PnL recall. Portfolio
-    week/all-time aggregate windows remain audit-only. The dense ``perpMonth`` series owns the earliest
-    independent four-week profitability gate; later strict Copy confirms Campaign count and execution-cost
-    robustness using our own capital.
-    """
+    """Require profitable, Perp-led activity and at least 20% official Perp 30-day ROI."""
     del pnl_minima
     windows = _portfolio_map(payload)
     if not windows:
@@ -189,15 +219,19 @@ def evaluate(
         return Result("rejected", "perp_pnl_not_profitable:month", metrics)
     if month.get("perpShare") is None or float(month["perpShare"]) < float(share_min):
         return Result("rejected", "perp_share_below_floor:month", metrics)
-    stability = official_weekly_stability(
+    official_return = official_perp_month_return(
         windows.get("perpMonth"),
-        fold_days=stability_fold_days,
-        fold_count=stability_fold_count,
-        min_return=stability_min_return,
+        max_boundary_gap_hours=max_boundary_gap_hours,
     )
-    metrics["officialStability"] = stability
-    if not stability["evidenceSufficient"]:
-        return Result("deferred_data_error", "portfolio_weekly_stability_incomplete", metrics)
-    if not stability["passed"]:
-        return Result("rejected", "portfolio_weekly_return_below_floor", metrics)
+    metrics["officialPerp30d"] = official_return
+    if not official_return["evidenceSufficient"]:
+        return Result(
+            "deferred_data_error",
+            str(official_return.get("reason") or "official_perp_return_evidence_incomplete"),
+            metrics,
+        )
+    month["perpReturn"] = official_return.get("return")
+    month["perpStartEquity"] = official_return.get("startEquity")
+    if float(official_return.get("return") or 0.0) < float(min_return_30d):
+        return Result("rejected", "official_perp_return_below_floor:month", metrics)
     return Result("passed", "perp_prefilter_passed", metrics)

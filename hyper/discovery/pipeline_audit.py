@@ -70,7 +70,6 @@ def record_workset_summary(db: sqlite3.Connection, stamp: str, source: str, brea
         "mode": breakdown.get("mode"),
         "fullScan": bool(breakdown.get("full_scan")),
         "limit": breakdown.get("limit"),
-        "dailyRecheckTop": breakdown.get("daily_recheck_top"),
         "counts": counts,
     }
     _insert_event(
@@ -125,6 +124,7 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "copy_bt_data_status": r.get("data_status"),
                 "copy_bt_evidence_status": r.get("evidence_status"),
             },
+            stage="rough",
             margin_equity_pct=margin_equity_pct,
             policy_values=policy_values,
         )
@@ -142,7 +142,7 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
         elif qualification.get("coreEligible"):
             decision_stage, failure_category = "personal_core", "passed"
         elif qualification.get("role") == "challenger":
-            decision_stage, failure_category = "copy_qualification", "soft_retention_failure"
+            decision_stage, failure_category = "copy_qualification", "quality_gate_not_met"
         else:
             decision_stage, failure_category = "copy_qualification", "business_reject"
         sector_failures = [
@@ -178,21 +178,19 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "openFillRate": r["copy_bt_open_fill_rate"],
                 "liquidations": r["copy_bt_liquidations"],
                 "feeDrag": r["copy_bt_fee_drag"],
-                "expectedReturn": r["copy_expected_return"],
-                "returnLcb": r["copy_return_lcb"],
-                "positiveProbability": r["copy_positive_probability"],
                 "evidenceDays": r["copy_evidence_days"],
-                "recentReturn14d": r["copy_recent_return_14d"],
-                "recentReturn7d": r["copy_recent_return_7d"],
-                "riskScore": r["copy_risk_score"],
                 "executionScore": r["execution_score"],
                 "actionableOpenRate": r["actionable_open_rate"],
                 "capacityFit": r["capacity_fit"],
-                "campaigns30d": (
-                    qualification.get("campaigns", {}).get(30)
-                    if 30 in qualification.get("campaigns", {})
-                    else qualification.get("campaigns", {}).get("30")
-                ),
+            },
+            "sourceQuality": {
+                "episodes30d": r.get("source_episode_n_30d"),
+                "winRate30d": r.get("source_win_rate_30d"),
+                "netPnl30d": r.get("source_net_pnl_30d"),
+                "top3ProfitShare": r.get("source_top3_profit_share"),
+                "bodyWinRate": r.get("source_body_after_top3_win_rate"),
+                "bodyNetPnl": r.get("source_body_after_top3_net_pnl"),
+                "preScore": r.get("source_quality_score"),
             },
             "followEligibility": qualification,
             "decisionAudit": {
@@ -212,8 +210,7 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                     "closed30d": r.get("copy_bt_closed_n"),
                     "closed14d": r.get("copy_bt_14d_closed_n"),
                     "closed7d": r.get("copy_bt_7d_closed_n"),
-                    "campaignWinRate30d": (qualification.get("winRates") or {}).get(30),
-                    "campaignWinRateLcb30d": qualification.get("winRateLcb30"),
+                    "copyWinRate30d": qualification.get("copyWinRate"),
                     "intratradeDrawdown": r.get("copy_intratrade_max_drawdown"),
                     "failedDeepEvents": r.get("copy_failed_deep_bag_n"),
                     "actionableOpenRate": r.get("actionable_open_rate"),

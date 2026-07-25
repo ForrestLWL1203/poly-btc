@@ -38,17 +38,31 @@ def _profile_row(addr, status, score, **overrides):
         first_added="2026-07-05T00:00:00Z",
         last_refreshed="2026-07-05T00:00:00Z",
         last_fill_ms=1,
+        official_perp_status="passed",
+        official_perp_reason="perp_prefilter_passed",
+        official_perp_return_30d=.40,
+        source_episode_n_30d=20,
+        source_win_rate_30d=.80,
+        source_top3_profit_share=.50,
+        source_body_after_top3_n=17,
+        source_body_after_top3_win_rate=.75,
+        source_body_after_top3_net_pnl=500,
+        source_quality_score=.80,
         copy_bt_closed_n=16,
+        copy_bt_net_pnl=2_000,
+        copy_bt_win_rate=.75,
+        copy_bt_window_start_equity=10_000,
+        copy_bt_7d_net_pnl=600,
+        copy_bt_7d_window_start_equity=10_000,
+        copy_bt_open_fill_rate=.90,
+        copy_bt_valuation_status="complete",
+        copy_path_risk_status="complete",
+        last_copyable_open_ms=int(time.time() * 1000),
+        open_events_30d=20,
+        sector_policy_json=json.dumps({"allowed": ["crypto"]}),
         copy_bt_14d_closed_n=9,
         copy_bt_7d_closed_n=5,
-        copy_expected_return=0.04,
-        copy_return_lcb=0.01,
-        copy_return_volatility=0.08,
-        copy_positive_probability=0.82,
         copy_evidence_days=10,
-        copy_recent_return_14d=0.03,
-        copy_recent_return_7d=0.02,
-        copy_risk_score=0.80,
         execution_score=0.90,
         actionable_open_rate=0.90,
         capacity_fit=0.90,
@@ -340,7 +354,7 @@ class ScannerWatchlistTests(unittest.TestCase):
 
         self.assertEqual(compute.call_args.args[3], 14)
 
-    def test_single_complete_heavy_dca_sector_enters_pressure_watch(self):
+    def test_single_complete_heavy_dca_sector_is_rejected(self):
         p = SimpleNamespace(days=14, max_single_adds=30, grid_max_adds=3)
         fills = [{"coin": "BTC"}]
         episodes = [
@@ -357,10 +371,46 @@ class ScannerWatchlistTests(unittest.TestCase):
                 patch.object(scanner.metrics, "gates_structural", return_value=(False, "heavy_dca")):
             policy = scanner._current_sector_structure_policy(fills, 1_000, p)
 
-        self.assertEqual(policy["allowed"], ["crypto"])
-        self.assertTrue(policy["crypto"]["watch"])
-        self.assertFalse(policy["crypto"]["coreBlocked"])
+        self.assertEqual(policy["allowed"], [])
+        self.assertFalse(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["status"], "heavy_dca")
         self.assertEqual(policy["crypto"]["heavyEpisodeCount"], 1)
+
+    def test_source_quality_ignores_recent_activity_and_episodes_from_rejected_sector(self):
+        now_ms = 1_000_000_000
+        crypto_open = now_ms - 80 * 3_600_000
+        stock_open = now_ms - 1 * 3_600_000
+        fills = [
+            {
+                "coin": "BTC", "time": crypto_open, "tid": 1,
+                "startPosition": "0", "sz": "1", "side": "B",
+            },
+            {
+                "coin": "xyz:IBM", "time": stock_open, "tid": 2,
+                "startPosition": "0", "sz": "1", "side": "B",
+            },
+        ]
+        episodes = [
+            {
+                "coin": "BTC", "open_complete": True,
+                "close_ms": now_ms - 2 * 3_600_000, "net_pnl": 10,
+            },
+            {
+                "coin": "xyz:IBM", "open_complete": True,
+                "close_ms": now_ms - 1 * 3_600_000, "net_pnl": 20,
+            },
+        ]
+
+        result = scanner._source_quality_surface(
+            fills,
+            episodes,
+            {"allowed": ["crypto"]},
+            now_ms,
+        )
+
+        self.assertEqual(result["source_episode_n_30d"], 1)
+        self.assertEqual(result["source_net_pnl_30d"], 10)
+        self.assertEqual(result["last_copyable_open_ms"], crypto_open)
 
     def test_structural_specialization_snapshot_is_persistable_before_copy_replay(self):
         snapshot = scanner._structural_specialization_snapshot({
@@ -592,99 +642,6 @@ class ScannerWatchlistTests(unittest.TestCase):
             remaining = {row[0] for row in db.execute("SELECT addr FROM profile")}
             self.assertEqual(remaining, {"0xrole", "0xopen"})
 
-    def test_incremental_scan_workset_rechecks_current_top_ranked_rejected_tail(self):
-        cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]
-        active = ["0xactive"]
-        profiled = {"0xactive", "0xold_good", "0xold_tail"}
-
-        workset, mode = scanner_lifecycle.profile_workset(
-            cand,
-            active,
-            profiled,
-            full_scan=False,
-            limit=100,
-            daily_recheck_top=2,
-        )
-
-        self.assertEqual(workset, ["0xactive", "0xnew", "0xold_good"])
-        self.assertIn("1 active + 1 new + 1 top-recheck", mode)
-        self.assertIn("top-recheck", mode)
-
-    def test_incremental_workset_breakdown_separates_new_recheck_and_off_list_active(self):
-        cand = ["0xactive", "0xold_good", "0xnew", "0xold_tail"]
-        active = ["0xactive", "0xoff"]
-        profiled = {"0xactive", "0xold_good", "0xold_tail", "0xoff"}
-
-        breakdown = scanner_lifecycle.profile_workset_breakdown(
-            cand,
-            active,
-            profiled,
-            full_scan=False,
-            limit=100,
-            daily_recheck_top=2,
-        )
-
-        self.assertEqual(breakdown["workset"], ["0xactive", "0xnew", "0xold_good", "0xoff"])
-        self.assertEqual(breakdown["counts"]["active_candidate"], 1)
-        self.assertEqual(breakdown["counts"]["new_candidate"], 1)
-        self.assertEqual(breakdown["counts"]["top_recheck"], 1)
-        self.assertEqual(breakdown["counts"]["off_list_active"], 1)
-        self.assertEqual(breakdown["counts"]["workset"], 4)
-        self.assertEqual(breakdown["counts"]["deferred_tail"], 1)
-
-    def test_workset_breakdown_counts_only_wallets_inside_limit(self):
-        cand = ["0xactive", "0xnew", "0xold_good"]
-        active = ["0xactive", "0xoff"]
-        profiled = {"0xactive", "0xold_good", "0xoff"}
-
-        breakdown = scanner_lifecycle.profile_workset_breakdown(
-            cand,
-            active,
-            profiled,
-            full_scan=False,
-            limit=2,
-            daily_recheck_top=3,
-        )
-
-        self.assertEqual(breakdown["workset"], ["0xactive", "0xnew"])
-        self.assertEqual(breakdown["counts"]["active_candidate"], 1)
-        self.assertEqual(breakdown["counts"]["new_candidate"], 1)
-        self.assertEqual(breakdown["counts"]["top_recheck"], 0)
-        self.assertEqual(breakdown["counts"]["off_list_active"], 0)
-        self.assertEqual(breakdown["counts"]["workset"], 2)
-
-    def test_incremental_scan_workset_keeps_off_list_actives_and_dedupes_recheck(self):
-        cand = ["0xactive", "0xold_good", "0xnew"]
-        active = ["0xactive", "0xoff"]
-        profiled = {"0xactive", "0xold_good", "0xoff"}
-
-        workset, _mode = scanner_lifecycle.profile_workset(
-            cand,
-            active,
-            profiled,
-            full_scan=False,
-            limit=100,
-            daily_recheck_top=3,
-        )
-
-        self.assertEqual(workset, ["0xactive", "0xnew", "0xold_good", "0xoff"])
-
-    def test_full_scan_workset_uses_all_candidates_plus_off_list_actives(self):
-        cand = ["0xa", "0xb"]
-        active = ["0xb", "0xoff"]
-
-        workset, mode = scanner_lifecycle.profile_workset(
-            cand,
-            active,
-            profiled={"0xa", "0xb", "0xoff"},
-            full_scan=True,
-            limit=100,
-            daily_recheck_top=0,
-        )
-
-        self.assertEqual(workset, ["0xa", "0xb", "0xoff"])
-        self.assertIn("FULL", mode)
-
     def test_copy_backtest_gate_rejects_copy_loss_with_enough_sample(self):
         m = {}
         ok, reason = scanner_copy_bt.apply_copy_bt_gate(
@@ -865,8 +822,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             {
                 "crypto": {
                     30: {"copy_net_pnl": 1200.0, "copy_win_rate": 0.73, "closed_n": 15, "wins": 11,
-                         "campaign_closed_n": 12, "campaign_wins": 9, "evidence_days": 5,
-                         "campaign_net_after_top2": 300.0, "cost_stress_net_pnl": 800.0,
+                         "evidence_days": 5,
                          "opened_n": 15, "target_open_events": 15, "liquidations": 0, "fee_drag": 7.0},
                     14: {"copy_net_pnl": 600.0, "copy_win_rate": 0.71, "closed_n": 7, "wins": 5,
                          "opened_n": 7, "target_open_events": 7, "liquidations": 0, "fee_drag": 4.0},
@@ -954,6 +910,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                     payoff_ratio=1.2,
                     avg_notional=1_000,
                     last_fill_ms=now_ms,
+                    last_copyable_open_ms=now_ms,
                 ),
             )
             db.commit()
@@ -978,7 +935,9 @@ class ScannerWatchlistTests(unittest.TestCase):
                 copy_bt_min_net_pnl=0.0,
             )
 
-            with patch.object(scanner, "_copy_bt_results", return_value={
+            with patch.object(scanner, "_open_flow_metrics", return_value={
+                "last_copyable_open_ms": now_ms,
+            }), patch.object(scanner, "_copy_bt_results", return_value={
                 "copy_net_pnl": -25.0,
                 "copy_win_rate": 0.3,
                 "closed_n": 9,
@@ -992,7 +951,10 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_net_pnl,copy_bt_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("retired", "copy_not_profitable", -25.0, 9))
+            self.assertEqual(
+                tuple(row),
+                ("active", "rough_copy_30d_return_below_floor", -25.0, 9),
+            )
 
     def test_regate_reactivates_obsolete_low_quality_outcome_when_copy_gates_pass(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1024,7 +986,6 @@ class ScannerWatchlistTests(unittest.TestCase):
             with (
                 patch.object(scanner.metrics, "gates_structural", return_value=(True, "ok")),
                 patch.object(scanner.metrics, "gates_state", return_value=(True, "ok")),
-                patch.object(scanner.metrics, "score", return_value=0.581),
                 patch.object(scanner, "_copy_bt_cached_fills", return_value=[]),
                 patch.object(scanner, "_copy_bt_results", return_value={}),
                 patch.object(scanner, "_sector_copy_bt_results", return_value={}),
@@ -1042,8 +1003,8 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(row[0], "active")
             self.assertEqual(row[1], "ok")
-            self.assertAlmostEqual(row[2], 0.581)
-            self.assertAlmostEqual(row[3], 0.581)
+            self.assertGreater(row[2], 0.0)
+            self.assertAlmostEqual(row[3], row[2])
             self.assertEqual(row[4], "valid")
             stale = db.execute(
                 "SELECT status,reason,score FROM profile WHERE addr='0xstale'"
@@ -1082,6 +1043,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                     payoff_ratio=1.2,
                     avg_notional=1_000,
                     last_fill_ms=now_ms,
+                    last_copyable_open_ms=now_ms,
                 ),
             )
             db.commit()
@@ -1106,8 +1068,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                 copy_bt_min_net_pnl=0.0,
             )
 
-            with patch.object(scanner, "_copy_bt_results", return_value={
-                "copy_net_pnl": 120.0,
+            with patch.object(scanner, "_open_flow_metrics", return_value={
+                "last_copyable_open_ms": now_ms,
+            }), patch.object(scanner, "_copy_bt_results", return_value={
+                "copy_net_pnl": 2_000.0,
                 "copy_win_rate": 0.6,
                 "closed_n": 9,
                 "opened_n": 4,
@@ -1121,10 +1085,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "SELECT status,reason,copy_bt_open_fill_rate FROM profile WHERE addr='0xaaa'"
             ).fetchone()
             self.assertEqual(row[0], "active")
-            self.assertEqual(row[1], "copy_backtest_deferred_data_error")
+            self.assertEqual(row[1], "rough_copy_open_rate_below_floor")
             self.assertAlmostEqual(row[2], 0.4)
 
-    def test_regate_retires_thin_recent_copy_sample(self):
+    def test_regate_keeps_weak_recent_copy_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             cols = storage.PROFILE_COLS.split(",")
@@ -1156,6 +1120,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                     payoff_ratio=1.2,
                     avg_notional=1_000,
                     last_fill_ms=now_ms,
+                    last_copyable_open_ms=now_ms,
                 ),
             )
             db.commit()
@@ -1180,8 +1145,10 @@ class ScannerWatchlistTests(unittest.TestCase):
                 copy_bt_min_net_pnl=0.0,
             )
 
-            with patch.object(scanner, "_copy_bt_results", return_value={
-                30: {"copy_net_pnl": 200.0, "copy_win_rate": 0.6, "closed_n": 9,
+            with patch.object(scanner, "_open_flow_metrics", return_value={
+                "last_copyable_open_ms": now_ms,
+            }), patch.object(scanner, "_copy_bt_results", return_value={
+                30: {"copy_net_pnl": 2_000.0, "copy_win_rate": 0.6, "closed_n": 9,
                      "opened_n": 9, "target_open_events": 9, "liquidations": 0, "fee_drag": 4.0},
                 14: {"copy_net_pnl": 50.0, "copy_win_rate": 0.5, "closed_n": 4,
                      "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
@@ -1193,7 +1160,10 @@ class ScannerWatchlistTests(unittest.TestCase):
             row = db.execute(
                 "SELECT status,reason,copy_bt_7d_net_pnl,copy_bt_7d_closed_n FROM profile WHERE addr='0xaaa'"
             ).fetchone()
-            self.assertEqual(tuple(row), ("active", "copy_backtest_deferred_data_error", -5.0, 1))
+            self.assertEqual(
+                tuple(row),
+                ("active", "rough_copy_7d_return_below_floor", -5.0, 1),
+            )
 
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1401,10 +1371,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                         copy_bt_14d_closed_n=30,
                         copy_bt_7d_closed_n=8,
                         copy_bt_open_fill_rate=1.0,
-                        copy_expected_return=0.01,
-                        copy_return_lcb=-0.01,
-                        copy_positive_probability=0.71,
-                        copy_risk_score=0.55,
+                        source_win_rate_30d=0.72,
                     ),
                     _profile_row(
                         "0xstrong",
@@ -1417,10 +1384,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                         copy_bt_14d_closed_n=22,
                         copy_bt_7d_closed_n=17,
                         copy_bt_open_fill_rate=1.0,
-                        copy_expected_return=0.07,
-                        copy_return_lcb=0.025,
-                        copy_positive_probability=0.90,
-                        copy_risk_score=0.85,
+                        source_win_rate_30d=0.82,
                     ),
                 ],
             )

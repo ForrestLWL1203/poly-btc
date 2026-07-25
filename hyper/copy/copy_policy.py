@@ -1,9 +1,4 @@
-"""Versioned copy-evidence and portfolio-selection policy.
-
-All consumers load this immutable value object instead of carrying their own evidence, Campaign/fold, risk,
-selection, or tuning thresholds. Scanner params may override matching upper-case keys, while the version hash
-keeps every published decision reproducible.
-"""
+"""Versioned source-quality, Copy and portfolio-selection policy."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -16,20 +11,16 @@ from hyper import config
 
 COPY_POLICY_PARAM_KEYS = (
     "COPY_BT_DAYS", "COPY_BT_RECENT_DAYS", "COPY_BT_MIN_CLOSED", "COPY_BT_MIN_CLOSED_14D",
-    "COPY_BT_MIN_CLOSED_7D", "CORE_COPY_MIN_CAMPAIGNS_30D",
-    "CORE_COPY_MIN_CAMPAIGN_WIN_RATE", "CORE_COPY_MIN_BODY_WIN_RATE",
-    "CORE_MIN_FOLLOW_SCORE",
-    "CORE_SOFT_FAIL_CONFIRMATIONS",
+    "COPY_BT_MIN_CLOSED_7D", "SOURCE_QUALITY_MAX_N", "SOURCE_MIN_EPISODES_30D",
+    "SOURCE_MIN_EPISODE_WIN_RATE", "SOURCE_TOP3_CONCENTRATION_TRIGGER",
+    "SOURCE_BODY_MIN_WIN_RATE", "ROUGH_COPY_MIN_CLOSED_30D",
+    "ROUGH_COPY_MIN_WIN_RATE", "ROUGH_COPY_MIN_RETURN_30D", "ROUGH_COPY_MIN_RETURN_7D",
+    "CORE_COPY_MIN_WIN_RATE",
     "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
     "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS",
-    "COPY_MIN_EXPECTED_MARGIN_RETURN", "COPY_MIN_RAW_PAYOFF_RATIO",
-    "COPY_STABILITY_FOLD_DAYS", "COPY_STABILITY_FOLD_COUNT",
-    "COPY_STABILITY_MIN_EVALUABLE_FOLDS", "COPY_STABILITY_MIN_PROFITABLE_FOLDS",
-    "COPY_STABILITY_MIN_RETURN", "COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT",
-    "CORE_MIN_COPY_RETURN_30D", "CORE_MIN_COPY_RETURN_7D",
-    "CORE_MIN_AVG_NET_PER_CLOSE_RETURN",
-    "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD", "COPY_WEEKLY_MIN_RETURN",
-    "COPY_WEEKLY_SCORE_RETURN_TARGET", "COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN",
+    "OFFICIAL_PERP_MIN_RETURN_30D", "OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS",
+    "CORE_MIN_DYNAMIC_COPY_RETURN_30D", "CORE_MIN_DYNAMIC_COPY_RETURN_7D",
+    "CORE_PORTFOLIO_MIN_RETURN_30D", "CORE_PORTFOLIO_MIN_RETURN_7D",
     "SELECTION_MIN_ACTIONABLE_RATE", "SELECTION_MIN_CAPACITY_FIT",
 )
 
@@ -40,30 +31,26 @@ class CopyPolicy:
     min_closed_30d: int
     min_closed_14d: int
     min_closed_7d: int
-    core_min_campaigns_30d: int
-    core_min_campaign_win_rate: float
-    core_min_body_win_rate: float
-    core_min_follow_score: float
-    soft_fail_confirmations: int
+    source_quality_max_n: int
+    source_min_episodes_30d: int
+    source_min_episode_win_rate: float
+    source_top3_concentration_trigger: float
+    source_body_min_win_rate: float
+    rough_min_closed_30d: int
+    rough_min_win_rate: float
+    rough_min_return_30d: float
+    rough_min_return_7d: float
+    core_min_copy_win_rate: float
     core_max_liquidations_30d: int
     deep_bag_event_pct: float
     deep_bag_event_min_hours: float
     deep_bag_long_hours: float
-    min_expected_margin_return: float
-    min_raw_payoff_ratio: float
-    stability_fold_days: int
-    stability_fold_count: int
-    stability_min_evaluable_folds: int
-    stability_min_profitable_folds: int
-    stability_min_return: float
-    stability_max_loss_to_30d_profit: float
-    core_min_copy_return_30d: float
-    core_min_copy_return_7d: float
-    core_min_avg_net_per_close_return: float
-    copy_weekly_min_campaigns_per_fold: int
-    copy_weekly_min_return: float
-    copy_weekly_score_return_target: float
-    copy_weekly_min_net_per_closed_return: float
+    official_perp_min_return_30d: float
+    official_perp_boundary_max_gap_hours: float
+    core_min_dynamic_copy_return_30d: float
+    core_min_dynamic_copy_return_7d: float
+    portfolio_min_return_30d: float
+    portfolio_min_return_7d: float
     min_actionable_open_rate: float
     min_capacity_fit: float
     tune_min_relative_gain: float
@@ -98,47 +85,43 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         min_closed_30d=int(_value(values, "COPY_BT_MIN_CLOSED", 7) or 0),
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
         min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
-        core_min_campaigns_30d=int(_value(values, "CORE_COPY_MIN_CAMPAIGNS_30D", 8) or 0),
-        core_min_campaign_win_rate=float(_value(
-            values, "CORE_COPY_MIN_CAMPAIGN_WIN_RATE", 0.45,
+        source_quality_max_n=int(_value(values, "SOURCE_QUALITY_MAX_N", 40) or 0),
+        source_min_episodes_30d=int(_value(values, "SOURCE_MIN_EPISODES_30D", 10) or 0),
+        source_min_episode_win_rate=float(_value(
+            values, "SOURCE_MIN_EPISODE_WIN_RATE", 0.70,
         )),
-        core_min_body_win_rate=float(_value(values, "CORE_COPY_MIN_BODY_WIN_RATE", 0.40)),
-        core_min_follow_score=float(_value(values, "CORE_MIN_FOLLOW_SCORE", 0.75)),
-        soft_fail_confirmations=int(_value(values, "CORE_SOFT_FAIL_CONFIRMATIONS", 2) or 1),
+        source_top3_concentration_trigger=float(_value(
+            values, "SOURCE_TOP3_CONCENTRATION_TRIGGER", 0.70,
+        )),
+        source_body_min_win_rate=float(_value(values, "SOURCE_BODY_MIN_WIN_RATE", 0.70)),
+        rough_min_closed_30d=int(_value(values, "ROUGH_COPY_MIN_CLOSED_30D", 7) or 0),
+        rough_min_win_rate=float(_value(values, "ROUGH_COPY_MIN_WIN_RATE", 0.60)),
+        rough_min_return_30d=float(_value(values, "ROUGH_COPY_MIN_RETURN_30D", 0.15)),
+        rough_min_return_7d=float(_value(values, "ROUGH_COPY_MIN_RETURN_7D", 0.05)),
+        core_min_copy_win_rate=float(_value(values, "CORE_COPY_MIN_WIN_RATE", 0.60)),
         core_max_liquidations_30d=int(_value(
             values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 3,
         ) or 0),
         deep_bag_event_pct=float(_value(values, "COPY_DEEP_BAG_EVENT_PCT", 0.08)),
         deep_bag_event_min_hours=float(_value(values, "COPY_DEEP_BAG_EVENT_MIN_HOURS", 4.0)),
         deep_bag_long_hours=float(_value(values, "COPY_DEEP_BAG_LONG_HOURS", 24.0)),
-        min_expected_margin_return=float(_value(values, "COPY_MIN_EXPECTED_MARGIN_RETURN", 0.02)),
-        min_raw_payoff_ratio=float(_value(values, "COPY_MIN_RAW_PAYOFF_RATIO", 0.60)),
-        stability_fold_days=int(_value(values, "COPY_STABILITY_FOLD_DAYS", 7) or 7),
-        stability_fold_count=int(_value(values, "COPY_STABILITY_FOLD_COUNT", 4) or 4),
-        stability_min_evaluable_folds=int(_value(
-            values, "COPY_STABILITY_MIN_EVALUABLE_FOLDS", 4,
-        ) or 1),
-        stability_min_profitable_folds=int(_value(
-            values, "COPY_STABILITY_MIN_PROFITABLE_FOLDS", 3,
-        ) or 1),
-        stability_min_return=float(_value(values, "COPY_STABILITY_MIN_RETURN", 0.05)),
-        stability_max_loss_to_30d_profit=float(_value(
-            values, "COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT", 0.25,
+        official_perp_min_return_30d=float(_value(
+            values, "OFFICIAL_PERP_MIN_RETURN_30D", 0.20,
         )),
-        core_min_copy_return_30d=float(_value(values, "CORE_MIN_COPY_RETURN_30D", 0.10)),
-        core_min_copy_return_7d=float(_value(values, "CORE_MIN_COPY_RETURN_7D", 0.04)),
-        core_min_avg_net_per_close_return=float(_value(
-            values, "CORE_MIN_AVG_NET_PER_CLOSE_RETURN", 0.005,
+        official_perp_boundary_max_gap_hours=float(_value(
+            values, "OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS", 36,
         )),
-        copy_weekly_min_campaigns_per_fold=int(_value(
-            values, "COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD", 1,
-        ) or 1),
-        copy_weekly_min_return=float(_value(values, "COPY_WEEKLY_MIN_RETURN", 0.0)),
-        copy_weekly_score_return_target=float(_value(
-            values, "COPY_WEEKLY_SCORE_RETURN_TARGET", 0.04,
+        core_min_dynamic_copy_return_30d=float(_value(
+            values, "CORE_MIN_DYNAMIC_COPY_RETURN_30D", 0.10,
         )),
-        copy_weekly_min_net_per_closed_return=float(_value(
-            values, "COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN", 0.005,
+        core_min_dynamic_copy_return_7d=float(_value(
+            values, "CORE_MIN_DYNAMIC_COPY_RETURN_7D", 0.03,
+        )),
+        portfolio_min_return_30d=float(_value(
+            values, "CORE_PORTFOLIO_MIN_RETURN_30D", 0.10,
+        )),
+        portfolio_min_return_7d=float(_value(
+            values, "CORE_PORTFOLIO_MIN_RETURN_7D", 0.03,
         )),
         min_actionable_open_rate=float(_value(values, "SELECTION_MIN_ACTIONABLE_RATE", 0.70)),
         min_capacity_fit=float(_value(values, "SELECTION_MIN_CAPACITY_FIT", 0.75)),

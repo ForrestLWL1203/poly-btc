@@ -1,10 +1,9 @@
-"""Copy-follow score used to rank the final watchlist.
+"""Source-quality, rough-Copy and final strict-Copy ranking.
 
-`profile.score` remains a discovery-only prior when Copy evidence is absent. Once
-canonical Copy exists, the final score is derived only from funded weekly economics,
-repeatability, edge confidence, operability, and path risk.
+Qualification answers four independent questions only: is the source wallet consistently good, is its
+profit material, can our execution follow it, and is it currently active. The score never grants permission;
+it orders wallets which already passed the applicable business contract.
 """
-
 from __future__ import annotations
 
 import math
@@ -16,28 +15,27 @@ from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import apply_allowed_sector_copy_metrics, parse_json_obj
 
 
-def _num(v, default: float = 0.0) -> float:
+def _num(value, default: float = 0.0) -> float:
     try:
-        if v is None:
+        if value is None:
             return default
-        f = float(v)
-        if math.isnan(f) or math.isinf(f):
-            return default
-        return f
+        number = float(value)
+        return default if math.isnan(number) or math.isinf(number) else number
     except (TypeError, ValueError):
         return default
 
 
-def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, v))
+def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, float(value)))
+
+
+def _quality_above_floor(value: float, floor: float, span: float) -> float:
+    """Give a qualified boundary 60%, then continue monotonically to a transparent cap."""
+    return _clamp(0.60 + 0.40 * (float(value) - float(floor)) / max(1e-9, float(span)))
 
 
 def _replay_window_equity(metrics: Mapping, days: int) -> float:
-    """Return the floating account equity that actually funded one replay window."""
-    key = (
-        "copy_bt_window_start_equity"
-        if int(days) == 30 else f"copy_bt_{int(days)}d_window_start_equity"
-    )
+    key = "copy_bt_window_start_equity" if int(days) == 30 else f"copy_bt_{int(days)}d_window_start_equity"
     for candidate in (
         metrics.get(key),
         metrics.get("copy_bt_initial_margin_equity"),
@@ -50,584 +48,344 @@ def _replay_window_equity(metrics: Mapping, days: int) -> float:
     return 1.0
 
 
-def _has_copy_evidence(metrics: Mapping, c30: int, c14: int, c7: int) -> bool:
-    return any(metrics.get(k) is not None for k in (
-        "copy_expected_return", "copy_return_lcb", "copy_positive_probability",
-    )) and c30 > 0
+def _activity_age_hours(metrics: Mapping, as_of_ms: int) -> float | None:
+    last_open = int(_num(metrics.get("last_copyable_open_ms")))
+    if last_open <= 0:
+        return None
+    return max(0.0, (int(as_of_ms) - last_open) / 3_600_000.0)
+
+
+def evaluate_source_quality(
+    metrics: Mapping,
+    *,
+    policy_values: Mapping | None = None,
+    as_of_ms: int | None = None,
+) -> dict:
+    """Apply the sole deep-fill source-wallet quality contract."""
+    policy = load_copy_policy(policy_values)
+    as_of_ms = int(as_of_ms or time.time() * 1000)
+    episodes = int(_num(metrics.get("source_episode_n_30d")))
+    win_rate = metrics.get("source_win_rate_30d")
+    top3_share = metrics.get("source_top3_profit_share")
+    body_n = int(_num(metrics.get("source_body_after_top3_n")))
+    body_win_rate = metrics.get("source_body_after_top3_win_rate")
+    body_net = metrics.get("source_body_after_top3_net_pnl")
+    activity_age = _activity_age_hours(metrics, as_of_ms)
+    concentration_triggered = bool(
+        top3_share is not None
+        and _num(top3_share) >= policy.source_top3_concentration_trigger
+    )
+    checks = {
+        "minimumCompleteEpisodes": episodes >= policy.source_min_episodes_30d,
+        "sourceWinRate": (
+            win_rate is not None
+            and _num(win_rate) >= policy.source_min_episode_win_rate
+        ),
+        "activityWithin72h": activity_age is not None and activity_age <= 72.0,
+        "concentratedBodyWinRate": (
+            not concentration_triggered
+            or (
+                body_n > 0 and body_win_rate is not None
+                and _num(body_win_rate) >= policy.source_body_min_win_rate
+            )
+        ),
+        "concentratedBodyNonNegative": (
+            not concentration_triggered
+            or (body_net is not None and _num(body_net) >= 0.0)
+        ),
+    }
+    failures = (
+        ("source_episode_evidence_insufficient", "minimumCompleteEpisodes"),
+        ("source_win_rate_below_floor", "sourceWinRate"),
+        ("source_activity_stale", "activityWithin72h"),
+        ("source_concentrated_body_win_rate_low", "concentratedBodyWinRate"),
+        ("source_concentrated_body_unprofitable", "concentratedBodyNonNegative"),
+    )
+    first_failure = next((reason for reason, key in failures if not checks[key]), None)
+    return {
+        "eligible": first_failure is None,
+        "status": "source_quality_passed" if first_failure is None else first_failure,
+        "firstFailure": first_failure,
+        "checks": checks,
+        "episodeN30d": episodes,
+        "winRate30d": _num(win_rate) if win_rate is not None else None,
+        "activityAgeHours": activity_age,
+        "top3ProfitShare": _num(top3_share) if top3_share is not None else None,
+        "concentrationTriggered": concentration_triggered,
+        "bodyAfterTop3N": body_n,
+        "bodyAfterTop3WinRate": _num(body_win_rate) if body_win_rate is not None else None,
+        "bodyAfterTop3NetPnl": _num(body_net) if body_net is not None else None,
+    }
+
+
+def compute_source_quality_score(
+    metrics: Mapping,
+    *,
+    policy_values: Mapping | None = None,
+    as_of_ms: int | None = None,
+) -> tuple[float, dict]:
+    """Rank source-qualified wallets before the global Top40 cap."""
+    policy = load_copy_policy(policy_values)
+    as_of_ms = int(as_of_ms or time.time() * 1000)
+    official_return = _num(metrics.get("official_perp_return_30d"))
+    win_rate = _num(metrics.get("source_win_rate_30d"))
+    episodes = int(_num(metrics.get("source_episode_n_30d")))
+    activity_age = _activity_age_hours(metrics, as_of_ms)
+    official_score = _quality_above_floor(
+        official_return, policy.official_perp_min_return_30d, 0.80,
+    )
+    win_score = _quality_above_floor(
+        win_rate, policy.source_min_episode_win_rate, 0.25,
+    )
+    sample_score = _quality_above_floor(
+        episodes, policy.source_min_episodes_30d, 30,
+    )
+    recency_score = 0.0 if activity_age is None else _clamp(1.0 - activity_age / 180.0)
+    score = 0.25 * official_score + 0.40 * win_score + 0.25 * sample_score + 0.10 * recency_score
+    return _clamp(score), {
+        "officialPerp30dScore": official_score,
+        "sourceWinRateScore": win_score,
+        "sourceSampleScore": sample_score,
+        "sourceRecencyScore": recency_score,
+    }
 
 
 def evaluate_follow_eligibility(
     metrics: Mapping,
     *,
+    stage: str = "rough",
     min_closed30: int | None = None,
     min_closed14: int | None = None,
     min_closed7: int | None = None,
     min_open_fill_rate: float | None = None,
-    min_expected_return: float | None = None,
     min_evidence_days: int | None = None,
     margin_equity_pct: float | None = None,
-    retention: bool = False,
     policy_values: Mapping | None = None,
     as_of_ms: int | None = None,
     follow_score_value: float | None = None,
 ) -> dict:
-    """Classify evidence once: positive wallets remain researchable; Core adds non-duplicated proof.
-
-    The old policy independently gated 7/14/30 returns, win rates, PF, tail-2 and concentration body.  Those
-    checks were correlated views of the same trades and created an exclusion cascade. V3 keeps hard data,
-    structural safety and final-surface proxy-liquidation limits; profitable canonical replay retains research
-    eligibility.
-    The bounded formation surface may publish that wallet as Challenger. Target-wallet return stability is
-    owned by the official Portfolio front gate. Core separately requires at least 10% strict-Copy return in
-    30d, at least 4% in the latest rolling 7d, and four evidence-complete non-overlapping folds of which at
-    least three are profitable and the one permitted losing fold is bounded. Body-after-top-three,
-    per-wallet cost stress, open-fill rate and capacity remain score diagnostics; making them hard gates as
-    well as score/final-portfolio inputs repeatedly charged the same evidence.
-    """
-    del min_closed14, min_closed7, margin_equity_pct
+    """Classify one rough or final strict Copy result with one ordered failure reason."""
+    del min_closed14, min_closed7, min_evidence_days, margin_equity_pct, follow_score_value
+    stage = "strict" if str(stage).lower() in {"strict", "final"} else "rough"
     policy = load_copy_policy(policy_values)
-    min_closed30 = policy.min_closed_30d if min_closed30 is None else int(min_closed30)
-    min_evidence_days = min(5, min_closed30) if min_evidence_days is None else int(min_evidence_days)
-    min_open_fill_rate = (
-        policy.min_actionable_open_rate if min_open_fill_rate is None else float(min_open_fill_rate)
-    )
-    min_expected_return = (
-        policy.min_expected_margin_return if min_expected_return is None else float(min_expected_return)
-    )
-    source = metrics
+    as_of_ms = int(as_of_ms or time.time() * 1000)
     scoped = apply_allowed_sector_copy_metrics(metrics)
-    policy_json = parse_json_obj(source.get("sector_policy_json"))
-    copy_weekly = (
-        policy_json.get("copyWeeklyProfitability")
-        if isinstance(policy_json.get("copyWeeklyProfitability"), dict) else {}
-    )
-    allowed = set(policy_json.get("allowed") or ())
-    watched = set(policy_json.get("watch") or ())
+    policy_json = parse_json_obj(scoped.get("sector_policy_json"))
     c30 = int(_num(scoped.get("copy_bt_closed_n")))
-    c7 = int(_num(scoped.get("copy_bt_7d_closed_n")))
-    campaigns = int(_num(scoped.get("copy_bt_campaign_closed_n"), c30))
+    copy_win_rate = scoped.get("copy_bt_win_rate")
     pnl30 = _num(scoped.get("copy_bt_net_pnl"))
-    closed_pnl30 = _num(
-        scoped.get("copy_bt_closed_net_pnl"),
-        pnl30 - _num(scoped.get("copy_bt_unrealized_pnl")),
-    )
     pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
-    closed_pnl7 = pnl7 - _num(scoped.get("copy_bt_7d_unrealized_pnl"))
     equity30 = _replay_window_equity(scoped, 30)
     equity7 = _replay_window_equity(scoped, 7)
     return30 = pnl30 / equity30
     return7 = pnl7 / equity7
-    average_net_per_close_return = (
-        closed_pnl30 / max(1, c30) / equity30 if c30 > 0 else 0.0
-    )
-    average_net_per_close_return_7d = (
-        closed_pnl7 / max(1, c7) / equity7 if c7 > 0 else 0.0
-    )
-    evidence_days = int(_num(scoped.get("copy_evidence_days")))
-    data_status = str(scoped.get("copy_bt_data_status") or "").strip().lower()
-    evidence_status = str(scoped.get("copy_bt_evidence_status") or "").strip().lower()
-    valuation_status = str(scoped.get("copy_bt_valuation_status") or "complete").strip().lower()
-    path_status = str(scoped.get("copy_path_risk_status") or "").strip().lower()
-    intratrade_dd = max(0.0, _num(scoped.get("copy_intratrade_max_drawdown")))
-    failed_deep = int(_num(scoped.get("copy_failed_deep_bag_n")))
-    deep_events = int(_num(scoped.get("copy_deep_bag_event_n")))
-    recovery_rate = _num(scoped.get("copy_deep_bag_recovery_rate"), 1.0)
-    current_loss = max(
-        abs(min(0.0, _num(scoped.get("copy_current_open_loss_frac")))),
-        max(0.0, _num(scoped.get("copy_current_drawdown_frac"))),
-    )
-    current_bag_hours = max(0.0, _num(scoped.get("copy_current_bag_hours")))
-    liquidations = int(_num(scoped.get("copy_bt_liquidations")))
-    forward_liquidations = int(_num(scoped.get("forward_liquidations")))
-    top1 = scoped.get("copy_bt_campaign_net_after_top1")
-    if top1 is None:
-        # Compact legacy results always carried top2 but not every caller exposed top1. Do not invent a pass.
-        top1 = scoped.get("copy_bt_net_after_top1")
-    cost_stress = scoped.get("copy_bt_cost_stress_net_pnl")
     open_rate = scoped.get("actionable_open_rate", scoped.get("copy_bt_open_fill_rate"))
-    capacity = scoped.get("capacity_fit")
-    expected = scoped.get("copy_expected_return")
-    last_open = int(_num(scoped.get("last_copyable_open_ms")))
-    as_of_ms = int(as_of_ms or time.time() * 1000)
-    activity_age_ms = as_of_ms - last_open if last_open > 0 else None
-    activity_ok = bool(
-        last_open > 0 and 0 <= activity_age_ms <= int(config.INACTIVE_DAYS * 86_400_000)
+    activity_age = _activity_age_hours(scoped, as_of_ms)
+    data_status = str(scoped.get("copy_bt_data_status") or scoped.get("data_status") or "valid").lower()
+    evidence_status = str(
+        scoped.get("copy_bt_evidence_status") or scoped.get("evidence_status") or ""
+    ).lower()
+    valuation_status = str(scoped.get("copy_bt_valuation_status") or "complete").lower()
+    path_status = str(scoped.get("copy_path_risk_status") or "").lower()
+    official_status = str(scoped.get("official_perp_status") or "").lower()
+    official_reason = str(scoped.get("official_perp_reason") or "official_perp_evidence_missing")
+    source = evaluate_source_quality(scoped, policy_values=policy_values, as_of_ms=as_of_ms)
+    minimum_closed = int(
+        policy.rough_min_closed_30d if min_closed30 is None else min_closed30
     )
+    minimum_open_rate = (
+        policy.min_actionable_open_rate
+        if min_open_fill_rate is None else float(min_open_fill_rate)
+    )
+    return_floor30 = (
+        policy.core_min_dynamic_copy_return_30d
+        if stage == "strict" else policy.rough_min_return_30d
+    )
+    return_floor7 = (
+        policy.core_min_dynamic_copy_return_7d
+        if stage == "strict" else policy.rough_min_return_7d
+    )
+    win_floor = (
+        policy.core_min_copy_win_rate if stage == "strict" else policy.rough_min_win_rate
+    )
+    allowed = set(policy_json.get("allowed") or ())
+    watched = set(policy_json.get("watch") or ())
     sector_ready = bool(allowed) if "allowed" in policy_json else True
-    path_complete = path_status not in {"pending", "missing", "invalid", "replay_error", "incomplete"}
-    copy_weekly_sufficient = bool(copy_weekly.get("evidenceSufficient"))
-    copy_weekly_positive = bool(copy_weekly.get("passed"))
-    campaign_win_rate = _num(scoped.get(
-        "copy_bt_campaign_win_rate", scoped.get("copy_bt_win_rate"),
-    ))
-    body_n = int(_num(scoped.get("copy_bt_body_after_top3_n")))
-    body_win_rate = _num(scoped.get("copy_bt_body_after_top3_win_rate"))
-    body_net_pnl = scoped.get("copy_bt_body_after_top3_net_pnl")
-    if follow_score_value is None:
-        follow_score_value = compute_follow_score(scoped, policy_values=policy_values)[0]
-    else:
-        follow_score_value = _clamp(_num(follow_score_value))
-    sample_ok = bool(
-        c30 >= min_closed30 and campaigns >= policy.core_min_campaigns_30d
-        and evidence_days >= min_evidence_days
-    )
     checks = {
-        "copyDataValid": not data_status or data_status in {"valid", "ok"},
-        "normalizedEvidencePresent": _has_copy_evidence(scoped, c30, 0, 0),
-        "strictCopy30dPositive": pnl30 > 0.0,
-        "strictCopy30dReturn": return30 >= policy.core_min_copy_return_30d,
-        "strictCopyRolling7dReturn": return7 >= policy.core_min_copy_return_7d,
-        "averageNetPerClose": (
-            average_net_per_close_return >= policy.core_min_avg_net_per_close_return
-        ),
-        "averageNetPerClose7d": (
-            average_net_per_close_return_7d
-            >= policy.core_min_avg_net_per_close_return
-        ),
-        "strictCopyWeeklyPositive": copy_weekly_positive,
-        "independentCampaignEvidence": campaigns >= policy.core_min_campaigns_30d,
-        "campaignWinRate": campaign_win_rate >= policy.core_min_campaign_win_rate,
-        "repeatableBodyWinRate": (
-            body_n > 0 and body_win_rate >= policy.core_min_body_win_rate
-        ),
-        "repeatableBodyPositive": body_net_pnl is not None and _num(body_net_pnl) > 0.0,
-        "coreFollowScore": follow_score_value >= policy.core_min_follow_score,
-        "activityWithin72h": activity_ok,
-        "oneWinnerRemovalPositive": top1 is not None and _num(top1) > 0.0,
-        "costStressPositive": cost_stress is not None and _num(cost_stress) > 0.0,
-        "openExecution": open_rate is None or _num(open_rate, 1.0) >= min_open_fill_rate,
-        "capacity": capacity is None or _num(capacity) >= policy.min_capacity_fit,
+        "copyDataValid": data_status in {"", "valid", "ok"} and evidence_status != "invalid",
+        "officialPerpPassed": official_status == "passed",
+        "sourceQualityPassed": bool(source.get("eligible")),
+        "minimumClosedEvidence": c30 >= minimum_closed,
+        "copy30dReturn": return30 >= return_floor30,
+        "copy7dReturn": return7 >= return_floor7,
+        "copyWinRate": copy_win_rate is not None and _num(copy_win_rate) >= win_floor,
+        "openExecution": open_rate is not None and _num(open_rate) >= minimum_open_rate,
+        "activityWithin72h": activity_age is not None and activity_age <= 72.0,
         "valuationComplete": valuation_status == "complete",
-        "pathRiskComplete": path_complete,
         "sectorExecutable": sector_ready,
-        "expectedEdge": expected is None or _num(expected) >= min_expected_return,
-        "noRepeatedLiquidation": liquidations <= policy.core_max_liquidations_30d,
-        "noForwardLiquidation": forward_liquidations <= policy.core_max_liquidations_30d,
+        "pathComplete": (
+            stage != "strict"
+            or path_status not in {"", "pending", "missing", "invalid", "replay_error", "incomplete"}
+        ),
+        "liquidationsWithinLimit": (
+            stage != "strict"
+            or int(_num(scoped.get("copy_bt_liquidations"))) <= policy.core_max_liquidations_30d
+        ),
     }
-    detail = {
-        "returns": {"30": return30, "7": return7},
-        "windowStartEquity": {"30": equity30, "7": equity7},
-        "returnFloors": {
-            "30": policy.core_min_copy_return_30d,
-            "7": policy.core_min_copy_return_7d,
-        },
-        "averageNetPerCloseReturn": average_net_per_close_return,
-        "averageNetPerCloseReturn7d": average_net_per_close_return_7d,
-        "averageNetPerCloseReturnFloor": policy.core_min_avg_net_per_close_return,
-        "evidenceDays": evidence_days, "copyWeeklyProfitability": copy_weekly,
-        "repeatability": {
-            "campaignWinRate": campaign_win_rate,
-            "campaignWinRateFloor": policy.core_min_campaign_win_rate,
-            "bodyAfterTop3N": body_n,
-            "bodyAfterTop3WinRate": body_win_rate if body_n > 0 else None,
-            "bodyWinRateFloor": policy.core_min_body_win_rate,
-            "bodyAfterTop3NetPnl": _num(body_net_pnl) if body_net_pnl is not None else None,
-        },
-        "followScore": follow_score_value,
-        "coreFollowScoreFloor": policy.core_min_follow_score,
-        "activityAgeHours": activity_age_ms / 3_600_000 if activity_age_ms is not None else None,
-        "campaignNetAfterTop1": _num(top1) if top1 is not None else None,
-        "costStressNetPnl": _num(cost_stress) if cost_stress is not None else None,
-        "simulatedPathRisk": {
-            "intratradeMaxDrawdown": intratrade_dd,
-            "deepBagEvents": deep_events,
-            "failedDeepBagEvents": failed_deep,
-            "deepBagRecoveryRate": recovery_rate,
-            "currentOpenLossFrac": current_loss,
-            "currentBagHours": current_bag_hours,
-            "liquidations30d": liquidations,
-            "forwardLiquidations30d": forward_liquidations,
-            "liquidationLimit30d": policy.core_max_liquidations_30d,
-        },
-        "checks": checks, "retentionSurface": bool(retention),
-        "softFailConfirmationsRequired": policy.soft_fail_confirmations,
-    }
-
-    if not checks["copyDataValid"] or evidence_status == "invalid":
-        return {"eligible": False, "coreEligible": False, "status": "copy_data_error",
-                "role": "quarantine", "deferred": True, **detail,
-                "reasons": ["copy回放数据无效，等待同一钱包重新生成证据"]}
-    if evidence_status in {"no_evidence", "no_fills", "no_open_events"}:
-        return {"eligible": False, "coreEligible": False, "status": "no_copy_evidence",
-                "role": "rejected", **detail, "reasons": ["没有可执行flat→open事件，无法进行跟单"]}
-    if pnl30 <= 0.0:
-        return {"eligible": False, "coreEligible": False, "status": "copy_not_profitable",
-                "role": "rejected", **detail, "reasons": ["30天严格Copy净收益不为正"]}
-    if not checks["normalizedEvidencePresent"]:
-        return {"eligible": False, "coreEligible": False, "status": "normalized_evidence_missing",
-                "role": "quarantine", "deferred": True, **detail,
-                "reasons": ["归一化Copy证据缺失，保留并等待重放而不是经济淘汰"]}
     if "allowed" in policy_json and not allowed and not watched:
-        return {"eligible": False, "coreEligible": False, "status": "no_copyable_sector",
-                "role": "rejected", **detail, "reasons": ["没有盈利且可执行的Crypto/Stock板块"]}
-
-    core_eligible = bool(
-        sample_ok and checks["strictCopy30dReturn"] and checks["strictCopyRolling7dReturn"]
-        and checks["averageNetPerClose"] and checks["averageNetPerClose7d"]
-        and copy_weekly_positive and activity_ok
-        and checks["campaignWinRate"] and checks["coreFollowScore"]
-        and checks["oneWinnerRemovalPositive"] and checks["valuationComplete"]
-        and checks["pathRiskComplete"]
-        and checks["sectorExecutable"] and checks["expectedEdge"]
-        and checks["noRepeatedLiquidation"] and checks["noForwardLiquidation"]
-        and not bool(policy_json.get("coreBlocked"))
+        checks["sectorExecutable"] = False
+    failures = (
+        ("copy_data_error", "copyDataValid", True),
+        (
+            official_reason if official_status == "deferred_data_error" else "official_perp_not_qualified",
+            "officialPerpPassed", official_status == "deferred_data_error",
+        ),
+        (source.get("firstFailure") or "source_quality_not_qualified", "sourceQualityPassed", False),
+        ("copy_episode_evidence_insufficient", "minimumClosedEvidence", True),
+        (f"{stage}_copy_30d_return_below_floor", "copy30dReturn", False),
+        (f"{stage}_copy_7d_return_below_floor", "copy7dReturn", False),
+        (f"{stage}_copy_win_rate_below_floor", "copyWinRate", False),
+        (f"{stage}_copy_open_rate_below_floor", "openExecution", False),
+        ("activity_over_72h", "activityWithin72h", False),
+        ("copy_valuation_incomplete", "valuationComplete", True),
+        ("sector_not_executable", "sectorExecutable", False),
+        ("copy_path_incomplete", "pathComplete", True),
+        ("strict_copy_liquidations_over_3", "liquidationsWithinLimit", False),
     )
-    if core_eligible:
-        return {"eligible": True, "coreEligible": True,
-                "status": "core_retention_eligible" if retention else "core_eligible",
-                "role": "core_eligible", **detail,
-                "reasons": ["官方四段周收益、严格Copy 30d/最近7d盈利、四段时序稳定性、可重复性及爆仓≤3均通过"]}
-
-    if not checks["strictCopy30dReturn"]:
-        status, reason = (
-            "challenger_return_watch",
-            "30天严格Copy收益未达到10%，盈利能力暂不足以进入Core",
-        )
-    elif not checks["strictCopyRolling7dReturn"]:
-        status, reason = (
-            "challenger_recent_return_watch",
-            f"最近7天严格Copy收益未达到{policy.core_min_copy_return_7d * 100:g}%，"
-            "近期盈利能力暂不足以进入Core",
-        )
-    elif not checks["averageNetPerClose"]:
-        status, reason = (
-            "challenger_thin_profit_watch",
-            "30天平均每个平仓的净收益低于本金0.5%，属于薄利高周转，不进入Core",
-        )
-    elif not checks["averageNetPerClose7d"]:
-        status, reason = (
-            "challenger_recent_thin_profit_watch",
-            "最近7天平均每个平仓的净收益低于该窗口起始权益0.5%，近期利润过薄，不进入Core",
-        )
-    elif not copy_weekly_sufficient:
-        status, reason = (
-            "challenger_copy_fold_evidence_building",
-            "严格Copy四个非重叠7日段证据尚未完整；保留Challenger继续积累，不按亏损淘汰",
-        )
-    elif not copy_weekly_positive:
-        status, reason = (
-            "challenger_copy_timing_instability",
-            "四段证据完整，但少于三段盈利或唯一亏损段超过30日总利润的25%",
-        )
-    elif not sample_ok:
-        status, reason = "challenger_campaign_evidence_building", "独立Campaign或证据日不足，继续积累"
-    elif not activity_ok:
-        status, reason = "challenger_activity_watch", "最近72小时没有新的可执行flat→open信号"
-    elif not checks["campaignWinRate"]:
-        status, reason = (
-            "challenger_repeatability_watch",
-            "Campaign胜率不足，暂不承担随机入场时点风险",
-        )
-    elif not checks["coreFollowScore"]:
-        status, reason = "challenger_score_watch", "综合质量分未达到Core 75分准入线"
-    elif not checks["oneWinnerRemovalPositive"]:
-        status, reason = "challenger_outlier_watch", "移除最大一个盈利Campaign后不再为正"
-    elif not checks["pathRiskComplete"]:
-        status, reason = "challenger_path_risk_pending", "路径风险证据尚未完整"
-    elif not checks["noRepeatedLiquidation"]:
-        status, reason = "challenger_liquidation_tuning", "当前参数回放爆仓超过3次，等待降低杠杆/调整保证金"
-    elif not checks["noForwardLiquidation"]:
-        status, reason = "challenger_forward_liquidation_watch", "实跟近30日爆仓超过3次，暂不进入Core"
-    elif not checks["sectorExecutable"]:
-        status, reason = "challenger_sector_watch", "板块证据仍处于观察状态"
-    else:
-        status, reason = "challenger_execution_watch", "估值、板块或前向风险条件尚未全部通过"
-    return {"eligible": True, "coreEligible": False, "status": status,
-            "role": "challenger", "researchEligible": True, **detail, "reasons": [reason]}
+    first_failure = None
+    deferred = False
+    for reason, key, is_deferred in failures:
+        if not checks[key]:
+            first_failure, deferred = reason, is_deferred
+            break
+    stage_eligible = first_failure is None
+    research_eligible = checks["copyDataValid"] and (
+        pnl30 > 0.0 or deferred or official_status == "deferred_data_error"
+    )
+    return {
+        "eligible": research_eligible,
+        "coreEligible": stage_eligible,
+        "stageEligible": stage_eligible,
+        "stage": stage,
+        "status": f"{stage}_copy_qualified" if stage_eligible else first_failure,
+        "firstFailure": first_failure,
+        "role": "core_eligible" if stage_eligible else "challenger" if research_eligible else "rejected",
+        "deferred": bool(deferred),
+        "checks": checks,
+        "returns": {"30": return30, "7": return7},
+        "returnFloors": {"30": return_floor30, "7": return_floor7},
+        "windowStartEquity": {"30": equity30, "7": equity7},
+        "netPnl": {"30": pnl30, "7": pnl7},
+        "closedN": c30,
+        "copyWinRate": _num(copy_win_rate) if copy_win_rate is not None else None,
+        "copyWinRateFloor": win_floor,
+        "openFillRate": _num(open_rate) if open_rate is not None else None,
+        "openFillRateFloor": minimum_open_rate,
+        "activityAgeHours": activity_age,
+        "sourceQuality": source,
+        "officialPerpEvidence": {"status": official_status or "missing", "reason": official_reason},
+        "simulatedLiquidations": int(_num(scoped.get("copy_bt_liquidations"))),
+        "reasons": [] if stage_eligible else [str(first_failure or "copy_not_qualified")],
+    }
 
 
 def compute_follow_score(
-    metrics: Mapping, *, policy_values: Mapping | None = None,
+    metrics: Mapping,
+    *,
+    policy_values: Mapping | None = None,
+    stage: str | None = None,
 ) -> tuple[float, dict]:
-    """Score five non-duplicated properties on a calibrated 0–100 quality scale.
-
-    Economics answers whether our canonical account made enough money. Repeatability answers whether that
-    money survives an arbitrary follow start rather than depending on a rare winner. Edge confidence,
-    operability and path risk retain their separate meanings. Evidence completeness shrinks the total score;
-    it no longer lets a six-Campaign perfect streak masquerade as Core-grade proof.
-    """
-    metrics = apply_allowed_sector_copy_metrics(metrics)
-    raw = _clamp(_num(metrics.get("score")))
-    c30 = int(_num(metrics.get("copy_bt_closed_n")))
-    c14 = int(_num(metrics.get("copy_bt_14d_closed_n")))
-    c7 = int(_num(metrics.get("copy_bt_7d_closed_n")))
-    has_copy = _has_copy_evidence(metrics, c30, c14, c7)
-    if not has_copy:
-        return raw * 0.35, {
-            "rawScore": raw,
-            "copyScore": None,
-            "confidence": 0.0,
-            "copyPnl": {"30d": None, "14d": None, "7d": None},
-            "closedN": {"30d": c30, "14d": c14, "7d": c7},
-            "reasons": ["暂无归一化copy证据，仅保留Raw先验"],
-        }
-    expected = _num(metrics.get("copy_expected_return"))
-    lcb = _num(metrics.get("copy_return_lcb"))
-    probability = _num(metrics.get("copy_positive_probability"), 0.5)
-    risk = _clamp(_num(metrics.get("copy_risk_score"), 0.5))
-    execution = metrics.get("execution_score")
-    if execution is None:
-        execution = (
-            _num(metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")), 0.0)
-            + _num(metrics.get("capacity_fit"), 0.0)
-        ) / 2.0
-    execution = _clamp(_num(execution))
-    if metrics.get("copy_bt_add_fidelity_applied"):
-        # V2 add fidelity is continuous ranking evidence only. Noise-merged fragments are excluded inside
-        # the metric; only capacity/liquidity blocks and entry-path divergence can lower this component.
-        execution = _clamp((execution + _num(metrics.get("copy_bt_add_fidelity"), 1.0)) / 2.0)
-    evidence_days = int(_num(metrics.get("copy_evidence_days")))
+    """Return the exact 40/30/20/10 monotonic ranking score; never a permission line."""
+    scoped = apply_allowed_sector_copy_metrics(metrics)
     policy = load_copy_policy(policy_values)
-    # Qualification already defines seven 30d closes and five independent days as sufficient evidence.
-    # Continuing to shrink a qualified wallet toward a neutral 0.5 until 20 closes/10 days silently ranks
-    # a five-close +30% week behind a much thinner but older wallet.  Saturate at the actual evidence floors;
-    # below them the continuous factor still keeps observation-only wallets appropriately conservative.
-    closed_confidence = _clamp(c30 / max(1.0, float(policy.min_closed_30d)))
-    day_confidence = _clamp(evidence_days / max(1.0, float(min(5, policy.min_closed_30d))))
-    confidence = min(closed_confidence, day_confidence)
-    edge_score = _clamp(
-        0.55 + 0.45 * (expected - policy.min_expected_margin_return) / 0.08
+    c30 = int(_num(scoped.get("copy_bt_closed_n")))
+    if c30 <= 0 or scoped.get("copy_bt_net_pnl") is None:
+        source_score = scoped.get("source_quality_score")
+        if source_score is None:
+            source_score = compute_source_quality_score(scoped, policy_values=policy_values)[0]
+        return _clamp(_num(source_score)), {
+            "sourceOnly": True,
+            "sourceQualityScore": _clamp(_num(source_score)),
+            "copyScore": None,
+            "reasons": ["尚未进入Top40粗略Copy"],
+        }
+    stage = str(stage or scoped.get("copy_replay_stage") or "rough").lower()
+    strict = stage in {"strict", "final"}
+    floor30 = (
+        policy.core_min_dynamic_copy_return_30d if strict else policy.rough_min_return_30d
     )
-    lcb_score = _clamp(0.5 + 0.5 * math.tanh(lcb / 0.03))
-    probability_score = _clamp((probability - 0.50) / 0.45)
-    pnl30 = _num(metrics.get("copy_bt_net_pnl"))
-    pnl14 = _num(metrics.get("copy_bt_14d_net_pnl"))
-    pnl7 = _num(metrics.get("copy_bt_7d_net_pnl"))
-    economic_equities = {
-        days: _replay_window_equity(metrics, days) for days in (30, 14, 7)
-    }
-    returns = {
-        "30d": pnl30 / economic_equities[30],
-        "14d": pnl14 / economic_equities[14],
-        "7d": pnl7 / economic_equities[7],
-    }
-    # Explicit 30d/latest-7d magnitude and four independent timing folds share the economics pillar.
-    # The overlapping 14d window remains display-only so the same profitable days are not triple-counted.
-    policy_json = parse_json_obj(metrics.get("sector_policy_json"))
-    copy_weekly = (
-        policy_json.get("copyWeeklyProfitability")
-        if isinstance(policy_json.get("copyWeeklyProfitability"), dict) else {}
+    floor7 = policy.core_min_dynamic_copy_return_7d if strict else policy.rough_min_return_7d
+    pnl30 = _num(scoped.get("copy_bt_net_pnl"))
+    pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
+    return30 = pnl30 / _replay_window_equity(scoped, 30)
+    return7 = pnl7 / _replay_window_equity(scoped, 7)
+    official_return = _num(scoped.get("official_perp_return_30d"))
+    source_win = _num(scoped.get("source_win_rate_30d"))
+    copy_win = _num(scoped.get("copy_bt_win_rate"))
+    open_rate = _clamp(_num(
+        scoped.get("actionable_open_rate", scoped.get("copy_bt_open_fill_rate"))
+    ))
+    behavior = scoped.get(
+        "copy_bt_behavior_replication_rate",
+        scoped.get("copy_bt_add_fidelity"),
     )
-    weekly_folds = [
-        fold for fold in copy_weekly.get("folds") or ()
-        if isinstance(fold, Mapping) and fold.get("evaluable")
-    ]
-    weekly_returns = [_num(fold.get("return")) for fold in weekly_folds]
-    density_returns = [
-        _num(fold.get("averageClosedNetReturn"))
-        for fold in weekly_folds if fold.get("averageClosedNetReturn") is not None
-    ]
-    weekly_floor = max(1e-9, policy.copy_weekly_score_return_target)
-    density_floor = max(
-        1e-9,
-        _num(
-            copy_weekly.get("minNetPerClosedReturn"),
-            policy.copy_weekly_min_net_per_closed_return,
+    behavior_score = 0.50 if behavior is None else _clamp(_num(behavior))
+    as_of_ms = int(_num(scoped.get("score_as_of_ms"), time.time() * 1000))
+    activity_age = _activity_age_hours(scoped, as_of_ms)
+    activity_score = 0.0 if activity_age is None else _clamp(1.0 - activity_age / 180.0)
+    source_opens = int(_num(scoped.get("open_events_30d")))
+    components = {
+        "officialPerp30d": _quality_above_floor(
+            official_return, policy.official_perp_min_return_30d, 0.80,
         ),
-    )
-
-    def floor_quality(value, floor, span):
-        return _clamp(0.60 + 0.40 * (float(value) - float(floor)) / float(span))
-
-    def median(values):
-        rows = sorted(values)
-        if not rows:
-            return 0.0
-        middle = len(rows) // 2
-        return (
-            rows[middle] if len(rows) % 2
-            else (rows[middle - 1] + rows[middle]) / 2.0
-        )
-
-    return30_quality = floor_quality(
-        returns["30d"], policy.core_min_copy_return_30d, 0.20,
-    )
-    return7_quality = floor_quality(
-        returns["7d"], policy.core_min_copy_return_7d, 0.10,
-    )
-    if weekly_returns:
-        min_weekly = min(weekly_returns)
-        median_weekly = median(weekly_returns)
-        min_density = min(density_returns) if density_returns else None
-        median_density = median(density_returns) if density_returns else None
-        evidence_ratio = _clamp(len(weekly_returns) / max(1.0, float(policy.stability_fold_count)))
-        profitable_ratio = _clamp(
-            sum(value > 0.0 for value in weekly_returns)
-            / max(1.0, float(policy.stability_fold_count))
-        )
-        loss_ratio = copy_weekly.get("worstLossToTotalProfit")
-        if all(value >= 0.0 for value in weekly_returns):
-            loss_quality = 1.0
-        elif loss_ratio is None:
-            loss_quality = 0.0
-        else:
-            loss_quality = _clamp(
-                1.0 - _num(loss_ratio)
-                / max(1e-9, policy.stability_max_loss_to_30d_profit)
-            )
-        weekly_magnitude = floor_quality(median_weekly, weekly_floor, 0.08)
-        weekly_return_score = evidence_ratio * (
-            0.50 * profitable_ratio + 0.30 * loss_quality + 0.20 * weekly_magnitude
-        )
-        density_score = (
-            floor_quality(median_density, density_floor, 0.02)
-            if median_density is not None else 0.0
-        )
-    else:
-        min_weekly = median_weekly = min_density = median_density = None
-        profitable_ratio = loss_quality = 0.0
-        weekly_return_score = density_score = 0.0
-    economic_score = (
-        0.35 * return30_quality
-        + 0.25 * return7_quality
-        + 0.25 * weekly_return_score
-        + 0.15 * density_score
-    )
-    campaign_n = int(_num(metrics.get("copy_bt_campaign_closed_n"), c30))
-    campaign_win_rate = _clamp(_num(
-        metrics.get("copy_bt_campaign_win_rate", metrics.get("copy_bt_win_rate")),
-    ))
-    body_n = int(_num(metrics.get("copy_bt_body_after_top3_n")))
-    body_win_rate = _clamp(_num(metrics.get("copy_bt_body_after_top3_win_rate")))
-    body_net_pnl = _num(metrics.get("copy_bt_body_after_top3_net_pnl"))
-    top3_share = _clamp(_num(metrics.get("copy_bt_top3_profit_share"), 1.0))
-    campaign_win_quality = floor_quality(
-        campaign_win_rate, policy.core_min_campaign_win_rate, 0.35,
-    )
-    body_win_quality = (
-        floor_quality(body_win_rate, policy.core_min_body_win_rate, 0.30)
-        if body_n > 0 else 0.0
-    )
-    concentration_quality = _clamp(0.50 + (0.65 - top3_share) / 0.50)
-    repeatability_score = (
-        0.40 * campaign_win_quality
-        + 0.35 * body_win_quality
-        + 0.15 * concentration_quality
-        + 0.10 * (1.0 if body_n > 0 and body_net_pnl > 0.0 else 0.0)
-    )
-    profit_factor = max(0.0, _num(metrics.get("copy_bt_profit_factor")))
-    payoff_ratio = max(0.0, _num(metrics.get("copy_bt_payoff_ratio")))
-    profit_factor_quality = _clamp(math.log(max(1.0, profit_factor)) / math.log(5.0))
-    payoff_quality = _clamp(payoff_ratio / 2.0)
-    edge_confidence_score = (
-        0.35 * edge_score + 0.25 * lcb_score + 0.20 * probability_score
-        + 0.10 * profit_factor_quality + 0.10 * payoff_quality
-    )
-    activity = _clamp(_num(metrics.get("open_probability_48h"), 0.0))
-    actionable_rate = _clamp(_num(
-        metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")),
-    ))
-    capacity_fit = _clamp(_num(metrics.get("capacity_fit")))
-    operability_score = (
-        0.40 * execution + 0.25 * actionable_rate + 0.20 * capacity_fit + 0.15 * activity
-    )
-    liqs = int(_num(metrics.get("copy_bt_liquidations")))
-    liquidation_cleanliness = 1.0 - _clamp(liqs / max(1.0, float(campaign_n)))
-    # Historical fills do not expose the source order's true margin/leverage. Maximum drawdown reconstructed
-    # with our leverage ceiling remains an audit/tuning metric, not a hidden score penalty that can recreate
-    # the deleted drawdown gate through the 75-point Core floor.
-    # Cap the pillar at .90 because historical leverage coverage can never prove perfect path safety.
-    # This preserves the established 75-point calibration without reintroducing drawdown as a score input.
-    risk_score = 0.75 * risk + 0.15 * liquidation_cleanliness
+        "copy30d": _quality_above_floor(return30, floor30, 0.60),
+        "copy7d": _quality_above_floor(return7, floor7, 0.25),
+        "sourceWinRate": _quality_above_floor(
+            source_win, policy.source_min_episode_win_rate, 0.25,
+        ),
+        "copyWinRate": _quality_above_floor(
+            copy_win,
+            policy.core_min_copy_win_rate if strict else policy.rough_min_win_rate,
+            0.35,
+        ),
+        "openFollowRate": _quality_above_floor(
+            open_rate, policy.min_actionable_open_rate, 0.30,
+        ),
+        "behaviorReplication": behavior_score,
+        "activityRecency": activity_score,
+        "independentOpens": _quality_above_floor(source_opens, 10, 30),
+    }
     score = (
-        0.30 * economic_score + 0.25 * repeatability_score
-        + 0.15 * edge_confidence_score + 0.15 * operability_score + 0.15 * risk_score
+        0.10 * components["officialPerp30d"]
+        + 0.20 * components["copy30d"]
+        + 0.10 * components["copy7d"]
+        + 0.20 * components["sourceWinRate"]
+        + 0.10 * components["copyWinRate"]
+        + 0.15 * components["openFollowRate"]
+        + 0.05 * components["behaviorReplication"]
+        + 0.05 * components["activityRecency"]
+        + 0.05 * components["independentOpens"]
     )
-    campaign_confidence = _clamp(
-        campaign_n / max(1.0, float(policy.core_min_campaigns_30d))
-    )
-    readiness_confidence = min(confidence, campaign_confidence)
-    score *= 0.70 + 0.30 * readiness_confidence
-    reasons = [
-        (
-            f"最弱周Copy {min_weekly * 100:+.1f}% / 每平仓{min_density * 100:+.2f}%"
-            if min_weekly is not None and min_density is not None
-            else "四周Copy经济证据不完整"
-        ),
-        f"预期保证金收益{expected * 100:+.1f}%",
-        f"LCB {lcb * 100:+.1f}%",
-        f"盈利概率{probability * 100:.0f}%",
-        f"独立证据{evidence_days}天/{c30}笔",
-    ]
-    liquidation_rate = liqs / c30 if c30 > 0 else 0.0
-    if liqs > 0:
-        reasons.append(f"copy爆仓{liqs}次/{c30}回合（按Campaign频率进入风险柱）")
-    score = _clamp(score)
-    return score, {
-        "rawScore": raw,
-        "copyScore": edge_confidence_score,
-        "economicScore": economic_score,
-        "repeatabilityScore": repeatability_score,
-        "edgeConfidenceScore": edge_confidence_score,
-        "operabilityScore": operability_score,
-        "calibratedRiskScore": risk_score,
-        "economicReturns": returns,
-        "weeklyEconomics": {
-            "returns": weekly_returns,
-            "densityReturns": density_returns,
-            "returnFloor": weekly_floor,
-            "densityFloor": density_floor,
-            "return30Score": return30_quality,
-            "return7Score": return7_quality,
-            "minimumReturn": min_weekly,
-            "medianReturn": median_weekly,
-            "minimumNetPerClosedReturn": min_density,
-            "medianNetPerClosedReturn": median_density,
-            "profitableRatio": profitable_ratio,
-            "lossBoundScore": loss_quality,
-            "returnScore": weekly_return_score,
-            "densityScore": density_score,
-        },
-        "economicEquity": economic_equities[30],
+    return _clamp(score), {
+        "sourceOnly": False,
+        "stage": "strict" if strict else "rough",
+        "components": components,
+        "economicReturns": {"30d": return30, "7d": return7},
         "economicEquities": {
-            "30d": economic_equities[30],
-            "14d": economic_equities[14],
-            "7d": economic_equities[7],
+            "30d": _replay_window_equity(scoped, 30),
+            "7d": _replay_window_equity(scoped, 7),
         },
-        "confidence": readiness_confidence,
-        "sampleConfidence": confidence,
-        "copyPnl": {
-            "30d": metrics.get("copy_bt_net_pnl"),
-            "14d": metrics.get("copy_bt_14d_net_pnl"),
-            "7d": metrics.get("copy_bt_7d_net_pnl"),
-        },
-        "closedN": {"30d": c30, "14d": c14, "7d": c7},
-        "expectedReturn": expected,
-        "returnLcb": lcb,
-        "positiveProbability": probability,
-        "evidenceDays": evidence_days,
-        "riskScore": risk,
-        "executionScore": execution,
-        "profitFactor": profit_factor,
-        "payoffRatio": payoff_ratio,
-        "netAfterTop1": metrics.get("copy_bt_net_after_top1"),
-        "netAfterTop2": metrics.get("copy_bt_net_after_top2"),
-        "top1ProfitShare": metrics.get("copy_bt_top1_profit_share"),
-        "top3ProfitShare": metrics.get("copy_bt_top3_profit_share"),
-        "costStressNetPnl": metrics.get("copy_bt_cost_stress_net_pnl"),
-        "bodyAfterTop3": {
-            "episodes": metrics.get("copy_bt_body_after_top3_n"),
-            "wins": metrics.get("copy_bt_body_after_top3_wins"),
-            "losses": metrics.get("copy_bt_body_after_top3_losses"),
-            "winRate": metrics.get("copy_bt_body_after_top3_win_rate"),
-            "netPnl": metrics.get("copy_bt_body_after_top3_net_pnl"),
-            "profitFactor": metrics.get("copy_bt_body_after_top3_profit_factor"),
-            "payoffRatio": metrics.get("copy_bt_body_after_top3_payoff_ratio"),
-            "medianPnl": metrics.get("copy_bt_body_after_top3_median_pnl"),
-        },
-        "addMetrics": {
-            "version": metrics.get("copy_bt_add_metrics_version"),
-            "outcomeCounts": metrics.get("copy_bt_add_outcome_counts"),
-            "rawAddOrderFollowRate": metrics.get("copy_bt_raw_add_order_follow_rate"),
-            "actionableAddCaptureRate": metrics.get("copy_bt_actionable_add_capture_rate"),
-            "entryGapPctWeighted": metrics.get("copy_bt_entry_gap_pct_weighted"),
-            "entryGapPctP90": metrics.get("copy_bt_entry_gap_pct_p90"),
-            "addFidelity": metrics.get("copy_bt_add_fidelity"),
-            "behaviorReplicationV2": metrics.get("copy_bt_behavior_replication_v2"),
-        },
-        "openFillRate": metrics.get("actionable_open_rate", metrics.get("copy_bt_open_fill_rate")),
-        "liquidations": liqs,
-        "liquidationRate": liquidation_rate,
-        "feeDrag": metrics.get("copy_bt_fee_drag"),
-        "reasons": reasons,
+        "copyPnl": {"30d": pnl30, "7d": pnl7},
+        "closedN": {"30d": c30, "7d": int(_num(scoped.get("copy_bt_7d_closed_n")))},
+        "sourceWinRate": source_win,
+        "copyWinRate": copy_win,
+        "openFillRate": open_rate,
+        "activityAgeHours": activity_age,
+        "liquidations": int(_num(scoped.get("copy_bt_liquidations"))),
+        "feeDrag": scoped.get("copy_bt_fee_drag"),
+        "reasons": [
+            f"动态Copy 30d {return30 * 100:+.1f}% / 7d {return7 * 100:+.1f}%",
+            f"源胜率 {source_win * 100:.1f}% / Copy胜率 {copy_win * 100:.1f}%",
+            f"开仓跟随率 {open_rate * 100:.1f}%",
+        ],
     }

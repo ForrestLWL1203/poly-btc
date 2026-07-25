@@ -51,71 +51,62 @@ PARAM_SPEC = [
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
-    ("min_activity",         "scanner", "hidden", "float",   "rescan", 0.21, "最低活跃度", ""),
     ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 3, "网格判定:中位加仓上限(超过=习惯性均摊,跟不动)", ""),
     ("max_single_adds",      "scanner", "hidden", "int",     "rescan", config.MAX_SINGLE_ADDS_PER_EP,
         "重DCA判定:单回合加仓上限(超过=偶发但不可复制的重仓摊价)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
     ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
-    ("COPY_MIN_EXPECTED_MARGIN_RETURN", "scanner", "blue", "pct", "rescan",
-        config.COPY_MIN_EXPECTED_MARGIN_RETURN * 100,
-        "Copy保证金收益下限", "回放扣除费用、滑点后按占用保证金归一并向零收缩；低于此值属于薄利，资格阶段直接排除"),
-    # (MIN_PAYOFF removed v10 — the small_win_big_loss hard gate is gone; 盈亏比 now a smooth g_payoff factor in score)
     ("MAX_CONCURRENT_POS",   "scanner", "blue",   "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
-    ("EVIDENCE_MIN_DAYS",    "scanner", "blue",   "int",     "rescan", config.EVIDENCE_MIN_DAYS,
-        "证据·最低独立天数", "Copy已平episode分布的独立交易日少于此值，资格阶段直接排除"),
-    ("EVIDENCE_MIN_TRADES",  "scanner", "blue",   "int",     "rescan", config.EVIDENCE_MIN_TRADES,
-        "证据·最低回合数", "30天Copy回放已平episode少于此值，资格阶段直接排除"),
+    ("SOURCE_QUALITY_MAX_N", "scanner", "hidden", "int", "rescan",
+        config.SOURCE_QUALITY_MAX_N, "源质量池上限", "深采源钱包按质量预评分最多保留40个"),
+    ("SOURCE_MIN_EPISODES_30D", "scanner", "black", "int", "rescan",
+        config.SOURCE_MIN_EPISODES_30D, "源钱包30日最低完整回合", "边界不完整回合不计入样本或胜率"),
+    ("SOURCE_MIN_EPISODE_WIN_RATE", "scanner", "black", "pct", "rescan",
+        config.SOURCE_MIN_EPISODE_WIN_RATE * 100, "源钱包30日最低胜率", "手续费后完整Episode胜率至少70%"),
+    ("SOURCE_TOP3_CONCENTRATION_TRIGGER", "scanner", "hidden", "pct", "rescan",
+        config.SOURCE_TOP3_CONCENTRATION_TRIGGER * 100, "前三大赢家集中检查线", "低于70%不触发主体检查"),
+    ("SOURCE_BODY_MIN_WIN_RATE", "scanner", "hidden", "pct", "rescan",
+        config.SOURCE_BODY_MIN_WIN_RATE * 100, "高集中钱包主体最低胜率", "仅当前三大赢家占毛盈利至少70%时启用"),
     ("COPY_BT_GATE_ENABLE",  "scanner", "hidden", "bool",    "rescan", config.COPY_BT_GATE_ENABLE,
         "copy回测准入", "用历史 fills 按当前跟单规则回放;目标赚但我们复制亏的钱包不进 active"),
     ("COPY_BT_DAYS",         "scanner", "hidden", "int",     "rescan", config.COPY_BT_DAYS,
         "copy回测窗口", "copy 回测准入使用的天数"),
-    ("COPY_BT_MIN_CLOSED",   "scanner", "hidden", "int",     "rescan", config.COPY_BT_MIN_CLOSED,
-        "copy回测最低已平仓数", "低于此样本只记录,不作为硬闸"),
+    ("ROUGH_COPY_MIN_CLOSED_30D", "scanner", "black", "int", "rescan",
+        config.ROUGH_COPY_MIN_CLOSED_30D, "粗略Copy最低完整回合", "样本不足标记证据不足，不伪装为经济失败"),
+    ("ROUGH_COPY_MIN_WIN_RATE", "scanner", "black", "pct", "rescan",
+        config.ROUGH_COPY_MIN_WIN_RATE * 100, "粗略Copy最低胜率", "Copy完整Episode胜率至少60%"),
+    ("ROUGH_COPY_MIN_RETURN_30D", "scanner", "black", "pct", "rescan",
+        config.ROUGH_COPY_MIN_RETURN_30D * 100, "粗略Copy 30日动态收益", "连续浮动权益曲线至少增长15%"),
+    ("ROUGH_COPY_MIN_RETURN_7D", "scanner", "black", "pct", "rescan",
+        config.ROUGH_COPY_MIN_RETURN_7D * 100, "粗略Copy最近7日动态收益", "以第23天浮动权益为分母至少增长5%"),
     ("COPY_BT_MIN_NET_PNL",  "scanner", "hidden", "usd",     "rescan", config.COPY_BT_MIN_NET_PNL,
         "copy回测最低净收益", "扣费后的 copy 回测净收益必须高于此值才可 active"),
-    ("CORE_MIN_COPY_RETURN_30D", "scanner", "hidden", "pct", "rescan",
-        config.CORE_MIN_COPY_RETURN_30D * 100, "Core严格Copy 30日收益", ""),
-    ("CORE_MIN_COPY_RETURN_7D", "scanner", "hidden", "pct", "rescan",
-        config.CORE_MIN_COPY_RETURN_7D * 100, "Core严格Copy最近7日收益", ""),
-    ("CORE_COPY_CAMPAIGN_FLOOR", "scanner", "black", "display", "rescan",
-        f"≥ {config.CORE_COPY_MIN_CAMPAIGNS_30D} 批",
-        "独立Campaign证据", "Core要求30日至少8个独立Campaign；证据不足保留Challenger"),
-    ("CORE_COPY_MIN_CAMPAIGN_WIN_RATE", "scanner", "black", "pct", "rescan",
-        config.CORE_COPY_MIN_CAMPAIGN_WIN_RATE * 100,
-        "Core Campaign最低胜率", "防止随机跟入时过度依赖少数高盈亏比赢家；低胜率钱包仍保留Challenger研究证据"),
-    ("CORE_COPY_MIN_BODY_WIN_RATE", "scanner", "black", "pct", "rescan",
-        config.CORE_COPY_MIN_BODY_WIN_RATE * 100,
-        "Core主体最低胜率", "移除前三大盈利交易后，剩余主体必须盈利且达到此胜率"),
-    ("CORE_MIN_FOLLOW_SCORE", "scanner", "black", "pct", "rescan",
-        config.CORE_MIN_FOLLOW_SCORE * 100,
-        "Core综合质量分", "新版评分同时覆盖收益、可重复性、置信度、可执行性和风险；新进入Core至少75分"),
-    ("CORE_COPY_STABILITY", "scanner", "black", "display", "rescan",
-        f"官方4周各≥{config.COPY_STABILITY_MIN_RETURN * 100:g}%；"
-        f"Copy 30d≥{config.CORE_MIN_COPY_RETURN_30D * 100:g}% / "
-        f"最近7d≥{config.CORE_MIN_COPY_RETURN_7D * 100:g}%；30d/7d每平仓≥"
-        f"{config.CORE_MIN_AVG_NET_PER_CLOSE_RETURN * 100:g}%",
-        "目标与跟单双重盈利硬闸",
-        "官方Portfolio验证目标钱包四个非重叠7日段均≥5%；严格Copy要求30日≥10%、"
-        "最近7日≥4%，且30日与最近7日平均每个平仓均≥本金0.5%；"
-        "四段证据完整且至少三段盈利，唯一亏损段不得超过30日总利润的25%"),
+    ("CORE_MIN_DYNAMIC_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
+        config.CORE_MIN_DYNAMIC_COPY_RETURN_30D * 100, "Core动态Copy 30日收益",
+        "连续回放全程按浮动权益复利；期末相对30日起始浮动权益至少增长10%"),
+    ("CORE_MIN_DYNAMIC_COPY_RETURN_7D", "scanner", "black", "pct", "rescan",
+        config.CORE_MIN_DYNAMIC_COPY_RETURN_7D * 100, "Core动态Copy最近7日收益",
+        "从同一条复利曲线截取最近7日，期末相对第23天边界浮动权益至少增长3%"),
+    ("CORE_COPY_MIN_WIN_RATE", "scanner", "black", "pct", "rescan",
+        config.CORE_COPY_MIN_WIN_RATE * 100, "最终严格Copy最低胜率", "评分只排序，胜率是明确业务条件"),
+    ("CORE_PROFITABILITY_CONTRACT", "scanner", "black", "display", "rescan",
+        f"官方Perp 30d≥{config.OFFICIAL_PERP_MIN_RETURN_30D * 100:g}%；"
+        f"粗略Copy 30d/7d≥{config.ROUGH_COPY_MIN_RETURN_30D * 100:g}%/"
+        f"{config.ROUGH_COPY_MIN_RETURN_7D * 100:g}%；"
+        f"动态Copy 30d≥{config.CORE_MIN_DYNAMIC_COPY_RETURN_30D * 100:g}% / "
+        f"最近7d≥{config.CORE_MIN_DYNAMIC_COPY_RETURN_7D * 100:g}%",
+        "源钱包、粗略Copy与最终严格Copy盈利线",
+        "所有Copy收益均来自同一条动态复利权益曲线；评分只排序，不设75分硬线"),
     ("CORE_COPY_MAX_LIQUIDATIONS_30D", "scanner", "black", "display", "rescan",
         f"≤ {config.CORE_COPY_MAX_LIQUIDATIONS_30D} 次",
         "最终回放爆仓上限", "使用我们最大杠杆的代理回放允许至多3次；调参在保留盈利前提下优先减少，第四次才拒绝"),
-    ("CORE_SOFT_FAIL_CONFIRMATIONS", "scanner", "black", "int", "rescan",
-        config.CORE_SOFT_FAIL_CONFIRMATIONS, "Core软失败确认轮数", "收益、胜率、样本等软条件需连续完整扫描失败才降级；硬风险即时退出"),
     ("COPY_DEEP_BAG_EVENT_PCT", "scanner", "black", "pct", "rescan",
         config.COPY_DEEP_BAG_EVENT_PCT * 100, "深亏事件线", "从成员周期权益高点回撤达到此比例并持续至少4小时计为深亏事件"),
     ("COPY_DEEP_BAG_EVENT_MIN_HOURS", "scanner", "blue", "float", "rescan",
         config.COPY_DEEP_BAG_EVENT_MIN_HOURS, "深亏事件最短时长", "达到深亏比例后持续至少此小时数才形成事件"),
     ("COPY_DEEP_BAG_LONG_HOURS", "scanner", "blue", "float", "rescan",
         config.COPY_DEEP_BAG_LONG_HOURS, "长时间深亏时长", "已恢复但持续达到此时长最多只允许Challenger"),
-    ("WINDFALL_CONC",        "scanner", "hidden", "pct",     "rescan", config.WINDFALL_CONC * 100,
-        "单日利润集中度上限", "单日≥此比例毛利且胜率<下条=靠一笔偶然大赚撑着(亏损未覆盖),排除"),
-    ("WINDFALL_WIN_MAX",     "scanner", "hidden", "pct",     "rescan", config.WINDFALL_WIN_MAX * 100,
-        "windfall判定·胜率上限", "配合上条:高集中度+胜率低于此=一波流;真高胜率的集中不算(靠稳定胜率不靠一把)"),
-
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("FOLLOW_SELECTION_MODE", "follow", "hidden", "text", "immediate", config.FOLLOW_SELECTION_MODE,
         "跟单集合模式", "auto使用已发布Core集合;manual保留人工集合"),
@@ -344,7 +335,22 @@ def seed_params(db):
         "'WALLET_CRYPTO_HIGH_SIDE_CAP_PCT','WALLET_STOCK_SIDE_CAP_PCT',"
         "'WALLET_MAX_OPEN_POSITIONS','WALLET_STOCK_SIDE_MAX_POSITIONS',"
         "'CORE_INTRATRADE_DD_MAX','CORE_INTRATRADE_DD_REJECT',"
-        "'CORE_DEEP_BAG_MAX_FAILED','CORE_DEEP_BAG_MIN_RECOVERY_RATE')"
+        "'CORE_DEEP_BAG_MAX_FAILED','CORE_DEEP_BAG_MIN_RECOVERY_RATE',"
+        "'CORE_TARGET_MIN_N','CORE_PROMOTION_MIN_HOURS','CORE_SOFT_MIN_TENURE_DAYS',"
+        "'CORE_SOFT_FAIL_CONFIRMATIONS','COPY_MIN_EXPECTED_MARGIN_RETURN',"
+        "'COPY_STABILITY_FOLD_DAYS','COPY_STABILITY_FOLD_COUNT',"
+        "'COPY_STABILITY_MIN_EVALUABLE_FOLDS','COPY_STABILITY_MIN_PROFITABLE_FOLDS',"
+        "'COPY_STABILITY_MIN_RETURN','COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT',"
+        "'CORE_MIN_COPY_RETURN_30D','CORE_MIN_COPY_RETURN_7D',"
+        "'CORE_MIN_AVG_NET_PER_CLOSE_RETURN','COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD',"
+        "'COPY_WEEKLY_MIN_RETURN','COPY_WEEKLY_SCORE_RETURN_TARGET',"
+        "'COPY_WEEKLY_MIN_NET_PER_CLOSED_RETURN','CORE_MIN_COPY_NET_PNL_30D',"
+        "'CORE_MIN_COPY_NET_PNL_7D','CORE_COPY_STABILITY',"
+        "'CORE_MIN_CAMPAIGN_MARGIN_RETURN_30D','CORE_MIN_CAMPAIGN_MARGIN_RETURN_7D',"
+        "'CORE_COPY_CAMPAIGN_FLOOR','CORE_COPY_MIN_CAMPAIGN_WIN_RATE',"
+        "'CORE_COPY_MIN_BODY_WIN_RATE','CORE_MIN_FOLLOW_SCORE',"
+        "'OFFICIAL_PERP_FOLD_DAYS','OFFICIAL_PERP_FOLD_COUNT',"
+        "'OFFICIAL_PERP_MIN_FOLD_RETURN','COPY_CAMPAIGN_ZERO_RETURN_PRIOR')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)
@@ -358,14 +364,6 @@ def seed_params(db):
             db.execute(
                 "UPDATE params SET value=? WHERE key=? AND value IN ('10','10.0') "
                 "AND default_value IN ('10','10.0') AND value=default_value",
-                (dv, key),
-            )
-        # Approved Core recent-profit policy: migrate untouched historical 5% and 3% defaults to 4%.
-        # Preserve any operator override, including a value that happens to equal another old threshold.
-        if key == "CORE_MIN_COPY_RETURN_7D":
-            db.execute(
-                "UPDATE params SET value=? WHERE key=? AND value IN ('3','3.0','5','5.0') "
-                "AND default_value IN ('3','3.0','5','5.0') AND value=default_value",
                 (dv, key),
             )
         # Approved harvest-policy migration. Move only previously approved default surfaces, including the
@@ -482,16 +480,13 @@ SCANNER_ARG_MAP = {
     "HARVEST_MONTH_PNL_MIN": "month_pnl_min", "HARVEST_ALL_PNL_MIN": "all_pnl_min",
     "HARVEST_PERP_PNL_SHARE_MIN": "perp_pnl_share_min",
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
-    "min_activity": "min_activity", "grid_max_adds": "grid_max_adds",
+    "grid_max_adds": "grid_max_adds",
     "max_single_adds": "max_single_adds",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
-    "COPY_MIN_EXPECTED_MARGIN_RETURN": "copy_min_expected_margin_return",
     "COPY_BT_GATE_ENABLE": "copy_bt_gate_enable", "COPY_BT_DAYS": "copy_bt_days",
     "COPY_BT_MIN_CLOSED": "copy_bt_min_closed", "COPY_BT_MIN_NET_PNL": "copy_bt_min_net_pnl",
-    "WINDFALL_CONC": "windfall_conc", "WINDFALL_WIN_MAX": "windfall_win_max",
     "MAX_CONCURRENT_POS": "max_concurrent_pos",
-    "EVIDENCE_MIN_DAYS": "evidence_min_days", "EVIDENCE_MIN_TRADES": "evidence_min_trades",
     "DAILY_SCAN_TIME_BUDGET_MIN": "daily_scan_time_budget_min",
     "CORE_REFRESH_DEADLINE_MIN": "core_refresh_deadline_min",
     "SCAN_FINALIZE_RESERVE_MIN": "scan_finalize_reserve_min",

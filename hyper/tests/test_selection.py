@@ -270,7 +270,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["looRemoved"], ("0xb",))
         self.assertEqual(result["reasons"]["0xb"], "portfolio_negative_incremental_net")
 
-    def test_prequalified_starred_core_cannot_be_removed_by_loo(self):
+    def test_starred_core_has_no_selection_or_tail_removal_bypass(self):
         profiles = [
             {
                 "addr": "0xstar", "status": "active", "profile_generation": "g2",
@@ -291,13 +291,13 @@ class SelectionTests(unittest.TestCase):
 
         result = scanner._quality_first_core_transition(
             profiles, generation_id="g2", previous_roles={"0xstar": "core"}, controls={},
-            desired_order=("0xstar", "0xgood"), pinned_order=("0xstar",),
+            desired_order=("0xgood", "0xstar"),
             strict_evaluate=lambda addrs: self._transition_metrics(metrics[tuple(sorted(addrs))]),
         )
 
-        self.assertEqual(result["selected"], ("0xstar", "0xgood"))
-        self.assertEqual(result["reasons"]["0xstar"], "operator_starred_core")
-        self.assertNotIn("0xstar", result["looRemoved"])
+        self.assertEqual(result["selected"], ("0xgood",))
+        self.assertEqual(result["reasons"]["0xstar"], "portfolio_negative_incremental_net")
+        self.assertIn("0xstar", result["looRemoved"])
 
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,

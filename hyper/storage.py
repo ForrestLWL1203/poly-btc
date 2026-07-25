@@ -209,6 +209,26 @@ CREATE TABLE IF NOT EXISTS profile (
     evaluated_at TEXT,
     data_status TEXT DEFAULT 'valid',     -- valid / deferred_data_error; business rejection belongs to status/reason
     evidence_status TEXT,                 -- qualified / thin / missing / invalid
+    official_perp_status TEXT,             -- passed / rejected / deferred_data_error for this generation
+    official_perp_reason TEXT,
+    official_perp_evidence_json TEXT,
+    official_perp_return_30d REAL,
+    official_perp_pnl_30d REAL,
+    official_perp_pnl_share REAL,
+    source_episode_n_30d INTEGER DEFAULT 0,
+    source_episode_n_7d INTEGER DEFAULT 0,
+    source_win_rate_30d REAL,
+    source_win_rate_7d REAL,
+    source_net_pnl_30d REAL,
+    source_net_pnl_7d REAL,
+    source_active_days_30d INTEGER DEFAULT 0,
+    source_active_days_7d INTEGER DEFAULT 0,
+    source_top3_profit_share REAL,
+    source_body_after_top3_n INTEGER DEFAULT 0,
+    source_body_after_top3_win_rate REAL,
+    source_body_after_top3_net_pnl REAL,
+    source_quality_score REAL,
+    rough_copy_score REAL,
     last_copyable_open_ms INTEGER,
     open_events_7d INTEGER DEFAULT 0,
     open_events_30d INTEGER DEFAULT 0,
@@ -329,9 +349,6 @@ CREATE TABLE IF NOT EXISTS wallet_registry (
     core_entries               INTEGER NOT NULL DEFAULT 0,
     core_exits                 INTEGER NOT NULL DEFAULT 0,
     recovery_count             INTEGER NOT NULL DEFAULT 0,
-    core_soft_fail_count       INTEGER NOT NULL DEFAULT 0,
-    core_soft_fail_generation  TEXT,
-    core_soft_fail_reason      TEXT,
     last_valid_generation      TEXT,
     last_evaluated_generation  TEXT,
     last_actionable_open_ms    INTEGER,
@@ -384,6 +401,7 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     acct_value      REAL,
     sector_policy_json TEXT,
     replay_copy_bt_net_pnl        REAL,
+    replay_copy_bt_window_start_equity REAL,
     replay_copy_bt_win_rate       REAL,
     replay_copy_bt_closed_n       INTEGER,
     replay_copy_bt_open_fill_rate REAL,
@@ -395,6 +413,7 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     replay_copy_bt_14d_unrealized_pnl REAL,
     replay_copy_bt_14d_closed_n   INTEGER,
     replay_copy_bt_7d_net_pnl     REAL,
+    replay_copy_bt_7d_window_start_equity REAL,
     replay_copy_bt_7d_unrealized_pnl REAL,
     replay_copy_bt_7d_closed_n    INTEGER,
     replay_sector_copy_json       TEXT,
@@ -522,18 +541,21 @@ PROFILE_COLS = (
     "copy_bt_14d_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,copy_bt_14d_window_start_equity,"
     "copy_bt_7d_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,copy_bt_7d_window_start_equity,"
     "sector_copy_json,sector_policy_json,"
-    "profile_generation,evaluated_at,data_status,evidence_status,last_copyable_open_ms,"
+    "profile_generation,evaluated_at,data_status,evidence_status,"
+    "official_perp_status,official_perp_reason,official_perp_evidence_json,"
+    "official_perp_return_30d,official_perp_pnl_30d,official_perp_pnl_share,"
+    "source_episode_n_30d,source_episode_n_7d,source_win_rate_30d,source_win_rate_7d,"
+    "source_net_pnl_30d,source_net_pnl_7d,source_active_days_30d,source_active_days_7d,"
+    "source_top3_profit_share,source_body_after_top3_n,source_body_after_top3_win_rate,"
+    "source_body_after_top3_net_pnl,source_quality_score,rough_copy_score,last_copyable_open_ms,"
     "open_events_7d,open_events_30d,actionable_open_events_7d,actionable_open_events_30d,"
     "open_days_30d,open_probability_48h,open_position_count,material_open_count,"
-    "raw_quality_score,copy_expected_return,copy_return_lcb,copy_return_volatility,"
-    "copy_positive_probability,copy_evidence_days,copy_recent_return_14d,copy_recent_return_7d,"
-    "copy_risk_score,execution_score,"
+    "raw_quality_score,copy_evidence_days,execution_score,"
     "selection_marginal_utility,model_coverage,oos_net_pnl,oos_max_drawdown,oos_cvar95,"
     "actionable_open_rate,capacity_fit,"
     "copy_path_risk_status,copy_intratrade_max_drawdown,copy_max_underwater_hours,"
     "copy_loss_over_5_time_ratio,copy_deep_bag_event_n,copy_failed_deep_bag_n,"
     "copy_deep_bag_recovery_rate,copy_max_deep_bag_hours,copy_current_open_loss_frac,copy_current_bag_hours,"
-    "copy_campaign_max_drawdown,copy_campaign_peak_positions,copy_campaign_peak_margin_pct,"
     "first_added,last_refreshed,times_seen,times_active"
 )
 
@@ -1076,6 +1098,26 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN evaluated_at TEXT",
     "ALTER TABLE profile ADD COLUMN data_status TEXT DEFAULT 'valid'",
     "ALTER TABLE profile ADD COLUMN evidence_status TEXT",
+    "ALTER TABLE profile ADD COLUMN official_perp_status TEXT",
+    "ALTER TABLE profile ADD COLUMN official_perp_reason TEXT",
+    "ALTER TABLE profile ADD COLUMN official_perp_evidence_json TEXT",
+    "ALTER TABLE profile ADD COLUMN official_perp_return_30d REAL",
+    "ALTER TABLE profile ADD COLUMN official_perp_pnl_30d REAL",
+    "ALTER TABLE profile ADD COLUMN official_perp_pnl_share REAL",
+    "ALTER TABLE profile ADD COLUMN source_episode_n_30d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN source_episode_n_7d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN source_win_rate_30d REAL",
+    "ALTER TABLE profile ADD COLUMN source_win_rate_7d REAL",
+    "ALTER TABLE profile ADD COLUMN source_net_pnl_30d REAL",
+    "ALTER TABLE profile ADD COLUMN source_net_pnl_7d REAL",
+    "ALTER TABLE profile ADD COLUMN source_active_days_30d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN source_active_days_7d INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN source_top3_profit_share REAL",
+    "ALTER TABLE profile ADD COLUMN source_body_after_top3_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN source_body_after_top3_win_rate REAL",
+    "ALTER TABLE profile ADD COLUMN source_body_after_top3_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN source_quality_score REAL",
+    "ALTER TABLE profile ADD COLUMN rough_copy_score REAL",
     "ALTER TABLE profile ADD COLUMN last_copyable_open_ms INTEGER",
     "ALTER TABLE profile ADD COLUMN open_events_7d INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN open_events_30d INTEGER DEFAULT 0",
@@ -1115,9 +1157,6 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_campaign_max_drawdown REAL",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_positions INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_margin_pct REAL",
-    "ALTER TABLE wallet_registry ADD COLUMN core_soft_fail_count INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE wallet_registry ADD COLUMN core_soft_fail_generation TEXT",
-    "ALTER TABLE wallet_registry ADD COLUMN core_soft_fail_reason TEXT",
     "ALTER TABLE wallet_risk_state ADD COLUMN pnl_baseline REAL NOT NULL DEFAULT 0",
     "ALTER TABLE wallet_risk_state ADD COLUMN active_member INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE copy_account ADD COLUMN equity_high_water REAL",
@@ -1141,6 +1180,7 @@ _MIGRATIONS = (
     # Display-only replay under the currently effective strategy parameters.  The scan-time profile
     # evidence remains immutable, so this refresh cannot feed back into Core membership.
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_window_start_equity REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_win_rate REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_closed_n INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_open_fill_rate REAL",
@@ -1149,6 +1189,7 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_net_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_closed_n INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_window_start_equity REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_closed_n INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN replay_sector_copy_json TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_params_hash TEXT",

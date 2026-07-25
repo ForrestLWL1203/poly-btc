@@ -176,29 +176,47 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
     core_rows = []
     cur = db.execute(
         "SELECT fs.addr,lb.week_roi,lb.mon_roi,lb.all_roi,lb.week_pnl,lb.mon_pnl,lb.all_pnl,"
-        "p.market_type,p.copy_expected_return,p.copy_recent_return_14d,p.copy_recent_return_7d,"
-        "p.oos_max_drawdown,p.copy_risk_score,p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
-        "p.last_copyable_open_ms,p.sector_policy_json FROM follow_selection fs "
+        "p.market_type,fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_window_start_equity,"
+        "fs.replay_copy_bt_7d_net_pnl,fs.replay_copy_bt_7d_window_start_equity,"
+        "fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,fs.replay_copy_bt_7d_closed_n,"
+        "fs.replay_copy_bt_open_fill_rate,fs.replay_copy_bt_liquidations,"
+        "p.official_perp_return_30d,p.source_episode_n_30d,p.source_win_rate_30d,"
+        "p.source_top3_profit_share,p.source_body_after_top3_win_rate,"
+        "p.source_body_after_top3_net_pnl,p.last_copyable_open_ms,p.sector_policy_json "
+        "FROM follow_selection fs "
         "JOIN leaderboard_staging lb ON lb.generation=fs.generation AND lb.addr=fs.addr "
         "JOIN profile p ON p.addr=fs.addr WHERE fs.generation=? AND fs.role='core' ORDER BY fs.selection_rank",
         (generation_id,),
     )
     for row in cur.fetchall():
         (addr, week_roi, month_roi, all_roi, week_pnl, month_pnl, all_pnl, market_type,
-         return30, return14, return7, max_dd, risk_score, closed30, closed14, closed7, last_open, sector_json) = row
+         net30, equity30, net7, equity7, copy_win, closed30, closed7, open_rate, liquidations,
+         official_perp_return, source_n, source_win, top3_share, body_win, body_net,
+         last_open, sector_json) = row
         windows = (perp_payload.get(addr) or {}).get("windows") or {}
         core_rows.append({
             "wallet": _mask(addr),
             "official": {"roi": {"7d": week_roi, "30d": month_roi, "all": all_roi},
                          "pnl": {"7d": week_pnl, "30d": month_pnl, "all": all_pnl}},
             "perpShare": {key: value.get("perpShare") for key, value in windows.items()},
+            "officialPerpReturn30d": official_perp_return,
             "marketType": market_type,
             "allowedMarkets": (json.loads(sector_json or "{}").get("allowed") if sector_json else []),
-            "copyReturn": {"7d": return7, "14d": return14, "30d": return30},
-            "maxDrawdown": max_dd if max_dd is not None else (
-                max(0.0, 1.0 - float(risk_score)) if risk_score is not None else None
-            ),
-            "sample": {"7d": closed7, "14d": closed14, "30d": closed30},
+            "strictCopy": {
+                "netPnl": {"7d": net7, "30d": net30},
+                "return": {
+                    "7d": (net7 / equity7) if net7 is not None and equity7 else None,
+                    "30d": (net30 / equity30) if net30 is not None and equity30 else None,
+                },
+                "winRate": copy_win, "openFillRate": open_rate,
+                "liquidations": liquidations,
+            },
+            "sourceQuality": {
+                "episodes30d": source_n, "winRate30d": source_win,
+                "top3ProfitShare": top3_share, "bodyWinRate": body_win,
+                "bodyNetPnl": body_net,
+            },
+            "sample": {"7d": closed7, "30d": closed30},
             "lastOpenMs": last_open,
         })
     previous = {}

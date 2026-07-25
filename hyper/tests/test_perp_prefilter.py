@@ -55,7 +55,7 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.windows["week"]["perpShare"], 0.8)
         self.assertEqual(result.windows["month"]["perpShare"], 0.8)
-        self.assertEqual(result.windows["officialStability"]["qualifiedFolds"], 4)
+        self.assertGreater(result.windows["officialPerp30d"]["return"], 0.20)
 
     def test_week_and_lifetime_are_audit_only(self):
         weak_week = perp_prefilter.evaluate(
@@ -91,7 +91,7 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(result.deferred)
         self.assertEqual(result.reason, "portfolio_window_missing:month")
 
-    def test_official_four_week_stability_rejects_one_weak_fold_before_fills(self):
+    def test_official_month_uses_full_window_not_four_week_vetoes(self):
         payload = _portfolio()
         payload = [
             [name, _stability_window([0.06, 0.04, 0.07, 0.08])]
@@ -100,11 +100,10 @@ class PerpPrefilterTests(unittest.TestCase):
             for name in [row[0]]
         ]
         result = perp_prefilter.evaluate(payload, pnl_minima=self.minima, share_min=0.1)
-        self.assertEqual(result.status, "rejected")
-        self.assertEqual(result.reason, "portfolio_weekly_return_below_floor")
-        self.assertEqual(result.windows["officialStability"]["qualifiedFolds"], 3)
+        self.assertTrue(result.passed)
+        self.assertAlmostEqual(result.windows["officialPerp30d"]["return"], .25)
 
-    def test_sparse_month_history_is_evidence_deferred_not_business_rejection(self):
+    def test_exact_sparse_month_endpoints_are_valid_official_evidence(self):
         payload = _portfolio()
         sparse = {
             "pnlHistory": [[0, "0"], [28 * 86400_000, "4000"]],
@@ -116,8 +115,45 @@ class PerpPrefilterTests(unittest.TestCase):
             for name in [row[0]]
         ]
         result = perp_prefilter.evaluate(payload, pnl_minima=self.minima, share_min=0.1)
+        self.assertTrue(result.passed)
+        self.assertAlmostEqual(result.windows["officialPerp30d"]["return"], .40)
+
+    def test_official_perp_return_twenty_percent_boundary_is_inclusive(self):
+        payload = _portfolio()
+        exact = {
+            "pnlHistory": [[0, "0"], [28 * 86400_000, "2000"]],
+            "accountValueHistory": [[0, "10000"], [28 * 86400_000, "12000"]],
+        }
+        payload = [
+            [name, exact] if name == "perpMonth" else row
+            for row in payload
+            for name in [row[0]]
+        ]
+        passed = perp_prefilter.evaluate(
+            payload, pnl_minima=self.minima, share_min=0.1, min_return_30d=.20,
+        )
+        exact["pnlHistory"][-1][1] = "1999"
+        failed = perp_prefilter.evaluate(
+            payload, pnl_minima=self.minima, share_min=0.1, min_return_30d=.20,
+        )
+
+        self.assertTrue(passed.passed)
+        self.assertEqual(failed.reason, "official_perp_return_below_floor:month")
+
+    def test_history_under_28_days_is_deferred_not_business_rejection(self):
+        payload = _portfolio()
+        short = {
+            "pnlHistory": [[0, "0"], [27 * 86400_000, "4000"]],
+            "accountValueHistory": [[0, "10000"], [27 * 86400_000, "14000"]],
+        }
+        payload = [
+            [name, short] if name == "perpMonth" else row
+            for row in payload
+            for name in [row[0]]
+        ]
+        result = perp_prefilter.evaluate(payload, pnl_minima=self.minima, share_min=0.1)
         self.assertTrue(result.deferred)
-        self.assertEqual(result.reason, "portfolio_weekly_stability_incomplete")
+        self.assertEqual(result.reason, "history_under_28d")
 
     def test_leveraged_volume_does_not_affect_leaderboard_decision(self):
         def row(volume):

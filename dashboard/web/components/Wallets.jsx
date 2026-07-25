@@ -68,9 +68,11 @@ export function Wallets({ confirm }) {
         <h2>跟踪名单</h2>
         <div className="wallets-head-actions">
           {tab === "followed" && portfolioReplay && (
-            <div className="portfolio-replay-kpi" title="当前 Core 使用 Observer 已生效参数在共享账户中做严格30日回放。复刻率同时考虑开仓捕获、加仓捕获以及是否存活到目标自然退出；爆仓为成交OHLC代理的保守压力值。">
-              <span>当前Core · 生效参数 · 严格30d：</span>
+            <div className="portfolio-replay-kpi" title="共享账户从期初权益开始连续滚动复利；30日和最近7日收益率分别使用各自窗口边界的真实浮动权益。">
+              <span>当前Core · 生效参数 · 动态严格Copy：</span>
               <b className={(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0, 0)}</b>
+              {portfolioReplay.dynamicReturn30d != null && <i>30d {fSign(portfolioReplay.dynamicReturn30d * 100, 1)}%</i>}
+              {portfolioReplay.dynamicReturn7d != null && <i>7d {fSign(portfolioReplay.dynamicReturn7d * 100, 1)}%</i>}
               <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
               {portfolioReplay.behaviorReplication30Worst != null && <i>复刻≈{fNum(portfolioReplay.behaviorReplication30Worst * 100, 0)}%</i>}
               {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}
@@ -89,9 +91,9 @@ export function Wallets({ confirm }) {
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
-              <th className="num" title="按当前已生效的调参结果回放，已扣手续费；同时展示长期与近期结果">当前参数回放</th>
+              <th className="num" title="Core展示调参后的严格K线路径回放；Challenger展示Top40阶段的fills-only粗略回放。收益率使用各窗口真实浮动期初权益。">Copy回放</th>
               <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
-              <th className="num" title="重叠的同钱包、同板块、同方向仓位合并为一次独立campaign后计算">独立胜率</th><th>主力</th>
+              <th className="num" title="上行为我们Copy回放的完整已平回合胜率；下行为源钱包30日完整Episode胜率">Copy / 源胜率</th><th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>
             <tbody>
@@ -107,7 +109,7 @@ export function Wallets({ confirm }) {
                         className={"btn btn-star" + (w.starred ? " on" : "")}
                         aria-label={w.starred ? "取消星标" : "设为星标钱包"}
                         aria-pressed={!!w.starred}
-                        title={w.starred ? "已锁定在跟单列表；点击取消星标" : "星标后锁定在跟单列表并置顶"}
+                        title={w.starred ? "已标记为关注；点击取消星标" : "仅作关注标记，不改变评分、准入或排序"}
                         disabled={!!starPending[w.address]}
                         onClick={(e) => { e.stopPropagation(); toggleStar(w); }}>
                         {starPending[w.address] ? "…" : w.starred ? "★" : "☆"}
@@ -122,14 +124,23 @@ export function Wallets({ confirm }) {
                     <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
                     <td className="num mono"><b>{w.openEvents7d ?? "—"}</b> <span className="muted">/</span> {w.closed7d ?? "—"}</td>
                     <td className="num">
+                      <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>
+                        {w.copyReplayStage === "strict" ? "最终严格" : "粗略fills-only"}
+                      </div>
                       <b style={{ color: (w.copyBacktestNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.copyBacktestNetPnl != null ? fSign(w.copyBacktestNetPnl, 0) : "—"}</b>
+                      {w.copyBacktestReturnPct != null && <span className="muted"> · {fSign(w.copyBacktestReturnPct, 1)}%</span>}
                       <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
                         30日已平 {w.copyBacktestNetPnl != null ? fSign((w.copyBacktestNetPnl || 0) - (w.copyBacktestUnrealizedPnl || 0), 0) : "—"}
                         {Math.abs(w.copyBacktestUnrealizedPnl || 0) >= 0.5 && <React.Fragment> · {(w.copyBacktestUnrealizedPnl || 0) < 0 ? "持仓亏损" : "持仓盈利"} <span style={{ color: (w.copyBacktestUnrealizedPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.copyBacktestUnrealizedPnl, 0)}</span></React.Fragment>}
                       </div>
                       <div style={{ fontSize: 11, marginTop: 2, color: (w.copyBacktest7dNetPnl || 0) < 0 ? "var(--red-l)" : "var(--t2)" }}>
-                        7日合计 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"} · {w.copyBacktest7dClosedN || 0}笔
+                        7日合计 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"}
+                        {w.copyBacktest7dReturnPct != null && <> · {fSign(w.copyBacktest7dReturnPct, 1)}%</>} · {w.copyBacktest7dClosedN || 0}笔
                       </div>
+                      {w.openFollowRatePct != null && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
+                        开仓跟随 {fNum(w.openFollowRatePct, 0)}%
+                        {w.liquidations30d != null && <> · 爆仓 {w.liquidations30d}</>}
+                      </div>}
                       {w.copyBacktestValuationStatus && w.copyBacktestValuationStatus !== "complete" && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>持仓估值待确认</div>}
                     </td>
                     <td className="num">
@@ -140,7 +151,10 @@ export function Wallets({ confirm }) {
                     </td>
                     <td className="num">
                       {w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}
-                      {w.campaignClosedN != null && <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>{w.campaignClosedN} 批</div>}
+                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
+                        源 {w.sourceWinRatePct != null ? fNum(w.sourceWinRatePct, 0) + "%" : "—"}
+                        {w.sourceEpisodeN30d != null && <> · {w.sourceEpisodeN30d}回合</>}
+                      </div>
                     </td>
                     <td><b>{w.mainCoin || "—"}</b></td>
                     {tab === "challenger" && <td><span className="muted">{w.selectionReasonText || "未满足实跟条件"}</span></td>}

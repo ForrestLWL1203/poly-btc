@@ -63,7 +63,7 @@ def _endpoint_pnl(position: dict) -> float:
     )
 
 
-def profit_structure_metrics(positions: list[dict], *, total_net: float, fee_drag: float) -> dict:
+def profit_structure_metrics(positions: list[dict], *, total_net: float) -> dict:
     """Return fee-paid distribution diagnostics for one replay endpoint.
 
     Open positions participate at their canonical marked endpoint.  This keeps qualification aligned with
@@ -131,106 +131,6 @@ def profit_structure_metrics(positions: list[dict], *, total_net: float, fee_dra
             if body_avg_loss > 0.0 else (999.0 if body_avg_win > 0.0 else 0.0)
         ),
         "body_after_top3_median_pnl": body_median,
-        # An exact 1.5x replay is still run for portfolio finalists.  At the individual-evidence layer this
-        # same-path value is the deterministic extra half-fee stress and avoids doubling profile CPU work.
-        "cost_stress_net_pnl": float(total_net) - 0.5 * max(0.0, float(fee_drag)),
-    }
-
-
-def campaign_structure_metrics(positions: list[dict]) -> dict:
-    """Collapse overlapping same-wallet/board/direction positions into independent trade campaigns.
-
-    A basket trader may open ten correlated stock shorts at once. Counting those symbols as ten independent
-    wins makes both win rate and Wilson confidence fictitious; economically they are one directional bet.
-    """
-    grouped = {}
-    for position in positions or ():
-        opened = int(f(position.get("opened_at")) or 0)
-        closed = int(f(position.get("closed_at")) or 0)
-        is_open = str(position.get("status") or "open") == "open" or closed <= 0
-        end = float("inf") if is_open else closed
-        key = (
-            str(position.get("addr") or "").lower(),
-            "stock" if str(position.get("coin") or "").lower().startswith("xyz:") else "crypto",
-            str(position.get("side") or "").lower(),
-        )
-        grouped.setdefault(key, []).append((opened, end, position, is_open))
-
-    campaigns = []
-    for key, rows in grouped.items():
-        rows.sort(key=lambda row: (row[0], row[1]))
-        current = None
-        for opened, end, position, is_open in rows:
-            pnl = _endpoint_pnl(position)
-            if current is None or opened > current["end"]:
-                if current is not None:
-                    campaigns.append(current)
-                current = {
-                    "key": key, "opened_at": opened, "end": end, "closed": not is_open,
-                    "pnl": pnl, "position_n": 1, "positions": [position],
-                }
-            else:
-                current["end"] = max(current["end"], end)
-                current["closed"] = bool(current["closed"] and not is_open)
-                current["pnl"] += pnl
-                current["position_n"] += 1
-                current["positions"].append(position)
-        if current is not None:
-            campaigns.append(current)
-
-    closed_campaigns = [campaign for campaign in campaigns if campaign["closed"]]
-    pnls = [float(campaign["pnl"]) for campaign in closed_campaigns]
-    wins = sorted((value for value in pnls if value > 0.0), reverse=True)
-    losses = [-value for value in pnls if value < 0.0]
-    gross_profit = sum(wins)
-    gross_loss = sum(losses)
-    peak_positions = 0
-    peak_margin = 0.0
-    for campaign in campaigns:
-        events = []
-        for position in campaign.get("positions") or ():
-            opened = int(f(position.get("opened_at")))
-            closed = int(f(position.get("closed_at")))
-            margin = max(0.0, f(position.get("margin")))
-            events.append((opened, 1, margin))
-            if closed:
-                events.append((closed, -1, -margin))
-        current_n = 0
-        current_margin = 0.0
-        # Process opens before closes at an identical timestamp so a flip/rebalance cannot under-report
-        # the momentary basket capacity required by a strict follower.
-        for _stamp, count_delta, margin_delta in sorted(events, key=lambda row: (row[0], -row[1])):
-            current_n += count_delta
-            current_margin += margin_delta
-            peak_positions = max(peak_positions, current_n)
-            peak_margin = max(peak_margin, current_margin)
-    open_campaigns = [campaign for campaign in campaigns if not campaign["closed"]]
-    worst_open = min((float(campaign["pnl"]) for campaign in open_campaigns), default=0.0)
-    oldest_losing_open = min(
-        (int(campaign["opened_at"]) for campaign in open_campaigns if float(campaign["pnl"]) < 0.0),
-        default=0,
-    )
-    return {
-        "campaign_closed_n": len(closed_campaigns),
-        "campaign_open_n": len(campaigns) - len(closed_campaigns),
-        "campaign_wins": len(wins),
-        "campaign_win_rate": len(wins) / len(closed_campaigns) if closed_campaigns else 0.0,
-        "campaign_net_pnl": sum(pnls),
-        "campaign_gross_profit": gross_profit,
-        "campaign_gross_loss": gross_loss,
-        "campaign_profit_factor": (
-            gross_profit / gross_loss if gross_loss > 0.0 else (999.0 if gross_profit > 0.0 else 0.0)
-        ),
-        "campaign_top1_profit_share": wins[0] / gross_profit if gross_profit > 0.0 else 0.0,
-        "campaign_top2_profit_share": sum(wins[:2]) / gross_profit if gross_profit > 0.0 else 0.0,
-        "campaign_net_after_top1": sum(pnls) - sum(wins[:1]),
-        "campaign_net_after_top2": sum(pnls) - sum(wins[:2]),
-        "campaign_max_positions": max((campaign["position_n"] for campaign in campaigns), default=0),
-        "campaign_peak_positions": peak_positions,
-        "campaign_peak_margin": peak_margin,
-        "campaign_worst_pnl": min((float(campaign["pnl"]) for campaign in campaigns), default=0.0),
-        "campaign_worst_open_pnl": worst_open,
-        "campaign_oldest_losing_open_ms": oldest_losing_open,
     }
 
 
@@ -636,9 +536,6 @@ class Backtest:
         self.deploy_samples = []
         self.path_equity_samples = []
         self.path_liquidation_times = []
-        self.campaign_closed_net = Counter()
-        self.campaign_risk_high_water = {}
-        self.campaign_intratrade_max_drawdown = 0.0
         self.track_price_path = False
 
     def open_sizing_params(self):
@@ -719,41 +616,6 @@ class Backtest:
         if stamp <= 0:
             return
         self.path_equity_samples.append({"time": stamp, "equity": self.marked_equity()})
-        self._sample_campaign_risk()
-
-    @staticmethod
-    def _campaign_key(position):
-        return (
-            str(position.get("addr") or "").lower(),
-            "stock" if str(position.get("coin") or "").lower().startswith("xyz:") else "crypto",
-            str(position.get("side") or "").lower(),
-        )
-
-    def _sample_campaign_risk(self):
-        """Mark every currently overlapping source/sector/direction basket on the same price path."""
-        if self.path_refinement_probe:
-            return
-        grouped = {}
-        for position in self.open.values():
-            key = self._campaign_key(position)
-            mark = self.last_px.get(position.get("coin")) or position.get("entry_px")
-            pnl = f(position.get("realized_net")) + f(position.get("rem_size")) * (
-                f(mark) - f(position.get("entry_px"))
-            ) * f(position.get("sign"))
-            grouped[key] = grouped.get(key, 0.0) + pnl
-        for key, open_pnl in grouped.items():
-            campaign_pnl = f(self.campaign_closed_net.get(key)) + open_pnl
-            campaign_equity = self.initial_balance + campaign_pnl
-            peak = max(
-                self.initial_balance,
-                f(self.campaign_risk_high_water.get(key) or self.initial_balance),
-                campaign_equity,
-            )
-            self.campaign_risk_high_water[key] = peak
-            self.campaign_intratrade_max_drawdown = max(
-                self.campaign_intratrade_max_drawdown,
-                max(0.0, peak - campaign_equity) / self.initial_balance,
-            )
 
     def risk_available(self):
         return max(0.0, self.available() + min(0.0, self.unrealized()))
@@ -1445,23 +1307,6 @@ class Backtest:
             ep["status"] = status
             self.closed.append(ep)
             self.open.pop(key, None)
-            campaign_key = self._campaign_key(ep)
-            self.campaign_closed_net[campaign_key] += f(ep.get("realized_net"))
-            self._sample_campaign_risk()
-            if not any(self._campaign_key(position) == campaign_key for position in self.open.values()):
-                final_campaign_pnl = f(self.campaign_closed_net.get(campaign_key))
-                campaign_equity = self.initial_balance + final_campaign_pnl
-                peak = max(
-                    self.initial_balance,
-                    f(self.campaign_risk_high_water.get(campaign_key) or self.initial_balance),
-                    campaign_equity,
-                )
-                self.campaign_intratrade_max_drawdown = max(
-                    self.campaign_intratrade_max_drawdown,
-                    max(0.0, peak - campaign_equity) / self.initial_balance,
-                )
-                self.campaign_closed_net.pop(campaign_key, None)
-                self.campaign_risk_high_water.pop(campaign_key, None)
             if status == "liquidated":
                 self._record_liquidation_freeze(addr, coin, t)
                 self.path_liquidation_times.append(int(f(t)))
@@ -1602,9 +1447,7 @@ class Backtest:
         profit_metrics = profit_structure_metrics(
             all_positions,
             total_net=equity_pnl,
-            fee_drag=self.fee_drag,
         )
-        campaign_metrics = campaign_structure_metrics(all_positions)
         path_metrics = path_risk_metrics(
             self.path_equity_samples,
             initial_equity=self.initial_balance,
@@ -1658,14 +1501,21 @@ class Backtest:
         latest_path_ms = max((int(row.get("time") or 0) for row in self.path_equity_samples), default=0)
         current_asof_ms = int(self.valuation_asof_ms or latest_path_ms or 0)
         aggregate_open_loss = min(0.0, unreal) / self.initial_balance
-        campaign_open_loss = min(0.0, f(campaign_metrics.get("campaign_worst_open_pnl"))) / self.initial_balance
-        current_open_loss = min(aggregate_open_loss, campaign_open_loss)
-        oldest_losing_open = int(campaign_metrics.get("campaign_oldest_losing_open_ms") or 0)
+        losing_open = [
+            position for position in open_positions if _endpoint_pnl(position) < 0.0
+        ]
+        worst_position_open_loss = min(
+            (_endpoint_pnl(position) for position in losing_open), default=0.0,
+        ) / self.initial_balance
+        current_open_loss = min(aggregate_open_loss, worst_position_open_loss)
+        oldest_losing_open = min(
+            (int(position.get("opened_at") or 0) for position in losing_open),
+            default=0,
+        )
         current_bag_hours = (
             max(0, current_asof_ms - oldest_losing_open) / 3_600_000
             if current_open_loss < 0.0 and oldest_losing_open and current_asof_ms else 0.0
         )
-        campaign_worst_endpoint = f(campaign_metrics.get("campaign_worst_pnl"))
         result = {
             "addr": self.addr,
             "closed_n": len(self.closed),
@@ -1741,13 +1591,6 @@ class Backtest:
             "path_liquidation_times": self.path_liquidation_times,
             "current_open_loss_frac": current_open_loss,
             "current_bag_hours": current_bag_hours,
-            "campaign_max_drawdown": max(
-                self.campaign_intratrade_max_drawdown,
-                abs(min(0.0, campaign_worst_endpoint)) / self.initial_balance,
-            ),
-            "campaign_peak_margin_pct": (
-                f(campaign_metrics.get("campaign_peak_margin")) / self.initial_balance
-            ),
             "master_leverage_known": self.master_leverage_known,
             "master_leverage_missing": self.master_leverage_missing,
             "master_leverage_coverage": leverage_coverage,
@@ -1762,7 +1605,6 @@ class Backtest:
         }
         result.update(add_metrics)
         result.update(profit_metrics)
-        result.update(campaign_metrics)
         result.update(path_metrics)
         return result
 
@@ -1834,6 +1676,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     prevents an open loss from disappearing merely because it has not closed yet.
     """
     out = dict(result or {})
+    full_endpoint_net = f(out.get("copy_net_pnl"))
     all_positions = [dict(position) for position in (out.get("positions") or [])]
     positions = [
         dict(position)
@@ -1976,6 +1819,14 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     )
     if prior_sample and f(prior_sample.get("equity")) > 0.0:
         window_start_equity = f(prior_sample.get("equity"))
+    terminal_equity = max(1.0, initial_equity + full_endpoint_net)
+    # A close inside the window may belong to a position opened before the boundary. Summing its lifetime
+    # PnL would assign pre-window profit/loss to the recent window. When the strict path provides a marked
+    # boundary, the only correct rolling result is endpoint marked equity minus boundary marked equity.
+    window_net_pnl = (
+        terminal_equity - window_start_equity
+        if prior_sample else closed_net + open_unrealized
+    )
     path_risk = path_risk_metrics(
         path_samples,
         initial_equity=window_start_equity,
@@ -2017,10 +1868,10 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "ambiguous_path_ranges": ambiguous_ranges,
         "path_equity_samples": path_samples,
         "copy_win_rate": wins / len(positions) if positions else 0.0,
-        "copy_net_pnl": closed_net + open_unrealized,
+        "copy_net_pnl": window_net_pnl,
         "window_start_equity": window_start_equity,
-        "window_end_equity": max(
-            1.0, window_start_equity + closed_net + open_unrealized,
+        "window_end_equity": terminal_equity if prior_sample else max(
+            1.0, window_start_equity + window_net_pnl,
         ),
         "closed_net_pnl": closed_net,
         "copy_gross_pnl": gross,
@@ -2052,9 +1903,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     out.update(add_metrics)
     out.update(profit_structure_metrics(
         positions + open_positions,
-        total_net=closed_net + open_unrealized,
-        fee_drag=fees,
+        total_net=window_net_pnl,
     ))
-    out.update(campaign_structure_metrics(positions + open_positions))
     out.update(path_risk)
     return out

@@ -255,7 +255,6 @@ class GenerationFoundationTests(unittest.TestCase):
 
     def test_scheduler_preserves_priority_and_never_defers_candidate_tail(self):
         candidates = [f"0xc{i}" for i in range(30)]
-        budget = scanner_lifecycle.ScanTimeBudget(100.0, total_s=60.0, finalize_reserve_s=10.0)
         result = scanner_lifecycle.schedule_profile_workset(
             candidates,
             position_addrs=["0xposition"],
@@ -263,12 +262,6 @@ class GenerationFoundationTests(unittest.TestCase):
             qualified_addrs=["0xcore", "0xqualified"],
             challenger_addrs=["0xchallenger"],
             off_list_qualified_addrs=["0xoff"],
-            profiled_addrs=candidates,
-            limit=300,
-            budget=budget,
-            estimated_profile_s=5.0,
-            now_monotonic=125.0,
-            refresh_shard=0,
         )
 
         self.assertEqual(result["workset"][:5], [
@@ -287,9 +280,6 @@ class GenerationFoundationTests(unittest.TestCase):
             qualified_addrs=["0xcore", "0xchallenger"],
             challenger_addrs=["0xchallenger"],
             warmup_backfill_addrs=["0xwarm1", "0xwarm2"],
-            profiled_addrs=candidates,
-            limit=4,
-            refresh_shard=0,
         )
 
         self.assertEqual(result["counts"]["priority"], 2)
@@ -301,25 +291,10 @@ class GenerationFoundationTests(unittest.TestCase):
         ])
 
     def test_scheduler_has_no_rotation_recovery_or_exploration_lanes(self):
-        new = [f"0xnew{i}" for i in range(30)]
-        recovery = [f"0xrecover{i}" for i in range(30)]
-        explore = [f"0xexplore{i}" for i in range(30)]
-        candidates = new + recovery + explore
-        profiled = recovery + explore
-        refresh_shard = 3
-        rotation_n = sum(
-            scanner_lifecycle.stable_refresh_shard(addr, 7) == refresh_shard for addr in candidates
-        )
+        candidates = [f"0xwallet{i}" for i in range(90)]
         result = scanner_lifecycle.schedule_profile_workset(
             candidates,
-            profiled_addrs=profiled,
-            near_threshold_addrs=recovery,
-            exploration_addrs=explore,
-            full_refetch_addrs=[new[0]],
-            limit=rotation_n + 10,
-            shard_count=7,
-            refresh_shard=refresh_shard,
-            exploration_seed="g1",
+            full_refetch_addrs=[candidates[0]],
         )
 
         self.assertEqual(result["workset"], candidates)
@@ -330,33 +305,21 @@ class GenerationFoundationTests(unittest.TestCase):
         self.assertEqual(result["counts"]["deferred"], 0)
         self.assertEqual(
             result["refresh"]["full_refetch"],
-            [new[0]] if new[0] in result["workset"] else [],
+            [candidates[0]],
         )
         self.assertTrue(all(
             addr not in result["refresh"]["full_refetch"]
-            for addr in result["workset"] if addr != new[0]
+            for addr in result["workset"] if addr != candidates[0]
         ))
-        self.assertEqual(
-            scanner_lifecycle.stable_refresh_shard("0xabc", 7),
-            scanner_lifecycle.stable_refresh_shard("0xABC", 7),
-        )
 
     def test_complete_cache_daily_full_workset_stays_delta_only(self):
         candidates = [f"0xwallet{i}" for i in range(40)]
-        refresh_shard = 2
         result = scanner_lifecycle.schedule_profile_workset(
             candidates,
-            profiled_addrs=candidates,
-            limit=len(candidates),
-            shard_count=7,
-            refresh_shard=refresh_shard,
             full_refetch_addrs=[],
         )
 
-        self.assertTrue(any(
-            scanner_lifecycle.stable_refresh_shard(addr, 7) == refresh_shard
-            for addr in result["workset"]
-        ))
+        self.assertEqual(result["workset"], candidates)
         self.assertEqual(result["refresh"]["full_refetch"], [])
         self.assertEqual(result["refresh"]["delta"], result["workset"])
 
@@ -364,10 +327,7 @@ class GenerationFoundationTests(unittest.TestCase):
         candidates = ["0xknown1", "0xknown2", "0xnew"]
         result = scanner_lifecycle.schedule_profile_workset(
             candidates,
-            profiled_addrs=candidates[:2],
             full_refetch_addrs=["0xnew"],
-            limit=len(candidates),
-            full_scan=True,
         )
 
         self.assertEqual(result["workset"], candidates)

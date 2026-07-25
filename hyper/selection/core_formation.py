@@ -43,141 +43,45 @@ class PrefixEvaluation:
                 and self.capacity_fit >= float(config.SELECTION_MIN_CAPACITY_FIT)
             )
         )
-        return (
-            self.net_pnl > 0
-            and self.stress_net_pnl > 0
-            and congestion_ok
+        return_fit = bool(
+            not self.payload.get("requireReturnFit")
+            or (
+                float(self.payload.get("return30d") or 0.0)
+                >= float(config.CORE_PORTFOLIO_MIN_RETURN_30D)
+                and float(self.payload.get("return7d") or 0.0)
+                >= float(config.CORE_PORTFOLIO_MIN_RETURN_7D)
+            )
         )
+        return self.net_pnl > 0 and congestion_ok and return_fit
 
 
 def validate_final_membership(
     candidate: PrefixEvaluation,
-    candidate_folds: list[PrefixEvaluation],
     *,
-    cost_stress_net: float,
     baseline: PrefixEvaluation | None = None,
-    baseline_folds: list[PrefixEvaluation] | None = None,
     membership_changed: bool = False,
     replacing_qualified_core: bool = False,
     initial_margin_equity: float = 10_000.0,
     min_relative_utility_gain: float = 0.05,
     min_net_return_gain: float = 0.02,
-    tail_after_top1: float | None = None,
 ) -> dict:
-    """Final, expensive membership guard shared by production formation and tests.
-
-    Parameter tuning already validates its chosen surface.  This separate check validates the *wallet set*
-    on three disjoint regimes, cost stress and one-Campaign removal. It deliberately has no clock or
-    multi-generation hysteresis: a currently unqualified old member is outside the baseline.
-    """
+    """Validate the shared account without repeating individual-wallet outlier gates."""
+    del baseline, membership_changed, replacing_qualified_core
+    del initial_margin_equity, min_relative_utility_gain, min_net_return_gain
     reasons = []
-    required_fold_count = int(config.COPY_STABILITY_FOLD_COUNT)
-    min_profitable_folds = int(config.COPY_STABILITY_MIN_PROFITABLE_FOLDS)
-    max_loss_to_total_profit = float(config.COPY_STABILITY_MAX_LOSS_TO_30D_PROFIT)
-    weekly_rows = []
-    floating_equity = max(1.0, float(initial_margin_equity))
-    for fold in candidate_folds:
-        net = float(fold.net_pnl)
-        # Continuous replay owns the actual capital path.  Older callers did four independent $10k
-        # replays and then divided those fixed-size profits by an artificially compounded denominator,
-        # mixing two incompatible capital bases.  Prefer the boundary equity recorded by the one
-        # continuous replay; retain the carried fallback only for historical snapshots/tests.
-        start_equity = max(
-            1.0, float(fold.payload.get("startEquity") or floating_equity),
-        )
-        fold_return = net / start_equity
-        cost_stress = float(fold.payload.get("costStressNetPnl", fold.stress_net_pnl))
-        weekly_rows.append({
-            "return": fold_return,
-            "startEquity": start_equity,
-            "netPnl": net,
-            "costStressNetPnl": cost_stress,
-            "campaignClosedN": int(fold.payload.get("campaignClosedN") or 0),
-        })
-        floating_equity = max(1.0, start_equity + net)
-    if len(candidate_folds) != required_fold_count:
-        reasons.append("membership_folds_unavailable")
-    else:
-        evaluable_folds = [
-            fold for fold in candidate_folds
-            if int(fold.payload.get("campaignClosedN") or 0)
-            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
-        ]
-        if len(evaluable_folds) < int(config.COPY_STABILITY_MIN_EVALUABLE_FOLDS):
-            reasons.append("membership_fold_evidence_insufficient")
-        evaluable_rows = [
-            row for row in weekly_rows
-            if row["campaignClosedN"] >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
-        ]
-        profitable_folds = [row for row in evaluable_rows if row["netPnl"] > 0.0]
-        if len(profitable_folds) < min_profitable_folds:
-            reasons.append("membership_weekly_profitability")
-        total_fold_net = sum(row["netPnl"] for row in evaluable_rows)
-        worst_fold_loss = max(
-            (abs(row["netPnl"]) for row in evaluable_rows if row["netPnl"] < 0.0),
-            default=0.0,
-        )
-        if worst_fold_loss and (
-            total_fold_net <= 0.0
-            or worst_fold_loss / total_fold_net > max_loss_to_total_profit
-        ):
-            reasons.append("membership_weekly_loss_bound")
-        if sum(row["costStressNetPnl"] for row in evaluable_rows) <= 0.0:
-            reasons.append("membership_weekly_cost_stress")
-    if candidate.net_pnl <= 0.0 or candidate.stress_net_pnl <= 0.0 or cost_stress_net <= 0.0:
-        reasons.append("membership_cost_stress_not_profitable")
+    if not candidate.feasible:
+        reasons.append("membership_dynamic_return_or_execution_failed")
 
-    baseline_folds = list(baseline_folds or [])
-    fold_deltas = []
-    compare_folds = membership_changed or replacing_qualified_core or baseline is None
-    if (
-        compare_folds
-        and len(candidate_folds) == len(baseline_folds) == required_fold_count
-    ):
-        fold_deltas = [
-            candidate_fold.net_pnl - baseline_fold.net_pnl
-            for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds)
-            if int(candidate_fold.payload.get("campaignClosedN") or 0)
-            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
-            and int(baseline_fold.payload.get("campaignClosedN") or 0)
-            >= int(config.COPY_WEEKLY_MIN_CAMPAIGNS_PER_FOLD)
-        ]
-        if len(fold_deltas) >= 2 and sum(delta > 0.0 for delta in fold_deltas) < 2:
-            reasons.append("membership_fewer_than_two_fold_wins")
-    elif compare_folds:
-        reasons.append("membership_baseline_folds_unavailable")
-
-    if membership_changed and baseline is not None and not replacing_qualified_core:
-        # Adding a wallet is not a replacement of a still-qualified Core member.  It must improve funded
-        # dollars and independent windows, but does not owe the 5% utility / 2%-of-equity hurdle designed
-        # to prevent churn from swapping healthy incumbents.
-        if candidate.net_pnl - baseline.net_pnl + 1e-9 < float(config.CORE_LOO_MIN_NET_GAIN):
-            reasons.append("membership_addition_no_positive_marginal_net")
-
-    if replacing_qualified_core and baseline is not None:
-        utility_floor = baseline.utility + abs(baseline.utility) * max(0.0, min_relative_utility_gain)
-        if candidate.utility + 1e-9 < utility_floor:
-            reasons.append("membership_utility_gain_below_5pct")
-        absolute_net_floor = max(0.0, initial_margin_equity) * max(0.0, min_net_return_gain)
-        if candidate.net_pnl - baseline.net_pnl + 1e-9 < absolute_net_floor:
-            reasons.append("membership_net_gain_below_2pct_equity")
-
-    # One and only one outlier stress: remove the largest winning Campaign and require the remainder positive.
-    # Top-two, body-after-top-three and top-wallet removal were correlated repetitions that over-pruned Core.
-    if tail_after_top1 is None:
-        reasons.append("membership_tail_metrics_missing")
-    elif tail_after_top1 <= 0.0:
-        reasons.append("membership_single_campaign_dependency")
-    dependency_warning = False
     return {
         "eligible": not reasons,
         "reasons": reasons,
-        "foldWins": sum(delta > 0.0 for delta in fold_deltas),
-        "foldDeltas": fold_deltas,
-        "weeklyFolds": weekly_rows,
-        "requiredProfitableFolds": min_profitable_folds,
-        "maxLossToTotalProfit": max_loss_to_total_profit,
-        "singleWalletDependencyWarning": dependency_warning,
+        "return30d": candidate.payload.get("return30d"),
+        "return7d": candidate.payload.get("return7d"),
+        "returnFloors": {
+            "30d": float(config.CORE_PORTFOLIO_MIN_RETURN_30D),
+            "7d": float(config.CORE_PORTFOLIO_MIN_RETURN_7D),
+        },
+        "singleWalletDependencyWarning": False,
     }
 
 
@@ -202,15 +106,10 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
         return False
     utility_floor = reference.utility - max(abs(reference.utility) * (1.0 - utility_retention), utility_slack)
     net_floor = reference.net_pnl - max(abs(reference.net_pnl) * (1.0 - net_retention), net_slack)
-    stress_floor = max(
-        0.0,
-        reference.stress_net_pnl
-        - max(abs(reference.stress_net_pnl) * (1.0 - stress_retention), stress_slack),
-    )
+    del stress_retention, stress_slack
     return (
         candidate.utility >= utility_floor
         and candidate.net_pnl >= net_floor
-        and candidate.stress_net_pnl >= stress_floor
     )
 
 

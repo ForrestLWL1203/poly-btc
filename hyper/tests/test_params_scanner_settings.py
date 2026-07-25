@@ -8,7 +8,7 @@ from hyper import config, params, storage
 
 
 class ScannerSettingsParamTests(unittest.TestCase):
-    def test_product_defaults_use_cheap_recall_before_official_weekly_stability(self):
+    def test_product_defaults_use_cheap_recall_before_official_perp_return(self):
         self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 250_000.0)
         self.assertEqual(config.HARVEST_MIN_ACCT, 20_000.0)
         self.assertFalse(hasattr(config, "HARVEST_WEEK_ROI_MIN"))
@@ -73,7 +73,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(visible_follow["SMART_TP_ENABLE"]["level"], "green")
             self.assertNotIn("SMART_TP_GIVEBACK_1_PCT", visible_follow)
 
-    def test_scanner_settings_expose_basic_and_folded_advanced_knobs(self):
+    def test_scanner_settings_expose_extreme_quality_contract(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
@@ -98,20 +98,26 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("PORTFOLIO_MIN_EDGE_BPS", scanner_keys)
             self.assertIn("MAX_CONCURRENT_POS", scanner_keys)
             self.assertNotIn("MIN_ACTIVE_SCORE", scanner_keys)
-            self.assertIn("EVIDENCE_MIN_DAYS", scanner_keys)
-            self.assertIn("EVIDENCE_MIN_TRADES", scanner_keys)
-            self.assertIn("CORE_COPY_CAMPAIGN_FLOOR", scanner_keys)
-            self.assertIn("CORE_COPY_STABILITY", scanner_keys)
+            self.assertNotIn("EVIDENCE_MIN_DAYS", scanner_keys)
+            self.assertNotIn("EVIDENCE_MIN_TRADES", scanner_keys)
+            self.assertIn("SOURCE_MIN_EPISODES_30D", scanner_keys)
+            self.assertIn("SOURCE_MIN_EPISODE_WIN_RATE", scanner_keys)
+            self.assertIn("ROUGH_COPY_MIN_CLOSED_30D", scanner_keys)
+            self.assertIn("ROUGH_COPY_MIN_WIN_RATE", scanner_keys)
+            self.assertIn("ROUGH_COPY_MIN_RETURN_30D", scanner_keys)
+            self.assertIn("ROUGH_COPY_MIN_RETURN_7D", scanner_keys)
+            self.assertNotIn("CORE_COPY_CAMPAIGN_FLOOR", scanner_keys)
+            self.assertIn("CORE_PROFITABILITY_CONTRACT", scanner_keys)
             self.assertNotIn("CORE_COPY_WIN_RATE_FLOORS", scanner_keys)
             self.assertNotIn("CORE_COPY_WIN_RATE_LCB", scanner_keys)
             self.assertIn("CORE_COPY_MAX_LIQUIDATIONS_30D", scanner_keys)
-            self.assertEqual(levels["CORE_COPY_STABILITY"], "black")
+            self.assertEqual(levels["CORE_PROFITABILITY_CONTRACT"], "black")
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
             self.assertEqual(levels["CORE_INITIAL_MAX_N"], "green")
             initial_limit = next(p for p in scanner_params if p["key"] == "CORE_INITIAL_MAX_N")
             self.assertEqual(initial_limit["value"], 16)
             self.assertNotIn("AUTO_TUNE_RISK_PROFILE", scanner_keys)
-            self.assertEqual(levels["EVIDENCE_MIN_TRADES"], "blue")
+            self.assertEqual(levels["SOURCE_MIN_EPISODES_30D"], "black")
             self.assertFalse(any(k.startswith("SCORE_") for k in scanner_keys))
 
     def test_seed_params_refreshes_metadata_without_overwriting_operator_value(self):
@@ -237,30 +243,27 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
             ).fetchone()[0]), 15.0)
 
-    def test_seed_params_migrates_untouched_copy_7d_floor_but_preserves_operator_override(self):
+    def test_seed_params_deletes_retired_copy_7d_floor(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
             db.execute(
-                "UPDATE params SET value='5',default_value='5' WHERE key='CORE_MIN_COPY_RETURN_7D'"
+                "INSERT INTO params "
+                "(key,value,category,level,type,effect,default_value,updated_at) "
+                "VALUES ('CORE_MIN_COPY_RETURN_7D','5','scanner','blue','pct','rescan','5','old')"
             )
             db.commit()
 
             params.seed_params(db)
 
-            self.assertEqual(float(db.execute(
+            self.assertIsNone(db.execute(
                 "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_7D'"
-            ).fetchone()[0]), 4.0)
-            db.execute(
-                "UPDATE params SET value='4',default_value='3' WHERE key='CORE_MIN_COPY_RETURN_7D'"
-            )
-            db.commit()
-            params.seed_params(db)
+            ).fetchone())
             self.assertEqual(float(db.execute(
-                "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_7D'"
-            ).fetchone()[0]), 4.0)
+                "SELECT value FROM params WHERE key='CORE_MIN_DYNAMIC_COPY_RETURN_7D'"
+            ).fetchone()[0]), 3.0)
 
-    def test_seed_params_removes_obsolete_rows_but_restores_current_copy_return_gate(self):
+    def test_seed_params_removes_obsolete_rows_and_seeds_dynamic_return_gate(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.executemany(
@@ -287,6 +290,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "CORE_COPY_WIN_RATE_30D_MIN",
                 "COPY_MIN_TAIL_RETURN_30D",
                 "CORE_RETENTION_MIN_COPY_RETURN_30D",
+                "CORE_MIN_COPY_RETURN_30D",
                 "HARVEST_WEEK_ROI_MIN",
                 "HARVEST_MONTH_ROI_MIN",
                 "HARVEST_ALL_ROI_MIN",
@@ -296,38 +300,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
                     "SELECT 1 FROM params WHERE key=?", (key,)
                 ).fetchone())
             self.assertEqual(float(db.execute(
-                "SELECT value FROM params WHERE key='CORE_MIN_COPY_RETURN_30D'"
+                "SELECT value FROM params WHERE key='CORE_MIN_DYNAMIC_COPY_RETURN_30D'"
             ).fetchone()[0]), 10.0)
-
-    def test_db_score_rows_do_not_override_code_score_weights(self):
-        original = {
-            "SCORE_W_WIN": config.SCORE_W_WIN,
-            "SCORE_W_ACT": config.SCORE_W_ACT,
-            "SCORE_W_ROI": config.SCORE_W_ROI,
-            "SCORE_STRETCH": config.SCORE_STRETCH,
-        }
-        try:
-            with tempfile.TemporaryDirectory() as td:
-                db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
-                params.seed_params(db)
-                for key in original:
-                    db.execute(
-                        "INSERT OR REPLACE INTO params "
-                        "(key,value,category,level,type,effect,default_value,updated_at) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
-                        (key, "999", "scanner", "yellow", "float", "rescan", "999", "test"),
-                    )
-                db.commit()
-
-                ns = SimpleNamespace()
-                params.apply_scanner_params(db, ns)
-
-                for key, value in original.items():
-                    self.assertEqual(getattr(config, key), value)
-        finally:
-            for key, value in original.items():
-                setattr(config, key, value)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -175,6 +175,7 @@ def current_selection_rows(db) -> list:
         + "," + expr("acct_value", "NULL")
         + "," + expr("sector_policy_json", "NULL")
         + "," + expr("replay_copy_bt_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_window_start_equity", "NULL")
         + "," + expr("replay_copy_bt_win_rate", "NULL")
         + "," + expr("replay_copy_bt_closed_n", "NULL")
         + "," + expr("replay_copy_bt_open_fill_rate", "NULL")
@@ -186,6 +187,7 @@ def current_selection_rows(db) -> list:
         + "," + expr("replay_copy_bt_14d_unrealized_pnl", "NULL")
         + "," + expr("replay_copy_bt_14d_closed_n", "NULL")
         + "," + expr("replay_copy_bt_7d_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_7d_window_start_equity", "NULL")
         + "," + expr("replay_copy_bt_7d_unrealized_pnl", "NULL")
         + "," + expr("replay_copy_bt_7d_closed_n", "NULL")
         + "," + expr("replay_sector_copy_json", "NULL")
@@ -201,15 +203,16 @@ def current_selection_rows(db) -> list:
             utility=row[4], follow_score=row[5], selection_rank=row[6], data_status=row[7] or "valid",
             evidence_status=row[8] or "", model_version=row[9] or "", policy_version=row[10] or "",
             acct_value=row[11], sector_policy_json=row[12],
-            replay_copy_bt_net_pnl=row[13], replay_copy_bt_win_rate=row[14],
-            replay_copy_bt_closed_n=row[15], replay_copy_bt_open_fill_rate=row[16],
-            replay_copy_bt_liquidations=row[17], replay_copy_bt_fee_drag=row[18],
-            replay_copy_bt_unrealized_pnl=row[19], replay_copy_bt_valuation_status=row[20],
-            replay_copy_bt_14d_net_pnl=row[21], replay_copy_bt_14d_unrealized_pnl=row[22],
-            replay_copy_bt_14d_closed_n=row[23], replay_copy_bt_7d_net_pnl=row[24],
-            replay_copy_bt_7d_unrealized_pnl=row[25], replay_copy_bt_7d_closed_n=row[26],
-            replay_sector_copy_json=row[27], replay_params_hash=row[28],
-            replay_score_detail_json=row[29], replayed_at=row[30],
+            replay_copy_bt_net_pnl=row[13], replay_copy_bt_window_start_equity=row[14],
+            replay_copy_bt_win_rate=row[15], replay_copy_bt_closed_n=row[16],
+            replay_copy_bt_open_fill_rate=row[17], replay_copy_bt_liquidations=row[18],
+            replay_copy_bt_fee_drag=row[19], replay_copy_bt_unrealized_pnl=row[20],
+            replay_copy_bt_valuation_status=row[21], replay_copy_bt_14d_net_pnl=row[22],
+            replay_copy_bt_14d_unrealized_pnl=row[23], replay_copy_bt_14d_closed_n=row[24],
+            replay_copy_bt_7d_net_pnl=row[25], replay_copy_bt_7d_window_start_equity=row[26],
+            replay_copy_bt_7d_unrealized_pnl=row[27], replay_copy_bt_7d_closed_n=row[28],
+            replay_sector_copy_json=row[29], replay_params_hash=row[30],
+            replay_score_detail_json=row[31], replayed_at=row[32],
         )
         for row in rows
     ]
@@ -231,6 +234,7 @@ class SelectionRow:
     acct_value: Optional[float] = None
     sector_policy_json: Optional[str] = None
     replay_copy_bt_net_pnl: Optional[float] = None
+    replay_copy_bt_window_start_equity: Optional[float] = None
     replay_copy_bt_win_rate: Optional[float] = None
     replay_copy_bt_closed_n: Optional[int] = None
     replay_copy_bt_open_fill_rate: Optional[float] = None
@@ -242,6 +246,7 @@ class SelectionRow:
     replay_copy_bt_14d_unrealized_pnl: Optional[float] = None
     replay_copy_bt_14d_closed_n: Optional[int] = None
     replay_copy_bt_7d_net_pnl: Optional[float] = None
+    replay_copy_bt_7d_window_start_equity: Optional[float] = None
     replay_copy_bt_7d_unrealized_pnl: Optional[float] = None
     replay_copy_bt_7d_closed_n: Optional[int] = None
     replay_sector_copy_json: Optional[str] = None
@@ -306,6 +311,7 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("acct_value", lambda r: r.acct_value),
         ("sector_policy_json", lambda r: r.sector_policy_json),
         ("replay_copy_bt_net_pnl", lambda r: r.replay_copy_bt_net_pnl),
+        ("replay_copy_bt_window_start_equity", lambda r: r.replay_copy_bt_window_start_equity),
         ("replay_copy_bt_win_rate", lambda r: r.replay_copy_bt_win_rate),
         ("replay_copy_bt_closed_n", lambda r: r.replay_copy_bt_closed_n),
         ("replay_copy_bt_open_fill_rate", lambda r: r.replay_copy_bt_open_fill_rate),
@@ -317,6 +323,7 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("replay_copy_bt_14d_unrealized_pnl", lambda r: r.replay_copy_bt_14d_unrealized_pnl),
         ("replay_copy_bt_14d_closed_n", lambda r: r.replay_copy_bt_14d_closed_n),
         ("replay_copy_bt_7d_net_pnl", lambda r: r.replay_copy_bt_7d_net_pnl),
+        ("replay_copy_bt_7d_window_start_equity", lambda r: r.replay_copy_bt_7d_window_start_equity),
         ("replay_copy_bt_7d_unrealized_pnl", lambda r: r.replay_copy_bt_7d_unrealized_pnl),
         ("replay_copy_bt_7d_closed_n", lambda r: r.replay_copy_bt_7d_closed_n),
         ("replay_sector_copy_json", lambda r: r.replay_sector_copy_json),

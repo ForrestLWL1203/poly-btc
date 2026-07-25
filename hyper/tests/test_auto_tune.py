@@ -33,44 +33,53 @@ class AutoTuneTests(unittest.TestCase):
             "maintenanceMarginCoverage": 1.0,
         }
 
-    def test_formation_does_not_treat_capacity_as_a_second_profit_veto(self):
+    def test_formation_tuning_does_not_treat_capacity_as_a_profit_veto(self):
         validation = self._formation_validation(
             baseline_capacity=.70, challenger_capacity=.80,
         )
 
         model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
 
-        self.assertFalse(model["eligible"])
+        self.assertTrue(model["eligible"])
         self.assertTrue(model["baselineFeasible"])
-        self.assertNotIn("formation_admission_still_infeasible", model["reasons"])
+        self.assertEqual(model["reasons"], [])
 
-    def test_formation_keeps_normal_profit_validation_when_baseline_is_fundable(self):
+    def test_formation_tuning_can_compare_a_lower_profit_baseline_surface(self):
         validation = self._formation_validation(
             baseline_capacity=.90, challenger_capacity=.92,
         )
 
         model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
 
-        self.assertFalse(model["eligible"])
+        self.assertTrue(model["eligible"])
         self.assertTrue(model["baselineFeasible"])
-        self.assertIn("relative_gain_below_floor", model["reasons"])
+        self.assertLess(model["relativeGain"], 0)
 
-    def test_formation_rejects_surface_that_breaks_four_week_stability(self):
+    def test_formation_uses_aggregate_profit_not_a_hidden_fold_veto(self):
         validation = self._formation_validation(
             baseline_capacity=.90, challenger_capacity=.92,
             baseline_net=100, challenger_net=130,
         )
         validation["folds"][-1]["challengerNet"] = -200
         validation["holdout"] = validation["folds"][-1]
-        validation["stressNet"] = -210
 
         model = auto_tune._formation_model_validation(
             validation, auto_tune.load_copy_policy(),
         )
 
+        self.assertTrue(model["eligible"])
+        self.assertTrue(model["challengerFeasible"])
+
+    def test_formation_rejects_nonpositive_aggregate_profit(self):
+        validation = self._formation_validation(
+            baseline_capacity=.90, challenger_capacity=.92,
+            baseline_net=100, challenger_net=-1,
+        )
+        model = auto_tune._formation_model_validation(
+            validation, auto_tune.load_copy_policy(),
+        )
         self.assertFalse(model["eligible"])
-        self.assertFalse(model["challengerFeasible"])
-        self.assertIn("holdout_not_profitable", model["reasons"])
+        self.assertIn("formation_profit_not_positive", model["reasons"])
 
     def test_walk_forward_folds_share_one_compounding_account(self):
         day = 86_400_000

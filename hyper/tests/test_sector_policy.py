@@ -10,10 +10,6 @@ def bt(net, closed, wins=None, target_open=None, opened=None):
         "copy_net_pnl": net,
         "closed_n": closed,
         "wins": wins,
-        "campaign_closed_n": closed,
-        "campaign_wins": wins,
-        "campaign_net_after_top2": net * 0.25,
-        "cost_stress_net_pnl": net * 0.75,
         "profit_factor": 2.0 if net > 0 else 0.5,
         "evidence_days": min(5, closed),
         "target_open_events": closed if target_open is None else target_open,
@@ -113,9 +109,8 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(policy["allowed"], ["crypto", "stock"])
         self.assertTrue(policy["crypto"]["allow"])
         self.assertTrue(policy["stock"]["allow"])
-        self.assertFalse(policy["coreBlocked"])
 
-    def test_single_heavy_dca_pressure_pass_can_enter_core(self):
+    def test_legacy_heavy_dca_watch_cannot_be_resurrected_by_profit(self):
         sector_results = {
             "crypto": {30: bt(2200, 15), 14: bt(1000, 7), 7: bt(600, 5)},
         }
@@ -126,14 +121,11 @@ class SectorPolicyTests(unittest.TestCase):
 
         policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
 
-        self.assertEqual(policy["allowed"], ["crypto"])
-        self.assertEqual(policy["structuralWatch"], ["crypto"])
-        self.assertFalse(policy["coreBlocked"])
-        self.assertTrue(policy["crypto"]["allow"])
-        self.assertFalse(policy["crypto"]["coreBlocked"])
-        self.assertEqual(policy["crypto"]["status"], "heavy_dca_pressure_passed")
+        self.assertEqual(policy["allowed"], [])
+        self.assertFalse(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["status"], "heavy_dca_watch")
 
-    def test_profitable_thin_sector_is_sample_watch_not_live_allowed(self):
+    def test_profitable_sector_with_two_closes_is_executable(self):
         sector_results = {
             "crypto": {30: bt(1900, 2), 14: bt(1900, 2), 7: bt(1900, 2)},
         }
@@ -144,11 +136,10 @@ class SectorPolicyTests(unittest.TestCase):
 
         policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
 
-        self.assertEqual(policy["allowed"], [])
-        self.assertEqual(policy["watch"], ["crypto"])
-        self.assertFalse(policy["crypto"]["allow"])
-        self.assertTrue(policy["crypto"]["watch"])
-        self.assertEqual(policy["crypto"]["status"], "sector_sample_watch")
+        self.assertEqual(policy["allowed"], ["crypto"])
+        self.assertEqual(policy["watch"], [])
+        self.assertTrue(policy["crypto"]["allow"])
+        self.assertEqual(policy["crypto"]["status"], "allowed")
 
     def test_profitable_mix_sectors_share_wallet_sample_density_once(self):
         crypto = bt(900, 4)
@@ -174,34 +165,11 @@ class SectorPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(policy["allowed"], ["crypto", "stock"])
-        self.assertEqual(
-            policy["crypto"]["status"], "allowed_by_wallet_aggregate_evidence",
-        )
-        self.assertEqual(
-            policy["stock"]["status"], "allowed_by_wallet_aggregate_evidence",
-        )
-        self.assertEqual(
-            policy["crypto"]["aggregateEvidence"],
-            {"closed": 7, "campaigns": 7, "days": 7},
-        )
+        self.assertEqual(policy["crypto"]["status"], "allowed")
+        self.assertEqual(policy["stock"]["status"], "allowed")
+        self.assertNotIn("aggregateEvidence", policy["crypto"])
 
-    def test_single_heavy_dca_with_recent_loss_fails_pressure_validation(self):
-        sector_results = {
-            "crypto": {30: bt(2200, 12), 14: bt(1000, 7), 7: bt(-100, 5)},
-        }
-        structure = {
-            "source": "current_generation",
-            "crypto": {"allow": True, "watch": True, "status": "heavy_dca_watch"},
-        }
-
-        policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
-
-        self.assertEqual(policy["allowed"], [])
-        self.assertFalse(policy["coreBlocked"])
-        self.assertFalse(policy["crypto"]["allow"])
-        self.assertEqual(policy["crypto"]["status"], "heavy_dca_pressure_failed")
-
-    def test_mix_wallet_keeps_clean_and_pressure_tested_heavy_dca_sectors(self):
+    def test_mix_wallet_keeps_clean_sector_and_rejects_heavy_dca_sector(self):
         sector_results = {
             "crypto": {30: bt(2200, 15), 14: bt(1000, 7), 7: bt(600, 5)},
             "stock": {30: bt(1800, 15), 14: bt(900, 7), 7: bt(500, 5)},
@@ -214,11 +182,10 @@ class SectorPolicyTests(unittest.TestCase):
 
         policy = sector.evaluate_sector_policy(sector_results, structural_policy=structure)
 
-        self.assertEqual(policy["allowed"], ["crypto", "stock"])
-        self.assertFalse(policy["coreBlocked"])
+        self.assertEqual(policy["allowed"], ["crypto"])
         self.assertTrue(policy["crypto"]["allow"])
-        self.assertTrue(policy["stock"]["allow"])
-        self.assertEqual(policy["stock"]["status"], "heavy_dca_pressure_passed")
+        self.assertFalse(policy["stock"]["allow"])
+        self.assertEqual(policy["stock"]["status"], "heavy_dca_watch")
 
     def test_recent_loss_is_diagnostic_when_thirty_day_sector_copy_remains_profitable(self):
         sector_results = {

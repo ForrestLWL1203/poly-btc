@@ -173,16 +173,12 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_gate_args(pr):
-        # v3 ELIGIBILITY gates (the few binary thresholds; QUALITY is the continuous score in
-        # metrics.score, shaped by config constants). No more hardcoded win/roi/dd cutoffs.
+        # Structural copyability only. Source quality and Copy economics are owned by the centralized
+        # source/rough/strict contracts, not by overlapping CLI thresholds.
         pr.add_argument("--min-perp", type=float, default=0.6, help="min copyable-perp share of fills")
         pr.add_argument("--inactive-days", type=float, default=config.INACTIVE_DAYS,
                         help="reject if no copyable open within N days")
         pr.add_argument("--max-daily-eps", type=float, default=30.0, help="reject bots: max median episodes/active-day")
-        pr.add_argument("--min-activity", type=float, default=0.21,
-                        help="MINIMAL floor on active_days/lookback (~3 of 14d) — just rejects one-shot "
-                             "noise. Low-freq-but-real traders are NOT killed here; the evidence-shrink "
-                             "in score() ranks them DOWN until round-trips accumulate (soft, not hard)")
         pr.add_argument("--grid-max-adds", type=float, default=3.0,
                         help="reject grid/DCA: MEDIAN scale-ins per round-trip above this = habitual "
                              "averaging-down. Our model = open + MAX_ADDS adds, so a wallet that TYPICALLY "
@@ -190,15 +186,6 @@ def main() -> int:
         pr.add_argument("--max-single-adds", type=float, default=config.MAX_SINGLE_ADDS_PER_EP,
                         help="reject heavy DCA: any single round-trip with more scale-ins than this is "
                              "uncopyable even when the median is low")
-        pr.add_argument("--max-single-loss", type=float, default=0.10,
-                        help="reject 扛单到爆: worst single round-trip loss as fraction of account "
-                             "(cuts-losses-small wallets pass even at 50%% win; one disaster loss = out)")
-        pr.add_argument("--gate-loss-pain-max", type=float, default=config.GATE_LOSS_PAIN_MAX,
-                        help="reject 小赚大亏: worst loss / median win at or above this (0 = off)")
-        pr.add_argument("--gate-hold-skew-max", type=float, default=config.GATE_HOLD_SKEW_MAX,
-                        help="reject 抗单: losing-hold / winning-hold at or above this (0 = off)")
-        pr.add_argument("--gate-profit-conc-max", type=float, default=config.GATE_PROFIT_CONC_MAX,
-                        help="reject 一把行情: best day share of gross profit at or above this (0 = off)")
         pr.add_argument("--no-exclude-hft", dest="exclude_hft", action="store_false", default=True,
                         help="by default reject sub-minute HFT scalpers (uncopyable at our latency); "
                              "pass this to allow them (only once a high-freq feed exists)")
@@ -207,7 +194,7 @@ def main() -> int:
 
     def add_harvest_args(pr):
         # Nominal contract volume is activity only and never a profitability denominator because leverage
-        # makes that ratio incomparable. Official four-week return quality comes from Portfolio history.
+        # makes that ratio incomparable. Official 30-day Perp return quality comes from Portfolio history.
         pr.add_argument("--min-acct", type=float, default=config.HARVEST_MIN_ACCT,
                         help="real-capital floor (we copy by pct, not $)")
         pr.add_argument("--week-vlm-min", type=float, default=config.HARVEST_WEEK_VLM_MIN,

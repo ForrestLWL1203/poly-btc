@@ -63,25 +63,37 @@ db.execute(
 for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enumerate(W, 1):
     db.execute("INSERT INTO leaderboard (addr,display_name,account_value,mon_roi,is_candidate,fetched_at,generation) "
                "VALUES (?,?,?,?,1,?,?)", (addr, name, acct, roi, now_iso(), GEN))
-    db.execute("INSERT INTO profile (addr,status,reason,score,n_trades,win_rate,roi_equity,acct_value,"
-               "top_coin,market_type,worst_loss_pct,median_adds_per_ep,profile_generation,evaluated_at,"
-               "data_status,evidence_status,last_copyable_open_ms,open_events_7d,actionable_open_events_7d,"
-               "actionable_open_rate,capacity_fit,"
-               "oos_net_pnl,oos_max_drawdown,oos_cvar95,selection_marginal_utility,"
-               "copy_bt_net_pnl,copy_bt_closed_n,copy_bt_14d_net_pnl,copy_bt_14d_closed_n,"
-               "copy_bt_7d_net_pnl,copy_bt_7d_closed_n,copy_expected_return,copy_return_lcb,"
-               "copy_return_volatility,copy_positive_probability,copy_evidence_days,"
-               "copy_recent_return_14d,copy_recent_return_7d,copy_risk_score,execution_score,open_probability_48h) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-               (addr, "active", "ok", score, 40, wr, roi, acct, coin, mt, worst, madds, GEN, ago(300),
-                "valid", "qualified" if rank <= 4 else "thin", now_ms() - rank * 5 * 3600_000,
-                19 - rank * 2, 19 - rank * 2,
-                max(.62, .92 - rank * .04), max(.75, .96 - rank * .025),
-                1450 - rank * 170, .025 + rank * .004, -120 - rank * 18, .18 - rank * .025,
-                1800 - rank * 150, 24 - rank, 900 - rank * 70, 12 - rank, 420 - rank * 35, 7 - min(rank, 2),
-                .085 - rank * .006, .032 - rank * .003, .09 + rank * .005, .94 - rank * .025,
-                18 - rank, .07 - rank * .005, .06 - rank * .004, .91 - rank * .025,
-                .93 - rank * .02, .88 - rank * .04))
+    profile = {
+        "addr": addr, "status": "active", "reason": "ok", "score": score,
+        "n_trades": 40, "win_rate": wr, "roi_equity": roi, "acct_value": acct,
+        "top_coin": coin, "market_type": mt, "worst_loss_pct": worst,
+        "median_adds_per_ep": madds, "profile_generation": GEN, "evaluated_at": ago(300),
+        "data_status": "valid", "evidence_status": "qualified" if rank <= 4 else "thin",
+        "last_copyable_open_ms": now_ms() - rank * 5 * 3600_000,
+        "official_perp_status": "passed", "official_perp_reason": "perp_prefilter_passed",
+        "official_perp_return_30d": roi, "official_perp_pnl_30d": 1800 - rank * 120,
+        "official_perp_pnl_share": .80,
+        "source_episode_n_30d": 24 - rank, "source_episode_n_7d": 7 - min(rank, 2),
+        "source_win_rate_30d": max(.70, wr), "source_win_rate_7d": max(.70, wr),
+        "source_net_pnl_30d": 2200 - rank * 150, "source_net_pnl_7d": 500 - rank * 30,
+        "source_active_days_30d": 18 - rank, "source_active_days_7d": 6 - min(rank, 2),
+        "source_top3_profit_share": .45, "source_body_after_top3_n": 18 - rank,
+        "source_body_after_top3_win_rate": max(.70, wr),
+        "source_body_after_top3_net_pnl": 600 - rank * 35,
+        "actionable_open_rate": max(.62, .92 - rank * .04),
+        "capacity_fit": max(.75, .96 - rank * .025),
+        "copy_bt_net_pnl": 1800 - rank * 150, "copy_bt_win_rate": max(.60, wr),
+        "copy_bt_closed_n": 24 - rank, "copy_bt_window_start_equity": 10_000,
+        "copy_bt_14d_net_pnl": 900 - rank * 70, "copy_bt_14d_closed_n": 12 - rank,
+        "copy_bt_7d_net_pnl": 420 - rank * 35, "copy_bt_7d_closed_n": 7 - min(rank, 2),
+        "copy_bt_7d_window_start_equity": 10_000, "copy_evidence_days": 18 - rank,
+    }
+    profile_cols = tuple(profile)
+    db.execute(
+        f"INSERT INTO profile ({','.join(profile_cols)}) "
+        f"VALUES ({','.join('?' for _ in profile_cols)})",
+        tuple(profile[col] for col in profile_cols),
+    )
     db.execute("INSERT INTO watchlist (rank,addr,display_name,score,roi_equity,win_rate,top_coin,"
                "market_type,acct_value,generation,profile_generation,evaluated_at,data_status,evidence_status,updated_at) "
                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

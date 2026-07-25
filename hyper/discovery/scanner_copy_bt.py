@@ -242,14 +242,11 @@ def record_primary_copy_bt(metrics, result):
         copy_max_deep_bag_hours=result.get("max_deep_bag_hours"),
         copy_current_open_loss_frac=result.get("current_open_loss_frac"),
         copy_current_bag_hours=result.get("current_bag_hours"),
-        copy_campaign_max_drawdown=result.get("campaign_max_drawdown"),
-        copy_campaign_peak_positions=int(result.get("campaign_peak_positions") or 0),
-        copy_campaign_peak_margin_pct=result.get("campaign_peak_margin_pct"),
     )
     for key in (
         "profit_factor", "payoff_ratio", "gross_profit", "gross_loss",
         "positive_episode_n", "negative_episode_n", "top1_profit_share",
-        "top3_profit_share", "net_after_top1", "net_after_top2", "cost_stress_net_pnl",
+        "top3_profit_share", "net_after_top1", "net_after_top2",
         "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
         "body_after_top3_win_rate", "body_after_top3_net_pnl",
         "body_after_top3_gross_profit", "body_after_top3_gross_loss",
@@ -260,9 +257,6 @@ def record_primary_copy_bt(metrics, result):
         "entry_gap_pct_weighted", "entry_gap_pct_p90", "entry_gap_sigma_weighted",
         "entry_gap_sigma_p90", "entry_alignment", "add_execution", "add_fidelity",
         "add_fidelity_applied", "behavior_replication_v2", "behavior_replication_rate",
-        "campaign_closed_n", "campaign_wins", "campaign_win_rate", "campaign_net_pnl",
-        "campaign_profit_factor", "campaign_net_after_top1", "campaign_net_after_top2",
-        "campaign_max_positions", "campaign_peak_positions", "campaign_peak_margin_pct",
     ):
         if key in result:
             metrics[f"copy_bt_{key}"] = result.get(key)
@@ -324,15 +318,12 @@ def record_recent_copy_bt(metrics, days, result):
     prefix = f"copy_bt_{int(days)}d_"
     for key in (
         "profit_factor", "payoff_ratio", "top1_profit_share", "top3_profit_share",
-        "net_after_top1", "net_after_top2", "cost_stress_net_pnl",
+        "net_after_top1", "net_after_top2",
         "body_after_top3_n", "body_after_top3_wins", "body_after_top3_losses",
         "body_after_top3_win_rate", "body_after_top3_net_pnl",
         "body_after_top3_gross_profit", "body_after_top3_gross_loss",
         "body_after_top3_profit_factor", "body_after_top3_payoff_ratio",
         "body_after_top3_median_pnl",
-        "campaign_closed_n", "campaign_wins", "campaign_win_rate", "campaign_net_pnl",
-        "campaign_profit_factor", "campaign_net_after_top1", "campaign_net_after_top2",
-        "campaign_max_positions", "campaign_peak_positions", "campaign_peak_margin_pct",
     ):
         if key in result:
             metrics[prefix + key] = result.get(key)
