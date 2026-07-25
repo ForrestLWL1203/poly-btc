@@ -38,7 +38,7 @@ Official Portfolio 30d Perp prefilter
 Deep fills source quality
     ↓ complete Episodes, source win rate ≥ 70%, activity and structural copyability; Top40
 Fills-only rough Copy
-    ↓ dynamic 30d/7d ≥ 15%/5%, Copy wins ≥ 60%, open follow ≥ 70%
+    ↓ dynamic 30d/7d both profitable, Copy wins ≥ 60%, open follow ≥ 70%
 Composite score → unified tuning → strict K-line Copy
     ↓ score-ordered Top16 only; final individual 10%/3%, shared 10%/3%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
@@ -60,8 +60,9 @@ Wallet quality and funded-account membership are separate decisions.
   wins, a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
   at 70% of gross profit; then the remaining body must still win at least 70% and not lose money. At most the
   best 40 source wallets receive rough replay.
-- Rough Copy uses one continuously compounded `$10,000` comparison account and requires dynamic 30d/7d returns
-  of 15%/5%, seven closed Copy Episodes, 60% Copy wins, 70% open follow and complete valuation.
+- Rough Copy uses one continuously compounded `$10,000` comparison account and requires both dynamic 30d and
+  rolling-7d profitability, seven closed Copy Episodes, 60% Copy wins, 70% open follow and complete valuation.
+  Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
 - The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
   activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a
   strict failure is removed without taking a replacement below rank 16.

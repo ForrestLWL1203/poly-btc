@@ -18,8 +18,6 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(policy.official_perp_boundary_max_gap_hours, 36)
         self.assertEqual(policy.rough_min_closed_30d, 7)
         self.assertEqual(policy.rough_min_win_rate, 0.60)
-        self.assertEqual(policy.rough_min_return_30d, 0.15)
-        self.assertEqual(policy.rough_min_return_7d, 0.05)
         self.assertEqual(policy.core_min_dynamic_copy_return_30d, 0.10)
         self.assertEqual(policy.core_min_dynamic_copy_return_7d, 0.03)
         self.assertEqual(policy.core_min_copy_win_rate, 0.60)
@@ -32,7 +30,7 @@ class CopyPolicyTests(unittest.TestCase):
     def test_policy_version_changes_with_overrides(self):
         baseline = load_copy_policy()
         changed = load_copy_policy({
-            "ROUGH_COPY_MIN_RETURN_7D": baseline.rough_min_return_7d + .01,
+            "ROUGH_COPY_MIN_WIN_RATE": baseline.rough_min_win_rate + .01,
         })
         self.assertNotEqual(baseline.version, changed.version)
 

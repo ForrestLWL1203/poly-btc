@@ -172,10 +172,12 @@ and a true actionable open within 72 hours. If the three largest winning Episode
 gross profit, the remainder must itself have at least 70% wins and non-negative net PnL. Structural exclusions
 cover HFT, systematic slicing, grid/heavy DCA, spot hedging, extreme concurrency and opaque markets.
 
-At most 40 source-qualified wallets receive a fills-only rough Copy replay. Rough admission requires dynamic
-30d/rolling-7d returns of 15%/5%, at least seven closed Copy Episodes, at least 60% Copy wins, at least 70% open
-follow rate and complete valuation. The composite score ranks this pool only; it never vetoes a qualified wallet.
-At most the first 16 proceed to unified tuning and strict path replay.
+At most 40 source-qualified wallets receive a fills-only rough Copy replay. Rough admission requires positive
+dynamic 30d and rolling-7d net returns, at least seven closed Copy Episodes, at least 60% Copy wins, at least 70%
+open follow and complete valuation. Return magnitude ranks the rough pool instead of vetoing it before parameter
+tuning. The persisted rough-pass decision and score are the frozen hand-off into formation; formation must not
+silently rebuild that gate from a partial Profile projection. At most the first 16 proceed to unified tuning and
+strict path replay.
 
 Final per-wallet strict admission requires dynamic 30d/rolling-7d returns of 10%/3%, at least 60% Copy wins,
 at least 70% open follow rate, activity within 72 hours, complete data/valuation/sector/path evidence and no more
@@ -216,8 +218,9 @@ reduce net PnL and receive a bounded score penalty; path drawdown remains visibl
 `source_quality_score` orders deep-fill survivors before the Top40 cap. `rough_copy_score` then orders the rough
 Copy-qualified pool using exactly: official Perp 30d return 10%; rough Copy 30d/7d dynamic returns 20%/10%;
 source/Copy Episode win rates 20%/10%; open-follow/add-reduction replication 15%/5%; and recency/open count
-5%/5%. Components are monotonic and capped. Scores only establish strict descending order and have no 70/75
-permission line. Final strict metrics recompute the same score surface for the surviving Top16.
+5%/5%. Positive rough returns are the scoring baseline; components are monotonic and capped. Scores only
+establish strict descending order and have no 70/75 permission line. Final strict metrics recompute the same
+score surface for the surviving Top16 against the material 10%/3% return floors.
 
 Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
 `noise_merged`, `hard_cap_blocked`, `coin_cap_blocked`, `cash_blocked`, `min_margin_blocked`, or

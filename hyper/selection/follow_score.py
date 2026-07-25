@@ -225,14 +225,8 @@ def evaluate_follow_eligibility(
         policy.min_actionable_open_rate
         if min_open_fill_rate is None else float(min_open_fill_rate)
     )
-    return_floor30 = (
-        policy.core_min_dynamic_copy_return_30d
-        if stage == "strict" else policy.rough_min_return_30d
-    )
-    return_floor7 = (
-        policy.core_min_dynamic_copy_return_7d
-        if stage == "strict" else policy.rough_min_return_7d
-    )
+    return_floor30 = policy.core_min_dynamic_copy_return_30d if stage == "strict" else 0.0
+    return_floor7 = policy.core_min_dynamic_copy_return_7d if stage == "strict" else 0.0
     win_floor = (
         policy.core_min_copy_win_rate if stage == "strict" else policy.rough_min_win_rate
     )
@@ -244,8 +238,15 @@ def evaluate_follow_eligibility(
         "officialPerpPassed": official_status == "passed",
         "sourceQualityPassed": bool(source.get("eligible")),
         "minimumClosedEvidence": c30 >= minimum_closed,
-        "copy30dReturn": return30 >= return_floor30,
-        "copy7dReturn": return7 >= return_floor7,
+        # Fills-only rough replay runs before unified parameter tuning. It proves that both windows point in
+        # the profitable direction; return magnitude belongs to score order. The tuned strict surface owns
+        # the material 10%/3% admission contract.
+        "copy30dReturn": (
+            return30 >= return_floor30 if stage == "strict" else return30 > 0.0
+        ),
+        "copy7dReturn": (
+            return7 >= return_floor7 if stage == "strict" else return7 > 0.0
+        ),
         "copyWinRate": copy_win_rate is not None and _num(copy_win_rate) >= win_floor,
         "openExecution": open_rate is not None and _num(open_rate) >= minimum_open_rate,
         "activityWithin72h": activity_age is not None and activity_age <= 72.0,
@@ -270,8 +271,16 @@ def evaluate_follow_eligibility(
         ),
         (source.get("firstFailure") or "source_quality_not_qualified", "sourceQualityPassed", False),
         ("copy_episode_evidence_insufficient", "minimumClosedEvidence", True),
-        (f"{stage}_copy_30d_return_below_floor", "copy30dReturn", False),
-        (f"{stage}_copy_7d_return_below_floor", "copy7dReturn", False),
+        (
+            "strict_copy_30d_return_below_floor"
+            if stage == "strict" else "rough_copy_30d_not_profitable",
+            "copy30dReturn", False,
+        ),
+        (
+            "strict_copy_7d_return_below_floor"
+            if stage == "strict" else "rough_copy_7d_not_profitable",
+            "copy7dReturn", False,
+        ),
         (f"{stage}_copy_win_rate_below_floor", "copyWinRate", False),
         (f"{stage}_copy_open_rate_below_floor", "openExecution", False),
         ("activity_over_72h", "activityWithin72h", False),
@@ -339,10 +348,8 @@ def compute_follow_score(
         }
     stage = str(stage or scoped.get("copy_replay_stage") or "rough").lower()
     strict = stage in {"strict", "final"}
-    floor30 = (
-        policy.core_min_dynamic_copy_return_30d if strict else policy.rough_min_return_30d
-    )
-    floor7 = policy.core_min_dynamic_copy_return_7d if strict else policy.rough_min_return_7d
+    floor30 = policy.core_min_dynamic_copy_return_30d if strict else 0.0
+    floor7 = policy.core_min_dynamic_copy_return_7d if strict else 0.0
     pnl30 = _num(scoped.get("copy_bt_net_pnl"))
     pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
     return30 = pnl30 / _replay_window_equity(scoped, 30)

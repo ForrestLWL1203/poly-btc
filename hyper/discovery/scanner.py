@@ -1843,7 +1843,8 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
         "p.copy_evidence_days,p.execution_score,p.open_probability_48h,"
-        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
+        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_win_rate,"
+        "p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
         "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
         "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_window_start_equity,"
         "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_window_start_equity,"
@@ -1880,15 +1881,38 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         row["addr"] = addr
         row.update(forward_risk.get(addr) or {})
         row["margin_equity_pct"] = margin_equity_pct
+        # Rough replay already evaluated this exact generation and persisted its score/reason. Formation must
+        # consume that frozen hand-off instead of silently rebuilding the gate from a partial SELECT or a
+        # later parameter/time surface. The tuned path-complete replay below is the next authoritative gate.
         row["score_as_of_ms"] = now_ms
-        row["follow_score"] = follow_score.compute_follow_score(row, stage="rough")[0]
-        row["follow_qualification"] = follow_score.evaluate_follow_eligibility({
-            **row,
-            "copy_bt_data_status": row.get("data_status"),
-            "copy_bt_evidence_status": row.get("evidence_status"),
-        }, stage="rough", margin_equity_pct=margin_equity_pct,
-            policy_values=policy_values, as_of_ms=now_ms,
-            follow_score_value=row["follow_score"])
+        row["follow_score"] = (
+            f(row.get("rough_copy_score"))
+            if row.get("rough_copy_score") is not None
+            else follow_score.compute_follow_score(
+                row, policy_values=policy_values, stage="rough",
+            )[0]
+        )
+        rough_passed = bool(
+            row.get("reason") == "rough_copy_qualified"
+            and row.get("rough_copy_score") is not None
+        )
+        row["follow_qualification"] = {
+            "eligible": rough_passed,
+            "coreEligible": rough_passed,
+            "stageEligible": rough_passed,
+            "stage": "rough",
+            "status": (
+                "rough_copy_qualified" if rough_passed
+                else row.get("reason") or "rough_copy_not_qualified"
+            ),
+            "firstFailure": None if rough_passed else row.get("reason"),
+            "role": "core_eligible" if rough_passed else "challenger",
+            "deferred": False,
+            "checks": {"frozenRoughCopyPassed": rough_passed},
+            "reasons": [] if rough_passed else [
+                str(row.get("reason") or "rough_copy_not_qualified")
+            ],
+        }
         qualified = (
             row.get("status") in {"active", "qualified"}
             and (row.get("follow_qualification") or {}).get("coreEligible")

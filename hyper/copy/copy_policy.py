@@ -14,8 +14,7 @@ COPY_POLICY_PARAM_KEYS = (
     "COPY_BT_MIN_CLOSED_7D", "SOURCE_QUALITY_MAX_N", "SOURCE_MIN_EPISODES_30D",
     "SOURCE_MIN_EPISODE_WIN_RATE", "SOURCE_TOP3_CONCENTRATION_TRIGGER",
     "SOURCE_BODY_MIN_WIN_RATE", "ROUGH_COPY_MIN_CLOSED_30D",
-    "ROUGH_COPY_MIN_WIN_RATE", "ROUGH_COPY_MIN_RETURN_30D", "ROUGH_COPY_MIN_RETURN_7D",
-    "CORE_COPY_MIN_WIN_RATE",
+    "ROUGH_COPY_MIN_WIN_RATE", "CORE_COPY_MIN_WIN_RATE",
     "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
     "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS",
     "OFFICIAL_PERP_MIN_RETURN_30D", "OFFICIAL_PERP_MIN_RETURN_7D",
@@ -40,8 +39,6 @@ class CopyPolicy:
     source_body_min_win_rate: float
     rough_min_closed_30d: int
     rough_min_win_rate: float
-    rough_min_return_30d: float
-    rough_min_return_7d: float
     core_min_copy_win_rate: float
     core_max_liquidations_30d: int
     deep_bag_event_pct: float
@@ -101,8 +98,6 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         source_body_min_win_rate=float(_value(values, "SOURCE_BODY_MIN_WIN_RATE", 0.70)),
         rough_min_closed_30d=int(_value(values, "ROUGH_COPY_MIN_CLOSED_30D", 7) or 0),
         rough_min_win_rate=float(_value(values, "ROUGH_COPY_MIN_WIN_RATE", 0.60)),
-        rough_min_return_30d=float(_value(values, "ROUGH_COPY_MIN_RETURN_30D", 0.15)),
-        rough_min_return_7d=float(_value(values, "ROUGH_COPY_MIN_RETURN_7D", 0.05)),
         core_min_copy_win_rate=float(_value(values, "CORE_COPY_MIN_WIN_RATE", 0.60)),
         core_max_liquidations_30d=int(_value(
             values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 3,

@@ -373,7 +373,9 @@ def evaluate_sector_policy(
     previous_policy=None,
     structural_policy=None,
 ) -> dict:
-    min_net = float(config.COPY_BT_MIN_NET_PNL if min_net is None else min_net)
+    # The retired dollar knob duplicated the dynamic return contract and made admission depend on account
+    # scale. Keep the argument only for old offline callers; production always uses the zero-profit boundary.
+    min_net = float(0.0 if min_net is None else min_net)
     # Kept in the signature for old replay callers. Current-generation sector weakness is immediate and
     # never inherits a live permission or grace period from the previous policy.
     previous_policy = parse_json_obj(previous_policy)

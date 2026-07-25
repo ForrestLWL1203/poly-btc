@@ -142,7 +142,7 @@ def _structure_namespace(db) -> SimpleNamespace:
         copy_bt_gate_enable=True,
         copy_bt_days=config.COPY_BT_DAYS,
         copy_bt_min_closed=config.COPY_BT_MIN_CLOSED,
-        copy_bt_min_net_pnl=config.COPY_BT_MIN_NET_PNL,
+        copy_bt_min_net_pnl=0.0,
     )
     return params.apply_scanner_params(db, p)
 

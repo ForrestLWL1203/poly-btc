@@ -636,6 +636,61 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(ranked, [])
 
+    def test_quality_prefix_consumes_frozen_rough_pass_and_score(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            cols = storage.PROFILE_COLS.split(",")
+            profile = {
+                "addr": "0xfrozen",
+                "status": "active",
+                "reason": "rough_copy_qualified",
+                "score": .20,
+                "rough_copy_score": .91,
+                "profile_generation": "g-frozen",
+                "data_status": "valid",
+                "evidence_status": "qualified",
+                "official_perp_status": "passed",
+                "official_perp_reason": "perp_prefilter_passed",
+                "official_perp_return_30d": .40,
+                "source_episode_n_30d": 12,
+                "source_win_rate_30d": .80,
+                "source_top3_profit_share": .50,
+                "last_copyable_open_ms": 2_000_000_000_000 - 3_600_000,
+                "copy_bt_net_pnl": 500,
+                "copy_bt_window_start_equity": 10_000,
+                "copy_bt_7d_net_pnl": 100,
+                "copy_bt_7d_window_start_equity": 10_500,
+                "copy_bt_closed_n": 12,
+                "copy_bt_win_rate": .75,
+                "copy_bt_open_fill_rate": .90,
+                "actionable_open_rate": .90,
+                "copy_bt_valuation_status": "complete",
+                "sector_policy_json": json.dumps({
+                    "allowed": ["crypto"],
+                    "crypto": {"allow": True},
+                }),
+            }
+            db.execute(
+                f"INSERT INTO profile ({storage.PROFILE_COLS}) "
+                f"VALUES ({','.join('?' for _ in cols)})",
+                [profile.get(column) for column in cols],
+            )
+            db.commit()
+
+            ranked = scanner._quality_core_profiles(
+                db, "g-frozen", core_only=False, now_ms=2_000_000_000_000,
+            )
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["addr"], "0xfrozen")
+        self.assertEqual(ranked[0]["follow_score"], .91)
+        self.assertTrue(ranked[0]["follow_qualification"]["coreEligible"])
+        self.assertEqual(
+            ranked[0]["follow_qualification"]["checks"],
+            {"frozenRoughCopyPassed": True},
+        )
+
     def open_db(self, td):
         return storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 

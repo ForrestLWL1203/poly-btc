@@ -72,10 +72,10 @@ SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.70
 SOURCE_BODY_MIN_WIN_RATE = 0.70
 ROUGH_COPY_MIN_CLOSED_30D = 7
 ROUGH_COPY_MIN_WIN_RATE = 0.60
-ROUGH_COPY_MIN_RETURN_30D = 0.15
-ROUGH_COPY_MIN_RETURN_7D = 0.05
 # Both rough and strict Copy start with a standardized comparable balance, then size every later open from
 # the floating equity produced by the same continuous 30-day path. Latest-7d uses the day-23 boundary equity.
+# Rough Copy only rejects a non-profitable 30d or rolling-7d direction; return magnitude ranks candidates.
+# The tuned, path-complete strict replay owns the material 10%/3% Core return contract below.
 CORE_MIN_DYNAMIC_COPY_RETURN_30D = 0.10
 CORE_MIN_DYNAMIC_COPY_RETURN_7D = 0.03
 CORE_COPY_MIN_WIN_RATE = 0.60
@@ -329,7 +329,6 @@ COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数
 COPY_BT_MIN_CLOSED = 7      # copy资格最低已平样本；不足则不进入Active
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
 COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
-COPY_BT_MIN_NET_PNL = 0.0   # copy 回测净收益必须 > 此值才可 active; 手续费已扣
 
 # Historical fills do not expose the source order's actual margin/leverage. Strict Copy deliberately
 # simulates our configured leverage ceiling, so a small number of proxy liquidations is a sizing signal,

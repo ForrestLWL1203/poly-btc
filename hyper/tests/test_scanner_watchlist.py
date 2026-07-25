@@ -953,7 +953,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(
                 tuple(row),
-                ("active", "rough_copy_30d_return_below_floor", -25.0, 9),
+                ("active", "rough_copy_30d_not_profitable", -25.0, 9),
             )
 
     def test_regate_reactivates_obsolete_low_quality_outcome_when_copy_gates_pass(self):
@@ -1162,7 +1162,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(
                 tuple(row),
-                ("active", "rough_copy_7d_return_below_floor", -5.0, 1),
+                ("active", "rough_copy_7d_not_profitable", -5.0, 1),
             )
 
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):

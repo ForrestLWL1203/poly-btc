@@ -76,12 +76,6 @@ PARAM_SPEC = [
         config.ROUGH_COPY_MIN_CLOSED_30D, "粗略Copy最低完整回合", "样本不足标记证据不足，不伪装为经济失败"),
     ("ROUGH_COPY_MIN_WIN_RATE", "scanner", "black", "pct", "rescan",
         config.ROUGH_COPY_MIN_WIN_RATE * 100, "粗略Copy最低胜率", "Copy完整Episode胜率至少60%"),
-    ("ROUGH_COPY_MIN_RETURN_30D", "scanner", "black", "pct", "rescan",
-        config.ROUGH_COPY_MIN_RETURN_30D * 100, "粗略Copy 30日动态收益", "连续浮动权益曲线至少增长15%"),
-    ("ROUGH_COPY_MIN_RETURN_7D", "scanner", "black", "pct", "rescan",
-        config.ROUGH_COPY_MIN_RETURN_7D * 100, "粗略Copy最近7日动态收益", "以第23天浮动权益为分母至少增长5%"),
-    ("COPY_BT_MIN_NET_PNL",  "scanner", "hidden", "usd",     "rescan", config.COPY_BT_MIN_NET_PNL,
-        "copy回测最低净收益", "扣费后的 copy 回测净收益必须高于此值才可 active"),
     ("CORE_MIN_DYNAMIC_COPY_RETURN_30D", "scanner", "black", "pct", "rescan",
         config.CORE_MIN_DYNAMIC_COPY_RETURN_30D * 100, "Core动态Copy 30日收益",
         "连续回放全程按浮动权益复利；期末相对30日起始浮动权益至少增长10%"),
@@ -96,8 +90,7 @@ PARAM_SPEC = [
         f"{config.OFFICIAL_PERP_SHORT_HISTORY_DAYS}–"
         f"{config.OFFICIAL_PERP_LONG_HISTORY_DAYS - 1}d时最近7d≥"
         f"{config.OFFICIAL_PERP_MIN_RETURN_7D * 100:g}%；"
-        f"粗略Copy 30d/7d≥{config.ROUGH_COPY_MIN_RETURN_30D * 100:g}%/"
-        f"{config.ROUGH_COPY_MIN_RETURN_7D * 100:g}%；"
+        "粗略Copy 30d与最近7d均须净盈利，收益幅度只参与排序；"
         f"动态Copy 30d≥{config.CORE_MIN_DYNAMIC_COPY_RETURN_30D * 100:g}% / "
         f"最近7d≥{config.CORE_MIN_DYNAMIC_COPY_RETURN_7D * 100:g}%",
         "源钱包、粗略Copy与最终严格Copy盈利线",
@@ -327,6 +320,7 @@ def seed_params(db):
         "'CORE_COPY_WIN_RATE_FLOORS','CORE_COPY_WIN_RATE_LCB','CORE_COPY_RECENT_BODY',"
         "'CORE_COPY_CAMPAIGN_FLOORS','CHALLENGER_MIN_COPY_RETURN_30D',"
         "'CORE_STRONG_COPY_RETURN_30D',"
+        "'ROUGH_COPY_MIN_RETURN_30D','ROUGH_COPY_MIN_RETURN_7D','COPY_BT_MIN_NET_PNL',"
         "'CORE_COPY_WIN_RATE_30D_MIN','CORE_RETENTION_WIN_RATE_30D_MIN',"
         "'CORE_COPY_WIN_RATE_LCB_30D_MIN','CORE_RETENTION_WIN_RATE_LCB_30D_MIN',"
         "'COPY_MIN_PROFIT_FACTOR','COPY_MIN_TAIL_RETURN_30D',"
@@ -489,7 +483,7 @@ SCANNER_ARG_MAP = {
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
     "COPY_BT_GATE_ENABLE": "copy_bt_gate_enable", "COPY_BT_DAYS": "copy_bt_days",
-    "COPY_BT_MIN_CLOSED": "copy_bt_min_closed", "COPY_BT_MIN_NET_PNL": "copy_bt_min_net_pnl",
+    "COPY_BT_MIN_CLOSED": "copy_bt_min_closed",
     "MAX_CONCURRENT_POS": "max_concurrent_pos",
     "DAILY_SCAN_TIME_BUDGET_MIN": "daily_scan_time_budget_min",
     "CORE_REFRESH_DEADLINE_MIN": "core_refresh_deadline_min",

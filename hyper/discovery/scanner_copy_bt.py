@@ -418,7 +418,7 @@ def apply_copy_bt_gate(metrics, result, p):
         if int(result.get("closed_n") or 0) < copy_bt_min_closed_for_days(p, days):
             return True, "ok"
         net = result.get("copy_net_pnl")
-        min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
+        min_net = 0.0
         if net is not None and net <= min_net:
             return False, "copy_backtest_loss"
         return True, "ok"
@@ -442,7 +442,7 @@ def apply_copy_bt_gate(metrics, result, p):
 
     if not getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE):
         return True, "ok"
-    min_net = float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0)
+    min_net = 0.0
     recent_recovery_ok = copy_bt_recent_recovery_ok(metrics, by_days, primary_days, p, min_net)
     for days in sorted(by_days, reverse=True):
         res = by_days[days]
@@ -467,7 +467,7 @@ def apply_sector_copy_bt_gate(metrics, result, sector_results, p, previous_polic
     compact = compact_sector_results(sector_results or {}, joint_results=result)
     policy = evaluate_sector_policy(
         sector_results or {},
-        min_net=float(getattr(p, "copy_bt_min_net_pnl", config.COPY_BT_MIN_NET_PNL) or 0.0),
+        min_net=0.0,
         previous_policy=previous_policy,
         structural_policy=structural_policy,
     )

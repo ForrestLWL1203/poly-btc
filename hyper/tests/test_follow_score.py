@@ -130,26 +130,24 @@ class SourceQualityTests(unittest.TestCase):
 
 
 class FollowScoreTests(unittest.TestCase):
-    def test_rough_copy_contract_uses_15_and_5_percent(self):
-        boundary = judge(
+    def test_rough_copy_contract_requires_both_windows_to_be_profitable(self):
+        profitable = judge(
             "rough",
-            copy_bt_net_pnl=1_500,
+            copy_bt_net_pnl=1,
             copy_bt_window_start_equity=10_000,
-            copy_bt_7d_net_pnl=600,
+            copy_bt_7d_net_pnl=1,
             copy_bt_7d_window_start_equity=12_000,
         )
-        self.assertTrue(boundary["coreEligible"])
-        self.assertAlmostEqual(boundary["returns"]["30"], .15)
-        self.assertAlmostEqual(boundary["returns"]["7"], .05)
+        self.assertTrue(profitable["coreEligible"])
         self.assertEqual(
-            judge("rough", copy_bt_net_pnl=1_499)["firstFailure"],
-            "rough_copy_30d_return_below_floor",
+            judge("rough", copy_bt_net_pnl=0)["firstFailure"],
+            "rough_copy_30d_not_profitable",
         )
         self.assertEqual(
-            judge("rough", copy_bt_7d_net_pnl=599, copy_bt_7d_window_start_equity=12_000)[
+            judge("rough", copy_bt_7d_net_pnl=0, copy_bt_7d_window_start_equity=12_000)[
                 "firstFailure"
             ],
-            "rough_copy_7d_return_below_floor",
+            "rough_copy_7d_not_profitable",
         )
 
     def test_strict_copy_uses_dynamic_window_equities(self):

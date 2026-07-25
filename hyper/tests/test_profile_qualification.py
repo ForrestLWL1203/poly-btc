@@ -58,7 +58,7 @@ class ProfileQualificationTests(unittest.TestCase):
     def test_rough_failures_remain_active_challengers(self):
         cases = (
             ({"copy_bt_closed_n": 6}, "copy_episode_evidence_insufficient"),
-            ({"copy_bt_net_pnl": -1}, "rough_copy_30d_return_below_floor"),
+            ({"copy_bt_net_pnl": -1}, "rough_copy_30d_not_profitable"),
             (
                 {"last_copyable_open_ms": NOW - 90 * 3_600_000},
                 "source_activity_stale",
