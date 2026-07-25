@@ -91,7 +91,11 @@ PARAM_SPEC = [
     ("CORE_COPY_MIN_WIN_RATE", "scanner", "black", "pct", "rescan",
         config.CORE_COPY_MIN_WIN_RATE * 100, "最终严格Copy最低胜率", "评分只排序，胜率是明确业务条件"),
     ("CORE_PROFITABILITY_CONTRACT", "scanner", "black", "display", "rescan",
-        f"官方Perp 30d≥{config.OFFICIAL_PERP_MIN_RETURN_30D * 100:g}%；"
+        f"官方Perp ≥{config.OFFICIAL_PERP_LONG_HISTORY_DAYS}d时收益≥"
+        f"{config.OFFICIAL_PERP_MIN_RETURN_30D * 100:g}%；"
+        f"{config.OFFICIAL_PERP_SHORT_HISTORY_DAYS}–"
+        f"{config.OFFICIAL_PERP_LONG_HISTORY_DAYS - 1}d时最近7d≥"
+        f"{config.OFFICIAL_PERP_MIN_RETURN_7D * 100:g}%；"
         f"粗略Copy 30d/7d≥{config.ROUGH_COPY_MIN_RETURN_30D * 100:g}%/"
         f"{config.ROUGH_COPY_MIN_RETURN_7D * 100:g}%；"
         f"动态Copy 30d≥{config.CORE_MIN_DYNAMIC_COPY_RETURN_30D * 100:g}% / "

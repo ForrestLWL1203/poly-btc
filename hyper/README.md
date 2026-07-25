@@ -140,9 +140,9 @@ python3 -m hyper.cli.core_lab --db /path/to/production.db --max-rough 40
 ```
 
 `core_lab` opens the database with SQLite `mode=ro` plus `query_only`, emits anonymous wallet labels, and never
-migrates or writes the source database. A legacy generation without the new official Perp 30-day return may be
-used only for an explicitly marked economic preview; it always reports that a new Portfolio scan is required
-before publication.
+migrates or writes the source database. A legacy generation without the current official Perp observed-history
+return may be used only for an explicitly marked economic preview; it always reports that a new Portfolio scan
+is required before publication.
 
 ## Copy replay and automatic tuning
 

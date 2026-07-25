@@ -101,10 +101,12 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 - New-wallet Leaderboard recall requires account value `$20,000`, leveraged 7d notional volume `$250,000`,
   and positive 7d and 30d PnL. Nominal leveraged volume is activity evidence, never a profitability denominator.
-  Before fill history is downloaded, official `perpMonth` must show positive 30d Perp PnL, at least 60% Perp
-  PnL share and at least 20% dynamic 30d Perp return. `history_under_28d`, `boundary_sample_gap`, and
-  `zero_start_equity` are evidence gaps: they may remain Challenger but cannot enter Core. No prior role, star
-  or retention state can bypass current qualification.
+  Before fill history is downloaded, official `perpMonth` must show positive observed-period Perp PnL and at
+  least 60% Perp PnL share. A continuously positive Perp-equity history of at least 28 days must return at
+  least 20%; a 7–27 day history uses its latest complete seven-day window and must return at least 5%.
+  Leading zero-equity funding samples are skipped without annualising the shorter return. `history_under_7d`,
+  `boundary_sample_gap`, and an unusable `zero_start_equity` are evidence gaps: they may remain Challenger but
+  cannot enter Core. No prior role, star or retention state can bypass current qualification.
 - Deep profiling uses one immutable executable universe for the generation. `hyper/copy/copy_data.py` normalizes symbols
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are

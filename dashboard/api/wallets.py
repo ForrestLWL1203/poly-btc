@@ -39,10 +39,12 @@ def _selection_reason_text(row):
         "portfolio_not_selected": "组合候补：未进入本轮评分前缀",
         "portfolio_negative_incremental_net": "组合候补：移除低分尾部后共享账户净收益更高",
         "core_eligible": "组合候补：个人资格合格，本轮组合未选中",
-        "official_perp_not_qualified": "官方Perp 30日收益未通过",
+        "official_perp_not_qualified": "官方Perp收益资格未通过",
         "history_under_28d": "官方Perp历史不足28天，证据待积累",
+        "history_under_7d": "官方Perp正权益历史不足7天，证据待积累",
         "boundary_sample_gap": "官方Perp窗口边界样本不足",
         "zero_start_equity": "官方Perp期初权益异常",
+        "official_perp_return_below_floor:short_7d": "官方Perp短历史最近7日收益低于5%",
         "source_episode_evidence_insufficient": "源钱包30日完整回合少于10个",
         "source_win_rate_below_floor": "源钱包30日胜率低于70%",
         "source_activity_stale": "最近72小时没有真实新开仓",
@@ -109,6 +111,7 @@ def _score_breakdown(row):
     if not detail:
         _score, detail = follow_score.compute_follow_score({
             "official_perp_return_30d": _col(row, "official_perp_return_30d"),
+            "official_perp_evidence_json": _col(row, "official_perp_evidence_json"),
             "source_win_rate_30d": _col(row, "source_win_rate_30d"),
             "open_events_30d": _col(row, "open_events_30d"),
             "last_copyable_open_ms": _col(row, "last_copyable_open_ms"),
@@ -314,6 +317,10 @@ def _ep_selected_wallets(db, generation, role, page, size):
         equity7 = _col(display_metrics, "copy_bt_7d_window_start_equity")
         net30 = _col(display_metrics, "copy_bt_net_pnl")
         net7 = _col(display_metrics, "copy_bt_7d_net_pnl")
+        official_evidence = _json_obj(_col(r, "official_perp_evidence_json"))
+        official_window = (
+            (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
+        )
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
@@ -391,7 +398,13 @@ def _ep_selected_wallets(db, generation, role, page, size):
                 _col(r, "official_perp_return_30d") * 100
                 if _col(r, "official_perp_return_30d") is not None else None
             ),
-            "officialPerpEvidence": _json_obj(_col(r, "official_perp_evidence_json")),
+            "officialPerpReturnPct": (
+                _col(r, "official_perp_return_30d") * 100
+                if _col(r, "official_perp_return_30d") is not None else None
+            ),
+            "officialPerpHistoryTier": official_window.get("historyTier"),
+            "officialPerpWindowDays": official_window.get("windowDays"),
+            "officialPerpEvidence": official_evidence,
             "forwardNetPnl": _col(r, "fwd_net") or 0,
             "isNew": _is_new_followed(_col(r, "first_followed_at")),
             "dataStatus": _col(r, "selection_data_status") or _col(r, "data_status"),
@@ -514,6 +527,7 @@ def ep_wallet_detail(db, addr, qs=None):
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
             "p.official_perp_return_30d,p.official_perp_status,p.official_perp_reason,"
+            "p.official_perp_evidence_json,"
             "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,"
             "p.source_win_rate_7d,p.source_net_pnl_30d,p.source_net_pnl_7d,"
             "p.source_top3_profit_share,p.source_body_after_top3_n,"
@@ -558,6 +572,12 @@ def ep_wallet_detail(db, addr, qs=None):
         final_score = _col(pr, "last_followed_score")
     if final_score is None and not _col(pr, "selection_role"):
         final_score = w["score"] if (w and w["score"] is not None) else (pr["score"] if pr else None)
+    official_evidence = (
+        _json_obj(_col(pr, "official_perp_evidence_json")) if pr else {}
+    )
+    official_window = (
+        (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
+    )
     return {
         "address": addr, "rank": (w["rank"] if w else None),
         "role": (_col(pr, "selection_role") if pr else None),
@@ -573,6 +593,15 @@ def ep_wallet_detail(db, addr, qs=None):
             _col(pr, "official_perp_return_30d") * 100
             if pr and _col(pr, "official_perp_return_30d") is not None else None
         ),
+        "officialPerpReturnPct": (
+            _col(pr, "official_perp_return_30d") * 100
+            if pr and _col(pr, "official_perp_return_30d") is not None else None
+        ),
+        "officialPerpHistoryTier": official_window.get("historyTier"),
+        "officialPerpWindowDays": official_window.get("windowDays"),
+        "officialPerpStatus": _col(pr, "official_perp_status") if pr else None,
+        "officialPerpReason": _col(pr, "official_perp_reason") if pr else None,
+        "officialPerpEvidence": official_evidence,
         "sourceQuality": {
             "score": score100(_col(pr, "source_quality_score")) if pr else None,
             "episodeN30d": _col(pr, "source_episode_n_30d") if pr else None,

@@ -484,9 +484,9 @@ def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, act
 def _prepare_leaderboard_rows(rows, p, fetched_at):
     """Attach the cheap discovery decision without mutating the live leaderboard.
 
-    New-wallet recall combines useful account size/activity and absolute recent PnL. Independent official
-    four adjacent Perp return segments are evaluated from the dense Portfolio series after this raw-row gate;
-    the Leaderboard's overlapping month ROI remains audit-only.
+    New-wallet recall combines useful account size/activity and absolute recent PnL. Official Portfolio then
+    evaluates either a full positive-equity history or, for a 7–27 day account, its latest complete seven-day
+    Perp return; the Leaderboard's overlapping month ROI remains audit-only.
     Current roles/open-position owners bypass this discovery-only decision and receive retention replay.
     """
     min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
@@ -520,7 +520,7 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
 
 
 def harvest(db, p, *, generation_id=None) -> int:
-    """Leaderboard account/activity + positive PnL recall before official four-segment Perp stability."""
+    """Leaderboard account/activity + positive PnL recall before official observed-history Perp ROI."""
     rows = rest.get_leaderboard()
     now = now_iso()
     prepared = _prepare_leaderboard_rows(rows, p, now)
@@ -625,7 +625,7 @@ def _leaderboard_recall_audit(db, generation_id, stamp, p):
 
 
 def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True):
-    """Run official Perp 30-day return and profit-share checks before downloading fills."""
+    """Run official Perp observed-history return and profit-share checks before downloading fills."""
     pipeline_audit._delete_stage(db, stamp, "scan", "perp_prefilter")
     # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
     # single writer slot across a batch of rate-paced Portfolio calls freezes Observer marks and commands.
@@ -638,11 +638,14 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True):
     share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
     copy_policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
     cache_policy = {
-        "version": "official_perp_30d_return_v6",
+        "version": "official_perp_observed_return_v7",
         "monthPerpPnlMustBePositive": True,
         "auditPnlMinima": {key: float(value) for key, value in minima.items()},
         "shareMin": float(share_min),
         "minReturn30d": float(copy_policy.official_perp_min_return_30d),
+        "minReturn7d": float(copy_policy.official_perp_min_return_7d),
+        "longHistoryDays": int(copy_policy.official_perp_long_history_days),
+        "shortHistoryDays": int(copy_policy.official_perp_short_history_days),
         "maxBoundaryGapHours": float(
             copy_policy.official_perp_boundary_max_gap_hours
         ),
@@ -697,6 +700,9 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True):
                     pnl_minima=minima,
                     share_min=share_min,
                     min_return_30d=copy_policy.official_perp_min_return_30d,
+                    min_return_7d=copy_policy.official_perp_min_return_7d,
+                    long_history_days=copy_policy.official_perp_long_history_days,
+                    short_history_days=copy_policy.official_perp_short_history_days,
                     max_boundary_gap_hours=(
                         copy_policy.official_perp_boundary_max_gap_hours
                     ),
@@ -4650,7 +4656,8 @@ def scan(db, p) -> None:
             )
         if gate.deferred:
             if gate.reason in {
-                "history_under_28d", "boundary_sample_gap", "zero_start_equity",
+                "history_under_7d", "history_under_28d",
+                "boundary_sample_gap", "zero_start_equity",
             }:
                 return addr, prior, _defer_official_evidence_profile(
                     db, addr, prior, stamp, generation_id, gate,

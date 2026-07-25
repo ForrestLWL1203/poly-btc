@@ -5,7 +5,7 @@ The source database is opened with ``mode=ro`` and ``PRAGMA query_only``. The co
 Episode quality and runs at most 40 K-line-free wallet replays under the active parameter surface. It never
 migrates a table, writes a profile, changes parameters, publishes a generation, or starts a process.
 
-Legacy generations may have cached Portfolio decisions without the new official Perp 30-day return. Those
+Legacy generations may have cached Portfolio decisions without the current official Perp observed-history return. Those
 wallets are useful for an explicitly labelled economic preview, but can never be reported as publishable Core
 evidence. A complete new generation must collect and persist the missing official return first.
 """

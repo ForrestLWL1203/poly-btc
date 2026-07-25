@@ -108,6 +108,26 @@ class SourceQualityTests(unittest.TestCase):
         ), as_of_ms=NOW)[0]
         self.assertGreater(high, low)
 
+    def test_short_history_uses_its_five_percent_official_floor_for_scoring(self):
+        short_evidence = json.dumps({
+            "windows": {
+                "officialPerp30d": {
+                    "historyTier": "short_history_7d",
+                    "windowDays": 7,
+                    "positiveCoverageDays": 15,
+                    "minimumReturn": .05,
+                },
+            },
+        })
+        _score, detail = compute_source_quality_score(evidence(
+            official_perp_return_30d=.05,
+            official_perp_evidence_json=short_evidence,
+        ), as_of_ms=NOW)
+
+        self.assertAlmostEqual(detail["officialPerp30dScore"], .60)
+        self.assertEqual(detail["officialPerpHistoryTier"], "short_history_7d")
+        self.assertEqual(detail["officialPerpWindowDays"], 7)
+
 
 class FollowScoreTests(unittest.TestCase):
     def test_rough_copy_contract_uses_15_and_5_percent(self):

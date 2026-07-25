@@ -53,6 +53,11 @@ export function WalletDrawer({ address, onClose }) {
   const scoreBreakdown = (d && d.scoreBreakdown) || {};
   const scoreComponents = scoreBreakdown.components || {};
   const sourceQuality = (d && d.sourceQuality) || {};
+  const officialEvidence = (((d && d.officialPerpEvidence) || {}).windows || {}).officialPerp30d || {};
+  const officialIsShort = officialEvidence.historyTier === "short_history_7d";
+  const officialRoiLabel = officialIsShort
+    ? `官方 Perp 最近7日 ROI（${fNum(officialEvidence.positiveCoverageDays, 0)}日历史）`
+    : `官方 Perp ${officialEvidence.windowDays != null ? fNum(officialEvidence.windowDays, 0) : "约30"}日 ROI`;
   const copyRows = copyWindowRows(scoreBreakdown);
   const copy30 = copyRows.find(([label]) => label === "30 天");
   const roleView = !d ? null : d.role === "core"
@@ -117,7 +122,7 @@ export function WalletDrawer({ address, onClose }) {
               {sourceQuality.episodeN30d != null && (
                 <DecisionCard title="源钱包质量" tone={(sourceQuality.winRate30dPct || 0) >= 70 ? "good" : "warn"}>
                   <div className="wallet-risk-list">
-                    <div className="wallet-risk"><span>官方 Perp 30日 ROI</span><b>{d.officialPerpReturn30dPct != null ? fNum(d.officialPerpReturn30dPct, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>{officialRoiLabel}</span><b>{d.officialPerpReturnPct != null ? fNum(d.officialPerpReturnPct, 1) + "%" : "—"}</b></div>
                     <div className="wallet-risk"><span>30日完整回合 / 胜率</span><b>{sourceQuality.episodeN30d} / {sourceQuality.winRate30dPct != null ? fNum(sourceQuality.winRate30dPct, 1) + "%" : "—"}</b></div>
                     <div className="wallet-risk"><span>最近7日回合 / 胜率</span><b>{sourceQuality.episodeN7d ?? "—"} / {sourceQuality.winRate7dPct != null ? fNum(sourceQuality.winRate7dPct, 1) + "%" : "—"}</b></div>
                     <div className="wallet-risk"><span>源钱包30日 / 7日净利</span><b>{fSign(sourceQuality.netPnl30d, 0)} / {fSign(sourceQuality.netPnl7d, 0)}</b></div>
@@ -130,7 +135,7 @@ export function WalletDrawer({ address, onClose }) {
               {Object.keys(scoreComponents).length > 0 && (
                 <DecisionCard title="综合评分构成" tone="neutral">
                   <div className="wallet-risk-list">
-                    <div className="wallet-risk"><span>官方 / Copy 30日 / Copy 7日</span><b>{fNum(scoreComponents.officialPerp30d, 1)} / {fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
+                    <div className="wallet-risk"><span>官方资格窗口 / Copy 30日 / Copy 7日</span><b>{fNum(scoreComponents.officialPerp30d, 1)} / {fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
                     <div className="wallet-risk"><span>源胜率 / Copy胜率</span><b>{fNum(scoreComponents.sourceWinRate, 1)} / {fNum(scoreComponents.copyWinRate, 1)}</b></div>
                     <div className="wallet-risk"><span>开仓跟随 / 行为复制</span><b>{fNum(scoreComponents.openFollowRate, 1)} / {fNum(scoreComponents.behaviorReplication, 1)}</b></div>
                     <div className="wallet-risk"><span>活跃度 / 独立开仓</span><b>{fNum(scoreComponents.activityRecency, 1)} / {fNum(scoreComponents.independentOpens, 1)}</b></div>

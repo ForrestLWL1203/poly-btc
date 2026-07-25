@@ -18,7 +18,9 @@ COPY_POLICY_PARAM_KEYS = (
     "CORE_COPY_MIN_WIN_RATE",
     "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
     "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS",
-    "OFFICIAL_PERP_MIN_RETURN_30D", "OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS",
+    "OFFICIAL_PERP_MIN_RETURN_30D", "OFFICIAL_PERP_MIN_RETURN_7D",
+    "OFFICIAL_PERP_LONG_HISTORY_DAYS", "OFFICIAL_PERP_SHORT_HISTORY_DAYS",
+    "OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS",
     "CORE_MIN_DYNAMIC_COPY_RETURN_30D", "CORE_MIN_DYNAMIC_COPY_RETURN_7D",
     "CORE_PORTFOLIO_MIN_RETURN_30D", "CORE_PORTFOLIO_MIN_RETURN_7D",
     "SELECTION_MIN_ACTIONABLE_RATE", "SELECTION_MIN_CAPACITY_FIT",
@@ -46,6 +48,9 @@ class CopyPolicy:
     deep_bag_event_min_hours: float
     deep_bag_long_hours: float
     official_perp_min_return_30d: float
+    official_perp_min_return_7d: float
+    official_perp_long_history_days: int
+    official_perp_short_history_days: int
     official_perp_boundary_max_gap_hours: float
     core_min_dynamic_copy_return_30d: float
     core_min_dynamic_copy_return_7d: float
@@ -107,6 +112,15 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         deep_bag_long_hours=float(_value(values, "COPY_DEEP_BAG_LONG_HOURS", 24.0)),
         official_perp_min_return_30d=float(_value(
             values, "OFFICIAL_PERP_MIN_RETURN_30D", 0.20,
+        )),
+        official_perp_min_return_7d=float(_value(
+            values, "OFFICIAL_PERP_MIN_RETURN_7D", 0.05,
+        )),
+        official_perp_long_history_days=int(_value(
+            values, "OFFICIAL_PERP_LONG_HISTORY_DAYS", 28,
+        )),
+        official_perp_short_history_days=int(_value(
+            values, "OFFICIAL_PERP_SHORT_HISTORY_DAYS", 7,
         )),
         official_perp_boundary_max_gap_hours=float(_value(
             values, "OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS", 36,

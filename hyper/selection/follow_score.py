@@ -55,6 +55,31 @@ def _activity_age_hours(metrics: Mapping, as_of_ms: int) -> float | None:
     return max(0.0, (int(as_of_ms) - last_open) / 3_600_000.0)
 
 
+def _official_return_context(metrics: Mapping, policy) -> dict:
+    """Recover the qualifying official window without calling a 7-day return "30-day ROI"."""
+    payload = parse_json_obj(metrics.get("official_perp_evidence_json"))
+    windows = payload.get("windows") if isinstance(payload.get("windows"), dict) else {}
+    evidence = (
+        windows.get("officialPerp30d")
+        if isinstance(windows.get("officialPerp30d"), dict)
+        else {}
+    )
+    floor = _num(evidence.get("minimumReturn"), policy.official_perp_min_return_30d)
+    return {
+        "return": _num(metrics.get("official_perp_return_30d")),
+        "floor": floor,
+        "historyTier": evidence.get("historyTier") or "full_history",
+        "windowDays": (
+            _num(evidence.get("windowDays"))
+            if evidence.get("windowDays") is not None else None
+        ),
+        "positiveCoverageDays": (
+            _num(evidence.get("positiveCoverageDays"))
+            if evidence.get("positiveCoverageDays") is not None else None
+        ),
+    }
+
+
 def evaluate_source_quality(
     metrics: Mapping,
     *,
@@ -127,12 +152,13 @@ def compute_source_quality_score(
     """Rank source-qualified wallets before the global Top40 cap."""
     policy = load_copy_policy(policy_values)
     as_of_ms = int(as_of_ms or time.time() * 1000)
-    official_return = _num(metrics.get("official_perp_return_30d"))
+    official = _official_return_context(metrics, policy)
+    official_return = official["return"]
     win_rate = _num(metrics.get("source_win_rate_30d"))
     episodes = int(_num(metrics.get("source_episode_n_30d")))
     activity_age = _activity_age_hours(metrics, as_of_ms)
     official_score = _quality_above_floor(
-        official_return, policy.official_perp_min_return_30d, 0.80,
+        official_return, official["floor"], 0.80,
     )
     win_score = _quality_above_floor(
         win_rate, policy.source_min_episode_win_rate, 0.25,
@@ -144,6 +170,8 @@ def compute_source_quality_score(
     score = 0.25 * official_score + 0.40 * win_score + 0.25 * sample_score + 0.10 * recency_score
     return _clamp(score), {
         "officialPerp30dScore": official_score,
+        "officialPerpHistoryTier": official["historyTier"],
+        "officialPerpWindowDays": official["windowDays"],
         "sourceWinRateScore": win_score,
         "sourceSampleScore": sample_score,
         "sourceRecencyScore": recency_score,
@@ -319,7 +347,8 @@ def compute_follow_score(
     pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
     return30 = pnl30 / _replay_window_equity(scoped, 30)
     return7 = pnl7 / _replay_window_equity(scoped, 7)
-    official_return = _num(scoped.get("official_perp_return_30d"))
+    official = _official_return_context(scoped, policy)
+    official_return = official["return"]
     source_win = _num(scoped.get("source_win_rate_30d"))
     copy_win = _num(scoped.get("copy_bt_win_rate"))
     open_rate = _clamp(_num(
@@ -336,7 +365,7 @@ def compute_follow_score(
     source_opens = int(_num(scoped.get("open_events_30d")))
     components = {
         "officialPerp30d": _quality_above_floor(
-            official_return, policy.official_perp_min_return_30d, 0.80,
+            official_return, official["floor"], 0.80,
         ),
         "copy30d": _quality_above_floor(return30, floor30, 0.60),
         "copy7d": _quality_above_floor(return7, floor7, 0.25),
@@ -371,6 +400,7 @@ def compute_follow_score(
         "stage": "strict" if strict else "rough",
         "components": components,
         "economicReturns": {"30d": return30, "7d": return7},
+        "officialPerp": official,
         "economicEquities": {
             "30d": _replay_window_equity(scoped, 30),
             "7d": _replay_window_equity(scoped, 7),

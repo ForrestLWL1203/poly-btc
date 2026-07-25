@@ -35,6 +35,27 @@ def _stability_window(returns, *, equity=10_000):
     return {"pnlHistory": pnl_history, "accountValueHistory": equity_history}
 
 
+def _daily_window(days, *, equity=10_000, pnl_by_day=None, leading_zero_days=0):
+    pnl_by_day = dict(pnl_by_day or {})
+    pnl = 0.0
+    pnl_history = []
+    equity_history = []
+    for day in range(days + 1):
+        pnl += float(pnl_by_day.get(day, 0.0))
+        pnl_history.append([day * 86400_000, str(pnl)])
+        account_value = 0.0 if day < leading_zero_days else float(equity)
+        equity_history.append([day * 86400_000, str(account_value)])
+    return {"pnlHistory": pnl_history, "accountValueHistory": equity_history}
+
+
+def _replace_month(payload, window):
+    return [
+        [name, window] if name in {"month", "perpMonth"} else row
+        for row in payload
+        for name in [row[0]]
+    ]
+
+
 def _portfolio(*, total=(6000, 18000, 25000), perp=(5000, 15000, 20000)):
     rows = []
     for label, value in zip(("week", "month", "allTime"), total):
@@ -140,20 +161,99 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(passed.passed)
         self.assertEqual(failed.reason, "official_perp_return_below_floor:month")
 
-    def test_history_under_28_days_is_deferred_not_business_rejection(self):
-        payload = _portfolio()
-        short = {
-            "pnlHistory": [[0, "0"], [27 * 86400_000, "4000"]],
-            "accountValueHistory": [[0, "10000"], [27 * 86400_000, "14000"]],
-        }
-        payload = [
-            [name, short] if name == "perpMonth" else row
-            for row in payload
-            for name in [row[0]]
-        ]
-        result = perp_prefilter.evaluate(payload, pnl_minima=self.minima, share_min=0.1)
+    def test_fifteen_day_wallet_uses_latest_complete_seven_day_return(self):
+        short = _daily_window(
+            15,
+            pnl_by_day={day: 500 / 7 for day in range(9, 16)},
+        )
+        result = perp_prefilter.evaluate(
+            _replace_month(_portfolio(), short),
+            pnl_minima=self.minima,
+            share_min=0.1,
+        )
+        evidence = result.windows["officialPerp30d"]
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.reason, "perp_prefilter_passed_short_history")
+        self.assertEqual(evidence["historyTier"], "short_history_7d")
+        self.assertAlmostEqual(evidence["windowDays"], 7.0)
+        self.assertAlmostEqual(evidence["return"], .05)
+        self.assertAlmostEqual(evidence["minimumReturn"], .05)
+
+    def test_short_history_seven_day_return_below_five_percent_is_rejected(self):
+        short = _daily_window(
+            15,
+            pnl_by_day={day: 499 / 7 for day in range(9, 16)},
+        )
+        result = perp_prefilter.evaluate(
+            _replace_month(_portfolio(), short),
+            pnl_minima=self.minima,
+            share_min=0.1,
+        )
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.reason, "official_perp_return_below_floor:short_7d")
+
+    def test_history_under_seven_days_is_deferred_not_business_rejection(self):
+        short = _daily_window(6, pnl_by_day={day: 100 for day in range(1, 7)})
+        result = perp_prefilter.evaluate(
+            _replace_month(_portfolio(), short),
+            pnl_minima=self.minima,
+            share_min=0.1,
+        )
+
         self.assertTrue(result.deferred)
-        self.assertEqual(result.reason, "history_under_28d")
+        self.assertEqual(result.reason, "history_under_7d")
+
+    def test_leading_zero_is_skipped_when_positive_history_still_covers_28_days(self):
+        funded = _daily_window(
+            30,
+            leading_zero_days=2,
+            pnl_by_day={day: 2000 / 28 for day in range(3, 31)},
+        )
+        result = perp_prefilter.evaluate(
+            _replace_month(_portfolio(), funded),
+            pnl_minima=self.minima,
+            share_min=0.1,
+        )
+        evidence = result.windows["officialPerp30d"]
+
+        self.assertTrue(result.passed)
+        self.assertEqual(evidence["historyTier"], "full_history")
+        self.assertGreaterEqual(evidence["positiveCoverageDays"], 28)
+        self.assertAlmostEqual(evidence["return"], .20)
+
+    def test_leading_zero_with_fifteen_positive_days_uses_short_history(self):
+        funded = _daily_window(
+            20,
+            leading_zero_days=6,
+            pnl_by_day={day: 500 / 7 for day in range(14, 21)},
+        )
+        result = perp_prefilter.evaluate(
+            _replace_month(_portfolio(), funded),
+            pnl_minima=self.minima,
+            share_min=0.1,
+        )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(
+            result.windows["officialPerp30d"]["historyTier"],
+            "short_history_7d",
+        )
+
+    def test_short_sparse_history_without_reliable_seven_day_boundary_is_deferred(self):
+        sparse = {
+            "pnlHistory": [[0, "0"], [15 * 86400_000, "500"]],
+            "accountValueHistory": [[0, "10000"], [15 * 86400_000, "10500"]],
+        }
+        result = perp_prefilter.evaluate(
+            _replace_month(_portfolio(), sparse),
+            pnl_minima=self.minima,
+            share_min=0.1,
+        )
+
+        self.assertTrue(result.deferred)
+        self.assertEqual(result.reason, "boundary_sample_gap")
 
     def test_leveraged_volume_does_not_affect_leaderboard_decision(self):
         def row(volume):

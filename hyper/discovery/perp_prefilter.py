@@ -106,29 +106,80 @@ def official_perp_month_return(
     window: dict | None,
     *,
     max_boundary_gap_hours: float = 36.0,
+    long_history_days: int = 28,
+    short_history_days: int = 7,
+    min_return_30d: float = 0.20,
+    min_return_7d: float = 0.05,
 ) -> dict:
-    """Return the official ``perpMonth`` ROI from its own window endpoints.
+    """Return one trustworthy official ``perpMonth`` qualification ROI.
 
-    Hyperliquid's month series can span 28–30 days depending on the sampling boundary.  Treat the
-    official window as authoritative instead of inventing a synthetic 30-day boundary outside it.
-    Interpolation is only allowed when an endpoint differs between the PnL and equity series and the
-    adjacent samples are at most 36 hours apart.
+    A wallet with at least 28 days of continuously positive Perp equity uses its full observable window
+    and the normal 20% return floor. A younger wallet with at least seven days uses the latest complete
+    seven-day window and a 5% floor. This admits genuinely strong new accounts without annualising one
+    lucky week or dividing across a zero-equity funding boundary.
     """
     pnl = _history(window, "pnlHistory")
     equity = _history(window, "accountValueHistory")
     if len(pnl) < 2 or len(equity) < 2:
         return {
-            "version": "official-perp-30d-return-v1",
-            "evidenceSufficient": False, "reason": "history_under_28d",
+            "version": "official-perp-observed-return-v2",
+            "evidenceSufficient": False, "reason": "history_under_7d",
         }
-    start_ms = max(pnl[0][0], equity[0][0])
+    raw_start_ms = max(pnl[0][0], equity[0][0])
     end_ms = min(pnl[-1][0], equity[-1][0])
-    if end_ms - start_ms < 28 * DAY_MS:
+    if end_ms <= raw_start_ms:
         return {
-            "version": "official-perp-30d-return-v1",
-            "evidenceSufficient": False, "reason": "history_under_28d",
-            "startMs": start_ms, "endMs": end_ms,
+            "version": "official-perp-observed-return-v2",
+            "evidenceSufficient": False, "reason": "history_under_7d",
+            "rawStartMs": raw_start_ms, "endMs": end_ms,
         }
+
+    # A leading zero is normally an account's initial funding boundary, not evidence that its later
+    # Perp trading is invalid. Start after the latest non-positive sample so a later reset can never be
+    # crossed. Every observed equity sample in the accepted coverage is therefore strictly positive.
+    last_nonpositive_ms = max(
+        (stamp for stamp, value in equity if raw_start_ms <= stamp <= end_ms and value <= 0.0),
+        default=None,
+    )
+    if last_nonpositive_ms is None:
+        positive_start_ms = raw_start_ms
+    else:
+        positive_start_ms = next(
+            (
+                stamp for stamp, value in equity
+                if last_nonpositive_ms < stamp <= end_ms and value > 0.0
+            ),
+            None,
+        )
+        if positive_start_ms is None:
+            return {
+                "version": "official-perp-observed-return-v2",
+                "evidenceSufficient": False, "reason": "history_under_7d",
+                "rawStartMs": raw_start_ms, "endMs": end_ms,
+                "positiveCoverageDays": 0.0,
+            }
+
+    positive_coverage_days = (end_ms - positive_start_ms) / DAY_MS
+    long_days = max(1, int(long_history_days))
+    short_days = max(1, min(int(short_history_days), long_days))
+    if positive_coverage_days >= long_days:
+        start_ms = positive_start_ms
+        history_tier = "full_history"
+        minimum_return = float(min_return_30d)
+    elif positive_coverage_days >= short_days:
+        start_ms = end_ms - short_days * DAY_MS
+        history_tier = "short_history_7d"
+        minimum_return = float(min_return_7d)
+    else:
+        return {
+            "version": "official-perp-observed-return-v2",
+            "evidenceSufficient": False, "reason": "history_under_7d",
+            "rawStartMs": raw_start_ms, "endMs": end_ms,
+            "positiveCoverageStartMs": positive_start_ms,
+            "positiveCoverageDays": positive_coverage_days,
+            "minimumHistoryDays": short_days,
+        }
+
     max_gap_ms = max(1, int(float(max_boundary_gap_hours) * 3_600_000))
     pnl_start, pnl_start_source = _at_boundary(pnl, start_ms, max_gap_ms=max_gap_ms)
     pnl_end, pnl_end_source = _at_boundary(pnl, end_ms, max_gap_ms=max_gap_ms)
@@ -148,11 +199,17 @@ def official_perp_month_return(
     )
     net_pnl = (pnl_end - pnl_start) if sufficient else None
     return {
-        "version": "official-perp-30d-return-v1",
+        "version": "official-perp-observed-return-v2",
         "maxBoundaryGapHours": float(max_boundary_gap_hours),
         "evidenceSufficient": sufficient,
         "reason": reason or ("passed" if sufficient else "boundary_sample_gap"),
+        "historyTier": history_tier,
+        "rawStartMs": raw_start_ms,
+        "positiveCoverageStartMs": positive_start_ms,
+        "positiveCoverageDays": positive_coverage_days,
         "startMs": start_ms, "endMs": end_ms,
+        "windowDays": (end_ms - start_ms) / DAY_MS,
+        "minimumReturn": minimum_return,
         "startEquity": start_equity,
         "netPnl": net_pnl,
         "return": (net_pnl / start_equity) if sufficient else None,
@@ -188,9 +245,12 @@ def evaluate(
     pnl_minima: dict[str, float],
     share_min: float,
     min_return_30d: float = 0.20,
+    min_return_7d: float = 0.05,
+    long_history_days: int = 28,
+    short_history_days: int = 7,
     max_boundary_gap_hours: float = 36.0,
 ) -> Result:
-    """Require profitable, Perp-led activity and at least 20% official Perp 30-day ROI."""
+    """Require profitable, Perp-led activity and a qualified long/short official Perp ROI."""
     del pnl_minima
     windows = _portfolio_map(payload)
     if not windows:
@@ -222,6 +282,10 @@ def evaluate(
     official_return = official_perp_month_return(
         windows.get("perpMonth"),
         max_boundary_gap_hours=max_boundary_gap_hours,
+        long_history_days=long_history_days,
+        short_history_days=short_history_days,
+        min_return_30d=min_return_30d,
+        min_return_7d=min_return_7d,
     )
     metrics["officialPerp30d"] = official_return
     if not official_return["evidenceSufficient"]:
@@ -232,6 +296,17 @@ def evaluate(
         )
     month["perpReturn"] = official_return.get("return")
     month["perpStartEquity"] = official_return.get("startEquity")
-    if float(official_return.get("return") or 0.0) < float(min_return_30d):
-        return Result("rejected", "official_perp_return_below_floor:month", metrics)
-    return Result("passed", "perp_prefilter_passed", metrics)
+    required_return = float(official_return.get("minimumReturn") or min_return_30d)
+    if float(official_return.get("return") or 0.0) + 1e-12 < required_return:
+        suffix = (
+            "short_7d"
+            if official_return.get("historyTier") == "short_history_7d"
+            else "month"
+        )
+        return Result("rejected", f"official_perp_return_below_floor:{suffix}", metrics)
+    reason = (
+        "perp_prefilter_passed_short_history"
+        if official_return.get("historyTier") == "short_history_7d"
+        else "perp_prefilter_passed"
+    )
+    return Result("passed", reason, metrics)
