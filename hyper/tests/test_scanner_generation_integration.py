@@ -409,6 +409,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(source.count("_effective_follow_replay("), 1)
         self.assertIn("tune_ranked = ranked_candidates[:upper]", source)
 
+    def test_effective_replay_keeps_one_sector_scoped_surface(self):
+        source = inspect.getsource(scanner._effective_follow_replay)
+
+        self.assertIn(
+            "apply_allowed_sector_copy_metrics({**row, **effective})",
+            source,
+        )
+        self.assertNotIn('"sector_copy_json": None', source)
+        self.assertIn("**scoring_metrics", source)
+
     def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 

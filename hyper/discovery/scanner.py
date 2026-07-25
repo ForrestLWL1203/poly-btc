@@ -2024,10 +2024,12 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     for key in ("forward_net_pnl", "forward_liquidations", "forward_closed_n"):
         if row.get(key) is not None:
             effective[key] = row[key]
-    # Compute once from the exact sealed parameter replay. Qualification and published rank must consume
-    # this same value; otherwise a hidden second score can disagree with the score-ordered Core prefix.
+    # Freeze one executable-sector surface for score, qualification, formation and persistence.  The
+    # historical path nulled ``sector_copy_json`` for scoring after qualification had already applied the
+    # allowed-sector policy.  That made the final formation re-read the all-sector aggregate and made
+    # persisted replay counts/returns disagree with the wallet's first failure reason.
     scoring_metrics = {
-        **row, **effective, "sector_copy_json": None,
+        **apply_allowed_sector_copy_metrics({**row, **effective}),
         "margin_equity_pct": replay_ctx.margin_equity_pct,
         "copy_replay_stage": qualification_stage,
         "score_as_of_ms": now_ms,
@@ -2037,10 +2039,12 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
     )
     qualification = follow_score.evaluate_follow_eligibility(
         {
-            **row, **effective,
-            "copy_bt_data_status": effective.get("data_status", effective.get("copy_bt_data_status")),
-            "copy_bt_evidence_status": effective.get(
-                "evidence_status", effective.get("copy_bt_evidence_status")
+            **scoring_metrics,
+            "copy_bt_data_status": scoring_metrics.get(
+                "data_status", scoring_metrics.get("copy_bt_data_status")
+            ),
+            "copy_bt_evidence_status": scoring_metrics.get(
+                "evidence_status", scoring_metrics.get("copy_bt_evidence_status")
             ),
         },
         stage=qualification_stage,
