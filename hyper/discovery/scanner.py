@@ -4009,6 +4009,9 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         force_entry_requalification=force_entry_requalification,
         force_retune=retune_formation,
     )
+    _assert_automatic_formation_tuned(
+        formation, required=bool(retune_formation),
+    )
     refresh_watchlist(
         db,
         stamp,

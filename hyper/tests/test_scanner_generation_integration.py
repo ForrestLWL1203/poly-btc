@@ -179,6 +179,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("_assert_automatic_formation_tuned(", scan_source)
         self.assertNotIn("generation_id, stamp, now_ms, retune=False", scan_source)
         self.assertIn("retune_formation=True", optimize_source)
+        self.assertIn(
+            "_assert_automatic_formation_tuned(",
+            inspect.getsource(scanner.repair_published_selection),
+        )
         self.assertIn("path_rows=None, path_meta=None", formation_source)
         self.assertNotIn("shared_path = price_path.load_refined", formation_source)
         self.assertEqual(publication_source.count("auto_tune._candidate_windows("), 3)
