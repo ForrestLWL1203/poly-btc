@@ -510,6 +510,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     30: {
                         "copy_net_pnl": 3_000 if better else 1_500,
                         "window_start_equity": 10_000,
+                        "price_path_coverage": 1.0,
+                        "maintenance_margin_coverage": 1.0,
                     },
                     7: {
                         "copy_net_pnl": 700 if better else 500,
@@ -528,19 +530,30 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             metrics = SimpleNamespace(actionable_open_rate=.9, capacity_fit=1.0)
             with patch.object(scanner, "_effective_follow_replay", side_effect=replay), \
                     patch.object(
+                        scanner.price_path, "load_refined",
+                        return_value=[{"coin": "BTC", "time": 1}],
+                    ), \
+                    patch.object(
+                        scanner.price_path, "coverage",
+                        return_value={"coverage": 1.0},
+                    ), \
+                    patch.object(
+                        scanner, "prepare_price_path", return_value=["strict-path"],
+                    ), \
+                    patch.object(
                         scanner.auto_tune, "_filter_window_fills_by_addr",
-                        return_value={30: [], 7: []},
+                        return_value={30: [{"coin": "BTC", "time": 1}], 7: []},
                     ), \
                     patch.object(
                         scanner.auto_tune, "_candidate_windows", side_effect=windows,
-                    ), \
+                    ) as window_mock, \
                     patch.object(
                         scanner, "_portfolio_selection_metrics", return_value=metrics,
                     ):
                 chosen, audit = scanner._select_formation_finalist_surface(
                     db, tune, rows, base_follow=base, generation_id="g1",
                     now_ms=1, valuation_marks={}, sigmas={}, market_ctx={},
-                    window_fills={30: [], 7: []},
+                    window_fills={30: [{"coin": "BTC", "time": 1}], 7: []},
                 )
 
             self.assertEqual(
@@ -548,6 +561,92 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(
                 sorted(item["qualifiedCount"] for item in audit), [1, 2],
+            )
+            self.assertTrue(all(
+                call.kwargs["path_rows"] == ["strict-path"]
+                for call in window_mock.call_args_list
+            ))
+
+    def test_finalist_surface_rejects_fills_only_winner_with_negative_strict_recent_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            base = params.load_follow(db)
+            baseline = {
+                key: base[key]
+                for key in (*scanner.auto_tune.TUNE_KEYS, *scanner.auto_tune.ADD_TUNE_KEYS)
+            }
+            aggressive = {**baseline, "STABLE_MARGIN_PCT": baseline["STABLE_MARGIN_PCT"] + .01}
+            rows = [{"addr": "0xaaa"}]
+
+            def replay(_db, _row, _now, **_kwargs):
+                return {
+                    "qualification": {
+                        "checks": {key: True for key in scanner._FORMATION_PREPATH_CHECKS},
+                        "status": "strict_copy_qualified",
+                    },
+                    "metrics": {"copy_bt_net_pnl": 2_000},
+                }
+
+            def windows(_db, _addrs, _sigmas, overrides, _now, **kwargs):
+                self.assertEqual(kwargs["path_rows"], ["strict-path"])
+                is_aggressive = (
+                    float(overrides["STABLE_MARGIN_PCT"])
+                    == float(aggressive["STABLE_MARGIN_PCT"])
+                )
+                return {
+                    30: {
+                        "copy_net_pnl": 4_000 if is_aggressive else 2_000,
+                        "window_start_equity": 10_000,
+                        "price_path_coverage": 1.0,
+                        "maintenance_margin_coverage": 1.0,
+                    },
+                    7: {
+                        "copy_net_pnl": -100 if is_aggressive else 500,
+                        "window_start_equity": 10_000,
+                    },
+                }
+
+            tune = {
+                "params": aggressive,
+                "proposal": aggressive,
+                "baseline_proposal": baseline,
+                "validation": {
+                    "challengerLiquidations": 0,
+                    "baselineLiquidations": 0,
+                },
+                "finalists": [
+                    {"eligible": True, "params": aggressive, "challengerLiquidations": 0},
+                ],
+            }
+            metrics = SimpleNamespace(actionable_open_rate=.9, capacity_fit=1.0)
+            with patch.object(scanner, "_effective_follow_replay", side_effect=replay), \
+                    patch.object(
+                        scanner.price_path, "load_refined",
+                        return_value=[{"coin": "BTC", "time": 1}],
+                    ), \
+                    patch.object(
+                        scanner.price_path, "coverage",
+                        return_value={"coverage": 1.0},
+                    ), \
+                    patch.object(scanner, "prepare_price_path", return_value=["strict-path"]), \
+                    patch.object(
+                        scanner.auto_tune, "_filter_window_fills_by_addr",
+                        return_value={30: [{"coin": "BTC", "time": 1}], 7: []},
+                    ), \
+                    patch.object(scanner.auto_tune, "_candidate_windows", side_effect=windows), \
+                    patch.object(
+                        scanner, "_portfolio_selection_metrics", return_value=metrics,
+                    ):
+                chosen, audit = scanner._select_formation_finalist_surface(
+                    db, tune, rows, base_follow=base, generation_id="g1",
+                    now_ms=1, valuation_marks={}, sigmas={}, market_ctx={},
+                    window_fills={30: [{"coin": "BTC", "time": 1}], 7: []},
+                )
+
+            self.assertEqual(chosen, baseline)
+            self.assertEqual(
+                {item["source"]: item["feasible"] for item in audit},
+                {"tuner_winner": False, "active_baseline": True},
             )
 
     def test_final_surface_quarantines_one_bad_candidate_without_aborting_generation(self):

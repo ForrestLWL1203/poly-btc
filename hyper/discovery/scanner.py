@@ -2292,8 +2292,9 @@ def _select_formation_finalist_surface(
     The tuner ranks fills-only portfolio surfaces before the final per-wallet contract.  Selecting its raw
     all-wallet winner can therefore maximize profit from wallets which the next step immediately removes.
     Re-score the bounded finalists using the same individual 10%/3%, win-rate, execution and evidence
-    checks, then compare the surviving shared portfolios.  Path completeness and proxy liquidations stay in
-    the one final K-line replay; this pass remains fills-only.
+    checks, then compare the surviving shared portfolios on the already-prefetched K-line path.  This is a
+    small finalist set, not the exploratory grid: it prevents a fills-only recent winner from reaching the
+    publication transaction and turning negative only in the final strict replay.
     """
     tune_result = dict(tune_result or {})
     candidates = []
@@ -2307,6 +2308,15 @@ def _select_formation_finalist_surface(
             "params": selected,
             "liquidations": int(
                 ((tune_result.get("validation") or {}).get("challengerLiquidations") or 0)
+            ),
+        })
+    baseline = dict(tune_result.get("baseline_proposal") or {})
+    if baseline:
+        candidates.append({
+            "source": "active_baseline",
+            "params": baseline,
+            "liquidations": int(
+                ((tune_result.get("validation") or {}).get("baselineLiquidations") or 0)
             ),
         })
     for index, item in enumerate(tune_result.get("finalists") or (), 1):
@@ -2336,6 +2346,20 @@ def _select_formation_finalist_surface(
         return (unique[0]["params"] if unique else selected), []
 
     policy = load_copy_policy(base_follow)
+    finalist_fills = list((window_fills or {}).get(30) or [])
+    finalist_path = None
+    finalist_path_meta = None
+    if finalist_fills:
+        path_start = int(now_ms) - (
+            30 + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+        ) * 86_400_000
+        finalist_path = prepare_price_path(
+            price_path.load_refined(db, finalist_fills, path_start, int(now_ms))
+        )
+        finalist_path_meta = price_path.coverage(
+            db, finalist_fills, path_start, int(now_ms),
+        )
+    paper_start_equity = _paper_account_equity(db)
     audits = []
     for item in unique:
         follow = {
@@ -2377,7 +2401,8 @@ def _select_formation_finalist_surface(
             windows = auto_tune._candidate_windows(
                 db, qualified, sigmas, follow, now_ms,
                 window_fills=filtered, market_ctx=market_ctx,
-                path_rows=None, path_meta=None,
+                path_rows=finalist_path, path_meta=finalist_path_meta,
+                initial_balance=float(config.INITIAL_BALANCE),
             )
             primary = windows.get(30) or windows.get(max(windows)) or {}
             recent = windows.get(7) or {}
@@ -2404,12 +2429,62 @@ def _select_formation_finalist_surface(
             )
             open_rate = f(portfolio_metrics.actionable_open_rate)
             capacity_fit = f(portfolio_metrics.capacity_fit)
+            if abs(paper_start_equity - float(config.INITIAL_BALANCE)) <= 1e-9:
+                paper_primary = primary
+                paper_recent = recent
+                paper_return_30d = return_30d
+                paper_return_7d = return_7d
+            else:
+                paper_windows = auto_tune._candidate_windows(
+                    db, qualified, sigmas, follow, now_ms,
+                    window_fills=filtered, market_ctx=market_ctx,
+                    path_rows=finalist_path, path_meta=finalist_path_meta,
+                    initial_balance=paper_start_equity,
+                )
+                paper_primary = (
+                    paper_windows.get(30)
+                    or paper_windows.get(max(paper_windows))
+                    or {}
+                )
+                paper_recent = paper_windows.get(7) or {}
+                paper_equity_30d = f(
+                    paper_primary.get("window_start_equity")
+                    or paper_primary.get("initial_margin_equity")
+                    or paper_start_equity
+                )
+                paper_equity_7d = f(
+                    paper_recent.get("window_start_equity")
+                    or paper_recent.get("initial_margin_equity")
+                )
+                paper_return_30d = (
+                    f(paper_primary.get("copy_net_pnl")) / paper_equity_30d
+                    if paper_equity_30d > 0.0 else float("-inf")
+                )
+                paper_return_7d = (
+                    f(paper_recent.get("copy_net_pnl")) / paper_equity_7d
+                    if paper_equity_7d > 0.0 else float("-inf")
+                )
+                del paper_windows
+            path_complete = bool(
+                finalist_path is None
+                or (
+                    f(primary.get("price_path_coverage"))
+                    >= float(config.CORE_PRICE_PATH_MIN_COVERAGE)
+                    and f(primary.get("maintenance_margin_coverage"))
+                    >= float(config.CORE_MAINTENANCE_META_MIN_COVERAGE)
+                )
+            )
             feasible = bool(
                 portfolio_net > 0.0
                 and recent_net > 0.0
                 and return_30d >= policy.portfolio_min_return_30d
                 and return_7d >= policy.portfolio_min_return_7d
                 and open_rate >= policy.min_actionable_open_rate
+                and f(paper_primary.get("copy_net_pnl")) > 0.0
+                and f(paper_recent.get("copy_net_pnl")) > 0.0
+                and paper_return_30d >= policy.portfolio_min_return_30d
+                and paper_return_7d >= policy.portfolio_min_return_7d
+                and path_complete
             )
             del windows
         audits.append({
@@ -2422,6 +2497,9 @@ def _select_formation_finalist_surface(
             "return7d": return_7d,
             "openRate": open_rate,
             "capacityFit": capacity_fit,
+            "paperReturn30d": paper_return_30d if qualified else float("-inf"),
+            "paperReturn7d": paper_return_7d if qualified else float("-inf"),
+            "strictPath": bool(finalist_path is not None),
             "liquidations": int(item["liquidations"]),
             "feasible": feasible,
             "failureCounts": failure_counts,
