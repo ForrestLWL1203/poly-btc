@@ -168,16 +168,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("full_tune_timeout_using_coarse", source)
         self.assertIn("full_tune_timeout_using_active", source)
 
-    def test_normal_scan_does_not_block_publication_on_parameter_grid(self):
+    def test_normal_scan_honors_auto_tune_switch_before_publication(self):
         scan_source = inspect.getsource(scanner.scan)
         optimize_source = inspect.getsource(scanner.optimize_published_generation)
         formation_source = inspect.getsource(scanner.form_quality_prefix)
         publication_source = inspect.getsource(scanner._build_forced_prefix_selection)
 
-        self.assertIn(
-            "form_quality_prefix(\n                    db, generation_id, stamp, now_ms, retune=False,",
-            scan_source,
-        )
+        self.assertIn("automatic_retune = _automatic_formation_retune_enabled(db)", scan_source)
+        self.assertIn("retune=automatic_retune, force_retune=automatic_retune", scan_source)
+        self.assertIn("_assert_automatic_formation_tuned(", scan_source)
+        self.assertNotIn("generation_id, stamp, now_ms, retune=False", scan_source)
         self.assertIn("retune_formation=True", optimize_source)
         self.assertIn("path_rows=None, path_meta=None", formation_source)
         self.assertNotIn("shared_path = price_path.load_refined", formation_source)
@@ -186,12 +186,56 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("dynamicReturn7d", publication_source)
         self.assertIn("final_strict_copy_failed:", publication_source)
 
+    def test_auto_tune_switch_and_publication_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            params.seed_params(db)
+            self.assertTrue(scanner._automatic_formation_retune_enabled(db))
+            db.execute(
+                "UPDATE params SET value='false' WHERE key='AUTO_TUNE_MARGIN_ENABLE'"
+            )
+            db.commit()
+            self.assertFalse(scanner._automatic_formation_retune_enabled(db))
+
+        scanner._assert_automatic_formation_tuned(
+            {"search": {"tunePoolCount": 0, "formationTuneEligible": False}},
+            required=True,
+        )
+        scanner._assert_automatic_formation_tuned(
+            {"search": {
+                "tunePoolCount": 7,
+                "formationTuneEligible": True,
+                "formationTuneReason": "validated_proposal",
+            }},
+            required=True,
+        )
+        with self.assertRaisesRegex(RuntimeError, "automatic_core_tune_not_eligible"):
+            scanner._assert_automatic_formation_tuned(
+                {"search": {
+                    "tunePoolCount": 7,
+                    "formationTuneEligible": False,
+                    "formationTuneReason": "no_validated_finalist",
+                }},
+                required=True,
+            )
+        with self.assertRaisesRegex(RuntimeError, "automatic_core_tune_not_executed"):
+            scanner._assert_automatic_formation_tuned(
+                {"search": {
+                    "tunePoolCount": 7,
+                    "formationTuneEligible": True,
+                    "formationTuneReason": "full_tune_timeout_using_active:timeout",
+                }},
+                required=True,
+            )
+
     def test_scheduled_formation_never_overwrites_verified_membership_with_old_core(self):
         source = inspect.getsource(scanner.form_quality_prefix)
+        finalize_source = inspect.getsource(scanner.finalize_profiled_generation)
 
         self.assertNotIn("weekly_rebalance_not_due", source)
         self.assertNotIn("chosen_addrs = tuple(stable)", source)
         self.assertIn("retune = bool(retune and (force_retune or rebalance_due))", source)
+        self.assertIn("retune=bool(retune), force_retune=bool(retune)", finalize_source)
 
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:

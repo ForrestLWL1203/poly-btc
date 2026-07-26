@@ -598,6 +598,40 @@ class AutoTuneTests(unittest.TestCase):
 
         self.assertEqual(selected["marker"], "safe-fundable")
 
+    def test_candidate_profit_objective_does_not_triple_count_recent_windows(self):
+        def candidate(pnl30, pnl14, pnl7, marker):
+            return {
+                "mult": 1.0,
+                "marker": marker,
+                "windows": {
+                    30: {
+                        "copy_net_pnl": pnl30, "closed_n": 20,
+                        "open_fill_rate": .90, "capacity_open_fit": .90,
+                        "liquidations": 0, "target_open_events": 20, "skip_reasons": {},
+                    },
+                    14: {
+                        "copy_net_pnl": pnl14, "closed_n": 10,
+                        "open_fill_rate": .90, "capacity_open_fit": .90,
+                        "liquidations": 0, "target_open_events": 10, "skip_reasons": {},
+                    },
+                    7: {
+                        "copy_net_pnl": pnl7, "closed_n": 5,
+                        "open_fill_rate": .90, "capacity_open_fit": .90,
+                        "liquidations": 0, "target_open_events": 5, "skip_reasons": {},
+                    },
+                },
+            }
+
+        baseline = candidate(900, 200, 100, "baseline")
+        best_30d = candidate(1100, 100, 50, "best-30d")
+        overlapping_recent = candidate(1000, 1000, 1000, "recent-triple-count")
+
+        selected = auto_tune.choose_margin_candidate(
+            [baseline, best_30d, overlapping_recent], baseline,
+        )
+
+        self.assertEqual(selected["marker"], "best-30d")
+
     def test_model_validation_allows_profit_retaining_liquidation_repair(self):
         folds = [{
             "baselineNet": 100.0, "challengerNet": 95.0,

@@ -7,6 +7,7 @@ Composes rest + fills + metrics + storage; holds no infra of its own.
 import calendar
 import concurrent.futures
 from dataclasses import replace
+import gc
 import hashlib
 import json
 import math
@@ -2243,6 +2244,28 @@ def _formation_param_surface(base_follow, tune_result=None, *, retune=True):
         proposal.update((tune_result or {}).get("proposal") or {})
         tuned.update({key: f(proposal.get(key, tuned[key])) for key in tuned})
     return tuned, eligible, reason
+
+
+def _automatic_formation_retune_enabled(db) -> bool:
+    """Make the visible auto-tune switch authoritative for complete generation publication."""
+    return bool(params.get(
+        db, "AUTO_TUNE_MARGIN_ENABLE", config.AUTO_TUNE_MARGIN_ENABLE,
+    ))
+
+
+def _assert_automatic_formation_tuned(formation, *, required: bool) -> None:
+    """Refuse to publish a non-empty tune pool on an untuned/invalid execution surface."""
+    if not required:
+        return
+    search = dict((formation or {}).get("search") or {})
+    tune_pool_n = int(search.get("tunePoolCount") or 0)
+    if tune_pool_n <= 0:
+        return
+    reason = str(search.get("formationTuneReason") or "missing_tune_result")
+    if search.get("formationTuneEligible") is not True:
+        raise RuntimeError(f"automatic_core_tune_not_eligible:{reason}")
+    if reason == "retune_disabled" or "using_active" in reason:
+        raise RuntimeError(f"automatic_core_tune_not_executed:{reason}")
 
 
 _FORMATION_PREPATH_CHECKS = (
@@ -4553,7 +4576,11 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     if preview:
         _set_scan_progress(db, stage="prefetch_selection_paths")
         _prefetch_selection_paths(db, preview, now_ms, generation_id)
-    formation = form_quality_prefix(db, generation_id, stamp, now_ms, retune=bool(retune))
+    formation = form_quality_prefix(
+        db, generation_id, stamp, now_ms,
+        retune=bool(retune), force_retune=bool(retune),
+    )
+    _assert_automatic_formation_tuned(formation, required=bool(retune))
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:
@@ -5077,11 +5104,18 @@ def scan(db, p) -> None:
             _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             formation = None
             if selection_mode == "auto":
-                # Discovery proves wallets against the currently active execution surface. Parameter search
-                # is an explicit ``optimize`` job: coupling its large grid to every cold/scheduled publication
-                # made a completed strict scan wait another hour and could OOM before any Core was sealed.
+                # The visible switch owns the complete publication contract.  When enabled, a new generation
+                # must tune its own bounded Core pool and pass final strict replay on that exact surface before
+                # Core membership and parameters are published together.  The tuner is now count-bounded and
+                # summary-only, so reclaim profile temporaries before entering its largest allocation phase.
+                automatic_retune = _automatic_formation_retune_enabled(db)
+                gc.collect()
                 formation = form_quality_prefix(
-                    db, generation_id, stamp, now_ms, retune=False,
+                    db, generation_id, stamp, now_ms,
+                    retune=automatic_retune, force_retune=automatic_retune,
+                )
+                _assert_automatic_formation_tuned(
+                    formation, required=automatic_retune,
                 )
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),

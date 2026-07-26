@@ -167,12 +167,15 @@ def _result_pnl(result: dict) -> float:
 
 
 def _candidate_score(candidate: dict) -> float:
+    """Primary tuning objective: rolling-equity 30d net profit.
+
+    The shorter windows remain mandatory validity/strict-replay checks, but adding them again here would
+    triple-count recent trades and could select a lower 30d-profit surface merely because the same final
+    week appears in the 30d, 14d and 7d windows.
+    """
     windows = candidate.get("windows") or {}
-    return (
-        _result_pnl(windows.get(14, {}))
-        + 0.50 * _result_pnl(windows.get(7, {}))
-        + 0.25 * _result_pnl(windows.get(30, {}))
-    )
+    primary = windows.get(30) or (windows.get(max(windows)) if windows else {})
+    return _result_pnl(primary)
 
 
 def _capacity_fit(result: dict) -> float:

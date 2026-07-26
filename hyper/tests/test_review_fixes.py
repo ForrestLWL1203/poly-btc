@@ -174,6 +174,40 @@ class ReviewFixTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(events[:3], ["sync_units", "restart:dashboard", "restart:observe"])
 
+    def test_launcher_observer_stop_immediately_syncs_dashboard_state(self):
+        commands = []
+
+        class FakeExecutor:
+            def run(self, command):
+                commands.append(command)
+                return type("R", (), {"ok": True, "out": ""})()
+            def close(self):
+                pass
+
+        class FakeServices:
+            start = restart = lambda self, unit: None
+            def stop(self, unit):
+                self.unit = unit
+                return type("R", (), {"ok": True, "out": ""})()
+
+        with patch.object(ops, "_conn", return_value=(FakeExecutor(), FakeServices())):
+            result = ops.action(DeployConfig(mode="vps"), "stop", "observe")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(any("_set_proc_status" in command for command in commands))
+        self.assertTrue(any("'stopped'" in command for command in commands))
+
+    def test_reconcile_marks_stopped_observer_without_waiting_for_stale_heartbeat(self):
+        with patch("hyper.ops.procman.observer_running", return_value=False), \
+                patch("hyper.ops.procman._read_pid", return_value=None), \
+                patch("hyper.ops.procman._set_proc_status") as mark:
+            from hyper.ops import procman
+            procman.reconcile("/tmp/test-observer-state.db")
+
+        mark.assert_called_once_with(
+            "/tmp/test-observer-state.db", "observer", "stopped", None,
+        )
+
     def test_ssh_unknown_host_requires_matching_fingerprint_before_pinning(self):
         class SSHError(Exception):
             pass
@@ -224,6 +258,16 @@ class ReviewFixTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[2] / "dashboard" / "web" / "components" / "Settings.jsx").read_text()
         self.assertNotIn("startRescan", source)
         self.assertIn("不会立即启动采集", source)
+
+    def test_dashboard_separates_pause_opening_from_process_stop(self):
+        source = (
+            Path(__file__).resolve().parents[2] / "dashboard" / "web" / "app.jsx"
+        ).read_text()
+        self.assertIn("暂停新开仓", source)
+        self.assertIn("停止跟单", source)
+        self.assertIn('ctl("pause"', source)
+        self.assertIn('ctl("observer_stop"', source)
+        self.assertNotIn("stopChecked", source)
 
 
 if __name__ == "__main__":

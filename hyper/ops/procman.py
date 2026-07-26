@@ -339,6 +339,7 @@ def reconcile(db_path):
         pid = _read_pid(db_path, OBSERVER)
         if pid:
             _clear_pid(db_path, OBSERVER)        # one-time cleanup of the pre-systemd naked pidfile
+        _set_proc_status(db_path, "observer", "stopped", None)
 
 
 def start_auto_scan_ticker(db_path, interval=60.0, stop_event=None):

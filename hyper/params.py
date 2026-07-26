@@ -47,7 +47,7 @@ PARAM_SPEC = [
     ("CORE_INITIAL_MAX_N", "scanner", "green", "int", "rescan", config.CORE_INITIAL_MAX_N,
         "Core容量上限", "仅限制最多可发布多少个Core；不是目标数量，系统不会为了接近上限而补位"),
     ("CORE_REBALANCE_INTERVAL_DAYS", "scanner", "hidden", "int", "rescan",
-        config.CORE_REBALANCE_INTERVAL_DAYS, "Core参数重调周期", "只限制昂贵参数网格；当前严格回放可更新成员"),
+        config.CORE_REBALANCE_INTERVAL_DAYS, "显式调参节流周期", "只供维护命令使用；开启自动调参后，每个新代际均强制重新调参"),
     # —— hidden 采集底层(细门槛/次要预筛,引擎读取,UI 不显示)——
     ("min_perp",             "scanner", "hidden", "pct",     "rescan", 60, "合约占比下限", ""),
     ("max_daily_eps",        "scanner", "hidden", "int",     "rescan", 30, "日交易次数上限", ""),
@@ -136,7 +136,7 @@ PARAM_SPEC = [
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with
     #  tier cap + master-lev cap + margin/coin/deploy limits)
     ("AUTO_TUNE_MARGIN_ENABLE", "follow", "green", "bool", "immediate", config.AUTO_TUNE_MARGIN_ENABLE,
-        "自动调保证金", "证据采集与调参解耦；常规每7天仅对当时通过全部质量闸口的Core组合调参，不按数量补位；下限/单币上限/总上限由人工控制"),
+        "自动调参", "开启后，每个新代际都对本代际Top Core统一优化保证金、杠杆和加仓参数，并在最终严格回放通过后原子发布；失败则保留上一代"),
     ("AUTO_TUNE_MODE", "follow", "hidden", "text", "immediate", config.AUTO_TUNE_MODE,
         "自动调参模式", "Paper默认apply;仍须通过OOS、Holdout、盈利压力与最终爆仓≤3规则"),
     ("AUTO_TUNE_APPLY_MIN_SHADOW_DAYS", "follow", "hidden", "int", "immediate",

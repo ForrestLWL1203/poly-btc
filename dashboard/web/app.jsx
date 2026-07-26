@@ -37,7 +37,6 @@ function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
   const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
   const [confirmCfg, setConfirmCfg] = useState(null);
-  const [stopChecked, setStopChecked] = useState(false); // 运行态按钮内「彻底停止」复选框(勾选才升级为杀进程)
   const [scanStopping, setScanStopping] = useState(false);
   const [scanStopError, setScanStopError] = useState(null);
   const mobileNavRef = useRef(null);
@@ -77,18 +76,12 @@ function Dashboard({ onLogout }) {
   const smartStart = () => obs === "paused"
     ? ctl("resume", "正在恢复开单…", "running")
     : ctl("observer_start", "正在启动跟单…", "running");
-  // RUNNING control: default = soft pause (停开新仓、存量继续管); arm the in-button checkbox to ESCALATE to
-  // a full process stop. One button, FIXED size — only label/color change between 暂停开单 ↔ 彻底停止跟单.
-  const pauseOrStop = () => {
-    if (stopChecked) {
-      setConfirmCfg({ title: "彻底停止跟单", danger: true, ok: "彻底停止整个进程",
-        body: "将停止整个 Observer 进程:不再开新仓,且存量持仓也不再被管理(下次启动会自动重新接管)。只想停开新仓、让存量继续跟到平仓的话,取消勾选即可。",
-        onConfirm: () => ctl("observer_stop", "正在停止跟单…", "stopped") });
-    } else {
-      ctl("pause", "正在暂停开单…", "paused");
-    }
-  };
-  useEffect(() => { if (obs === "stopped") setStopChecked(false); }, [obs]);
+  const pauseOpening = () => ctl("pause", "正在暂停新开仓…", "paused");
+  const stopObserver = () => setConfirmCfg({
+    title: "彻底停止跟单", danger: true, ok: "彻底停止整个进程",
+    body: "将停止整个 Observer 进程：不再开新仓，存量持仓也不再由跟单进程管理。只想停止新开仓、让存量继续跟到平仓，请使用“暂停新开仓”。",
+    onConfirm: () => ctl("observer_stop", "正在停止跟单…", "stopped"),
+  });
   useEffect(() => {
     if (typeof window !== "undefined" && window.matchMedia && !window.matchMedia("(max-width: 860px)").matches) return;
     const raf = requestAnimationFrame(() => {
@@ -145,24 +138,16 @@ function Dashboard({ onLogout }) {
                 title={`权益高水位回撤 ${fNum(ov.system.portfolioDrawdownStop.drawdownPct, 1)}%，已暂停并执行全平`}>
                 <span className="dot" style={{ background: "var(--red)" }} /> 总体回撤止损已触发
               </span>}
-            {/* fixed-width control (minWidth 150, centered) so changing the label never resizes the button.
-                stopped → 启动跟单(restart) · paused → 恢复开单或彻底停止 · running → 暂停开单或彻底停止。
-                两种存活状态都保留 in-button checkbox，避免 paused 后失去停止进程入口。 */}
+            {/* Soft pause and process stop are deliberately separate controls.  A paused Observer remains
+                alive to manage existing positions; only “停止跟单” means the process is inactive. */}
             {!(ov && ov.system) ? null : obs === "stopped"
               ? <button className="btn btn-go" style={{ minWidth: 150, justifyContent: "center" }} onClick={smartStart} disabled={pausing}>
                   <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} /> 启动跟单</button>
               : obs === "paused"
-              ? <button className={"btn " + (stopChecked ? "btn-stop" : "btn-go")} style={{ minWidth: 150, justifyContent: "center" }}
-                  onClick={stopChecked ? pauseOrStop : smartStart} disabled={pausing}>
-                  <span onClick={(e) => { e.stopPropagation(); setStopChecked(v => !v); }} title="勾选后彻底停止整个进程，不恢复开单"
-                    style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 15, height: 15, borderRadius: 4, border: "1.5px solid rgba(255,255,255,.75)", fontSize: 10, lineHeight: 1, cursor: "pointer", flexShrink: 0 }}>
-                    {stopChecked ? "✓" : ""}</span>
-                  {stopChecked ? "彻底停止跟单" : "恢复开单"}</button>
-              : <button className={"btn " + (stopChecked ? "btn-stop" : "btn-accent")} style={{ minWidth: 150, justifyContent: "center" }} disabled={pausing} onClick={pauseOrStop}>
-                  <span onClick={(e) => { e.stopPropagation(); setStopChecked(v => !v); }} title="勾选后升级为彻底停止整个进程"
-                    style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 15, height: 15, borderRadius: 4, border: "1.5px solid rgba(255,255,255,.75)", fontSize: 10, lineHeight: 1, cursor: "pointer", flexShrink: 0 }}>
-                    {stopChecked ? "✓" : ""}</span>
-                  {stopChecked ? "彻底停止跟单" : "暂停开单"}</button>}
+              ? <><button className="btn btn-go" onClick={smartStart} disabled={pausing}>恢复开单</button>
+                  <button className="btn btn-stop" onClick={stopObserver} disabled={pausing}>停止跟单</button></>
+              : <><button className="btn btn-accent" onClick={pauseOpening} disabled={pausing}>暂停新开仓</button>
+                  <button className="btn btn-stop" onClick={stopObserver} disabled={pausing}>停止跟单</button></>}
           </div>
         </div>
 

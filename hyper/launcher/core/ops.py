@@ -35,6 +35,15 @@ def action(cfg, op, unit):
     try:
         fn = {"start": svc.start, "stop": svc.stop, "restart": svc.restart}[op]
         r = fn(unit)
+        # The launcher can stop systemd outside the Dashboard command path.  Mirror that lifecycle change
+        # immediately so the Dashboard cannot keep rendering the observer's last ``paused`` heartbeat until
+        # the periodic reconcile tick notices that the process is gone.
+        if unit == "observe" and op == "stop" and getattr(r, "ok", True):
+            py = (
+                "from hyper.ops import procman; "
+                f"procman._set_proc_status({_q('data/hl.db')},'observer','stopped',None)"
+            )
+            ex.run(f"cd {_q(cfg.app_dir)} && {_q(cfg.py)} -c {_q(py)}")
         return {"ok": getattr(r, "ok", True), "out": getattr(r, "out", "")}
     finally:
         ex.close()

@@ -30,7 +30,7 @@ export const PARAM_META = {
   HARVEST_MIN_ACCT: { name: "钱包最低资金门槛", desc: "账户≥此金额才看", range: "$5k+", up: "只看大资金", dn: "纳入小资金、更杂" },
   HARVEST_WEEK_VLM_MIN: { name: "周成交量下限", desc: "只判断近期是否交易，不参与盈利效率计算", range: "$150k+" },
   HARVEST_WEEK_PNL_MIN: { name: "近7日绝对 PnL 下限", desc: "默认只要求正收益；不按绝对利润偏向大账户", range: ">$0" },
-  HARVEST_MONTH_PNL_MIN: { name: "近30日绝对 PnL 下限", desc: "默认只要求正收益；后续由四段周稳定性判断质量", range: ">$0" },
+  HARVEST_MONTH_PNL_MIN: { name: "近30日绝对 PnL 下限", desc: "默认只要求正收益；后续由官方Perp收益、深采Episode和Copy回放判断质量", range: ">$0" },
   HARVEST_ALL_PNL_MIN: { name: "历史绝对 PnL 下限", desc: "只要求历史不亏损", range: "$0+" },
   HARVEST_PERP_PNL_SHARE_MIN: { name: "Perp 盈利占比下限", desc: "只检查30日盈利是否主要来自Perp", range: "60%+" },
   inactive_days: { name: "最长不活跃天数", desc: "超过此天数没成交则剔除", range: "1–7 天", up: "更宽容沉默", dn: "更快剔除" },

@@ -74,7 +74,7 @@ export function FollowSettingsPanel({
         <div className="psec-title-block">保证金与杠杆 · BTC固定稳定档，其余按波动率 σ 分档
           <span>BTC始终使用稳定档；其余市场由 σ 进入中档/剧烈档，这里设各档的单笔保证金% 与杠杆上限</span></div>
         {autoTuneParam && <div className={"psec-switch" + (dirty[AUTO_TUNE_KEY] ? " dirty" : "")} title={autoTuneParam.desc}>
-          <span>自动调保证金</span>
+          <span>新代际自动调参</span>
           <div className={"toggle " + (vals[AUTO_TUNE_KEY] ? "on" : "")}
             onClick={() => editableParam(autoTuneParam) && onChange(AUTO_TUNE_KEY, !vals[AUTO_TUNE_KEY])}
             style={{ opacity: editableParam(autoTuneParam) ? 1 : .5 }}>
