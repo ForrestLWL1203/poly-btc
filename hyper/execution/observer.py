@@ -455,70 +455,8 @@ class Observer:
         self.db.commit()
         return expires_at
 
-    def _liquidation_cooldown_until(self, addr: str, coin: str):
-        """Return active coin or wallet-wide liquidation freeze, expiring stale rows lazily."""
-        addr = (addr or "").lower()
-        if not addr or not coin:
-            return None
-        now = now_iso()
-        self.db.execute(
-            "DELETE FROM manual_close_cooldown WHERE addr=? AND coin IN (?, '*') "
-            "AND reason LIKE 'liquidation_%' AND expires_at<=?",
-            (addr, coin, now),
-        )
-        row = self.db.execute(
-            "SELECT MAX(expires_at) FROM manual_close_cooldown WHERE addr=? "
-            "AND (lower(coin)=lower(?) OR coin='*') AND reason LIKE 'liquidation_%' AND expires_at>?",
-            (addr, coin, now),
-        ).fetchone()
-        self.db.commit()
-        return row[0] if row and row[0] else None
-
-    def _add_liquidation_cooldown(self, addr: str, coin: str, pos_id: int, book=None):
-        """Freeze a liquidated source wallet; a repeat liquidation escalates from 24h to seven days."""
-        book = book or self.taker
-        if book is not self.taker:
-            return None
-        addr = (addr or "").lower()
-        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 30 * 86400))
-        row = self.db.execute(
-            f"SELECT COUNT(*) FROM {book.pos_table} WHERE lower(addr)=? AND was_liq=1 AND closed_at>=?",
-            (addr, cutoff),
-        ).fetchone()
-        repeat = int(row[0] or 0) >= 2
-        duration = (
-            config.REPEAT_LIQUIDATION_FREEZE_DAYS * 86400
-            if repeat else config.LIQUIDATION_REENTRY_COOLDOWN_HOURS * 3600
-        )
-        created_at = now_iso()
-        expires_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + duration))
-        for key_coin, reason in ((coin, "liquidation_reentry"), ("*", "liquidation_wallet_freeze")):
-            self.db.execute(
-                "INSERT INTO manual_close_cooldown (addr,coin,pos_id,reason,created_at,expires_at) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT(addr,coin) DO UPDATE SET "
-                "pos_id=excluded.pos_id,reason=excluded.reason,created_at=excluded.created_at,"
-                "expires_at=MAX(manual_close_cooldown.expires_at,excluded.expires_at)",
-                (addr, key_coin, pos_id, reason, created_at, expires_at),
-            )
-        self.db.commit()
-        return expires_at
-
-    def _reentry_block_reason(self, addr: str, coin: str):
-        """Return only liquidation/manual-close re-entry blocks.
-
-        Source-wallet high-water breakers were retired because they truncated otherwise valid copy evidence
-        and could permanently suppress a recovered wallet. Deep-loss and liquidation risk remain explicit
-        qualification/execution controls.
-        """
-        if self._liquidation_cooldown_until(addr, coin):
-            return "liquidation_cooldown"
-        return None
-
     def _new_exposure_block_reason(self, addr: str, coin: str, book=None, side=None):
         book = book or self.taker
-        risk_reason = self._reentry_block_reason(addr, coin)
-        if risk_reason:
-            return risk_reason
         wallet_open_n = sum(
             1 for position in book.open_ep.values()
             if str(position.get("addr") or "").lower() == str(addr or "").lower()
@@ -1652,10 +1590,6 @@ class Observer:
                             "skip_heldoff_add" if addr in self.held_off else
                             "skip_sector_add", book)
                 return
-            add_risk = self._reentry_block_reason(addr, coin)
-            if add_risk:
-                self._tally(f"skip_{add_risk}_add", book)
-                return
             asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, oid, book))
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
@@ -2219,10 +2153,6 @@ class Observer:
             self._save_account(book)
             self.db.commit()
             if closing:
-                if liq:
-                    cooldown_until = self._add_liquidation_cooldown(addr, coin, ep["pos_id"], book)
-                    if cooldown_until:
-                        self._tally("liquidation_wallet_freeze", book)
                 if book is self.taker:
                     try:
                         self.risk_radar.resolve_intent(ep["pos_id"])

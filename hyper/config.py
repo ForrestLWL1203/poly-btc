@@ -251,8 +251,6 @@ WALLET_HWM_REDUCE_DD_PCT = 0.06
 WALLET_HWM_EXIT_DD_PCT = 0.10
 WALLET_HWM_RELEASE_DD_PCT = 0.02
 WALLET_HWM_EXIT_COOLDOWN_DAYS = 7
-LIQUIDATION_REENTRY_COOLDOWN_HOURS = 24
-REPEAT_LIQUIDATION_FREEZE_DAYS = 7  # second copied liquidation inside 30d freezes the whole source for a week.
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is below this fraction of margin-calculation equity:
 #                             once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay

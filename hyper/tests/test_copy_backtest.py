@@ -113,7 +113,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["path_risk_status"], "missing")
         self.assertIsNone(result["intratrade_max_drawdown"])
 
-    def test_liquidation_blocks_immediate_reentry_in_replay(self):
+    def test_allowed_liquidation_does_not_hide_later_copyable_opens(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100.0, 1),
             fill(2_000, "BTC", "B", 1, 100, 90.0, 2),
@@ -124,8 +124,9 @@ class CopyBacktestTests(unittest.TestCase):
         result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04})
 
         self.assertEqual(result["liquidations"], 1)
-        self.assertEqual(result["liquidation_reentry_blocks"], 1)
-        self.assertEqual(result["opened_n"], 1)
+        self.assertEqual(result["opened_n"], 2)
+        self.assertEqual(result["target_open_events"], 2)
+        self.assertEqual(result["actionable_open_rate"], 1.0)
 
     def test_retired_wallet_position_cap_does_not_reserve_slots(self):
         fills = [

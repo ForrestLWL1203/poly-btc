@@ -213,7 +213,10 @@ There is no zero-liquidation rule and no historical maximum-drawdown admission t
 disclose their true margin/leverage, so both values are conservative reconstructions at our leverage ceiling.
 The active surface may enter tuning with any proxy count; the final tuned 30-day strict replay permits at most
 three isolated proxy liquidations per Core wallet. Four or more remain Challenger-only. Liquidation losses still
-reduce net PnL and receive a bounded score penalty; path drawdown remains visible for diagnostics only.
+reduce net PnL and receive a bounded score penalty; path drawdown remains visible for diagnostics only. An allowed
+proxy liquidation must not trigger a hidden 24-hour/seven-day wallet freeze that then lowers open-follow rate and
+rejects the wallet a second time. Live Paper execution likewise records the actual isolated loss without inventing
+a source-wallet-wide re-entry ban.
 
 `source_quality_score` orders deep-fill survivors before the Top40 cap. `rough_copy_score` then orders the rough
 Copy-qualified pool using exactly: official Perp 30d return 10%; rough Copy 30d/7d dynamic returns 20%/10%;

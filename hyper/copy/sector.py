@@ -209,7 +209,7 @@ def _compact_result(result: Mapping) -> dict:
         "loss_over_5_time_ratio", "deep_bag_event_n", "failed_deep_bag_n",
         "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
         "current_bag_hours",
-        "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
+        "wallet_forward_loss_blocks",
         "initial_margin_equity", "window_start_equity",
     )
     return {k: result.get(k) for k in keys if k in result}
@@ -546,7 +546,7 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "loss_over_5_time_ratio", "deep_bag_event_n", "failed_deep_bag_n",
             "deep_bag_recovery_rate", "max_deep_bag_hours", "current_open_loss_frac",
             "current_bag_hours",
-            "liquidation_reentry_blocks", "wallet_forward_loss_blocks",
+            "wallet_forward_loss_blocks",
         ):
             if key in primary:
                 # Keep the transient legacy alias for in-process callers and the prefixed field for durable

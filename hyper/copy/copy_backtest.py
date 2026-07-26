@@ -35,7 +35,6 @@ ADD_OUTCOMES = (
     "wallet_sector_side_cap_blocked",
     "wallet_cap_blocked",
     "total_margin_cap_blocked",
-    "liquidation_cooldown_blocked",
     "forward_loss_blocked",
 )
 ADD_BLOCKED_OUTCOMES = tuple(
@@ -469,16 +468,6 @@ class Backtest:
         self.wallet_margin_cap_pct = 1.0
         self.wallet_max_open_positions = config.MAX_CONCURRENT_POS
         self.wallet_stock_side_max_positions = config.MAX_CONCURRENT_POS
-        self.liquidation_reentry_cooldown_ms = int(
-            overrides.get("LIQUIDATION_REENTRY_COOLDOWN_HOURS", config.LIQUIDATION_REENTRY_COOLDOWN_HOURS)
-            * 60 * 60 * 1000
-        )
-        self.repeat_liquidation_freeze_ms = int(
-            overrides.get("REPEAT_LIQUIDATION_FREEZE_DAYS", config.REPEAT_LIQUIDATION_FREEZE_DAYS)
-            * 24 * 60 * 60 * 1000
-        )
-        self.liquidation_times = {}
-        self.liquidation_cooldown_until = {}
         self.margin_equity_pct = overrides.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
         self.min_open_margin_pct = overrides.get("MIN_OPEN_MARGIN_PCT", config.MIN_OPEN_MARGIN_PCT)
         self.tail_close_enable = bool(overrides.get("TAIL_CLOSE_ENABLE", config.TAIL_CLOSE_ENABLE))
@@ -619,27 +608,6 @@ class Backtest:
 
     def risk_available(self):
         return max(0.0, self.available() + min(0.0, self.unrealized()))
-
-    def _liquidation_freeze_active(self, addr, coin, t):
-        stamp = int(t or 0)
-        return max(
-            int(self.liquidation_cooldown_until.get((str(addr or "").lower(), "*"), 0)),
-            int(self.liquidation_cooldown_until.get((str(addr or "").lower(), str(coin or "").lower()), 0)),
-        ) > stamp
-
-    def _record_liquidation_freeze(self, addr, coin, t):
-        stamp = int(t or 0)
-        wallet = str(addr or "").lower()
-        cutoff = stamp - 30 * 24 * 60 * 60 * 1000
-        times = [value for value in self.liquidation_times.get(wallet, []) if value >= cutoff]
-        times.append(stamp)
-        self.liquidation_times[wallet] = times
-        duration = self.repeat_liquidation_freeze_ms if len(times) >= 2 else self.liquidation_reentry_cooldown_ms
-        until = stamp + duration
-        self.liquidation_cooldown_until[(wallet, str(coin or "").lower())] = until
-        self.liquidation_cooldown_until[(wallet, "*")] = max(
-            until, int(self.liquidation_cooldown_until.get((wallet, "*"), 0)),
-        )
 
     def coin_cap_pct(self, tier):
         return self.tier_coin_cap[tier]
@@ -851,9 +819,6 @@ class Backtest:
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
         wallet_key = str(addr or "").lower()
-        if self._liquidation_freeze_active(addr, coin, t):
-            self.skip_reasons["skip_liquidation_cooldown"] += 1
-            return
         wallet_open_n = sum(
             1 for position in self.open.values()
             if str(position.get("addr") or "").lower() == wallet_key
@@ -1064,10 +1029,6 @@ class Backtest:
             self.target_adds += 1
             if oid is not None:
                 ep["observed_add_oids"].add(oid)
-
-        if self._liquidation_freeze_active(addr, coin, t):
-            self.skip_reasons["skip_liquidation_cooldown_add"] += 1
-            return self._observe_add(ep, oid, "liquidation_cooldown_blocked", t=t)
 
         # Once our first proactive profit cut has executed, the released exposure stays released.  Target
         # re-adds are observed for source state but never rebuild the protected position.
@@ -1308,7 +1269,6 @@ class Backtest:
             self.closed.append(ep)
             self.open.pop(key, None)
             if status == "liquidated":
-                self._record_liquidation_freeze(addr, coin, t)
                 self.path_liquidation_times.append(int(f(t)))
         self._sample_deploy(t)
 
@@ -1534,7 +1494,6 @@ class Backtest:
             "wallet_sector_side_caps": dict(self.wallet_sector_side_caps),
             "wallet_max_open_positions": self.wallet_max_open_positions,
             "wallet_stock_side_max_positions": self.wallet_stock_side_max_positions,
-            "liquidation_reentry_blocks": self.skip_reasons["skip_liquidation_cooldown"],
             # Qualification returns are normalized to the full Paper risk capital.
             # ``MARGIN_EQUITY_PCT`` is a sizing budget, not a smaller return denominator.
             "initial_margin_equity": self.initial_balance,

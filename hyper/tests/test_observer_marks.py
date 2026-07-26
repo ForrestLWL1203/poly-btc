@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 from hyper import config, storage
 from hyper.execution.observer import Observer
 from hyper.market import volatility
-from hyper.util import now_ms
+from hyper.util import now_iso, now_ms
 
 
 class ObserverMarkRefreshTests(unittest.TestCase):
@@ -661,7 +661,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_liquidation_freezes_new_exposure_across_wallet_coins(self):
+    def test_prior_liquidation_does_not_create_hidden_wallet_freeze(self):
         db = self._db()
         pos_id = db.execute(
             "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
@@ -670,7 +670,11 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         obs.target_sector_policy = {
             "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
         }
-        obs._add_liquidation_cooldown("0xaaa", "BTC", pos_id)
+        db.execute(
+            "UPDATE copy_position SET was_liq=1,status='liquidated',closed_at=? WHERE pos_id=?",
+            (now_iso(), pos_id),
+        )
+        db.commit()
 
         with patch.object(obs, "_open_position") as open_position:
             obs._dispatch_fill(
@@ -678,15 +682,14 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 1.0, 0.0, 1.0, 200.0, False, 9001,
             )
 
-        open_position.assert_not_called()
-        self.assertEqual(obs.hb.get("skip_liquidation_cooldown"), 1)
-        rows = db.execute(
-            "SELECT coin,reason FROM manual_close_cooldown WHERE addr='0xaaa' ORDER BY coin"
-        ).fetchall()
-        self.assertEqual([(row["coin"], row["reason"]) for row in rows], [
-            ("*", "liquidation_wallet_freeze"),
-            ("BTC", "liquidation_reentry"),
-        ])
+        open_position.assert_called_once()
+        self.assertEqual(
+            db.execute(
+                "SELECT COUNT(*) FROM manual_close_cooldown "
+                "WHERE reason LIKE 'liquidation_%'"
+            ).fetchone()[0],
+            0,
+        )
 
     def test_manual_full_profit_does_not_add_cooldown(self):
         async def run():
