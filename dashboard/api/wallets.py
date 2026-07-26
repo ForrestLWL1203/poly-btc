@@ -45,8 +45,11 @@ def _selection_reason_text(row):
         "boundary_sample_gap": "官方Perp窗口边界样本不足",
         "zero_start_equity": "官方Perp期初权益异常",
         "official_perp_return_below_floor:short_7d": "官方Perp短历史最近7日收益低于5%",
-        "source_episode_evidence_insufficient": "源钱包30日完整回合少于10个",
+        "source_episode_evidence_insufficient": "源钱包30日完整回合少于7个",
         "source_win_rate_below_floor": "源钱包30日胜率低于70%",
+        "source_low_frequency_win_rate_below_floor": "强力低频钱包30日胜率低于85%",
+        "source_low_frequency_official_return_below_floor": "强力低频钱包官方Perp收益低于30%",
+        "source_low_frequency_recent_not_profitable": "强力低频钱包最近7日源净收益未盈利",
         "source_activity_stale": "最近72小时没有真实新开仓",
         "source_concentrated_body_win_rate_low": "大赢家集中且其余交易胜率低于70%",
         "source_concentrated_body_unprofitable": "大赢家集中且其余交易手续费后亏损",
@@ -210,6 +213,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
     )
     total = (_col(total_row, "c") or 0) if total_row else 0
     cutoff7d = int((time.time() - 7 * 86400) * 1000)
+    cutoff30d = int((time.time() - 30 * 86400) * 1000)
     rows = qall(
         db,
         "WITH page_selected AS ("
@@ -224,6 +228,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_window_start_equity,"
         "         fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,"
         "         fs.replay_copy_bt_open_fill_rate,fs.replay_copy_bt_liquidations,"
+        "         fs.replay_copy_bt_raw_target_open_n,fs.replay_copy_bt_small_open_excluded_n,"
+        "         fs.replay_copy_bt_effective_target_open_n,fs.replay_copy_bt_opened_n,"
+        "         fs.replay_copy_bt_raw_open_capture_rate,fs.replay_copy_bt_open_audit_json,"
         "         fs.replay_copy_bt_fee_drag,"
         "         fs.replay_copy_bt_unrealized_pnl,fs.replay_copy_bt_valuation_status,"
         "         fs.replay_copy_bt_7d_net_pnl,fs.replay_copy_bt_7d_window_start_equity,"
@@ -251,6 +258,12 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  SELECT f.addr,COUNT(cp.pos_id) AS follow_count,"
         "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net "
         "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
+        "), live_liquidity AS ("
+        "  SELECT f.addr,COALESCE(SUM(l.count),0) AS live_liquidity_skip_n,"
+        "         GROUP_CONCAT(DISTINCT l.coin) AS live_liquidity_skip_coins "
+        "  FROM page_selected f LEFT JOIN live_policy_skip l "
+        "    ON l.addr=f.addr AND l.last_ms>=? "
+        "  GROUP BY f.addr"
         ") "
         "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
         "s.pinned,s.pinned_at,"
@@ -264,6 +277,12 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_win_rate ELSE p.copy_bt_win_rate END AS copy_bt_win_rate,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_open_fill_rate ELSE p.copy_bt_open_fill_rate END AS copy_bt_open_fill_rate,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_raw_target_open_n ELSE p.copy_bt_raw_target_open_n END AS copy_bt_raw_target_open_n,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_small_open_excluded_n ELSE p.copy_bt_small_open_excluded_n END AS copy_bt_small_open_excluded_n,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_effective_target_open_n ELSE p.copy_bt_effective_target_open_n END AS copy_bt_effective_target_open_n,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_opened_n ELSE p.copy_bt_opened_n END AS copy_bt_opened_n,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_raw_open_capture_rate ELSE p.copy_bt_raw_open_capture_rate END AS copy_bt_raw_open_capture_rate,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_open_audit_json ELSE p.copy_bt_open_audit_json END AS copy_bt_open_audit_json,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
@@ -286,7 +305,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "p.copy_bt_win_rate AS rough_copy_win_rate,p.copy_bt_closed_n AS rough_copy_closed_n,"
         "p.copy_bt_open_fill_rate AS rough_copy_open_fill_rate,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
-        "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.fwd_net,0) AS fwd_net "
+        "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.fwd_net,0) AS fwd_net,"
+        "COALESCE(ll.live_liquidity_skip_n,0) AS live_liquidity_skip_n,"
+        "ll.live_liquidity_skip_coins "
         "FROM page_selected s LEFT JOIN watchlist w ON w.addr=s.addr "
         "LEFT JOIN target_controls tc ON tc.addr=s.addr LEFT JOIN profile p ON p.addr=s.addr "
         "LEFT JOIN active_strategy_revision ar ON ar.id=1 "
@@ -296,10 +317,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "LEFT JOIN follow_history fh ON fh.addr=s.addr "
         "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=s.addr "
+        "LEFT JOIN live_liquidity ll ON ll.addr=s.addr "
         "ORDER BY CASE WHEN s.selection_role='core' THEN COALESCE(s.selection_rank,999999) ELSE 0 END,"
         "CASE WHEN s.selection_role='core' THEN s.utility END DESC,"
         "COALESCE(s.selection_follow_score,s.legacy_follow_score,-1) DESC,s.addr",
-        (generation, role, size, page * size, cutoff7d),
+        (generation, role, size, page * size, cutoff7d, cutoff30d),
     )
     out = []
     for i, r in enumerate(rows):
@@ -321,6 +343,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         official_window = (
             (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
         )
+        open_audit = _json_obj(_col(display_metrics, "copy_bt_open_audit_json"))
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
@@ -369,6 +392,23 @@ def _ep_selected_wallets(db, generation, role, page, size):
                 _col(display_metrics, "copy_bt_open_fill_rate") * 100
                 if _col(display_metrics, "copy_bt_open_fill_rate") is not None else None
             ),
+            "rawOpenCaptureRatePct": (
+                _col(display_metrics, "copy_bt_raw_open_capture_rate") * 100
+                if _col(display_metrics, "copy_bt_raw_open_capture_rate") is not None else None
+            ),
+            "rawTargetOpenN": _col(display_metrics, "copy_bt_raw_target_open_n"),
+            "smallOpenExcludedN": _col(
+                display_metrics, "copy_bt_small_open_excluded_n"
+            ),
+            "effectiveTargetOpenN": _col(
+                display_metrics, "copy_bt_effective_target_open_n"
+            ),
+            "historicalOpenedN": _col(display_metrics, "copy_bt_opened_n"),
+            "openExecutionAudit": open_audit,
+            "liveLiquiditySkipN30d": _col(r, "live_liquidity_skip_n") or 0,
+            "liveLiquiditySkipCoins30d": sorted(filter(
+                None, str(_col(r, "live_liquidity_skip_coins") or "").split(","),
+            )),
             "liquidations30d": _col(display_metrics, "copy_bt_liquidations"),
             "roughCopyScore": score100(_col(r, "rough_copy_score")),
             "roughCopyNetPnl": _col(r, "rough_copy_net_pnl"),
@@ -515,6 +555,12 @@ def ep_wallet_detail(db, addr, qs=None):
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_win_rate ELSE p.copy_bt_win_rate END AS copy_bt_win_rate,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_open_fill_rate ELSE p.copy_bt_open_fill_rate END AS copy_bt_open_fill_rate,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_raw_target_open_n ELSE p.copy_bt_raw_target_open_n END AS copy_bt_raw_target_open_n,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_small_open_excluded_n ELSE p.copy_bt_small_open_excluded_n END AS copy_bt_small_open_excluded_n,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_effective_target_open_n ELSE p.copy_bt_effective_target_open_n END AS copy_bt_effective_target_open_n,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_opened_n ELSE p.copy_bt_opened_n END AS copy_bt_opened_n,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_raw_open_capture_rate ELSE p.copy_bt_raw_open_capture_rate END AS copy_bt_raw_open_capture_rate,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_open_audit_json ELSE p.copy_bt_open_audit_json END AS copy_bt_open_audit_json,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
@@ -550,6 +596,12 @@ def ep_wallet_detail(db, addr, qs=None):
              "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_n,"
              "COALESCE(SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END),0) open_u "
              "FROM copy_position WHERE addr=?", (addr,))
+    live_liquidity = q1(
+        db,
+        "SELECT COALESCE(SUM(count),0) AS skip_n,GROUP_CONCAT(DISTINCT coin) AS coins "
+        "FROM live_policy_skip WHERE addr=? AND last_ms>=?",
+        (addr, int((time.time() - 30 * 86_400) * 1000)),
+    )
     n = (agg["closed_n"] if agg else 0) or 0
     win_n = (agg["wins"] if agg else 0) or 0
     realized = (agg["realized"] if agg else 0.0) or 0.0
@@ -589,6 +641,34 @@ def ep_wallet_detail(db, addr, qs=None):
         "copyReplayParamsHash": (_col(pr, "replay_params_hash") if pr else None),
         "copyReplayedAt": iso_epoch(_col(pr, "replayed_at")) if pr else None,
         "copyReplayStage": "strict" if pr and _col(pr, "replayed_at") else "rough",
+        "copyExecution": {
+            "effectiveFollowRatePct": (
+                _col(pr, "copy_bt_open_fill_rate") * 100
+                if pr and _col(pr, "copy_bt_open_fill_rate") is not None else None
+            ),
+            "rawCaptureRatePct": (
+                _col(pr, "copy_bt_raw_open_capture_rate") * 100
+                if pr and _col(pr, "copy_bt_raw_open_capture_rate") is not None else None
+            ),
+            "rawTargetOpenN": _col(pr, "copy_bt_raw_target_open_n") if pr else None,
+            "smallOpenExcludedN": (
+                _col(pr, "copy_bt_small_open_excluded_n") if pr else None
+            ),
+            "effectiveTargetOpenN": (
+                _col(pr, "copy_bt_effective_target_open_n") if pr else None
+            ),
+            "openedN": _col(pr, "copy_bt_opened_n") if pr else None,
+            "historicalAudit": (
+                _json_obj(_col(pr, "copy_bt_open_audit_json")) if pr else {}
+            ),
+            "liveLiquiditySkipN30d": (
+                _col(live_liquidity, "skip_n", 0) or 0
+            ),
+            "liveLiquiditySkipCoins30d": sorted(filter(
+                None,
+                str(_col(live_liquidity, "coins") or "").split(","),
+            )),
+        },
         "officialPerpReturn30dPct": (
             _col(pr, "official_perp_return_30d") * 100
             if pr and _col(pr, "official_perp_return_30d") is not None else None

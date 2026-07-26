@@ -13,6 +13,8 @@ COPY_POLICY_PARAM_KEYS = (
     "COPY_BT_DAYS", "COPY_BT_RECENT_DAYS", "COPY_BT_MIN_CLOSED", "COPY_BT_MIN_CLOSED_14D",
     "COPY_BT_MIN_CLOSED_7D", "SOURCE_QUALITY_MAX_N", "SOURCE_MIN_EPISODES_30D",
     "SOURCE_MIN_EPISODE_WIN_RATE", "SOURCE_TOP3_CONCENTRATION_TRIGGER",
+    "SOURCE_LOW_FREQ_MIN_EPISODES_30D", "SOURCE_LOW_FREQ_MAX_EPISODES_30D",
+    "SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", "SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN",
     "SOURCE_BODY_MIN_WIN_RATE", "ROUGH_COPY_MIN_CLOSED_30D",
     "ROUGH_COPY_MIN_WIN_RATE", "CORE_COPY_MIN_WIN_RATE",
     "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
@@ -35,6 +37,10 @@ class CopyPolicy:
     source_quality_max_n: int
     source_min_episodes_30d: int
     source_min_episode_win_rate: float
+    source_low_freq_min_episodes_30d: int
+    source_low_freq_max_episodes_30d: int
+    source_low_freq_min_episode_win_rate: float
+    source_low_freq_min_official_return: float
     source_top3_concentration_trigger: float
     source_body_min_win_rate: float
     rough_min_closed_30d: int
@@ -91,6 +97,18 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         source_min_episodes_30d=int(_value(values, "SOURCE_MIN_EPISODES_30D", 10) or 0),
         source_min_episode_win_rate=float(_value(
             values, "SOURCE_MIN_EPISODE_WIN_RATE", 0.70,
+        )),
+        source_low_freq_min_episodes_30d=int(_value(
+            values, "SOURCE_LOW_FREQ_MIN_EPISODES_30D", 7,
+        ) or 0),
+        source_low_freq_max_episodes_30d=int(_value(
+            values, "SOURCE_LOW_FREQ_MAX_EPISODES_30D", 9,
+        ) or 0),
+        source_low_freq_min_episode_win_rate=float(_value(
+            values, "SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", 0.85,
+        )),
+        source_low_freq_min_official_return=float(_value(
+            values, "SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN", 0.30,
         )),
         source_top3_concentration_trigger=float(_value(
             values, "SOURCE_TOP3_CONCENTRATION_TRIGGER", 0.70,

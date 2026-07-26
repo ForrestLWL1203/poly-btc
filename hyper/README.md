@@ -32,11 +32,11 @@ The current runtime turns the public Hyperliquid leaderboard into a live, paper-
 Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
-    ↓ account ≥ $20k, 7d notional volume ≥ $250k, positive 7d/30d PnL
+    ↓ account ≥ $20k, 7d notional volume ≥ $150k, positive 7d/30d PnL
 Official Portfolio 30d Perp prefilter
     ↓ Perp ROI ≥ 20%, positive Perp PnL, Perp-profit share ≥ 60%
 Deep fills source quality
-    ↓ complete Episodes, source win rate ≥ 70%, activity and structural copyability; Top40
+    ↓ standard ≥10 Episodes/70% wins or strong low-frequency 7–9/85%; activity and structural copyability; Top40
 Fills-only rough Copy
     ↓ dynamic 30d/7d both profitable, Copy wins ≥ 60%, open follow ≥ 70%
 Composite score → unified tuning → strict K-line Copy
@@ -56,12 +56,15 @@ Wallet quality and funded-account membership are separate decisions.
 - Raw recall requires useful account size/activity and positive 7/30-day PnL. Before fill download, official
   Portfolio requires positive 30-day Perp PnL, at least 60% Perp-profit share and at least 20% dynamic Perp
   return. Incomplete official history is Challenger evidence, never a fabricated return failure.
-- Deep fills provide the source-wallet contract: at least ten complete 30-day Episodes, at least 70% source
-  wins, a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
+- Deep fills provide two source-wallet lanes: at least ten complete 30-day Episodes with at least 70% source
+  wins, or 7–9 Episodes with at least 85% wins, 30% official Perp return and positive recent-7d source PnL.
+  Both require a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
   at 70% of gross profit; then the remaining body must still win at least 70% and not lose money. At most the
   best 40 source wallets receive rough replay.
 - Rough Copy uses one continuously compounded `$10,000` comparison account and requires both dynamic 30d and
   rolling-7d profitability, seven closed Copy Episodes, 60% Copy wins, 70% open follow and complete valuation.
+  Historical replay assumes liquidity was executable; opens below the tier minimum notional are excluded from
+  the effective denominator. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
 - The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
   activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a
@@ -94,7 +97,7 @@ Profiles are not re-downloaded from zero on every scheduled run.
   cache.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
-- Leaderboard candidates require at least `$20,000` account value, `$250,000` leveraged 7-day notional volume,
+- Leaderboard candidates require at least `$20,000` account value, `$150,000` leveraged 7-day notional volume,
   and positive 7-day and 30-day PnL. The cheap Portfolio precheck requires positive 30-day Perp PnL, at least
   60% Perp-profit share and at least 20% dynamic 30-day Perp return. Source quality and follower profitability
   are confirmed later from fills under a standardized `$10,000` starting equity with continuous compounding.

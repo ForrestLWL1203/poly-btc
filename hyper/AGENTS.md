@@ -99,7 +99,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 ### 2. Candidate workset and profiles
 
-- New-wallet Leaderboard recall requires account value `$20,000`, leveraged 7d notional volume `$250,000`,
+- New-wallet Leaderboard recall requires account value `$20,000`, leveraged 7d notional volume `$150,000`,
   and positive 7d and 30d PnL. Nominal leveraged volume is activity evidence, never a profitability denominator.
   Before fill history is downloaded, official `perpMonth` must show positive observed-period Perp PnL and at
   least 60% Perp PnL share. A continuously positive Perp-equity history of at least 28 days must return at
@@ -167,8 +167,10 @@ For any window, dynamic return is `window net PnL / that window's start equity`;
 per-trade return. Thus a 30-day replay that grows `$10,000` to `$13,000` contributes 30%. The rolling 7-day
 window is cut from the same continuous 30-day equity path and uses its own day-23 boundary equity.
 
-The deep-fill source gate requires at least ten complete 30-day Episodes, at least 70% fee-paid Episode wins,
-and a true actionable open within 72 hours. If the three largest winning Episodes contribute at least 70% of
+The deep-fill source gate accepts either at least ten complete 30-day Episodes with at least 70% fee-paid wins,
+or a strong low-frequency lane of 7–9 Episodes with at least 85% wins, at least 30% official Perp return and
+positive recent-7d source PnL. Both require a true actionable open within 72 hours. If the three largest winning
+Episodes contribute at least 70% of
 gross profit, the remainder must itself have at least 70% wins and non-negative net PnL. Structural exclusions
 cover HFT, systematic slicing, grid/heavy DCA, spot hedging, extreme concurrency and opaque markets.
 
@@ -195,7 +197,9 @@ replay. Publication requires the shared account to return at least 10% over 30 d
 rolling 7 days, with both standardized `$10,000` and actual Paper starting-equity results persisted.
 There is no second 85% total-margin slice: adds may use the remaining real available cash after fresh opens
 stop, while per-coin caps and isolated-margin liquidation still bound exposure.
-Liquidity rejection and target-dust minimum-notional rejection are never tuned away.
+Historical replay assumes sufficient market liquidity; its effective open denominator excludes target opens
+below our tier minimum notional and counts every other strategy/capacity rejection as a miss. Observer retains
+the live liquidity filter and persists those live-only skips separately.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by source/Copy Episode win rates plus the dynamic rolling-7-day return from the same

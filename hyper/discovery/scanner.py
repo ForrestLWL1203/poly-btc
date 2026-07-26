@@ -2164,6 +2164,10 @@ def _rough_replay_source_pool(db, addrs, generation_id, now_ms, p, stamp) -> dic
                 "returns": qualification.get("returns"),
                 "winRate": qualification.get("copyWinRate"),
                 "openFillRate": qualification.get("openFillRate"),
+                "rawTargetOpenN": effective.get("copy_bt_raw_target_open_n"),
+                "smallOpenExcludedN": effective.get("copy_bt_small_open_excluded_n"),
+                "effectiveTargetOpenN": effective.get("copy_bt_effective_target_open_n"),
+                "openedN": effective.get("copy_bt_opened_n"),
                 "closedN": qualification.get("closedN"),
             },
         )
@@ -3673,6 +3677,18 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 replay_copy_bt_open_fill_rate=replay.get(
                     "copy_bt_open_fill_rate", replay.get("actionable_open_rate")
                 ),
+                replay_copy_bt_raw_target_open_n=replay.get("copy_bt_raw_target_open_n"),
+                replay_copy_bt_small_open_excluded_n=replay.get(
+                    "copy_bt_small_open_excluded_n"
+                ),
+                replay_copy_bt_effective_target_open_n=replay.get(
+                    "copy_bt_effective_target_open_n"
+                ),
+                replay_copy_bt_opened_n=replay.get("copy_bt_opened_n"),
+                replay_copy_bt_raw_open_capture_rate=replay.get(
+                    "copy_bt_raw_open_capture_rate"
+                ),
+                replay_copy_bt_open_audit_json=replay.get("copy_bt_open_audit_json"),
                 replay_copy_bt_liquidations=replay.get("copy_bt_liquidations"),
                 replay_copy_bt_fee_drag=replay.get("copy_bt_fee_drag"),
                 replay_copy_bt_unrealized_pnl=replay.get("copy_bt_unrealized_pnl"),
@@ -4379,6 +4395,9 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         db.execute(
             "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
             "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
+            "copy_bt_raw_target_open_n=?,copy_bt_small_open_excluded_n=?,"
+            "copy_bt_effective_target_open_n=?,copy_bt_opened_n=?,"
+            "copy_bt_raw_open_capture_rate=?,copy_bt_open_audit_json=?,"
             "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_unrealized_pnl=?,copy_bt_valuation_status=?,"
             "copy_bt_initial_margin_equity=?,copy_bt_window_start_equity=?,"
             "copy_bt_14d_net_pnl=?,copy_bt_14d_unrealized_pnl=?,copy_bt_14d_closed_n=?,copy_bt_14d_window_start_equity=?,"
@@ -4392,7 +4411,10 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             "copy_current_bag_hours=?,data_status=?,evidence_status=? WHERE addr=?",
             (status, reason, score, m.get("raw_quality_score"), m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
              m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
-             m.get("copy_bt_open_fill_rate"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
+             m.get("copy_bt_open_fill_rate"), m.get("copy_bt_raw_target_open_n"),
+             m.get("copy_bt_small_open_excluded_n"), m.get("copy_bt_effective_target_open_n"),
+             m.get("copy_bt_opened_n"), m.get("copy_bt_raw_open_capture_rate"),
+             m.get("copy_bt_open_audit_json"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
              m.get("copy_bt_unrealized_pnl"), m.get("copy_bt_valuation_status"),
              m.get("copy_bt_initial_margin_equity"), m.get("copy_bt_window_start_equity"),
              m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_unrealized_pnl"),

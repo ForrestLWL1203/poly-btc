@@ -260,7 +260,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(recent["window_end_equity"], 11_000.0)
         self.assertEqual(recent["copy_net_pnl"], 400.0)
 
-    def test_low_liquidity_crypto_open_is_skipped(self):
+    def test_historical_replay_ignores_current_low_liquidity_snapshot(self):
         fills = [
             fill(1_000, "VINE", "A", 100_000, 0, 0.0098, 1),
             fill(2_000, "VINE", "B", 100_000, -100_000, 0.0100, 2),
@@ -274,9 +274,34 @@ class CopyBacktestTests(unittest.TestCase):
         )
 
         self.assertEqual(result["target_open_events"], 1)
-        self.assertEqual(result["opened_n"], 0)
-        self.assertEqual(result["closed_n"], 0)
-        self.assertEqual(result["skip_reasons"].get("skip_low_liquidity"), 1)
+        self.assertEqual(result["opened_n"], 1)
+        self.assertEqual(result["closed_n"], 1)
+        self.assertIsNone(result["skip_reasons"].get("skip_low_liquidity"))
+
+    def test_economic_small_open_is_excluded_from_effective_follow_denominator(self):
+        fills = [
+            fill(1_000, "HYPE", "B", 986.34, 0, 1.0, 1),
+            fill(2_000, "HYPE", "A", 986.34, 986.34, 1.01, 2),
+            fill(3_000, "ETH", "B", 10_000, 0, 1.0, 3),
+            fill(4_000, "ETH", "A", 10_000, 10_000, 1.01, 4),
+        ]
+
+        result = run_backtest(
+            "0xabc", fills, sigmas={"HYPE": 0.062, "ETH": 0.062},
+            overrides={"MID_MIN_NOTIONAL": 1_000.0},
+        )
+
+        self.assertEqual(result["raw_target_open_events"], 2)
+        self.assertEqual(result["small_open_excluded_n"], 1)
+        self.assertEqual(result["effective_target_open_events"], 1)
+        self.assertEqual(result["opened_n"], 1)
+        self.assertEqual(result["effective_open_follow_rate"], 1.0)
+        self.assertEqual(result["raw_open_capture_rate"], 0.5)
+        detail = result["open_execution_audit"]["skipDetails"][0]
+        self.assertEqual(detail["coin"], "HYPE")
+        self.assertEqual(detail["tier"], "mid")
+        self.assertEqual(detail["reason"], "skip_small_notl")
+        self.assertEqual(detail["minimumNotional"], 1_000.0)
 
     def test_coin_blacklist_skips_new_open(self):
         fills = [

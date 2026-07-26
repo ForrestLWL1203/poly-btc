@@ -188,7 +188,13 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_bt_net_pnl  REAL,                -- copy replay net PnL under current observer rules (fees included)
     copy_bt_win_rate REAL,                -- copy replay closed-position win rate
     copy_bt_closed_n INTEGER DEFAULT 0,   -- copy replay closed positions
-    copy_bt_open_fill_rate REAL,          -- copied opens / target open events
+    copy_bt_open_fill_rate REAL,          -- copied opens / economically effective target opens
+    copy_bt_raw_target_open_n INTEGER DEFAULT 0,
+    copy_bt_small_open_excluded_n INTEGER DEFAULT 0,
+    copy_bt_effective_target_open_n INTEGER DEFAULT 0,
+    copy_bt_opened_n INTEGER DEFAULT 0,
+    copy_bt_raw_open_capture_rate REAL,
+    copy_bt_open_audit_json TEXT,
     copy_bt_liquidations INTEGER DEFAULT 0,
     copy_bt_fee_drag REAL DEFAULT 0,
     copy_bt_unrealized_pnl REAL DEFAULT 0,
@@ -405,6 +411,12 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     replay_copy_bt_win_rate       REAL,
     replay_copy_bt_closed_n       INTEGER,
     replay_copy_bt_open_fill_rate REAL,
+    replay_copy_bt_raw_target_open_n INTEGER,
+    replay_copy_bt_small_open_excluded_n INTEGER,
+    replay_copy_bt_effective_target_open_n INTEGER,
+    replay_copy_bt_opened_n INTEGER,
+    replay_copy_bt_raw_open_capture_rate REAL,
+    replay_copy_bt_open_audit_json TEXT,
     replay_copy_bt_liquidations   INTEGER,
     replay_copy_bt_fee_drag       REAL,
     replay_copy_bt_unrealized_pnl REAL,
@@ -427,6 +439,23 @@ CREATE INDEX IF NOT EXISTS idx_follow_selection_generation_role
     ON follow_selection(generation, role, enabled, addr);
 CREATE INDEX IF NOT EXISTS idx_follow_selection_addr_generation
     ON follow_selection(addr, generation);
+
+-- Live-only execution-policy skips. Historical Copy replay intentionally assumes sufficient liquidity;
+-- Observer records the real-time liquidity decisions here so the dashboard can explain any divergence.
+CREATE TABLE IF NOT EXISTS live_policy_skip (
+    day TEXT NOT NULL,
+    addr TEXT NOT NULL,
+    coin TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    first_ms INTEGER NOT NULL,
+    last_ms INTEGER NOT NULL,
+    strategy_revision_id TEXT,
+    PRIMARY KEY (day, addr, coin, action, reason)
+);
+CREATE INDEX IF NOT EXISTS idx_live_policy_skip_addr_last
+    ON live_policy_skip(addr, last_ms DESC);
 
 -- Immutable execution bundles.  A revision binds one published Core generation to the exact
 -- engine-unit follow parameters and target execution context used by Observer.  Activation is a
@@ -536,7 +565,10 @@ PROFILE_COLS = (
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
     "net_7d,net_14d,net_30d,net_life,"
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_turnover,"
-    "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,copy_bt_liquidations,copy_bt_fee_drag,"
+    "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
+    "copy_bt_raw_target_open_n,copy_bt_small_open_excluded_n,copy_bt_effective_target_open_n,"
+    "copy_bt_opened_n,copy_bt_raw_open_capture_rate,copy_bt_open_audit_json,"
+    "copy_bt_liquidations,copy_bt_fee_drag,"
     "copy_bt_unrealized_pnl,copy_bt_valuation_status,copy_bt_initial_margin_equity,copy_bt_window_start_equity,"
     "copy_bt_14d_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,copy_bt_14d_window_start_equity,"
     "copy_bt_7d_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,copy_bt_7d_window_start_equity,"
@@ -1064,6 +1096,12 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_bt_win_rate REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_closed_n INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_bt_open_fill_rate REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_raw_target_open_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_small_open_excluded_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_effective_target_open_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_opened_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN copy_bt_raw_open_capture_rate REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_open_audit_json TEXT",
     "ALTER TABLE profile ADD COLUMN copy_bt_liquidations INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_bt_fee_drag REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_bt_14d_net_pnl REAL",
@@ -1184,6 +1222,12 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_win_rate REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_closed_n INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_open_fill_rate REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_raw_target_open_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_small_open_excluded_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_effective_target_open_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_opened_n INTEGER",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_raw_open_capture_rate REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_open_audit_json TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_liquidations INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_fee_drag REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_net_pnl REAL",

@@ -518,6 +518,26 @@ class Observer:
         """Count one heartbeat event for the diagnostic rollup without per-fill log growth."""
         self.hb[key] = self.hb.get(key, 0) + 1
 
+    def _record_live_policy_skip(self, addr, coin, action, reason, stamp_ms):
+        """Persist a bounded live-only policy decision without changing replay qualification."""
+        stamp_ms = int(stamp_ms or now_ms())
+        day = time.strftime("%Y-%m-%d", time.gmtime(stamp_ms / 1000.0))
+        try:
+            self.db.execute(
+                "INSERT INTO live_policy_skip "
+                "(day,addr,coin,action,reason,count,first_ms,last_ms,strategy_revision_id) "
+                "VALUES (?,?,?,?,?,1,?,?,?) "
+                "ON CONFLICT(day,addr,coin,action,reason) DO UPDATE SET "
+                "count=live_policy_skip.count+1,last_ms=excluded.last_ms,"
+                "strategy_revision_id=excluded.strategy_revision_id",
+                (
+                    day, str(addr or "").lower(), str(coin or ""), str(action or ""),
+                    str(reason or ""), stamp_ms, stamp_ms, self.strategy_revision_id,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - audit telemetry must never interrupt execution safety
+            pass
+
     # -- restart recovery: reload open copies from db ------------------------
     def _reload_params(self, follow_values=None):
         """Refresh UI-tunable strategy params from the params table (engine units; config = fallback).
@@ -1109,6 +1129,10 @@ class Observer:
                 time.gmtime(time.time() - config.ACCOUNT_STATS_RETENTION_DAYS * 86400),
             )
             self.db.execute("DELETE FROM account_stats WHERE ts < ?", (stats_cutoff,))
+            self.db.execute(
+                "DELETE FROM live_policy_skip WHERE last_ms < ?",
+                (now_ms() - 90 * 86_400_000,),
+            )
             self.db.commit()
             self.risk_radar.prune()
             if n:
@@ -1675,9 +1699,10 @@ class Observer:
         liquidity_reason = self._coin_liquidity_block_reason(coin)
         if liquidity_reason:
             self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
-            self.db.commit()
             book.open_ep.pop((addr, coin), None)
             self._tally("skip_low_liquidity", book)
+            self._record_live_policy_skip(addr, coin, "open", liquidity_reason, now_ms())
+            self.db.commit()
             _log(f"skip {coin} {ep['side']} {addr[:10]}: low liquidity ({liquidity_reason})")
             return
         master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
@@ -1867,8 +1892,12 @@ class Observer:
                 self._tally("skip_coin_blacklist_add", book)
                 return _observe_only(final=True)
 
-            if self._coin_liquidity_block_reason(coin):
+            add_liquidity_reason = self._coin_liquidity_block_reason(coin)
+            if add_liquidity_reason:
                 self._tally("skip_low_liquidity_add", book)
+                self._record_live_policy_skip(
+                    addr, coin, "add", add_liquidity_reason, now_ms(),
+                )
                 return _observe_only(final=True)
 
             if self.add_strategy == "smart":

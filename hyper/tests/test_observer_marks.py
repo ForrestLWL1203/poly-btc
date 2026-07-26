@@ -919,6 +919,11 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 0,
             )
             self.assertEqual(obs.hb.get("skip_low_liquidity"), 1)
+            audit = db.execute(
+                "SELECT action,reason,count FROM live_policy_skip "
+                "WHERE addr='0xaaa' AND coin='VINE'"
+            ).fetchone()
+            self.assertEqual(tuple(audit), ("open", "day_volume", 1))
 
         asyncio.run(run())
 
@@ -956,6 +961,11 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             self.assertGreater(row["master_open_px"], 100)
             self.assertEqual(act["our_qty_delta"], 0)
             self.assertEqual(obs.hb.get("skip_low_liquidity_add"), 1)
+            audit = db.execute(
+                "SELECT action,reason,count FROM live_policy_skip "
+                "WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()
+            self.assertEqual(tuple(audit), ("add", "day_volume", 1))
 
         asyncio.run(run())
 

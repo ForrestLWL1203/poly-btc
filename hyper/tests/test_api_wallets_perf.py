@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -382,6 +383,20 @@ class ApiWalletsPerfTests(unittest.TestCase):
                     "INSERT INTO watchlist (rank,addr,score,market_type,updated_at) VALUES (1,?,0.8,'crypto','now')",
                     (addr,),
                 )
+            db.execute(
+                "UPDATE profile SET copy_bt_open_fill_rate=.8,copy_bt_raw_target_open_n=6,"
+                "copy_bt_small_open_excluded_n=1,copy_bt_effective_target_open_n=5,"
+                "copy_bt_opened_n=4,copy_bt_raw_open_capture_rate=(4.0/6.0),"
+                "copy_bt_open_audit_json=? WHERE addr='0xbbb'",
+                (json.dumps({"rawTargetOpenN": 6, "smallOpenExcludedN": 1}),),
+            )
+            stamp_ms = int(time.time() * 1000)
+            db.execute(
+                "INSERT INTO live_policy_skip "
+                "(day,addr,coin,action,reason,count,first_ms,last_ms) "
+                "VALUES ('2026-07-26','0xbbb','TAO','open','day_volume',2,?,?)",
+                (stamp_ms, stamp_ms),
+            )
             db.commit()
 
             core = api_wallets.ep_wallets(db, {"tab": ["followed"]})
@@ -397,7 +412,17 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertNotIn("role", core["wallets"][0])
         self.assertNotIn("selectionMarginalUtility", challenger["wallets"][0])
         self.assertEqual(challenger["wallets"][0]["selectionReasonText"], "Copy完整已平回合少于7个")
+        self.assertEqual(challenger["wallets"][0]["openFollowRatePct"], 80)
+        self.assertEqual(challenger["wallets"][0]["rawTargetOpenN"], 6)
+        self.assertEqual(challenger["wallets"][0]["smallOpenExcludedN"], 1)
+        self.assertEqual(challenger["wallets"][0]["effectiveTargetOpenN"], 5)
+        self.assertEqual(challenger["wallets"][0]["historicalOpenedN"], 4)
+        self.assertEqual(challenger["wallets"][0]["liveLiquiditySkipN30d"], 2)
+        self.assertEqual(challenger["wallets"][0]["liveLiquiditySkipCoins30d"], ["TAO"])
         self.assertEqual(challenger_detail["selectionReasonText"], "Copy完整已平回合少于7个")
+        self.assertEqual(challenger_detail["copyExecution"]["effectiveFollowRatePct"], 80)
+        self.assertEqual(challenger_detail["copyExecution"]["smallOpenExcludedN"], 1)
+        self.assertEqual(challenger_detail["copyExecution"]["liveLiquiditySkipN30d"], 2)
 
     def test_published_selection_scores_do_not_follow_in_progress_profile_mutations(self):
         with tempfile.TemporaryDirectory() as td:

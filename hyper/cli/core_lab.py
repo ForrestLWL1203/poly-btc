@@ -177,12 +177,12 @@ def _source_record(db, row: dict, official: dict, now_ms: int, p, follow: dict) 
     structure = scanner._current_sector_structure_policy(fills, int(now_ms), p)
     episodes, _open = build_episodes(fills)
     source = scanner._source_quality_surface(fills, episodes, structure, int(now_ms))
+    # The immutable prefilter decision already applied the history-tier-specific floor: full-history
+    # wallets use the 30-day line, while 7–29 day wallets use the short-history 7-day line.  Reapplying
+    # the full-history 20% floor here would incorrectly hide valid short-history candidates.
     current_official = bool(
         official.get("status") == "passed"
         and official.get("return30d") is not None
-        and f(official.get("return30d")) >= f(follow.get(
-            "OFFICIAL_PERP_MIN_RETURN_30D", config.OFFICIAL_PERP_MIN_RETURN_30D,
-        ))
     )
     legacy_preview = bool(
         official.get("status") == "passed" and official.get("return30d") is None

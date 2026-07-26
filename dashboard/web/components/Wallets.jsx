@@ -138,8 +138,13 @@ export function Wallets({ confirm }) {
                         {w.copyBacktest7dReturnPct != null && <> · {fSign(w.copyBacktest7dReturnPct, 1)}%</>} · {w.copyBacktest7dClosedN || 0}笔
                       </div>
                       {w.openFollowRatePct != null && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
-                        开仓跟随 {fNum(w.openFollowRatePct, 0)}%
+                        历史有效跟随 {fNum(w.openFollowRatePct, 0)}%
+                        {w.historicalOpenedN != null && w.effectiveTargetOpenN != null && <> · {w.historicalOpenedN}/{w.effectiveTargetOpenN}</>}
+                        {(w.smallOpenExcludedN || 0) > 0 && <> · 小单排除 {w.smallOpenExcludedN}</>}
                         {w.liquidations30d != null && <> · 爆仓 {w.liquidations30d}</>}
+                      </div>}
+                      {(w.liveLiquiditySkipN30d || 0) > 0 && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
+                        实时流动性跳过 {w.liveLiquiditySkipN30d} 次 · {(w.liveLiquiditySkipCoins30d || []).join(" / ")}
                       </div>}
                       {w.copyBacktestValuationStatus && w.copyBacktestValuationStatus !== "complete" && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>持仓估值待确认</div>}
                     </td>

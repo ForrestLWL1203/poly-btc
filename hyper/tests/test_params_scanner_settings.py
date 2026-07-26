@@ -9,7 +9,7 @@ from hyper import config, params, storage
 
 class ScannerSettingsParamTests(unittest.TestCase):
     def test_product_defaults_use_cheap_recall_before_official_perp_return(self):
-        self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 250_000.0)
+        self.assertEqual(config.HARVEST_WEEK_VLM_MIN, 150_000.0)
         self.assertEqual(config.HARVEST_MIN_ACCT, 20_000.0)
         self.assertFalse(hasattr(config, "HARVEST_WEEK_ROI_MIN"))
         self.assertFalse(hasattr(config, "HARVEST_MONTH_ROI_MIN"))
@@ -35,7 +35,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
 
             scanner = params.load_category(db, "scanner")
             follow = params.load_follow(db)
-            self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 250_000.0)
+            self.assertEqual(scanner["HARVEST_WEEK_VLM_MIN"], 150_000.0)
             self.assertEqual(scanner["HARVEST_MIN_ACCT"], 20_000.0)
             self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner)
             self.assertNotIn("HARVEST_MONTH_ROI_MIN", scanner)
@@ -102,6 +102,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("EVIDENCE_MIN_TRADES", scanner_keys)
             self.assertIn("SOURCE_MIN_EPISODES_30D", scanner_keys)
             self.assertIn("SOURCE_MIN_EPISODE_WIN_RATE", scanner_keys)
+            self.assertIn("SOURCE_LOW_FREQ_MIN_EPISODES_30D", scanner_keys)
+            self.assertIn("SOURCE_LOW_FREQ_MAX_EPISODES_30D", scanner_keys)
+            self.assertIn("SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", scanner_keys)
+            self.assertIn("SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN", scanner_keys)
             self.assertIn("ROUGH_COPY_MIN_CLOSED_30D", scanner_keys)
             self.assertIn("ROUGH_COPY_MIN_WIN_RATE", scanner_keys)
             self.assertNotIn("ROUGH_COPY_MIN_RETURN_30D", scanner_keys)
@@ -149,6 +153,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             params.seed_params(db)
             old = {
                 "HARVEST_MIN_ACCT": "30000",
+                "HARVEST_WEEK_VLM_MIN": "250000",
                 "HARVEST_WEEK_PNL_MIN": "5000",
                 "HARVEST_MONTH_PNL_MIN": "15000",
                 "HARVEST_ALL_PNL_MIN": "20000",
@@ -164,7 +169,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 "SELECT key,value FROM params WHERE key LIKE 'HARVEST_%'"
             ).fetchall())
             self.assertEqual(float(values["HARVEST_MIN_ACCT"]), 20_000.0)
-            self.assertEqual(float(values["HARVEST_WEEK_VLM_MIN"]), 250_000.0)
+            self.assertEqual(float(values["HARVEST_WEEK_VLM_MIN"]), 150_000.0)
             self.assertEqual(float(values["HARVEST_WEEK_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_ALL_PNL_MIN"]), 0.0)

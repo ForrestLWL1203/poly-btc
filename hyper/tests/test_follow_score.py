@@ -67,6 +67,38 @@ class SourceQualityTests(unittest.TestCase):
         self.assertTrue(passed["eligible"])
         self.assertEqual(failed["firstFailure"], "source_win_rate_below_floor")
 
+    def test_strong_low_frequency_lane_requires_all_four_proofs(self):
+        passed = evaluate_source_quality(evidence(
+            source_episode_n_30d=8,
+            source_win_rate_30d=0.875,
+            official_perp_return_30d=0.35,
+            source_net_pnl_7d=100,
+        ), as_of_ms=NOW)
+        self.assertTrue(passed["eligible"])
+        self.assertEqual(passed["qualityLane"], "strong_low_frequency")
+
+        cases = (
+            ({"source_episode_n_30d": 6}, "source_episode_evidence_insufficient"),
+            (
+                {"source_episode_n_30d": 8, "source_win_rate_30d": 0.84},
+                "source_low_frequency_win_rate_below_floor",
+            ),
+            (
+                {"source_episode_n_30d": 8, "source_win_rate_30d": 0.875,
+                 "official_perp_return_30d": 0.29},
+                "source_low_frequency_official_return_below_floor",
+            ),
+            (
+                {"source_episode_n_30d": 8, "source_win_rate_30d": 0.875,
+                 "official_perp_return_30d": 0.35, "source_net_pnl_7d": 0},
+                "source_low_frequency_recent_not_profitable",
+            ),
+        )
+        for overrides, reason in cases:
+            with self.subTest(reason=reason):
+                result = evaluate_source_quality(evidence(**overrides), as_of_ms=NOW)
+                self.assertEqual(result["firstFailure"], reason)
+
     def test_top3_concentration_is_conditional(self):
         unconcentrated = evaluate_source_quality(evidence(
             source_top3_profit_share=0.699,

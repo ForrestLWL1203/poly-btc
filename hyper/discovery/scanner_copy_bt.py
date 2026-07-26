@@ -214,13 +214,33 @@ def record_primary_copy_bt(metrics, result):
         return
     opened = int(result.get("opened_n") or 0)
     target_open = int(result.get("target_open_events") or 0)
+    effective_target = int(
+        result.get("effective_target_open_events")
+        if result.get("effective_target_open_events") is not None else target_open
+    )
     metrics.update(
         copy_bt_net_pnl=result.get("copy_net_pnl"),
         copy_bt_unrealized_pnl=result.get("unrealized_pnl"),
         copy_bt_valuation_status=result.get("valuation_status"),
         copy_bt_win_rate=result.get("copy_win_rate"),
         copy_bt_closed_n=int(result.get("closed_n") or 0),
-        copy_bt_open_fill_rate=(opened / target_open) if target_open else None,
+        copy_bt_open_fill_rate=(
+            result.get("effective_open_follow_rate")
+            if result.get("effective_open_follow_rate") is not None
+            else (opened / effective_target) if effective_target else None
+        ),
+        copy_bt_raw_target_open_n=int(
+            result.get("raw_target_open_events")
+            if result.get("raw_target_open_events") is not None else target_open
+        ),
+        copy_bt_small_open_excluded_n=int(result.get("small_open_excluded_n") or 0),
+        copy_bt_effective_target_open_n=effective_target,
+        copy_bt_opened_n=opened,
+        copy_bt_raw_open_capture_rate=result.get("raw_open_capture_rate"),
+        copy_bt_open_audit_json=json.dumps(
+            result.get("open_execution_audit") or {},
+            sort_keys=True, separators=(",", ":"),
+        ),
         copy_bt_liquidations=int(result.get("liquidations") or 0),
         copy_bt_fee_drag=result.get("fee_drag"),
         initial_margin_equity=result.get("initial_margin_equity"),

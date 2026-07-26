@@ -96,16 +96,34 @@ def evaluate_source_quality(
     body_win_rate = metrics.get("source_body_after_top3_win_rate")
     body_net = metrics.get("source_body_after_top3_net_pnl")
     activity_age = _activity_age_hours(metrics, as_of_ms)
+    official = _official_return_context(metrics, policy)
+    recent_net = _num(metrics.get("source_net_pnl_7d"))
+    standard_lane = episodes >= policy.source_min_episodes_30d
+    low_frequency_lane = (
+        policy.source_low_freq_min_episodes_30d
+        <= episodes
+        <= policy.source_low_freq_max_episodes_30d
+    )
+    source_lane = "standard" if standard_lane else "strong_low_frequency" if low_frequency_lane else None
+    lane_win_floor = (
+        policy.source_min_episode_win_rate
+        if standard_lane else policy.source_low_freq_min_episode_win_rate
+    )
     concentration_triggered = bool(
         top3_share is not None
         and _num(top3_share) >= policy.source_top3_concentration_trigger
     )
     checks = {
-        "minimumCompleteEpisodes": episodes >= policy.source_min_episodes_30d,
+        "minimumCompleteEpisodes": source_lane is not None,
         "sourceWinRate": (
             win_rate is not None
-            and _num(win_rate) >= policy.source_min_episode_win_rate
+            and _num(win_rate) >= lane_win_floor
         ),
+        "lowFrequencyOfficialReturn": (
+            not low_frequency_lane
+            or official["return"] >= policy.source_low_freq_min_official_return
+        ),
+        "lowFrequencyRecentProfit": not low_frequency_lane or recent_net > 0.0,
         "activityWithin72h": activity_age is not None and activity_age <= 72.0,
         "concentratedBodyWinRate": (
             not concentration_triggered
@@ -121,7 +139,13 @@ def evaluate_source_quality(
     }
     failures = (
         ("source_episode_evidence_insufficient", "minimumCompleteEpisodes"),
-        ("source_win_rate_below_floor", "sourceWinRate"),
+        (
+            "source_low_frequency_win_rate_below_floor"
+            if low_frequency_lane else "source_win_rate_below_floor",
+            "sourceWinRate",
+        ),
+        ("source_low_frequency_official_return_below_floor", "lowFrequencyOfficialReturn"),
+        ("source_low_frequency_recent_not_profitable", "lowFrequencyRecentProfit"),
         ("source_activity_stale", "activityWithin72h"),
         ("source_concentrated_body_win_rate_low", "concentratedBodyWinRate"),
         ("source_concentrated_body_unprofitable", "concentratedBodyNonNegative"),
@@ -133,6 +157,8 @@ def evaluate_source_quality(
         "firstFailure": first_failure,
         "checks": checks,
         "episodeN30d": episodes,
+        "qualityLane": source_lane,
+        "winRateFloor": lane_win_floor,
         "winRate30d": _num(win_rate) if win_rate is not None else None,
         "activityAgeHours": activity_age,
         "top3ProfitShare": _num(top3_share) if top3_share is not None else None,
@@ -157,14 +183,30 @@ def compute_source_quality_score(
     win_rate = _num(metrics.get("source_win_rate_30d"))
     episodes = int(_num(metrics.get("source_episode_n_30d")))
     activity_age = _activity_age_hours(metrics, as_of_ms)
+    source = evaluate_source_quality(
+        metrics, policy_values=policy_values, as_of_ms=as_of_ms,
+    )
+    low_frequency = source.get("qualityLane") == "strong_low_frequency"
+    official_floor = (
+        policy.source_low_freq_min_official_return
+        if low_frequency else official["floor"]
+    )
+    win_floor = (
+        policy.source_low_freq_min_episode_win_rate
+        if low_frequency else policy.source_min_episode_win_rate
+    )
+    episode_floor = (
+        policy.source_low_freq_min_episodes_30d
+        if low_frequency else policy.source_min_episodes_30d
+    )
     official_score = _quality_above_floor(
-        official_return, official["floor"], 0.80,
+        official_return, official_floor, 0.80,
     )
     win_score = _quality_above_floor(
-        win_rate, policy.source_min_episode_win_rate, 0.25,
+        win_rate, win_floor, 0.25,
     )
     sample_score = _quality_above_floor(
-        episodes, policy.source_min_episodes_30d, 30,
+        episodes, episode_floor, 30,
     )
     recency_score = 0.0 if activity_age is None else _clamp(1.0 - activity_age / 180.0)
     score = 0.25 * official_score + 0.40 * win_score + 0.25 * sample_score + 0.10 * recency_score
@@ -172,6 +214,7 @@ def compute_source_quality_score(
         "officialPerp30dScore": official_score,
         "officialPerpHistoryTier": official["historyTier"],
         "officialPerpWindowDays": official["windowDays"],
+        "sourceQualityLane": source.get("qualityLane"),
         "sourceWinRateScore": win_score,
         "sourceSampleScore": sample_score,
         "sourceRecencyScore": recency_score,

@@ -31,7 +31,6 @@ ADD_OUTCOMES = (
     "coin_cap_blocked",
     "cash_blocked",
     "min_margin_blocked",
-    "liquidity_blocked",
     "wallet_sector_side_cap_blocked",
     "wallet_cap_blocked",
     "total_margin_cap_blocked",
@@ -42,6 +41,84 @@ ADD_BLOCKED_OUTCOMES = tuple(
     if outcome not in {"followed", "noise_merged"}
 )
 ADD_METRICS_VERSION = "add_metrics_v2"
+CAPACITY_OPEN_OUTCOMES = frozenset({
+    "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
+    "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
+    "skip_wallet_stock_side_position_cap",
+})
+
+
+def open_execution_metrics(open_events) -> dict:
+    """Return one auditable historical-open denominator.
+
+    Historical replay assumes the market was liquid enough to execute.  A target open whose copy-sized
+    notional is below our tier's economic floor is not an execution miss; it is excluded from the effective
+    opportunity set.  Every other policy/capacity rejection remains a real miss.
+    """
+    events = [dict(event) for event in (open_events or ())]
+    raw_n = len(events)
+    opened_n = sum(event.get("outcome") == "opened" for event in events)
+    small_n = sum(event.get("outcome") == "skip_small_notl" for event in events)
+    effective_n = max(0, raw_n - small_n)
+    capacity_skips = sum(event.get("outcome") in CAPACITY_OPEN_OUTCOMES for event in events)
+    details = {}
+    for event in events:
+        outcome = str(event.get("outcome") or "skip_unknown_open")
+        if outcome == "opened":
+            continue
+        key = (
+            str(event.get("coin") or ""),
+            str(event.get("tier") or ""),
+            outcome,
+            f(event.get("minimum_notional")),
+        )
+        item = details.setdefault(key, {
+            "coin": key[0],
+            "tier": key[1],
+            "reason": outcome,
+            "minimumNotional": key[3],
+            "count": 0,
+            "copyNotionalMin": None,
+            "copyNotionalMax": None,
+        })
+        item["count"] += 1
+        copy_notional = event.get("copy_notional")
+        if copy_notional is not None:
+            value = f(copy_notional)
+            item["copyNotionalMin"] = (
+                value if item["copyNotionalMin"] is None else min(item["copyNotionalMin"], value)
+            )
+            item["copyNotionalMax"] = (
+                value if item["copyNotionalMax"] is None else max(item["copyNotionalMax"], value)
+            )
+    raw_rate = opened_n / raw_n if raw_n else 1.0
+    effective_rate = opened_n / effective_n if effective_n else 1.0
+    capacity_fit = (
+        opened_n / (opened_n + capacity_skips)
+        if (opened_n + capacity_skips) else 1.0
+    )
+    return {
+        "raw_target_open_events": raw_n,
+        "small_open_excluded_n": small_n,
+        "effective_target_open_events": effective_n,
+        "opened_n": opened_n,
+        "raw_open_capture_rate": raw_rate,
+        "effective_open_follow_rate": effective_rate,
+        "capacity_open_fit": capacity_fit,
+        "open_execution_audit": {
+            "rawTargetOpenN": raw_n,
+            "smallOpenExcludedN": small_n,
+            "effectiveTargetOpenN": effective_n,
+            "openedN": opened_n,
+            "rawOpenCaptureRate": raw_rate,
+            "effectiveOpenFollowRate": effective_rate,
+            "capacityFit": capacity_fit,
+            "skipDetails": sorted(
+                details.values(),
+                key=lambda item: (-int(item["count"]), item["reason"], item["coin"]),
+            ),
+        },
+    }
 
 
 def _clamp01(value: float) -> float:
@@ -501,10 +578,6 @@ class Backtest:
             "SMART_TP_MIN_FEE_MULT", config.SMART_TP_MIN_FEE_MULT)
         self.coin_blacklist = parse_coin_blacklist(overrides.get("COIN_BLACKLIST", config.COIN_BLACKLIST))
         self.block_korean_stocks = bool(overrides.get("BLOCK_KOREAN_STOCKS", config.BLOCK_KOREAN_STOCKS))
-        self.low_liquidity_filter_enable = bool(overrides.get(
-            "LOW_LIQUIDITY_FILTER_ENABLE", config.LOW_LIQUIDITY_FILTER_ENABLE))
-        self.min_coin_day_ntl_vlm = overrides.get("MIN_COIN_DAY_NTL_VLM", config.MIN_COIN_DAY_NTL_VLM)
-        self.min_coin_oi_notional = overrides.get("MIN_COIN_OI_NOTIONAL", config.MIN_COIN_OI_NOTIONAL)
         self.market_ctx = market_ctx or {}
         self.replay_cost_mult = max(1.0, f(overrides.get("REPLAY_COST_MULT", 1.0)))
         self.path_refinement_probe = bool(overrides.get("_PATH_REFINEMENT_PROBE", False))
@@ -526,6 +599,7 @@ class Backtest:
         self.path_equity_samples = []
         self.path_liquidation_times = []
         self.track_price_path = False
+        self._last_open_detail = {}
 
     def open_sizing_params(self):
         return OpenSizingParams(
@@ -621,22 +695,6 @@ class Backtest:
             crypto_high=self.wallet_sector_side_caps["high"],
             stock=self.wallet_sector_side_caps["stock"],
         )
-
-    def liquidity_block_reason(self, coin):
-        if not self.low_liquidity_filter_enable or not coin or ":" in coin:
-            return None
-        ctx = self.market_ctx.get(coin)
-        if not ctx:
-            return None
-        day_ntl_vlm = ctx.get("day_ntl_vlm")
-        oi_notional = ctx.get("oi_notional")
-        if day_ntl_vlm is None or oi_notional is None:
-            return None
-        if day_ntl_vlm < self.min_coin_day_ntl_vlm:
-            return "day_volume"
-        if oi_notional < self.min_coin_oi_notional:
-            return "open_interest"
-        return None
 
     def run(self, fills, price_path=None):
         fills = normalize_copyable_fills(
@@ -742,6 +800,7 @@ class Backtest:
         """Open once and retain the time-local outcome for continuous-window slicing."""
         opened_before = self.opened_n
         skips_before = Counter(self.skip_reasons)
+        self._last_open_detail = {}
         self._open_position(addr, coin, t, px, pos1, oid, fill)
         if self.opened_n > opened_before:
             outcome = "opened"
@@ -751,7 +810,11 @@ class Backtest:
                 if int(value) > int(skips_before.get(key, 0))
             ]
             outcome = changed[-1] if changed else "skip_unknown_open"
-        self.open_events.append({"time": int(f(t)), "outcome": outcome})
+        self.open_events.append({
+            "time": int(f(t)),
+            "outcome": outcome,
+            **dict(self._last_open_detail or {}),
+        })
 
     def process_price(self, x, *, has_fill_events=None):
         coin = x.get("coin")
@@ -809,13 +872,17 @@ class Backtest:
         self._sample_path_equity(x.get("close_time") or x.get("time"))
 
     def _open_position(self, addr, coin, t, px, pos1, oid, fill=None):
+        sigma = self.sigma(coin)
+        tier = self.tier(sigma, coin)
+        self._last_open_detail = {
+            "coin": coin,
+            "tier": tier,
+            "minimum_notional": f(self.tier_min_notional.get(tier)),
+            "master_notional": abs(pos1) * px,
+        }
         if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
             self.skip_reasons["skip_coin_blacklist"] += 1
             return
-        if self.liquidity_block_reason(coin):
-            self.skip_reasons["skip_low_liquidity"] += 1
-            return
-        sigma = self.sigma(coin)
         side = "long" if pos1 > 0 else "short"
         sign = 1 if side == "long" else -1
         wallet_key = str(addr or "").lower()
@@ -879,6 +946,12 @@ class Backtest:
             wallet_sector_side_room=group_room,
             wallet_room=source_room,
         )
+        self._last_open_detail.update({
+            "tier": plan.tier,
+            "minimum_notional": f(self.tier_min_notional.get(plan.tier)),
+            "master_notional": f(plan.master_notional),
+            "copy_notional": f(plan.notional),
+        })
         tier = plan.tier
         if not plan.ok:
             why = plan.reason
@@ -1062,8 +1135,6 @@ class Backtest:
             if c == coin and p["side"] == ep["side"]
         )
         coin_room = max(0.0, self.coin_cap_pct(tier) * risk_equity - existing)
-        if self.liquidity_block_reason(coin):
-            return self._observe_add(ep, oid, "liquidity_blocked", t=t)
         if self.add_strategy == "smart":
             last = ep.get("last_target_add_px") or ep["master_open_px"]
             adv = (((last - decision_px) if is_buy else (decision_px - last)) / last) if last else 0.0
@@ -1371,11 +1442,7 @@ class Backtest:
         path_completion_rate = natural_closes / len(self.closed) if self.closed else 1.0
         initial_notl = sum(p["target_initial_notl"] for p in self.closed) + sum(p["target_initial_notl"] for p in self.open.values())
         add_notl = sum(p["target_add_notl"] for p in self.closed) + sum(p["target_add_notl"] for p in self.open.values())
-        capacity_skips = sum(self.skip_reasons[k] for k in (
-            "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
-            "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
-            "skip_wallet_stock_side_position_cap",
-        ))
+        open_metrics = open_execution_metrics(self.open_events)
         equity_pnl = self.balance - self.initial_balance + unreal
         curve = []
         equity = self.initial_balance
@@ -1413,7 +1480,7 @@ class Backtest:
             initial_equity=self.initial_balance,
             liquidation_times=self.path_liquidation_times,
         )
-        open_rate = self.opened_n / self.target_open_events if self.target_open_events else 1.0
+        open_rate = f(open_metrics.get("effective_open_follow_rate"))
         behavior_v2 = _clamp01(
             open_rate
             * (f(add_metrics.get("effective_add_fidelity")) if add_metrics.get("effective_add_fidelity") is not None else 1.0)
@@ -1509,14 +1576,20 @@ class Backtest:
             "target_open_events": self.target_open_events,
             "opened_n": self.opened_n,
             "open_events": list(self.open_events),
-            "open_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
+            "raw_target_open_events": open_metrics["raw_target_open_events"],
+            "small_open_excluded_n": open_metrics["small_open_excluded_n"],
+            "effective_target_open_events": open_metrics["effective_target_open_events"],
+            "raw_open_capture_rate": open_metrics["raw_open_capture_rate"],
+            "effective_open_follow_rate": open_rate,
+            "open_execution_audit": open_metrics["open_execution_audit"],
+            "open_fill_rate": open_rate,
             "add_dependency": add_notl / initial_notl if initial_notl else 0.0,
             "target_peak_concurrent": self.target_peak_concurrent,
             "copy_peak_concurrent": self.copy_peak_concurrent,
             "max_concurrent_fit": self.copy_peak_concurrent / self.target_peak_concurrent if self.target_peak_concurrent else 1.0,
-            "capacity_open_fit": self.opened_n / (self.opened_n + capacity_skips) if (self.opened_n + capacity_skips) else 1.0,
-            "actionable_open_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
-            "execution_fill_rate": self.opened_n / self.target_open_events if self.target_open_events else 1.0,
+            "capacity_open_fit": open_metrics["capacity_open_fit"],
+            "actionable_open_rate": open_rate,
+            "execution_fill_rate": open_rate,
             "behavior_replication_rate": behavior_v2,
             "behavior_replication_v2": behavior_v2,
             "behavior_replication_rate_legacy": behavior_legacy,
@@ -1662,21 +1735,11 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         if int(event.get("time") or 0) >= int(start_ms)
     ]
     if all_open_events:
-        opened_n = sum(event.get("outcome") == "opened" for event in window_open_events)
-        target_open_events = len(window_open_events)
-        open_rate = opened_n / target_open_events if target_open_events else 1.0
-        capacity_outcomes = {
-            "skip_coin_full", "skip_no_cash", "skip_deploy_cap", "skip_margin_too_small",
-            "skip_wallet_sector_side_full", "skip_wallet_full", "skip_wallet_position_cap",
-            "skip_wallet_stock_side_position_cap",
-        }
-        capacity_skips = sum(
-            event.get("outcome") in capacity_outcomes for event in window_open_events
-        )
-        capacity_fit = (
-            opened_n / (opened_n + capacity_skips)
-            if (opened_n + capacity_skips) else 1.0
-        )
+        open_metrics = open_execution_metrics(window_open_events)
+        opened_n = open_metrics["opened_n"]
+        target_open_events = open_metrics["raw_target_open_events"]
+        open_rate = open_metrics["effective_open_follow_rate"]
+        capacity_fit = open_metrics["capacity_open_fit"]
         sliced_skip_reasons = dict(out.get("skip_reasons") or {})
         logged_outcomes = {
             str(event.get("outcome") or "")
@@ -1702,6 +1765,22 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
             if out.get("capacity_open_fit") is not None else open_rate
         )
         sliced_skip_reasons = dict(out.get("skip_reasons") or {})
+        open_metrics = {
+            "raw_target_open_events": int(
+                out.get("raw_target_open_events") or target_open_events
+            ),
+            "small_open_excluded_n": int(out.get("small_open_excluded_n") or 0),
+            "effective_target_open_events": int(
+                out.get("effective_target_open_events") or target_open_events
+            ),
+            "raw_open_capture_rate": f(
+                out.get("raw_open_capture_rate")
+                if out.get("raw_open_capture_rate") is not None else open_rate
+            ),
+            "effective_open_follow_rate": open_rate,
+            "capacity_open_fit": capacity_fit,
+            "open_execution_audit": dict(out.get("open_execution_audit") or {}),
+        }
     all_add_events = list(out.get("add_events") or ())
     window_add_events = [
         dict(event) for event in all_add_events
@@ -1817,6 +1896,12 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "target_open_events": target_open_events,
         "opened_n": opened_n,
         "open_events": window_open_events,
+        "raw_target_open_events": open_metrics["raw_target_open_events"],
+        "small_open_excluded_n": open_metrics["small_open_excluded_n"],
+        "effective_target_open_events": open_metrics["effective_target_open_events"],
+        "raw_open_capture_rate": open_metrics["raw_open_capture_rate"],
+        "effective_open_follow_rate": open_metrics["effective_open_follow_rate"],
+        "open_execution_audit": open_metrics["open_execution_audit"],
         "open_fill_rate": open_rate,
         "actionable_open_rate": open_rate,
         "execution_fill_rate": open_rate,

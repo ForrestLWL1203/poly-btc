@@ -64,6 +64,14 @@ PARAM_SPEC = [
         config.SOURCE_MIN_EPISODES_30D, "源钱包30日最低完整回合", "边界不完整回合不计入样本或胜率"),
     ("SOURCE_MIN_EPISODE_WIN_RATE", "scanner", "black", "pct", "rescan",
         config.SOURCE_MIN_EPISODE_WIN_RATE * 100, "源钱包30日最低胜率", "手续费后完整Episode胜率至少70%"),
+    ("SOURCE_LOW_FREQ_MIN_EPISODES_30D", "scanner", "black", "int", "rescan",
+        config.SOURCE_LOW_FREQ_MIN_EPISODES_30D, "强力低频最低完整回合", "仅7–9个完整Episode时启用强力低频通道"),
+    ("SOURCE_LOW_FREQ_MAX_EPISODES_30D", "scanner", "black", "int", "rescan",
+        config.SOURCE_LOW_FREQ_MAX_EPISODES_30D, "强力低频最高完整回合", "达到10个Episode后使用标准源质量通道"),
+    ("SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", "scanner", "black", "pct", "rescan",
+        config.SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE * 100, "强力低频最低胜率", "低频样本必须达到85%手续费后胜率"),
+    ("SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN", "scanner", "black", "pct", "rescan",
+        config.SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN * 100, "强力低频官方收益", "低频样本要求官方Perp资格窗口收益至少30%"),
     ("SOURCE_TOP3_CONCENTRATION_TRIGGER", "scanner", "hidden", "pct", "rescan",
         config.SOURCE_TOP3_CONCENTRATION_TRIGGER * 100, "前三大赢家集中检查线", "低于70%不触发主体检查"),
     ("SOURCE_BODY_MIN_WIN_RATE", "scanner", "hidden", "pct", "rescan",
@@ -259,7 +267,9 @@ _SPEC_BY_KEY = {s[0]: s for s in PARAM_SPEC}
 # Known predecessor defaults that are policy-migrated on deploy. Values are stored in UI units.
 _HARVEST_PREVIOUS_DEFAULTS = {
     "HARVEST_MIN_ACCT": ("5000", "5000.0", "10000", "10000.0", "30000", "30000.0"),
-    "HARVEST_WEEK_VLM_MIN": ("50000", "50000.0", "300000", "300000.0"),
+    "HARVEST_WEEK_VLM_MIN": (
+        "50000", "50000.0", "250000", "250000.0", "300000", "300000.0",
+    ),
     "HARVEST_WEEK_PNL_MIN": ("0", "0.0", "250", "250.0", "2000", "2000.0", "5000", "5000.0"),
     "HARVEST_MONTH_PNL_MIN": (
         "0", "0.0", "500", "500.0", "1000", "1000.0", "5000", "5000.0",

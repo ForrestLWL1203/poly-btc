@@ -9,6 +9,16 @@ const { useState, useEffect, useCallback } = React;
 const STATUS_LABEL = { open: "在持", closed: "已平", gap_closed: "缺口平", liquidated: "爆仓", tail_closed: "尾盈平" };
 
 const marketLabel = (m) => ({ crypto: "加密", stock: "美股/指数", mixed: "混合" }[m] || m || "—");
+const tierLabel = (tier) => ({ stable: "稳定档", mid: "中档", high: "剧烈档" }[tier] || tier || "未分档");
+const openSkipLabel = (reason) => ({
+  skip_small_notl: "低于最低经济名义额",
+  skip_coin_full: "单币容量已满",
+  skip_deploy_cap: "组合部署上限",
+  skip_no_cash: "可用保证金不足",
+  skip_margin_too_small: "可用开仓保证金过小",
+  skip_wallet_position_cap: "并发仓位上限",
+  skip_coin_blacklist: "策略禁用市场",
+}[reason] || reason || "未执行");
 
 const copyWindowRows = (breakdown) => {
   const pnl = breakdown.copyPnl || {};
@@ -53,6 +63,8 @@ export function WalletDrawer({ address, onClose }) {
   const scoreBreakdown = (d && d.scoreBreakdown) || {};
   const scoreComponents = scoreBreakdown.components || {};
   const sourceQuality = (d && d.sourceQuality) || {};
+  const copyExecution = (d && d.copyExecution) || {};
+  const historicalSkipDetails = (copyExecution.historicalAudit && copyExecution.historicalAudit.skipDetails) || [];
   const officialEvidence = (((d && d.officialPerpEvidence) || {}).windows || {}).officialPerp30d || {};
   const officialIsShort = officialEvidence.historyTier === "short_history_7d";
   const officialRoiLabel = officialIsShort
@@ -128,6 +140,24 @@ export function WalletDrawer({ address, onClose }) {
                     <div className="wallet-risk"><span>源钱包30日 / 7日净利</span><b>{fSign(sourceQuality.netPnl30d, 0)} / {fSign(sourceQuality.netPnl7d, 0)}</b></div>
                     <div className="wallet-risk"><span>前三大赢家占毛利</span><b>{sourceQuality.top3ProfitSharePct != null ? fNum(sourceQuality.top3ProfitSharePct, 1) + "%" : "—"}</b></div>
                     {sourceQuality.top3ProfitSharePct >= 70 && <div className="wallet-risk"><span>去前三后胜率 / 净利</span><b>{sourceQuality.bodyAfterTop3WinRatePct != null ? fNum(sourceQuality.bodyAfterTop3WinRatePct, 1) + "%" : "—"} / {fSign(sourceQuality.bodyAfterTop3NetPnl, 0)}</b></div>}
+                  </div>
+                </DecisionCard>
+              )}
+
+              {copyExecution.effectiveFollowRatePct != null && (
+                <DecisionCard title="开仓执行审计" tone="neutral">
+                  <div className="wallet-risk-list">
+                    <div className="wallet-risk"><span>历史有效跟随率</span><b>{fNum(copyExecution.effectiveFollowRatePct, 1)}%</b></div>
+                    <div className="wallet-risk"><span>实际开仓 / 有效目标开仓</span><b>{copyExecution.openedN ?? "—"} / {copyExecution.effectiveTargetOpenN ?? "—"}</b></div>
+                    <div className="wallet-risk"><span>原始目标开仓 / 原始捕获率</span><b>{copyExecution.rawTargetOpenN ?? "—"} / {copyExecution.rawCaptureRatePct != null ? fNum(copyExecution.rawCaptureRatePct, 1) + "%" : "—"}</b></div>
+                    <div className="wallet-risk"><span>经济小单排除</span><b>{copyExecution.smallOpenExcludedN || 0}</b></div>
+                    <div className="wallet-risk"><span>近30日实时流动性跳过</span><b>{copyExecution.liveLiquiditySkipN30d || 0}{(copyExecution.liveLiquiditySkipCoins30d || []).length ? " · " + copyExecution.liveLiquiditySkipCoins30d.join(" / ") : ""}</b></div>
+                    {historicalSkipDetails.map((item, index) => (
+                      <div className="wallet-risk" key={`${item.coin}-${item.reason}-${index}`}>
+                        <span>{item.coin || "未知市场"} · {tierLabel(item.tier)} · {openSkipLabel(item.reason)}</span>
+                        <b>{item.count || 0} 次{item.copyNotionalMax != null ? ` · $${fNum(item.copyNotionalMax, 0)}` : ""}{item.minimumNotional ? ` / 门槛 $${fNum(item.minimumNotional, 0)}` : ""}</b>
+                      </div>
+                    ))}
                   </div>
                 </DecisionCard>
               )}

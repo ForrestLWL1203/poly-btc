@@ -194,7 +194,10 @@ def _compact_result(result: Mapping) -> dict:
     keys = (
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "valuation_status",
         "valuation_coverage", "closed_n", "wins", "liquidations", "fee_drag",
-        "target_open_events", "opened_n", "open_fill_rate", "capacity_open_fit",
+        "target_open_events", "raw_target_open_events", "small_open_excluded_n",
+        "effective_target_open_events", "opened_n", "raw_open_capture_rate",
+        "effective_open_follow_rate", "open_execution_audit",
+        "open_fill_rate", "capacity_open_fit",
         "target_adds", "followed_adds", "missed_adds", "missed_add_rate",
         "path_completion_rate", "behavior_replication_rate", "behavior_replication_v2",
         "add_metrics_version", "add_outcome_counts", "raw_add_order_follow_rate",
@@ -530,6 +533,13 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         out["copy_bt_open_fill_rate"] = primary.get("open_fill_rate")
         if out["copy_bt_open_fill_rate"] is None and target_open:
             out["copy_bt_open_fill_rate"] = _int(primary.get("opened_n")) / target_open
+        for key in (
+            "raw_target_open_events", "small_open_excluded_n",
+            "effective_target_open_events", "opened_n", "raw_open_capture_rate",
+            "effective_open_follow_rate", "open_execution_audit",
+        ):
+            if key in primary:
+                out[f"copy_bt_{key}"] = primary[key]
         out["copy_bt_liquidations"] = _int(primary.get("liquidations"))
         out["copy_bt_fee_drag"] = _num(primary.get("fee_drag"))
         out["copy_bt_unrealized_pnl"] = _num(primary.get("unrealized_pnl"))

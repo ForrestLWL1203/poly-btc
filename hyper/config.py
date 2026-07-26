@@ -68,6 +68,10 @@ OFFICIAL_PERP_SHORT_HISTORY_DAYS = 7
 OFFICIAL_PERP_MIN_RETURN_7D = 0.05
 SOURCE_MIN_EPISODES_30D = 10
 SOURCE_MIN_EPISODE_WIN_RATE = 0.70
+SOURCE_LOW_FREQ_MIN_EPISODES_30D = 7
+SOURCE_LOW_FREQ_MAX_EPISODES_30D = 9
+SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE = 0.85
+SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN = 0.30
 SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.70
 SOURCE_BODY_MIN_WIN_RATE = 0.70
 ROUGH_COPY_MIN_CLOSED_30D = 7
@@ -155,7 +159,7 @@ HIGH_LEV_CAP   = 4.0        # ...for HIGH-VOL-tier coins
 # PER-TIER minimum order notional: skip a copy whose FINAL notional (after the master-notl cap) is below
 # its tier's floor — a too-small position isn't worth the fee/latency drag (esp. on calm coins where the
 # whole edge is a fraction of a %). Per-tier only — the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
-STABLE_MIN_NOTIONAL = 2500.0   # BTC/majors: below this it's not worth opening
+STABLE_MIN_NOTIONAL = 2500.0   # BTC only: below this it's not worth opening
 MID_MIN_NOTIONAL    = 1000.0   # mid-vol coins
 HIGH_MIN_NOTIONAL   = 250.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
@@ -295,12 +299,12 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $250k leveraged
+# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $150k leveraged
 # 7d notional activity, and positive 7d/30d PnL before any wallet history is downloaded. The immediately
 # Official Portfolio prefilter owns the cheap target-wallet return check: positive Perp PnL, at least 60%
 # Perp profit share and at least 20% dynamic 30-day Perp return. Role history never bypasses this contract.
 HARVEST_MIN_ACCT = 20_000.0
-HARVEST_WEEK_VLM_MIN = 250_000.0
+HARVEST_WEEK_VLM_MIN = 150_000.0
 HARVEST_WEEK_PNL_MIN = 0.0
 HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0

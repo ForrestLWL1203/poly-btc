@@ -194,6 +194,12 @@ def current_selection_rows(db) -> list:
         + "," + expr("replay_params_hash", "NULL")
         + "," + expr("replay_score_detail_json", "NULL")
         + "," + expr("replayed_at", "NULL")
+        + "," + expr("replay_copy_bt_raw_target_open_n", "NULL")
+        + "," + expr("replay_copy_bt_small_open_excluded_n", "NULL")
+        + "," + expr("replay_copy_bt_effective_target_open_n", "NULL")
+        + "," + expr("replay_copy_bt_opened_n", "NULL")
+        + "," + expr("replay_copy_bt_raw_open_capture_rate", "NULL")
+        + "," + expr("replay_copy_bt_open_audit_json", "NULL")
         + " FROM follow_selection WHERE generation=? ORDER BY addr",
         (generation,),
     ).fetchall()
@@ -213,6 +219,12 @@ def current_selection_rows(db) -> list:
             replay_copy_bt_7d_unrealized_pnl=row[27], replay_copy_bt_7d_closed_n=row[28],
             replay_sector_copy_json=row[29], replay_params_hash=row[30],
             replay_score_detail_json=row[31], replayed_at=row[32],
+            replay_copy_bt_raw_target_open_n=row[33],
+            replay_copy_bt_small_open_excluded_n=row[34],
+            replay_copy_bt_effective_target_open_n=row[35],
+            replay_copy_bt_opened_n=row[36],
+            replay_copy_bt_raw_open_capture_rate=row[37],
+            replay_copy_bt_open_audit_json=row[38],
         )
         for row in rows
     ]
@@ -253,6 +265,12 @@ class SelectionRow:
     replay_params_hash: Optional[str] = None
     replay_score_detail_json: Optional[str] = None
     replayed_at: Optional[str] = None
+    replay_copy_bt_raw_target_open_n: Optional[int] = None
+    replay_copy_bt_small_open_excluded_n: Optional[int] = None
+    replay_copy_bt_effective_target_open_n: Optional[int] = None
+    replay_copy_bt_opened_n: Optional[int] = None
+    replay_copy_bt_raw_open_capture_rate: Optional[float] = None
+    replay_copy_bt_open_audit_json: Optional[str] = None
 
 
 def _coerce_selection_row(value) -> SelectionRow:
@@ -330,6 +348,12 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("replay_params_hash", lambda r: r.replay_params_hash),
         ("replay_score_detail_json", lambda r: r.replay_score_detail_json),
         ("replayed_at", lambda r: r.replayed_at),
+        ("replay_copy_bt_raw_target_open_n", lambda r: r.replay_copy_bt_raw_target_open_n),
+        ("replay_copy_bt_small_open_excluded_n", lambda r: r.replay_copy_bt_small_open_excluded_n),
+        ("replay_copy_bt_effective_target_open_n", lambda r: r.replay_copy_bt_effective_target_open_n),
+        ("replay_copy_bt_opened_n", lambda r: r.replay_copy_bt_opened_n),
+        ("replay_copy_bt_raw_open_capture_rate", lambda r: r.replay_copy_bt_raw_open_capture_rate),
+        ("replay_copy_bt_open_audit_json", lambda r: r.replay_copy_bt_open_audit_json),
         ("selected_at", lambda r: selected_at),
     )
     fields = [(name, getter) for name, getter in field_values if name in cols]
