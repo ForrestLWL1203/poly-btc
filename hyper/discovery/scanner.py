@@ -2880,7 +2880,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             db.commit()
             finalist_surface, finalist_admission_audit = (
                 _select_formation_finalist_surface(
-                    db, full_run, tune_ranked[:winning_count],
+                    db, full_run, tune_ranked,
                     base_follow=base_follow, generation_id=generation_id,
                     now_ms=now_ms, valuation_marks=valuation_marks,
                     sigmas=sigmas, market_ctx=market_ctx,
@@ -2910,10 +2910,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             base_follow, None, retune=False,
         )
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
-    tuned_candidate_addrs = set(tune_ordered[:winning_count])
-    tuned_candidate_rows = [
-        row for row in ranked_candidates if row.get("addr") in tuned_candidate_addrs
-    ]
+    # ``winning_count`` says which score prefix fitted this parameter surface; it must not permanently
+    # delete the rest of the bounded Top16 before strict replay.  Every Top16 wallet receives the winning
+    # surface, individual failures are removed, and only then may the shared-account prefix search choose
+    # its final count.  Otherwise fitting k=9 silently made ranks 10–16 ineligible without evaluating them.
+    tuned_candidate_rows = list(ranked_candidates)
 
     def replay_effective_surface(follow_surface):
         qualifications = {}

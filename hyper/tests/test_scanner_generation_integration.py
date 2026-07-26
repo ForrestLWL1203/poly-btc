@@ -167,6 +167,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("except TimeoutError as exc", source)
         self.assertIn("full_tune_timeout_using_coarse", source)
         self.assertIn("full_tune_timeout_using_active", source)
+        self.assertIn(
+            "_select_formation_finalist_surface(\n                    db, full_run, tune_ranked,",
+            source,
+        )
+        self.assertIn("tuned_candidate_rows = list(ranked_candidates)", source)
+        self.assertNotIn("tuned_candidate_addrs", source)
 
     def test_normal_scan_honors_auto_tune_switch_before_publication(self):
         scan_source = inspect.getsource(scanner.scan)
