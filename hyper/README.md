@@ -68,7 +68,9 @@ Wallet quality and funded-account membership are separate decisions.
   rolling-7d profitability, seven closed Copy Episodes over 30 days, 60% Copy wins, 70% open follow and
   complete valuation. The rolling-7d window has no minimum closed-Episode count.
   Historical replay assumes liquidity was executable; opens below the tier minimum notional are excluded from
-  the effective denominator. Live Observer liquidity skips remain separate audit evidence.
+  the effective denominator. A sliced source order whose first fill is below that floor remains pending and is
+  retried against the growing source position; it is excluded only if the whole episode never becomes
+  executable. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
 - The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
   activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a

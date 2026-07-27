@@ -479,6 +479,11 @@ class Backtest:
         self.last_px = {}
         self.skip_reasons = Counter()
         self.target_pos = {}
+        # Some large source orders arrive as a tiny first fill followed milliseconds later by the real
+        # size.  If the first slice is below the tier's economic floor, keep its one open event pending so
+        # a later add can retry against the source's current full position instead of becoming `midway`
+        # forever.  This is not a second target open and must not inflate the follow denominator.
+        self.pending_small_opens = {}
         self.target_peak_concurrent = 0
         self.copy_peak_concurrent = 0
         self.target_open_events = 0
@@ -761,6 +766,7 @@ class Backtest:
             self.target_open_events += 1
         if abs(pos1) < config.FLAT:
             self.target_pos.pop(key, None)
+            self.pending_small_opens.pop(key, None)
         else:
             self.target_pos[key] = pos1
         self.target_peak_concurrent = max(self.target_peak_concurrent, len(self.target_pos))
@@ -769,6 +775,14 @@ class Backtest:
         if ep is None:
             if transition in ("open", "flip") and abs(pos1) >= config.FLAT:
                 self._attempt_open(addr, coin, x.get("time"), px, pos1, oid, x)
+            elif (
+                transition == "add"
+                and abs(pos1) >= config.FLAT
+                and key in self.pending_small_opens
+            ):
+                self._retry_pending_small_open(
+                    addr, coin, x.get("time"), px, pos1, oid, x,
+                )
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
@@ -810,11 +824,53 @@ class Backtest:
                 if int(value) > int(skips_before.get(key, 0))
             ]
             outcome = changed[-1] if changed else "skip_unknown_open"
-        self.open_events.append({
+        event = {
             "time": int(f(t)),
             "outcome": outcome,
             **dict(self._last_open_detail or {}),
+        }
+        self.open_events.append(event)
+        key = (addr, coin)
+        if outcome == "skip_small_notl":
+            self.pending_small_opens[key] = event
+        else:
+            self.pending_small_opens.pop(key, None)
+        return event
+
+    def _retry_pending_small_open(self, addr, coin, t, px, pos1, oid, fill=None):
+        """Replace one dust-slice miss when the same target position grows to executable size."""
+        key = (addr, coin)
+        event = self.pending_small_opens.get(key)
+        if event is None:
+            return None
+        # The pending event owns one final outcome.  Remove its previous provisional counter before
+        # re-evaluating so a successfully recovered sliced open does not remain in skip telemetry.
+        if self.skip_reasons.get("skip_small_notl", 0) > 0:
+            self.skip_reasons["skip_small_notl"] -= 1
+            if self.skip_reasons["skip_small_notl"] <= 0:
+                self.skip_reasons.pop("skip_small_notl", None)
+        opened_before = self.opened_n
+        skips_before = Counter(self.skip_reasons)
+        self._last_open_detail = {}
+        self._open_position(addr, coin, t, px, pos1, oid, fill)
+        if self.opened_n > opened_before:
+            outcome = "opened"
+        else:
+            changed = [
+                name for name, value in self.skip_reasons.items()
+                if int(value) > int(skips_before.get(name, 0))
+            ]
+            outcome = changed[-1] if changed else "skip_unknown_open"
+        event.clear()
+        event.update({
+            "time": int(f(t)),
+            "outcome": outcome,
+            "retriedAfterSmallSlice": True,
+            **dict(self._last_open_detail or {}),
         })
+        if outcome != "skip_small_notl":
+            self.pending_small_opens.pop(key, None)
+        return event
 
     def process_price(self, x, *, has_fill_events=None):
         coin = x.get("coin")

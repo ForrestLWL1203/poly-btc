@@ -303,6 +303,29 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(detail["reason"], "skip_small_notl")
         self.assertEqual(detail["minimumNotional"], 1_000.0)
 
+    def test_sliced_open_retries_when_target_position_grows_past_notional_floor(self):
+        fills = [
+            fill(1_000, "BTC", "A", 1, 0, 1_000.0, 1),
+            fill(1_050, "BTC", "A", 100, -1, 1_000.0, 1),
+            fill(2_000, "BTC", "B", 101, -101, 990.0, 2),
+        ]
+
+        result = run_backtest(
+            "0xabc", fills, sigmas={"BTC": 0.04},
+            overrides={"STABLE_MIN_NOTIONAL": 2_500.0},
+        )
+
+        self.assertEqual(result["raw_target_open_events"], 1)
+        self.assertEqual(result["effective_target_open_events"], 1)
+        self.assertEqual(result["small_open_excluded_n"], 0)
+        self.assertEqual(result["opened_n"], 1)
+        self.assertEqual(result["closed_n"], 1)
+        self.assertEqual(result["effective_open_follow_rate"], 1.0)
+        self.assertIsNone(result["skip_reasons"].get("skip_small_notl"))
+        self.assertIsNone(result["skip_reasons"].get("skip_midway"))
+        self.assertTrue(result["open_events"][0]["retriedAfterSmallSlice"])
+        self.assertGreater(result["positions"][0]["net_pnl"], 0)
+
     def test_coin_blacklist_skips_new_open(self):
         fills = [
             fill(1_000, "xyz:SHKX", "B", 100, 0, 100.0, 1),

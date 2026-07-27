@@ -210,8 +210,10 @@ rolling 7 days, with both standardized `$10,000` and actual Paper starting-equit
 There is no second 85% total-margin slice: adds may use the remaining real available cash after fresh opens
 stop, while per-coin caps and isolated-margin liquidation still bound exposure.
 Historical replay assumes sufficient market liquidity; its effective open denominator excludes target opens
-below our tier minimum notional and counts every other strategy/capacity rejection as a miss. Observer retains
-the live liquidity filter and persists those live-only skips separately.
+below our tier minimum notional and counts every other strategy/capacity rejection as a miss. A source order
+whose first slice is below the floor remains one pending open event: later same-position adds must retry against
+the target's current full position, and the event is excluded only if it never becomes executable. Observer
+retains the live liquidity filter and persists those live-only skips separately.
 
 Qualification includes both realized and marked open PnL from one canonical valuation snapshot. Recent
 repeatability is judged by source/Copy Episode win rates plus the dynamic rolling-7-day return from the same
