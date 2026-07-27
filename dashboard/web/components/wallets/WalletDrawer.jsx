@@ -115,6 +115,7 @@ export function WalletDrawer({ address, onClose }) {
               <div><span>实际跟单</span><b>{d.recordsTotal}</b><em>{d.closedN} 已平 · {d.openN} 在持</em></div>
               <div><span>实盘胜率</span><b>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}</b><em>{d.closedN} 平仓</em></div>
               <div><span>30日回放</span><b className={copy30 ? cls(copy30[1]) : ""}>{copy30 ? fSign(copy30[1] || 0, 0) : "—"}</b><em>{copy30 ? (copy30[2] || 0) + " 笔" : "暂无数据"}</em></div>
+              <div><span>盈利优先值</span><b className={(d.profitPriorityPct || 0) < 0 ? "down" : "up"}>{d.profitPriorityPct != null ? fSign(d.profitPriorityPct, 1) + "%" : "—"}</b><em>70%×30日 + 30%×7日{d.profitRank != null ? ` · #${d.profitRank}` : ""}</em></div>
             </div>
 
             <div className="wallet-decision-grid">

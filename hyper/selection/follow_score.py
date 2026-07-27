@@ -15,6 +15,11 @@ from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import apply_allowed_sector_copy_metrics, parse_json_obj
 
 
+PROFIT_PRIORITY_30_WEIGHT = 0.70
+PROFIT_PRIORITY_7_WEIGHT = 0.30
+PROFIT_PRIORITY_MODE = "profit_70_30"
+
+
 def _num(value, default: float = 0.0) -> float:
     try:
         if value is None:
@@ -46,6 +51,56 @@ def _replay_window_equity(metrics: Mapping, days: int) -> float:
         if value > 0.0:
             return value
     return 1.0
+
+
+def compute_profit_priority(metrics: Mapping) -> tuple[float | None, dict]:
+    """Return the immutable 70/30 strict-Copy return priority and its audit evidence."""
+    scoped = apply_allowed_sector_copy_metrics(metrics)
+    available = (
+        scoped.get("copy_bt_net_pnl") is not None
+        and scoped.get("copy_bt_7d_net_pnl") is not None
+    )
+    pnl30 = _num(scoped.get("copy_bt_net_pnl"))
+    pnl7 = _num(scoped.get("copy_bt_7d_net_pnl"))
+    equity30 = _replay_window_equity(scoped, 30)
+    equity7 = _replay_window_equity(scoped, 7)
+    return30 = pnl30 / equity30
+    return7 = pnl7 / equity7
+    priority = (
+        PROFIT_PRIORITY_30_WEIGHT * return30
+        + PROFIT_PRIORITY_7_WEIGHT * return7
+        if available else None
+    )
+    return priority, {
+        "available": available,
+        "mode": PROFIT_PRIORITY_MODE,
+        "weights": {
+            "30d": PROFIT_PRIORITY_30_WEIGHT,
+            "7d": PROFIT_PRIORITY_7_WEIGHT,
+        },
+        "returns": {"30d": return30, "7d": return7},
+        "windowStartEquity": {"30d": equity30, "7d": equity7},
+        "netPnl": {"30d": pnl30, "7d": pnl7},
+        "value": priority,
+    }
+
+
+def profit_priority_sort_key(
+    metrics: Mapping,
+    *,
+    follow_score_value: float = 0.0,
+    addr: str = "",
+) -> tuple:
+    """Exact formation order: 70/30 priority, 30d, 7d, quality score, address."""
+    priority, detail = compute_profit_priority(metrics)
+    returns = detail["returns"]
+    return (
+        -(priority if priority is not None else float("-inf")),
+        -returns["30d"],
+        -returns["7d"],
+        -_num(follow_score_value),
+        str(addr or "").lower(),
+    )
 
 
 def _activity_age_hours(metrics: Mapping, as_of_ms: int) -> float | None:
@@ -283,7 +338,7 @@ def evaluate_follow_eligibility(
         "sourceQualityPassed": bool(source.get("eligible")),
         "minimumClosedEvidence": c30 >= minimum_closed,
         # Fills-only rough replay runs before unified parameter tuning. It proves that both windows point in
-        # the profitable direction; return magnitude belongs to score order. The tuned strict surface owns
+        # the profitable direction; return magnitude belongs to the later profit-priority order. The tuned strict surface owns
         # the material 10%/3% admission contract.
         "copy30dReturn": (
             return30 >= return_floor30 if stage == "strict" else return30 > 0.0

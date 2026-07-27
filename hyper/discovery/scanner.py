@@ -1628,7 +1628,7 @@ def _quality_first_core_transition(
     strict_evaluate,
     robust_allowed_memberships=None,
 ):
-    """Publish exactly the currently qualified score-ordered Core prefix.
+    """Publish exactly the currently qualified profit-ordered Core prefix.
 
     There is no minimum count, promotion delay, incumbent tenure, or stale-Core retention path. Open copies
     are handled by the caller as Exit-only and never justify Core authority.
@@ -1638,7 +1638,7 @@ def _quality_first_core_transition(
         (addr or "").lower() for addr, role in previous_roles.items() if role == selection.CORE
     }
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
-    quality_order = desired
+    profit_order = desired
     selected = []
     reasons = {}
     hard_removed = set()
@@ -1665,8 +1665,8 @@ def _quality_first_core_transition(
         elif row.get("status") in {"active", "qualified"}:
             reasons[addr] = qualification.get("status") or "portfolio_not_selected"
 
-    # A final conditional check may shorten only the low-quality suffix. Testing every member and deleting
-    # an arbitrary middle row silently converted a score-ranked quality prefix into a profit-ranked subset.
+    # A final conditional check may shorten only the low-profit suffix. Testing every member and deleting
+    # an arbitrary middle row would convert a deterministic profit prefix into an overfit subset.
     published = set(selected)
     max_removals = max(0, int(getattr(config, "CORE_LOO_MAX_REMOVALS", 2) or 0))
     min_net_gain = float(getattr(config, "CORE_LOO_MIN_NET_GAIN", 1.0) or 0.0)
@@ -1677,8 +1677,8 @@ def _quality_first_core_transition(
     }
     while len(published) > 1 and len(removed_by_loo) < max_removals:
         base = strict_evaluate(tuple(sorted(published)))
-        score_order = tuple(addr for addr in quality_order if addr in published)
-        removable = next(reversed(score_order), None)
+        ranked_order = tuple(addr for addr in profit_order if addr in published)
+        removable = next(reversed(ranked_order), None)
         if removable is None:
             break
         without = strict_evaluate(tuple(sorted(published - {removable})))
@@ -1701,7 +1701,7 @@ def _quality_first_core_transition(
         if removable in previous_core:
             hard_removed.add(removable)
 
-    # Conditional contribution remains telemetry; the operator-facing Core rank is the immutable score order.
+    # Conditional contribution remains telemetry; the operator-facing Core rank is the immutable profit order.
     final_metrics = strict_evaluate(tuple(sorted(published)))
     base_utility = f(
         final_metrics.net_pnl if final_metrics.net_pnl is not None else final_metrics.net_lcb
@@ -1714,7 +1714,7 @@ def _quality_first_core_transition(
             without.net_pnl if without.net_pnl is not None else without.net_lcb
         )
         contribution_rows.append((base_utility - without_utility, -desired_rank.get(addr, 999999), addr))
-    final_order = tuple(addr for addr in quality_order if addr in published)
+    final_order = tuple(addr for addr in profit_order if addr in published)
     return {
         "selected": final_order,
         "reasons": reasons,
@@ -2269,6 +2269,17 @@ def _assert_automatic_formation_tuned(formation, *, required: bool) -> None:
         raise RuntimeError(f"automatic_core_tune_not_executed:{reason}")
 
 
+def _formation_membership_changed(formation, current_core) -> bool:
+    """Membership includes deterministic order because order owns capital priority."""
+    selected = tuple(
+        str(addr or "").lower()
+        for addr in ((formation or {}).get("selected") or ())
+        if addr
+    )
+    previous = tuple(str(addr or "").lower() for addr in (current_core or ()) if addr)
+    return selected != previous
+
+
 _FORMATION_PREPATH_CHECKS = (
     "copyDataValid",
     "officialPerpPassed",
@@ -2609,10 +2620,16 @@ def _formation_prepath_candidate(row) -> bool:
 
 
 def _bounded_formation_candidates(rows, limit) -> list[dict]:
-    """Return the strict score-ordered rough-Copy winners, capped at 16."""
-    return [
+    """Return rough-Copy winners in 70/30 dynamic-profit order, capped at 16."""
+    candidates = [
         row for row in rows if _formation_prepath_candidate(row)
-    ][:max(0, int(limit))]
+    ]
+    candidates.sort(key=lambda row: follow_score.profit_priority_sort_key(
+        row,
+        follow_score_value=f(row.get("follow_score")),
+        addr=row.get("addr") or "",
+    ))
+    return candidates[:max(0, int(limit))]
 
 
 def _core_prefix_retention() -> dict:
@@ -2634,20 +2651,26 @@ def _core_rebalance_due(db, current_core, *, now_ms: int, interval_days: int) ->
     rebalance clock.  Hard qualification failures still bypass this normal-cycle decision in formation.
     """
     rows = db.execute(
-        "SELECT sg.generation,sg.published_at,lower(fs.addr),lower(fs.role),COALESCE(fs.enabled,1) "
+        "SELECT sg.generation,sg.published_at,lower(fs.addr),lower(fs.role),COALESCE(fs.enabled,1),"
+        "COALESCE(fs.selection_rank,999999) "
         "FROM scan_generation sg LEFT JOIN follow_selection fs ON fs.generation=sg.generation "
         "WHERE sg.status='published' AND sg.complete=1 "
-        "ORDER BY sg.published_at DESC,sg.id DESC,lower(fs.addr),fs.addr"
+        "ORDER BY sg.published_at DESC,sg.id DESC,COALESCE(fs.selection_rank,999999),"
+        "lower(fs.addr),fs.addr"
     ).fetchall()
     if not rows:
         return True, None
     snapshots = []
-    for generation_id, published_at, addr, role, enabled in rows:
+    for generation_id, published_at, addr, role, enabled, _rank in rows:
         if not snapshots or snapshots[-1][0] != generation_id:
-            snapshots.append([generation_id, published_at, set()])
-        if role == selection.CORE and enabled and addr:
-            snapshots[-1][2].add(addr)
-    wanted = {(addr or "").lower() for addr in (current_core or ()) if addr}
+            snapshots.append([generation_id, published_at, []])
+        if role == selection.CORE and enabled and addr and addr not in snapshots[-1][2]:
+            snapshots[-1][2].append(addr)
+    wanted = tuple((addr or "").lower() for addr in (current_core or ()) if addr)
+    snapshots = [
+        (generation_id, published_at, tuple(members))
+        for generation_id, published_at, members in snapshots
+    ]
     if not wanted or not snapshots or snapshots[0][2] != wanted:
         return True, None
     anchor = snapshots[0][1]
@@ -2700,7 +2723,7 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
         "scores": scores,
         "policies": policies,
         "search": {
-            "algorithm": "quality_first_then_unified_tune_v6",
+            "algorithm": "profit_priority_then_unified_tune_v1",
             "initialCount": len(rows),
             "selectedCount": 0,
             "explicitEmptyCore": True,
@@ -2741,7 +2764,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         db, generation_id, core_only=False, now_ms=now_ms,
     )
     # Refined candle paths are needed only after every cheaper Core gate passes. Neither incumbent status nor
-    # operator stars may move a lower-score wallet ahead of the current score order.
+    # operator stars may move a lower-profit wallet ahead of the current 70/30 dynamic-return order.
     ranked_candidates = _bounded_formation_candidates(
         all_ranked_candidates,
         upper,
@@ -2757,7 +2780,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # set with the previous Core merely because the parameter-retune interval has not elapsed.
     retune = bool(retune and (force_retune or rebalance_due))
     # Profile construction already performed the cheap profitability, evidence and valuation checks that
-    # establish this score order. Do not run a path-complete individual replay on the active/default surface:
+    # establish this rough profit order. Do not run a path-complete individual replay on the active/default surface:
     # that duplicated the expensive work and could reject a wallet for parameters the following tuner exists
     # to repair. The winning surface below receives the one authoritative per-wallet strict replay.
     tune_ranked = ranked_candidates[:upper]
@@ -2921,6 +2944,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         qualifications = {}
         scores = {}
         score_details = {}
+        profit_priorities = {}
         policies = {}
         metrics = {}
         qualified_rows = []
@@ -2956,8 +2980,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             }
             qualifications[addr] = qualification
             scores[addr] = f(effective.get("score"))
-            score_details[addr] = dict(effective.get("scoreDetail") or {})
             metrics[addr] = dict(effective.get("metrics") or {})
+            priority, priority_detail = follow_score.compute_profit_priority(metrics[addr])
+            profit_priorities[addr] = priority
+            score_details[addr] = {
+                **dict(effective.get("scoreDetail") or {}),
+                "profitPriority": priority_detail,
+            }
             if effective.get("sectorPolicyJson"):
                 policies[addr] = effective["sectorPolicyJson"]
             replay_invalid = bool(
@@ -2981,7 +3010,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             else:
                 rejected.append(addr)
         return (
-            qualifications, scores, score_details, policies, metrics, qualified_rows,
+            qualifications, scores, score_details, profit_priorities,
+            policies, metrics, qualified_rows,
             audit, rejected, surface_key,
         )
 
@@ -2990,14 +3020,17 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # just succeeded.
     qualification_follow = fixed_follow
     (effective_qualifications, effective_scores, effective_score_details,
+     effective_profit_priorities,
      effective_policies, effective_metrics, effective_ranked,
      admission_audit, qualification_rejected,
      effective_surface_hash) = replay_effective_surface(
         qualification_follow
     )
     tune_coverage_fallback = False
-    effective_ranked.sort(key=lambda row: (
-        -effective_scores.get(row["addr"], 0.0), row["addr"],
+    effective_ranked.sort(key=lambda row: follow_score.profit_priority_sort_key(
+        effective_metrics.get(row["addr"]) or {},
+        follow_score_value=effective_scores.get(row["addr"], 0.0),
+        addr=row["addr"],
     ))
     ordered = tuple(row["addr"] for row in effective_ranked[:upper])
     if not ordered:
@@ -3006,11 +3039,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "qualifications": effective_qualifications,
             "scores": effective_scores,
             "scoreDetails": effective_score_details,
+            "profitPriorities": effective_profit_priorities,
             "policies": effective_policies,
             "walletMetrics": effective_metrics,
             "replayParamsHash": effective_surface_hash,
             "search": {
-                "algorithm": "quality_first_then_unified_tune_v6", "initialCount": 0,
+                "algorithm": "profit_priority_then_unified_tune_v1", "initialCount": 0,
                 "selectedCount": 0,
                 "explicitEmptyCore": True,
                 "tunePoolCount": len(tune_ordered),
@@ -3127,12 +3161,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
         required_count=0,
     )
-    # Core membership is a strict prefix of final-surface score order. An arbitrary add/swap search could
-    # replace a higher-score wallet with a lower-score wallet merely because the latter improved in-sample
-    # portfolio PnL, contradicting the quality-first contract.
+    # Core membership is a strict prefix of final-surface 70/30 profit order. An arbitrary add/swap search
+    # would turn the deterministic ranking contract into an overfit subset search.
     chosen = prefix_search.selected
     chosen_addrs = tuple(ordered[:chosen.count])
-    membership_algorithm = "strict_score_prefix"
+    membership_algorithm = "strict_profit_prefix"
 
     robust_cache = {}
 
@@ -3170,7 +3203,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         key: value for key, value in membership_eval_cache.items()
         if key in prefix_keys and value.feasible
     }
-    # Always include the count search's chosen score prefix in the bounded robust finalist set.
+    # Always include the count search's chosen profit prefix in the bounded robust finalist set.
     chosen_key = tuple(sorted(chosen_addrs))
     finalist_pool[chosen_key] = chosen
     finalist_states = sorted(
@@ -3209,7 +3242,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         robust_members = set(robust_key)
         chosen_addrs = tuple(addr for addr in ordered if addr in robust_members)
     # Pre-validate any strict LOO result. Publication may remove a negative incremental member only when
-    # the resulting set has passed these same membership stress rules. Only the score suffix is removable.
+    # the resulting set has passed these same membership stress rules. Only the profit-ranked suffix is removable.
     robust_allowed = {tuple(sorted(chosen_addrs))}
     outgoing = next(
         reversed(chosen_addrs), None,
@@ -3249,6 +3282,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "params": dict(chosen.params), "evaluations": evaluations,
         "qualifications": effective_qualifications, "scores": effective_scores,
         "scoreDetails": effective_score_details,
+        "profitPriorities": effective_profit_priorities,
         "policies": effective_policies, "walletMetrics": effective_metrics,
         "replayParamsHash": effective_surface_hash,
         "search": {
@@ -3257,6 +3291,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
             "membershipAlgorithm": membership_algorithm,
+            "rankingMode": follow_score.PROFIT_PRIORITY_MODE,
+            "rankingWeights": {
+                "30d": follow_score.PROFIT_PRIORITY_30_WEIGHT,
+                "7d": follow_score.PROFIT_PRIORITY_7_WEIGHT,
+            },
+            "membershipChanged": tuple(chosen_addrs) != tuple(current_core),
+            "retuneApplied": bool(retune),
             "membershipEvaluated": len(membership_eval_cache),
             "membershipSelected": list(chosen_addrs),
             "membershipRobustAudit": robust_audit,
@@ -3445,7 +3486,17 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         for addr, detail in dict(effective_score_details or {}).items()
         if addr and detail
     }
-    profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
+    for row in profiles:
+        addr = (row.get("addr") or "").lower()
+        ranking_metrics = replay_by_addr.get(addr) or row
+        priority, priority_detail = follow_score.compute_profit_priority(ranking_metrics)
+        row["replay_profit_priority"] = priority
+        score_detail_by_addr.setdefault(addr, {})["profitPriority"] = priority_detail
+    profiles.sort(key=lambda row: follow_score.profit_priority_sort_key(
+        replay_by_addr.get((row.get("addr") or "").lower()) or row,
+        follow_score_value=f(row.get("follow_score")),
+        addr=row.get("addr") or "",
+    ))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
@@ -3764,10 +3815,11 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 addr=addr, role=role, enabled=enabled, reason=reason,
                 utility=transition.get("utilities", {}).get(addr, f(row.get("follow_score"))),
                 follow_score=f(row.get("follow_score")),
+                replay_profit_priority=row.get("replay_profit_priority"),
                 selection_rank=core_rank.get(addr) if role == selection.CORE else rank,
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
-                model_version="selection-quality-profit-add-v2-robust-v1",
+                model_version="selection-profit-70-30-prefix-v1",
                 policy_version=copy_policy.version,
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
@@ -4089,8 +4141,18 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         force_entry_requalification=force_entry_requalification,
         force_retune=retune_formation,
     )
+    membership_retune_triggered = (
+        not bool(retune_formation)
+        and _formation_membership_changed(formation, existing_core)
+    )
+    if membership_retune_triggered:
+        formation = form_quality_prefix(
+            db, generation_id, stamp, repair_now_ms, retune=True,
+            force_entry_requalification=force_entry_requalification,
+            force_retune=True,
+        )
     _assert_automatic_formation_tuned(
-        formation, required=bool(retune_formation),
+        formation, required=bool(retune_formation or membership_retune_triggered),
     )
     refresh_watchlist(
         db,
@@ -4146,6 +4208,7 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
             payload={
                 "generation": generation_id,
                 "selectionRank": row.selection_rank,
+                "profitPriority": row.replay_profit_priority,
                 "marginalUtility": row.utility,
                 "dataStatus": row.data_status,
                 "evidenceStatus": row.evidence_status,
@@ -4691,7 +4754,18 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         db, generation_id, stamp, now_ms,
         retune=bool(retune), force_retune=bool(retune),
     )
-    _assert_automatic_formation_tuned(formation, required=bool(retune))
+    membership_retune_triggered = (
+        not bool(retune)
+        and _formation_membership_changed(formation, previous_core)
+    )
+    if membership_retune_triggered:
+        formation = form_quality_prefix(
+            db, generation_id, stamp, now_ms,
+            retune=True, force_retune=True,
+        )
+    _assert_automatic_formation_tuned(
+        formation, required=bool(retune or membership_retune_triggered),
+    )
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:
@@ -4742,6 +4816,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
                 follow_score=item.follow_score,
                 payload={
                     "generation": generation_id, "selectionRank": item.selection_rank,
+                    "profitPriority": item.replay_profit_priority,
                     "marginalUtility": item.utility, "dataStatus": item.data_status,
                     "evidenceStatus": item.evidence_status,
                 },
@@ -4833,11 +4908,12 @@ def refresh_challengers(db, p) -> dict:
     now_ms = int(time.time() * 1000)
     started, t0, stamp = now_iso(), time.time(), now_iso()
     previous_generation = selection.latest_published_generation(db)
-    previous_core = {
+    previous_core_order = tuple(
         str(addr or "").lower()
         for addr in (selection.published_core_addrs(db) or ())
         if addr
-    }
+    )
+    previous_core = set(previous_core_order)
     base_generation, workset = challenger_refresh_pool(db)
     if not base_generation or not workset:
         record_challenger_refresh_skip(db, "no_complete_challenger_pool")
@@ -5090,12 +5166,13 @@ def refresh_challengers(db, p) -> dict:
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
         )
-        fixed_core = {
+        fixed_core_order = tuple(
             str(addr or "").lower()
             for addr in (fixed_formation.get("selected") or ())
             if addr
-        }
-        membership_retune_triggered = fixed_core != previous_core
+        )
+        fixed_core = set(fixed_core_order)
+        membership_retune_triggered = fixed_core_order != previous_core_order
         formation = fixed_formation
         if membership_retune_triggered:
             _set_scan_progress(
@@ -5181,6 +5258,7 @@ def refresh_challengers(db, p) -> dict:
                 payload={
                     "generation": generation_id,
                     "selectionRank": row.selection_rank,
+                    "profitPriority": row.replay_profit_priority,
                     "marginalUtility": row.utility,
                     "dataStatus": row.data_status,
                     "evidenceStatus": row.evidence_status,
@@ -5746,8 +5824,22 @@ def scan(db, p) -> None:
                     db, generation_id, stamp, now_ms,
                     retune=automatic_retune, force_retune=automatic_retune,
                 )
+                membership_retune_triggered = (
+                    not automatic_retune
+                    and _formation_membership_changed(formation, previous_core)
+                )
+                if membership_retune_triggered:
+                    _set_scan_progress(
+                        db, stage="core_membership_retune",
+                        candidates_scanned=len(workset), candidates_total=len(workset),
+                    )
+                    formation = form_quality_prefix(
+                        db, generation_id, stamp, now_ms,
+                        retune=True, force_retune=True,
+                    )
                 _assert_automatic_formation_tuned(
-                    formation, required=automatic_retune,
+                    formation,
+                    required=bool(automatic_retune or membership_retune_triggered),
                 )
             _set_scan_progress(
                 db, stage="selection_search", candidates_scanned=len(workset),
@@ -5840,6 +5932,7 @@ def scan(db, p) -> None:
                     payload={
                         "generation": generation_id,
                         "selectionRank": row.selection_rank,
+                        "profitPriority": row.replay_profit_priority,
                         "marginalUtility": row.utility,
                         "dataStatus": row.data_status,
                         "evidenceStatus": row.evidence_status,

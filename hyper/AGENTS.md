@@ -248,9 +248,11 @@ a source-wallet-wide re-entry ban.
 `source_quality_score` orders deep-fill survivors before the Top40 cap. `rough_copy_score` then orders the rough
 Copy-qualified pool using exactly: official Perp 30d return 10%; rough Copy 30d/7d dynamic returns 20%/10%;
 source/Copy Episode win rates 20%/10%; open-follow/add-reduction replication 15%/5%; and recency/open count
-5%/5%. Positive rough returns are the scoring baseline; components are monotonic and capped. Scores only
-establish strict descending order and have no 70/75 permission line. Final strict metrics recompute the same
-score surface for the surviving Top16 against the material 10%/3% return floors.
+5%/5%. Positive rough returns are the scoring baseline; components are monotonic and capped. The composite score
+has no 70/75 permission line. After qualification, Core formation orders by
+`0.70 × strict 30d dynamic return + 0.30 × strict 7d dynamic return`; 30d return, 7d return, composite score and
+address are the deterministic tie-breaks. Final strict metrics recompute both score and profit priority for the
+surviving Top16 against the material 10%/3% return floors.
 
 Smart-add replication uses `add_metrics_v2`. Each distinct target add order is finalized as `followed`,
 `noise_merged`, `hard_cap_blocked`, `coin_cap_blocked`, `cash_blocked`, `min_margin_blocked`, or
@@ -277,11 +279,12 @@ incumbent grace or forced replacement count: zero to sixteen wallets may publish
 
 1. Build final-surface individual evidence from cached fills and one refined 15-minute path per bounded
    candidate. Qualification uses the complete current rules above, not current/previous role.
-2. Sort every qualified candidate by final score descending and retain at most the first 16. Stars remain
-   operator attention metadata only. They do not affect admission, ordering, membership or suffix removal.
-3. Search only score prefixes. Each count node is tuned from the same normalized cached fills with continuous
-   floating equity. A combination may shorten the lowest-scoring suffix, but may never skip a higher score to
-   insert a lower score.
+2. Use the rough 70/30 dynamic-return priority to bound the pool to 16, then recompute strict 30d/7d returns on
+   the winning final parameter surface and reorder those finalists by strict 70/30 priority. Stars remain
+   operator attention metadata only.
+3. Search only strict-profit prefixes. Each count node uses the same normalized cached fills with continuous
+   floating equity. A combination may shorten the lowest-profit suffix, but may never skip a higher-profit
+   wallet to insert a lower-profit wallet.
 4. Recompute each wallet's strict qualification on the tuned surface. Failures are removed without pulling
    replacements from rank 17 or below.
 5. Run exactly one final path-complete 30-day shared-account replay after parameters and membership are fixed.
@@ -300,8 +303,8 @@ stale activity never deletes an otherwise profitable Profile: it remains Challen
 signal and confirmation. Existing copied positions remain managed exit-only.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
-per-coin limits. Core and Challenger order is final score order. Leave-one-out economics may remove only the
-current low-score suffix and remains audit telemetry for every other member. There is no promotion confirmation,
+per-coin limits. Core and Challenger order is final strict 70/30 profit order. Leave-one-out economics may remove
+only the current low-profit suffix and remains audit telemetry for every other member. There is no promotion confirmation,
 soft tenure, stable-retention bypass or minimum count.
 
 `FOLLOW_SELECTION_MODE=auto` lets the scanner publish this selection. `manual` carries the current selection
@@ -384,7 +387,7 @@ the current published generation.
 - `MARGIN_EQUITY_PCT` is a manual-only sizing base (default 100%, UI range 10–100%). It scales each new
   position's drawdown-adjusted equity base without freezing the remainder; real cash, per-coin caps and total
   deployment still use full risk equity. Auto-tune and Core-count selection must not modify this value.
-- A new open uses the tuned tier margin until `MAX_DEPLOY_PCT`; new opens stop at that cap, while follow-on
+- A new open uses the tuned tier margin until `MAX_DEPLOY_PCT` (default 90%); new opens stop at that cap, while follow-on
   adds may use the remaining real cash because they preserve an already-entered episode. The former
   `DEPLOY_FULL_PCT` linear-shrink line and second 85% total-margin slice are compatibility-only/retired.
 - Smart-add spacing compares target transaction prices only; our BBO price is execution/PnL, never mixed into the

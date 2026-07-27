@@ -1,7 +1,7 @@
-"""Quality-first Core formation.
+"""Profit-priority Core formation.
 
-Individual quality builds one bounded score-ordered pool without a minimum-wallet quota. That pool receives one
-shared parameter tune; portfolio economics may shorten only its low-score suffix.
+Individual qualification builds one bounded 70/30 dynamic-return ordered pool without a minimum-wallet quota.
+That pool receives one shared parameter tune; portfolio economics may shorten only its low-profit suffix.
 """
 from __future__ import annotations
 

@@ -247,6 +247,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("retune = bool(retune and (force_retune or rebalance_due))", source)
         self.assertIn("retune=bool(retune), force_retune=bool(retune)", finalize_source)
 
+    def test_core_order_change_is_a_membership_change_that_requires_retune(self):
+        formation = {"selected": ("0xbbb", "0xaaa")}
+
+        self.assertTrue(scanner._formation_membership_changed(
+            formation, ("0xaaa", "0xbbb"),
+        ))
+        self.assertFalse(scanner._formation_membership_changed(
+            formation, ("0xbbb", "0xaaa"),
+        ))
+
     def test_missing_portfolio_fill_evidence_publishes_an_explicit_empty_core(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
@@ -706,7 +716,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(candidates, ["0xhigh", "0xlow"])
 
-    def test_bounded_path_pool_is_strict_rough_score_order_without_incumbent_bypass(self):
+    def test_bounded_path_pool_is_profit_ordered_without_incumbent_bypass(self):
         rows = [
             {
                 "addr": "0xweak", "follow_score": .99,
@@ -734,6 +744,34 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         selected = scanner._bounded_formation_candidates(rows, 16)
 
         self.assertEqual([row["addr"] for row in selected], ["0xready"])
+
+    def test_bounded_path_pool_places_higher_profit_ahead_of_higher_score(self):
+        rows = [
+            {
+                "addr": "0xquality", "follow_score": .99,
+                "copy_bt_net_pnl": 1_200, "copy_bt_window_start_equity": 10_000,
+                "copy_bt_7d_net_pnl": 300,
+                "copy_bt_7d_window_start_equity": 10_000,
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": True,
+                    "role": "core_eligible", "deferred": False,
+                },
+            },
+            {
+                "addr": "0xprofit", "follow_score": .70,
+                "copy_bt_net_pnl": 3_000, "copy_bt_window_start_equity": 10_000,
+                "copy_bt_7d_net_pnl": 800,
+                "copy_bt_7d_window_start_equity": 10_000,
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": True,
+                    "role": "core_eligible", "deferred": False,
+                },
+            },
+        ]
+
+        selected = scanner._bounded_formation_candidates(rows, 16)
+
+        self.assertEqual([row["addr"] for row in selected], ["0xprofit", "0xquality"])
 
     def test_bounded_path_pool_caps_at_sixteen_without_rank_seventeen_backfill(self):
         rows = [

@@ -200,6 +200,7 @@ def current_selection_rows(db) -> list:
         + "," + expr("replay_copy_bt_opened_n", "NULL")
         + "," + expr("replay_copy_bt_raw_open_capture_rate", "NULL")
         + "," + expr("replay_copy_bt_open_audit_json", "NULL")
+        + "," + expr("replay_profit_priority", "NULL")
         + " FROM follow_selection WHERE generation=? ORDER BY addr",
         (generation,),
     ).fetchall()
@@ -225,6 +226,7 @@ def current_selection_rows(db) -> list:
             replay_copy_bt_opened_n=row[36],
             replay_copy_bt_raw_open_capture_rate=row[37],
             replay_copy_bt_open_audit_json=row[38],
+            replay_profit_priority=row[39],
         )
         for row in rows
     ]
@@ -238,6 +240,7 @@ class SelectionRow:
     reason: str = ""
     utility: Optional[float] = None
     follow_score: Optional[float] = None
+    replay_profit_priority: Optional[float] = None
     selection_rank: Optional[int] = None
     data_status: str = "valid"
     evidence_status: str = ""
@@ -321,6 +324,7 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("reason", lambda r: r.reason),
         ("utility", lambda r: r.utility),
         ("follow_score", lambda r: r.follow_score),
+        ("replay_profit_priority", lambda r: r.replay_profit_priority),
         ("selection_rank", lambda r: r.selection_rank),
         ("data_status", lambda r: r.data_status),
         ("evidence_status", lambda r: r.evidence_status),

@@ -3,9 +3,11 @@ import unittest
 
 from hyper.selection.follow_score import (
     compute_follow_score,
+    compute_profit_priority,
     compute_source_quality_score,
     evaluate_follow_eligibility,
     evaluate_source_quality,
+    profit_priority_sort_key,
 )
 
 
@@ -162,6 +164,36 @@ class SourceQualityTests(unittest.TestCase):
 
 
 class FollowScoreTests(unittest.TestCase):
+    def test_profit_priority_uses_dynamic_window_equities_and_fixed_70_30_weights(self):
+        priority, detail = compute_profit_priority(evidence(
+            copy_bt_net_pnl=4_000,
+            copy_bt_window_start_equity=20_000,
+            copy_bt_7d_net_pnl=1_000,
+            copy_bt_7d_window_start_equity=10_000,
+        ))
+
+        self.assertAlmostEqual(priority, .70 * .20 + .30 * .10)
+        self.assertEqual(detail["mode"], "profit_70_30")
+        self.assertEqual(detail["weights"], {"30d": .70, "7d": .30})
+        self.assertEqual(detail["returns"], {"30d": .20, "7d": .10})
+
+    def test_profit_priority_tie_breaks_by_30d_7d_score_then_address(self):
+        rows = [
+            (evidence(copy_bt_net_pnl=1_000, copy_bt_7d_net_pnl=1_000), .99, "0xz"),
+            (evidence(copy_bt_net_pnl=1_300, copy_bt_7d_net_pnl=300), .80, "0xb"),
+            (evidence(copy_bt_net_pnl=1_300, copy_bt_7d_net_pnl=300), .90, "0xc"),
+            (evidence(copy_bt_net_pnl=1_300, copy_bt_7d_net_pnl=300), .90, "0xa"),
+        ]
+        # Give every row a $10k start in both windows. The first two rows both have 10% priority,
+        # so the larger 30d return wins before the lower-priority score/address tie-breaks.
+        for metrics, _score, _addr in rows:
+            metrics["copy_bt_7d_window_start_equity"] = 10_000
+        ordered = sorted(rows, key=lambda item: profit_priority_sort_key(
+            item[0], follow_score_value=item[1], addr=item[2],
+        ))
+
+        self.assertEqual([item[2] for item in ordered], ["0xa", "0xc", "0xb", "0xz"])
+
     def test_rough_copy_contract_requires_both_windows_to_be_profitable(self):
         profitable = judge(
             "rough",

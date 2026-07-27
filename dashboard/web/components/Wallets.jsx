@@ -90,6 +90,7 @@ export function Wallets({ confirm }) {
           <table>
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
+              <th className="num" title="70% × 严格Copy 30日动态收益率 + 30% × 严格Copy 7日动态收益率">盈利优先</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
               <th className="num" title="Core展示调参后的严格K线路径回放；Challenger展示Top40阶段的fills-only粗略回放。收益率使用各窗口真实浮动期初权益。">Copy回放</th>
               <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
@@ -97,8 +98,8 @@ export function Wallets({ confirm }) {
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>
             <tbody>
-              {data === null && <tr><td colSpan={tab === "challenger" ? 11 : 10} className="loading">加载中…</td></tr>}
-              {data && pageRows.length === 0 && <tr><td colSpan={tab === "challenger" ? 11 : 10} className="empty">{tab === "challenger" ? "当前没有待观察钱包" : "当前没有符合实跟条件的钱包"}</td></tr>}
+              {data === null && <tr><td colSpan={tab === "challenger" ? 12 : 11} className="loading">加载中…</td></tr>}
+              {data && pageRows.length === 0 && <tr><td colSpan={tab === "challenger" ? 12 : 11} className="empty">{tab === "challenger" ? "当前没有待观察钱包" : "当前没有符合实跟条件的钱包"}</td></tr>}
               {data && pageRows.map(w => {
                 const warning = dataWarning(w.dataStatus);
                 return (
@@ -122,6 +123,12 @@ export function Wallets({ confirm }) {
                     </td>
                     <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{marketLabel(w.marketType)}</span></td>
                     <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
+                    <td className="num">
+                      <b className={(w.profitPriorityPct || 0) < 0 ? "down" : "up"}>
+                        {w.profitPriorityPct != null ? fSign(w.profitPriorityPct, 1) + "%" : "—"}
+                      </b>
+                      {w.profitRank != null && <div className="muted" style={{ fontSize: 10 }}>盈利序 #{w.profitRank}</div>}
+                    </td>
                     <td className="num mono"><b>{w.openEvents7d ?? "—"}</b> <span className="muted">/</span> {w.closed7d ?? "—"}</td>
                     <td className="num">
                       <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>

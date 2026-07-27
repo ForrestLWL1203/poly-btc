@@ -4,11 +4,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hyper import params, storage
+from hyper import config, params, storage
 from hyper.selection import auto_tune
 
 
 class AutoTuneTests(unittest.TestCase):
+    def test_deployment_default_is_ninety_percent_and_not_tuned(self):
+        self.assertEqual(config.MAX_DEPLOY_PCT, .90)
+        self.assertEqual(config.DEPLOY_FULL_PCT, .90)
+        self.assertNotIn("MAX_DEPLOY_PCT", auto_tune.TUNE_KEYS)
+        self.assertNotIn("DEPLOY_FULL_PCT", auto_tune.TUNE_KEYS)
+
     @staticmethod
     def _formation_validation(*, baseline_capacity, challenger_capacity,
                               baseline_open=.80, challenger_open=.90,

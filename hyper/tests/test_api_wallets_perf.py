@@ -436,12 +436,13 @@ class ApiWalletsPerfTests(unittest.TestCase):
             )
             db.executemany(
                 "INSERT INTO follow_selection "
-                "(generation,addr,role,enabled,utility,follow_score,selection_rank,selected_at) "
-                "VALUES ('g1',?,?,?,?,?,?,'2026-01-02')",
+                "(generation,addr,role,enabled,utility,follow_score,"
+                "replay_profit_priority,selection_rank,selected_at) "
+                "VALUES ('g1',?,?,?,?,?,?,?,'2026-01-02')",
                 [
-                    ("0xcore2", "core", 1, 20, .72, 2),
-                    ("0xcore1", "core", 1, 30, .68, 1),
-                    ("0xchallenger", "challenger", 1, .81, .81, 3),
+                    ("0xcore2", "core", 1, 20, .72, .21, 2),
+                    ("0xcore1", "core", 1, 30, .68, .32, 1),
+                    ("0xchallenger", "challenger", 1, .81, .81, .18, 3),
                 ],
             )
             for addr in ("0xcore1", "0xcore2", "0xchallenger"):
@@ -456,6 +457,8 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
         self.assertEqual([row["address"] for row in core["wallets"]], ["0xcore1", "0xcore2"])
         self.assertEqual([row["score"] for row in core["wallets"]], [68.0, 72.0])
+        self.assertEqual([row["profitPriorityPct"] for row in core["wallets"]], [32.0, 21.0])
+        self.assertEqual([row["profitRank"] for row in core["wallets"]], [1, 2])
         self.assertEqual(challenger["wallets"][0]["score"], 81.0)
 
     def test_selected_list_displays_only_observer_allowed_sector_replay(self):

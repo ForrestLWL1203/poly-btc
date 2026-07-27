@@ -399,7 +399,8 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     reason          TEXT,
     utility         REAL,
     follow_score    REAL,             -- immutable final copy-follow score at selection publication
-    selection_rank  INTEGER,          -- immutable final score order within Core/Challenger
+    replay_profit_priority REAL,       -- immutable 70/30 strict-Copy dynamic-return priority
+    selection_rank  INTEGER,          -- immutable final profit order within Core/Challenger
     data_status     TEXT,
     evidence_status TEXT,
     model_version   TEXT,
@@ -1226,8 +1227,8 @@ _MIGRATIONS = (
     "ALTER TABLE auto_tune_runs ADD COLUMN applied_at TEXT",
     "ALTER TABLE auto_tune_runs ADD COLUMN rollback_at TEXT",
     "ALTER TABLE auto_tune_runs ADD COLUMN rollback_reason TEXT",
-    # Display-only replay under the currently effective strategy parameters.  The scan-time profile
-    # evidence remains immutable, so this refresh cannot feed back into Core membership.
+    # Immutable final-surface replay evidence published with selection. Older databases acquire these
+    # columns additively so rolling readers remain backward compatible.
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_net_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_window_start_equity REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_win_rate REAL",
@@ -1251,6 +1252,7 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_score_detail_json TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replayed_at TEXT",
     "ALTER TABLE follow_selection ADD COLUMN follow_score REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_profit_priority REAL",
     "ALTER TABLE follow_selection ADD COLUMN selection_rank INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN acct_value REAL",
     "ALTER TABLE follow_selection ADD COLUMN sector_policy_json TEXT",

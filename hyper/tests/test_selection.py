@@ -112,8 +112,10 @@ class SelectionTests(unittest.TestCase):
         self._published(db)
         db.execute(
             "INSERT INTO follow_selection "
-            "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,model_version,policy_version,selected_at) "
-            "VALUES ('g1','0xmanual','core',0,'operator_pick',12.5,'valid','qualified','m1','p1','now')"
+            "(generation,addr,role,enabled,reason,utility,replay_profit_priority,"
+            "data_status,evidence_status,model_version,policy_version,selected_at) "
+            "VALUES ('g1','0xmanual','core',0,'operator_pick',12.5,.42,"
+            "'valid','qualified','m1','p1','now')"
         )
         db.commit()
 
@@ -121,6 +123,7 @@ class SelectionTests(unittest.TestCase):
 
         self.assertEqual(rows, [selection.SelectionRow(
             "0xmanual", "core", enabled=False, reason="operator_pick", utility=12.5,
+            replay_profit_priority=.42,
             data_status="valid", evidence_status="qualified", model_version="m1", policy_version="p1",
         )])
 

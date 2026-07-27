@@ -238,11 +238,11 @@ MARGIN_EQUITY_PCT = 1.00    # manual sizing base: each new open uses this share 
 #                            The remainder is NOT reserved/frozen: real available cash, per-coin caps and
 #                            portfolio deployment limits still use full risk equity, so it remains usable by
 #                            other wallets, later signals and adds.  This knob is deliberately not auto-tuned.
-DEPLOY_FULL_PCT = 0.80      # legacy snapshot compatibility; runtime no longer applies a separate firepower line.
-MAX_DEPLOY_PCT = 0.80       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin
+DEPLOY_FULL_PCT = 0.90      # legacy snapshot compatibility; runtime no longer applies a separate firepower line.
+MAX_DEPLOY_PCT = 0.90       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin
 #                           reaches this fraction of equity. Equity-based sizing (每笔=权益×档位%) has no
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
-#                           a (1-this)=20% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
+#                           a (1-this)=10% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
 PORTFOLIO_DRAWDOWN_STOP_ENABLE = True
 PORTFOLIO_DRAWDOWN_STOP_PCT = 0.15  # live account HWM stop: pause + flatten; manual resume rebases.

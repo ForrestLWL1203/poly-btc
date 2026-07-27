@@ -4,7 +4,7 @@ Usage (from repo root):  python3 dashboard/web/dev/seed_mock.py data/hl_mock.db
 - equity curve with a midday drawdown then recovery
 - open positions: long/short, crypto+stock, one near liquidation; rejects covering all funnel buckets
 """
-import math, os, sys, time
+import json, math, os, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from hyper import storage, params
@@ -101,12 +101,46 @@ for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enum
                 "qualified" if rank <= 4 else "thin", now_iso()))
     db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES (?,?,?)", (addr, en, now_iso()))
     role = "core" if rank <= 3 else "challenger"
+    profit_priority = (
+        .70 * profile["copy_bt_net_pnl"] / profile["copy_bt_window_start_equity"]
+        + .30 * profile["copy_bt_7d_net_pnl"] / profile["copy_bt_7d_window_start_equity"]
+    )
     db.execute("INSERT INTO follow_selection "
-               "(generation,addr,role,enabled,reason,utility,data_status,evidence_status,model_version,policy_version,selected_at) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               "(generation,addr,role,enabled,reason,utility,follow_score,replay_profit_priority,"
+               "selection_rank,data_status,evidence_status,model_version,policy_version,"
+               "replay_copy_bt_net_pnl,replay_copy_bt_window_start_equity,"
+               "replay_copy_bt_win_rate,replay_copy_bt_closed_n,replay_copy_bt_open_fill_rate,"
+               "replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_window_start_equity,"
+               "replay_copy_bt_7d_closed_n,replay_score_detail_json,replayed_at,selected_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (GEN, addr, role, en, "core_keep" if role == "core" else "challenger_evidence",
-                .18 - rank * .025, "valid", "qualified" if rank <= 4 else "thin",
-                "selection-vnext-1", "copy-policy-mock", ago(120)))
+                .18 - rank * .025, score, profit_priority, rank,
+                "valid", "qualified" if rank <= 4 else "thin",
+                "selection-profit-70-30-prefix-v1", "copy-policy-mock",
+                profile["copy_bt_net_pnl"], profile["copy_bt_window_start_equity"],
+                profile["copy_bt_win_rate"], profile["copy_bt_closed_n"],
+                profile["actionable_open_rate"],
+                profile["copy_bt_7d_net_pnl"], profile["copy_bt_7d_window_start_equity"],
+                profile["copy_bt_7d_closed_n"], json.dumps({
+                    "stage": "strict",
+                    "economicReturns": {
+                        "30d": profile["copy_bt_net_pnl"] / profile["copy_bt_window_start_equity"],
+                        "7d": profile["copy_bt_7d_net_pnl"] / profile["copy_bt_7d_window_start_equity"],
+                    },
+                    "economicEquities": {
+                        "30d": profile["copy_bt_window_start_equity"],
+                        "7d": profile["copy_bt_7d_window_start_equity"],
+                    },
+                    "copyPnl": {
+                        "30d": profile["copy_bt_net_pnl"],
+                        "7d": profile["copy_bt_7d_net_pnl"],
+                    },
+                    "closedN": {
+                        "30d": profile["copy_bt_closed_n"],
+                        "7d": profile["copy_bt_7d_closed_n"],
+                    },
+                }, sort_keys=True),
+                ago(120), ago(120)))
     if role == "core":
         db.execute("INSERT INTO follow_history (addr,first_followed_at,last_followed_at,last_followed_score) "
                    "VALUES (?,?,?,?)", (addr, ago(7 * 86400), ago(120), score))

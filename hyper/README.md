@@ -39,8 +39,8 @@ Deep fills source quality
     ↓ standard ≥10 Episodes/70% wins or strong low-frequency 7–9/85%; activity and structural copyability; Top40
 Fills-only rough Copy
     ↓ dynamic 30d/7d both profitable, Copy wins ≥ 60%, open follow ≥ 70%
-Composite score → unified tuning → strict K-line Copy
-    ↓ score-ordered Top16 only; final individual 10%/3%, shared 10%/3%; no minimum quota
+Composite score + 70/30 Copy profit priority → unified tuning → strict K-line Copy
+    ↓ profit-ordered Top16 only; final individual 10%/3%, shared 10%/3%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ forward-only Observer
 Paper copy positions, PnL, and execution audit
@@ -75,14 +75,16 @@ Wallet quality and funded-account membership are separate decisions.
   seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
-- The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
-  activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a
-  strict failure is removed without taking a replacement below rank 16.
+- The composite score remains the broad quality indicator: profitability 40%, source/Copy win stability 30%,
+  copyability 20% and activity 10%. There is no score floor. Qualified wallets instead form Core by
+  `70% × 30d dynamic Copy return + 30% × 7d dynamic Copy return`, with 30d return, 7d return, composite score
+  and address as fixed tie-breaks. The rough form of that value bounds Top16; the final tuned surface strictly
+  replays and reranks those same finalists.
 - Final individual strict replay requires dynamic 30d/7d returns of 10%/3%, 60% Copy wins, 70% open follow,
   complete data/path evidence and at most three proxy liquidations. Final shared replay requires 10%/3% and
   70% open follow on both standardized and actual Paper capital. Campaign, weekly-fold, per-close, cost-multiple,
   maximum-drawdown and 75-point gates do not exist.
-- Wallet count and parameters are tuned together over score prefixes. The winning surface requalifies every
+- Wallet count and parameters are tuned together over profit-ranked prefixes. The winning surface requalifies every
   individual and receives exactly one conservative path-complete shared replay before publication.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
@@ -97,7 +99,7 @@ Wallet quality and funded-account membership are separate decisions.
 - `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
   enabled Core rows. Removed wallets with open positions remain exit-only until flat.
 - Core has no minimum wallet quota and a maximum of sixteen. A complete scan may publish any count from zero to sixteen;
-  final score/evidence and funded shared-account economics decide membership.
+  final profit order/evidence and funded shared-account economics decide membership.
 
 ## Scheduled complete candidate reevaluation
 
@@ -182,7 +184,7 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
 A replay starts with standardized `$10,000` equity and continuously compounds it; dynamic return divides net PnL
 by the applicable window-start floating equity. Rough replay uses fills only and is capped at 40 source-quality
-wallets. Strict replay loads K-line paths only for the score-ordered Top16 and uses the final tuned parameters.
+wallets. Strict replay loads K-line paths only for the profit-ordered Top16 and uses the final tuned parameters.
 There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
@@ -193,7 +195,7 @@ separately by the global equity high-water stop (15% by default), which pauses a
 
 Source-wallet profit high-water is not used as an admission or execution gate. Static per-wallet and
 per-sector slices are also retired: wallets compete only when their positions actually overlap. New opens
-stop at the account-wide 80% deployment line; adds may use the remaining real available cash. Per-coin
+stop at the account-wide 90% deployment line; adds may use the remaining real available cash. Per-coin
 same-direction caps, liquidity checks, isolated liquidation and the global concurrency ceiling remain.
 
 An explicit optimization run starts from the bounded pre-Core pool, searches wallet count and sizing together,

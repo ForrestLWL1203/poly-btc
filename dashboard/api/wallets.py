@@ -218,7 +218,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
         db,
         "WITH page_selected AS ("
         "  SELECT fs.addr,fs.role AS selection_role,fs.reason AS selection_reason,fs.utility,"
-        "         fs.selection_rank,COALESCE(tc.pinned,0) AS pinned,tc.pinned_at,"
+        "         fs.selection_rank,fs.replay_profit_priority,"
+        "         COALESCE(tc.pinned,0) AS pinned,tc.pinned_at,"
         "         fs.follow_score AS selection_follow_score,"
         "         CASE WHEN fs.follow_score IS NOT NULL THEN fs.follow_score "
         "              WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility "
@@ -242,12 +243,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
         "  LEFT JOIN follow_history sfh ON sfh.addr=fs.addr "
         "  WHERE fs.generation=? AND fs.role=? "
-        "  ORDER BY CASE WHEN fs.role='core' THEN COALESCE(fs.selection_rank,999999) ELSE 0 END,"
-        "      CASE WHEN fs.role='core' THEN fs.utility END DESC,"
-        "      COALESCE(fs.follow_score,"
-        "      CASE WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility END,"
-        "      CASE WHEN sfh.last_followed_generation=fs.generation THEN sfh.last_followed_score END,-1) DESC,"
-        "      fs.addr LIMIT ? OFFSET ?"
+        "  ORDER BY COALESCE(fs.selection_rank,999999),fs.addr LIMIT ? OFFSET ?"
         "), ep7 AS ("
         "  SELECT f.addr,COUNT(e.addr) AS closed_7d "
         "  FROM page_selected f LEFT JOIN episode e ON e.addr=f.addr AND e.close_ms>=? GROUP BY f.addr"
@@ -266,6 +262,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  GROUP BY f.addr"
         ") "
         "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
+        "s.replay_profit_priority,"
         "s.pinned,s.pinned_at,"
         "s.selection_follow_score,s.legacy_follow_score,"
         "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
@@ -318,9 +315,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "LEFT JOIN ep7 ON ep7.addr=s.addr LEFT JOIN ep_all ON ep_all.addr=s.addr "
         "LEFT JOIN copy_stats cs ON cs.addr=s.addr "
         "LEFT JOIN live_liquidity ll ON ll.addr=s.addr "
-        "ORDER BY CASE WHEN s.selection_role='core' THEN COALESCE(s.selection_rank,999999) ELSE 0 END,"
-        "CASE WHEN s.selection_role='core' THEN s.utility END DESC,"
-        "COALESCE(s.selection_follow_score,s.legacy_follow_score,-1) DESC,s.addr",
+        "ORDER BY COALESCE(s.selection_rank,999999),s.addr",
         (generation, role, size, page * size, cutoff7d, cutoff30d),
     )
     out = []
@@ -350,6 +345,15 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "selectionReasonText": _selection_reason_text(r),
             "marketType": _market_type_from_sector_policy(r),
             "score": score100(published_score) if published_score is not None else None,
+            "profitPriorityPct": (
+                _col(r, "replay_profit_priority") * 100
+                if _col(r, "replay_profit_priority") is not None else None
+            ),
+            "profitRank": _col(r, "selection_rank"),
+            "rankingMode": (
+                follow_score.PROFIT_PRIORITY_MODE
+                if _col(r, "replay_profit_priority") is not None else None
+            ),
             # The list describes the strategy we can actually copy, not the target's raw account win rate.
             # A missing immutable replay/profile value is unknown and must never be rendered as 0%.
             "winRatePct": None if display_win_rate is None else display_win_rate * 100,
@@ -583,6 +587,7 @@ def ep_wallet_detail(db, addr, qs=None):
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
             "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"
+            "fs.replay_profit_priority,fs.selection_rank,"
             "fh.last_followed_score,fh.last_followed_generation,"
             "fs.replay_params_hash,fs.replay_score_detail_json,fs.replayed_at "
             "FROM profile p LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=p.addr "
@@ -637,6 +642,15 @@ def ep_wallet_detail(db, addr, qs=None):
         "selectionReasonText": (_selection_reason_text(pr) if pr else None),
         "marketType": (pr["market_type"] if pr else None),
         "score": score100(final_score) if final_score is not None else None,
+        "profitPriorityPct": (
+            _col(pr, "replay_profit_priority") * 100
+            if pr and _col(pr, "replay_profit_priority") is not None else None
+        ),
+        "profitRank": (_col(pr, "selection_rank") if pr else None),
+        "rankingMode": (
+            follow_score.PROFIT_PRIORITY_MODE
+            if pr and _col(pr, "replay_profit_priority") is not None else None
+        ),
         "scoreBreakdown": _score_breakdown(pr) if pr else {},
         "copyReplayParamsHash": (_col(pr, "replay_params_hash") if pr else None),
         "copyReplayedAt": iso_epoch(_col(pr, "replayed_at")) if pr else None,
