@@ -35,7 +35,8 @@ class DeployConfig:
     scan_interval: int = 8
     # Stable membership matters more than a daily beauty contest. Monday/Thursday gives a predictable
     # alternating 3/4-day evidence refresh while live Observer risk controls remain continuous.
-    scan_calendar: str = "Mon,Thu *-*-* 04:00:00"
+    scan_calendar: str = "Mon,Thu *-*-* 04:00:00 Asia/Shanghai"
+    challenger_calendar: str = "Tue,Wed,Fri,Sat,Sun *-*-* 04:00:00 Asia/Shanghai"
 
     @property
     def py(self):

@@ -10,9 +10,15 @@ from . import templates
 from .ssh import _q
 
 SYSTEMD_UNITS = {"dashboard": "hl-dashboard.service", "observe": "hl-observe.service",
-                 "scan": "hl-scan.service", "timer": "hl-scan.timer"}
+                 "scan": "hl-scan.service", "timer": "hl-scan.timer",
+                 "challenger_scan": "hl-challenger-refresh.service",
+                 "challenger_timer": "hl-challenger-refresh.timer"}
 # procman pidfile basenames (data/run/<name>.pid|.log) — used by the local backend
 PID_NAMES = {"dashboard": "dashboard", "observe": "observer", "scan": "scan"}
+TIMER_UNITS = {
+    "timer": "hl-scan.timer",
+    "challenger_timer": "hl-challenger-refresh.timer",
+}
 
 
 def for_mode(ex, cfg):
@@ -36,8 +42,20 @@ class SystemdServices:
         self.sync_units(emit)
         emit("启用 + 启动 dashboard(常开)…")
         self.ex.run("systemctl enable --now hl-dashboard.service", on_line=emit)
-        emit("启用 scan 定时器(每周一/四 04:00，间隔3/4天)…")
-        self.ex.run("systemctl enable --now hl-scan.timer", on_line=emit)
+        emit("启用 scan 定时器(北京时间每周一/四 04:00，间隔3/4天)…")
+        self.ex.run(
+            "mkdir -p /var/lib/systemd/timers && "
+            "touch /var/lib/systemd/timers/stamp-hl-scan.timer && "
+            "systemctl enable --now hl-scan.timer",
+            on_line=emit,
+        )
+        emit("启用 Challenger 定时器(北京时间周二/三/五/六/日 04:00)…")
+        self.ex.run(
+            "mkdir -p /var/lib/systemd/timers && "
+            "touch /var/lib/systemd/timers/stamp-hl-challenger-refresh.timer && "
+            "systemctl enable --now hl-challenger-refresh.timer",
+            on_line=emit,
+        )
         emit("禁用 observe 开机自启(仍可由 dashboard 手动启动)…")
         self.ex.run("systemctl disable hl-observe.service", on_line=emit)
 
@@ -50,6 +68,19 @@ class SystemdServices:
         for k, u in SYSTEMD_UNITS.items():
             out[k] = (self.ex.run(f"systemctl is-active {u}").out.strip() or "unknown")
         return out
+
+    def timer_schedule(self):
+        return {
+            key: {
+                "next": self.ex.run(
+                    f"systemctl show {unit} -p NextElapseUSecRealtime --value"
+                ).out.strip(),
+                "last": self.ex.run(
+                    f"systemctl show {unit} -p LastTriggerUSec --value"
+                ).out.strip(),
+            }
+            for key, unit in TIMER_UNITS.items()
+        }
 
     def logs(self, unit, lines=80):
         return self.ex.run(f"journalctl -u {SYSTEMD_UNITS[unit]} -n {lines} -o cat --no-pager").out
@@ -99,6 +130,9 @@ class LocalServices:
             out[k] = "active" if (pid and self.ex.run(f"kill -0 {pid} 2>/dev/null").ok) else "inactive"
         out["timer"] = "n/a"                        # no daily timer locally (manual scans)
         return out
+
+    def timer_schedule(self):
+        return {}
 
     def logs(self, unit, lines=80):
         name = PID_NAMES.get(unit, unit)

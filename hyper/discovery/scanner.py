@@ -625,9 +625,9 @@ def _leaderboard_recall_audit(db, generation_id, stamp, p):
     db.commit()
 
 
-def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True):
+def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan"):
     """Run official Perp observed-history return and profit-share checks before downloading fills."""
-    pipeline_audit._delete_stage(db, stamp, "scan", "perp_prefilter")
+    pipeline_audit._delete_stage(db, stamp, source, "perp_prefilter")
     # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
     # single writer slot across a batch of rate-paced Portfolio calls freezes Observer marks and commands.
     db.commit()
@@ -711,7 +711,7 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True):
         results[addr] = result
         # Buffer audit values in memory so no write transaction remains open during the next REST call.
         pending_audit.append({
-            "stamp": stamp, "source": "scan", "stage": "perp_prefilter", "addr": addr,
+            "stamp": stamp, "source": source, "stage": "perp_prefilter", "addr": addr,
             "rank": rank, "status": result.status, "reason": result.reason,
             "payload": {**result.payload(), "policy": cache_policy, "cacheHit": cache_hit},
         })
@@ -2084,7 +2084,9 @@ def _source_quality_pool(db, generation_id: str, *, limit: int) -> tuple[list[st
     return kept, tail
 
 
-def _rough_replay_source_pool(db, addrs, generation_id, now_ms, p, stamp) -> dict:
+def _rough_replay_source_pool(
+    db, addrs, generation_id, now_ms, p, stamp, *, source="scan",
+) -> dict:
     """Run one cache-only, K-line-free Copy replay for at most the source-quality Top40."""
     addrs = list(dict.fromkeys((addr or "").lower() for addr in addrs if addr))
     if not addrs:
@@ -2157,7 +2159,7 @@ def _rough_replay_source_pool(db, addrs, generation_id, now_ms, p, stamp) -> dic
             [row.get(column) for column in cols],
         )
         pipeline_audit._insert_event(
-            db, stamp=stamp, source="scan", stage="rough_copy", addr=addr, rank=rank,
+            db, stamp=stamp, source=source, stage="rough_copy", addr=addr, rank=rank,
             status="passed" if qualification.get("coreEligible") else "rejected",
             reason=qualification.get("firstFailure") or "rough_copy_qualified",
             payload={
@@ -4232,12 +4234,35 @@ def ensure_watchlist_current(db, stamp=None) -> int:
 
 
 def _record_run(db, started, t0, candidates, profiled, added, retired, kept, rejected, n_active,
-                full=0, failed=0, complete=True):
+                full=0, failed=0, complete=True, kind="complete", generation_id=None,
+                reason=None, api_stats=None, commit=True):
+    api_stats = dict(api_stats or {})
     db.execute(
         "INSERT INTO scan_runs (started_at,finished_at,duration_s,candidates,profiled,probed_new,added,"
-        "retired,kept,rejected,n_active,full,failed,complete) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "retired,kept,rejected,n_active,full,failed,complete,kind,generation,api_requests,api_weight,"
+        "outcome_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (started, now_iso(), round(time.time() - t0, 1), candidates, profiled, profiled, added, retired,
-         kept, rejected, n_active, 1 if full else 0, failed, 1 if complete else 0))
+         kept, rejected, n_active, 1 if full else 0, failed, 1 if complete else 0,
+         str(kind or "complete"), generation_id, int(api_stats.get("requests") or 0),
+         int(api_stats.get("estimated_weight") or 0), str(reason)[:300] if reason else None))
+    if commit:
+        db.commit()
+
+
+def record_challenger_refresh_skip(db, reason="skipped_scan_busy"):
+    """Record a scheduled refresh which intentionally did no work."""
+    started = now_iso()
+    _record_run(
+        db, started, time.time(), 0, 0, 0, 0, 0, 0,
+        len(selection.published_core_addrs(db) or ()),
+        full=False, failed=0, complete=True, kind="challenger_refresh",
+        reason=reason,
+    )
+    pipeline_audit._insert_event(
+        db, stamp=started, source="challenger_daily", stage="selection_summary",
+        status="skipped", reason=str(reason or "skipped"),
+        payload={"retainedGeneration": selection.latest_published_generation(db)},
+    )
     db.commit()
 
 
@@ -4760,6 +4785,484 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     }
 
 
+# ---------------------------------------------------------------- Challenger daily refresh
+def _latest_complete_scan_generation(db):
+    row = db.execute(
+        "SELECT generation FROM scan_generation "
+        "WHERE source='scan' AND status='published' AND complete=1 "
+        "ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return row[0] if row else None
+
+
+def challenger_refresh_pool(db, base_generation=None):
+    """Freeze the daily workset to the latest complete discovery generation."""
+    base_generation = base_generation or _latest_complete_scan_generation(db)
+    if not base_generation:
+        return None, []
+    frozen = {
+        str(addr or "").lower()
+        for (addr,) in db.execute(
+            "SELECT addr FROM follow_selection WHERE generation=? "
+            "AND role IN ('core','challenger')",
+            (base_generation,),
+        ).fetchall()
+        if addr
+    }
+    current = {
+        str(addr or "").lower()
+        for addr in (selection.published_core_addrs(db) or ())
+        if addr
+    }
+    held = {
+        str(addr or "").lower()
+        for (addr,) in db.execute(
+            "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+        ).fetchall()
+        if addr
+    }
+    return base_generation, sorted(frozen | current | held)
+
+
+def refresh_challengers(db, p) -> dict:
+    """Refresh the frozen Core/Challenger cohort and publish strict membership on active parameters."""
+    now_ms = int(time.time() * 1000)
+    started, t0, stamp = now_iso(), time.time(), now_iso()
+    previous_generation = selection.latest_published_generation(db)
+    previous_core = {
+        str(addr or "").lower()
+        for addr in (selection.published_core_addrs(db) or ())
+        if addr
+    }
+    base_generation, workset = challenger_refresh_pool(db)
+    if not base_generation or not workset:
+        record_challenger_refresh_skip(db, "no_complete_challenger_pool")
+        return {"status": "skipped", "reason": "no_complete_challenger_pool"}
+
+    selection_mode = str(
+        params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
+    ).lower()
+    if selection_mode != "auto":
+        record_challenger_refresh_skip(db, "automatic_selection_disabled")
+        return {"status": "skipped", "reason": "automatic_selection_disabled"}
+
+    generation_id = generation.begin_generation(
+        db, source="challenger_daily", started_at=started,
+        workset_mode="frozen_challenger_pool", fill_mode="delta",
+    )
+    p.scan_generation = generation_id
+    p.full_scan = False
+    p.no_harvest = True
+    p.rebuild_sector_policy = True
+    p.source_only_profile = True
+    p.copy_bt_sigmas = {}
+    p.copy_bt_market_ctx = {}
+    p.copy_bt_overrides = _copy_bt_overrides(db)
+    p.margin_equity_pct = p.copy_bt_overrides.get(
+        "MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT,
+    )
+    db.commit()
+    _set_scanner_proc(db, "scanning", {"phase": "challenger_refresh"})
+    _set_scan_progress(
+        db, state="scanning", started_at=started, stage="challenger_prepare",
+        candidates_scanned=0, candidates_total=len(workset), manual=0,
+    )
+    rest.reset_request_stats()
+    profiled = failed = valid_profiles = deferred_profiles = rejected = 0
+    outcomes = {}
+    published = False
+
+    try:
+        _stage_existing_leaderboard(db, generation_id)
+        universe = rest.copyable_universe(force=True)
+        if not universe:
+            raise RuntimeError("copyable_universe_unavailable")
+        p.copyable_universe = frozenset(universe)
+        p.generation_market_resolver = generation_market.Resolver(
+            db, generation_id, now_ms, p.copyable_universe,
+            generation_market.fetch_context_snapshot(p.copyable_universe),
+            db_lock=_db_lock,
+        )
+        generation.record_workset(
+            db, generation_id,
+            workset_mode="frozen_challenger_pool", fill_mode="delta",
+            full_refresh_shard=None, workset_n=len(workset), deferred_n=0,
+            metrics={
+                "baseFullGeneration": base_generation,
+                "marginEquityPct": float(p.margin_equity_pct),
+                "initialMarginEquity": float(config.INITIAL_BALANCE),
+            },
+        )
+        db.commit()
+
+        _set_scan_progress(
+            db, stage="perp_prefilter", candidates_scanned=0,
+            candidates_total=len(workset),
+        )
+        perp_results = _run_perp_prefilter(
+            db, workset, p, stamp, allow_cache=False, source="challenger_daily",
+        )
+        p.official_perp_results = dict(perp_results)
+        desired_cache_start_ms = now_ms - config.PROFILE_FETCH_DAYS * 86_400_000
+        incomplete_cache = set(_incomplete_fill_cache_addrs(
+            db, workset, desired_cache_start_ms,
+        ))
+        open_copy_pnl_by_addr = {
+            str(addr or "").lower(): f(unrealized)
+            for addr, unrealized in db.execute(
+                "SELECT addr,SUM(COALESCE(unrealized_pnl,0)) FROM copy_position "
+                "WHERE status='open' GROUP BY addr"
+            ).fetchall()
+        }
+        p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
+        cols = storage.PROFILE_COLS.split(",")
+        priors = {
+            str(row[0] or "").lower(): dict(zip(cols, row))
+            for row in db.execute(f"SELECT {storage.PROFILE_COLS} FROM profile").fetchall()
+        }
+        lbs = {
+            str(addr or "").lower(): {
+                "account_value": account_value,
+                "week_roi": week_roi, "mon_roi": mon_roi, "all_roi": all_roi,
+            }
+            for addr, account_value, week_roi, mon_roi, all_roi in db.execute(
+                "SELECT addr,account_value,week_roi,mon_roi,all_roi "
+                "FROM leaderboard_staging WHERE generation=?",
+                (generation_id,),
+            ).fetchall()
+        }
+
+        def work(addr):
+            prior = priors.get(addr)
+            if addr in incomplete_cache:
+                return addr, prior, _defer_profile(
+                    db, addr, prior, stamp, "daily_cache_incomplete_full_scan_required",
+                )
+            gate = perp_results.get(addr)
+            if gate is None:
+                return addr, prior, _defer_profile(
+                    db, addr, prior, stamp, "official_perp_evidence_missing",
+                )
+            if gate.deferred:
+                if gate.reason in {
+                    "history_under_7d", "history_under_28d",
+                    "boundary_sample_gap", "zero_start_equity",
+                }:
+                    return addr, prior, _defer_official_evidence_profile(
+                        db, addr, prior, stamp, generation_id, gate,
+                    )
+                return addr, prior, _defer_profile(db, addr, prior, stamp, gate.reason)
+            if not gate.passed:
+                return addr, prior, _reject_prefilter_profile(
+                    db, addr, prior, stamp, generation_id, gate.reason,
+                )
+            return addr, prior, _profile_one(
+                db, addr, now_ms - int(p.days) * 86_400_000, now_ms,
+                p, prior, lbs.get(addr, {}), stamp, universe, force_full=False,
+            )
+
+        workers = max(1, int(getattr(p, "workers", 4) or 4))
+        done = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(work, addr): addr for addr in workset}
+            for future in concurrent.futures.as_completed(futures):
+                addr = futures[future]
+                done += 1
+                try:
+                    _addr, prior, (status, reason, profile, _hit_cap) = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    reason = f"profile_error:{type(exc).__name__}"
+                    if addr in previous_core:
+                        failed += 1
+                        outcomes[addr] = {
+                            "status": "error", "data_status": "deferred_data_error",
+                            "reason": reason,
+                        }
+                        print(
+                            f"  [{done}/{len(workset)}] Core refresh FAIL: {exc}",
+                            flush=True,
+                        )
+                    else:
+                        status, reason, profile, _hit_cap = _defer_profile(
+                            db, addr, priors.get(addr), stamp, reason,
+                        )
+                        profiled += 1
+                        deferred_profiles += 1
+                        outcomes[addr] = {
+                            "status": status,
+                            "data_status": "deferred_data_error",
+                            "reason": reason,
+                        }
+                        print(
+                            f"  [{done}/{len(workset)}] Challenger refresh deferred: {exc}",
+                            flush=True,
+                        )
+                else:
+                    profiled += 1
+                    data_status = profile.get("data_status") or "valid"
+                    outcomes[addr] = {
+                        "status": status, "data_status": data_status, "reason": reason,
+                    }
+                    if data_status == "deferred_data_error":
+                        deferred_profiles += 1
+                    else:
+                        valid_profiles += 1
+                    if status in {"rejected", "retired"}:
+                        rejected += 1
+                _set_scan_progress(
+                    db, stage="challenger_score", candidates_scanned=done,
+                    candidates_total=len(workset),
+                )
+                if done % 10 == 0:
+                    _set_scanner_proc(
+                        db, "scanning",
+                        {"stage": "challenger_score", "scanned": done, "total": len(workset)},
+                    )
+        if failed:
+            raise RuntimeError(f"challenger_profile_failures:{failed}")
+        invalid_core = [
+            addr for addr in previous_core
+            if (outcomes.get(addr) or {}).get("data_status") != "valid"
+        ]
+        if invalid_core:
+            raise RuntimeError(f"challenger_refresh_core_data_incomplete:{len(invalid_core)}")
+
+        policy = load_copy_policy({
+            **params.load_follow(db), **params.load_category(db, "scanner"),
+        })
+        source_pool, source_tail = _source_quality_pool(
+            db, generation_id, limit=int(policy.source_quality_max_n),
+        )
+        _set_scan_progress(
+            db, stage="rough_copy", candidates_scanned=0,
+            candidates_total=len(source_pool),
+        )
+        rough_summary = _rough_replay_source_pool(
+            db, source_pool, generation_id, now_ms, p, stamp,
+            source="challenger_daily",
+        )
+        p.source_only_profile = False
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="challenger_daily",
+            stage="source_quality_pool", status="ok",
+            reason="frozen_challenger_source_quality",
+            payload={
+                "baseFullGeneration": base_generation,
+                "qualifiedBeforeCap": len(source_pool) + len(source_tail),
+                "retained": len(source_pool), "tailRemoved": len(source_tail),
+                "roughCopyQualified": len(rough_summary.get("qualified") or ()),
+            },
+        )
+        db.commit()
+        market_snapshot = generation_market.seal(db, generation_id)
+        scope_audit = _assert_scoped_fill_cache(db, workset, universe)
+        pipeline_audit.record_profile_snapshot(
+            db, stamp, "challenger_daily", workset,
+        )
+        db.commit()
+
+        _set_scan_progress(
+            db, stage="prepare_selection_candidates",
+            candidates_scanned=len(workset), candidates_total=len(workset),
+        )
+        refresh_watchlist(
+            db, stamp, leaderboard_generation=generation_id, commit=False,
+        )
+        preview = _selection_prefetch_candidates(
+            db, generation_id, now_ms,
+            limit=int(params.get(
+                db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
+            )),
+        )
+        db.rollback()
+        if preview:
+            _set_scan_progress(
+                db, stage="prefetch_selection_paths",
+                candidates_scanned=len(workset), candidates_total=len(workset),
+            )
+            _prefetch_selection_paths(db, preview, now_ms, generation_id)
+
+        formation = form_quality_prefix(
+            db, generation_id, stamp, now_ms,
+            retune=False, force_retune=False,
+        )
+        _assert_margin_equity_snapshot(db, p.margin_equity_pct)
+        publication_stamp = now_iso()
+        refresh_watchlist(
+            db, publication_stamp,
+            leaderboard_generation=generation_id, commit=False,
+        )
+        _apply_formation_params(db, formation, publication_stamp)
+        selection_rows, marginal = _build_explicit_selection(
+            db, generation_id, publication_stamp, now_ms,
+            forced_core_order=formation.get("selected") or (),
+            formation_meta=formation.get("search") or {},
+            effective_qualifications=formation.get("qualifications") or {},
+            effective_scores=formation.get("scores") or {},
+            effective_policies=formation.get("policies") or {},
+            effective_metrics=formation.get("walletMetrics") or {},
+            effective_score_details=formation.get("scoreDetails") or {},
+            effective_replay_params_hash=formation.get("replayParamsHash"),
+            audit_stamp=stamp,
+        )
+        generation.mark_generation_ready(
+            db, generation_id, profile_total=len(workset),
+            profile_valid=valid_profiles, profile_deferred=deferred_profiles,
+            profile_rejected=rejected, profile_complete=True,
+            ready_at=publication_stamp,
+        )
+        selection.replace_selection_rows(
+            db, generation_id, selection_rows, selected_at=publication_stamp,
+        )
+        market_validation = _selection_market_snapshot_validation(
+            db, generation_id, selection_rows, now_ms,
+        )
+        generation.publish_generation(
+            db, generation_id, published_at=publication_stamp,
+            promote_leaderboard=False,
+        )
+        current_core = _record_explicit_follow_history(
+            db, selection_rows, publication_stamp, previous_core, generation_id,
+        )
+        active_strategy = strategy_revision.create_revision(
+            db, generation_id, source="challenger_daily",
+            reason="challenger_daily_strict_membership",
+            validation={
+                **(marginal.search_meta or {}),
+                "marketSnapshot": market_validation,
+                "baseFullGeneration": base_generation,
+            },
+            stamp=publication_stamp,
+        )
+        for row in selection_rows:
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily", stage="selection",
+                addr=row.addr, status=row.role, reason=row.reason,
+                follow_score=row.follow_score,
+                payload={
+                    "generation": generation_id,
+                    "selectionRank": row.selection_rank,
+                    "marginalUtility": row.utility,
+                    "dataStatus": row.data_status,
+                    "evidenceStatus": row.evidence_status,
+                },
+            )
+        added_core = sorted(set(current_core) - previous_core)
+        removed_core = sorted(previous_core - set(current_core))
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="challenger_daily",
+            stage="selection_summary", status="ok",
+            reason="challenger_daily_strict_membership",
+            payload={
+                "generation": generation_id,
+                "baseFullGeneration": base_generation,
+                "core": len(current_core),
+                "challenger": sum(
+                    1 for row in selection_rows if row.role == selection.CHALLENGER
+                ),
+                "coreAdded": len(added_core), "coreRemoved": len(removed_core),
+                "strategyRevision": active_strategy["revision"],
+            },
+        )
+        metrics_json = {
+            "kind": "challenger_refresh",
+            "baseFullGeneration": base_generation,
+            "workset": len(workset), "profileValid": valid_profiles,
+            "profileDeferred": deferred_profiles,
+            "roughCopyQualified": len(rough_summary.get("qualified") or ()),
+            "selectionCore": len(current_core),
+            "selectionChallenger": sum(
+                1 for row in selection_rows if row.role == selection.CHALLENGER
+            ),
+            "coreAdded": len(added_core), "coreRemoved": len(removed_core),
+            "retuned": False, "marketSnapshot": market_snapshot,
+            "marketValidation": market_validation, "marketScopeAudit": scope_audit,
+            **rest.request_stats(),
+        }
+        db.execute(
+            "UPDATE scan_generation SET metrics_json=? WHERE generation=?",
+            (json.dumps(metrics_json, sort_keys=True), generation_id),
+        )
+        portfolio_replay, selection_replay = _store_final_copy_summary(
+            db, generation_id, marginal,
+        )
+        auto_tune.bind_active_tune_rollback_core(db, current_core)
+        _record_run(
+            db, started, t0, len(workset), profiled,
+            len(added_core), len(removed_core),
+            len(set(current_core) & previous_core), rejected, len(current_core),
+            full=False, failed=0, complete=True, kind="challenger_refresh",
+            generation_id=generation_id, api_stats=rest.request_stats(),
+            commit=False,
+        )
+        db.commit()
+        published = True
+        _set_scan_progress(
+            db, state="idle", stage="persist",
+            candidates_scanned=len(workset), candidates_total=len(workset),
+        )
+        _set_scanner_proc(
+            db, "idle",
+            {"last_challenger_refresh_at": now_iso(), "active": len(current_core)},
+        )
+        db.commit()
+        return {
+            "status": "published", "generation": generation_id,
+            "baseFullGeneration": base_generation,
+            "core": len(current_core),
+            "challenger": sum(
+                1 for row in selection_rows if row.role == selection.CHALLENGER
+            ),
+            "coreAdded": len(added_core), "coreRemoved": len(removed_core),
+            "portfolioReplay": portfolio_replay,
+            "selectionReplay": selection_replay,
+            "strategyRevision": active_strategy["revision"],
+        }
+    except Exception as exc:
+        db.rollback()
+        if published:
+            _set_scan_progress(
+                db, state="idle", stage="error",
+                candidates_scanned=len(workset), candidates_total=len(workset),
+            )
+            _set_scanner_proc(
+                db, "idle",
+                {"last_error": str(exc)[:300], "active": len(current_core)},
+            )
+            db.commit()
+            raise
+        try:
+            generation.fail_generation(db, generation_id, str(exc))
+        except Exception:
+            pass
+        _record_run(
+            db, started, t0, len(workset), profiled, 0, 0,
+            len(previous_core), rejected, len(previous_core),
+            full=False, failed=max(1, failed), complete=False,
+            kind="challenger_refresh", generation_id=generation_id,
+            reason=str(exc), api_stats=rest.request_stats(),
+        )
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="challenger_daily",
+            stage="selection_summary", status="failed", reason=str(exc)[:300],
+            payload={
+                "generation": generation_id,
+                "baseFullGeneration": base_generation,
+                "retainedGeneration": previous_generation,
+            },
+        )
+        _set_scan_progress(
+            db, state="idle", stage="error",
+            candidates_scanned=profiled, candidates_total=len(workset),
+        )
+        _set_scanner_proc(
+            db, "idle",
+            {"last_error": str(exc)[:300], "active": len(previous_core)},
+        )
+        db.commit()
+        raise
+
+
 # ----------------------------------------------------------------------------- scan
 def scan(db, p) -> None:
     now_ms = int(time.time() * 1000)
@@ -4851,7 +5354,8 @@ def scan(db, p) -> None:
         generation.fail_generation(db, generation_id, str(exc))
         old_core = selection.published_core_addrs(db) or []
         _record_run(db, started, t0, 0, 0, 0, 0, 0, 0, len(old_core),
-                    full=run_full, failed=1, complete=False)
+                    full=run_full, failed=1, complete=False, generation_id=generation_id,
+                    reason=str(exc), api_stats=rest.request_stats())
         _set_scan_progress(db, state="idle", stage="error", candidates_scanned=0, candidates_total=0)
         _set_scanner_proc(db, "idle", {"last_error": str(exc)[:300], "active": len(old_core)})
         _resolve_rescan_commands(
@@ -5461,7 +5965,9 @@ def scan(db, p) -> None:
         db.commit()
     _set_scan_progress(db, stage="persist")
     _record_run(db, started, t0, n_cand, profiled_ok, added, retired, kept, rejected, n_active,
-                full=run_full, failed=failed, complete=complete)
+                full=run_full, failed=failed, complete=complete, generation_id=generation_id,
+                reason=None if complete else "generation_not_published",
+                api_stats=rest.request_stats())
     try:
         if not published:
             raise RuntimeError("generation_not_published")

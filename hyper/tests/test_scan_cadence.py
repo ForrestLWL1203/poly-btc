@@ -1,4 +1,5 @@
 import sqlite3
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -45,6 +46,22 @@ class ScanCadenceTests(unittest.TestCase):
         self.assertEqual(cadence, "cold_full")
         self.assertTrue(args.full_scan)
         self.assertFalse(args.no_harvest)
+
+    def test_challenger_refresh_does_not_delay_complete_scan_cadence(self):
+        self.db.execute("ALTER TABLE scan_runs ADD COLUMN kind TEXT DEFAULT 'complete'")
+        old = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 80 * 3600),
+        )
+        fresh = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1 * 3600),
+        )
+        self.db.executemany(
+            "INSERT INTO scan_runs(finished_at,complete,full,kind) VALUES (?,?,?,?)",
+            [(old, 1, 1, "complete"), (fresh, 1, 0, "challenger_refresh")],
+        )
+        self.db.commit()
+
+        self.assertGreaterEqual(hl_discover._hours_since_last_scan(self.db), 79)
 
     def test_manual_scan_uses_same_complete_mode_after_publication(self):
         self.db.execute("INSERT INTO scan_generation VALUES ('published',1)")

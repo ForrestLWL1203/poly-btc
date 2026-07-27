@@ -126,11 +126,21 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   the earliest retained fill: a wallet may simply have no trade near the boundary. Only new wallets and
   missing/incomplete/capped caches perform a resumable 37-day bootstrap or repair. A capped page saves its
   continuation cursor; it must not restart from the 37-day boundary on the next run.
-- Every scheduled generation refreshes the complete Leaderboard and evaluates every official-ROI + Perp-precheck
-  survivor. Core, Challenger and open-position owners are also evaluated for safe removal/exit. There is no
-  300-wallet budget, rotation/recovery/exploration allocation, deferred tail, seven-day shard or weekly full
-  refresh. Workset and fill transport remain separate: the workset is always `all`, while fills are `delta`,
-  `full_refetch`, or `mixed`.
+- Complete discovery runs Monday and Thursday at 04:00 `Asia/Shanghai`. They refresh the complete Leaderboard,
+  discover the candidate universe, repair missing 37-day caches, and evaluate every official-ROI +
+  Perp-precheck survivor. Core, Challenger and open-position owners are also evaluated for safe removal/exit.
+  There is no 300-wallet budget, rotation/recovery/exploration allocation, deferred tail or seven-day shard.
+- On Tuesday, Wednesday, Friday, Saturday and Sunday at 04:00 `Asia/Shanghai`,
+  `python3 -m hyper.cli.discover --db ... challenger-refresh` refreshes only the Core + Challenger cohort frozen
+  by the latest successful complete discovery generation, plus current Core and open-position owners. It clones
+  that generation's Leaderboard snapshot for integrity but never calls the Leaderboard API, discovers wallets,
+  bootstraps/repairs 37-day history, prunes discovery caches or runs a parameter grid. It uses the active
+  strategy surface (`retune=False`), replays the bounded Top16 and shared account strictly, and atomically
+  publishes symmetric Core promotion/removal with a new strategy revision. A current-Core data/path failure
+  retains the previous generation; a deferred Challenger remains in the frozen pool for the next daily run.
+- Complete scans, manual scans and Challenger refreshes share `data/run/scanner.lock`. A busy daily job records
+  `skipped_scan_busy` and exits successfully. Workset and fill transport remain separate: complete worksets are
+  `all`; daily worksets are `frozen_challenger_pool`; fill transport is delta unless a complete run repairs it.
 
 ### 3. Market-sector specialization
 

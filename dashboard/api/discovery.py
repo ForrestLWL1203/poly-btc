@@ -100,14 +100,20 @@ def ep_discovery(db):
 def ep_scan_runs(db, limit):
     rows = qall(db, "SELECT started_at,finished_at,candidates,COALESCE(profiled,probed_new) AS profiled,"
                     "added,retired,kept,rejected,n_active,COALESCE(failed,0) AS failed,"
-                    "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full "
+                    "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full,"
+                    "COALESCE(kind,'complete') AS kind,COALESCE(api_requests,0) AS api_requests,"
+                    "COALESCE(api_weight,0) AS api_weight,outcome_reason "
                     "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
     return {"runs": [{"at": _col(r, "started_at", 0), "finishedAt": _col(r, "finished_at", 1),
                       "candidates": _col(r, "candidates", 2), "profiled": _col(r, "profiled", 3),
                       "added": _col(r, "added", 4), "retired": _col(r, "retired", 5),
                       "kept": _col(r, "kept", 6), "rejected": _col(r, "rejected", 7),
                       "active": _col(r, "n_active", 8), "failed": _col(r, "failed", 9) or 0,
-                      "complete": bool(_col(r, "complete", 10)), "full": bool(_col(r, "full", 11))}
+                      "complete": bool(_col(r, "complete", 10)), "full": bool(_col(r, "full", 11)),
+                      "kind": _col(r, "kind", 12) or "complete",
+                      "apiRequests": _col(r, "api_requests", 13) or 0,
+                      "apiWeight": _col(r, "api_weight", 14) or 0,
+                      "reason": _col(r, "outcome_reason", 15)}
                      for r in rows]}
 
 

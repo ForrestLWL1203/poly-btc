@@ -124,8 +124,9 @@ class ApiScannerStatusTests(unittest.TestCase):
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.execute(
                 "INSERT INTO scan_runs "
-                "(started_at,finished_at,duration_s,candidates,probed_new,profiled,added,retired,kept,rejected,n_active) "
-                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8)"
+                "(started_at,finished_at,duration_s,candidates,probed_new,profiled,added,retired,kept,"
+                "rejected,n_active,api_requests,api_weight,outcome_reason) "
+                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8,19,54,'example')"
             )
             db.commit()
 
@@ -133,6 +134,10 @@ class ApiScannerStatusTests(unittest.TestCase):
 
         self.assertEqual(res["runs"][0]["profiled"], 42)
         self.assertNotIn("probedNew", res["runs"][0])
+        self.assertEqual(res["runs"][0]["kind"], "complete")
+        self.assertEqual(res["runs"][0]["apiRequests"], 19)
+        self.assertEqual(res["runs"][0]["apiWeight"], 54)
+        self.assertEqual(res["runs"][0]["reason"], "example")
 
 
 if __name__ == "__main__":

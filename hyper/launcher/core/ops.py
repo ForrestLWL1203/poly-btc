@@ -20,7 +20,7 @@ def status(cfg):
         commit = ex.run(f"cd {_q(cfg.app_dir)} && git log -1 --format='%h %s' 2>/dev/null").out.strip()
         code = ex.run(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{cfg.port}/ "
                       f"--max-time 6 2>/dev/null || true").out.strip()[-3:]
-        return {"services": st, "commit": commit,
+        return {"services": st, "timerSchedule": svc.timer_schedule(), "commit": commit,
                 "dashboardHttp": code, "url": (f"https://{cfg.domain}" if cfg.domain
                                                else f"http://127.0.0.1:{cfg.port}")}
     finally:
@@ -28,7 +28,7 @@ def status(cfg):
 
 
 def action(cfg, op, unit):
-    """op ∈ start|stop|restart, unit ∈ dashboard|observe|scan|timer."""
+    """Operate one known dashboard, observer, scan, or timer unit."""
     if op not in {"start", "stop", "restart"} or unit not in services.SYSTEMD_UNITS:
         raise ValueError("invalid service action")
     ex, svc = _conn(cfg)

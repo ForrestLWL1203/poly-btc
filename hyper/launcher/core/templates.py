@@ -5,9 +5,12 @@ parameterized). Keeping them here as templates — not shell heredocs buried in 
 deployed system auditable and lets `ops.update` diff/re-push a unit without touching the pipeline.
 """
 
-# The three long-lived services + the twice-weekly scan (oneshot) and its timer. `observe` is the copy
-# engine — enabled but NOT started at deploy (the operator starts copy-trading from the dashboard).
-UNITS = ("hl-dashboard", "hl-observe", "hl-scan.service", "hl-scan.timer")
+# Long-lived services plus the two mutually-exclusive scanner jobs and their timers. `observe` is the copy
+# engine — installed but NOT started at deploy (the operator starts copy-trading from the dashboard).
+UNITS = (
+    "hl-dashboard", "hl-observe", "hl-scan.service", "hl-scan.timer",
+    "hl-challenger-refresh.service", "hl-challenger-refresh.timer",
+)
 
 
 def dashboard_unit(app_dir, py, db, port, host="127.0.0.1"):
@@ -61,9 +64,39 @@ ExecStopPost={py} -m hyper.cli.discover --db {db} repair-watchlist
 """
 
 
-def scan_timer(on_calendar="Mon,Thu *-*-* 04:00:00"):
+def scan_timer(on_calendar="Mon,Thu *-*-* 04:00:00 Asia/Shanghai"):
     return f"""[Unit]
 Description=Run HL scanner twice weekly (alternating 3/4-day evidence refresh)
+
+[Timer]
+OnCalendar={on_calendar}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def challenger_refresh_service(app_dir, py, db, scan_interval=8):
+    return f"""[Unit]
+Description=HL frozen Challenger evidence refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory={app_dir}
+ExecStart={py} -m hyper.cli.discover --db {db} challenger-refresh --scan-interval {scan_interval}
+TimeoutStartSec=8h
+"""
+
+
+def challenger_refresh_timer(
+    on_calendar="Tue,Wed,Fri,Sat,Sun *-*-* 04:00:00 Asia/Shanghai",
+):
+    return f"""[Unit]
+Description=Refresh frozen HL Challengers on non-full-scan days
 
 [Timer]
 OnCalendar={on_calendar}
@@ -92,6 +125,12 @@ def render_all(cfg):
         "/etc/systemd/system/hl-scan.service": scan_service(cfg.app_dir, cfg.py, cfg.db,
                                                             cfg.scan_days, cfg.scan_interval),
         "/etc/systemd/system/hl-scan.timer": scan_timer(cfg.scan_calendar),
+        "/etc/systemd/system/hl-challenger-refresh.service": challenger_refresh_service(
+            cfg.app_dir, cfg.py, cfg.db, cfg.scan_interval,
+        ),
+        "/etc/systemd/system/hl-challenger-refresh.timer": challenger_refresh_timer(
+            cfg.challenger_calendar,
+        ),
     }
     if cfg.domain:
         out["/etc/caddy/Caddyfile"] = caddyfile(cfg.domain, cfg.port)

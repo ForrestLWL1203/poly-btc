@@ -76,9 +76,10 @@ Wallet quality and funded-account membership are separate decisions.
 - Wallet count and parameters are tuned together over score prefixes. The winning surface requalifies every
   individual and receives exactly one conservative path-complete shared replay before publication.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
-  Production evidence refresh runs Monday and Thursday (alternating three/four-day gaps), but parameter search
-  is explicit rather than an automatic side effect. There is no promotion delay, tenure, old-Core retention,
-  star priority or minimum count.
+  Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
+  five days. Daily refresh uses the active parameters and can publish Core promotion/removal immediately, but
+  never runs the parameter grid. There is no promotion delay, tenure, old-Core retention, star priority or
+  minimum count.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
   search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
@@ -106,10 +107,24 @@ Profiles are not re-downloaded from zero on every scheduled run.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
   cannot prune, publish, or tune.
 
-Production automatically performs one complete candidate-universe evidence refresh every Monday and Thursday;
-the local daemon fallback uses a 72-hour interval. Previously known wallets remain history-incremental, and only
-genuinely new/incomplete wallets bootstrap 37 days. The Dashboard rescan button queues the same complete
-reevaluation; changing scanner settings only persists params and does not start a scan.
+Production schedules all jobs in `Asia/Shanghai`:
+
+- Monday and Thursday 04:00: complete Leaderboard discovery and candidate-universe reevaluation.
+- Tuesday, Wednesday, Friday, Saturday and Sunday 04:00: frozen Challenger/Core refresh via
+  `python3 -m hyper.cli.discover --db ... challenger-refresh`.
+
+The daily job clones the last complete generation's Leaderboard staging rows; it does not access the Leaderboard
+API or discover a new wallet. It refreshes official Portfolio evidence, cached-fill deltas, positions, valuation
+and required market paths, then reruns source gates, true 72-hour open/flip activity, canonical 30/14/7 Copy,
+strict Top16 individual replay and strict shared-account replay with `retune=False`. Missing or incomplete
+37-day caches are deferred to the next complete run. A current-Core data/path failure prevents publication;
+an individual Challenger failure remains eligible for the next daily attempt because the pool stays anchored to
+the last successful complete generation. Daily runs never prune discovery caches and do not reset the periodic
+parameter-retune age.
+
+Previously known wallets remain history-incremental, and only complete discovery runs bootstrap or repair 37
+days. The Dashboard rescan button queues the same complete reevaluation; changing scanner settings only persists
+params and does not start a scan.
 
 Before production rollout, operators can run the same pipeline against an online SQLite backup:
 

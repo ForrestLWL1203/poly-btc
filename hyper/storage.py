@@ -523,7 +523,12 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     n_active    INTEGER,
     full        INTEGER DEFAULT 0,
     failed      INTEGER DEFAULT 0,
-    complete    INTEGER DEFAULT 1
+    complete    INTEGER DEFAULT 1,
+    kind        TEXT DEFAULT 'complete',
+    generation  TEXT,
+    api_requests INTEGER DEFAULT 0,
+    api_weight  INTEGER DEFAULT 0,
+    outcome_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
 
@@ -1120,6 +1125,11 @@ _MIGRATIONS = (
     "ALTER TABLE scan_runs ADD COLUMN full INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN failed INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN complete INTEGER DEFAULT 1",
+    "ALTER TABLE scan_runs ADD COLUMN kind TEXT DEFAULT 'complete'",
+    "ALTER TABLE scan_runs ADD COLUMN generation TEXT",
+    "ALTER TABLE scan_runs ADD COLUMN api_requests INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN api_weight INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN outcome_reason TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_generation TEXT",
     "ALTER TABLE follow_history ADD COLUMN last_followed_generation TEXT",

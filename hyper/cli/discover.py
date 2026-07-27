@@ -18,7 +18,7 @@ import threading
 from hyper import config, params, storage
 from hyper.discovery import frozen_audit, scanner
 from hyper.discovery import shadow_scan
-from hyper.ops import paper_reset, procman
+from hyper.ops import paper_reset, procman, scan_lock
 from hyper.util import now_iso
 
 
@@ -82,7 +82,13 @@ def _scan_ns():
 def _hours_since_last_scan(db):
     """Hours since the last COMPLETED scan (scan_runs.finished_at, UTC). Survives daemon restarts ->
     a restart never re-triggers a scan that already ran recently. 1e9 if never scanned."""
-    r = db.execute("SELECT MAX(finished_at) m FROM scan_runs").fetchone()
+    try:
+        r = db.execute(
+            "SELECT MAX(finished_at) m FROM scan_runs "
+            "WHERE COALESCE(kind,'complete')='complete'"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        r = db.execute("SELECT MAX(finished_at) m FROM scan_runs").fetchone()
     if not r or not r[0]:
         return 1e9
     try:
@@ -130,7 +136,7 @@ def _serve_observer_cmds(db):
         print(f"observer {action}: {'ok' if ok else 'FAIL ' + detail}", flush=True)
 
 
-def _serve_rescan(db):
+def _serve_rescan(db, db_path=config.DEFAULT_DB):
     """Always-on scan executor: runs a scan when the dashboard queues a `rescan`
     command or the configured automatic cadence is due. A single executor (never
     two scans at once) -> the observer's HL rate budget is never double-hit. No systemd timeout ->
@@ -155,7 +161,11 @@ def _serve_rescan(db):
                 cadence = _configure_scan_cadence(db, ns, manual=bool(pend))
                 why = f"command #{pend[0]}" if pend else "auto 72h complete candidate reevaluation"
                 print(f"-> running scan [{why}]", flush=True)
-                scanner.scan(db, ns)                 # consumes pending rescan(s) + writes progress/status
+                try:
+                    with scan_lock.acquire(db_path):
+                        scanner.scan(db, ns)         # consumes pending rescan(s) + writes progress/status
+                except scan_lock.ScanBusyError:
+                    print("scan daemon: another scanner run is active; retrying later", flush=True)
         except Exception as exc:  # noqa: BLE001
             print(f"scan daemon error: {exc}", flush=True)
             try:
@@ -218,6 +228,15 @@ def main() -> int:
     add_gate_args(s)
     s.add_argument("--no-harvest", action="store_true")
     s.add_argument("--full", dest="full_scan", action="store_true", help=argparse.SUPPRESS)
+
+    cr = sub.add_parser(
+        "challenger-refresh",
+        help="refresh the frozen Core/Challenger cohort and publish strict fixed-parameter membership",
+    )
+    cr.add_argument("--days", type=int, default=14)
+    cr.add_argument("--max-pages", type=int, default=5)
+    cr.add_argument("--workers", type=int, default=4)
+    cr.add_argument("--scan-interval", type=float, default=8.0)
 
     w = sub.add_parser("watchlist", help="show our curated tiny leaderboard")
     w.add_argument("--top", type=int, default=40)
@@ -302,14 +321,33 @@ def main() -> int:
         _start_adaptive_pace(args.db, args.scan_interval)  # observer live → slow trickle; idle → full speed
         params.apply_scanner_params(db, args)           # UI-tuned gates/harvest override CLI defaults
         try:
-            scanner.scan(db, args)                      # the observer (when up) keeps its own fast pace
+            with scan_lock.acquire(args.db):
+                scanner.scan(db, args)                  # the observer (when up) keeps its own fast pace
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
         except Exception as exc:  # noqa: BLE001
             n = scanner.ensure_watchlist_current(db)
             scanner._set_scan_progress(db, state="idle", stage="error")
             scanner._set_scanner_proc(db, "idle", {"last_error": str(exc)[:300], "active": n})
             raise
+    elif args.cmd == "challenger-refresh":
+        ns = _scan_ns()
+        ns.days = args.days
+        ns.max_pages = args.max_pages
+        ns.workers = args.workers
+        ns.scan_interval = args.scan_interval
+        config.MIN_POST_INTERVAL = args.scan_interval
+        _start_adaptive_pace(args.db, args.scan_interval)
+        params.apply_scanner_params(db, ns)
+        try:
+            with scan_lock.acquire(args.db):
+                result = scanner.refresh_challengers(db, ns)
+        except scan_lock.ScanBusyError:
+            scanner.record_challenger_refresh_skip(db, "skipped_scan_busy")
+            result = {"status": "skipped", "reason": "skipped_scan_busy"}
+        print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "serve-rescan":
-        _serve_rescan(db)
+        _serve_rescan(db, args.db)
     elif args.cmd == "watchlist":
         scanner.watchlist(db, args.top)
     elif args.cmd == "harvest":

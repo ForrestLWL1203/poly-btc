@@ -15,6 +15,8 @@ const SVC_LABEL = {
   observe: ["跟单引擎", "复制目标交易(纸面)"],
   scan: ["扫描器", "发现优质钱包"],
   timer: ["周期扫描", "周一/周四完整重评"],
+  challenger_scan: ["Challenger 重评", "固定候选池轻量重评分"],
+  challenger_timer: ["Challenger 周期", "周二/三/五/六/日 04:00"],
 };
 
 function App() {
@@ -306,7 +308,7 @@ function Ops({ target, onBack, say }) {
   };
 
   const units = target.mode === "local" ? ["dashboard", "observe", "scan"]
-    : ["dashboard", "observe", "scan", "timer"];
+    : ["dashboard", "observe", "scan", "timer", "challenger_scan", "challenger_timer"];
 
   return (
     <React.Fragment>
@@ -337,12 +339,14 @@ function Ops({ target, onBack, say }) {
         {st && st.services && units.map((u) => {
           const state = st.services[u] || "unknown";
           const on = state === "active" || state === "running";
+          const schedule = st.timerSchedule && st.timerSchedule[u];
           return (
             <div className="svc" key={u}>
-              <div className="nm">{SVC_LABEL[u][0]}<small>{SVC_LABEL[u][1]}</small></div>
+              <div className="nm">{SVC_LABEL[u][0]}<small>{SVC_LABEL[u][1]}
+                {schedule && schedule.next ? ` · 下次 ${schedule.next}` : ""}</small></div>
               <span className={"stt " + (on ? "active" : state === "n/a" ? "inactive" : state)}>{state}</span>
               <div className="spacer" />
-              {u !== "timer" && <React.Fragment>
+              {!u.endsWith("timer") && <React.Fragment>
                 {!on && <button className="btn btn-sm" disabled={busy} onClick={() => doAction("start", u)}>启动</button>}
                 {on && <button className="btn btn-sm" disabled={busy} onClick={() => doAction("stop", u)}>停止</button>}
                 <button className="btn btn-sm" disabled={busy} onClick={() => doAction("restart", u)}>重启</button>
