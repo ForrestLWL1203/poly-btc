@@ -86,9 +86,13 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner_keys[:4], [
                 "HARVEST_MIN_ACCT",
                 "HARVEST_WEEK_VLM_MIN",
-                "HARVEST_WEEK_PNL_MIN",
-                "HARVEST_MONTH_PNL_MIN",
+                "EXCLUDE_HFT",
+                "inactive_days",
             ])
+            self.assertNotIn("HARVEST_WEEK_PNL_MIN", scanner_keys)
+            self.assertNotIn("HARVEST_MONTH_PNL_MIN", scanner_keys)
+            self.assertNotIn("HARVEST_ALL_PNL_MIN", scanner_keys)
+            self.assertNotIn("HARVEST_PERP_PNL_SHARE_MIN", scanner_keys)
             self.assertNotIn("HARVEST_WEEK_ROI_MIN", scanner_keys)
             self.assertNotIn("HARVEST_MONTH_ROI_MIN", scanner_keys)
             self.assertNotIn("HARVEST_ALL_ROI_MIN", scanner_keys)

@@ -2,10 +2,6 @@ import { ParamRow } from "./ParamRow.jsx";
 const BASIC_SCANNER_KEYS = new Set([
   "HARVEST_MIN_ACCT",
   "HARVEST_WEEK_VLM_MIN",
-  "HARVEST_WEEK_PNL_MIN",
-  "HARVEST_MONTH_PNL_MIN",
-  "HARVEST_ALL_PNL_MIN",
-  "HARVEST_PERP_PNL_SHARE_MIN",
   "EXCLUDE_HFT",
   "inactive_days",
   "CORE_INITIAL_MAX_N",
