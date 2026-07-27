@@ -679,7 +679,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         with patch.object(obs, "_open_position") as open_position:
             obs._dispatch_fill(
                 "0xaaa", "ETH", ("0xaaa", "ETH"), now_ms(),
-                1.0, 0.0, 1.0, 200.0, False, 9001,
+                10.0, 0.0, 10.0, 200.0, False, 9001,
             )
 
         open_position.assert_called_once()
@@ -714,7 +714,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             with patch.object(obs, "_open_position") as open_position:
                 obs._dispatch_fill(
                     "0xaaa", "BTC", ("0xaaa", "BTC"), now_ms(),
-                    1.0, 0.0, 1.0, 109.0, False, 125,
+                    30.0, 0.0, 30.0, 109.0, False, 125,
                 )
             open_position.assert_called_once()
 
@@ -812,9 +812,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                     "BTC",
                     ("0xaaa", "BTC"),
                     1_000,
-                    1,
+                    30,
                     0,
-                    1,
+                    30,
                     100,
                     False,
                     1,
@@ -825,6 +825,76 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         finally:
             asyncio.set_event_loop(None)
             loop.close()
+
+    def test_source_open_waits_for_floor_then_carries_open_oid_slices(self):
+        db = self._db()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs.vol["BTC"] = 0.04
+            obs.target_sector_policy = {
+                "0xaaa": {"allowed": ["crypto"], "crypto": {"allow": True}}
+            }
+            key = ("0xaaa", "BTC")
+
+            with patch.object(obs, "_open_position") as open_position:
+                obs._dispatch_fill(
+                    "0xaaa", "BTC", key, 1_000,
+                    1.0, 0.0, 1.0, 1_000.0, False, 77,
+                )
+                open_position.assert_not_called()
+                self.assertEqual(obs.taker.pending_source_opens[key]["source_notional"], 1_000.0)
+
+                obs._dispatch_fill(
+                    "0xaaa", "BTC", key, 1_050,
+                    2.0, 1.0, 3.0, 1_000.0, False, 77,
+                )
+
+            open_position.assert_called_once()
+            self.assertEqual(open_position.call_args.kwargs["source_open_oids"], {77})
+            self.assertNotIn(key, obs.taker.pending_source_opens)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_same_source_open_oid_extension_is_not_dispatched_as_add(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 1_000.0, 3.0)
+            ep.update(
+                addr="0xaaa",
+                coin="BTC",
+                master_open_px=1_000.0,
+                master_peak=3.0,
+                master_current=3.0,
+                master_first_notl=3_000.0,
+                source_open_oids={77},
+                seen_oids={77},
+                add_orders={},
+            )
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            with patch.object(obs, "_apply_add", new_callable=AsyncMock) as apply_add:
+                obs._dispatch_fill(
+                    "0xaaa", "BTC", ("0xaaa", "BTC"), 1_100,
+                    1.0, 3.0, 4.0, 1_000.0, False, 77,
+                )
+                await asyncio.sleep(0)
+
+            apply_add.assert_not_awaited()
+            self.assertEqual(ep["master_first_notl"], 4_000.0)
+            persisted = db.execute(
+                "SELECT master_open_notional FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()[0]
+            self.assertEqual(persisted, 4_000.0)
+
+        asyncio.run(run())
 
     def test_restart_prunes_legacy_profitable_but_keeps_losing_cooldown(self):
         async def run():
@@ -879,9 +949,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                     "BTC",
                     ("0xaaa", "BTC"),
                     1_000,
-                    1,
+                    30,
                     0,
-                    1,
+                    30,
                     100,
                     False,
                     1,

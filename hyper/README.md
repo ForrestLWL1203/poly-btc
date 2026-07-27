@@ -67,10 +67,12 @@ Wallet quality and funded-account membership are separate decisions.
 - Rough Copy uses one continuously compounded `$10,000` comparison account and requires both dynamic 30d and
   rolling-7d profitability, seven closed Copy Episodes over 30 days, 60% Copy wins, 70% open follow and
   complete valuation. The rolling-7d window has no minimum closed-Episode count.
-  Historical replay assumes liquidity was executable; opens below the tier minimum notional are excluded from
-  the effective denominator. A sliced source order whose first fill is below that floor remains pending and is
-  retried against the growing source position; it is excluded only if the whole episode never becomes
-  executable. Live Observer liquidity skips remain separate audit evidence.
+  Historical replay assumes liquidity was executable. A source flat-to-open lifecycle remains pending until its
+  cumulative position reaches the tier minimum notional and is excluded only if it never does. Once confirmed,
+  our open is sized independently by our margin, leverage and capacity rules instead of being capped by source
+  notional. Further fills from the confirming opening OID extend the opening anchor and are never treated as
+  smart adds; later source adds keep the existing smart-add behavior. Live Observer liquidity skips remain
+  separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
 - The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
   activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a

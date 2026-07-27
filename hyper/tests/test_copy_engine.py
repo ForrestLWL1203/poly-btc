@@ -233,7 +233,7 @@ class CopyEngineTests(unittest.TestCase):
             master_notional=100_000.0, master_leverage=10.0, params=fixed_floor,
         ).reason, "small_notl")
 
-    def test_open_sizing_caps_leverage_to_master_and_master_notional(self):
+    def test_open_sizing_caps_leverage_but_not_notional_to_master(self):
         params = OpenSizingParams(
             stable_sigma_max=0.05,
             high_sigma_min=0.10,
@@ -265,9 +265,9 @@ class CopyEngineTests(unittest.TestCase):
         self.assertTrue(plan.ok)
         self.assertEqual(plan.tier, "stable")
         self.assertEqual(plan.leverage, 5.0)
-        self.assertEqual(plan.notional, 500.0)
-        self.assertEqual(plan.margin, 100.0)
-        self.assertEqual(plan.size, 5.0)
+        self.assertEqual(plan.notional, 750.0)
+        self.assertEqual(plan.margin, 150.0)
+        self.assertEqual(plan.size, 7.5)
         self.assertAlmostEqual(plan.liq_px, 80.0)
 
     def test_open_sizing_never_exceeds_market_max_leverage(self):

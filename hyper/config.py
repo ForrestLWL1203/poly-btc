@@ -144,7 +144,8 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #   leverage = the σ-tier's LEV CAP (v10: σ-scaled RISK_BUDGET/σ dropped as redundant with tier cap +
 #              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV; the caller
 #              further caps to the master's own leverage and the stock cap. σ still selects the tier.
-#   notional = margin × leverage. (Capped at the master's notional — moot at our size, kept as safety.)
+#   notional = margin × leverage. The source's cumulative flat→open position must first cross the tier floor,
+#              but once confirmed it does not cap our independently sized notional.
 STABLE_SIGMA_MAX = 0.05     # compatibility/audit only: BTC is always stable-tier; non-BTC never enters stable.
 HIGH_SIGMA_MIN   = 0.09     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
 STABLE_MARGIN_MIN_PCT = 0.020  # legacy snapshot compatibility; firepower-line shrinking is retired
@@ -156,9 +157,10 @@ HIGH_MARGIN_PCT   = 0.020
 STABLE_LEV_CAP = 25.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 25x)
 MID_LEV_CAP    = 10.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 4.0        # ...for HIGH-VOL-tier coins
-# PER-TIER minimum order notional: skip a copy whose FINAL notional (after the master-notl cap) is below
-# its tier's floor — a too-small position isn't worth the fee/latency drag (esp. on calm coins where the
-# whole edge is a fraction of a %). Per-tier only — the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
+# PER-TIER minimum order notional: the source's cumulative flat→open position and our final independently
+# sized open must each reach the tier floor. A sub-floor source open remains pending while it grows; once
+# confirmed, later adds use the existing smart-add rules without another hard notional gate. Per-tier only —
+# the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
 STABLE_MIN_NOTIONAL = 2500.0   # BTC only: below this it's not worth opening
 MID_MIN_NOTIONAL    = 1000.0   # mid-vol coins
 HIGH_MIN_NOTIONAL   = 250.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)

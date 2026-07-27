@@ -62,6 +62,7 @@ class Book:
         self.wallet_initial_balance = config.PAPER_WALLET_INITIAL_BALANCE
         self.protected_reserve = max(0.0, self.wallet_initial_balance - self.initial_balance)
         self.open_ep: dict = {}             # (addr,coin) -> position state
+        self.pending_source_opens: dict = {}  # sub-floor flat→open lifecycles, retried as the source grows
         self._acct_lock = None              # created lazily inside the running loop (sync inspection creates none)
         # Lifetime dashboard counters. Initialized once from history at startup, then maintained per action/close
         # so the 5-minute stats snapshot never rescans the ever-growing action/position tables.
@@ -644,7 +645,7 @@ class Observer:
         rows = self.db.execute(
             "SELECT pos_id,addr,coin,side,master_open_ms,master_open_px,master_peak_sz,leverage,"
             "margin,notional,entry_px,size,rem_size,peak_size,liq_px,realized_pnl,add_count,mae_pct,num_actions,"
-            "master_margin,master_leverage,master_current_sz,smart_tp_armed,smart_tp_stage,"
+            "master_margin,master_leverage,master_open_notional,master_current_sz,smart_tp_armed,smart_tp_stage,"
             f"smart_tp_peak_pnl,smart_tp_base_size,smart_tp_master_anchor FROM {book.pos_table} "
             "WHERE status='open'").fetchall()
         loaded = 0
@@ -652,7 +653,7 @@ class Observer:
         reconstructed_peaks = []
         for r in rows:
             (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, peak_sz, liq, rpnl, adds, mae, na,
-             m_mgn, m_lev, master_current, smart_armed, smart_stage, smart_peak, smart_base,
+             m_mgn, m_lev, master_open_notional, master_current, smart_armed, smart_stage, smart_peak, smart_base,
              smart_master_anchor) = r
             rem = rem or 0.0
             sz = sz or 0.0
@@ -691,6 +692,13 @@ class Observer:
                 (pid,),
             ).fetchone()
             exact_last_target_add_px = f(last_followed_add[0]) if last_followed_add else mpx
+            source_open_oids = {
+                o for (o,) in self.db.execute(
+                    f"SELECT DISTINCT master_oid FROM {book.act_table} "
+                    "WHERE pos_id=? AND action='open'",
+                    (pid,),
+                ).fetchall() if o is not None
+            }
             book.open_ep[(addr, coin)] = {
                 "pos_id": pid, "addr": addr, "coin": coin,
                 "side": side, "sign": 1 if side == "long" else -1,
@@ -704,7 +712,12 @@ class Observer:
                 # Reconstruct smart-add anchors from the immutable action audit.  Using total margin/add_count
                 # is wrong when proportional smart adds differ from ADD_FRAC and can oversize after restart.
                 "first_margin": exact_first_margin,
-                "master_first_notl": (m_mgn or 0.0) * (m_lev or 0.0),
+                "master_first_notl": (
+                    master_open_notional
+                    if master_open_notional is not None
+                    else (m_mgn or 0.0) * (m_lev or 0.0)
+                ),
+                "source_open_oids": source_open_oids,
                 "last_target_add_px": exact_last_target_add_px,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False, "add_orders": {},
                 "smart_tp_armed": bool(smart_armed),
@@ -1606,12 +1619,22 @@ class Observer:
         book = self.taker
         transition = classify_fill_transition(pos0, pos1)
         target_in_position = abs(pos1) >= config.FLAT
+        if not target_in_position:
+            book.pending_source_opens.pop(key, None)
         cooldown_until = self._manual_close_cooldown_until(addr, coin) if target_in_position else None
         side = "long" if pos1 > 0 else "short"
         risk_block = self._new_exposure_block_reason(addr, coin, book, side=side) if target_in_position else None
         ep = book.open_ep.get(key)
         if ep is None:
-            if transition in ("open", "flip") and target_in_position:
+            pending = book.pending_source_opens.get(key)
+            if pending and pending.get("side") != side:
+                book.pending_source_opens.pop(key, None)
+                pending = None
+            opening_lifecycle = (
+                transition in ("open", "flip")
+                or (pending is not None and transition == "add")
+            )
+            if opening_lifecycle and target_in_position:
                 if cooldown_until:
                     self._tally("skip_manual_cooldown", book)
                 elif risk_block:
@@ -1619,14 +1642,20 @@ class Observer:
                 elif (addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                         and not self.paused           # dashboard pause = no new opens (existing keep to close)
                         and self._sector_allowed(addr, coin)):
-                    self._open_position(addr, coin, t, px, pos1, oid, book)
+                    self._start_or_defer_source_open(
+                        addr, coin, key, t, px, pos1, oid, book, pending=pending,
+                    )
                 else:
                     self._tally("skip_paused" if self.paused else
                                 "skip_heldoff" if addr in self.held_off else
                                 "skip_sector_disabled" if not self._sector_allowed(addr, coin) else
                                 "skip_midway", book)
-            elif abs(pos1) < config.FLAT:
+            elif not target_in_position:
                 pass                                    # target closed a position we never held — nothing to copy
+            elif pending is not None:
+                # A sub-floor source opening may shrink before growing.  It remains one pending lifecycle,
+                # not a midway miss, and only same-direction growth can cross the opening floor.
+                pending.update(last_ms=t, source_notional=abs(pos1) * px)
             else:                                       # a fresh open we chose not to take → tally the reason
                 self._tally("skip_manual_cooldown" if cooldown_until else
                             f"skip_{risk_block}" if risk_block else
@@ -1653,6 +1682,21 @@ class Observer:
             # notional and counts/follows the oid only once.  Old already-finalised orders loaded from
             # disk remain ignored, preserving restart idempotence.
             add_orders = ep.setdefault("add_orders", {})
+            if oid is not None and oid in ep.get("source_open_oids", ()):
+                source_open_notional = f(ep.get("master_first_notl")) + abs(signed) * px
+                ep["master_first_notl"] = source_open_notional
+                if abs(pos1) > 0:
+                    ep["master_open_px"] = source_open_notional / abs(pos1)
+                self.db.execute(
+                    f"UPDATE {book.pos_table} SET master_open_px=?,master_peak_sz=?,"
+                    "master_current_sz=?,master_open_notional=? WHERE pos_id=?",
+                    (
+                        ep["master_open_px"], ep["master_peak"], abs(pos1),
+                        source_open_notional, ep["pos_id"],
+                    ),
+                )
+                self.db.commit()
+                return
             if oid is not None and oid in ep.get("seen_oids", ()) and oid not in add_orders:
                 return
             if self.paused or addr in self.held_off or not self._sector_allowed(addr, coin):
@@ -1664,6 +1708,35 @@ class Observer:
         else:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
                                                    closing=abs(pos1) < config.FLAT, liq=liq, oid=oid, book=book))
+
+    def _start_or_defer_source_open(self, addr, coin, key, t, px, pos1, oid, book=None, *,
+                                    pending=None, forced_entry_px=None):
+        """Confirm cumulative source opening size before our independent sizing surface runs."""
+        book = book or self.taker
+        side = "long" if pos1 > 0 else "short"
+        tier = self._tier(self._sigma(coin), coin)
+        source_notional = abs(pos1) * px
+        source_floor = f(self.tier_min_notional.get(tier))
+        if source_notional < source_floor:
+            item = book.pending_source_opens.setdefault(key, {
+                "side": side,
+                "first_ms": t,
+                "oids": set(),
+            })
+            if oid is not None:
+                item["oids"].add(oid)
+            item.update(last_ms=t, source_notional=source_notional)
+            self._tally("pending_source_open", book)
+            return None
+        opening_oids = set((pending or {}).get("oids") or ())
+        if oid is not None:
+            opening_oids.add(oid)
+        book.pending_source_opens.pop(key, None)
+        return self._open_position(
+            addr, coin, t, px, pos1, oid, book,
+            forced_entry_px=forced_entry_px,
+            source_open_oids=opening_oids,
+        )
 
     async def _apply_flip(self, addr, coin, ep, t, master_px, pos0, pos1, liq, oid,
                           book=None, forced_px=None):
@@ -1681,9 +1754,13 @@ class Observer:
         if risk_block:
             self._tally(f"skip_{risk_block}", book)
             return
-        self._open_position(addr, coin, t, master_px, pos1, oid, book, forced_entry_px=forced_px)
+        self._start_or_defer_source_open(
+            addr, coin, (addr, coin), t, master_px, pos1, oid, book,
+            forced_entry_px=forced_px,
+        )
 
-    def _open_position(self, addr, coin, t, px, pos1, oid, book=None, forced_entry_px=None):
+    def _open_position(self, addr, coin, t, px, pos1, oid, book=None, forced_entry_px=None,
+                       source_open_oids=None):
         book = book or self.taker
         side = "long" if pos1 > 0 else "short"
         risk_block = self._new_exposure_block_reason(addr, coin, book, side=side)
@@ -1708,7 +1785,10 @@ class Observer:
               "open_oid": oid, "leverage": 0.0, "margin": 0.0, "notional": 0.0,
               "entry_px": None, "size": 0.0, "rem_size": 0.0, "liq_px": 0.0, "realized_pnl": 0.0,
               "add_count": 0, "entries_ready": asyncio.Event(), "lock": asyncio.Lock(), "mae": 0.0,
-              "num_actions": 0, "gap": False, "seen_oids": {oid}, "add_orders": {},
+              "num_actions": 0, "gap": False,
+              "seen_oids": ({oid} if oid is not None else set()) | set(source_open_oids or ()),
+              "source_open_oids": ({oid} if oid is not None else set()) | set(source_open_oids or ()),
+              "add_orders": {},
               "smart_tp_armed": False, "smart_tp_stage": 0, "smart_tp_peak_pnl": 0.0,
               "smart_tp_base_size": 0.0, "smart_tp_master_anchor": 0.0,
               "smart_tp_inflight": False}  # order accumulators
@@ -1881,13 +1961,17 @@ class Observer:
             liq_px = plan.liq_px
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
                       size=size, rem_size=size, peak_size=size, liq_px=liq_px,
-                      master_first_notl=master_notl,      # 目标首仓名义额 → smart 加仓比例基准
+                      master_first_notl=target_notl,      # confirmed source opening → smart-add ratio anchor
                       last_target_add_px=master_px)       # 波动闸只比较目标成交价；我方BBO只负责执行/PnL
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
-                "liq_px=?,master_leverage=?,master_margin=?,master_open_px=COALESCE(?,master_open_px) "
+                "liq_px=?,master_leverage=?,master_margin=?,master_open_notional=?,"
+                "master_open_px=COALESCE(?,master_open_px) "
                 "WHERE pos_id=?",
-                (lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn, m_entry, ep["pos_id"]))
+                (
+                    lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn,
+                    target_notl, m_entry, ep["pos_id"],
+                ))
             book.balance -= abs(size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.commit()

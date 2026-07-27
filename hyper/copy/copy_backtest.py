@@ -783,6 +783,10 @@ class Backtest:
                 self._retry_pending_small_open(
                     addr, coin, x.get("time"), px, pos1, oid, x,
                 )
+            elif key in self.pending_small_opens and abs(pos1) >= config.FLAT:
+                # A reduction while the source is still building a sub-floor opening is neither a new
+                # opportunity nor a midway miss.  Keep the one pending lifecycle until it grows or closes.
+                return
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
@@ -798,6 +802,15 @@ class Backtest:
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if transition == "add":
             add_orders = ep.setdefault("add_orders", {})
+            if oid is not None and oid in ep.get("source_open_oids", ()):
+                # More fills from the source order that confirmed this opening extend the opening anchor.
+                # They are not adds and must not consume smart-add spacing/capacity.
+                source_open_notional = f(ep.get("master_first_notl")) + abs(signed) * px
+                ep["master_first_notl"] = source_open_notional
+                ep["target_initial_notl"] = source_open_notional
+                if abs(pos1) > 0:
+                    ep["master_open_px"] = source_open_notional / abs(pos1)
+                return
             if oid is not None and oid in ep["seen_oids"] and oid not in add_orders:
                 return
             # Do not consume an order id until an add was actually copied.  HL
@@ -831,7 +844,7 @@ class Backtest:
         }
         self.open_events.append(event)
         key = (addr, coin)
-        if outcome == "skip_small_notl":
+        if outcome == "skip_small_notl" and event.get("source_below_minimum"):
             self.pending_small_opens[key] = event
         else:
             self.pending_small_opens.pop(key, None)
@@ -955,6 +968,12 @@ class Backtest:
             self.skip_reasons["skip_wallet_stock_side_position_cap"] += 1
             return
         target_notl = abs(pos1) * px
+        source_floor = f(self.tier_min_notional.get(tier))
+        if target_notl < source_floor:
+            self._last_open_detail["source_below_minimum"] = True
+            self.skip_reasons["skip_small_notl"] += 1
+            return
+        self._last_open_detail["source_below_minimum"] = False
         risk_equity = self.risk_equity()
         avail = self.risk_available()
         existing_coin = sum(
@@ -1054,6 +1073,7 @@ class Backtest:
             "gross_pnl": 0.0,
             "realized_net": -fee,
             "seen_oids": ({oid} if oid is not None else set()),
+            "source_open_oids": ({oid} if oid is not None else set()),
             "add_orders": {},
             "observed_add_oids": set(),
             "missed_add_oids": set(),

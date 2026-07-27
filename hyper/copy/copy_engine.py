@@ -540,10 +540,10 @@ def plan_open_sizing(
                               room, deploy_room, risk_available, wanted_margin, master_notional,
                               risk_equity, sizing_equity, margin_equity)
 
+    # The source position proves that an entry signal is economically meaningful; it does not size our
+    # account.  Callers gate the source's cumulative opening notional before reaching this planner.  Once
+    # confirmed, our notional is owned entirely by our margin/leverage/capacity surface.
     notional = margin * lev
-    if master_notional > 0 and notional > master_notional:
-        notional = master_notional
-        margin = notional / lev if lev else margin
     if notional < params.tier_min_notional[tier]:
         reason = "wallet_sector_side_full" if group_limited else "wallet_full" if wallet_limited else "small_notl"
         return OpenSizingPlan(False, reason, tier, side, margin_pct, margin, notional, lev, 0.0, 0.0,

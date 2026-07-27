@@ -306,8 +306,9 @@ class CopyBacktestTests(unittest.TestCase):
     def test_sliced_open_retries_when_target_position_grows_past_notional_floor(self):
         fills = [
             fill(1_000, "BTC", "A", 1, 0, 1_000.0, 1),
-            fill(1_050, "BTC", "A", 100, -1, 1_000.0, 1),
-            fill(2_000, "BTC", "B", 101, -101, 990.0, 2),
+            fill(1_050, "BTC", "A", 2, -1, 1_000.0, 1),
+            fill(1_100, "BTC", "A", 1, -3, 1_000.0, 1),
+            fill(2_000, "BTC", "B", 4, -4, 990.0, 2),
         ]
 
         result = run_backtest(
@@ -324,6 +325,9 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertIsNone(result["skip_reasons"].get("skip_small_notl"))
         self.assertIsNone(result["skip_reasons"].get("skip_midway"))
         self.assertTrue(result["open_events"][0]["retriedAfterSmallSlice"])
+        self.assertEqual(result["open_events"][0]["master_notional"], 3_000.0)
+        self.assertGreater(result["open_events"][0]["copy_notional"], 3_000.0)
+        self.assertEqual(result["target_adds"], 0)
         self.assertGreater(result["positions"][0]["net_pnl"], 0)
 
     def test_coin_blacklist_skips_new_open(self):

@@ -671,6 +671,7 @@ CREATE TABLE IF NOT EXISTS copy_position (
     status         TEXT,                 -- open / closed / gap_closed / liquidated / tail_closed
     master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
     master_leverage REAL, master_margin REAL,     -- target's leverage + margin captured AT OPEN
+    master_open_notional REAL,                    -- cumulative source opening order used as add-ratio anchor
     leverage REAL, margin REAL, notional REAL,    -- our sizing (margin = 2% of available at open)
     entry_px REAL, size REAL, rem_size REAL,       -- our fill px, cumulative followed size, remaining
     peak_size REAL,                                -- historical peak live size; tail exits use rem/peak
@@ -1258,6 +1259,7 @@ _MIGRATIONS = (
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_position ADD COLUMN peak_size REAL",
     "ALTER TABLE copy_position ADD COLUMN master_current_sz REAL",
+    "ALTER TABLE copy_position ADD COLUMN master_open_notional REAL",
     "ALTER TABLE copy_position ADD COLUMN smart_tp_armed INTEGER DEFAULT 0",
     "ALTER TABLE copy_position ADD COLUMN smart_tp_stage INTEGER DEFAULT 0",
     "ALTER TABLE copy_position ADD COLUMN smart_tp_peak_pnl REAL DEFAULT 0",
