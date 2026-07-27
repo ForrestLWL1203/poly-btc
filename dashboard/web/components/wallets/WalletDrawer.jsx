@@ -67,8 +67,9 @@ export function WalletDrawer({ address, onClose }) {
   const historicalSkipDetails = (copyExecution.historicalAudit && copyExecution.historicalAudit.skipDetails) || [];
   const officialEvidence = (((d && d.officialPerpEvidence) || {}).windows || {}).officialPerp30d || {};
   const officialIsShort = officialEvidence.historyTier === "short_history_7d";
+  const officialFundedDays = officialEvidence.fundedCoverageDays ?? officialEvidence.positiveCoverageDays;
   const officialRoiLabel = officialIsShort
-    ? `官方 Perp 最近7日 ROI（${fNum(officialEvidence.positiveCoverageDays, 0)}日历史）`
+    ? `官方 Perp 短历史 ROI（累计${fNum(officialFundedDays, 0)}日有资金运行）`
     : `官方 Perp ${officialEvidence.windowDays != null ? fNum(officialEvidence.windowDays, 0) : "约30"}日 ROI`;
   const copyRows = copyWindowRows(scoreBreakdown);
   const copy30 = copyRows.find(([label]) => label === "30 天");

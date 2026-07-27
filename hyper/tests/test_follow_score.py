@@ -203,6 +203,15 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(recent["firstFailure"], "strict_copy_7d_return_below_floor")
         self.assertAlmostEqual(recent["returns"]["7"], 599 / 20_000)
 
+    def test_seven_day_closed_count_is_not_an_admission_gate(self):
+        result = judge(
+            "strict",
+            copy_bt_7d_closed_n=0,
+            copy_bt_7d_net_pnl=300,
+            copy_bt_7d_window_start_equity=10_000,
+        )
+        self.assertTrue(result["coreEligible"])
+
     def test_copy_win_rate_open_rate_and_sample_are_independent(self):
         self.assertEqual(
             judge("rough", copy_bt_closed_n=6)["firstFailure"],

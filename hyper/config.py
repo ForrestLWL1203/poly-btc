@@ -335,7 +335,6 @@ COPY_BT_WARMUP_DAYS = 7     # 每个窗口额外预热7天，恢复窗口开始�
 COPY_BT_RECENT_DAYS = (14, 7)  # 近期确认窗口: 达到近期最低样本数后,近期 copy 亏损也不进 active
 COPY_BT_MIN_CLOSED = 7      # copy资格最低已平样本；不足则不进入Active
 COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 门槛线性缩放
-COPY_BT_MIN_CLOSED_7D = 5   # 7d 少于 5 笔太容易被单笔噪声带偏,不作为盈利/亏损硬结论
 
 # Historical fills do not expose the source order's actual margin/leverage. Strict Copy deliberately
 # simulates our configured leverage ceiling, so a small number of proxy liquidations is a sizing signal,

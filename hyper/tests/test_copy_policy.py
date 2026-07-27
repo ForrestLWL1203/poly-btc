@@ -21,6 +21,7 @@ class CopyPolicyTests(unittest.TestCase):
         self.assertEqual(policy.official_perp_short_history_days, 7)
         self.assertEqual(policy.official_perp_boundary_max_gap_hours, 36)
         self.assertEqual(policy.rough_min_closed_30d, 7)
+        self.assertEqual(policy.min_closed(7), 0)
         self.assertEqual(policy.rough_min_win_rate, 0.60)
         self.assertEqual(policy.core_min_dynamic_copy_return_30d, 0.10)
         self.assertEqual(policy.core_min_dynamic_copy_return_7d, 0.03)

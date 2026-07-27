@@ -55,14 +55,18 @@ Wallet quality and funded-account membership are separate decisions.
 
 - Raw recall requires useful account size/activity and positive 7/30-day PnL. Before fill download, official
   Portfolio requires positive 30-day Perp PnL, at least 60% Perp-profit share and at least 20% dynamic Perp
-  return. Incomplete official history is Challenger evidence, never a fabricated return failure.
+  return. Official return compounds each positive-equity operating segment on that segment's own starting
+  capital: a full withdrawal and later redeposit preserves both sides of the evidence without dividing by
+  zero or treating the transfer as a loss. A real loss to zero remains a -100% segment and cannot be erased
+  by redeposit. Incomplete official history is Challenger evidence, never a fabricated return failure.
 - Deep fills provide two source-wallet lanes: at least ten complete 30-day Episodes with at least 70% source
   wins, or 7–9 Episodes with at least 85% wins, 30% official Perp return and positive recent-7d source PnL.
   Both require a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
   at 70% of gross profit; then the remaining body must still win at least 70% and not lose money. At most the
   best 40 source wallets receive rough replay.
 - Rough Copy uses one continuously compounded `$10,000` comparison account and requires both dynamic 30d and
-  rolling-7d profitability, seven closed Copy Episodes, 60% Copy wins, 70% open follow and complete valuation.
+  rolling-7d profitability, seven closed Copy Episodes over 30 days, 60% Copy wins, 70% open follow and
+  complete valuation. The rolling-7d window has no minimum closed-Episode count.
   Historical replay assumes liquidity was executable; opens below the tier minimum notional are excluded from
   the effective denominator. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.

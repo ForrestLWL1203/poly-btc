@@ -187,11 +187,11 @@ gross profit, the remainder must itself have at least 70% wins and non-negative 
 cover HFT, systematic slicing, grid/heavy DCA, spot hedging, extreme concurrency and opaque markets.
 
 At most 40 source-qualified wallets receive a fills-only rough Copy replay. Rough admission requires positive
-dynamic 30d and rolling-7d net returns, at least seven closed Copy Episodes, at least 60% Copy wins, at least 70%
-open follow and complete valuation. Return magnitude ranks the rough pool instead of vetoing it before parameter
-tuning. The persisted rough-pass decision and score are the frozen hand-off into formation; formation must not
-silently rebuild that gate from a partial Profile projection. At most the first 16 proceed to unified tuning and
-strict path replay.
+dynamic 30d and rolling-7d net returns, at least seven closed Copy Episodes over 30 days, at least 60% Copy wins,
+at least 70% open follow and complete valuation. The rolling-7d window has no minimum closed-Episode count.
+Return magnitude ranks the rough pool instead of vetoing it before parameter tuning. The persisted rough-pass
+decision and score are the frozen hand-off into formation; formation must not silently rebuild that gate from a
+partial Profile projection. At most the first 16 proceed to unified tuning and strict path replay.
 
 Final per-wallet strict admission requires dynamic 30d/rolling-7d returns of 10%/3%, at least 60% Copy wins,
 at least 70% open follow rate, activity within 72 hours, complete data/valuation/sector/path evidence and no more
@@ -219,6 +219,11 @@ continuous 30-day equity path; there are no weekly-fold or per-close-density adm
 failures remain explicit Challenger evidence. Four or more proxy liquidations on the final tuned 30-day surface
 remain Challenger evidence; the active pre-tune surface cannot reject a wallet that parameter optimization may
 repair.
+
+Official Portfolio return treats zero-equity transfer gaps as funding boundaries rather than trading resets.
+Each positive-equity operating segment uses its own starting capital and the segment returns are compounded.
+A full withdrawal and later redeposit therefore preserve prior trading evidence without creating a zero
+denominator. A genuine PnL loss to zero remains a -100% segment, so redeposit cannot wash out liquidation loss.
 
 Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme concurrency (default maximum 15),
 and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only

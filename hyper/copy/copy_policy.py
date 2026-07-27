@@ -11,7 +11,7 @@ from hyper import config
 
 COPY_POLICY_PARAM_KEYS = (
     "COPY_BT_DAYS", "COPY_BT_RECENT_DAYS", "COPY_BT_MIN_CLOSED", "COPY_BT_MIN_CLOSED_14D",
-    "COPY_BT_MIN_CLOSED_7D", "SOURCE_QUALITY_MAX_N", "SOURCE_MIN_EPISODES_30D",
+    "SOURCE_QUALITY_MAX_N", "SOURCE_MIN_EPISODES_30D",
     "SOURCE_MIN_EPISODE_WIN_RATE", "SOURCE_TOP3_CONCENTRATION_TRIGGER",
     "SOURCE_LOW_FREQ_MIN_EPISODES_30D", "SOURCE_LOW_FREQ_MAX_EPISODES_30D",
     "SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", "SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN",
@@ -33,7 +33,6 @@ class CopyPolicy:
     windows: tuple[int, ...]
     min_closed_30d: int
     min_closed_14d: int
-    min_closed_7d: int
     source_quality_max_n: int
     source_min_episodes_30d: int
     source_min_episode_win_rate: float
@@ -67,7 +66,7 @@ class CopyPolicy:
 
     def min_closed(self, days: int) -> int:
         if int(days) <= 7:
-            return self.min_closed_7d
+            return 0
         if int(days) <= 14:
             return self.min_closed_14d
         return self.min_closed_30d
@@ -92,7 +91,6 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         windows=windows,
         min_closed_30d=int(_value(values, "COPY_BT_MIN_CLOSED", 7) or 0),
         min_closed_14d=int(_value(values, "COPY_BT_MIN_CLOSED_14D", 5) or 0),
-        min_closed_7d=int(_value(values, "COPY_BT_MIN_CLOSED_7D", 5) or 0),
         source_quality_max_n=int(_value(values, "SOURCE_QUALITY_MAX_N", 40) or 0),
         source_min_episodes_30d=int(_value(values, "SOURCE_MIN_EPISODES_30D", 10) or 0),
         source_min_episode_win_rate=float(_value(

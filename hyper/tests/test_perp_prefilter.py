@@ -161,7 +161,7 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(passed.passed)
         self.assertEqual(failed.reason, "official_perp_return_below_floor:month")
 
-    def test_fifteen_day_wallet_uses_latest_complete_seven_day_return(self):
+    def test_fifteen_day_wallet_uses_all_observed_funded_history(self):
         short = _daily_window(
             15,
             pnl_by_day={day: 500 / 7 for day in range(9, 16)},
@@ -176,7 +176,7 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.reason, "perp_prefilter_passed_short_history")
         self.assertEqual(evidence["historyTier"], "short_history_7d")
-        self.assertAlmostEqual(evidence["windowDays"], 7.0)
+        self.assertAlmostEqual(evidence["windowDays"], 15.0)
         self.assertAlmostEqual(evidence["return"], .05)
         self.assertAlmostEqual(evidence["minimumReturn"], .05)
 
@@ -241,7 +241,68 @@ class PerpPrefilterTests(unittest.TestCase):
             "short_history_7d",
         )
 
-    def test_short_sparse_history_without_reliable_seven_day_boundary_is_deferred(self):
+    def test_temporary_full_withdrawal_compounds_funded_segments(self):
+        pnl_history = []
+        equity_history = []
+        pnl = 0.0
+        for day in range(31):
+            if 1 <= day <= 10:
+                pnl += 100.0
+            elif 14 <= day <= 30:
+                pnl += 200.0
+            pnl_history.append([day * 86400_000, str(pnl)])
+            equity = 0.0 if day in {11, 12} else (10_000.0 if day <= 10 else 20_000.0)
+            equity_history.append([day * 86400_000, str(equity)])
+        window = {
+            "pnlHistory": pnl_history,
+            "accountValueHistory": equity_history,
+        }
+
+        evidence = perp_prefilter.official_perp_month_return(window)
+
+        self.assertTrue(evidence["evidenceSufficient"])
+        self.assertEqual(evidence["historyTier"], "full_history")
+        self.assertEqual(evidence["fundedSegmentCount"], 2)
+        self.assertEqual(evidence["fundingResetCount"], 1)
+        self.assertAlmostEqual(evidence["fundedCoverageDays"], 28.0)
+        self.assertAlmostEqual(evidence["return"], (1.10 * 1.17) - 1.0)
+
+    def test_redeposit_uses_each_segments_own_capital_base(self):
+        window = {
+            "pnlHistory": [
+                [0, "0"], [8 * 86400_000, "100"], [9 * 86400_000, "100"],
+                [10 * 86400_000, "100"], [30 * 86400_000, "10100"],
+            ],
+            "accountValueHistory": [
+                [0, "1000"], [8 * 86400_000, "1100"], [9 * 86400_000, "0"],
+                [10 * 86400_000, "100000"], [30 * 86400_000, "110000"],
+            ],
+        }
+
+        evidence = perp_prefilter.official_perp_month_return(window)
+
+        self.assertTrue(evidence["evidenceSufficient"])
+        self.assertAlmostEqual(evidence["return"], .21)
+        self.assertLess(evidence["return"], 1.0)
+
+    def test_liquidation_to_zero_cannot_be_repaired_by_redeposit(self):
+        window = {
+            "pnlHistory": [
+                [0, "0"], [10 * 86400_000, "0"], [11 * 86400_000, "-10000"],
+                [13 * 86400_000, "-10000"], [30 * 86400_000, "-7000"],
+            ],
+            "accountValueHistory": [
+                [0, "10000"], [10 * 86400_000, "10000"], [11 * 86400_000, "0"],
+                [13 * 86400_000, "10000"], [30 * 86400_000, "13000"],
+            ],
+        }
+
+        evidence = perp_prefilter.official_perp_month_return(window)
+
+        self.assertTrue(evidence["evidenceSufficient"])
+        self.assertAlmostEqual(evidence["return"], -1.0)
+
+    def test_short_sparse_history_uses_exact_observed_endpoints(self):
         sparse = {
             "pnlHistory": [[0, "0"], [15 * 86400_000, "500"]],
             "accountValueHistory": [[0, "10000"], [15 * 86400_000, "10500"]],
@@ -252,8 +313,10 @@ class PerpPrefilterTests(unittest.TestCase):
             share_min=0.1,
         )
 
-        self.assertTrue(result.deferred)
-        self.assertEqual(result.reason, "boundary_sample_gap")
+        self.assertTrue(result.passed)
+        self.assertAlmostEqual(
+            result.windows["officialPerp30d"]["windowDays"], 15.0,
+        )
 
     def test_leveraged_volume_does_not_affect_leaderboard_decision(self):
         def row(volume):

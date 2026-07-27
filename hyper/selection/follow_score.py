@@ -73,9 +73,10 @@ def _official_return_context(metrics: Mapping, policy) -> dict:
             _num(evidence.get("windowDays"))
             if evidence.get("windowDays") is not None else None
         ),
-        "positiveCoverageDays": (
-            _num(evidence.get("positiveCoverageDays"))
-            if evidence.get("positiveCoverageDays") is not None else None
+        "fundedCoverageDays": (
+            _num(evidence.get("fundedCoverageDays", evidence.get("positiveCoverageDays")))
+            if evidence.get("fundedCoverageDays", evidence.get("positiveCoverageDays")) is not None
+            else None
         ),
     }
 

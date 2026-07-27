@@ -767,7 +767,7 @@ class ScannerWatchlistTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "copy_backtest_loss")
 
-    def test_copy_backtest_gate_records_but_allows_thin_recent_window_loss(self):
+    def test_copy_backtest_gate_rejects_recent_loss_without_a_close_count_exception(self):
         m = {}
         ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
@@ -781,12 +781,12 @@ class ScannerWatchlistTests(unittest.TestCase):
                             copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
         )
 
-        self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "copy_backtest_loss_7d")
         self.assertEqual(m["copy_bt_7d_net_pnl"], -3.0)
         self.assertEqual(m["copy_bt_7d_closed_n"], 1)
 
-    def test_copy_backtest_gate_does_not_treat_two_7d_closes_as_enough_sample(self):
+    def test_copy_backtest_gate_rejects_recent_loss_regardless_of_close_count(self):
         m = {}
         ok, reason = scanner_copy_bt.apply_copy_bt_gate(
             m,
@@ -800,8 +800,8 @@ class ScannerWatchlistTests(unittest.TestCase):
                             copy_bt_min_closed=7, copy_bt_min_net_pnl=0.0),
         )
 
-        self.assertTrue(ok)
-        self.assertEqual(reason, "ok")
+        self.assertFalse(ok)
+        self.assertEqual(reason, "copy_backtest_loss_7d")
         self.assertEqual(m["copy_bt_7d_closed_n"], 2)
 
     def test_sector_copy_gate_keeps_wallet_when_crypto_copy_wins_and_stock_loses(self):

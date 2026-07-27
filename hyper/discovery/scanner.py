@@ -839,8 +839,6 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
     closed_n = int(primary.get("closed_n") or 0)
     if not by_days or evidence.issubset({"", "no_fills", "no_open_events"}):
         evidence_status = "missing"
-    elif closed_n < load_copy_policy().min_closed_7d:
-        evidence_status = "thin"
     else:
         evidence_status = "qualified"
     evidence_days = len({
@@ -1734,9 +1732,6 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     usable = []
     for days, result in (windows or {}).items():
         if not result:
-            continue
-        closed = int(result.get("closed_n") or 0)
-        if closed < max(1, load_copy_policy().min_closed_7d):
             continue
         usable.append((int(days), result))
     if not usable:

@@ -102,6 +102,28 @@ def _at_boundary(
     return value, "interpolated"
 
 
+def _funded_segments(
+    equity: list[tuple[int, float]],
+    start_ms: int,
+    end_ms: int,
+) -> list[tuple[int, int]]:
+    """Return positive-equity operating segments, closing each one at its first zero sample."""
+    segments = []
+    segment_start = None
+    for stamp, value in equity:
+        if stamp < start_ms or stamp > end_ms:
+            continue
+        if value > 0.0 and segment_start is None:
+            segment_start = stamp
+        elif value <= 0.0 and segment_start is not None:
+            if stamp > segment_start:
+                segments.append((segment_start, stamp))
+            segment_start = None
+    if segment_start is not None and end_ms > segment_start:
+        segments.append((segment_start, end_ms))
+    return segments
+
+
 def official_perp_month_return(
     window: dict | None,
     *,
@@ -134,90 +156,103 @@ def official_perp_month_return(
             "rawStartMs": raw_start_ms, "endMs": end_ms,
         }
 
-    # A leading zero is normally an account's initial funding boundary, not evidence that its later
-    # Perp trading is invalid. Start after the latest non-positive sample so a later reset can never be
-    # crossed. Every observed equity sample in the accepted coverage is therefore strictly positive.
-    last_nonpositive_ms = max(
-        (stamp for stamp, value in equity if raw_start_ms <= stamp <= end_ms and value <= 0.0),
-        default=None,
-    )
-    if last_nonpositive_ms is None:
-        positive_start_ms = raw_start_ms
-    else:
-        positive_start_ms = next(
-            (
-                stamp for stamp, value in equity
-                if last_nonpositive_ms < stamp <= end_ms and value > 0.0
-            ),
-            None,
-        )
-        if positive_start_ms is None:
-            return {
-                "version": "official-perp-observed-return-v2",
-                "evidenceSufficient": False, "reason": "history_under_7d",
-                "rawStartMs": raw_start_ms, "endMs": end_ms,
-                "positiveCoverageDays": 0.0,
-            }
-
-    positive_coverage_days = (end_ms - positive_start_ms) / DAY_MS
+    # Portfolio PnL is deposit-adjusted. A temporary full withdrawal therefore closes one funded segment
+    # without creating a loss, and a later deposit starts another segment on its own capital base. Compound
+    # those segment returns instead of either (a) discarding all pre-withdrawal evidence or (b) dividing
+    # post-deposit profit by an obsolete pre-withdrawal balance. A genuine liquidation remains visible as
+    # the PnL loss at the zero-equity endpoint and cannot be repaired by a later deposit.
+    funded_segments = _funded_segments(equity, raw_start_ms, end_ms)
+    funded_coverage_ms = sum(end - start for start, end in funded_segments)
+    funded_coverage_days = funded_coverage_ms / DAY_MS
     long_days = max(1, int(long_history_days))
     short_days = max(1, min(int(short_history_days), long_days))
-    if positive_coverage_days >= long_days:
-        start_ms = positive_start_ms
+    if funded_coverage_days >= long_days:
+        selected_segments = funded_segments
         history_tier = "full_history"
         minimum_return = float(min_return_30d)
-    elif positive_coverage_days >= short_days:
-        start_ms = end_ms - short_days * DAY_MS
+    elif funded_coverage_days >= short_days:
+        # Use all observed funded segments for a young/re-funded wallet. Selecting an artificial trailing
+        # seven funded days can cut through a sparse transfer boundary and invent a zero-equity denominator.
+        selected_segments = funded_segments
         history_tier = "short_history_7d"
         minimum_return = float(min_return_7d)
     else:
         return {
-            "version": "official-perp-observed-return-v2",
+            "version": "official-perp-funded-segments-v3",
             "evidenceSufficient": False, "reason": "history_under_7d",
             "rawStartMs": raw_start_ms, "endMs": end_ms,
-            "positiveCoverageStartMs": positive_start_ms,
-            "positiveCoverageDays": positive_coverage_days,
+            "positiveCoverageStartMs": funded_segments[0][0] if funded_segments else None,
+            "positiveCoverageDays": funded_coverage_days,
+            "fundedCoverageDays": funded_coverage_days,
+            "fundedSegmentCount": len(funded_segments),
+            "fundingResetCount": max(0, len(funded_segments) - 1),
             "minimumHistoryDays": short_days,
         }
 
     max_gap_ms = max(1, int(float(max_boundary_gap_hours) * 3_600_000))
-    pnl_start, pnl_start_source = _at_boundary(pnl, start_ms, max_gap_ms=max_gap_ms)
-    pnl_end, pnl_end_source = _at_boundary(pnl, end_ms, max_gap_ms=max_gap_ms)
-    start_equity, equity_source = _at_boundary(
-        equity, start_ms, max_gap_ms=max_gap_ms, positive=True,
-    )
-    reason = next(
-        (
-            value for value in (pnl_start_source, pnl_end_source, equity_source)
-            if value in {"boundary_sample_gap", "zero_start_equity"}
-        ),
-        None,
-    )
-    sufficient = bool(
-        pnl_start is not None and pnl_end is not None
-        and start_equity is not None and start_equity > 0.0
-    )
-    net_pnl = (pnl_end - pnl_start) if sufficient else None
+    segment_results = []
+    boundary_reason = None
+    compounded_factor = 1.0
+    net_pnl = 0.0
+    for segment_start, segment_end in selected_segments:
+        pnl_start, pnl_start_source = _at_boundary(
+            pnl, segment_start, max_gap_ms=max_gap_ms,
+        )
+        pnl_end, pnl_end_source = _at_boundary(
+            pnl, segment_end, max_gap_ms=max_gap_ms,
+        )
+        start_equity, equity_source = _at_boundary(
+            equity, segment_start, max_gap_ms=max_gap_ms, positive=True,
+        )
+        reason = next(
+            (
+                value for value in (pnl_start_source, pnl_end_source, equity_source)
+                if value in {"boundary_sample_gap", "zero_start_equity"}
+            ),
+            None,
+        )
+        if reason or pnl_start is None or pnl_end is None or not start_equity:
+            boundary_reason = reason or "boundary_sample_gap"
+            break
+        segment_pnl = pnl_end - pnl_start
+        segment_return = segment_pnl / start_equity
+        compounded_factor *= max(0.0, 1.0 + segment_return)
+        net_pnl += segment_pnl
+        segment_results.append({
+            "startMs": segment_start,
+            "endMs": segment_end,
+            "days": (segment_end - segment_start) / DAY_MS,
+            "startEquity": start_equity,
+            "netPnl": segment_pnl,
+            "return": segment_return,
+            "boundarySource": {
+                "pnlStart": pnl_start_source,
+                "pnlEnd": pnl_end_source,
+                "startEquity": equity_source,
+            },
+        })
+    sufficient = not boundary_reason and len(segment_results) == len(selected_segments)
+    start_ms = selected_segments[0][0] if selected_segments else None
+    start_equity = segment_results[0]["startEquity"] if segment_results else None
     return {
-        "version": "official-perp-observed-return-v2",
+        "version": "official-perp-funded-segments-v3",
         "maxBoundaryGapHours": float(max_boundary_gap_hours),
         "evidenceSufficient": sufficient,
-        "reason": reason or ("passed" if sufficient else "boundary_sample_gap"),
+        "reason": boundary_reason or ("passed" if sufficient else "boundary_sample_gap"),
         "historyTier": history_tier,
         "rawStartMs": raw_start_ms,
-        "positiveCoverageStartMs": positive_start_ms,
-        "positiveCoverageDays": positive_coverage_days,
+        "positiveCoverageStartMs": funded_segments[0][0] if funded_segments else None,
+        "positiveCoverageDays": funded_coverage_days,
+        "fundedCoverageDays": funded_coverage_days,
+        "fundedSegmentCount": len(funded_segments),
+        "fundingResetCount": max(0, len(funded_segments) - 1),
         "startMs": start_ms, "endMs": end_ms,
-        "windowDays": (end_ms - start_ms) / DAY_MS,
+        "windowDays": sum(row["days"] for row in segment_results),
         "minimumReturn": minimum_return,
         "startEquity": start_equity,
-        "netPnl": net_pnl,
-        "return": (net_pnl / start_equity) if sufficient else None,
-        "boundarySource": {
-            "pnlStart": pnl_start_source,
-            "pnlEnd": pnl_end_source,
-            "startEquity": equity_source,
-        },
+        "netPnl": net_pnl if sufficient else None,
+        "return": (compounded_factor - 1.0) if sufficient else None,
+        "segments": segment_results,
     }
 
 
