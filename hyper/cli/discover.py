@@ -231,7 +231,7 @@ def main() -> int:
 
     cr = sub.add_parser(
         "challenger-refresh",
-        help="refresh the frozen Core/Challenger cohort and publish strict fixed-parameter membership",
+        help="refresh the frozen cohort; retune and recertify before publishing any Core change",
     )
     cr.add_argument("--days", type=int, default=14)
     cr.add_argument("--max-pages", type=int, default=5)

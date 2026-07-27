@@ -77,9 +77,10 @@ Wallet quality and funded-account membership are separate decisions.
   individual and receives exactly one conservative path-complete shared replay before publication.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
-  five days. Daily refresh uses the active parameters and can publish Core promotion/removal immediately, but
-  never runs the parameter grid. There is no promotion delay, tenure, old-Core retention, star priority or
-  minimum count.
+  five days. Daily refresh first certifies with the active parameters. If the proposed Core changes, it runs
+  parameter optimization and repeats strict certification before publishing membership and parameters
+  together; an unchanged Core skips the grid. There is no promotion delay, tenure, old-Core retention, star
+  priority or minimum count.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
   search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
@@ -116,11 +117,12 @@ Production schedules all jobs in `Asia/Shanghai`:
 The daily job clones the last complete generation's Leaderboard staging rows; it does not access the Leaderboard
 API or discover a new wallet. It refreshes official Portfolio evidence, cached-fill deltas, positions, valuation
 and required market paths, then reruns source gates, true 72-hour open/flip activity, canonical 30/14/7 Copy,
-strict Top16 individual replay and strict shared-account replay with `retune=False`. Missing or incomplete
-37-day caches are deferred to the next complete run. A current-Core data/path failure prevents publication;
-an individual Challenger failure remains eligible for the next daily attempt because the pool stays anchored to
-the last successful complete generation. Daily runs never prune discovery caches and do not reset the periodic
-parameter-retune age.
+strict Top16 individual replay and strict shared-account replay. The first pass uses `retune=False`; a proposed
+Core addition or removal forces a parameter-grid pass and a second strict certification before atomic
+publication. Missing or incomplete 37-day caches are deferred to the next complete run. A current-Core
+data/path failure prevents publication; an individual Challenger failure remains eligible for the next daily
+attempt because the pool stays anchored to the last successful complete generation. Daily runs never prune
+discovery caches, and an unchanged-Core run does not reset the periodic parameter-retune age.
 
 Previously known wallets remain history-incremental, and only complete discovery runs bootstrap or repair 37
 days. The Dashboard rescan button queues the same complete reevaluation; changing scanner settings only persists

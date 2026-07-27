@@ -5082,9 +5082,40 @@ def refresh_challengers(db, p) -> dict:
             )
             _prefetch_selection_paths(db, preview, now_ms, generation_id)
 
-        formation = form_quality_prefix(
+        fixed_formation = form_quality_prefix(
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
+        )
+        fixed_core = {
+            str(addr or "").lower()
+            for addr in (fixed_formation.get("selected") or ())
+            if addr
+        }
+        membership_retune_triggered = fixed_core != previous_core
+        formation = fixed_formation
+        if membership_retune_triggered:
+            _set_scan_progress(
+                db, stage="challenger_membership_retune",
+                candidates_scanned=len(workset), candidates_total=len(workset),
+            )
+            formation = form_quality_prefix(
+                db, generation_id, stamp, now_ms,
+                retune=True, force_retune=True,
+            )
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="membership_retune", status="ok",
+                reason="core_membership_change_requires_retune",
+                payload={
+                    "previousCore": len(previous_core),
+                    "fixedSurfaceCore": len(fixed_core),
+                    "added": len(fixed_core - previous_core),
+                    "removed": len(previous_core - fixed_core),
+                },
+            )
+            db.commit()
+        _assert_automatic_formation_tuned(
+            formation, required=membership_retune_triggered,
         )
         _assert_margin_equity_snapshot(db, p.margin_equity_pct)
         publication_stamp = now_iso()
@@ -5126,7 +5157,11 @@ def refresh_challengers(db, p) -> dict:
         )
         active_strategy = strategy_revision.create_revision(
             db, generation_id, source="challenger_daily",
-            reason="challenger_daily_strict_membership",
+            reason=(
+                "challenger_daily_membership_retune"
+                if membership_retune_triggered
+                else "challenger_daily_strict_membership"
+            ),
             validation={
                 **(marginal.search_meta or {}),
                 "marketSnapshot": market_validation,
@@ -5152,7 +5187,11 @@ def refresh_challengers(db, p) -> dict:
         pipeline_audit._insert_event(
             db, stamp=stamp, source="challenger_daily",
             stage="selection_summary", status="ok",
-            reason="challenger_daily_strict_membership",
+            reason=(
+                "challenger_daily_membership_retune"
+                if membership_retune_triggered
+                else "challenger_daily_strict_membership"
+            ),
             payload={
                 "generation": generation_id,
                 "baseFullGeneration": base_generation,
@@ -5161,6 +5200,7 @@ def refresh_challengers(db, p) -> dict:
                     1 for row in selection_rows if row.role == selection.CHALLENGER
                 ),
                 "coreAdded": len(added_core), "coreRemoved": len(removed_core),
+                "membershipRetuneTriggered": membership_retune_triggered,
                 "strategyRevision": active_strategy["revision"],
             },
         )
@@ -5175,7 +5215,9 @@ def refresh_challengers(db, p) -> dict:
                 1 for row in selection_rows if row.role == selection.CHALLENGER
             ),
             "coreAdded": len(added_core), "coreRemoved": len(removed_core),
-            "retuned": False, "marketSnapshot": market_snapshot,
+            "retuned": membership_retune_triggered,
+            "membershipRetuneTriggered": membership_retune_triggered,
+            "marketSnapshot": market_snapshot,
             "marketValidation": market_validation, "marketScopeAudit": scope_audit,
             **rest.request_stats(),
         }

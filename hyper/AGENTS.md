@@ -134,10 +134,12 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   `python3 -m hyper.cli.discover --db ... challenger-refresh` refreshes only the Core + Challenger cohort frozen
   by the latest successful complete discovery generation, plus current Core and open-position owners. It clones
   that generation's Leaderboard snapshot for integrity but never calls the Leaderboard API, discovers wallets,
-  bootstraps/repairs 37-day history, prunes discovery caches or runs a parameter grid. It uses the active
-  strategy surface (`retune=False`), replays the bounded Top16 and shared account strictly, and atomically
-  publishes symmetric Core promotion/removal with a new strategy revision. A current-Core data/path failure
-  retains the previous generation; a deferred Challenger remains in the frozen pool for the next daily run.
+  bootstraps/repairs 37-day history or prunes discovery caches. It first uses the active strategy surface
+  (`retune=False`) to replay the bounded Top16 and shared account strictly. If that fixed-surface result would
+  change Core membership, it must run the parameter grid, repeat strict individual/shared certification on the
+  tuned surface, and atomically publish the resulting membership, parameters and strategy revision. An
+  unchanged Core does not retune or reset tune age. A current-Core data/path failure retains the previous
+  generation; a deferred Challenger remains in the frozen pool for the next daily run.
 - Complete scans, manual scans and Challenger refreshes share `data/run/scanner.lock`. A busy daily job records
   `skipped_scan_busy` and exits successfully. Workset and fill transport remain separate: complete worksets are
   `all`; daily worksets are `frozen_challenger_pool`; fill transport is delta unless a complete run repairs it.

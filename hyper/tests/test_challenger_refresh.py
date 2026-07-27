@@ -110,7 +110,13 @@ class ChallengerRefreshTests(unittest.TestCase):
                 "qualifications": {}, "scores": {}, "policies": {},
                 "walletMetrics": {}, "scoreDetails": {},
                 "replayParamsHash": "fixed",
-                "search": {"retuned": False, "robustAllowedMemberships": [["0xchallenge"]]},
+                "search": {
+                    "retuned": True,
+                    "robustAllowedMemberships": [["0xchallenge"]],
+                    "tunePoolCount": 1,
+                    "formationTuneEligible": True,
+                    "formationTuneReason": "proposal_selected",
+                },
             }
             rows = [
                 selection.SelectionRow("0xchallenge", "core", follow_score=.9),
@@ -217,7 +223,10 @@ class ChallengerRefreshTests(unittest.TestCase):
         ])
         self.assertEqual(run, ("challenger_refresh", 1, 0))
         self.assertEqual(profile_one.call_count, 2)
-        self.assertFalse(form.call_args.kwargs["retune"])
+        self.assertEqual(form.call_count, 2)
+        self.assertFalse(form.call_args_list[0].kwargs["retune"])
+        self.assertTrue(form.call_args_list[1].kwargs["retune"])
+        self.assertTrue(form.call_args_list[1].kwargs["force_retune"])
 
     def test_current_core_data_error_aborts_and_retains_generation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -323,7 +332,7 @@ class ChallengerRefreshTests(unittest.TestCase):
                 stack.enter_context(patch.object(
                     scanner, "_selection_prefetch_candidates", return_value=[],
                 ))
-                stack.enter_context(patch.object(
+                form = stack.enter_context(patch.object(
                     scanner, "form_quality_prefix", return_value=formation,
                 ))
                 stack.enter_context(patch.object(
@@ -362,6 +371,8 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertEqual(result["status"], "published")
         self.assertEqual(deferred, "deferred_data_error")
         self.assertIn("0xchallenge", next_pool)
+        self.assertEqual(form.call_count, 1)
+        self.assertFalse(form.call_args.kwargs["retune"])
 
 
 if __name__ == "__main__":
