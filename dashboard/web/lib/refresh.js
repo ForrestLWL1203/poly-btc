@@ -1,5 +1,8 @@
 const { useState, useEffect, useCallback, useRef } = React;
 
+const STREAM_STALE_MS = 5000;
+const STREAM_RETRY_MS = 1200;
+
 export function usePolling(load, intervalMs, enabled = true) {
   useEffect(() => {
     if (!enabled) return;
@@ -51,13 +54,59 @@ function useDashboardStream(token) {
 
   useEffect(() => {
     if (!token || typeof EventSource === "undefined") return;
-    let es;
-    try {
-      es = new EventSource("/api/stream?token=" + encodeURIComponent(token));
-      es.onmessage = (e) => { try { setLive(JSON.parse(e.data)); setStreamOk(true); } catch (_e) {} };
-      es.onerror = () => setStreamOk(false);
-    } catch (_e) { setStreamOk(false); }
-    return () => { if (es) es.close(); };
+    let es = null;
+    let reconnectTimer = null;
+    let stopped = false;
+    let lastMessageAt = 0;
+
+    const scheduleReconnect = () => {
+      if (stopped || reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, STREAM_RETRY_MS);
+    };
+
+    const disconnect = (source) => {
+      if (source && source !== es) return;
+      setStreamOk(false);
+      if (es) es.close();
+      es = null;
+      scheduleReconnect();
+    };
+
+    const connect = () => {
+      if (stopped) return;
+      if (es) es.close();
+      lastMessageAt = Date.now();
+      try {
+        const source = new EventSource("/api/stream?token=" + encodeURIComponent(token));
+        es = source;
+        source.onmessage = (e) => {
+          if (source !== es) return;
+          try {
+            setLive(JSON.parse(e.data));
+            lastMessageAt = Date.now();
+            setStreamOk(true);
+          } catch (_e) {}
+        };
+        source.onerror = () => disconnect(source);
+      } catch (_e) {
+        disconnect();
+      }
+    };
+
+    connect();
+    const watchdog = setInterval(() => {
+      if (es && Date.now() - lastMessageAt > STREAM_STALE_MS) disconnect(es);
+    }, 1000);
+
+    return () => {
+      stopped = true;
+      clearInterval(watchdog);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
   }, [token]);
 
   return { live, streamOk };
