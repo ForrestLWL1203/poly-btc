@@ -33,6 +33,11 @@ def active_revision_id(db) -> Optional[str]:
 
 def params_snapshot(db, values: Optional[dict] = None) -> tuple[dict, str]:
     snapshot = dict(values if values is not None else params.load_follow(db))
+    # Compatibility-only field for old revisions. The retired firepower-shrink line must always equal the
+    # real deployment cap, including operator-owned revisions which do not pass through auto-tune.
+    snapshot["DEPLOY_FULL_PCT"] = float(
+        snapshot.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
+    )
     scanner_values = params.load_category(db, "scanner")
     snapshot.update({
         key: scanner_values[key] if key in scanner_values else getattr(config, key)
