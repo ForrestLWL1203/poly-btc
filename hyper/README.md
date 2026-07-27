@@ -71,8 +71,9 @@ Wallet quality and funded-account membership are separate decisions.
   cumulative position reaches the tier minimum notional and is excluded only if it never does. Once confirmed,
   our open is sized independently by our margin, leverage and capacity rules instead of being capped by source
   notional. Further fills from the confirming opening OID extend the opening anchor and are never treated as
-  smart adds; later source adds keep the existing smart-add behavior. Live Observer liquidity skips remain
-  separate audit evidence.
+  smart adds. A later add OID may wait for cumulative slices to become actionable, but its first Copy execution
+  seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
+  not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
 - The composite score is ranking-only: profitability 40%, source/Copy win stability 30%, copyability 20% and
   activity 10%. There is no score floor. Only the first 16 enter unified tuning and K-line strict replay; a

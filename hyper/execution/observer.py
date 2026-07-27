@@ -1677,10 +1677,9 @@ class Observer:
             return
         ep["master_peak"] = max(ep["master_peak"], abs(pos1))
         if transition == "add":
-            # One target order may fill in many slices over tens of seconds.  Keep feeding slices from
-            # an order that is still being accumulated; ``_apply_add`` sizes from the cumulative order
-            # notional and counts/follows the oid only once.  Old already-finalised orders loaded from
-            # disk remain ignored, preserving restart idempotence.
+            # One target order may fill in many slices over tens of seconds. Accumulate it until the first
+            # actionable Copy execution, then seal the OID. Later source slices only update source exposure;
+            # they can never send a second Copy add. Old finalised orders loaded from disk remain idempotent.
             add_orders = ep.setdefault("add_orders", {})
             if oid is not None and oid in ep.get("source_open_oids", ()):
                 source_open_notional = f(ep.get("master_first_notl")) + abs(signed) * px
@@ -1698,6 +1697,18 @@ class Observer:
                 self.db.commit()
                 return
             if oid is not None and oid in ep.get("seen_oids", ()) and oid not in add_orders:
+                m_now = abs(pos1)
+                if m_now > 0 and px and ep.get("master_open_px"):
+                    m_prev = abs(pos1 - signed)
+                    ep["master_open_px"] = (
+                        m_prev * ep["master_open_px"] + abs(signed) * px
+                    ) / m_now
+                    self.db.execute(
+                        f"UPDATE {book.pos_table} SET master_open_px=?,master_peak_sz=?,"
+                        "master_current_sz=? WHERE pos_id=?",
+                        (ep["master_open_px"], ep["master_peak"], abs(pos1), ep["pos_id"]),
+                    )
+                    self.db.commit()
                 return
             if self.paused or addr in self.held_off or not self._sector_allowed(addr, coin):
                 self._tally("skip_paused_add" if self.paused else
@@ -1992,11 +2003,9 @@ class Observer:
         """Master scaled in -> we follow (average down/up) up to MAX_ADDS, each add committing
         first_margin × ADD_FRAC (half the first-open by default) at the current price; avg entry + liq_px recompute.
 
-        Hyperliquid can fill one order as many same-oid slices.  Smart mode therefore keeps an order-level
-        accumulator: tiny early slices may remain below the minimum order size, while later slices increase
-        the desired cumulative copy margin.  The oid consumes one add slot, but later slices can top that same
-        copied add up to the cumulative target ratio.  This prevents both slice-as-many-adds and the inverse
-        failure where a dust first fill caused the whole target order to be skipped.
+        Hyperliquid can fill one order as many same-oid slices. Smart mode keeps an order-level accumulator so
+        tiny early slices may wait until the aggregate price/size is actionable. The first successful Copy add
+        then seals the OID; later fills update source exposure but never top the Copy add up again.
         """
         book = book or self.taker
         async with ep["lock"]:
@@ -2005,6 +2014,26 @@ class Observer:
             except asyncio.TimeoutError:
                 pass
             if ep.get("entry_px") is None or (addr, coin) not in book.open_ep:
+                return False
+            # Several fill callbacks for one OID may be queued before the first async add acquires this lock.
+            # Re-check finality inside the lock so those queued slices cannot recreate the accumulator.
+            if (
+                oid is not None
+                and oid in ep.get("seen_oids", ())
+                and oid not in ep.setdefault("add_orders", {})
+            ):
+                m_now = abs(pos1)
+                if m_now > 0 and master_px and ep.get("master_open_px"):
+                    m_prev = abs(pos1 - signed)
+                    ep["master_open_px"] = (
+                        m_prev * ep["master_open_px"] + abs(signed) * master_px
+                    ) / m_now
+                    self.db.execute(
+                        f"UPDATE {book.pos_table} SET master_open_px=?,master_peak_sz=?,"
+                        "master_current_sz=? WHERE pos_id=?",
+                        (ep["master_open_px"], ep.get("master_peak", 0.0), abs(pos1), ep["pos_id"]),
+                    )
+                    self.db.commit()
                 return False
             ep["master_peak"] = max(ep.get("master_peak", 0.0), abs(pos1))
             # 源(目标)加权均价:每次目标加仓都把 master_open_px 更新为其 size 加权均价(此前只存首开价 →
@@ -2222,6 +2251,8 @@ class Observer:
             if order is not None:
                 order["followed_margin"] += add_margin
                 order["counted"] = True
+                if oid is not None:
+                    ep.setdefault("add_orders", {}).pop(oid, None)
             if oid is not None:
                 ep.setdefault("seen_oids", set()).add(oid)
             book.balance -= abs(add_size * px) * config.TAKER_FEE

@@ -233,6 +233,8 @@ Structural gates are sector-local. HFT, habitual grid/DCA, spot hedge, extreme c
 and uncopyable structures remain hard failures. Heavy-DCA uses a default threshold of more than 30 adds and only
 counts complete round trips; a cache-window episode that starts already open cannot hard-reject a wallet.
 Any complete Heavy-DCA violation rejects that sector and cannot be resurrected by a profitable Copy replay.
+Execution density is based on distinct source OIDs per Episode, never exchange fill fragments. One followed add
+OID may create at most one Copy add; later slices update source exposure without sending another order.
 
 There is no zero-liquidation rule and no historical maximum-drawdown admission threshold. Source fills do not
 disclose their true margin/leverage, so both values are conservative reconstructions at our leverage ceiling.

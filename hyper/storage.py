@@ -281,7 +281,7 @@ CREATE TABLE IF NOT EXISTS profile (
 );
 CREATE TABLE IF NOT EXISTS episode (
     addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, seq INTEGER DEFAULT 0, close_ms INTEGER,
-    hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER,
+    hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER, n_oids INTEGER,
     open_px REAL, close_px REAL, open_complete INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (addr, coin, open_ms, seq)
 );
@@ -1255,6 +1255,7 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN acct_value REAL",
     "ALTER TABLE follow_selection ADD COLUMN sector_policy_json TEXT",
     "ALTER TABLE episode ADD COLUMN open_complete INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE episode ADD COLUMN n_oids INTEGER",
     "ALTER TABLE copy_position ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_action ADD COLUMN strategy_revision_id TEXT",
     "ALTER TABLE copy_position ADD COLUMN peak_size REAL",
@@ -1416,7 +1417,7 @@ def _migrate_episode_seq(db: sqlite3.Connection) -> None:
         """
         CREATE TABLE episode (
             addr TEXT, coin TEXT, side TEXT, open_ms INTEGER, seq INTEGER DEFAULT 0, close_ms INTEGER,
-            hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER,
+            hold_s REAL, net_pnl REAL, fee REAL, max_notl REAL, n_fills INTEGER, n_oids INTEGER,
             open_px REAL, close_px REAL, open_complete INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (addr, coin, open_ms, seq)
         );
@@ -1424,10 +1425,13 @@ def _migrate_episode_seq(db: sqlite3.Connection) -> None:
     )
     seq_expr = "COALESCE(seq, 0)" if "seq" in names else "0"
     complete_expr = "COALESCE(open_complete, 1)" if "open_complete" in names else "1"
+    oids_expr = "n_oids" if "n_oids" in names else "NULL"
     db.execute(
         "INSERT OR IGNORE INTO episode "
-        "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px,open_complete) "
-        f"SELECT addr,coin,side,open_ms,{seq_expr},close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px,{complete_expr} "
+        "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,n_oids,"
+        "open_px,close_px,open_complete) "
+        f"SELECT addr,coin,side,open_ms,{seq_expr},close_ms,hold_s,net_pnl,fee,max_notl,n_fills,"
+        f"{oids_expr},open_px,close_px,{complete_expr} "
         "FROM episode_migrate_old"
     )
     db.execute("DROP TABLE episode_migrate_old")

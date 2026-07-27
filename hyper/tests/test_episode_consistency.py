@@ -31,6 +31,7 @@ class EpisodeConsistencyTests(unittest.TestCase):
             cols = [r[1] for r in migrated.execute("PRAGMA table_info(episode)").fetchall()]
             self.assertIn("seq", cols)
             self.assertIn("open_complete", cols)
+            self.assertIn("n_oids", cols)
             migrated.execute(
                 "INSERT INTO episode (addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -54,6 +55,7 @@ class EpisodeConsistencyTests(unittest.TestCase):
                 "fee": 0.1,
                 "max_notl": 100.0,
                 "n_fills": 1,
+                "n_oids": 1,
                 "open_px": 100.0,
                 "close_px": 101.0,
             },
@@ -67,6 +69,7 @@ class EpisodeConsistencyTests(unittest.TestCase):
                 "fee": 0.1,
                 "max_notl": 100.0,
                 "n_fills": 1,
+                "n_oids": 1,
                 "open_px": 101.0,
                 "close_px": 100.0,
             },
@@ -87,6 +90,7 @@ class EpisodeConsistencyTests(unittest.TestCase):
 
         self.assertEqual(len(episodes), 1)
         self.assertFalse(episodes[0]["open_complete"])
+        self.assertEqual(episodes[0]["n_oids"], 2)
         self.assertEqual(_episode_rows("0xabc", episodes)[0][-1], 0)
 
 

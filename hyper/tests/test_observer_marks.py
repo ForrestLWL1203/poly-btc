@@ -1187,6 +1187,12 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                                    -2.00028, -4.0, 65008.0, False, 99)
                 await asyncio.sleep(0.05)
 
+                # The OID is final after its first successful Copy add. A later exchange fill updates
+                # source exposure but cannot submit another Copy order.
+                obs._dispatch_fill("0xaaa", "BTC", ("0xaaa", "BTC"), t + 2, -1.0,
+                                   -4.0, -5.0, 65008.0, False, 99)
+                await asyncio.sleep(0.05)
+
             row = db.execute(
                 "SELECT add_count,margin,master_open_px,master_peak_sz FROM copy_position WHERE pos_id=?",
                 (pos_id,),
@@ -1197,12 +1203,14 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             ).fetchall()
             self.assertEqual(row["add_count"], 2)
             self.assertAlmostEqual(row["margin"], 1878.0, places=4)
-            self.assertAlmostEqual(row["master_open_px"], 64514.5, places=4)
-            self.assertEqual(row["master_peak_sz"], 4.0)
+            self.assertAlmostEqual(row["master_open_px"], 64613.2, places=4)
+            self.assertEqual(row["master_peak_sz"], 5.0)
             self.assertEqual(len(actions), 2)
             self.assertEqual(actions[0]["our_qty_delta"], 0)
             self.assertLess(actions[1]["our_qty_delta"], 0)
             self.assertIn(99, ep["seen_oids"])
+            self.assertNotIn(99, ep["add_orders"])
+            self.assertEqual(ep["master_current"], 5.0)
 
         asyncio.run(run())
 

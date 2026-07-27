@@ -209,13 +209,14 @@ def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
         ) if complete_eps else 0,
         "complete_episode_n": len(complete_eps),
         "grid_episode_n": sum(1 for e in complete_eps if e.get("n_adds", 0) > 3),
-        # ALGO-SLICER signature: use the p90 of per-episode fills, NOT the average (hidden by light episodes,
-        # e.g. avg 34 but a 294-fill round-trip) and NOT the max (a single outlier — a swing trader forced to
-        # slice ONE illiquid-stock fill shows max 114 but p90 15; killing it is a false positive). p90 fires
-        # only on SYSTEMATIC slicing: ≥10% of round-trips are fill-heavy → a real algo, not a one-off.
+        # Execution structure is order-based. Hyperliquid may split one large maker/taker order into dozens of
+        # fills, while Observer and replay deliberately consume that OID once. Raw fill density remains audit
+        # telemetry; only distinct source OIDs may trip the systematic algo-execution gate.
         "max_fills_ep": max((e.get("n_fills", 0) for e in eps), default=0),
         "p90_fills_ep": sorted(e.get("n_fills", 0) for e in eps)[min(len(eps) - 1, int(len(eps) * 0.9))] if eps else 0,
-        "heavy_fills_episode_n": sum(1 for e in eps if e.get("n_fills", 0) > 50),
+        "max_orders_ep": max((e.get("n_oids", 0) for e in eps), default=0),
+        "p90_orders_ep": sorted(e.get("n_oids", 0) for e in eps)[min(len(eps) - 1, int(len(eps) * 0.9))] if eps else 0,
+        "heavy_orders_episode_n": sum(1 for e in eps if e.get("n_oids", 0) > 50),
         # LOSS DISCIPLINE: the single worst losing round-trip ($, <=0). Caller divides by acct_value
         # -> worst_loss_pct. Small = cuts losses promptly (followable even at 50% win); large = holds
         # one loser to disaster (扛单到爆) — the thing to gate, distinct from cumulative max_drawdown.
@@ -255,16 +256,16 @@ def gates_structural(m: dict, p) -> tuple:
         # scale-in winner can be exactly where the target's edge lives and where our copy path diverges.
         if (m.get("max_adds_per_ep") or 0) > getattr(p, "max_single_adds", config.MAX_SINGLE_ADDS_PER_EP):
             return False, "heavy_dca"
-        # ALGO-EXECUTION / 拆单: works each round-trip via dozens–hundreds of sliced fills we can't mirror
-        # (noise + fees). Gate on the p90 per-episode fill count — SYSTEMATIC slicing. NOT the average (a slicer
-        # hides when its heavy round-trips are diluted by light ones: avg 34 but one round-trip = 294 fills), and
-        # NOT the max (a swing trader forced to slice ONE illiquid-stock fill has max 114 but p90 15 — killing it
-        # is a false positive, empirically confirmed). p90 > threshold ⇒ ≥10% of round-trips are fill-heavy = algo.
-        fills_limit = getattr(p, "max_fills_per_ep", 50)
-        heavy_fills_n = int(m.get("heavy_fills_episode_n") or 0)
+        # ALGO-EXECUTION: count distinct source orders, never exchange fill fragments. One large order can be
+        # matched in dozens of slices because the wallet is large or the book is thin; our OID state machine
+        # mirrors it at most once, so fill count is not structural uncopyability.
+        orders_limit = getattr(
+            p, "max_orders_per_ep", getattr(p, "max_fills_per_ep", 50),
+        )
+        heavy_orders_n = int(m.get("heavy_orders_episode_n") or 0)
         systematic_n = max(2, int(math.ceil((m.get("n_trades") or 0) * 0.10)))
-        if ((m.get("n_trades") or 0) >= 10 and heavy_fills_n >= systematic_n
-                and (m.get("p90_fills_ep") or 0) > fills_limit):
+        if ((m.get("n_trades") or 0) >= 10 and heavy_orders_n >= systematic_n
+                and (m.get("p90_orders_ep") or 0) > orders_limit):
             return False, "hft_uncopyable"
         # v9 装不下: 峰值同时持仓 > cap. Our equity-均额 sizing + deploy cap fits ~5-8 concurrent; a wallet that
         # habitually holds 15-20 at once (portfolio/basket trader) can only be copied as a RANDOM subset — we

@@ -31,6 +31,8 @@ def gate_metrics(**overrides):
         "median_adds_per_ep": 0,
         "max_adds_per_ep": 0,
         "p90_fills_ep": 5,
+        "p90_orders_ep": 5,
+        "heavy_orders_episode_n": 0,
         "max_concurrent": 4,
     }
     base.update(overrides)
@@ -107,15 +109,16 @@ class MetricsGateTests(unittest.TestCase):
             gate_params(grid_max_adds=3),
         )
         hft_ok, _ = metrics.gates_structural(
-            gate_metrics(n_trades=10, p90_fills_ep=100, heavy_fills_episode_n=1),
+            gate_metrics(n_trades=10, p90_fills_ep=100),
             gate_params(max_fills_per_ep=50),
         )
         self.assertTrue(grid_ok)
         self.assertTrue(hft_ok)
 
-    def test_systematic_fill_slicing_requires_two_or_more_heavy_episodes(self):
+    def test_systematic_distinct_order_slicing_requires_two_or_more_heavy_episodes(self):
         ok, reason = metrics.gates_structural(
-            gate_metrics(n_trades=10, p90_fills_ep=100, heavy_fills_episode_n=2),
+            gate_metrics(n_trades=10, p90_fills_ep=500, p90_orders_ep=100,
+                         heavy_orders_episode_n=2),
             gate_params(max_fills_per_ep=50),
         )
         self.assertFalse(ok)

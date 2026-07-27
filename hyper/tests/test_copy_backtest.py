@@ -475,6 +475,35 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["add_outcome_counts"]["noise_merged"], 0)
         self.assertGreater(result["copy_net_pnl"], 0)
 
+    def test_followed_add_oid_never_executes_again_for_later_slices(self):
+        common = [
+            fill(1, "ZEC", "B", 10, 0, 100.0, 1),
+            fill(2, "ZEC", "B", 1, 10, 99.9, 2),
+            fill(3, "ZEC", "B", 9, 11, 98.0, 2),
+        ]
+        once = run_backtest(
+            "0xabc",
+            [*common, fill(5, "ZEC", "A", 20, 20, 101.0, 3)],
+            sigmas={"ZEC": 0.10},
+        )
+        later_slice = run_backtest(
+            "0xabc",
+            [
+                *common,
+                fill(4, "ZEC", "B", 10, 20, 97.0, 2),
+                fill(5, "ZEC", "A", 30, 30, 101.0, 3),
+            ],
+            sigmas={"ZEC": 0.10},
+        )
+
+        self.assertEqual(later_slice["target_adds"], 1)
+        self.assertEqual(later_slice["followed_adds"], 1)
+        self.assertEqual(later_slice["add_outcome_counts"]["followed"], 1)
+        self.assertAlmostEqual(
+            later_slice["positions"][0]["margin"],
+            once["positions"][0]["margin"],
+        )
+
     def test_true_add_cap_block_is_not_classified_as_noise(self):
         fills = [
             fill(1, "ZEC", "B", 10, 0, 100.0, 1),

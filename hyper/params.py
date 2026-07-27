@@ -55,7 +55,7 @@ PARAM_SPEC = [
     ("max_single_adds",      "scanner", "hidden", "int",     "rescan", config.MAX_SINGLE_ADDS_PER_EP,
         "重DCA判定:单回合加仓上限(超过=偶发但不可复制的重仓摊价)", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
-    ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法拆单判定:单回合成交笔数 p90 上限(看p90不看峰值——只惩罚系统性拆单,不误杀薄盘股偶发拆单)", ""),
+    ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法执行判定:单回合不同OID数p90上限；同一OID的成交分片不重复计数", ""),
     ("MAX_CONCURRENT_POS",   "scanner", "blue",   "int",     "rescan", config.MAX_CONCURRENT_POS,
         "峰值同时持仓上限", "目标峰值同时持仓 > 此 = 组合客,我们权益均额只能装~5-8个,只能随机抓一片跟不了 → 排除。全池p90=8,15卡在断层不误伤慢波段好钱包"),
     ("SOURCE_QUALITY_MAX_N", "scanner", "hidden", "int", "rescan",

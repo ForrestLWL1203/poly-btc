@@ -28,13 +28,14 @@ def _new_ep(coin, side, x, *, open_complete=None):
     return {"coin": coin, "side": side, "open_ms": x["time"], "open_px": f(x["px"]),
             "net_pnl": 0.0, "fee": 0.0, "max_notl": 0.0, "n_fills": 0,
             "close_ms": x["time"], "close_px": f(x["px"]), "open_complete": bool(open_complete),
-            "_grow_oids": set()}
+            "_grow_oids": set(), "_oids": set()}
 
 
 def _finalize(ep):
     ep["hold_s"] = (ep["close_ms"] - ep["open_ms"]) / 1000.0
     ep["net_pnl"] -= ep["fee"]                          # closedPnl is gross; net it of fees
     ep["n_adds"] = max(0, len(ep.pop("_grow_oids")) - 1)  # distinct grow-orders minus the open
+    ep["n_oids"] = len(ep.pop("_oids"))                 # exchange fill slices collapse to one source order
     return ep
 
 
@@ -73,6 +74,8 @@ def build_episodes(fills: list):
             ep["net_pnl"] += f(x.get("closedPnl"))      # this fill realizes PnL on the CURRENT side
             ep["fee"] += f(x.get("fee"))
             ep["n_fills"] += 1
+            if x.get("oid") is not None:
+                ep["_oids"].add(x.get("oid"))
             ep["max_notl"] = max(ep["max_notl"], abs(pos1) * px)
             ep["close_ms"] = x["time"]
             ep["close_px"] = px
@@ -88,6 +91,8 @@ def build_episodes(fills: list):
                     ep["n_fills"] = 1                    # the flip fill opened it (its closedPnl already
                     ep["max_notl"] = abs(pos1) * px      # counted to the old side; don't double-count)
                     ep["_grow_oids"].add(x.get("oid"))
+                    if x.get("oid") is not None:
+                        ep["_oids"].add(x.get("oid"))
         if ep is not None and abs(cur_pos) >= config.FLAT:   # window ended with the position STILL OPEN
             open_eps.append({"coin": coin, "side": ep["side"], "open_ms": ep["open_ms"],
                              "open_px": ep["open_px"], "cur_size": abs(cur_pos)})

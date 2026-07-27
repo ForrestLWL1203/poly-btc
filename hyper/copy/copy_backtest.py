@@ -812,6 +812,15 @@ class Backtest:
                     ep["master_open_px"] = source_open_notional / abs(pos1)
                 return
             if oid is not None and oid in ep["seen_oids"] and oid not in add_orders:
+                # One source add order is one Copy decision. Preserve the source's final exposure/average
+                # after our single execution, but never top the Copy position up again for later fill slices.
+                m_now = abs(pos1)
+                if m_now > 0 and ep.get("master_open_px"):
+                    m_prev = abs(pos1 - signed)
+                    ep["master_open_px"] = (
+                        m_prev * ep["master_open_px"] + abs(signed) * px
+                    ) / m_now
+                ep["target_add_notl"] += abs(signed) * px
                 return
             # Do not consume an order id until an add was actually copied.  HL
             # can match one order in many slices; the first tiny slice may miss
@@ -1094,8 +1103,9 @@ class Backtest:
         """Assign one final outcome to a distinct target add order.
 
         A same-oid order can first look like noise and become actionable after later fill slices move its
-        aggregate VWAP.  Reclassification decrements the old bucket before incrementing the new one, so an
-        order is never simultaneously counted as both ignored and followed.
+        aggregate VWAP. Once followed, that OID is final and later slices cannot create another Copy order.
+        Reclassification decrements the old bucket before incrementing the new one, so an order is never
+        simultaneously counted as both ignored and followed.
         """
         if outcome not in ADD_OUTCOMES:
             raise ValueError(f"unknown add outcome: {outcome}")
@@ -1313,6 +1323,10 @@ class Backtest:
         if order is not None:
             order["followed_margin"] += add_margin
             order["counted"] = True
+            # The first successful Copy execution seals this source OID. ``process_fill`` will still merge
+            # later source slices into audit exposure, but it cannot dispatch another add.
+            if oid is not None:
+                ep.setdefault("add_orders", {}).pop(oid, None)
         self._sample_deploy(t)
         return True
 

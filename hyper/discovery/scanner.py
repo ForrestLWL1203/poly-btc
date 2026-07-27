@@ -141,8 +141,8 @@ def _episode_rows(addr: str, eps: list) -> list:
         seq = seen.get(key, 0)
         seen[key] = seq + 1
         rows.append((addr, e["coin"], e["side"], e["open_ms"], seq, e["close_ms"], e["hold_s"],
-                     e["net_pnl"], e["fee"], e["max_notl"], e["n_fills"], e["open_px"], e["close_px"],
-                     1 if e.get("open_complete", True) else 0))
+                     e["net_pnl"], e["fee"], e["max_notl"], e["n_fills"], e.get("n_oids", 0),
+                     e["open_px"], e["close_px"], 1 if e.get("open_complete", True) else 0))
     return rows
 
 
@@ -298,8 +298,8 @@ def _replace_episode_rows(db, addr: str, eps: list) -> None:
     if erows:
         db.executemany(
             "INSERT OR REPLACE INTO episode "
-            "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,open_px,close_px,open_complete)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "(addr,coin,side,open_ms,seq,close_ms,hold_s,net_pnl,fee,max_notl,n_fills,n_oids,"
+            "open_px,close_px,open_complete) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             erows)
     stored = db.execute("SELECT COUNT(*) FROM episode WHERE addr=?", (addr,)).fetchone()[0]
     if stored != len(eps):
@@ -309,14 +309,18 @@ def _replace_episode_rows(db, addr: str, eps: list) -> None:
 def repair_missing_episode_rows(db, addrs) -> int:
     """Rebuild missing episode rows from cached fills.
 
-    Older scans could update profile/copy backtest evidence while leaving no episode detail rows.
-    Regate and the wallet UI depend on episode detail for activity and risk signals, so repair only
-    wallets that have cached fills but no stored episodes.
+    Older scans could update profile/copy backtest evidence while leaving no episode detail rows. Rows created
+    before order-aware structure evidence also have ``n_oids IS NULL`` and must be rebuilt once; treating their
+    exchange fill count as an order count would repeat the large-wallet HFT false positive.
     """
     repaired = 0
     for addr in dict.fromkeys(a for a in addrs if a):
-        has_episode = db.execute("SELECT 1 FROM episode WHERE addr=? LIMIT 1", (addr,)).fetchone()
-        if has_episode:
+        episode_state = db.execute(
+            "SELECT COUNT(*),SUM(CASE WHEN n_oids IS NULL THEN 1 ELSE 0 END) "
+            "FROM episode WHERE addr=?",
+            (addr,),
+        ).fetchone()
+        if episode_state and int(episode_state[0] or 0) > 0 and int(episode_state[1] or 0) == 0:
             continue
         fills = _load_cached_fills(db, addr, 0)
         if not fills:
@@ -4339,16 +4343,17 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     repaired_eps = repair_missing_episode_rows(db, [r[0] for r in rows])
     if repaired_eps:
         print(f"regate: repaired {repaired_eps} missing episode caches from candidate_fills")
-    # p90 per-episode fill count per wallet, from the stored episode table. Missing episode rows are repaired
-    # above from cached fills before this gate runs. p90 (not max) so a swing trader who sliced ONE illiquid-stock fill
-    # isn't killed for a single outlier; only SYSTEMATIC slicing (≥10% heavy round-trips) trips it.
+    # Distinct OIDs, not exchange fill fragments, own the execution-structure gate. Missing/legacy episode rows
+    # are rebuilt above from cached fills before this pass.
     # Load episode-derived regate inputs in one pass. Previously loss_pain issued one extra SELECT per
     # profile after the three table sweeps below, making a no-network regate progressively query-bound.
-    _epw, _iv, _wpt, _pnl = {}, {}, {}, {}
-    for a, nf, om, cm, npnl, mnotl in db.execute(
-            "SELECT addr,n_fills,open_ms,close_ms,net_pnl,max_notl FROM episode"):
+    _epw, _epo, _iv, _wpt, _pnl = {}, {}, {}, {}, {}
+    for a, nf, noid, om, cm, npnl, mnotl in db.execute(
+            "SELECT addr,n_fills,n_oids,open_ms,close_ms,net_pnl,max_notl FROM episode"):
         if nf is not None:
             _epw.setdefault(a, []).append(nf)
+        if noid is not None:
+            _epo.setdefault(a, []).append(noid)
         if om is not None and cm is not None:
             _iv.setdefault(a, []).append((om, cm))
         if npnl is not None:
@@ -4356,6 +4361,8 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             if npnl > 0 and mnotl is not None and mnotl > 0:
                 _wpt.setdefault(a, []).append(npnl / mnotl * 100)
     p90fe = {a: sorted(xs)[min(len(xs) - 1, int(len(xs) * 0.9))] for a, xs in _epw.items() if xs}
+    p90oe = {a: sorted(xs)[min(len(xs) - 1, int(len(xs) * 0.9))] for a, xs in _epo.items() if xs}
+    heavyoe = {a: sum(value > 50 for value in xs) for a, xs in _epo.items()}
     # peak concurrent positions per wallet (sweep line over each episode's [open,close]) — the too_many_concurrent
     # gate. Computed HERE from the episode table (not a stored col) so regate applies the SAME gate as a scan.
     def _peakc(ivs):
@@ -4390,7 +4397,9 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              "median_eps": meps or 0.0, "avg_notional": avgnotl or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
-             "p90_fills_ep": p90fe.get(addr, 0),   # p90 single-episode fills → algo-slicer gate (from episode table)
+             "p90_fills_ep": p90fe.get(addr, 0),   # raw fragmentation remains audit-only
+             "p90_orders_ep": p90oe.get(addr, 0),
+             "heavy_orders_episode_n": heavyoe.get(addr, 0),
              "max_concurrent": concw.get(addr, 0), # peak simultaneous positions → too_many_concurrent gate
              "win_pt": winptw.get(addr, 0.0),       # median winning per-trade % → audit metric
              "worst_loss_pct": wloss or 0.0,
