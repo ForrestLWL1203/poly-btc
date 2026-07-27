@@ -307,6 +307,12 @@ def realtime_book_top(coin: str, timeout: float = 5.0):
     return None
 
 
+def realtime_book_snapshot(coin: str, timeout: float = 2.0):
+    """Unpaced aggregated L2 snapshot for one latency-sensitive sizing decision."""
+    book = realtime_post_soft({"type": "l2Book", "coin": coin}, timeout=timeout)
+    return book if isinstance(book, dict) else None
+
+
 def book_snapshot(coin: str):
     """Raw aggregated L2 book for risk/microstructure features (weight 2, sampled at radar cadence)."""
     book = post_soft({"type": "l2Book", "coin": coin})

@@ -202,8 +202,13 @@ BLOCK_KOREAN_STOCKS = False # preset: block EWY/KR200/Samsung/SK hynix/Hyundai n
 #                           Existing copy positions still reduce/close normally; flips close old side, then skip
 #                           the new blacklisted side. Prefer adding from the position row to avoid symbol aliases.
 LOW_LIQUIDITY_FILTER_ENABLE = True
-MIN_COIN_DAY_NTL_VLM = 5_000_000.0  # crypto perp 24h notional volume floor; blocks thin meme/alt perps
-MIN_COIN_OI_NOTIONAL = 2_000_000.0  # crypto perp open-interest notional floor; volume alone can be one-day noise
+LIVE_BOOK_MAX_SPREAD_BPS = 20.0   # real-time only: planned order must not cross a wider top-of-book spread
+LIVE_BOOK_MAX_IMPACT_BPS = 35.0   # real-time only: average L2 execution displacement from mid, for OUR size
+LIVE_BOOK_TIMEOUT_S = 2.0
+# L2 is authoritative for live execution. These context floors are only a fallback when the live book cannot
+# be fetched; both must be weak before blocking, so one quiet 24h-volume snapshot cannot veto a deep-OI market.
+MIN_COIN_DAY_NTL_VLM = 5_000_000.0
+MIN_COIN_OI_NOTIONAL = 2_000_000.0
 MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (isolated 1x ≈ unliquidatable)
 #                           (per-coin cap now lives entirely in the σ-tiered STABLE/MID/HIGH_COIN_CAP_PCT below;
 #                           the old flat COIN_MARGIN_CAP_PCT was removed 2026-07-02 — the tiered caps fully cover it)

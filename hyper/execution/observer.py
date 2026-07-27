@@ -5,10 +5,12 @@ Two decoupled data planes, by design:
     userFillsByTime, cursor + small overlap, idempotent by tid). REST has no 10-user cap, so we
     can follow the whole watchlist; our targets are low-freq long-hold, so a few-seconds poll
     latency is fine. This is the primary engine.
-  • PRICING (what we'd fill at) — a WS bbo subscription PER COIN (top-of-book). bbo subs are
+  • PRICING (what we'd fill at) — a WS bbo subscription PER COIN plus a size-aware L2 check at
+    each new exposure. bbo subs are
     per-coin, NOT subject to the 10-user cap (only the 1000-sub cap, and we touch a few dozen
     coins). Every copy is priced as an honest taker catch-up off the LIVE book at detection:
-    buy→best ask, sell→best bid. (No user subscriptions on this WS, so no 10-user concern.)
+    the planned order must fit current depth/spread/impact and Paper uses its L2 average fill.
+    (No user subscriptions on this WS, so no 10-user concern.)
 
 A partial-aware state machine persists every target open/add/reduce/close and our mirrored fill.
 Open copies reload after restart. New exposure is equity- and volatility-tier-sized, smart adds are
@@ -35,6 +37,7 @@ from hyper.market import rest, volatility, ws
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from hyper.selection import state as selection, strategy_revision
 from hyper.util import f, now_iso, now_ms
+from .liquidity import assess_order_book
 from .risk_radar import RiskRadar
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
@@ -122,6 +125,8 @@ class Observer:
         self.coin_blacklist = parse_coin_blacklist(config.COIN_BLACKLIST)
         self.block_korean_stocks = bool(config.BLOCK_KOREAN_STOCKS)
         self.low_liquidity_filter_enable = config.LOW_LIQUIDITY_FILTER_ENABLE
+        self.live_book_max_spread_bps = config.LIVE_BOOK_MAX_SPREAD_BPS
+        self.live_book_max_impact_bps = config.LIVE_BOOK_MAX_IMPACT_BPS
         self.min_coin_day_ntl_vlm = config.MIN_COIN_DAY_NTL_VLM
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
@@ -549,6 +554,8 @@ class Observer:
             if f.get("COIN_BLACKLIST") is not None: self.coin_blacklist = parse_coin_blacklist(f["COIN_BLACKLIST"])
             if f.get("BLOCK_KOREAN_STOCKS") is not None: self.block_korean_stocks = bool(f["BLOCK_KOREAN_STOCKS"])
             if f.get("LOW_LIQUIDITY_FILTER_ENABLE") is not None: self.low_liquidity_filter_enable = bool(f["LOW_LIQUIDITY_FILTER_ENABLE"])
+            if f.get("LIVE_BOOK_MAX_SPREAD_BPS") is not None: self.live_book_max_spread_bps = f["LIVE_BOOK_MAX_SPREAD_BPS"]
+            if f.get("LIVE_BOOK_MAX_IMPACT_BPS") is not None: self.live_book_max_impact_bps = f["LIVE_BOOK_MAX_IMPACT_BPS"]
             if f.get("MIN_COIN_DAY_NTL_VLM") is not None: self.min_coin_day_ntl_vlm = f["MIN_COIN_DAY_NTL_VLM"]
             if f.get("MIN_COIN_OI_NOTIONAL") is not None: self.min_coin_oi_notional = f["MIN_COIN_OI_NOTIONAL"]
             if f.get("MAX_TARGETS"): self.top_n = int(f["MAX_TARGETS"])
@@ -905,23 +912,62 @@ class Observer:
             margin_equity_pct=self.margin_equity_pct,
         )
 
-    def _coin_liquidity_block_reason(self, coin: str):
+    async def _live_liquidity_book(self, coin: str):
         if not self.low_liquidity_filter_enable or not coin or ":" in coin:
             return None
+        try:
+            return await asyncio.to_thread(
+                rest.realtime_book_snapshot, coin, config.LIVE_BOOK_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - market-context fallback remains available
+            return None
+
+    def _coin_liquidity_decision(
+        self, coin: str, *, book_snapshot=None, is_buy=None, planned_notional=None,
+    ) -> dict:
+        """Assess our actual live order, falling back to coarse context only when L2 is unavailable."""
+        if not self.low_liquidity_filter_enable or not coin or ":" in coin:
+            return {"reason": None, "source": "disabled"}
+        if is_buy is not None and f(planned_notional) > 0.0:
+            assessment = assess_order_book(
+                book_snapshot,
+                is_buy=bool(is_buy),
+                planned_notional=f(planned_notional),
+                max_spread_bps=self.live_book_max_spread_bps,
+                max_impact_bps=self.live_book_max_impact_bps,
+            )
+            if assessment.get("available"):
+                return {**assessment, "source": "live_l2"}
         row = self.db.execute(
             "SELECT day_ntl_vlm,oi_notional FROM coin_vol WHERE coin=?",
             (coin,),
         ).fetchone()
         if not row:
-            return None
+            return {"reason": None, "source": "context_unavailable"}
         day_ntl_vlm, oi_notional = row[0], row[1]
         if day_ntl_vlm is None or oi_notional is None:
-            return None
-        if day_ntl_vlm < self.min_coin_day_ntl_vlm:
-            return "day_volume"
-        if oi_notional < self.min_coin_oi_notional:
-            return "open_interest"
-        return None
+            return {"reason": None, "source": "context_incomplete"}
+        # A quiet day alone does not prove that our small order is unfillable. Only reject the fallback when
+        # both turnover and open interest are weak; a live L2 snapshot remains authoritative when available.
+        weak_volume = day_ntl_vlm < self.min_coin_day_ntl_vlm
+        weak_oi = oi_notional < self.min_coin_oi_notional
+        return {
+            "reason": "fallback_volume_and_open_interest" if weak_volume and weak_oi else None,
+            "source": "market_context_fallback",
+            "day_ntl_vlm": day_ntl_vlm,
+            "oi_notional": oi_notional,
+        }
+
+    @staticmethod
+    def _liquidity_log_detail(decision: dict) -> str:
+        if decision.get("source") != "live_l2":
+            return str(decision.get("source") or "unknown")
+        return (
+            f"order ${f(decision.get('planned_notional')):,.0f}, "
+            f"spread {f(decision.get('spread_bps')):.1f}bps, "
+            f"impact {f(decision.get('impact_bps')):.1f}bps, "
+            f"depth {f(decision.get('fill_ratio')) * 100:.0f}%"
+        )
 
     async def _ensure_vol(self, coin: str):
         """Track coin for the periodic σ refresh, and fetch it NOW if we have no fresh value (so a
@@ -1696,16 +1742,12 @@ class Observer:
             self._tally("skip_chase", book)
             return                                            # chase-skip: price ran past master before we detected
         await self._ensure_vol(coin)                 # fetch THIS coin's real σ once (else first open = fallback)
-        liquidity_reason = self._coin_liquidity_block_reason(coin)
-        if liquidity_reason:
-            self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
-            book.open_ep.pop((addr, coin), None)
-            self._tally("skip_low_liquidity", book)
-            self._record_live_policy_skip(addr, coin, "open", liquidity_reason, now_ms())
-            self.db.commit()
-            _log(f"skip {coin} {ep['side']} {addr[:10]}: low liquidity ({liquidity_reason})")
-            return
-        master_cap, m_lev, m_mgn, m_entry = await asyncio.to_thread(self._target_snapshot, addr, coin)  # master ctx
+        # Fetch source leverage and L2 concurrently outside the account lock. The L2 is assessed only after
+        # sizing determines OUR actual notional, but it must not add a second network round trip to entry lag.
+        (master_cap, m_lev, m_mgn, m_entry), liquidity_book = await asyncio.gather(
+            asyncio.to_thread(self._target_snapshot, addr, coin),
+            self._live_liquidity_book(coin),
+        )
         # v10 sizing: σ → tier (stable/mid/high) → margin% + leverage = the tier's LEV CAP
         #  margin = adaptive sizing equity × <tier>_margin_pct
         #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ master lev + stock cap)
@@ -1778,6 +1820,53 @@ class Observer:
                 self.db.commit()
                 book.open_ep.pop((addr, coin), None)
                 return
+            liquidity = self._coin_liquidity_decision(
+                coin, book_snapshot=liquidity_book, is_buy=is_buy,
+                planned_notional=plan.notional,
+            )
+            liquidity_reason = liquidity.get("reason")
+            if liquidity_reason:
+                self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
+                book.open_ep.pop((addr, coin), None)
+                self._tally("skip_low_liquidity", book)
+                self._record_live_policy_skip(
+                    addr, coin, "open", liquidity_reason, now_ms(),
+                )
+                self.db.commit()
+                _log(
+                    f"skip {coin} {ep['side']} {addr[:10]}: live liquidity "
+                    f"{liquidity_reason} ({self._liquidity_log_detail(liquidity)})"
+                )
+                return
+            # Paper fills at the size-weighted live L2 price, not merely the best quote. Rebuild sizing so
+            # position size and isolated liquidation price use that same honest execution price.
+            l2_average_px = f(liquidity.get("average_px"))
+            if forced_entry_px is None and l2_average_px > 0.0:
+                px = l2_average_px
+                plan = plan_open_sizing(
+                    coin=coin,
+                    side=ep["side"],
+                    entry_px=px,
+                    sigma=sigma,
+                    balance=risk_equity,
+                    available=avail,
+                    existing_coin_margin=existing_coin,
+                    master_notional=master_notl,
+                    master_leverage=m_lev,
+                    params=self._open_sizing_params(book),
+                    maintenance_leverage=maintenance_leverage,
+                    wallet_sector_side_room=group_room,
+                    wallet_room=source_room,
+                )
+                chase = (px - master_px) / master_px * 1e4 * ep["sign"]
+                if self.max_entry_chase_pct is not None and chase > self.max_entry_chase_pct * 100:
+                    self.db.execute(
+                        f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],),
+                    )
+                    self.db.commit()
+                    book.open_ep.pop((addr, coin), None)
+                    self._tally("skip_chase", book)
+                    return
             # Shadow-only: capture the immutable entry-time decision after every existing execution gate has
             # passed, but before the paper fill is committed.  This call never influences `plan.ok` or sizing.
             if book is self.taker and coin in self.crypto_coins:
@@ -1892,14 +1981,6 @@ class Observer:
                 self._tally("skip_coin_blacklist_add", book)
                 return _observe_only(final=True)
 
-            add_liquidity_reason = self._coin_liquidity_block_reason(coin)
-            if add_liquidity_reason:
-                self._tally("skip_low_liquidity_add", book)
-                self._record_live_policy_skip(
-                    addr, coin, "add", add_liquidity_reason, now_ms(),
-                )
-                return _observe_only(final=True)
-
             if self.add_strategy == "smart":
                 # 逆向(adv>0=价格朝我们不利方向,摊低)走 ADD_GAP_K;
                 # 正向(adv<0=顺势加仓)也要过 POS_ADD_GAP_K,避免 1.01/1.02/1.03 这类小碎追单全跟。
@@ -1997,6 +2078,26 @@ class Observer:
                     elif group_room <= max(0.0, coin_cap - existing) + 1e-12:
                         self._tally("skip_wallet_sector_side_add", book)
                     return _observe_only(final=True)
+            planned_add_notional = add_margin * lev
+            liquidity_book = await self._live_liquidity_book(coin)
+            liquidity = self._coin_liquidity_decision(
+                coin, book_snapshot=liquidity_book, is_buy=is_buy,
+                planned_notional=planned_add_notional,
+            )
+            add_liquidity_reason = liquidity.get("reason")
+            if add_liquidity_reason:
+                self._tally("skip_low_liquidity_add", book)
+                self._record_live_policy_skip(
+                    addr, coin, "add", add_liquidity_reason, now_ms(),
+                )
+                _log(
+                    f"skip {coin} {ep['side']} add {addr[:10]}: live liquidity "
+                    f"{add_liquidity_reason} ({self._liquidity_log_detail(liquidity)})"
+                )
+                return _observe_only(final=True)
+            l2_average_px = f(liquidity.get("average_px"))
+            if forced_px is None and l2_average_px > 0.0:
+                px = l2_average_px
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size

@@ -126,11 +126,15 @@ PARAM_SPEC = [
     ("BLOCK_KOREAN_STOCKS",  "follow",  "green",  "bool",    "immediate", config.BLOCK_KOREAN_STOCKS,
         "屏蔽韩股相关标的", "预置屏蔽 EWY、KR200、Samsung(SMSN)、SK hynix(SKHX/SKHY)、Hyundai；已有仓位只减仓/平仓，不新增仓位"),
     ("LOW_LIQUIDITY_FILTER_ENABLE", "follow", "hidden", "bool", "immediate", config.LOW_LIQUIDITY_FILTER_ENABLE,
-        "低流动性币过滤", "标准 crypto perp 低于24h成交量/OI名义额阈值时不新开仓"),
+        "实时盘口承载过滤", "按我方实际计划订单检查实时L2完整深度、价差和平均冲击；历史回放不使用"),
+    ("LIVE_BOOK_MAX_SPREAD_BPS", "follow", "hidden", "float", "immediate",
+        config.LIVE_BOOK_MAX_SPREAD_BPS, "实时盘口最大价差(bps)", "超过则不新增实时敞口"),
+    ("LIVE_BOOK_MAX_IMPACT_BPS", "follow", "hidden", "float", "immediate",
+        config.LIVE_BOOK_MAX_IMPACT_BPS, "实时订单最大平均冲击(bps)", "按我方实际计划名义金额逐层吃单计算"),
     ("MIN_COIN_DAY_NTL_VLM", "follow", "hidden", "usd", "immediate", config.MIN_COIN_DAY_NTL_VLM,
-        "币种24h成交量下限", "crypto perp 24h名义成交量低于此值不新开仓"),
+        "盘口不可用时24h成交量下限", "仅实时L2不可用时兜底，并且成交量与OI必须同时不足才拒绝"),
     ("MIN_COIN_OI_NOTIONAL", "follow", "hidden", "usd", "immediate", config.MIN_COIN_OI_NOTIONAL,
-        "币种OI名义额下限", "crypto perp OI名义额低于此值不新开仓"),
+        "盘口不可用时OI名义额下限", "仅实时L2不可用时兜底，并且成交量与OI必须同时不足才拒绝"),
     # (FOLLOW_MIN_TRADES / FOLLOW_MIN_ACTIVE_DAYS removed v10 — redundant with the scanner EVIDENCE gate,
     #  which already enforces a track record (active_days≥5 且 回合≥7) before a wallet can be active)
     # (RISK_BUDGET removed v10 — σ-scaled leverage dropped; leverage = the σ-tier's LEV CAP, redundant with

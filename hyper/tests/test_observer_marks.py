@@ -908,12 +908,21 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             db.commit()
             obs = Observer(db, [], {})
             obs.vol["VINE"] = 0.12
+            shallow_book = {
+                "levels": [
+                    [{"px": "0.0097", "sz": "1000"}],
+                    [{"px": "0.0099", "sz": "1000"}],
+                ],
+            }
 
-            with patch.object(obs, "_target_snapshot") as target_snapshot:
-                obs._open_position("0xaaa", "VINE", now_ms(), 0.0098, -1000, 1, obs.taker)
+            with (
+                patch.object(obs, "_target_snapshot", return_value=(4, None, None, None)) as target_snapshot,
+                patch("hyper.execution.observer.rest.realtime_book_snapshot", return_value=shallow_book),
+            ):
+                obs._open_position("0xaaa", "VINE", now_ms(), 0.0098, -100000, 1, obs.taker)
                 await asyncio.sleep(0.05)
 
-            target_snapshot.assert_not_called()
+            target_snapshot.assert_called_once()
             self.assertEqual(
                 db.execute("SELECT COUNT(*) FROM copy_position WHERE coin='VINE'").fetchone()[0],
                 0,
@@ -923,9 +932,76 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 "SELECT action,reason,count FROM live_policy_skip "
                 "WHERE addr='0xaaa' AND coin='VINE'"
             ).fetchone()
-            self.assertEqual(tuple(audit), ("open", "day_volume", 1))
+            self.assertEqual(tuple(audit), ("open", "book_depth", 1))
 
         asyncio.run(run())
+
+    def test_low_day_volume_with_deep_l2_allows_our_small_tao_order(self):
+        async def run():
+            db = self._db()
+            db.execute(
+                "INSERT INTO coin_vol "
+                "(coin,sigma,sigma_fast,sigma_slow,n,day_ntl_vlm,open_interest,mark_px,oi_notional,"
+                "max_leverage,updated_at,market_ctx_updated_at) "
+                "VALUES ('TAO',0.05,0.04,0.05,30,2500000,260000,100,26000000,5,"
+                "'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')"
+            )
+            db.commit()
+            obs = Observer(db, [], {})
+            obs.vol["TAO"] = 0.05
+            self._set_bbo(obs, "TAO", 99.99, 100.01)
+            deep_book = {
+                "levels": [
+                    [{"px": "99.99", "sz": "1000"}],
+                    [{"px": "100.01", "sz": "1000"}],
+                ],
+            }
+
+            with (
+                patch.object(obs, "_target_snapshot", return_value=(5, 5, 50000, 100)),
+                patch("hyper.execution.observer.rest.realtime_book_snapshot", return_value=deep_book),
+            ):
+                obs._open_position("0xaaa", "TAO", now_ms(), 100, 2500, 1, obs.taker)
+                await asyncio.sleep(0.05)
+
+            position = db.execute(
+                "SELECT status,notional,entry_px FROM copy_position WHERE addr='0xaaa' AND coin='TAO'"
+            ).fetchone()
+            self.assertIsNotNone(position)
+            self.assertEqual(position["status"], "open")
+            self.assertGreaterEqual(position["notional"], 1000)
+            self.assertAlmostEqual(position["entry_px"], 100.01, places=6)
+            self.assertIsNone(
+                db.execute(
+                    "SELECT reason FROM live_policy_skip WHERE addr='0xaaa' AND coin='TAO'"
+                ).fetchone()
+            )
+
+        asyncio.run(run())
+
+    def test_missing_l2_only_blocks_when_volume_and_oi_are_both_weak(self):
+        db = self._db()
+        db.executemany(
+            "INSERT INTO coin_vol "
+            "(coin,sigma,day_ntl_vlm,oi_notional,updated_at,market_ctx_updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                ("TAO", 0.05, 2_500_000, 26_000_000, now_iso(), now_iso()),
+                ("VINE", 0.12, 1_600_000, 588_000, now_iso(), now_iso()),
+            ],
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+
+        tao = obs._coin_liquidity_decision(
+            "TAO", book_snapshot=None, is_buy=True, planned_notional=2_700,
+        )
+        vine = obs._coin_liquidity_decision(
+            "VINE", book_snapshot=None, is_buy=True, planned_notional=800,
+        )
+
+        self.assertIsNone(tao["reason"])
+        self.assertEqual(vine["reason"], "fallback_volume_and_open_interest")
 
     def test_low_liquidity_crypto_add_is_observe_only(self):
         async def run():
@@ -946,7 +1022,18 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                       add_count=0, seen_oids={1})
             obs.taker.open_ep[("0xaaa", "BTC")] = ep
 
-            await obs._apply_add("0xaaa", "BTC", ep, now_ms(), 101, 1, 3, 2, obs.taker)
+            shallow_book = {
+                "levels": [
+                    [{"px": "100.9", "sz": "0.01"}],
+                    [{"px": "101.1", "sz": "0.01"}],
+                ],
+            }
+            with patch(
+                "hyper.execution.observer.rest.realtime_book_snapshot", return_value=shallow_book,
+            ):
+                await obs._apply_add(
+                    "0xaaa", "BTC", ep, now_ms(), 101, 1, 3, 2, obs.taker,
+                )
 
             row = db.execute(
                 "SELECT add_count,margin,master_open_px FROM copy_position WHERE pos_id=?",
@@ -965,7 +1052,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 "SELECT action,reason,count FROM live_policy_skip "
                 "WHERE addr='0xaaa' AND coin='BTC'"
             ).fetchone()
-            self.assertEqual(tuple(audit), ("add", "day_volume", 1))
+            self.assertEqual(tuple(audit), ("add", "book_depth", 1))
 
         asyncio.run(run())
 
