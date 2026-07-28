@@ -28,6 +28,16 @@ def _strict(wallet, return30, return7):
     }
 
 
+def _rough(wallet, return30, return7):
+    def window(value):
+        return {"qualificationReturn": value}
+    return {
+        "wallet": wallet,
+        "status": "rough_complete",
+        "rough": {"windows": {"30": window(return30), "14": window(0), "7": window(return7)}},
+    }
+
+
 class ProfitDistributionTests(unittest.TestCase):
     def test_volume_recall_deliberately_ignores_old_quality_gates(self):
         rows = profit_distribution._leaderboard_candidates([
@@ -104,6 +114,18 @@ class ProfitDistributionTests(unittest.TestCase):
         source = inspect.getsource(profit_distribution.run)
         self.assertIn("progress(\"history_repair\"", source)
         self.assertIn("recovery_pages", source)
+
+    def test_bounded_strict_replay_uses_rough_profit_priority(self):
+        rows = [
+            _rough("recent", 0.40, 0.50),
+            _rough("month", 0.60, 0.00),
+            _rough("weak", 0.10, 0.10),
+        ]
+        ranked = sorted(rows, key=profit_distribution._rough_profit_sort_key)
+        self.assertEqual([row["wallet"] for row in ranked], ["recent", "month", "weak"])
+        source = inspect.getsource(profit_distribution.run)
+        self.assertIn("strict_replay_inputs", source)
+        self.assertIn("strictRankingMode", source)
 
 
 if __name__ == "__main__":

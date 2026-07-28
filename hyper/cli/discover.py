@@ -299,6 +299,10 @@ def main() -> int:
         "--limit", type=int, default=0,
         help="0 scans all; positive values take a deterministic volume-rank-stratified sample",
     )
+    profit.add_argument(
+        "--strict-limit", type=int, default=0,
+        help="0 strictly replays every structural survivor; positive values replay only the rough-profit leaders",
+    )
     profit.add_argument("--scan-interval", type=float, default=1.1)
 
     args = ap.parse_args()
@@ -315,6 +319,7 @@ def main() -> int:
                     max_pages=max(1, int(args.max_pages)),
                     recovery_pages=max(1, int(args.recovery_pages)),
                     limit=max(0, int(args.limit)),
+                    strict_limit=max(0, int(args.strict_limit)),
                     scan_interval=max(0.1, float(args.scan_interval)),
                     progress=emit,
                 )

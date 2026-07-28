@@ -453,6 +453,14 @@ def _quantile(values: list[float], q: float) -> float | None:
     return rows[lo] + (rows[hi] - rows[lo]) * (index - lo)
 
 
+def _rough_profit_sort_key(row: dict) -> tuple:
+    windows = ((row.get("rough") or {}).get("windows") or {})
+    return30 = f((windows.get("30") or {}).get("qualificationReturn"))
+    return7 = f((windows.get("7") or {}).get("qualificationReturn"))
+    priority = 0.70 * return30 + 0.30 * return7
+    return (-priority, -return30, -return7, str(row.get("wallet") or ""))
+
+
 def summarize(wallets: list[dict]) -> dict:
     strict = [
         row for row in wallets
@@ -517,6 +525,7 @@ def run(
     max_pages: int = 5,
     recovery_pages: int = 20,
     limit: int = 0,
+    strict_limit: int = 0,
     scan_interval: float = 1.1,
     progress=None,
 ) -> dict:
@@ -620,6 +629,13 @@ def run(
         if progress:
             progress("history_repair", index, len(repair_candidates))
 
+    by_wallet = {str(row.get("wallet")): row for row in wallets}
+    replay_inputs.sort(key=lambda item: _rough_profit_sort_key(by_wallet[item["wallet"]]))
+    strict_replay_inputs = (
+        replay_inputs[:max(0, int(strict_limit))]
+        if int(strict_limit) > 0 else replay_inputs
+    )
+
     Path(cache_db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
     cache = storage.connect(
         cache_db_path, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA,
@@ -627,7 +643,7 @@ def run(
     os.chmod(Path(cache_db_path).resolve(), 0o600)
     path_start = now_ms - int(config.PROFILE_FETCH_DAYS) * DAY_MS
     all_fills = [
-        fill for item in replay_inputs for fill in item["fills"]
+        fill for item in strict_replay_inputs for fill in item["fills"]
     ]
     path_audit = price_path.ensure(
         cache, all_fills, path_start, now_ms, interval=price_path.BASE_INTERVAL,
@@ -636,8 +652,7 @@ def run(
     for coin, maximum in leverage.items():
         market_context.setdefault(coin, {})["max_leverage"] = maximum
 
-    by_wallet = {str(row.get("wallet")): row for row in wallets}
-    for index, item in enumerate(replay_inputs, 1):
+    for index, item in enumerate(strict_replay_inputs, 1):
         row = by_wallet[item["wallet"]]
         coverage = price_path.coverage(
             cache, item["fills"], path_start, now_ms,
@@ -678,7 +693,7 @@ def run(
                 row["status"] = "strict_complete"
                 row["reason"] = "structural_sample_collected"
         if progress:
-            progress("strict", index, len(replay_inputs))
+            progress("strict", index, len(strict_replay_inputs))
 
     cache.close()
     summary = summarize(wallets)
@@ -697,6 +712,9 @@ def run(
         "leaderboardVolumeRecall": len(recalled),
         "sampledCandidates": len(candidates),
         "historyRepairCandidates": len(repair_candidates),
+        "strictReplayLimit": max(0, int(strict_limit)),
+        "strictReplayCandidates": len(strict_replay_inputs),
+        "strictRankingMode": "rough_conservative_profit_70_30",
         "pathAudit": path_audit,
         "requestStats": rest.request_stats(),
         "summary": summary,

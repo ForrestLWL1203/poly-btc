@@ -209,6 +209,7 @@ shared 15-minute price path:
 python3 -m hyper.cli.discover --db /path/to/production.db profit-distribution \
   --week-perp-volume-min 250000 \
   --limit 600 \
+  --strict-limit 0 \
   --max-pages 1 --recovery-pages 20 \
   --cache-db /private/profit-distribution-cache.db \
   --report /private/profit-distribution.json
@@ -219,7 +220,10 @@ The source database is opened read-only. The isolated cache and anonymous JSON r
 Observer. A positive `--limit` keeps current Core/Challenger evidence and deterministically samples the complete
 Perp-volume rank instead of taking a biased top-volume prefix; zero scans the entire recall set. Its strict
 30/14/7 conservative-return quantiles and paired threshold matrix are the evidence used to choose new
-profitability floors.
+profitability floors. For a complete-universe wallet hunt after that unbiased calibration, a positive
+`--strict-limit` first ranks every structural survivor by its fills-only 70/30 conservative return and spends
+the shared price-path replay budget only on that many leaders. Such a bounded result is intentionally biased
+and may find candidates, but must not replace the unbiased sample when choosing thresholds.
 
 ## Copy replay and automatic tuning
 
