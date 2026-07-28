@@ -298,16 +298,20 @@ def main() -> int:
     if args.cmd == "profit-distribution":
         def emit(stage, done, total):
             print(f"profit_distribution_progress {stage} {done}/{total}", flush=True)
-        result = profit_distribution.run(
-            args.db,
-            args.report,
-            args.cache_db,
-            minimum_week_volume=args.week_perp_volume_min,
-            max_pages=max(1, int(args.max_pages)),
-            limit=max(0, int(args.limit)),
-            scan_interval=max(0.1, float(args.scan_interval)),
-            progress=emit,
-        )
+        try:
+            with scan_lock.acquire(args.db):
+                result = profit_distribution.run(
+                    args.db,
+                    args.report,
+                    args.cache_db,
+                    minimum_week_volume=args.week_perp_volume_min,
+                    max_pages=max(1, int(args.max_pages)),
+                    limit=max(0, int(args.limit)),
+                    scan_interval=max(0.1, float(args.scan_interval)),
+                    progress=emit,
+                )
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
         print(json.dumps({
             "status": result["status"],
             "report": args.report,

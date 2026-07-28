@@ -1,6 +1,8 @@
+import inspect
 import sqlite3
 import unittest
 
+from hyper.cli import discover
 from hyper.discovery import profit_distribution
 
 
@@ -71,6 +73,10 @@ class ProfitDistributionTests(unittest.TestCase):
         sigmas, context = profit_distribution._market_evidence(db)
         self.assertEqual(sigmas, {"BTC": 0.04})
         self.assertEqual(context["BTC"]["max_leverage"], None)
+
+    def test_collector_uses_the_shared_scanner_process_lock(self):
+        source = inspect.getsource(discover.main)
+        self.assertIn("with scan_lock.acquire(args.db)", source)
 
 
 if __name__ == "__main__":
