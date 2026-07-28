@@ -79,6 +79,23 @@ def _scan_ns():
                            max_single_adds=config.MAX_SINGLE_ADDS_PER_EP)
 
 
+def _profit_distribution_cli_result(result, report_path):
+    """Keep the CLI summary compatible with both fresh and resumed research reports.
+
+    A targeted resume starts from an already-complete population and therefore does not have the fresh
+    run's ``leaderboardVolumeRecall`` count.  Missing optional provenance must not turn a successfully
+    persisted rough report into a failed systemd unit.
+    """
+    summary = result.get("summary") or {}
+    return {
+        "status": result["status"],
+        "report": report_path,
+        "strictSampleCount": int(summary.get("strictSampleCount") or 0),
+        "leaderboardVolumeRecall": result.get("leaderboardVolumeRecall"),
+        "sampledCandidates": result["sampledCandidates"],
+    }
+
+
 def _hours_since_last_scan(db):
     """Hours since the last COMPLETED scan (scan_runs.finished_at, UTC). Survives daemon restarts ->
     a restart never re-triggers a scan that already ran recently. 1e9 if never scanned."""
@@ -374,13 +391,10 @@ def main() -> int:
                     )
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")
-        print(json.dumps({
-            "status": result["status"],
-            "report": args.report,
-            "strictSampleCount": result["summary"]["strictSampleCount"],
-            "leaderboardVolumeRecall": result["leaderboardVolumeRecall"],
-            "sampledCandidates": result["sampledCandidates"],
-        }, sort_keys=True))
+        print(json.dumps(
+            _profit_distribution_cli_result(result, args.report),
+            sort_keys=True,
+        ))
         return 0
     if args.cmd == "audit-pipeline":
         result = frozen_audit.build(

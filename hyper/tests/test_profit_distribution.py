@@ -55,6 +55,17 @@ def _activity_results(now_ms, offsets_and_details):
 
 
 class ProfitDistributionTests(unittest.TestCase):
+    def test_cli_summary_accepts_targeted_resume_without_fresh_recall_count(self):
+        result = discover._profit_distribution_cli_result({
+            "status": "rough_complete",
+            "sampledCandidates": 5_448,
+            "summary": {"strictSampleCount": 0},
+        }, "rough.json")
+        self.assertEqual(result["status"], "rough_complete")
+        self.assertEqual(result["sampledCandidates"], 5_448)
+        self.assertEqual(result["strictSampleCount"], 0)
+        self.assertIsNone(result["leaderboardVolumeRecall"])
+
     def test_volume_recall_deliberately_ignores_old_quality_gates(self):
         rows = profit_distribution._leaderboard_candidates([
             _row("0xbbb", 250_000, pnl=-50_000, roi=-9, account=0),
