@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import threading
 
 from hyper import config, params, storage
-from hyper.discovery import frozen_audit, profit_distribution, scanner
+from hyper.discovery import frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
 from hyper.ops import paper_reset, procman, scan_lock
 from hyper.util import now_iso
@@ -316,8 +316,31 @@ def main() -> int:
         help="rough-profit prefix to refresh for recurring actionable-open activity in resume mode",
     )
     profit.add_argument("--scan-interval", type=float, default=1.1)
+    profit_analyze = sub.add_parser(
+        "profit-analyze",
+        help="anonymously analyze the private rough-research database without network access",
+    )
+    profit_analyze.add_argument("--research-db", required=True)
+    profit_analyze.add_argument("--report", required=True)
+    profit_analyze.add_argument("--run-key")
+    profit_analyze.add_argument("--reference-wallet")
 
     args = ap.parse_args()
+    if args.cmd == "profit-analyze":
+        result = profit_analysis.analyze(
+            args.research_db,
+            args.report,
+            run_key=args.run_key,
+            reference_wallet=args.reference_wallet,
+        )
+        print(json.dumps({
+            "status": result["status"],
+            "walletRows": result["walletRows"],
+            "roughRows": result["roughRows"],
+            "operationalRows": result["operationalRows"],
+            "report": args.report,
+        }, sort_keys=True))
+        return 0
     if args.cmd == "profit-distribution":
         def emit(stage, done, total):
             print(f"profit_distribution_progress {stage} {done}/{total}", flush=True)

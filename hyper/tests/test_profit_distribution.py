@@ -178,6 +178,9 @@ class ProfitDistributionTests(unittest.TestCase):
     def test_resume_mode_is_rough_only_and_refreshes_capped_plus_profit_prefix(self):
         source = inspect.getsource(profit_distribution.resume_rough)
         self.assertIn("capped_ids | ranked_ids", source)
+        self.assertLess(source.index("ranked_order"), source.index("capped_order"))
+        self.assertIn("cached_records", source)
+        self.assertIn("pending_ids", source)
         self.assertIn('"strictReplayCandidates": 0', source)
         self.assertNotIn("price_path.ensure", source)
         cli = inspect.getsource(discover.main)

@@ -1027,13 +1027,36 @@ def resume_rough(
     indexes = {
         str(row.get("wallet")): index for index, row in enumerate(wallets)
     }
-    ordered_ids = [
+    # Produce useful high-profit activity evidence first. Page-capped histories can take many API pages each;
+    # putting them first made operators wait over an hour before learning whether the already-known return
+    # leaders were recurring, actionable sources.
+    ranked_order = [
+        str(row.get("wallet"))
+        for row in prior_rough[:max(0, int(activity_audit_limit))]
+    ]
+    capped_order = [
         str(row.get("wallet")) for row in wallets
-        if str(row.get("wallet")) in audit_ids
+        if str(row.get("wallet")) in capped_ids
+        and str(row.get("wallet")) not in ranked_ids
+    ]
+    ordered_ids = ranked_order + capped_order
+    cached_records = {
+        str(wallet): json.loads(record_json)
+        for wallet, record_json in research_cache.execute(
+            "SELECT wallet,record_json FROM profit_research_wallet_cache "
+            "WHERE run_key=?",
+            (run_key,),
+        ).fetchall()
+        if str(wallet) in audit_ids
+    }
+    for wallet, cached_record in cached_records.items():
+        wallets[indexes[wallet]] = cached_record
+    pending_ids = [
+        wallet for wallet in ordered_ids if wallet not in cached_records
     ]
 
-    completed = 0
-    for index, wallet in enumerate(ordered_ids, 1):
+    completed = len(cached_records)
+    for index, wallet in enumerate(pending_ids, completed + 1):
         candidate = candidate_by_wallet.get(wallet)
         if candidate is None:
             if wallet in capped_ids:
