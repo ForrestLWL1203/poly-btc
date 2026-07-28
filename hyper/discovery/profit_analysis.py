@@ -85,6 +85,18 @@ GATE_SWEEPS = (
         "thresholds": (0.30, 0.40, 0.50, 0.60, 0.70, 0.80),
     },
     {
+        "stage": "fills_only_copy",
+        "feature": "copyPayoffRatio",
+        "direction": "minimum",
+        "thresholds": (1.0, 1.5, 2.0, 3.0),
+    },
+    {
+        "stage": "fills_only_copy",
+        "feature": "copyProfitFactor",
+        "direction": "minimum",
+        "thresholds": (1.0, 1.25, 1.50, 2.0),
+    },
+    {
         "stage": "activity",
         "feature": "activeWeeks4",
         "direction": "minimum",
@@ -143,6 +155,7 @@ def _wallet_view(wallet, status, reason, record, artifact=None):
     activity = record.get("activity") or {}
     artifact = artifact or {}
     source_artifact = artifact.get("sourceEpisodeQuality") or {}
+    computed_artifact = artifact.get("computedMetrics") or {}
     replay_artifact = artifact.get("roughCopyResults") or {}
     replay30 = replay_artifact.get("30") or replay_artifact.get(30) or {}
     closed_positions30 = list(replay30.get("positions") or ())
@@ -174,6 +187,21 @@ def _wallet_view(wallet, status, reason, record, artifact=None):
         0.70 * f(return30) + 0.30 * f(return7)
         if return30 is not None and return7 is not None else None
     )
+    copy_closed = int(value(30, "closedEpisodes") or 0)
+    copy_win_rate = (
+        f(value(30, "wins")) / copy_closed if copy_closed > 0 else None
+    )
+    copy_payoff = copy_structure_value(
+        "closedPayoffRatio", "payoff_ratio",
+    )
+    copy_profit_factor = copy_structure_value(
+        "closedProfitFactor", "profit_factor",
+    )
+    break_even_payoff = (
+        (1.0 - copy_win_rate) / copy_win_rate
+        if copy_win_rate is not None and 0.0 < copy_win_rate < 1.0
+        else 0.0 if copy_win_rate == 1.0 else None
+    )
     return {
         "wallet": wallet,
         "status": status,
@@ -186,9 +214,18 @@ def _wallet_view(wallet, status, reason, record, artifact=None):
         "closedEpisodes14": value(14, "closedEpisodes"),
         "closedEpisodes7": value(7, "closedEpisodes"),
         "copyWins30": value(30, "wins"),
-        "copyWinRate30": (
-            f(value(30, "wins")) / int(value(30, "closedEpisodes") or 0)
-            if int(value(30, "closedEpisodes") or 0) > 0 else None
+        "copyWinRate30": copy_win_rate,
+        "copyPayoffRatio": copy_payoff,
+        "copyProfitFactor": copy_profit_factor,
+        "copyBreakEvenPayoff": break_even_payoff,
+        "copyPayoffSafetyMultiple": (
+            f(copy_payoff) / break_even_payoff
+            if copy_payoff is not None and break_even_payoff is not None
+            and break_even_payoff > 0.0 else copy_profit_factor
+        ),
+        "copyExpectancyLossUnits": (
+            copy_win_rate * f(copy_payoff) - (1.0 - copy_win_rate)
+            if copy_win_rate is not None and copy_payoff is not None else None
         ),
         "copyLiquidations30": value(30, "liquidations"),
         "copyOpenLossRatio30": value(30, "openLossRatio"),
@@ -214,6 +251,11 @@ def _wallet_view(wallet, status, reason, record, artifact=None):
         "sourceBodyAfterTop3N": source_value("source_body_after_top3_n"),
         "sourceBodyAfterTop3WinRate": source_value("source_body_after_top3_win_rate"),
         "sourceBodyAfterTop3Pnl": source_value("source_body_after_top3_net_pnl"),
+        "sourcePayoffRatio": (
+            source.get("payoffRatio")
+            if source.get("payoffRatio") is not None
+            else computed_artifact.get("payoff_ratio")
+        ),
         "medianHoldHours": (
             f(source.get("medianHoldSeconds")) / 3600.0
             if source.get("medianHoldSeconds") is not None else None
@@ -356,11 +398,12 @@ def _sample_depth_grid(rows):
     return output
 
 
-def _gate_sensitivity(rows):
+def _gate_sensitivity(rows, rough_rows=None):
     """Measure retention and operational high-return recall for possible pre-strict gates."""
+    rough_rows = list(rows if rough_rows is None else rough_rows)
     tier_targets = {
         name: [
-            row for row in rows
+            row for row in rough_rows
             if row["operationalActivity"] is True
             and _tier_pass(row, floor30, floor7)
         ]
@@ -370,9 +413,14 @@ def _gate_sensitivity(rows):
     for sweep in GATE_SWEEPS:
         feature = str(sweep["feature"])
         direction = str(sweep["direction"])
+        stage_rows = (
+            rows
+            if sweep["stage"] in {"leaderboard", "portfolio"}
+            else rough_rows
+        )
         for threshold in sweep["thresholds"]:
-            known = [row for row in rows if row.get(feature) is not None]
-            missing = [row for row in rows if row.get(feature) is None]
+            known = [row for row in stage_rows if row.get(feature) is not None]
+            missing = [row for row in stage_rows if row.get(feature) is None]
             if direction == "minimum":
                 passed = [
                     row for row in known
@@ -393,7 +441,8 @@ def _gate_sensitivity(rows):
                 "feature": feature,
                 "direction": direction,
                 "threshold": threshold,
-                "roughPopulation": len(rows),
+                "stagePopulation": len(stage_rows),
+                "roughPopulation": len(rough_rows),
                 "knownEvidence": len(known),
                 "missingEvidence": len(missing),
                 "knownPass": len(passed),
@@ -746,7 +795,7 @@ def analyze(
         "returnTiers": tiers,
         "featureBuckets": _bucket_analysis(rough),
         "sampleDepthGrid": _sample_depth_grid(rough),
-        "gateSensitivity": _gate_sensitivity(rough),
+        "gateSensitivity": _gate_sensitivity(rows, rough),
         "repeatabilityAnalysis": _repeatability_analysis(operational, policy),
         "topRoughCandidates": ranked[:64],
         "referenceWallet": next(

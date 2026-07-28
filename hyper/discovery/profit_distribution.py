@@ -514,6 +514,8 @@ def _copy_windows(results: dict) -> dict:
             "closedBodyAfterTop3N": closed_structure.get("body_after_top3_n"),
             "closedBodyAfterTop3WinRate": closed_structure.get("body_after_top3_win_rate"),
             "closedBodyAfterTop3Pnl": closed_structure.get("body_after_top3_net_pnl"),
+            "closedPayoffRatio": closed_structure.get("payoff_ratio"),
+            "closedProfitFactor": closed_structure.get("profit_factor"),
         }
     return out
 
@@ -820,6 +822,7 @@ def _rough_wallet(
             "medianHoldSeconds": computed.get("median_hold_s"),
             "medianEpisodesPerActiveDay": computed.get("median_eps"),
             "takerNotionalFraction": computed.get("taker_frac_notl"),
+            "payoffRatio": computed.get("payoff_ratio"),
             "selfLiquidations": liquidation_count,
             "worstSelfLiquidationPct": worst_liquidation_pct,
         },

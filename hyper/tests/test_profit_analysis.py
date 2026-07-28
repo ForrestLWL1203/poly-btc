@@ -244,6 +244,29 @@ class ProfitAnalysisTests(unittest.TestCase):
             decision["firstFailure"], "copy_low_win_losing_body",
         )
 
+    def test_wallet_view_combines_win_rate_and_payoff_into_profit_factor(self):
+        record = _record(
+            "payoff", 0.20, 0.10, 0.05,
+            operational=True, episodes30=3, episodes7=1,
+        )
+        record["rough"]["windows"]["30"]["wins"] = 1
+        artifact = {
+            "computedMetrics": {"payoff_ratio": 4.0},
+            "roughCopyResults": {"30": {"positions": [
+                {"net_pnl": 100.0},
+                {"net_pnl": -25.0},
+                {"net_pnl": -25.0},
+            ]}},
+        }
+        row = profit_analysis._wallet_view(
+            "payoff", "rough_complete", "ok", record, artifact,
+        )
+        self.assertAlmostEqual(row["copyWinRate30"], 1 / 3)
+        self.assertAlmostEqual(row["copyPayoffRatio"], 4.0)
+        self.assertAlmostEqual(row["copyProfitFactor"], 2.0)
+        self.assertAlmostEqual(row["copyPayoffSafetyMultiple"], 2.0)
+        self.assertAlmostEqual(row["sourcePayoffRatio"], 4.0)
+
 
 if __name__ == "__main__":
     unittest.main()
