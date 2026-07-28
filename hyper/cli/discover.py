@@ -292,6 +292,10 @@ def main() -> int:
     profit.add_argument("--week-perp-volume-min", type=float, default=250_000.0)
     profit.add_argument("--max-pages", type=int, default=5)
     profit.add_argument(
+        "--recovery-pages", type=int, default=20,
+        help="deeper second pass only for page-capped wallets whose first page looked structurally copyable",
+    )
+    profit.add_argument(
         "--limit", type=int, default=0,
         help="0 scans all; positive values take a deterministic volume-rank-stratified sample",
     )
@@ -309,6 +313,7 @@ def main() -> int:
                     args.cache_db,
                     minimum_week_volume=args.week_perp_volume_min,
                     max_pages=max(1, int(args.max_pages)),
+                    recovery_pages=max(1, int(args.recovery_pages)),
                     limit=max(0, int(args.limit)),
                     scan_interval=max(0.1, float(args.scan_interval)),
                     progress=emit,

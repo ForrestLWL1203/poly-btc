@@ -515,6 +515,7 @@ def run(
     *,
     minimum_week_volume: float = 250_000.0,
     max_pages: int = 5,
+    recovery_pages: int = 20,
     limit: int = 0,
     scan_interval: float = 1.1,
     progress=None,
@@ -581,6 +582,43 @@ def run(
                 "wallets": wallets,
                 "requestStats": rest.request_stats(),
             })
+
+    repair_wallets = {
+        str(row.get("wallet")) for row in wallets
+        if row.get("reason") == "fill_history_page_cap"
+    }
+    repair_candidates = (
+        [candidate for candidate in candidates if candidate["wallet"] in repair_wallets]
+        if int(recovery_pages) > int(max_pages) else []
+    )
+    wallet_indexes = {
+        str(row.get("wallet")): index for index, row in enumerate(wallets)
+    }
+    for index, candidate in enumerate(repair_candidates, 1):
+        try:
+            record, replay_input = _rough_wallet(
+                candidate,
+                now_ms=now_ms,
+                minimum_week_volume=minimum_week_volume,
+                universe=universe,
+                namespace=namespace,
+                sigmas=sigmas,
+                market_context=market_context,
+                terminal_marks=terminal_marks,
+                known_risk=known_risk,
+                max_pages=max(1, int(recovery_pages)),
+            )
+        except Exception as exc:
+            record, replay_input = ({
+                **{key: value for key, value in candidate.items() if key != "addr"},
+                "status": "deferred",
+                "reason": f"history_repair_error:{type(exc).__name__}",
+            }, None)
+        wallets[wallet_indexes[candidate["wallet"]]] = record
+        if replay_input is not None:
+            replay_inputs.append(replay_input)
+        if progress:
+            progress("history_repair", index, len(repair_candidates))
 
     Path(cache_db_path).resolve().parent.mkdir(parents=True, exist_ok=True)
     cache = storage.connect(
@@ -658,6 +696,7 @@ def run(
         "leaderboardRows": len(leaderboard),
         "leaderboardVolumeRecall": len(recalled),
         "sampledCandidates": len(candidates),
+        "historyRepairCandidates": len(repair_candidates),
         "pathAudit": path_audit,
         "requestStats": rest.request_stats(),
         "summary": summary,

@@ -100,6 +100,11 @@ class ProfitDistributionTests(unittest.TestCase):
             source.index("if hit_cap:"),
         )
 
+    def test_collector_has_a_deeper_page_cap_recovery_stage(self):
+        source = inspect.getsource(profit_distribution.run)
+        self.assertIn("progress(\"history_repair\"", source)
+        self.assertIn("recovery_pages", source)
+
 
 if __name__ == "__main__":
     unittest.main()

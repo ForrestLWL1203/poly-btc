@@ -209,6 +209,7 @@ shared 15-minute price path:
 python3 -m hyper.cli.discover --db /path/to/production.db profit-distribution \
   --week-perp-volume-min 250000 \
   --limit 600 \
+  --max-pages 1 --recovery-pages 20 \
   --cache-db /private/profit-distribution-cache.db \
   --report /private/profit-distribution.json
 ```
