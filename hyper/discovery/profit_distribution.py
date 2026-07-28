@@ -1008,6 +1008,27 @@ def resume_rough(
         "recoveryPages": recovery_pages,
         "activityAuditLimit": activity_audit_limit,
     })
+    existing_wallets = {
+        str(row[0]) for row in research_cache.execute(
+            "SELECT wallet FROM profit_research_wallet_cache WHERE run_key=?",
+            (run_key,),
+        ).fetchall()
+    }
+    # The old anonymous checkpoint still contains a complete wallet-level population even though it did not
+    # persist raw evidence. Seed those derived records into the new research table so distribution analysis
+    # remains full-universe; refreshed audit/repair rows replace them with non-null artifact/replay blobs.
+    for row in wallets:
+        wallet = str(row.get("wallet") or "")
+        if not wallet or wallet in existing_wallets:
+            continue
+        candidate = candidate_by_wallet.get(wallet) or {
+            "wallet": wallet,
+            "addr": "",
+        }
+        _cache_rough_record(
+            research_cache, run_key, candidate, row, None, None,
+        )
+    research_cache.commit()
 
     capped_ids = {
         str(row.get("wallet")) for row in wallets
@@ -1044,7 +1065,7 @@ def resume_rough(
         str(wallet): json.loads(record_json)
         for wallet, record_json in research_cache.execute(
             "SELECT wallet,record_json FROM profit_research_wallet_cache "
-            "WHERE run_key=?",
+            "WHERE run_key=? AND artifact_blob IS NOT NULL",
             (run_key,),
         ).fetchall()
         if str(wallet) in audit_ids

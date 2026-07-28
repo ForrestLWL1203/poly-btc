@@ -181,6 +181,8 @@ class ProfitDistributionTests(unittest.TestCase):
         self.assertLess(source.index("ranked_order"), source.index("capped_order"))
         self.assertIn("cached_records", source)
         self.assertIn("pending_ids", source)
+        self.assertIn("artifact_blob IS NOT NULL", source)
+        self.assertIn("persist raw evidence", source)
         self.assertIn('"strictReplayCandidates": 0', source)
         self.assertNotIn("price_path.ensure", source)
         cli = inspect.getsource(discover.main)
