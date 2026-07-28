@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from hyper.discovery import profit_analysis, profit_distribution
+from hyper.copy.copy_policy import load_copy_policy
 
 
 def _record(wallet, return30, return14, return7, *, operational, episodes30, episodes7):
@@ -172,6 +173,42 @@ class ProfitAnalysisTests(unittest.TestCase):
         self.assertEqual(cell["tierOperationalTotals"]["50_10"], 1)
         self.assertEqual(cell["tierOperationalPass"]["50_10"], 0)
         self.assertEqual(cell["tierOperationalRecall"]["50_10"], 0.0)
+
+    def test_repeatability_rejects_low_win_and_top3_dependent_wallets(self):
+        row = profit_analysis._wallet_view(
+            "lottery", "rough_complete", "ok",
+            _record(
+                "lottery", 0.60, 0.30, 0.12,
+                operational=True, episodes30=20, episodes7=5,
+            ),
+        )
+        row.update({
+            "sourceWinRate30": 0.80,
+            "sourceTop3ProfitShare": 0.80,
+            "sourceBodyAfterTop3N": 17,
+            "sourceBodyAfterTop3WinRate": 0.20,
+            "sourceBodyAfterTop3Pnl": -100.0,
+            "copyWinRate30": 0.80,
+            "copyTop3ProfitShare": 0.80,
+            "copyBodyAfterTop3N": 17,
+            "copyBodyAfterTop3WinRate": 0.20,
+            "copyBodyAfterTop3Pnl": -100.0,
+        })
+        decision = profit_analysis._repeatability_check(
+            row, load_copy_policy(), copy_body_guard=True,
+        )
+        self.assertFalse(decision["passed"])
+        self.assertEqual(
+            decision["firstFailure"], "source_top3_dependent_body_weak",
+        )
+
+        row["sourceTop3ProfitShare"] = 0.20
+        row["sourceWinRate30"] = 0.40
+        decision = profit_analysis._repeatability_check(
+            row, load_copy_policy(), copy_body_guard=True,
+        )
+        self.assertFalse(decision["passed"])
+        self.assertEqual(decision["firstFailure"], "source_win_rate_below_floor")
 
 
 if __name__ == "__main__":

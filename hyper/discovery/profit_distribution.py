@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import zlib
 
 from hyper import config, params, storage
-from hyper.copy.copy_backtest import prepare_price_path
+from hyper.copy.copy_backtest import prepare_price_path, profit_structure_metrics
 from hyper.copy.economics import replay_result_profitability
 from hyper.copy.fills import build_episodes
 from hyper.copy.copy_data import normalize_copyable_fills
@@ -486,6 +486,11 @@ def _copy_windows(results: dict) -> dict:
     for days in (30, 14, 7):
         result = dict(results.get(days) or {})
         economics = replay_result_profitability(result)
+        closed_positions = list(result.get("positions") or ())
+        closed_structure = profit_structure_metrics(
+            closed_positions,
+            total_net=sum(f(position.get("net_pnl")) for position in closed_positions),
+        )
         out[str(days)] = {
             "valid": result.get("valid") is not False,
             "dataStatus": result.get("data_status"),
@@ -505,6 +510,10 @@ def _copy_windows(results: dict) -> dict:
             "actionableOpenRate": result.get("actionable_open_rate"),
             "pathCompletionRate": result.get("path_completion_rate"),
             "feeDrag": result.get("fee_drag"),
+            "closedTop3ProfitShare": closed_structure.get("top3_profit_share"),
+            "closedBodyAfterTop3N": closed_structure.get("body_after_top3_n"),
+            "closedBodyAfterTop3WinRate": closed_structure.get("body_after_top3_win_rate"),
+            "closedBodyAfterTop3Pnl": closed_structure.get("body_after_top3_net_pnl"),
         }
     return out
 
@@ -805,7 +814,8 @@ def _rough_wallet(
                 "source_episode_n_30d", "source_episode_n_7d",
                 "source_win_rate_30d", "source_win_rate_7d",
                 "source_net_pnl_30d", "source_net_pnl_7d",
-                "source_top3_profit_share", "source_body_after_top3_net_pnl",
+                "source_top3_profit_share", "source_body_after_top3_n",
+                "source_body_after_top3_win_rate", "source_body_after_top3_net_pnl",
             )},
             "medianHoldSeconds": computed.get("median_hold_s"),
             "medianEpisodesPerActiveDay": computed.get("median_eps"),

@@ -9,6 +9,8 @@ from pathlib import Path
 import sqlite3
 import zlib
 
+from hyper.copy.copy_backtest import profit_structure_metrics
+from hyper.copy.copy_policy import load_copy_policy
 from hyper.util import f
 
 from . import profit_distribution
@@ -77,6 +79,12 @@ GATE_SWEEPS = (
         "thresholds": (0.30, 0.50, 0.60, 0.70, 0.80),
     },
     {
+        "stage": "fills_only_copy",
+        "feature": "copyWinRate30",
+        "direction": "minimum",
+        "thresholds": (0.30, 0.40, 0.50, 0.60, 0.70, 0.80),
+    },
+    {
         "stage": "activity",
         "feature": "activeWeeks4",
         "direction": "minimum",
@@ -128,14 +136,36 @@ def _max_structure(record, key):
     return max((f(value) for value in values), default=None)
 
 
-def _wallet_view(wallet, status, reason, record):
+def _wallet_view(wallet, status, reason, record, artifact=None):
     windows = ((record.get("rough") or {}).get("windows") or {})
     source = record.get("source") or {}
     current = record.get("current") or {}
     activity = record.get("activity") or {}
+    artifact = artifact or {}
+    source_artifact = artifact.get("sourceEpisodeQuality") or {}
+    replay_artifact = artifact.get("roughCopyResults") or {}
+    replay30 = replay_artifact.get("30") or replay_artifact.get(30) or {}
+    closed_positions30 = list(replay30.get("positions") or ())
+    closed_structure30 = (
+        profit_structure_metrics(
+            closed_positions30,
+            total_net=sum(f(position.get("net_pnl")) for position in closed_positions30),
+        )
+        if closed_positions30 else {}
+    )
 
     def value(days, key):
         return (windows.get(str(days)) or {}).get(key)
+
+    def source_value(key):
+        value = source.get(key)
+        return source_artifact.get(key) if value is None else value
+
+    def copy_structure_value(window_key, structure_key):
+        window_value = value(30, window_key)
+        if window_value is not None:
+            return window_value
+        return closed_structure30.get(structure_key)
 
     return30 = value(30, "qualificationReturn")
     return14 = value(14, "qualificationReturn")
@@ -156,16 +186,34 @@ def _wallet_view(wallet, status, reason, record):
         "closedEpisodes14": value(14, "closedEpisodes"),
         "closedEpisodes7": value(7, "closedEpisodes"),
         "copyWins30": value(30, "wins"),
+        "copyWinRate30": (
+            f(value(30, "wins")) / int(value(30, "closedEpisodes") or 0)
+            if int(value(30, "closedEpisodes") or 0) > 0 else None
+        ),
         "copyLiquidations30": value(30, "liquidations"),
         "copyOpenLossRatio30": value(30, "openLossRatio"),
+        "copyTop3ProfitShare": copy_structure_value(
+            "closedTop3ProfitShare", "top3_profit_share",
+        ),
+        "copyBodyAfterTop3N": copy_structure_value(
+            "closedBodyAfterTop3N", "body_after_top3_n",
+        ),
+        "copyBodyAfterTop3WinRate": copy_structure_value(
+            "closedBodyAfterTop3WinRate", "body_after_top3_win_rate",
+        ),
+        "copyBodyAfterTop3Pnl": copy_structure_value(
+            "closedBodyAfterTop3Pnl", "body_after_top3_net_pnl",
+        ),
         "actionableOpenRate30": value(30, "actionableOpenRate"),
         "pathCompletionRate30": value(30, "pathCompletionRate"),
-        "sourceEpisodes30": source.get("source_episode_n_30d"),
-        "sourceEpisodes7": source.get("source_episode_n_7d"),
-        "sourceWinRate30": source.get("source_win_rate_30d"),
-        "sourceWinRate7": source.get("source_win_rate_7d"),
-        "sourceTop3ProfitShare": source.get("source_top3_profit_share"),
-        "sourceBodyAfterTop3Pnl": source.get("source_body_after_top3_net_pnl"),
+        "sourceEpisodes30": source_value("source_episode_n_30d"),
+        "sourceEpisodes7": source_value("source_episode_n_7d"),
+        "sourceWinRate30": source_value("source_win_rate_30d"),
+        "sourceWinRate7": source_value("source_win_rate_7d"),
+        "sourceTop3ProfitShare": source_value("source_top3_profit_share"),
+        "sourceBodyAfterTop3N": source_value("source_body_after_top3_n"),
+        "sourceBodyAfterTop3WinRate": source_value("source_body_after_top3_win_rate"),
+        "sourceBodyAfterTop3Pnl": source_value("source_body_after_top3_net_pnl"),
         "medianHoldHours": (
             f(source.get("medianHoldSeconds")) / 3600.0
             if source.get("medianHoldSeconds") is not None else None
@@ -369,6 +417,138 @@ def _gate_sensitivity(rows):
     return output
 
 
+def _repeatability_check(row, policy, *, copy_body_guard):
+    """Evaluate closed-Episode repeatability without any return or official-ROI gate."""
+    source_n = int(row.get("sourceEpisodes30") or 0)
+    source_win = row.get("sourceWinRate30")
+    standard_lane = source_n >= policy.source_min_episodes_30d
+    low_frequency_lane = (
+        policy.source_low_freq_min_episodes_30d
+        <= source_n
+        <= policy.source_low_freq_max_episodes_30d
+    )
+    source_floor = (
+        policy.source_min_episode_win_rate
+        if standard_lane else policy.source_low_freq_min_episode_win_rate
+    )
+    source_concentrated = (
+        row.get("sourceTop3ProfitShare") is not None
+        and f(row.get("sourceTop3ProfitShare")) >= policy.source_top3_concentration_trigger
+    )
+    copy_n = int(row.get("closedEpisodes30") or 0)
+    copy_win = row.get("copyWinRate30")
+    copy_concentrated = (
+        row.get("copyTop3ProfitShare") is not None
+        and f(row.get("copyTop3ProfitShare")) >= policy.source_top3_concentration_trigger
+    )
+    checks = {
+        "sourceSampleLane": standard_lane or low_frequency_lane,
+        "sourceWinRate": (
+            source_win is not None and f(source_win) >= source_floor
+        ),
+        "sourceConcentratedBody": (
+            not source_concentrated
+            or (
+                int(row.get("sourceBodyAfterTop3N") or 0) > 0
+                and row.get("sourceBodyAfterTop3WinRate") is not None
+                and f(row.get("sourceBodyAfterTop3WinRate")) >= policy.source_body_min_win_rate
+                and row.get("sourceBodyAfterTop3Pnl") is not None
+                and f(row.get("sourceBodyAfterTop3Pnl")) >= 0.0
+            )
+        ),
+        "copyClosedSample": copy_n >= policy.rough_min_closed_30d,
+        "copyWinRate": copy_win is not None and f(copy_win) >= policy.rough_min_win_rate,
+        "copyConcentratedBody": (
+            not copy_body_guard
+            or not copy_concentrated
+            or (
+                int(row.get("copyBodyAfterTop3N") or 0) > 0
+                and row.get("copyBodyAfterTop3WinRate") is not None
+                and f(row.get("copyBodyAfterTop3WinRate")) >= policy.rough_min_win_rate
+                and row.get("copyBodyAfterTop3Pnl") is not None
+                and f(row.get("copyBodyAfterTop3Pnl")) >= 0.0
+            )
+        ),
+    }
+    failures = (
+        ("source_sample_lane_missing", "sourceSampleLane"),
+        ("source_win_rate_below_floor", "sourceWinRate"),
+        ("source_top3_dependent_body_weak", "sourceConcentratedBody"),
+        ("copy_closed_sample_below_floor", "copyClosedSample"),
+        ("copy_win_rate_below_floor", "copyWinRate"),
+        ("copy_top3_dependent_body_weak", "copyConcentratedBody"),
+    )
+    first_failure = next(
+        (reason for reason, key in failures if not checks[key]), None,
+    )
+    return {
+        "passed": first_failure is None,
+        "firstFailure": first_failure,
+        "checks": checks,
+        "sourceLane": (
+            "standard" if standard_lane
+            else "strong_low_frequency" if low_frequency_lane
+            else None
+        ),
+        "sourceWinFloor": source_floor,
+        "copyWinFloor": policy.rough_min_win_rate,
+        "sourceConcentrationTriggered": source_concentrated,
+        "copyConcentrationTriggered": copy_concentrated,
+    }
+
+
+def _repeatability_analysis(rows, policy):
+    tier_targets = {
+        name: [
+            row for row in rows
+            if _tier_pass(row, floor30, floor7)
+        ]
+        for name, floor30, floor7 in RETURN_TIERS
+    }
+    scenarios = (
+        ("current_profile_repeatability", False),
+        ("closed_copy_body_lottery_guard", True),
+    )
+    output = {}
+    for name, copy_body_guard in scenarios:
+        decisions = {
+            row["wallet"]: _repeatability_check(
+                row, policy, copy_body_guard=copy_body_guard,
+            )
+            for row in rows
+        }
+        passed_ids = {
+            wallet for wallet, decision in decisions.items()
+            if decision["passed"]
+        }
+        failures = Counter(
+            decision["firstFailure"] or "passed"
+            for decision in decisions.values()
+        )
+        tier_pass = {
+            tier: sum(row["wallet"] in passed_ids for row in targets)
+            for tier, targets in tier_targets.items()
+        }
+        output[name] = {
+            "copyClosedBodyGuard": copy_body_guard,
+            "population": len(rows),
+            "passed": len(passed_ids),
+            "firstFailureCounts": dict(failures.most_common()),
+            "tierOperationalTotals": {
+                tier: len(targets) for tier, targets in tier_targets.items()
+            },
+            "tierOperationalPass": tier_pass,
+            "tierOperationalRecall": {
+                tier: (
+                    tier_pass[tier] / len(targets)
+                    if targets else None
+                )
+                for tier, targets in tier_targets.items()
+            },
+        }
+    return output
+
+
 def analyze(
     research_db_path: str,
     report_path: str,
@@ -396,13 +576,18 @@ def analyze(
         raise ValueError("profit_research_run_missing")
     context = json.loads(zlib.decompress(run[2]))
     rows = []
-    for wallet, status, reason, record_json in db.execute(
-        "SELECT wallet,status,reason,record_json FROM profit_research_wallet_cache "
+    for wallet, status, reason, record_json, artifact_blob in db.execute(
+        "SELECT wallet,status,reason,record_json,artifact_blob "
+        "FROM profit_research_wallet_cache "
         "WHERE run_key=? ORDER BY wallet",
         (run_key,),
     ):
+        artifact = (
+            json.loads(zlib.decompress(artifact_blob))
+            if artifact_blob is not None else None
+        )
         rows.append(_wallet_view(
-            str(wallet), str(status), reason, json.loads(record_json),
+            str(wallet), str(status), reason, json.loads(record_json), artifact,
         ))
     db.close()
 
@@ -445,6 +630,7 @@ def analyze(
     ) if leaderboard and minimum_volume else None
     status_counts = Counter(row["status"] for row in rows)
     reason_counts = Counter(str(row["reason"] or "unknown") for row in rows)
+    policy = load_copy_policy(context.get("surface") or {})
     report = {
         "status": "complete" if expected is not None and len(rows) >= expected else "partial",
         "anonymous": True,
@@ -470,6 +656,7 @@ def analyze(
         "featureBuckets": _bucket_analysis(rough),
         "sampleDepthGrid": _sample_depth_grid(rough),
         "gateSensitivity": _gate_sensitivity(rough),
+        "repeatabilityAnalysis": _repeatability_analysis(operational, policy),
         "topRoughCandidates": ranked[:64],
         "referenceWallet": next(
             (row for row in rows if row["wallet"] == reference_wallet), None,
