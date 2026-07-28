@@ -264,6 +264,28 @@ class ScannerWatchlistTests(unittest.TestCase):
                 scanner._assert_scoped_fill_cache(db, ["0xaaa"], {"BTC", "xyz:AAPL"})
             db.close()
 
+    def test_generation_scope_audit_streams_rows_without_fetchall(self):
+        class StreamingCursor:
+            def __iter__(self):
+                return iter([
+                    (json.dumps({"coin": "BTC"}),),
+                    (json.dumps({"coin": "xyz:AAPL"}),),
+                ])
+
+            def fetchall(self):
+                raise AssertionError("scope audit must not materialize a fill shard")
+
+        class StreamingDb:
+            def execute(self, _sql, _args):
+                return StreamingCursor()
+
+        self.assertEqual(
+            scanner._assert_scoped_fill_cache(
+                StreamingDb(), ["0xaaa"], {"BTC", "xyz:AAPL"},
+            ),
+            {"audited": 2, "invalid": 0, "scope": ["crypto", "stock"]},
+        )
+
     def test_source_cursor_advances_when_every_new_fill_is_out_of_scope(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

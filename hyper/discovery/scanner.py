@@ -29,7 +29,6 @@ from hyper.copy.copy_data import (
     is_copyable_coin,
     load_copyable_fills,
     normalize_copyable_fills,
-    out_of_scope_fills,
 )
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy.economics import (
@@ -215,17 +214,21 @@ def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=Fals
 
 
 def _assert_scoped_fill_cache(db, addrs, universe) -> dict:
-    """Fail publication if a profiled wallet cache contains an out-of-scope row."""
+    """Fail publication if a profiled wallet cache contains an out-of-scope row.
+
+    Keep the audit streaming.  A complete generation can own millions of cached fills; materializing
+    even a 400-wallet shard and then duplicating every decoded JSON object pushed the production scanner
+    above the memory+swap budget immediately after rough replay.
+    """
     owners = sorted({str(addr or "").lower() for addr in addrs or [] if addr})
     audited = invalid = 0
-    for offset in range(0, len(owners), 400):
-        batch = owners[offset:offset + 400]
+    for offset in range(0, len(owners), 100):
+        batch = owners[offset:offset + 100]
         marks = ",".join("?" for _ in batch)
         rows = db.execute(
             f"SELECT fill_json FROM candidate_fills WHERE lower(addr) IN ({marks})",
             batch,
-        ).fetchall()
-        payloads = []
+        )
         for (payload,) in rows:
             audited += 1
             try:
@@ -233,8 +236,8 @@ def _assert_scoped_fill_cache(db, addrs, universe) -> dict:
             except (TypeError, ValueError):
                 invalid += 1
                 continue
-            payloads.append(row)
-        invalid += len(out_of_scope_fills(payloads, universe=universe))
+            if not is_copyable_coin(row.get("coin"), universe=universe):
+                invalid += 1
     if invalid:
         raise RuntimeError(f"market_scope_cache_violation:{invalid}:{audited}")
     return {"audited": audited, "invalid": 0, "scope": ["crypto", "stock"]}
@@ -926,19 +929,26 @@ def _finalize_profile_qualification(m, ok: bool, reason: str) -> tuple[bool, str
     return ok, reason, score
 
 
-def _defer_profile(db, addr, prior, stamp, reason):
+def _defer_profile(db, addr, prior, stamp, reason, *, generation_id=None):
     """Persist a tri-state data error while preserving the last usable market snapshot."""
     reason = str(reason or "data_error")[:120]
     if prior:
         with _db_lock:
             db.execute(
                 "UPDATE profile SET data_status='deferred_data_error',evidence_status='invalid',"
-                "evaluated_at=?,reason=? WHERE addr=?",
-                (stamp, reason, addr),
+                "evaluated_at=?,reason=?,profile_generation=COALESCE(?,profile_generation) WHERE addr=?",
+                (stamp, reason, generation_id, addr),
             )
             db.commit()
         m = dict(prior)
-        m.update(data_status="deferred_data_error", evidence_status="invalid")
+        m.update(
+            data_status="deferred_data_error",
+            evidence_status="invalid",
+            evaluated_at=stamp,
+            reason=reason,
+        )
+        if generation_id:
+            m["profile_generation"] = generation_id
         return (prior.get("status") or "quarantine"), reason, m, False
     row = {
         "addr": addr,
@@ -948,6 +958,7 @@ def _defer_profile(db, addr, prior, stamp, reason):
         "raw_quality_score": 0.0,
         "data_status": "deferred_data_error",
         "evidence_status": "invalid",
+        "profile_generation": generation_id,
         "evaluated_at": stamp,
         "times_seen": 1,
         "times_active": 0,
@@ -1193,7 +1204,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     # over-rejected as hit_page_cap). We slice the 14d window for the existing scoring metrics (behaviour
     # unchanged) and use the full fetch for the multi-window / lifetime nets — still ONE fetch per wallet.
     if not universe:
-        return _defer_profile(db, addr, prior, stamp, "universe_unavailable")
+        return _defer_profile(
+            db, addr, prior, stamp, "universe_unavailable",
+            generation_id=getattr(p, "scan_generation", None),
+        )
     window_start = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
     # Workset scope and fill-fetch mode are independent.  A UI "full scan" may evaluate every candidate
     # while only the scheduler-selected migration/repair wallets perform a complete historical refetch.
@@ -1203,7 +1217,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             db, addr, window_start, p, full, universe=universe,
         )
     except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
-        return _defer_profile(db, addr, prior, stamp, f"fills_error:{type(exc).__name__}")
+        return _defer_profile(
+            db, addr, prior, stamp, f"fills_error:{type(exc).__name__}",
+            generation_id=getattr(p, "scan_generation", None),
+        )
     for x in raw_full:
         x["user"] = addr
     # `_fetch_profile_fills` already crossed the collection boundary: only current standard Crypto
@@ -1295,7 +1312,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                 coverage_complete=False, coverage_end=now_ms, universe=universe,
             )
             db.commit()
-        status, deferred_reason, deferred, _ = _defer_profile(db, addr, prior, stamp, "hit_page_cap")
+        status, deferred_reason, deferred, _ = _defer_profile(
+            db, addr, prior, stamp, "hit_page_cap",
+            generation_id=getattr(p, "scan_generation", None),
+        )
         return status, deferred_reason, deferred, True
     else:
         ok, reason = metrics.gates_structural(m, p)
@@ -1316,7 +1336,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         dexes = {(c.split(":")[0] if ":" in c else None) for c in {x["coin"] for x in perp}}
         snap = _open_snapshot(addr, dexes, open_eps, now_ms, acct_value, universe=universe)
         if snap is None:
-            return _defer_profile(db, addr, prior, stamp, "clearinghouse_unavailable")
+            return _defer_profile(
+                db, addr, prior, stamp, "clearinghouse_unavailable",
+                generation_id=getattr(p, "scan_generation", None),
+            )
         m["margin_type"] = snap["margin_type"]
         m["cur_leverage"] = snap["cur_leverage"]
         m["open_underwater"] = snap["worst_underwater"]
@@ -1444,7 +1467,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                             next(iter(sector_market_errors.values()))
                         )
         except generation_market.MarketSnapshotError as exc:
-            return _defer_profile(db, addr, prior, stamp, str(exc))
+            return _defer_profile(
+                db, addr, prior, stamp, str(exc),
+                generation_id=getattr(p, "scan_generation", None),
+            )
         # Qualification is anchored to the generation's scan-start context, not whichever target snapshot
         # happens to finish first.  A target can close between its history fetch and clearinghouse snapshot;
         # the replay then still has an as-of open position while the later account snapshot no longer lists
@@ -1509,7 +1535,10 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         ):
             m["evidence_status"] = "economically_disqualified"
         if m.get("data_status") == "deferred_data_error":
-            return _defer_profile(db, addr, prior, stamp, "copy_replay_unavailable")
+            return _defer_profile(
+                db, addr, prior, stamp, "copy_replay_unavailable",
+                generation_id=getattr(p, "scan_generation", None),
+            )
         if ok:
             _attach_open_copy_activity_context(
                 m, addr, getattr(p, "open_copy_pnl_by_addr", {}),
@@ -5224,6 +5253,29 @@ def _profiled_generation_coverage(db, generation_id: str, scan_stamp=None) -> di
     }
 
 
+def _adopt_resumable_deferred_profiles(db, generation_id: str, scan_stamp) -> int:
+    """Attach already-evaluated deferred rows to a generation interrupted before its profile audit.
+
+    Older `_defer_profile` calls preserved the prior profile generation.  If the process died between
+    completing rough replay and recording the generation-scoped profile audit, `finalize-profiled` could
+    therefore mistake current `hit_page_cap` outcomes for wallets that had never been processed.  The exact
+    scan timestamp plus the immutable successful Perp-prefilter audit identifies only rows evaluated by this
+    run; ordinary stale profiles cannot be adopted.
+    """
+    if not scan_stamp:
+        return 0
+    result = db.execute(
+        "UPDATE profile SET profile_generation=? "
+        "WHERE data_status='deferred_data_error' AND evaluated_at=? "
+        "AND COALESCE(profile_generation,'')<>? "
+        "AND EXISTS (SELECT 1 FROM pipeline_audit a "
+        "WHERE a.source='scan' AND a.stamp=? AND a.stage='perp_prefilter' "
+        "AND a.status='passed' AND lower(a.addr)=lower(profile.addr))",
+        (generation_id, scan_stamp, generation_id, scan_stamp),
+    )
+    return max(0, int(result.rowcount or 0))
+
+
 def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=True) -> dict:
     """Finish selection from an already-profiled generation without fetching wallet history.
 
@@ -5248,6 +5300,11 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     ).fetchone()
     if not meta or meta[0] in {"published", "failed"} or not int(meta[1] or 0):
         raise RuntimeError("generation_not_resumable")
+    adopted_deferred = _adopt_resumable_deferred_profiles(
+        db, generation_id, meta[5],
+    )
+    if adopted_deferred:
+        db.commit()
     workset_n = int(meta[2] or 0)
     profile_coverage = _profiled_generation_coverage(db, generation_id, meta[5])
     profile_total = int(profile_coverage["complete"])
@@ -5727,15 +5784,18 @@ def refresh_challengers(db, p) -> dict:
             if addr in incomplete_cache:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, "daily_cache_incomplete_full_scan_required",
+                    generation_id=generation_id,
                 )
             gate = perp_results.get(addr)
             if gate is None:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, "official_perp_evidence_missing",
+                    generation_id=generation_id,
                 )
             if gate.deferred:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, gate.reason,
+                    generation_id=generation_id,
                 )
             # The frozen daily pool already owns a complete 37-day cache, so even an official business-gate
             # failure or normal evidence-building state must consume its cheap delta. A zeroed wallet commonly
@@ -5773,6 +5833,7 @@ def refresh_challengers(db, p) -> dict:
                     else:
                         status, reason, profile, _hit_cap = _defer_profile(
                             db, addr, priors.get(addr), stamp, reason,
+                            generation_id=generation_id,
                         )
                         profiled += 1
                         deferred_profiles += 1
@@ -6559,7 +6620,10 @@ def scan(db, p) -> None:
                 return addr, prior, _defer_official_evidence_profile(
                     db, addr, prior, stamp, generation_id, gate,
                 )
-            return addr, prior, _defer_profile(db, addr, prior, stamp, gate.reason)
+            return addr, prior, _defer_profile(
+                db, addr, prior, stamp, gate.reason,
+                generation_id=generation_id,
+            )
         if not gate.passed:
             return addr, prior, _reject_prefilter_profile(
                 db, addr, prior, stamp, generation_id, gate.reason,
@@ -6693,6 +6757,11 @@ def scan(db, p) -> None:
         },
     )
     db.commit()
+    # Record durable per-wallet coverage before the market-scope audit and strict formation.  Either later
+    # step can fail (including a host-level OOM), and `finalize-profiled` must still be able to prove that
+    # every wallet in the frozen workset already reached a terminal profile/deferred outcome.
+    pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
+    db.commit()
 
     profile_done_at = time.time()
     profile_api_stats = rest.request_stats()
@@ -6719,7 +6788,6 @@ def scan(db, p) -> None:
     publication_stamp = None
     previous_core = selection.published_core_addrs(db) or []
     n_active = len(previous_core)
-    pipeline_audit.record_profile_snapshot(db, stamp, "scan", profiled_addrs)
     if complete:
         _set_scan_progress(db, stage="rebuild_watchlist", candidates_scanned=len(workset))
         selection_mode = str(

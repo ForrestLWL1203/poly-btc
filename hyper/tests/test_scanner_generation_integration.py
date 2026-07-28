@@ -1087,6 +1087,48 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "source": "profile_audit",
             })
 
+    def test_resume_adopts_only_same_scan_deferred_profile_outcomes(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile(addr,status,reason,profile_generation,data_status,evaluated_at) "
+                "VALUES(?,?,?,?,?,?)",
+                [
+                    ("0xcurrent", "quarantine", "hit_page_cap", "old-g",
+                     "deferred_data_error", "scan-start"),
+                    ("0xstale", "quarantine", "hit_page_cap", "old-g",
+                     "deferred_data_error", "older-scan"),
+                ],
+            )
+            scanner.pipeline_audit._insert_event(
+                db, stamp="scan-start", source="scan", stage="perp_prefilter",
+                addr="0xcurrent", status="passed", reason="perp_week_volume",
+            )
+            scanner.pipeline_audit._insert_event(
+                db, stamp="older-scan", source="scan", stage="perp_prefilter",
+                addr="0xstale", status="passed", reason="perp_week_volume",
+            )
+            db.commit()
+
+            adopted = scanner._adopt_resumable_deferred_profiles(
+                db, "new-g", "scan-start",
+            )
+
+            self.assertEqual(adopted, 1)
+            self.assertEqual(
+                db.execute(
+                    "SELECT profile_generation FROM profile WHERE addr='0xcurrent'"
+                ).fetchone()[0],
+                "new-g",
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT profile_generation FROM profile WHERE addr='0xstale'"
+                ).fetchone()[0],
+                "old-g",
+            )
+            db.close()
+
     def test_finalize_profiled_generation_reuses_cache_without_wallet_fetch(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
