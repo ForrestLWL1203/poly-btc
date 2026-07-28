@@ -316,8 +316,6 @@ def _rough_wallet(
     raw_fills, hit_cap = rest.fetch_window(
         addr, int(now_ms) - int(config.PROFILE_FETCH_DAYS) * DAY_MS, max_pages,
     )
-    if hit_cap:
-        return {**base, "status": "deferred", "reason": "fill_history_page_cap"}, None
     if not isinstance(raw_fills, list):
         return {**base, "status": "deferred", "reason": "fill_history_unavailable"}, None
     scoped = normalize_copyable_fills(raw_fills, addr=addr, universe=universe)
@@ -356,6 +354,11 @@ def _rough_wallet(
             **base, "status": "rejected",
             "reason": _first_structure_failure(structure),
         }, None
+    if hit_cap:
+        # A partial page may prove structural uncopyability, but it can never prove profitability. Reaching
+        # this branch means at least one sector looked copyable, so retain it as incomplete instead of
+        # calculating a flattering return from the truncated path.
+        return {**base, "status": "deferred", "reason": "fill_history_page_cap"}, None
 
     allowed = set(structure["allowed"])
     replay_fills = [

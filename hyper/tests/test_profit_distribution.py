@@ -93,6 +93,13 @@ class ProfitDistributionTests(unittest.TestCase):
         source = inspect.getsource(discover.main)
         self.assertIn("with scan_lock.acquire(args.db)", source)
 
+    def test_page_cap_is_checked_only_after_structural_rejection(self):
+        source = inspect.getsource(profit_distribution._rough_wallet)
+        self.assertLess(
+            source.index("if not structure.get(\"allowed\")"),
+            source.index("if hit_cap:"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
