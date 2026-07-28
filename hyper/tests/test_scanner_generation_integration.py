@@ -1170,6 +1170,20 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT status FROM commands WHERE type='rescan'"
             ).fetchone(), ("done",))
+            self.assertEqual(
+                db.execute(
+                    "SELECT kind,complete,candidates,profiled,n_active,outcome_reason "
+                    "FROM scan_runs WHERE generation='cached-g'"
+                ).fetchone(),
+                ("complete", 1, 1, 1, 0, "resumed_profiled_generation"),
+            )
+            metrics = json.loads(db.execute(
+                "SELECT metrics_json FROM scan_generation WHERE generation='cached-g'"
+            ).fetchone()[0])
+            self.assertEqual(metrics["coarseRecallPassed"], 1)
+            self.assertEqual(metrics["perpPrefilterPassed"], 1)
+            self.assertEqual(metrics["selectionCore"], 0)
+            self.assertTrue(metrics["resumedFinalize"])
 
     def test_final_copy_summary_reuses_publication_certification(self):
         with tempfile.TemporaryDirectory() as td:

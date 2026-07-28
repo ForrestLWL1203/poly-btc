@@ -5323,6 +5323,12 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         generation_metrics.get("marginEquityPct", _current_margin_equity_pct(db))
     )
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
+    candidate_count = int(db.execute(
+        "SELECT COUNT(*) FROM leaderboard_staging "
+        "WHERE generation=? AND is_candidate=1",
+        (generation_id,),
+    ).fetchone()[0] or 0)
+    pre_strict_counts = _pre_strict_counts(db, generation_id)
 
     now_ms = int(time.time() * 1000)
     previous_core = selection.published_core_addrs(db) or []
@@ -5381,6 +5387,28 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         valid = int(profile_coverage["valid"])
         deferred = int(profile_coverage["deferred"])
         rejected = int(profile_coverage["rejected"])
+        core_count = sum(1 for item in rows if item.role == selection.CORE)
+        challenger_count = sum(
+            1 for item in rows if item.role == selection.CHALLENGER
+        )
+        resumed_metrics = {
+            **generation_metrics,
+            "coarseRecallPassed": candidate_count,
+            "perpPrefilterPassed": workset_n,
+            "structurePassed": pre_strict_counts["roughCopyCompleted"],
+            **pre_strict_counts,
+            "profileValid": valid,
+            "profileDeferred": deferred,
+            "profileRejected": rejected,
+            "selectionCore": core_count,
+            "selectionChallenger": challenger_count,
+            "selectionSearch": marginal.search_meta or {},
+            "resumedFinalize": True,
+        }
+        db.execute(
+            "UPDATE scan_generation SET metrics_json=? WHERE generation=?",
+            (json.dumps(resumed_metrics, sort_keys=True), generation_id),
+        )
         generation.mark_generation_ready(
             db, generation_id, profile_total=profile_total, profile_valid=valid,
             profile_deferred=deferred, profile_rejected=rejected,
@@ -5444,6 +5472,33 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         candidates_total=profile_total,
     )
     _set_scanner_proc(db, "idle", {"last_scan_at": now_iso(), "active": len(current_core)})
+    existing_run = db.execute(
+        "SELECT 1 FROM scan_runs WHERE generation=? AND kind='complete' LIMIT 1",
+        (generation_id,),
+    ).fetchone()
+    if not existing_run:
+        try:
+            started_epoch = calendar.timegm(
+                time.strptime(str(meta[5]), "%Y-%m-%dT%H:%M:%SZ")
+            )
+        except (TypeError, ValueError):
+            started_epoch = time.time()
+        business_rejected = int(db.execute(
+            "SELECT COUNT(*) FROM profile WHERE profile_generation=? "
+            "AND status IN ('rejected','retired')",
+            (generation_id,),
+        ).fetchone()[0] or 0)
+        previous_set = {str(addr or "").lower() for addr in previous_core}
+        current_set = {str(addr or "").lower() for addr in current_core}
+        _record_run(
+            db, str(meta[5]), started_epoch,
+            candidate_count, profile_total,
+            len(current_set - previous_set), len(previous_set - current_set),
+            len(previous_set & current_set), business_rejected, len(current_core),
+            full=True, failed=0, complete=True, kind="complete",
+            generation_id=generation_id, reason="resumed_profiled_generation",
+            commit=False,
+        )
     db.commit()
     return {
         "status": "published", "generation": generation_id,
