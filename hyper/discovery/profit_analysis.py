@@ -497,6 +497,62 @@ def _repeatability_check(row, policy, *, copy_body_guard):
     }
 
 
+def _conditional_lottery_check(row, policy):
+    """Reject low-win/top-heavy windfalls without banning repeatable asymmetric-payoff strategies.
+
+    A low win rate alone is not evidence of luck: a trend strategy can distribute profit across many winners
+    and keep its post-Top3 body profitable.  The dangerous shape is low win rate plus a losing body, or a
+    Top3-concentrated book whose remaining body is losing/win-light.
+    """
+    low_win_floor = 0.50
+    source_n = int(row.get("sourceEpisodes30") or 0)
+    copy_n = int(row.get("closedEpisodes30") or 0)
+
+    def side(prefix):
+        win = row.get(f"{prefix}WinRate30")
+        top3 = row.get(f"{prefix}Top3ProfitShare")
+        body_n = int(row.get(f"{prefix}BodyAfterTop3N") or 0)
+        body_win = row.get(f"{prefix}BodyAfterTop3WinRate")
+        body_pnl = row.get(f"{prefix}BodyAfterTop3Pnl")
+        missing = any(value is None for value in (win, top3, body_win, body_pnl)) or body_n <= 0
+        if missing:
+            return {"passed": False, "reason": f"{prefix}_lottery_evidence_missing"}
+        low_win_losing_body = f(win) < low_win_floor and f(body_pnl) < 0.0
+        concentrated = f(top3) >= policy.source_top3_concentration_trigger
+        concentrated_weak_body = concentrated and (
+            f(body_pnl) < 0.0 or f(body_win) < low_win_floor
+        )
+        return {
+            "passed": not low_win_losing_body and not concentrated_weak_body,
+            "reason": (
+                f"{prefix}_low_win_losing_body"
+                if low_win_losing_body
+                else f"{prefix}_top3_windfall_dependency"
+                if concentrated_weak_body else None
+            ),
+        }
+
+    source_sample = source_n >= policy.source_low_freq_min_episodes_30d
+    copy_sample = copy_n >= policy.rough_min_closed_30d
+    source = side("source")
+    copy = side("copy")
+    failures = (
+        (source_sample, "source_sample_below_7"),
+        (copy_sample, "copy_sample_below_7"),
+        (source["passed"], source["reason"]),
+        (copy["passed"], copy["reason"]),
+    )
+    first_failure = next(
+        (reason for passed, reason in failures if not passed), None,
+    )
+    return {
+        "passed": first_failure is None,
+        "firstFailure": first_failure,
+        "lowWinFloor": low_win_floor,
+        "top3ConcentrationTrigger": policy.source_top3_concentration_trigger,
+    }
+
+
 def _repeatability_analysis(rows, policy):
     tier_targets = {
         name: [
@@ -546,6 +602,41 @@ def _repeatability_analysis(rows, policy):
                 for tier, targets in tier_targets.items()
             },
         }
+    conditional = {
+        row["wallet"]: _conditional_lottery_check(row, policy)
+        for row in rows
+    }
+    conditional_passed = {
+        wallet for wallet, decision in conditional.items()
+        if decision["passed"]
+    }
+    conditional_tier_pass = {
+        tier: sum(row["wallet"] in conditional_passed for row in targets)
+        for tier, targets in tier_targets.items()
+    }
+    output["conditional_closed_lottery_guard"] = {
+        "policy": (
+            "sample>=7; reject low-win<50% with losing post-Top3 body, or "
+            "Top3>=70% with losing/sub-50%-win body"
+        ),
+        "population": len(rows),
+        "passed": len(conditional_passed),
+        "firstFailureCounts": dict(Counter(
+            decision["firstFailure"] or "passed"
+            for decision in conditional.values()
+        ).most_common()),
+        "tierOperationalTotals": {
+            tier: len(targets) for tier, targets in tier_targets.items()
+        },
+        "tierOperationalPass": conditional_tier_pass,
+        "tierOperationalRecall": {
+            tier: (
+                conditional_tier_pass[tier] / len(targets)
+                if targets else None
+            )
+            for tier, targets in tier_targets.items()
+        },
+    }
     return output
 
 

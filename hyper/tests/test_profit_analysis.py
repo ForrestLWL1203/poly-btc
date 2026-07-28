@@ -210,6 +210,40 @@ class ProfitAnalysisTests(unittest.TestCase):
         self.assertFalse(decision["passed"])
         self.assertEqual(decision["firstFailure"], "source_win_rate_below_floor")
 
+    def test_conditional_lottery_guard_keeps_distributed_low_win_profit(self):
+        row = profit_analysis._wallet_view(
+            "asymmetric", "rough_complete", "ok",
+            _record(
+                "asymmetric", 0.60, 0.30, 0.12,
+                operational=True, episodes30=20, episodes7=5,
+            ),
+        )
+        row.update({
+            "sourceWinRate30": 0.40,
+            "sourceTop3ProfitShare": 0.20,
+            "sourceBodyAfterTop3N": 17,
+            "sourceBodyAfterTop3WinRate": 0.35,
+            "sourceBodyAfterTop3Pnl": 1_000.0,
+            "copyWinRate30": 0.40,
+            "copyTop3ProfitShare": 0.20,
+            "copyBodyAfterTop3N": 17,
+            "copyBodyAfterTop3WinRate": 0.35,
+            "copyBodyAfterTop3Pnl": 500.0,
+        })
+        decision = profit_analysis._conditional_lottery_check(
+            row, load_copy_policy(),
+        )
+        self.assertTrue(decision["passed"])
+
+        row["copyBodyAfterTop3Pnl"] = -1.0
+        decision = profit_analysis._conditional_lottery_check(
+            row, load_copy_policy(),
+        )
+        self.assertFalse(decision["passed"])
+        self.assertEqual(
+            decision["firstFailure"], "copy_low_win_losing_body",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
