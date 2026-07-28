@@ -38,6 +38,21 @@ class ProfitDistributionTests(unittest.TestCase):
         self.assertEqual(rows[0]["leaderboardWeekPnl"], -50_000)
         self.assertEqual(rows[0]["accountValue"], 0)
 
+    def test_bounded_sample_is_stratified_and_keeps_current_selection(self):
+        candidates = [
+            {"addr": f"0x{index:040x}", "leaderboardWeekVolume": 1000 - index}
+            for index in range(100)
+        ]
+        current = candidates[73]["addr"]
+        sampled = profit_distribution._stratified_sample(
+            candidates, 10, must_include={current},
+        )
+        addrs = {row["addr"] for row in sampled}
+        self.assertEqual(len(sampled), 10)
+        self.assertIn(current, addrs)
+        self.assertIn(candidates[0]["addr"], addrs)
+        self.assertIn(candidates[-1]["addr"], addrs)
+
     def test_threshold_matrix_uses_only_complete_strict_replays(self):
         wallets = [
             _strict("one", 0.50, 0.03),

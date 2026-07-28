@@ -208,14 +208,17 @@ shared 15-minute price path:
 ```bash
 python3 -m hyper.cli.discover --db /path/to/production.db profit-distribution \
   --week-perp-volume-min 250000 \
+  --limit 600 \
   --cache-db /private/profit-distribution-cache.db \
   --report /private/profit-distribution.json
 ```
 
 The source database is opened read-only. The isolated cache and anonymous JSON report are created with mode
 `0600`; the command never creates or publishes a generation, changes Core, updates parameters, or starts
-Observer. Its strict 30/14/7 conservative-return quantiles and paired threshold matrix are the evidence used to
-choose new profitability floors.
+Observer. A positive `--limit` keeps current Core/Challenger evidence and deterministically samples the complete
+Perp-volume rank instead of taking a biased top-volume prefix; zero scans the entire recall set. Its strict
+30/14/7 conservative-return quantiles and paired threshold matrix are the evidence used to choose new
+profitability floors.
 
 ## Copy replay and automatic tuning
 

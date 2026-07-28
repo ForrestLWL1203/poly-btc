@@ -291,8 +291,11 @@ def main() -> int:
     profit.add_argument("--cache-db", required=True, help="isolated 0600 research path cache")
     profit.add_argument("--week-perp-volume-min", type=float, default=250_000.0)
     profit.add_argument("--max-pages", type=int, default=5)
-    profit.add_argument("--limit", type=int, default=0, help="0 means every volume-recalled wallet")
-    profit.add_argument("--scan-interval", type=float, default=0.8)
+    profit.add_argument(
+        "--limit", type=int, default=0,
+        help="0 scans all; positive values take a deterministic volume-rank-stratified sample",
+    )
+    profit.add_argument("--scan-interval", type=float, default=1.1)
 
     args = ap.parse_args()
     if args.cmd == "profit-distribution":
@@ -317,6 +320,7 @@ def main() -> int:
             "report": args.report,
             "strictSampleCount": result["summary"]["strictSampleCount"],
             "leaderboardVolumeRecall": result["leaderboardVolumeRecall"],
+            "sampledCandidates": result["sampledCandidates"],
         }, sort_keys=True))
         return 0
     if args.cmd == "audit-pipeline":

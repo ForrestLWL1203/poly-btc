@@ -107,6 +107,40 @@ def _leaderboard_candidates(rows, minimum_week_volume: float) -> list[dict]:
     return sorted(out, key=lambda row: (-row["leaderboardWeekVolume"], row["addr"]))
 
 
+def _stratified_sample(
+    candidates: list[dict],
+    limit: int,
+    *,
+    must_include: set[str] | None = None,
+) -> list[dict]:
+    """Deterministically cover the full volume rank while retaining current operational evidence."""
+    if limit <= 0 or limit >= len(candidates):
+        return list(candidates)
+    required = {
+        str(addr or "").lower() for addr in (must_include or ()) if addr
+    }
+    forced = [row for row in candidates if row["addr"] in required]
+    forced = forced[:limit]
+    remaining_slots = max(0, int(limit) - len(forced))
+    pool = [row for row in candidates if row["addr"] not in required]
+    if remaining_slots >= len(pool):
+        sampled = pool
+    elif remaining_slots <= 0:
+        sampled = []
+    elif remaining_slots == 1:
+        sampled = [pool[len(pool) // 2]]
+    else:
+        indexes = {
+            int(round(index * (len(pool) - 1) / (remaining_slots - 1)))
+            for index in range(remaining_slots)
+        }
+        sampled = [pool[index] for index in sorted(indexes)]
+    selected = {row["addr"]: row for row in (*forced, *sampled)}
+    return [
+        row for row in candidates if row["addr"] in selected
+    ][:limit]
+
+
 def _active_surface(db: sqlite3.Connection) -> dict:
     try:
         row = db.execute(
@@ -156,6 +190,19 @@ def _known_major_risk(db: sqlite3.Connection) -> set[str]:
             "SELECT DISTINCT lower(addr) FROM wallet_risk_event "
             "WHERE event_type IN ('copy_single_liquidation_loss_over_5pct',"
             "'source_account_liquidated_zero')"
+        ).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row[0]).lower() for row in rows if row and row[0]}
+
+
+def _current_selection_addrs(db: sqlite3.Connection) -> set[str]:
+    try:
+        rows = db.execute(
+            "SELECT DISTINCT lower(fs.addr) FROM follow_selection fs "
+            "JOIN scan_generation sg ON sg.generation=fs.generation "
+            "WHERE sg.is_current=1 AND sg.status='published' "
+            "AND fs.role IN ('core','challenger')"
         ).fetchall()
     except sqlite3.Error:
         return set()
@@ -466,7 +513,7 @@ def run(
     minimum_week_volume: float = 250_000.0,
     max_pages: int = 5,
     limit: int = 0,
-    scan_interval: float = 0.8,
+    scan_interval: float = 1.1,
     progress=None,
 ) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
@@ -477,15 +524,17 @@ def run(
         surface = _active_surface(source)
         sigmas, market_context = _market_evidence(source)
         known_risk = _known_major_risk(source)
+        current_selection = _current_selection_addrs(source)
     finally:
         source.close()
 
     config.MIN_POST_INTERVAL = max(0.1, float(scan_interval))
     rest.reset_request_stats()
     leaderboard = rest.get_leaderboard()
-    candidates = _leaderboard_candidates(leaderboard, minimum_week_volume)
-    if limit > 0:
-        candidates = candidates[:int(limit)]
+    recalled = _leaderboard_candidates(leaderboard, minimum_week_volume)
+    candidates = _stratified_sample(
+        recalled, int(limit), must_include=current_selection,
+    )
     universe = rest.copyable_universe(force=True)
     namespace = _research_namespace(surface, universe)
     terminal_marks = scanner._current_copy_valuation_marks()
@@ -523,7 +572,8 @@ def run(
                 "startedAt": started_at,
                 "minimumPerpWeekVolume": minimum_week_volume,
                 "leaderboardRows": len(leaderboard),
-                "leaderboardVolumeRecall": len(candidates),
+                "leaderboardVolumeRecall": len(recalled),
+                "sampledCandidates": len(candidates),
                 "processed": index,
                 "wallets": wallets,
                 "requestStats": rest.request_stats(),
@@ -603,7 +653,8 @@ def run(
         "qualityGatesApplied": False,
         "structuralGates": list(STRUCTURAL_GATES),
         "leaderboardRows": len(leaderboard),
-        "leaderboardVolumeRecall": len(candidates),
+        "leaderboardVolumeRecall": len(recalled),
+        "sampledCandidates": len(candidates),
         "pathAudit": path_audit,
         "requestStats": rest.request_stats(),
         "summary": summary,
