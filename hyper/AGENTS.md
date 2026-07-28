@@ -118,12 +118,18 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
   tolerated only at the coarse-harvest layer.
 - `profit-distribution` is a non-publishing research path. It reads the source database in query-only mode and
-  bypasses ROI/PnL, win-rate, activity, sample-depth and score gates, while preserving structural
-  uncopyability, catastrophic source risk and data/path integrity checks. Its isolated path cache and anonymous
-  report must never be substituted for a scan generation or strategy revision. `--strict-limit 0` is the
-  unbiased threshold-distribution mode. A positive strict limit is a candidate-hunt mode: it profiles the
-  complete requested recall set, ranks structural survivors by rough 70/30 conservative return, and strictly
-  replays only that bounded prefix; never use its biased quantiles to set policy.
+  bypasses ROI/PnL, win-rate, sample-depth and score gates during broad collection, while preserving structural
+  uncopyability, catastrophic source risk and data/path integrity checks. Before strict replay it separately
+  requires recurring OID-deduplicated, source-notional-qualified open/flip opportunities: the latest seven days
+  must be active, at least three of four rolling seven-day buckets must be active and the maximum 28-day opening
+  gap must not exceed ten days. Sparse wallets remain in the research distribution but cannot consume strict
+  replay slots. Every requested source artifact and derived profile is committed to a private 0600 research
+  database, with an anonymous report checkpoint after rough collection and history repair; neither may be
+  substituted for a scan generation or strategy revision. `--rough-only` must stop before price-path or strict
+  work. `--strict-limit 0` is the unbiased strict-distribution mode after activity qualification. A positive
+  strict limit is a candidate-hunt mode: it profiles the complete requested recall set, ranks operational
+  structural survivors by rough 70/30 conservative return, and strictly replays only that bounded prefix; never
+  use its biased quantiles to set policy.
 - A fresh candidate profile fetch covers `PROFILE_FETCH_DAYS` (currently 37 days: 30-day scoring window plus
   seven warm-up days). Reported copy evidence remains 30/14/7 days.
 - Canonical 30/14/7 Copy evidence is one 37-day warm replay sliced at each reporting boundary, never three

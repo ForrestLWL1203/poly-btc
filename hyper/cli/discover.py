@@ -303,6 +303,18 @@ def main() -> int:
         "--strict-limit", type=int, default=0,
         help="0 strictly replays every structural survivor; positive values replay only the rough-profit leaders",
     )
+    profit.add_argument(
+        "--rough-only", action="store_true",
+        help="stop after history repair, activity qualification and the complete rough report",
+    )
+    profit.add_argument(
+        "--resume-rough-report",
+        help="finish page-capped histories and activity-audit a prior completed rough checkpoint",
+    )
+    profit.add_argument(
+        "--activity-audit-limit", type=int, default=256,
+        help="rough-profit prefix to refresh for recurring actionable-open activity in resume mode",
+    )
     profit.add_argument("--scan-interval", type=float, default=1.1)
 
     args = ap.parse_args()
@@ -311,18 +323,32 @@ def main() -> int:
             print(f"profit_distribution_progress {stage} {done}/{total}", flush=True)
         try:
             with scan_lock.acquire(args.db):
-                result = profit_distribution.run(
-                    args.db,
-                    args.report,
-                    args.cache_db,
-                    minimum_week_volume=args.week_perp_volume_min,
-                    max_pages=max(1, int(args.max_pages)),
-                    recovery_pages=max(1, int(args.recovery_pages)),
-                    limit=max(0, int(args.limit)),
-                    strict_limit=max(0, int(args.strict_limit)),
-                    scan_interval=max(0.1, float(args.scan_interval)),
-                    progress=emit,
-                )
+                if args.resume_rough_report:
+                    result = profit_distribution.resume_rough(
+                        args.db,
+                        args.report,
+                        args.cache_db,
+                        args.resume_rough_report,
+                        minimum_week_volume=args.week_perp_volume_min,
+                        recovery_pages=max(1, int(args.recovery_pages)),
+                        activity_audit_limit=max(0, int(args.activity_audit_limit)),
+                        scan_interval=max(0.1, float(args.scan_interval)),
+                        progress=emit,
+                    )
+                else:
+                    result = profit_distribution.run(
+                        args.db,
+                        args.report,
+                        args.cache_db,
+                        minimum_week_volume=args.week_perp_volume_min,
+                        max_pages=max(1, int(args.max_pages)),
+                        recovery_pages=max(1, int(args.recovery_pages)),
+                        limit=max(0, int(args.limit)),
+                        strict_limit=max(0, int(args.strict_limit)),
+                        rough_only=bool(args.rough_only),
+                        scan_interval=max(0.1, float(args.scan_interval)),
+                        progress=emit,
+                    )
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")
         print(json.dumps({

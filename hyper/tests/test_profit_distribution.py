@@ -1,6 +1,10 @@
 import inspect
+import json
+import os
 import sqlite3
+import tempfile
 import unittest
+import zlib
 
 from hyper.cli import discover
 from hyper.discovery import profit_distribution
@@ -36,6 +40,18 @@ def _rough(wallet, return30, return7):
         "status": "rough_complete",
         "rough": {"windows": {"30": window(return30), "14": window(0), "7": window(return7)}},
     }
+
+
+def _activity_results(now_ms, offsets_and_details):
+    events = []
+    for offset_days, detail in offsets_and_details:
+        events.append({
+            "time": now_ms - int(offset_days * profit_distribution.DAY_MS),
+            "outcome": detail.get("outcome", "opened"),
+            "minimum_notional": detail.get("minimum", 2_500),
+            "master_notional": detail.get("master", 5_000),
+        })
+    return {30: {"open_events": events}}
 
 
 class ProfitDistributionTests(unittest.TestCase):
@@ -126,6 +142,83 @@ class ProfitDistributionTests(unittest.TestCase):
         source = inspect.getsource(profit_distribution.run)
         self.assertIn("strict_replay_inputs", source)
         self.assertIn("strictRankingMode", source)
+
+    def test_activity_uses_real_threshold_opens_and_weekly_continuity(self):
+        now_ms = 40 * profit_distribution.DAY_MS
+        results = _activity_results(now_ms, [
+            (26, {}), (19, {}), (12, {}), (5, {}),
+            # A sub-floor trial order is not an actionable opportunity.
+            (2, {"outcome": "skip_small_notl", "master": 100}),
+        ])
+        activity = profit_distribution._copy_activity(results, now_ms)
+        self.assertEqual(activity["weeklyOpenCountsOldestFirst"], [1, 1, 1, 1])
+        self.assertEqual(activity["activeWeeks4"], 4)
+        self.assertEqual(activity["actionableOpenEvents28d"], 4)
+        self.assertTrue(activity["continuous4of4"])
+        self.assertTrue(activity["operational"])
+
+    def test_activity_rejects_one_trade_windfall_before_strict(self):
+        now_ms = 40 * profit_distribution.DAY_MS
+        activity = profit_distribution._copy_activity(
+            _activity_results(now_ms, [(2, {})]), now_ms,
+        )
+        self.assertEqual(activity["activeWeeks4"], 1)
+        self.assertFalse(activity["operational"])
+        self.assertEqual(activity["reason"], "active_weeks_below_3_of_4")
+
+    def test_history_repair_checkpoint_precedes_strict_and_supports_rough_only(self):
+        source = inspect.getsource(profit_distribution.run)
+        checkpoint = source.index("_atomic_json(report_path, pre_strict_report)")
+        strict_path = source.index("path_audit = price_path.ensure")
+        self.assertLess(checkpoint, strict_path)
+        self.assertIn("if rough_only:", source)
+        self.assertIn("operational_wallets", source)
+        self.assertIn("_load_cached_replay", source)
+
+    def test_resume_mode_is_rough_only_and_refreshes_capped_plus_profit_prefix(self):
+        source = inspect.getsource(profit_distribution.resume_rough)
+        self.assertIn("capped_ids | ranked_ids", source)
+        self.assertIn('"strictReplayCandidates": 0', source)
+        self.assertNotIn("price_path.ensure", source)
+        cli = inspect.getsource(discover.main)
+        self.assertIn("resume_rough_report", cli)
+
+    def test_private_research_cache_persists_record_and_replay_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "research.db")
+            cache = profit_distribution._research_cache(path)
+            profit_distribution._cache_rough_record(
+                cache,
+                "run",
+                {"wallet": "wallet_test", "addr": "0xprivate"},
+                {"wallet": "wallet_test", "status": "rough_complete", "reason": "ok"},
+                {
+                    "addr": "0xprivate",
+                    "wallet": "wallet_test",
+                    "fills": [{"coin": "BTC", "time": 1}],
+                    "marks": {"BTC": 100.0},
+                },
+                {"portfolioPayload": [["perpWeek", {"vlm": 1}]]},
+            )
+            cache.commit()
+            row = cache.execute(
+                "SELECT addr,record_json,replay_blob,artifact_blob "
+                "FROM profit_research_wallet_cache"
+            ).fetchone()
+            cache.close()
+            self.assertEqual(row[0], "0xprivate")
+            self.assertEqual(json.loads(row[1])["status"], "rough_complete")
+            replay = json.loads(zlib.decompress(row[2]))
+            self.assertEqual(replay["fills"][0]["coin"], "BTC")
+            reopened = profit_distribution._research_cache(path)
+            loaded = profit_distribution._load_cached_replay(
+                reopened, "run", "wallet_test",
+            )
+            reopened.close()
+            self.assertEqual(loaded["marks"]["BTC"], 100.0)
+            artifact = json.loads(zlib.decompress(row[3]))
+            self.assertEqual(artifact["portfolioPayload"][0][0], "perpWeek")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":
