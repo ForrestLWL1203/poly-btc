@@ -13,6 +13,7 @@ from hyper.discovery import perp_prefilter, scanner
 def _window(start, end):
     step = (end - start) / 4
     return {
+        "vlm": "1000000",
         "pnlHistory": [
             [index * 7 * 86400_000, str(start + index * step)]
             for index in range(5)
@@ -77,6 +78,28 @@ class PerpPrefilterTests(unittest.TestCase):
         self.assertEqual(result.windows["week"]["perpShare"], 0.8)
         self.assertEqual(result.windows["month"]["perpShare"], 0.8)
         self.assertGreater(result.windows["officialPerp30d"]["return"], 0.20)
+
+    def test_official_perp_week_volume_is_a_hard_gate_when_configured(self):
+        payload = _portfolio()
+        for name, window in payload:
+            if name == "week":
+                window["vlm"] = "900000"
+            elif name == "perpWeek":
+                window["vlm"] = "249999"
+        rejected = perp_prefilter.evaluate(
+            payload, pnl_minima=self.minima, share_min=0.8,
+            min_week_perp_volume=250000,
+        )
+        self.assertEqual(rejected.reason, "perp_week_volume_below_floor")
+        self.assertEqual(rejected.windows["week"]["totalVlm"], 900000)
+        self.assertEqual(rejected.windows["week"]["perpVlm"], 249999)
+        for name, window in payload:
+            if name == "perpWeek":
+                window["vlm"] = "250000"
+        self.assertTrue(perp_prefilter.evaluate(
+            payload, pnl_minima=self.minima, share_min=0.8,
+            min_week_perp_volume=250000,
+        ).passed)
 
     def test_week_and_lifetime_are_audit_only(self):
         weak_week = perp_prefilter.evaluate(

@@ -44,6 +44,14 @@ def _portfolio_map(payload) -> dict:
     }
 
 
+def perp_week_volume(payload) -> float | None:
+    """Return the official Perp-only seven-day notional volume."""
+    window = _portfolio_map(payload).get("perpWeek")
+    if not isinstance(window, dict):
+        return None
+    return _number(window.get("vlm"))
+
+
 def _history(window: dict | None, key: str) -> list[tuple[int, float]]:
     """Return one deduplicated, time-ordered official Portfolio series."""
     values = {}
@@ -284,6 +292,7 @@ def evaluate(
     long_history_days: int = 28,
     short_history_days: int = 7,
     max_boundary_gap_hours: float = 36.0,
+    min_week_perp_volume: float = 0.0,
 ) -> Result:
     """Require profitable, Perp-led activity and a qualified long/short official Perp ROI."""
     del pnl_minima
@@ -307,8 +316,16 @@ def evaluate(
         share = (perp_pnl / total_pnl) if total_pnl > 0 else None
         metrics[label] = {
             "totalPnl": total_pnl, "perpPnl": perp_pnl, "perpShare": share,
+            "totalVlm": _number(windows[total_key].get("vlm")),
+            "perpVlm": _number(windows[perp_key].get("vlm")),
             "hardGate": label == "month", "auditStatus": "complete",
         }
+    week = metrics.get("week") or {}
+    if float(min_week_perp_volume) > 0.0:
+        if week.get("perpVlm") is None:
+            return Result("deferred_data_error", "portfolio_volume_incomplete:week", metrics)
+        if float(week["perpVlm"]) < float(min_week_perp_volume):
+            return Result("rejected", "perp_week_volume_below_floor", metrics)
     month = metrics.get("month") or {}
     if float(month.get("perpPnl") or 0.0) <= 0.0:
         return Result("rejected", "perp_pnl_not_profitable:month", metrics)

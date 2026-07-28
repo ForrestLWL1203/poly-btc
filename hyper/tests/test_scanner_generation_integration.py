@@ -27,6 +27,7 @@ def leaderboard_row(addr="0xaaa"):
 def portfolio_rows():
     def window(pnl):
         return {
+            "vlm": "30000000",
             "pnlHistory": [
                 [index * 7 * 86400_000, str(pnl * index / 4)]
                 for index in range(5)

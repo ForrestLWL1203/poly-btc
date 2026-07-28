@@ -104,9 +104,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 
 ### 2. Candidate workset and profiles
 
-- New-wallet Leaderboard recall requires account value `$20,000`, leveraged 7d notional volume `$150,000`,
+- New-wallet Leaderboard recall requires account value `$20,000`, leveraged 7d notional volume `$250,000`,
   and positive 7d and 30d PnL. Nominal leveraged volume is activity evidence, never a profitability denominator.
-  Before fill history is downloaded, official `perpMonth` must show positive observed-period Perp PnL and at
+  Before fill history is downloaded, official `perpWeek` must independently confirm at least `$250,000` of
+  Perp-only seven-day volume, and official `perpMonth` must show positive observed-period Perp PnL and at
   least 60% Perp PnL share. A continuously positive Perp-equity history of at least 28 days must return at
   least 20%; a 7–27 day history uses its latest complete seven-day window and must return at least 5%.
   Leading zero-equity funding samples are skipped without annualising the shorter return. `history_under_7d`,
@@ -116,6 +117,10 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   and removes spot, outcomes and opaque builder fills before cache, metrics and replay; publication audits the
   active cache for scope violations. Network APIs that cannot filter leaderboard rows by product scope are
   tolerated only at the coarse-harvest layer.
+- `profit-distribution` is a non-publishing research path. It reads the source database in query-only mode and
+  bypasses ROI/PnL, win-rate, activity, sample-depth and score gates, while preserving structural
+  uncopyability, catastrophic source risk and data/path integrity checks. Its isolated path cache and anonymous
+  report must never be substituted for a scan generation or strategy revision.
 - A fresh candidate profile fetch covers `PROFILE_FETCH_DAYS` (currently 37 days: 30-day scoring window plus
   seven warm-up days). Reported copy evidence remains 30/14/7 days.
 - Canonical 30/14/7 Copy evidence is one 37-day warm replay sliced at each reporting boundary, never three

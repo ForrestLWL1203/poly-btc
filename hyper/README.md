@@ -124,10 +124,11 @@ Profiles are not re-downloaded from zero on every scheduled run.
   cache.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
-- Leaderboard candidates require at least `$20,000` account value, `$150,000` leveraged 7-day notional volume,
-  and positive 7-day and 30-day PnL. The cheap Portfolio precheck requires positive 30-day Perp PnL, at least
-  60% Perp-profit share and at least 20% dynamic 30-day Perp return. Source quality and follower profitability
-  are confirmed later from fills under a standardized `$10,000` starting equity with continuous compounding.
+- Leaderboard candidates require at least `$20,000` account value, `$250,000` leveraged 7-day notional volume,
+  and positive 7-day and 30-day PnL. The cheap Portfolio precheck independently confirms at least `$250,000`
+  of Perp-only 7-day volume, positive 30-day Perp PnL, at least 60% Perp-profit share and at least 20% dynamic
+  30-day Perp return. Source quality and follower profitability are confirmed later from fills under a
+  standardized `$10,000` starting equity with continuous compounding.
 - Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
   is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
@@ -197,6 +198,24 @@ python3 -m hyper.cli.core_lab --db /path/to/production.db --max-rough 40
 migrates or writes the source database. A legacy generation without the current official Perp observed-history
 return may be used only for an explicitly marked economic preview; it always reports that a new Portfolio scan
 is required before publication.
+
+For threshold research, the non-publishing distribution collector deliberately ignores the production ROI,
+PnL, win-rate, activity, sample-depth and score gates. It recalls every Leaderboard row above the volume floor,
+confirms `$250,000` of official Perp-only seven-day volume, retains only executable structure, catastrophic
+source-risk and data-integrity checks, and runs the active Copy surface first fills-only and then against a
+shared 15-minute price path:
+
+```bash
+python3 -m hyper.cli.discover --db /path/to/production.db profit-distribution \
+  --week-perp-volume-min 250000 \
+  --cache-db /private/profit-distribution-cache.db \
+  --report /private/profit-distribution.json
+```
+
+The source database is opened read-only. The isolated cache and anonymous JSON report are created with mode
+`0600`; the command never creates or publishes a generation, changes Core, updates parameters, or starts
+Observer. Its strict 30/14/7 conservative-return quantiles and paired threshold matrix are the evidence used to
+choose new profitability floors.
 
 ## Copy replay and automatic tuning
 

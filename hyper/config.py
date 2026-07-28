@@ -306,12 +306,12 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $150k leveraged
+# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $250k leveraged
 # 7d notional activity, and positive 7d/30d PnL before any wallet history is downloaded. The immediately
 # Official Portfolio prefilter owns the cheap target-wallet return check: positive Perp PnL, at least 60%
 # Perp profit share and at least 20% dynamic 30-day Perp return. Role history never bypasses this contract.
 HARVEST_MIN_ACCT = 20_000.0
-HARVEST_WEEK_VLM_MIN = 150_000.0
+HARVEST_WEEK_VLM_MIN = 250_000.0
 HARVEST_WEEK_PNL_MIN = 0.0
 HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0

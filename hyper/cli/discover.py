@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import threading
 
 from hyper import config, params, storage
-from hyper.discovery import frozen_audit, scanner
+from hyper.discovery import frozen_audit, profit_distribution, scanner
 from hyper.discovery import shadow_scan
 from hyper.ops import paper_reset, procman, scan_lock
 from hyper.util import now_iso
@@ -283,8 +283,38 @@ def main() -> int:
     audit.add_argument("--report", required=True, help="0600 redacted JSON report path")
     audit.add_argument("--generation")
     audit.add_argument("--stamp")
+    profit = sub.add_parser(
+        "profit-distribution",
+        help="non-publishing structural-only Perp sample and strict Copy return distribution",
+    )
+    profit.add_argument("--report", required=True, help="0600 redacted JSON report path")
+    profit.add_argument("--cache-db", required=True, help="isolated 0600 research path cache")
+    profit.add_argument("--week-perp-volume-min", type=float, default=250_000.0)
+    profit.add_argument("--max-pages", type=int, default=5)
+    profit.add_argument("--limit", type=int, default=0, help="0 means every volume-recalled wallet")
+    profit.add_argument("--scan-interval", type=float, default=0.8)
 
     args = ap.parse_args()
+    if args.cmd == "profit-distribution":
+        def emit(stage, done, total):
+            print(f"profit_distribution_progress {stage} {done}/{total}", flush=True)
+        result = profit_distribution.run(
+            args.db,
+            args.report,
+            args.cache_db,
+            minimum_week_volume=args.week_perp_volume_min,
+            max_pages=max(1, int(args.max_pages)),
+            limit=max(0, int(args.limit)),
+            scan_interval=max(0.1, float(args.scan_interval)),
+            progress=emit,
+        )
+        print(json.dumps({
+            "status": result["status"],
+            "report": args.report,
+            "strictSampleCount": result["summary"]["strictSampleCount"],
+            "leaderboardVolumeRecall": result["leaderboardVolumeRecall"],
+        }, sort_keys=True))
+        return 0
     if args.cmd == "audit-pipeline":
         result = frozen_audit.build(
             args.db, args.report, generation=args.generation, stamp=args.stamp,

@@ -647,9 +647,13 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
         "all": getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
     }
     share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
+    week_perp_volume_min = getattr(
+        p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN,
+    )
     copy_policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
     cache_policy = {
-        "version": "official_perp_observed_return_v7",
+        "version": "official_perp_observed_return_v8",
+        "weekPerpVolumeMin": float(week_perp_volume_min),
         "monthPerpPnlMustBePositive": True,
         "auditPnlMinima": {key: float(value) for key, value in minima.items()},
         "shareMin": float(share_min),
@@ -717,6 +721,7 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
                     max_boundary_gap_hours=(
                         copy_policy.official_perp_boundary_max_gap_hours
                     ),
+                    min_week_perp_volume=week_perp_volume_min,
                 )
         results[addr] = result
         # Buffer audit values in memory so no write transaction remains open during the next REST call.
