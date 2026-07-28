@@ -73,6 +73,13 @@ def _selection_reason_text(row):
         "rough_copy_7d_conservative_not_profitable": "粗略Copy扣除浮亏后7日未盈利",
         "rough_copy_win_rate_below_floor": "粗略Copy胜率低于60%",
         "rough_copy_open_rate_below_floor": "粗略Copy开仓跟随率低于70%",
+        "copy_profit_factor_below_1_25": "Copy Profit Factor 低于1.25",
+        "source_lottery_profile_rejected": "源钱包收益依赖少数偶发大赢家",
+        "copy_lottery_profile_rejected": "Copy收益依赖少数偶发大赢家",
+        "no_actionable_open_28d": "最近28日没有可跟的真实开仓",
+        "no_actionable_open_7d": "最近7日没有可跟的真实开仓",
+        "active_weeks_below_3_of_4": "最近四个7日桶中活跃不足三个",
+        "actionable_open_gap_over_10d": "最近28日可跟开仓最大间隔超过10天",
         "strict_copy_30d_return_below_floor": "严格Copy 30日动态收益低于10%",
         "strict_copy_7d_return_below_floor": "严格Copy最近7日动态收益低于3%",
         "strict_copy_30d_conservative_return_below_floor": "严格Copy保守30日收益低于10%",
@@ -198,6 +205,9 @@ def _score_breakdown(row):
         "activityAgeHours": detail.get("activityAgeHours"),
         "liquidations": detail.get("liquidations"),
         "feeDrag": detail.get("feeDrag"),
+        "strictQuality": detail.get("strictQuality") or {},
+        "preStrict": detail.get("preStrict") or {},
+        "profitPriority": detail.get("profitPriority") or {},
         "sectorPolicy": _sector_policy(row),
         "reasons": detail.get("reasons") or [],
     }
@@ -418,7 +428,10 @@ def _ep_selected_wallets(db, generation, role, page, size):
             ),
             "profitabilityBasis": (
                 PROFITABILITY_BASIS
-                if str(_col(r, "model_version") or "").endswith("v2")
+                if (
+                    str(_col(r, "model_version") or "").endswith("v2")
+                    or "pre-strict32" in str(_col(r, "model_version") or "")
+                )
                 else "legacy_marked_pnl"
             ),
             # The list describes the strategy we can actually copy, not the target's raw account win rate.
@@ -674,8 +687,18 @@ def ep_wallet_detail(db, addr, qs=None):
             "p.source_win_rate_7d,p.source_net_pnl_30d,p.source_net_pnl_7d,p.open_unrealized,"
             "p.source_top3_profit_share,p.source_body_after_top3_n,"
             "p.source_body_after_top3_win_rate,p.source_body_after_top3_net_pnl,"
+            "p.source_gross_profit_30d,p.source_gross_loss_30d,"
+            "p.source_profit_factor_30d,p.source_payoff_ratio_30d,"
+            "p.copy_bt_profit_factor,p.copy_bt_payoff_ratio,p.copy_bt_top3_profit_share,"
+            "p.copy_bt_body_after_top3_n,p.copy_bt_body_after_top3_win_rate,"
+            "p.copy_bt_body_after_top3_net_pnl,"
             "p.source_quality_score,p.rough_copy_score,p.last_copyable_open_ms,"
             "p.open_events_30d,p.actionable_open_rate,"
+            "pse.policy_version AS pre_strict_policy_version,pse.status AS pre_strict_status,"
+            "pse.first_failure AS pre_strict_first_failure,pse.tier AS pre_strict_tier,"
+            "pse.queue_rank AS pre_strict_queue_rank,pse.activity_json AS pre_strict_activity_json,"
+            "pse.strict_status AS pre_strict_strict_status,"
+            "pse.strict_first_failure AS pre_strict_strict_first_failure,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
             "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"
@@ -683,8 +706,9 @@ def ep_wallet_detail(db, addr, qs=None):
             "fh.last_followed_score,fh.last_followed_generation,"
             "fs.replay_params_hash,fs.replay_score_detail_json,fs.replayed_at "
             "FROM profile p LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=p.addr "
+            "LEFT JOIN pre_strict_evidence pse ON pse.generation=? AND lower(pse.addr)=lower(p.addr) "
             "LEFT JOIN follow_history fh ON fh.addr=p.addr "
-            "WHERE p.addr=?", (selection_generation, addr))
+            "WHERE p.addr=?", (selection_generation, selection_generation, addr))
     agg = q1(db,
              "SELECT COUNT(*) total_n,"
              "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) closed_n,"
@@ -738,6 +762,44 @@ def ep_wallet_detail(db, addr, qs=None):
         _col(pr, "source_net_pnl_7d") if pr else None,
         _col(pr, "open_unrealized") if pr else None,
     )
+    score_breakdown = _score_breakdown(pr) if pr else {}
+    strict_quality = dict(score_breakdown.get("strictQuality") or {})
+    copy_quality = {
+        "profitFactor": strict_quality.get(
+            "profitFactor", _col(pr, "copy_bt_profit_factor") if pr else None
+        ),
+        "payoffRatio": strict_quality.get(
+            "payoffRatio", _col(pr, "copy_bt_payoff_ratio") if pr else None
+        ),
+        "top3ProfitSharePct": (
+            strict_quality.get("top3ProfitShare") * 100
+            if strict_quality.get("top3ProfitShare") is not None
+            else (
+                _col(pr, "copy_bt_top3_profit_share") * 100
+                if pr and _col(pr, "copy_bt_top3_profit_share") is not None else None
+            )
+        ),
+        "bodyAfterTop3N": strict_quality.get(
+            "bodyAfterTop3N", _col(pr, "copy_bt_body_after_top3_n") if pr else None
+        ),
+        "bodyAfterTop3WinRatePct": (
+            strict_quality.get("bodyAfterTop3WinRate") * 100
+            if strict_quality.get("bodyAfterTop3WinRate") is not None
+            else (
+                _col(pr, "copy_bt_body_after_top3_win_rate") * 100
+                if pr and _col(pr, "copy_bt_body_after_top3_win_rate") is not None
+                else None
+            )
+        ),
+        "bodyAfterTop3NetPnl": strict_quality.get(
+            "bodyAfterTop3NetPnl",
+            _col(pr, "copy_bt_body_after_top3_net_pnl") if pr else None,
+        ),
+    }
+    pre_strict_activity = (
+        (score_breakdown.get("preStrict") or {}).get("activity")
+        or _json_obj(_col(pr, "pre_strict_activity_json") if pr else None)
+    )
     return {
         "address": addr, "rank": (w["rank"] if w else None),
         "role": (_col(pr, "selection_role") if pr else None),
@@ -756,7 +818,10 @@ def ep_wallet_detail(db, addr, qs=None):
         ),
         "profitabilityBasis": (
             PROFITABILITY_BASIS
-            if str(_col(pr, "model_version") or "").endswith("v2")
+            if (
+                str(_col(pr, "model_version") or "").endswith("v2")
+                or "pre-strict32" in str(_col(pr, "model_version") or "")
+            )
             else "legacy_marked_pnl"
         ),
         "copyProfitability": {
@@ -767,7 +832,29 @@ def ep_wallet_detail(db, addr, qs=None):
                 "7d": _col(display_metrics, "copy_bt_7d_net_pnl"),
             },
         },
-        "scoreBreakdown": _score_breakdown(pr) if pr else {},
+        "scoreBreakdown": score_breakdown,
+        "copyQuality": copy_quality,
+        "preStrict": {
+            "policyVersion": (
+                (score_breakdown.get("preStrict") or {}).get("policyVersion")
+                or (_col(pr, "pre_strict_policy_version") if pr else None)
+            ),
+            "status": _col(pr, "pre_strict_status") if pr else None,
+            "firstFailure": _col(pr, "pre_strict_first_failure") if pr else None,
+            "tier": (
+                (score_breakdown.get("preStrict") or {}).get("tier")
+                or (_col(pr, "pre_strict_tier") if pr else None)
+            ),
+            "queueRank": (
+                (score_breakdown.get("preStrict") or {}).get("queueRank")
+                or (_col(pr, "pre_strict_queue_rank") if pr else None)
+            ),
+            "strictStatus": _col(pr, "pre_strict_strict_status") if pr else None,
+            "strictFirstFailure": (
+                _col(pr, "pre_strict_strict_first_failure") if pr else None
+            ),
+            "activity": pre_strict_activity,
+        },
         "copyReplayParamsHash": (_col(pr, "replay_params_hash") if pr else None),
         "copyReplayedAt": iso_epoch(_col(pr, "replayed_at")) if pr else None,
         "copyReplayStage": "strict" if pr and _col(pr, "replayed_at") else "rough",
@@ -841,6 +928,10 @@ def ep_wallet_detail(db, addr, qs=None):
             "bodyAfterTop3NetPnl": (
                 _col(pr, "source_body_after_top3_net_pnl") if pr else None
             ),
+            "grossProfit30d": _col(pr, "source_gross_profit_30d") if pr else None,
+            "grossLoss30d": _col(pr, "source_gross_loss_30d") if pr else None,
+            "profitFactor30d": _col(pr, "source_profit_factor_30d") if pr else None,
+            "payoffRatio30d": _col(pr, "source_payoff_ratio_30d") if pr else None,
         },
         "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
         "scoredTrades": (pr["n_trades"] if pr else None),

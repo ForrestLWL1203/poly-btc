@@ -7,7 +7,7 @@ class CopyPolicyTests(unittest.TestCase):
     def test_extreme_quality_contract_is_one_versioned_policy(self):
         policy = load_copy_policy()
         self.assertEqual(policy.source_quality_max_n, 40)
-        self.assertEqual(policy.source_min_episodes_30d, 10)
+        self.assertEqual(policy.source_min_episodes_30d, 7)
         self.assertEqual(policy.source_min_episode_win_rate, 0.70)
         self.assertEqual(policy.source_low_freq_min_episodes_30d, 7)
         self.assertEqual(policy.source_low_freq_max_episodes_30d, 9)

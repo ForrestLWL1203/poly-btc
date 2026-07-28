@@ -238,6 +238,9 @@ def _compact_result(result: Mapping) -> dict:
     keys = (
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "valuation_status",
         "valuation_coverage", "closed_n", "wins", "liquidations", "fee_drag",
+        "gross_profit", "gross_loss", "profit_factor", "payoff_ratio",
+        "top3_profit_share", "body_after_top3_n", "body_after_top3_wins",
+        "body_after_top3_win_rate", "body_after_top3_net_pnl",
         "max_liquidation_loss_pct", "max_liquidation_loss",
         "max_liquidation_loss_coin", "max_liquidation_loss_closed_at",
         "target_open_events", "raw_target_open_events", "small_open_excluded_n",
@@ -600,6 +603,13 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             "max_liquidation_loss_closed_at"
         )
         out["copy_bt_fee_drag"] = _num(primary.get("fee_drag"))
+        for key in (
+            "gross_profit", "gross_loss", "profit_factor", "payoff_ratio",
+            "top3_profit_share", "body_after_top3_n", "body_after_top3_wins",
+            "body_after_top3_win_rate", "body_after_top3_net_pnl",
+        ):
+            if key in primary:
+                out[f"copy_bt_{key}"] = primary[key]
         out["copy_bt_unrealized_pnl"] = _num(primary.get("unrealized_pnl"))
         out["copy_bt_valuation_status"] = primary.get("valuation_status") or "complete"
         for key in (

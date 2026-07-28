@@ -46,8 +46,19 @@ def portfolio_rows():
 def strict_sector_json(net30=1800, n30=20, net14=900, n14=10, net7=600, n7=6):
     def window(net, closed, rate):
         wins = int(round(closed * rate))
+        losses = max(0, closed - wins)
+        gross_loss = 200.0 if losses else 0.0
+        gross_profit = max(1.0, net + gross_loss)
         return {
-            "copy_net_pnl": net, "closed_n": closed, "wins": wins,
+            "copy_net_pnl": net, "closed_net_pnl": net,
+            "unrealized_pnl": 0.0,
+            "closed_n": closed, "wins": wins,
+            "gross_profit": gross_profit, "gross_loss": gross_loss,
+            "profit_factor": gross_profit / gross_loss if gross_loss else 999.0,
+            "payoff_ratio": (
+                (gross_profit / wins) / (gross_loss / losses)
+                if wins and losses and gross_loss else 999.0
+            ),
             "opened_n": closed, "target_open_events": closed,
             "open_fill_rate": 1.0, "capacity_open_fit": 1.0,
             "liquidations": 0, "valuation_status": "complete",
@@ -95,6 +106,16 @@ def qualifying_source_fields(now_ms=None):
         "source_body_after_top3_n": 17,
         "source_body_after_top3_win_rate": .76,
         "source_body_after_top3_net_pnl": 900,
+        "source_profit_factor_30d": 2.0,
+        "source_payoff_ratio_30d": 1.5,
+        "pre_strict_activity": {
+            "operational": True,
+            "reason": "operational_activity",
+            "latest7dActive": True,
+            "activeWeeks4": 4,
+            "maxOpenGapDays28d": 7,
+            "weeklyOpenCountsOldestFirst": [2, 2, 2, 2],
+        },
         "last_copyable_open_ms": int(now_ms or time.time() * 1000),
     }
 
@@ -278,6 +299,22 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 },
             }
             with patch.object(scanner, "_quality_core_profiles", return_value=[candidate]), \
+                    patch.object(scanner, "_effective_follow_replay", return_value={
+                        "qualification": {
+                            "eligible": True, "coreEligible": True,
+                            "role": "core_eligible", "status": "strict_copy_qualified",
+                            "deferred": False,
+                        },
+                        "metrics": {
+                            "copy_bt_net_pnl": 1_000,
+                            "copy_bt_closed_net_pnl": 1_000,
+                            "copy_bt_window_start_equity": 10_000,
+                            "copy_bt_7d_net_pnl": 300,
+                            "copy_bt_7d_closed_net_pnl": 300,
+                            "copy_bt_7d_window_start_equity": 10_000,
+                        },
+                        "score": .9,
+                    }), \
                     patch.object(scanner.auto_tune, "_load_sigmas", return_value={}), \
                     patch.object(scanner.auto_tune, "_load_market_ctx", return_value={}), \
                     patch.object(scanner, "_current_copy_valuation_marks", return_value={}), \
@@ -356,7 +393,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
             self.assertEqual(addrs, ["0xrecent"])
 
-    def test_strong_30d_research_wallet_remains_visible_as_challenger(self):
+    def test_pre_strict_only_wallet_is_not_exposed_as_challenger(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             params.seed_params(db)
@@ -381,9 +418,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 formation_meta={"explicitEmptyCore": True},
             )
 
-            self.assertEqual([(row.addr, row.role) for row in rows], [
-                ("0xnear", scanner.selection.CHALLENGER),
-            ])
+            self.assertEqual(rows, [])
 
     def test_retired_core_soft_failure_grace_is_absent(self):
         self.assertFalse(hasattr(scanner, "_apply_core_soft_failure_grace"))
@@ -467,12 +502,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("force_promotion", forced_source)
         self.assertNotIn("core_retention_eligible", forced_source)
 
-    def test_formation_replays_only_once_after_the_winning_surface_is_known(self):
+    def test_formation_runs_one_path_bridge_and_one_final_surface_replay(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertNotIn("_rank_formation_candidates_for_surface", source)
-        self.assertEqual(source.count("_effective_follow_replay("), 1)
-        self.assertIn("tune_ranked = ranked_candidates[:upper]", source)
+        self.assertEqual(source.count("_effective_follow_replay("), 2)
+        self.assertIn("tune_ranked = ranked_candidates[:core_upper]", source)
 
     def test_effective_replay_keeps_one_sector_scoped_surface(self):
         source = inspect.getsource(scanner._effective_follow_replay)
@@ -796,7 +831,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         ])
         self.assertNotIn("0x10", [row["addr"] for row in selected])
 
-    def test_source_quality_pool_keeps_only_score_ordered_top_forty(self):
+    def test_source_quality_pool_keeps_every_structural_survivor_without_top40(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             db.executemany(
@@ -805,7 +840,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "official_perp_status) VALUES(?,?,?,?,?,?,?)",
                 [
                     (
-                        f"0x{index:02x}", "active", "source_quality_passed",
+                        f"0x{index:02x}", "active", "source_structure_passed",
                         100.0 - index, "g-source", "valid", "passed",
                     )
                     for index in range(42)
@@ -814,14 +849,9 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             db.commit()
 
             kept, tail = scanner._source_quality_pool(db, "g-source", limit=40)
-            rejected = db.execute(
-                "SELECT COUNT(*) FROM profile "
-                "WHERE reason='source_quality_below_top40' AND status='rejected'"
-            ).fetchone()[0]
 
-        self.assertEqual(kept, [f"0x{index:02x}" for index in range(40)])
-        self.assertEqual(tail, ["0x28", "0x29"])
-        self.assertEqual(rejected, 2)
+        self.assertEqual(kept, [f"0x{index:02x}" for index in range(42)])
+        self.assertEqual(tail, [])
 
     def test_source_quality_pool_permanently_rejects_recorded_major_liquidation(self):
         with tempfile.TemporaryDirectory() as td:
@@ -831,8 +861,8 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "(addr,status,reason,source_quality_score,profile_generation,data_status,"
                 "official_perp_status) VALUES(?,?,?,?,?,?,?)",
                 [
-                    ("0xsafe", "active", "source_quality_passed", 90, "g-new", "valid", "passed"),
-                    ("0xblown", "active", "source_quality_passed", 99, "g-new", "valid", "passed"),
+                    ("0xsafe", "active", "source_structure_passed", 90, "g-new", "valid", "passed"),
+                    ("0xblown", "active", "source_structure_passed", 99, "g-new", "valid", "passed"),
                 ],
             )
             scanner._record_wallet_risk_event(
@@ -988,6 +1018,22 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 f"INSERT INTO profile ({storage.PROFILE_COLS}) "
                 f"VALUES ({','.join('?' for _ in cols)})",
                 [profile.get(column) for column in cols],
+            )
+            db.execute(
+                "INSERT INTO pre_strict_evidence "
+                "(generation,addr,policy_version,model_version,status,activity_json,"
+                "tier,queue_rank,rough_profit_priority,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "g-frozen", "0xfrozen",
+                    scanner.pre_strict.POLICY_VERSION,
+                    scanner.pre_strict.SELECTION_MODEL_VERSION,
+                    "passed",
+                    json.dumps(qualifying_source_fields()[
+                        "pre_strict_activity"
+                    ]),
+                    "reserve", 1, .038, "now",
+                ),
             )
             db.commit()
 
@@ -1159,11 +1205,10 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(marginal.selected, ())
             self.assertEqual([(row.addr, row.role, row.reason) for row in rows], [
                 ("0xaaa", "challenger", "challenger_recent_return_watch"),
-                ("0xbbb", "challenger", "rough_copy_qualified"),
             ])
             self.assertEqual(db.execute(
                 "SELECT state,current_role FROM wallet_registry WHERE addr='0xbbb'"
-            ).fetchone(), ("challenger", "challenger"))
+            ).fetchone(), ("rejected", None))
 
     def test_final_parameter_policy_promotes_watch_sector_for_selected_core(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1492,6 +1537,32 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     db_.commit()
                 return "active", "ok", row, False
 
+            def fake_rough(db_, addrs, generation_id, now_ms, p, stamp, **kwargs):
+                db_.execute(
+                    "UPDATE profile SET rough_copy_score=.9,status='active',reason='pre_strict_qualified' "
+                    "WHERE addr='0xaaa' AND profile_generation=?",
+                    (generation_id,),
+                )
+                db_.execute(
+                    "INSERT INTO pre_strict_evidence "
+                    "(generation,addr,policy_version,model_version,status,activity_json,"
+                    "tier,queue_rank,rough_profit_priority,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        generation_id, "0xaaa",
+                        scanner.pre_strict.POLICY_VERSION,
+                        scanner.pre_strict.SELECTION_MODEL_VERSION,
+                        "passed",
+                        json.dumps(qualifying_source_fields(now_ms)["pre_strict_activity"]),
+                        "primary", 1, .144, stamp,
+                    ),
+                )
+                db_.commit()
+                return {
+                    "attempted": 1, "qualified": ["0xaaa"],
+                    "failed": [], "queued": ["0xaaa"],
+                }
+
             strict_windows = {
                 30: {
                     "copy_net_pnl": 100, "closed_n": 10, "open_fill_rate": .95,
@@ -1527,6 +1598,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                     patch.object(scanner.rest, "get_leaderboard", return_value=[leaderboard_row()]), \
                     patch.object(scanner.rest, "portfolio", return_value=portfolio_rows()), \
                     patch.object(scanner, "_profile_one", side_effect=fake_profile), \
+                    patch.object(scanner, "_rough_replay_source_pool", side_effect=fake_rough), \
                     patch.object(scanner, "form_quality_prefix", return_value=formation), \
                     patch.object(scanner.auto_tune, "_portfolio_window_fills",
                                  return_value={30: [{}], 14: [{}], 7: [{}]}), \
@@ -1680,8 +1752,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(marginal.selected, ())
-            self.assertEqual(marginal.search_meta["membershipPolicy"], "strict-score-prefix-v1")
-            self.assertEqual([(row.addr, row.role) for row in rows], [("0xaaa", "challenger")])
+            self.assertEqual(
+                marginal.search_meta["membershipPolicy"],
+                "selection-pre-strict32-pf125-strict-profit-prefix-v3",
+            )
+            self.assertEqual(rows, [])
 
     def test_manual_selection_mode_cannot_bypass_current_hard_gate(self):
         with tempfile.TemporaryDirectory() as td:

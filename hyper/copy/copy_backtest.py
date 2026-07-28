@@ -140,12 +140,7 @@ def _endpoint_pnl(position: dict) -> float:
 
 
 def profit_structure_metrics(positions: list[dict], *, total_net: float) -> dict:
-    """Return fee-paid distribution diagnostics for one replay endpoint.
-
-    Open positions participate at their canonical marked endpoint.  This keeps qualification aligned with
-    the same realized+unrealized dollars used by the public 30/14/7 return lines instead of letting a large
-    open winner/loss disappear from concentration and tail tests.
-    """
+    """Return fee-paid distribution diagnostics for complete closed Episodes only."""
     pnls = [_endpoint_pnl(position) for position in positions]
     wins = sorted((value for value in pnls if value > 0.0), reverse=True)
     losses = [-value for value in pnls if value < 0.0]
@@ -1569,10 +1564,7 @@ class Backtest:
         peak_deploy_pct = max(deploy_values, default=0.0)
         avg_deploy_pct = (sum(deploy_values) / len(deploy_values)) if deploy_values else 0.0
         add_metrics = add_fidelity_metrics(all_positions, self.add_outcome_counts)
-        profit_metrics = profit_structure_metrics(
-            all_positions,
-            total_net=equity_pnl,
-        )
+        profit_metrics = profit_structure_metrics(closed_positions, total_net=closed_net)
         path_metrics = path_risk_metrics(
             self.path_equity_samples,
             initial_equity=self.initial_balance,
@@ -2083,9 +2075,6 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
     })
     out.update(liquidation_risk)
     out.update(add_metrics)
-    out.update(profit_structure_metrics(
-        positions + open_positions,
-        total_net=window_net_pnl,
-    ))
+    out.update(profit_structure_metrics(positions, total_net=closed_net))
     out.update(path_risk)
     return out

@@ -35,9 +35,23 @@ def qualified(**overrides):
         "copy_bt_7d_window_start_equity": 10_000,
         "copy_bt_open_fill_rate": .90,
         "actionable_open_rate": .90,
+        "copy_bt_profit_factor": 1.8,
+        "copy_bt_payoff_ratio": 1.5,
+        "copy_bt_top3_profit_share": .40,
+        "copy_bt_body_after_top3_n": 13,
+        "copy_bt_body_after_top3_win_rate": .54,
+        "copy_bt_body_after_top3_net_pnl": 500,
         "copy_bt_liquidations": 0,
+        "copy_bt_max_liquidation_loss_pct": 0,
         "copy_bt_valuation_status": "complete",
         "copy_path_risk_status": "complete",
+        "pre_strict_activity": {
+            "operational": True,
+            "reason": "operational_activity",
+            "latest7dActive": True,
+            "activeWeeks4": 4,
+            "maxOpenGapDays28d": 7,
+        },
         "last_copyable_open_ms": NOW - 3_600_000,
         "open_events_30d": 20,
         "sector_policy_json": json.dumps({"allowed": ["crypto"]}),
@@ -70,11 +84,17 @@ class ProfileQualificationTests(unittest.TestCase):
                 "copy_30d_closed_pnl_not_positive",
             ),
             (
-                {"last_copyable_open_ms": NOW - 90 * 3_600_000},
+                {"pre_strict_activity": {
+                    "operational": False,
+                    "reason": "no_actionable_open_7d",
+                }},
                 True,
-                "source_activity_stale",
+                "no_actionable_open_7d",
             ),
-            ({"copy_bt_win_rate": .59}, True, "rough_copy_win_rate_below_floor"),
+            ({
+                "copy_bt_win_rate": .41,
+                "copy_bt_body_after_top3_net_pnl": -1,
+            }, True, "copy_lottery_profile_rejected"),
         )
         for overrides, expected_ok, expected in cases:
             with self.subTest(expected=expected):

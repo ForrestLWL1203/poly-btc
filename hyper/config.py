@@ -45,10 +45,12 @@ SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running —
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the
 # 10-user cap, only the 1000-sub cap, and we touch only a few dozen coins). Targets are low-freq
 # long-hold, so a few-seconds poll latency is fine; we execute against the live book at detection.
-MAX_TARGETS = 40            # hard cap on the source-quality research pool; published Core is capped at 16
-SOURCE_QUALITY_MAX_N = 40
-# Every complete generation first caps the deep-fill source-quality pool at 40, then rough-replays those
-# wallets and sends at most the highest-scoring 16 to parameter tuning and path-complete strict replay.
+MAX_TARGETS = 40            # Observer compatibility cap; published Core remains independently capped at 16.
+SOURCE_QUALITY_MAX_N = 40   # legacy database compatibility; no longer an admission/ranking boundary.
+# A complete generation rough-replays every structurally valid recalled wallet, freezes at most 32
+# pre-strict candidates, then sends at most 16 path-valid strict candidates into unified tuning.
+PRE_STRICT_QUEUE_MAX_N = 32
+STRICT_RETUNE_MAX_N = 16
 CORE_INITIAL_MAX_N = 16
 CORE_TARGET_MAX_N = 16
 CORE_REBALANCE_INTERVAL_DAYS = 7 # expensive parameter-grid cadence; each complete strict replay may update membership.
@@ -66,8 +68,8 @@ OFFICIAL_PERP_MIN_RETURN_30D = 0.20
 OFFICIAL_PERP_LONG_HISTORY_DAYS = 28
 OFFICIAL_PERP_SHORT_HISTORY_DAYS = 7
 OFFICIAL_PERP_MIN_RETURN_7D = 0.05
-SOURCE_MIN_EPISODES_30D = 10
-SOURCE_MIN_EPISODE_WIN_RATE = 0.70
+SOURCE_MIN_EPISODES_30D = 7
+SOURCE_MIN_EPISODE_WIN_RATE = 0.70  # legacy compatibility; conditional lottery protection replaces it.
 SOURCE_LOW_FREQ_MIN_EPISODES_30D = 7
 SOURCE_LOW_FREQ_MAX_EPISODES_30D = 9
 SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE = 0.85
@@ -75,14 +77,21 @@ SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN = 0.30
 SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.70
 SOURCE_BODY_MIN_WIN_RATE = 0.70
 ROUGH_COPY_MIN_CLOSED_30D = 7
-ROUGH_COPY_MIN_WIN_RATE = 0.60
+ROUGH_COPY_MIN_WIN_RATE = 0.60       # legacy compatibility; not an admission gate.
+PRE_STRICT_MIN_PROFIT_FACTOR = 1.25
+PRE_STRICT_PRIMARY_RETURN_30D = 0.20
+PRE_STRICT_PRIMARY_RETURN_7D = 0.05
+PRE_STRICT_ACTIVITY_LOOKBACK_DAYS = 28
+PRE_STRICT_ACTIVITY_BUCKET_DAYS = 7
+PRE_STRICT_ACTIVITY_MIN_ACTIVE_WEEKS = 3
+PRE_STRICT_ACTIVITY_MAX_OPEN_GAP_DAYS = 10.0
 # Both rough and strict Copy start with a standardized comparable balance, then size every later open from
 # the floating equity produced by the same continuous 30-day path. Latest-7d uses the day-23 boundary equity.
 # Rough Copy only rejects a non-profitable 30d or rolling-7d direction; return magnitude ranks candidates.
 # The tuned, path-complete strict replay owns the material 10%/3% Core return contract below.
 CORE_MIN_DYNAMIC_COPY_RETURN_30D = 0.10
 CORE_MIN_DYNAMIC_COPY_RETURN_7D = 0.03
-CORE_COPY_MIN_WIN_RATE = 0.60
+CORE_COPY_MIN_WIN_RATE = 0.60        # legacy compatibility; not an admission gate.
 # The shared final account, after all wallets are jointly tuned, still needs material rolling returns.
 CORE_PORTFOLIO_MIN_RETURN_30D = 0.10
 CORE_PORTFOLIO_MIN_RETURN_7D = 0.03
@@ -306,10 +315,9 @@ MAX_ENTRY_CHASE_PCT = None    # e.g. 0.5 => skip a taker open whose entry is >0.
 # A REST-detected copy reacts after the target, so retroactively assuming a resting maker fill would flatter
 # Paper results. A real-money maker workflow will be designed separately after Paper is stable.
 
-# Stage-1 leaderboard recall (UI-tunable). This cheap surface only proves $20k equity, $250k leveraged
-# 7d notional activity, and positive 7d/30d PnL before any wallet history is downloaded. The immediately
-# Official Portfolio prefilter owns the cheap target-wallet return check: positive Perp PnL, at least 60%
-# Perp profit share and at least 20% dynamic 30-day Perp return. Role history never bypasses this contract.
+# Stage-1 leaderboard recall. This cheap surface proves only $250k 7d notional activity and non-negative
+# 7d/30d PnL direction. Account size and official ROI magnitude remain audit telemetry. Portfolio only
+# confirms that the seven-day notional belongs to Perp before a new wallet receives a 37-day bootstrap.
 HARVEST_MIN_ACCT = 20_000.0
 HARVEST_WEEK_VLM_MIN = 250_000.0
 HARVEST_WEEK_PNL_MIN = 0.0
@@ -317,7 +325,7 @@ HARVEST_MONTH_PNL_MIN = 0.0
 HARVEST_ALL_PNL_MIN = 0.0
 HARVEST_PERP_PNL_SHARE_MIN = 0.60
 PERP_PREFILTER_CACHE_TTL_S = 2 * 3600  # interrupted/redeployed scans reuse the same fresh Portfolio evidence
-INACTIVE_DAYS = 3.0                 # Core needs a true flat->open signal within 72h; stale wallets remain Challenger.
+INACTIVE_DAYS = 3.0                 # legacy display compatibility; 72h no longer has admission authority.
 # Dashboard-only summary for historical/dropped rows which expose official 7d and 30d ROI separately.
 # These weights never participate in source quality, Copy qualification, ranking or Core admission.
 ROI_W_WEEK = 0.40

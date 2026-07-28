@@ -10,6 +10,7 @@ from unittest.mock import patch
 from hyper import params, storage
 from hyper.discovery import perp_prefilter, scanner
 from hyper.ops import scan_lock
+from hyper.selection import pre_strict
 from hyper.selection import state as selection
 
 
@@ -54,8 +55,16 @@ class ChallengerRefreshTests(unittest.TestCase):
         selection.replace_selection_rows(
             db, "g-full",
             [
-                selection.SelectionRow("0xcore", "core", follow_score=.8),
-                selection.SelectionRow("0xchallenge", "challenger", follow_score=.7),
+                selection.SelectionRow(
+                    "0xcore", "core", follow_score=.8,
+                    model_version=pre_strict.SELECTION_MODEL_VERSION,
+                    policy_version=pre_strict.POLICY_VERSION,
+                ),
+                selection.SelectionRow(
+                    "0xchallenge", "challenger", follow_score=.7,
+                    model_version=pre_strict.SELECTION_MODEL_VERSION,
+                    policy_version=pre_strict.POLICY_VERSION,
+                ),
             ],
             selected_at="start",
         )
@@ -93,6 +102,54 @@ class ChallengerRefreshTests(unittest.TestCase):
 
         self.assertEqual(base, "g-full")
         self.assertEqual(pool, ["0xchallenge", "0xcore"])
+
+    def test_daily_skips_a_legacy_full_generation(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "UPDATE follow_selection SET model_version='legacy',policy_version='legacy' "
+                "WHERE generation='g-full'"
+            )
+            db.commit()
+
+            result = scanner.refresh_challengers(db, self.ns())
+
+        self.assertEqual(result, {
+            "status": "skipped", "reason": "legacy_generation_policy_mismatch",
+        })
+
+    def test_daily_queue_cannot_admit_wallet_outside_full_strict_roles(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO pre_strict_evidence "
+                "(generation,addr,policy_version,model_version,status,tier,"
+                "rough_profit_priority,rough_return_30d,rough_return_7d,"
+                "copy_profit_factor_30d,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        "g-daily", "0xchallenge", pre_strict.POLICY_VERSION,
+                        pre_strict.SELECTION_MODEL_VERSION, "passed", "primary",
+                        .50, .50, .50, 2.0, "now",
+                    ),
+                    (
+                        "g-daily", "0xheld-only", pre_strict.POLICY_VERSION,
+                        pre_strict.SELECTION_MODEL_VERSION, "passed", "primary",
+                        .90, .90, .90, 5.0, "now",
+                    ),
+                ],
+            )
+            queued = scanner._finalize_pre_strict_queue(
+                db, "g-daily", allowed_addrs={"0xcore", "0xchallenge"},
+            )
+            ranks = dict(db.execute(
+                "SELECT addr,queue_rank FROM pre_strict_evidence "
+                "WHERE generation='g-daily'"
+            ).fetchall())
+
+        self.assertEqual(queued, ["0xchallenge"])
+        self.assertEqual(ranks["0xchallenge"], 1)
+        self.assertIsNone(ranks["0xheld-only"])
 
     def test_refresh_promotes_challenger_without_harvest_or_bootstrap_and_retunes(self):
         with tempfile.TemporaryDirectory() as td:
@@ -385,7 +442,7 @@ class ChallengerRefreshTests(unittest.TestCase):
                     patch.object(scanner, "_profile_one", side_effect=profile) as profile_one:
                 with self.assertRaisesRegex(RuntimeError, "core_data_incomplete"):
                     scanner.refresh_challengers(db, self.ns())
-                self.assertEqual(profile_one.call_count, 2)
+                self.assertEqual(profile_one.call_count, 1)
 
             current = db.execute(
                 "SELECT generation FROM scan_generation WHERE is_current=1"

@@ -57,6 +57,40 @@ class PaperResetTests(unittest.TestCase):
                 "SELECT value FROM params WHERE key='CORE_INITIAL_MAX_N'"
             ).fetchone()[0]), int(config.CORE_INITIAL_MAX_N))
 
+    def test_execution_selection_reset_can_preserve_fill_and_risk_caches(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES('0xabc',1,1,'{}')"
+            )
+            db.execute(
+                "INSERT INTO fill_cache_state(addr,coverage_start_ms,coverage_end_ms,updated_at) "
+                "VALUES('0xabc',1,2,'now')"
+            )
+            db.execute(
+                "INSERT INTO wallet_risk_event "
+                "(addr,event_type,event_key,first_seen_at,last_seen_at) "
+                "VALUES('0xabc','major','fixture','now','now')"
+            )
+            db.execute("INSERT INTO profile(addr,status) VALUES('0xabc','active')")
+            db.execute(
+                "INSERT INTO copy_position(addr,coin,side,status,opened_at) "
+                "VALUES('0xabc','BTC','long','closed','now')"
+            )
+            db.commit()
+
+            result = paper_reset.reset(db, preserve_discovery_cache=True)
+
+            self.assertEqual(result["discoveryCache"], "preserved")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM candidate_fills").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM fill_cache_state").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM wallet_risk_event").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM profile").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM copy_position").fetchone()[0], 0)
+            self.assertEqual(db.execute(
+                "SELECT initial_balance,balance FROM copy_account WHERE id=1"
+            ).fetchone(), (10000.0, 10000.0))
+
 
 if __name__ == "__main__":
     unittest.main()

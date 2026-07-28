@@ -92,14 +92,14 @@ export function Wallets({ confirm }) {
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
               <th className="num" title="70% × 严格Copy保守30日收益率 + 30% × 保守7日收益率；正浮盈权重为0，浮亏全额扣除">盈利优先</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
-              <th className="num" title="主结果为完整已平净利润减当前浮亏；正浮盈只作参考。Core展示严格路径，Challenger展示粗略回放。">Copy回放</th>
+              <th className="num" title="仅显示当前 generation 的最终严格 Copy 证据；缺少严格回放时不以粗回放替代。">回放数据</th>
               <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
-              <th className="num" title="上行为我们Copy回放的完整已平回合胜率；下行为源钱包30日完整Episode胜率">Copy / 源胜率</th><th>主力</th>
+              <th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
             </tr></thead>
             <tbody>
-              {data === null && <tr><td colSpan={tab === "challenger" ? 12 : 11} className="loading">加载中…</td></tr>}
-              {data && pageRows.length === 0 && <tr><td colSpan={tab === "challenger" ? 12 : 11} className="empty">{tab === "challenger" ? "当前没有待观察钱包" : "当前没有符合实跟条件的钱包"}</td></tr>}
+              {data === null && <tr><td colSpan={tab === "challenger" ? 11 : 10} className="loading">加载中…</td></tr>}
+              {data && pageRows.length === 0 && <tr><td colSpan={tab === "challenger" ? 11 : 10} className="empty">{tab === "challenger" ? "当前没有待观察钱包" : "当前没有符合实跟条件的钱包"}</td></tr>}
               {data && pageRows.map(w => {
                 const warning = dataWarning(w.dataStatus);
                 return (
@@ -131,43 +131,27 @@ export function Wallets({ confirm }) {
                     </td>
                     <td className="num mono"><b>{w.openEvents7d ?? "—"}</b> <span className="muted">/</span> {w.closed7d ?? "—"}</td>
                     <td className="num">
-                      <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>
-                        {w.copyReplayStage === "strict" ? "最终严格 · 保守资格" : "粗略fills-only · 保守资格"}
-                      </div>
-                      <b style={{ color: (w.copyBacktestNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.copyBacktestNetPnl != null ? fSign(w.copyBacktestNetPnl, 0) : "—"}</b>
-                      {w.copyBacktestReturnPct != null && <span className="muted"> · {fSign(w.copyBacktestReturnPct, 1)}%</span>}
-                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
-                        30日已平 {w.copyBacktestClosedNetPnl != null ? fSign(w.copyBacktestClosedNetPnl, 0) : "—"}
-                        {(w.copyBacktestOpenLoss || 0) > 0 && <React.Fragment> · 当前浮亏 <span className="down">{fSign(-w.copyBacktestOpenLoss, 0)}</span>{w.copyBacktestOpenLossRatioPct != null && <> ({fNum(w.copyBacktestOpenLossRatioPct, 0)}%)</>}</React.Fragment>}
-                        {(w.copyBacktestOpenProfitReference || 0) > 0 && <React.Fragment> · 浮盈参考 <span className="up">{fSign(w.copyBacktestOpenProfitReference, 0)}</span></React.Fragment>}
-                      </div>
-                      <div style={{ fontSize: 11, marginTop: 2, color: (w.copyBacktest7dNetPnl || 0) < 0 ? "var(--red-l)" : "var(--t2)" }}>
-                        7日保守 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"}
-                        {w.copyBacktest7dReturnPct != null && <> · {fSign(w.copyBacktest7dReturnPct, 1)}%</>} · {w.copyBacktest7dClosedN || 0}笔
-                      </div>
-                      {w.openFollowRatePct != null && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
-                        历史有效跟随 {fNum(w.openFollowRatePct, 0)}%
-                        {w.historicalOpenedN != null && w.effectiveTargetOpenN != null && <> · {w.historicalOpenedN}/{w.effectiveTargetOpenN}</>}
-                        {(w.smallOpenExcludedN || 0) > 0 && <> · 小单排除 {w.smallOpenExcludedN}</>}
-                        {w.liquidations30d != null && <> · 爆仓 {w.liquidations30d}</>}
-                      </div>}
-                      {(w.liveLiquiditySkipN30d || 0) > 0 && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>
-                        实时流动性跳过 {w.liveLiquiditySkipN30d} 次 · {(w.liveLiquiditySkipCoins30d || []).join(" / ")}
-                      </div>}
-                      {w.copyBacktestValuationStatus && w.copyBacktestValuationStatus !== "complete" && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>持仓估值待确认</div>}
+                      {w.copyReplayStage === "strict" ? <React.Fragment>
+                        <div><span className="muted">30d </span><b className={(w.copyBacktestReturnPct || 0) < 0 ? "down" : "up"}>{w.copyBacktestReturnPct != null ? fSign(w.copyBacktestReturnPct, 1) + "%" : "—"}</b>
+                          <span className="muted"> · 7d </span><b className={(w.copyBacktest7dReturnPct || 0) < 0 ? "down" : "up"}>{w.copyBacktest7dReturnPct != null ? fSign(w.copyBacktest7dReturnPct, 1) + "%" : "—"}</b>
+                        </div>
+                        <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
+                          完整回合 30d {w.copyBacktestClosedN ?? "—"} / 7d {w.copyBacktest7dClosedN ?? "—"}
+                        </div>
+                        <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+                          {Number(w.copyBacktestUnrealizedPnl || 0) < 0 ? "持仓浮亏 " : Number(w.copyBacktestUnrealizedPnl || 0) > 0 ? "持仓浮盈 " : "持仓浮动 "}
+                          {w.copyBacktestUnrealizedPnl != null
+                            ? <span className={w.copyBacktestUnrealizedPnl < 0 ? "down" : "up"}>{fSign(w.copyBacktestUnrealizedPnl, 0)}</span>
+                            : "—"}
+                          <span> · 胜率 {w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</span>
+                        </div>
+                      </React.Fragment> : <span className="muted">严格回放待完成</span>}
                     </td>
                     <td className="num">
                       {w.followCount > 0 ? <React.Fragment>
                         <b style={{ color: (w.forwardNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.forwardNetPnl || 0, 0)}</b>
                         <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>共 {w.followCount} 笔</div>
                       </React.Fragment> : <span className="muted">暂无跟单</span>}
-                    </td>
-                    <td className="num">
-                      {w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}
-                      <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
-                        源 {w.sourceWinRatePct != null ? fNum(w.sourceWinRatePct, 0) + "%" : "—"}
-                        {w.sourceEpisodeN30d != null && <> · {w.sourceEpisodeN30d}回合</>}
-                      </div>
                     </td>
                     <td><b>{w.mainCoin || "—"}</b></td>
                     {tab === "challenger" && <td><span className="muted">{w.selectionReasonText || "未满足实跟条件"}</span></td>}

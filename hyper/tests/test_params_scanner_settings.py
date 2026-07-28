@@ -84,10 +84,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
             levels = {p["key"]: p["level"] for p in scanner_params}
 
             self.assertEqual(scanner_keys[:4], [
-                "HARVEST_MIN_ACCT",
                 "HARVEST_WEEK_VLM_MIN",
                 "EXCLUDE_HFT",
-                "inactive_days",
+                "CORE_INITIAL_MAX_N",
+                "PRE_STRICT_QUEUE_MAX_N",
             ])
             self.assertNotIn("HARVEST_WEEK_PNL_MIN", scanner_keys)
             self.assertNotIn("HARVEST_MONTH_PNL_MIN", scanner_keys)
@@ -105,13 +105,13 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("EVIDENCE_MIN_DAYS", scanner_keys)
             self.assertNotIn("EVIDENCE_MIN_TRADES", scanner_keys)
             self.assertIn("SOURCE_MIN_EPISODES_30D", scanner_keys)
-            self.assertIn("SOURCE_MIN_EPISODE_WIN_RATE", scanner_keys)
-            self.assertIn("SOURCE_LOW_FREQ_MIN_EPISODES_30D", scanner_keys)
-            self.assertIn("SOURCE_LOW_FREQ_MAX_EPISODES_30D", scanner_keys)
-            self.assertIn("SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", scanner_keys)
-            self.assertIn("SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN", scanner_keys)
+            self.assertNotIn("SOURCE_MIN_EPISODE_WIN_RATE", scanner_keys)
+            self.assertNotIn("SOURCE_LOW_FREQ_MIN_EPISODES_30D", scanner_keys)
+            self.assertNotIn("SOURCE_LOW_FREQ_MAX_EPISODES_30D", scanner_keys)
+            self.assertNotIn("SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", scanner_keys)
+            self.assertNotIn("SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN", scanner_keys)
             self.assertIn("ROUGH_COPY_MIN_CLOSED_30D", scanner_keys)
-            self.assertIn("ROUGH_COPY_MIN_WIN_RATE", scanner_keys)
+            self.assertNotIn("ROUGH_COPY_MIN_WIN_RATE", scanner_keys)
             self.assertNotIn("ROUGH_COPY_MIN_RETURN_30D", scanner_keys)
             self.assertNotIn("ROUGH_COPY_MIN_RETURN_7D", scanner_keys)
             self.assertNotIn("COPY_BT_MIN_NET_PNL", scanner_keys)

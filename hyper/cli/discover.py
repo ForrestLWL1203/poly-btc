@@ -287,6 +287,10 @@ def main() -> int:
     reset = sub.add_parser("reset-paper", help="clear discovery/Paper state while preserving operator params")
     reset.add_argument("--factory-params", action="store_true",
                        help="also restore all params to code defaults")
+    reset.add_argument(
+        "--preserve-discovery-cache", action="store_true",
+        help="retain candidate fills/path caches and durable source-risk vetoes for the next full scan",
+    )
     reset.add_argument("--yes", action="store_true", help="required destructive-operation confirmation")
     shadow = sub.add_parser("shadow-scan", help="isolated full discovery on an online SQLite backup")
     shadow.add_argument("--report", required=True, help="0600 redacted JSON report path")
@@ -496,7 +500,11 @@ def main() -> int:
             raise RuntimeError("reset-paper requires --yes")
         if procman.observer_running(args.db) or procman.scan_running(args.db):
             raise RuntimeError("stop Observer and Scanner before reset-paper")
-        result = paper_reset.reset(db, factory_params=bool(args.factory_params))
+        result = paper_reset.reset(
+            db,
+            factory_params=bool(args.factory_params),
+            preserve_discovery_cache=bool(args.preserve_discovery_cache),
+        )
         print(json.dumps(result, sort_keys=True, default=str))
     db.close()
     return 0

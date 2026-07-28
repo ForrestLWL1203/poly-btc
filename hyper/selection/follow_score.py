@@ -19,6 +19,7 @@ from hyper.copy.economics import (
 )
 from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.sector import apply_allowed_sector_copy_metrics, parse_json_obj
+from . import pre_strict
 
 
 PROFIT_PRIORITY_30_WEIGHT = 0.70
@@ -165,13 +166,14 @@ def profit_priority_sort_key(
     follow_score_value: float = 0.0,
     addr: str = "",
 ) -> tuple:
-    """Exact formation order: 70/30 priority, 30d, 7d, quality score, address."""
+    """Exact strict formation order: 70/30 priority, 30d, 7d, PF, quality, address."""
     priority, detail = compute_profit_priority(metrics)
     returns = detail["returns"]
     return (
         -(priority if priority is not None else float("-inf")),
         -returns["30d"],
         -returns["7d"],
+        -_num(metrics.get("copy_bt_profit_factor")),
         -_num(follow_score_value),
         str(addr or "").lower(),
     )
@@ -370,173 +372,106 @@ def evaluate_follow_eligibility(
     as_of_ms: int | None = None,
     follow_score_value: float | None = None,
 ) -> dict:
-    """Classify one rough or final strict Copy result with one ordered failure reason."""
-    del min_closed14, min_closed7, min_evidence_days, margin_equity_pct, follow_score_value
+    """Classify rough/final Copy exclusively through the versioned pre-strict policy."""
+    del (
+        min_closed30, min_closed14, min_closed7, min_evidence_days,
+        margin_equity_pct, follow_score_value, policy_values, as_of_ms,
+    )
     stage = "strict" if str(stage).lower() in {"strict", "final"} else "rough"
-    policy = load_copy_policy(policy_values)
-    as_of_ms = int(as_of_ms or time.time() * 1000)
     scoped = apply_allowed_sector_copy_metrics(metrics)
     policy_json = parse_json_obj(scoped.get("sector_policy_json"))
-    c30 = int(_num(scoped.get("copy_bt_closed_n")))
-    copy_win_rate = scoped.get("copy_bt_win_rate")
-    economic30 = _copy_window_economics(scoped, 30)
-    economic7 = _copy_window_economics(scoped, 7)
-    pnl30 = economic30["qualificationPnl"]
-    pnl7 = economic7["qualificationPnl"]
-    equity30 = economic30["windowStartEquity"]
-    equity7 = economic7["windowStartEquity"]
-    return30 = _num(economic30.get("qualificationReturn"))
-    return7 = _num(economic7.get("qualificationReturn"))
-    open_rate = scoped.get("actionable_open_rate", scoped.get("copy_bt_open_fill_rate"))
-    activity_age = _activity_age_hours(scoped, as_of_ms)
-    data_status = str(scoped.get("copy_bt_data_status") or scoped.get("data_status") or "valid").lower()
-    evidence_status = str(
-        scoped.get("copy_bt_evidence_status") or scoped.get("evidence_status") or ""
-    ).lower()
-    valuation_status = str(scoped.get("copy_bt_valuation_status") or "complete").lower()
-    path_status = str(scoped.get("copy_path_risk_status") or "").lower()
-    official_status = str(scoped.get("official_perp_status") or "").lower()
-    official_reason = str(scoped.get("official_perp_reason") or "official_perp_evidence_missing")
-    source = evaluate_source_quality(scoped, policy_values=policy_values, as_of_ms=as_of_ms)
-    minimum_closed = int(
-        policy.rough_min_closed_30d if min_closed30 is None else min_closed30
-    )
-    minimum_open_rate = (
-        policy.min_actionable_open_rate
-        if min_open_fill_rate is None else float(min_open_fill_rate)
-    )
-    return_floor30 = policy.core_min_dynamic_copy_return_30d if stage == "strict" else 0.0
-    return_floor7 = policy.core_min_dynamic_copy_return_7d if stage == "strict" else 0.0
-    win_floor = (
-        policy.core_min_copy_win_rate if stage == "strict" else policy.rough_min_win_rate
-    )
+    activity = scoped.get("pre_strict_activity")
+    if not isinstance(activity, dict):
+        activity = parse_json_obj(scoped.get("pre_strict_activity_json"))
+    result = pre_strict.evaluate(scoped, activity, stage=stage)
     allowed = set(policy_json.get("allowed") or ())
     watched = set(policy_json.get("watch") or ())
     sector_ready = bool(allowed) if "allowed" in policy_json else True
+    if "allowed" in policy_json and not allowed and not watched:
+        sector_ready = False
+    if not sector_ready and result.get("eligible"):
+        result = {
+            **result, "eligible": False, "deferred": False,
+            "status": "sector_not_executable", "firstFailure": "sector_not_executable",
+        }
+    economic30 = (result.get("copyEconomics") or {}).get("30") or {}
+    economic7 = (result.get("copyEconomics") or {}).get("7") or {}
     checks = {
-        "copyDataValid": data_status in {"", "valid", "ok"} and evidence_status != "invalid",
-        "officialPerpPassed": official_status == "passed",
-        "sourceQualityPassed": bool(source.get("eligible")),
-        "minimumClosedEvidence": c30 >= minimum_closed,
-        "copyClosedProfit30d": economic30["closedPnl"] > 0.0,
-        "copyClosedProfit7d": economic7["closedPnl"] > 0.0,
-        "copyOpenLossRatio": open_loss_ratio_within_limit(economic30),
-        # Fills-only rough replay runs before unified parameter tuning. It proves that both windows point in
-        # the profitable direction; return magnitude belongs to the later profit-priority order. The tuned strict surface owns
-        # the material 10%/3% admission contract.
-        "copy30dReturn": (
-            return30 >= return_floor30 if stage == "strict" else return30 > 0.0
-        ),
-        "copy7dReturn": (
-            return7 >= return_floor7 if stage == "strict" else return7 > 0.0
-        ),
-        "copyWinRate": copy_win_rate is not None and _num(copy_win_rate) >= win_floor,
-        "openExecution": open_rate is not None and _num(open_rate) >= minimum_open_rate,
-        "activityWithin72h": activity_age is not None and activity_age <= 72.0,
-        "valuationComplete": valuation_status == "complete",
+        **dict(result.get("checks") or {}),
+        # Compatibility aliases for old immutable audit readers. They are not independent gates.
+        "officialPerpPassed": True,
+        "sourceQualityPassed": all(bool((result.get("checks") or {}).get(key)) for key in (
+            "sourceClosedSample", "sourceClosedProfit30d", "sourceClosedProfit7d",
+            "sourceOpenLossRatio", "sourceConservativeProfit30d",
+            "sourceConservativeProfit7d", "sourceLottery",
+        )),
+        "minimumClosedEvidence": bool((result.get("checks") or {}).get("copyClosedSample")),
+        "copy30dReturn": bool((result.get("checks") or {}).get(
+            "strictReturn30d" if stage == "strict" else "copyConservativeProfit30d"
+        )),
+        "copy7dReturn": bool((result.get("checks") or {}).get(
+            "strictReturn7d" if stage == "strict" else "copyConservativeProfit7d"
+        )),
+        "copyWinRate": bool((result.get("checks") or {}).get("copyLottery")),
+        "activityWithin72h": bool((result.get("checks") or {}).get("activityOperational")),
         "sectorExecutable": sector_ready,
-        "pathComplete": (
-            stage != "strict"
-            or path_status not in {"", "pending", "missing", "invalid", "replay_error", "incomplete"}
-        ),
-        "liquidationsWithinLimit": (
-            stage != "strict"
-            or int(_num(scoped.get("copy_bt_liquidations"))) <= policy.core_max_liquidations_30d
-        ),
-        # One material isolated loss is enough to reject the wallet even when its liquidation count is
-        # otherwise within the tolerated sizing-noise budget. Apply this in rough and strict qualification
-        # so a known 5% account hit cannot remain a Challenger waiting for promotion.
-        "singleLiquidationLossWithinLimit": (
-            _num(scoped.get("copy_bt_max_liquidation_loss_pct"))
-            + 1e-12
-            < policy.core_max_single_liquidation_loss_pct
+        "pathComplete": bool((result.get("checks") or {}).get("pathComplete")),
+        "liquidationsWithinLimit": bool((result.get("checks") or {}).get("liquidationsWithinLimit")),
+        "singleLiquidationLossWithinLimit": bool(
+            (result.get("checks") or {}).get("singleLiquidationLossWithinLimit")
         ),
     }
-    if "allowed" in policy_json and not allowed and not watched:
-        checks["sectorExecutable"] = False
-    failures = (
-        ("copy_data_error", "copyDataValid", True),
-        (
-            "copy_single_liquidation_loss_over_5pct",
-            "singleLiquidationLossWithinLimit",
-            False,
-        ),
-        (
-            official_reason if official_status == "deferred_data_error" else "official_perp_not_qualified",
-            "officialPerpPassed", official_status == "deferred_data_error",
-        ),
-        (source.get("firstFailure") or "source_quality_not_qualified", "sourceQualityPassed", False),
-        ("copy_episode_evidence_insufficient", "minimumClosedEvidence", True),
-        ("copy_30d_closed_pnl_not_positive", "copyClosedProfit30d", False),
-        ("copy_7d_closed_pnl_not_positive", "copyClosedProfit7d", False),
-        ("copy_open_loss_over_50pct", "copyOpenLossRatio", False),
-        (
-            "strict_copy_30d_conservative_return_below_floor"
-            if stage == "strict" else "rough_copy_30d_conservative_not_profitable",
-            "copy30dReturn", False,
-        ),
-        (
-            "strict_copy_7d_conservative_return_below_floor"
-            if stage == "strict" else "rough_copy_7d_conservative_not_profitable",
-            "copy7dReturn", False,
-        ),
-        (f"{stage}_copy_win_rate_below_floor", "copyWinRate", False),
-        (f"{stage}_copy_open_rate_below_floor", "openExecution", False),
-        ("activity_over_72h", "activityWithin72h", False),
-        ("copy_valuation_incomplete", "valuationComplete", True),
-        ("sector_not_executable", "sectorExecutable", False),
-        ("copy_path_incomplete", "pathComplete", True),
-        ("strict_copy_liquidations_over_3", "liquidationsWithinLimit", False),
-    )
-    first_failure = None
-    deferred = False
-    for reason, key, is_deferred in failures:
-        if not checks[key]:
-            first_failure, deferred = reason, is_deferred
-            break
-    stage_eligible = first_failure is None
-    research_eligible = (
-        checks["copyDataValid"]
-        and checks["singleLiquidationLossWithinLimit"]
-        and checks["copyClosedProfit30d"]
-        and checks["copyClosedProfit7d"]
-        and checks["copyOpenLossRatio"]
-        and (
-            (pnl30 > 0.0 and pnl7 > 0.0)
-            or deferred
-            or official_status == "deferred_data_error"
-        )
-    )
+    stage_eligible = bool(result.get("eligible") and sector_ready)
+    deferred = bool(result.get("deferred"))
+    first_failure = result.get("firstFailure")
+    candidate_eligible = bool(stage_eligible or deferred)
+    copy_win_rate = scoped.get("copy_bt_win_rate")
+    open_rate = scoped.get("actionable_open_rate", scoped.get("copy_bt_open_fill_rate"))
     return {
-        "eligible": research_eligible,
+        "eligible": candidate_eligible,
         "coreEligible": stage_eligible,
         "stageEligible": stage_eligible,
         "stage": stage,
         "status": f"{stage}_copy_qualified" if stage_eligible else first_failure,
         "firstFailure": first_failure,
-        "role": "core_eligible" if stage_eligible else "challenger" if research_eligible else "rejected",
+        "role": "core_eligible" if stage_eligible else "challenger" if deferred else "rejected",
         "deferred": bool(deferred),
         "checks": checks,
-        "returns": {"30": return30, "7": return7},
+        "returns": {
+            "30": _num(economic30.get("qualificationReturn")),
+            "7": _num(economic7.get("qualificationReturn")),
+        },
         "profitabilityBasis": PROFITABILITY_BASIS,
-        "returnFloors": {"30": return_floor30, "7": return_floor7},
-        "windowStartEquity": {"30": equity30, "7": equity7},
-        "netPnl": {"30": pnl30, "7": pnl7},
+        "returnFloors": {"30": 0.10 if stage == "strict" else 0.0, "7": 0.03 if stage == "strict" else 0.0},
+        "windowStartEquity": {
+            "30": economic30.get("windowStartEquity"),
+            "7": economic7.get("windowStartEquity"),
+        },
+        "netPnl": {
+            "30": economic30.get("qualificationPnl"),
+            "7": economic7.get("qualificationPnl"),
+        },
         "economics": {"30": economic30, "7": economic7},
-        "closedN": c30,
+        "closedN": int(_num(scoped.get("copy_bt_closed_n"))),
         "copyWinRate": _num(copy_win_rate) if copy_win_rate is not None else None,
-        "copyWinRateFloor": win_floor,
+        "copyWinRateFloor": None,
         "openFillRate": _num(open_rate) if open_rate is not None else None,
-        "openFillRateFloor": minimum_open_rate,
-        "activityAgeHours": activity_age,
-        "sourceQuality": source,
-        "officialPerpEvidence": {"status": official_status or "missing", "reason": official_reason},
+        "openFillRateFloor": 0.70,
+        "activity": activity,
+        "sourceQuality": {
+            "eligible": checks["sourceQualityPassed"],
+            "lottery": result.get("sourceLottery"),
+        },
+        "copyLottery": result.get("copyLottery"),
+        "copyProfitFactor": _num(scoped.get("copy_bt_profit_factor")),
+        "copyPayoffRatio": _num(scoped.get("copy_bt_payoff_ratio")),
+        "officialPerpEvidence": {"status": "audit_only", "reason": "not_an_admission_gate"},
         "simulatedLiquidations": int(_num(scoped.get("copy_bt_liquidations"))),
         "maxSingleLiquidationLossPct": _num(
             scoped.get("copy_bt_max_liquidation_loss_pct")
         ),
         "maxSingleLiquidationLossLimitPct": (
-            policy.core_max_single_liquidation_loss_pct
+            0.05
         ),
         "reasons": [] if stage_eligible else [str(first_failure or "copy_not_qualified")],
     }

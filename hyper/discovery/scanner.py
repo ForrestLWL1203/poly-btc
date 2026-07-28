@@ -35,6 +35,7 @@ from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy.economics import (
     OPEN_LOSS_RATIO_LIMIT,
     PROFITABILITY_BASIS,
+    conservative_profitability,
     open_loss_ratio_within_limit,
     replay_result_profitability,
 )
@@ -49,6 +50,7 @@ from hyper.selection import (
     auto_tune,
     core_formation,
     follow_score,
+    pre_strict,
     state as selection,
     strategy_revision,
 )
@@ -495,12 +497,10 @@ def _resolve_rescan_commands(db, initial_ids, *, run_full, complete, failed, act
 def _prepare_leaderboard_rows(rows, p, fetched_at):
     """Attach the cheap discovery decision without mutating the live leaderboard.
 
-    New-wallet recall combines useful account size/activity and absolute recent PnL. Official Portfolio then
-    evaluates either a full positive-equity history or, for a 7–27 day account, its latest complete seven-day
-    Perp return; the Leaderboard's overlapping month ROI remains audit-only.
+    New-wallet recall uses only seven-day volume and non-negative seven-/thirty-day PnL direction. Official
+    Portfolio then confirms that the seven-day volume belongs to Perp.
     Current roles/open-position owners bypass this discovery-only decision and receive retention replay.
     """
-    min_acct = getattr(p, "min_acct", config.HARVEST_MIN_ACCT)
     vlm_min = getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN)
     pnl_min = {
         "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
@@ -515,11 +515,10 @@ def _prepare_leaderboard_rows(rows, p, fetched_at):
         acct = f(r.get("accountValue"))
         wk_vlm, wk_pnl = f(wk.get("vlm")), f(wk.get("pnl"))
         month_pnl, all_pnl = f(mo.get("pnl")), f(al.get("pnl"))
-        week_positive = wk_pnl >= pnl_min["week"] if pnl_min["week"] > 0 else wk_pnl > 0
-        month_positive = month_pnl >= pnl_min["month"] if pnl_min["month"] > 0 else month_pnl > 0
+        week_positive = wk_pnl >= pnl_min["week"]
+        month_positive = month_pnl >= pnl_min["month"]
         r["is_candidate"] = int(
-            acct >= min_acct
-            and wk_vlm >= vlm_min
+            wk_vlm >= vlm_min
             and week_positive
             and month_positive
         )
@@ -614,10 +613,9 @@ def _leaderboard_recall_audit(db, generation_id, stamp, p):
         passed = bool(item.pop("is_candidate"))
         week_floor = getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN)
         month_floor = getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN)
-        week_positive = f(item["weekPnl"]) >= week_floor if week_floor > 0 else f(item["weekPnl"]) > 0
-        month_positive = f(item["monthPnl"]) >= month_floor if month_floor > 0 else f(item["monthPnl"]) > 0
+        week_positive = f(item["weekPnl"]) >= week_floor
+        month_positive = f(item["monthPnl"]) >= month_floor
         checks = {
-            "account_value_below_floor": f(item["accountValue"]) < getattr(p, "min_acct", config.HARVEST_MIN_ACCT),
             "week_volume_below_floor": f(item["weekVlm"]) < getattr(p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN),
             "week_pnl_below_floor": not week_positive,
             "month_pnl_below_floor": not month_positive,
@@ -636,7 +634,7 @@ def _leaderboard_recall_audit(db, generation_id, stamp, p):
 
 
 def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan"):
-    """Run official Perp observed-history return and profit-share checks before downloading fills."""
+    """Confirm official seven-day Perp volume before downloading a new wallet's fills."""
     pipeline_audit._delete_stage(db, stamp, source, "perp_prefilter")
     # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
     # single writer slot across a batch of rate-paced Portfolio calls freezes Observer marks and commands.
@@ -652,18 +650,12 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
     )
     copy_policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
     cache_policy = {
-        "version": "official_perp_observed_return_v8",
+        "version": "official_perp_week_volume_v9",
         "weekPerpVolumeMin": float(week_perp_volume_min),
-        "monthPerpPnlMustBePositive": True,
         "auditPnlMinima": {key: float(value) for key, value in minima.items()},
-        "shareMin": float(share_min),
-        "minReturn30d": float(copy_policy.official_perp_min_return_30d),
-        "minReturn7d": float(copy_policy.official_perp_min_return_7d),
-        "longHistoryDays": int(copy_policy.official_perp_long_history_days),
-        "shortHistoryDays": int(copy_policy.official_perp_short_history_days),
-        "maxBoundaryGapHours": float(
-            copy_policy.official_perp_boundary_max_gap_hours
-        ),
+        "roiMagnitudeGateEnabled": False,
+        "accountValueGateEnabled": False,
+        "perpProfitShareGateEnabled": False,
     }
     addr_set = {str(addr).lower() for addr in addrs}
     cached_results = {}
@@ -1349,18 +1341,14 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         ):
             ok, reason = True, "ok"
     if ok:
-        source_quality = follow_score.evaluate_source_quality(
-            m,
-            policy_values=getattr(p, "copy_bt_overrides", None),
-            as_of_ms=now_ms,
-        )
+        # Structural survivors all reach fills-only Copy. Source sample/PnL/PF/lottery/activity are evaluated
+        # together with Copy evidence after the replay; no legacy win-rate, official ROI or 72h pre-gate may
+        # truncate the dataset before the new funnel has the evidence it needs.
         m["source_quality_score"] = follow_score.compute_source_quality_score(
             m,
             policy_values=getattr(p, "copy_bt_overrides", None),
             as_of_ms=now_ms,
         )[0]
-        if not source_quality.get("eligible"):
-            ok, reason = False, source_quality.get("firstFailure") or "source_quality_not_qualified"
 
     if ok and getattr(p, "source_only_profile", False):
         # The global source-quality rank is not known until every deep-fill profile completes. Clear any
@@ -1370,8 +1358,20 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             copy_bt_closed_net_pnl=None,
             copy_bt_win_rate=None,
             copy_bt_closed_n=0,
+            copy_bt_gross_profit=None,
+            copy_bt_gross_loss=None,
+            copy_bt_profit_factor=None,
+            copy_bt_payoff_ratio=None,
+            copy_bt_top3_profit_share=None,
+            copy_bt_body_after_top3_n=0,
+            copy_bt_body_after_top3_win_rate=None,
+            copy_bt_body_after_top3_net_pnl=None,
             copy_bt_open_fill_rate=None,
             copy_bt_liquidations=0,
+            copy_bt_max_liquidation_loss_pct=0.0,
+            copy_bt_max_liquidation_loss=0.0,
+            copy_bt_max_liquidation_loss_coin=None,
+            copy_bt_max_liquidation_loss_closed_at=None,
             copy_bt_fee_drag=0.0,
             copy_bt_unrealized_pnl=0.0,
             copy_bt_valuation_status="pending",
@@ -1393,7 +1393,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             evidence_status="source_qualified",
             copy_path_risk_status="pending",
         )
-        reason = "source_quality_passed"
+        reason = "source_structure_passed"
     elif ok:
         try:
             resolver = getattr(p, "generation_market_resolver", None)
@@ -1825,7 +1825,9 @@ def _paper_account_equity(db) -> float:
 
 def _selection_prefetch_candidates(db, generation_id=None, now_ms=None, limit=None) -> list[str]:
     """Return the bounded qualified universe needed for path prefetch without running selection."""
-    limit = max(0, int(config.MAX_TARGETS if limit is None else limit))
+    limit = max(0, int(
+        config.PRE_STRICT_QUEUE_MAX_N if limit is None else limit
+    ))
     if not limit:
         return []
     if generation_id:
@@ -1865,17 +1867,30 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         "p.source_net_pnl_30d,p.source_net_pnl_7d,p.source_active_days_30d,p.source_active_days_7d,"
         "p.open_unrealized,"
         "p.source_top3_profit_share,p.source_body_after_top3_n,p.source_body_after_top3_win_rate,"
-        "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
+        "p.source_body_after_top3_net_pnl,p.source_gross_profit_30d,p.source_gross_loss_30d,"
+        "p.source_profit_factor_30d,p.source_payoff_ratio_30d,p.source_quality_score,p.rough_copy_score,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
         "p.copy_evidence_days,p.execution_score,p.open_probability_48h,"
-        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_win_rate,"
+        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_closed_net_pnl,p.copy_bt_win_rate,"
         "p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
         "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
-        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_window_start_equity,"
-        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_window_start_equity,"
-        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_fee_drag,p.sector_copy_json,p.sector_policy_json,p.acct_value "
-        "FROM profile p WHERE p.profile_generation=?",
-        (generation_id,),
+        "p.copy_bt_14d_net_pnl,p.copy_bt_14d_closed_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_window_start_equity,"
+        "p.copy_bt_7d_net_pnl,p.copy_bt_7d_closed_net_pnl,p.copy_bt_7d_unrealized_pnl,p.copy_bt_7d_window_start_equity,"
+        "p.copy_bt_open_fill_rate,p.copy_bt_liquidations,p.copy_bt_max_liquidation_loss_pct,"
+        "p.copy_bt_max_liquidation_loss,p.copy_bt_max_liquidation_loss_coin,"
+        "p.copy_bt_max_liquidation_loss_closed_at,p.copy_bt_fee_drag,"
+        "p.copy_bt_gross_profit,p.copy_bt_gross_loss,p.copy_bt_profit_factor,p.copy_bt_payoff_ratio,"
+        "p.copy_bt_top3_profit_share,p.copy_bt_body_after_top3_n,"
+        "p.copy_bt_body_after_top3_win_rate,p.copy_bt_body_after_top3_net_pnl,"
+        "p.sector_copy_json,p.sector_policy_json,p.acct_value,"
+        "pse.activity_json AS pre_strict_activity_json,pse.policy_version AS pre_strict_policy_version,"
+        "pse.status AS pre_strict_status,pse.first_failure AS pre_strict_first_failure,"
+        "pse.tier AS pre_strict_tier,pse.queue_rank AS pre_strict_queue_rank,"
+        "pse.rough_profit_priority AS pre_strict_profit_priority "
+        "FROM profile p JOIN pre_strict_evidence pse ON pse.generation=? "
+        "AND lower(pse.addr)=lower(p.addr) "
+        "WHERE p.profile_generation=? AND pse.queue_rank IS NOT NULL",
+        (generation_id, generation_id),
     )
     names = [desc[0] for desc in cur.description]
     controls = {
@@ -1906,6 +1921,12 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         row["addr"] = addr
         row.update(forward_risk.get(addr) or {})
         row["margin_equity_pct"] = margin_equity_pct
+        try:
+            row["pre_strict_activity"] = json.loads(
+                row.get("pre_strict_activity_json") or "{}"
+            )
+        except (TypeError, ValueError):
+            row["pre_strict_activity"] = {}
         # Rough replay already evaluated this exact generation and persisted its score/reason. Formation must
         # consume that frozen hand-off instead of silently rebuilding the gate from a partial SELECT or a
         # later parameter/time surface. The tuned path-complete replay below is the next authoritative gate.
@@ -1918,7 +1939,8 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
             )[0]
         )
         rough_passed = bool(
-            row.get("reason") == "rough_copy_qualified"
+            row.get("pre_strict_status") == "passed"
+            and row.get("pre_strict_queue_rank") is not None
             and row.get("rough_copy_score") is not None
         )
         row["follow_qualification"] = {
@@ -1927,15 +1949,15 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
             "stageEligible": rough_passed,
             "stage": "rough",
             "status": (
-                "rough_copy_qualified" if rough_passed
-                else row.get("reason") or "rough_copy_not_qualified"
+                "pre_strict_qualified" if rough_passed
+                else row.get("pre_strict_first_failure") or "pre_strict_not_qualified"
             ),
-            "firstFailure": None if rough_passed else row.get("reason"),
+            "firstFailure": None if rough_passed else row.get("pre_strict_first_failure"),
             "role": "core_eligible" if rough_passed else "challenger",
             "deferred": False,
             "checks": {"frozenRoughCopyPassed": rough_passed},
             "reasons": [] if rough_passed else [
-                str(row.get("reason") or "rough_copy_not_qualified")
+                str(row.get("pre_strict_first_failure") or "pre_strict_not_qualified")
             ],
         }
         qualified = (
@@ -1949,7 +1971,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         ):
             rows.append(row)
     rows.sort(key=lambda row: (
-        -(row.get("follow_score") or 0.0), row.get("addr") or "",
+        int(row.get("pre_strict_queue_rank") or 999999), row.get("addr") or "",
     ))
     return rows
 
@@ -2084,29 +2106,22 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         "score": score,
         "scoreDetail": _detail,
         "sectorPolicyJson": effective.get("sector_policy_json"),
+        "results": results,
     }
 
 
-def _source_quality_pool(db, generation_id: str, *, limit: int) -> tuple[list[str], list[str]]:
-    """Freeze the global source-quality Top40 and retire its lower-ranked tail."""
+def _source_quality_pool(db, generation_id: str, *, limit=None) -> tuple[list[str], list[str]]:
+    """Return every structurally valid deep-fill profile for fills-only pre-strict evaluation."""
+    del limit
     _apply_historical_major_liquidation_gate(db, generation_id)
     rows = db.execute(
         "SELECT lower(addr),COALESCE(source_quality_score,0) FROM profile "
         "WHERE profile_generation=? AND status='active' AND data_status='valid' "
-        "AND official_perp_status='passed' AND reason='source_quality_passed' "
+        "AND reason='source_structure_passed' "
         "ORDER BY COALESCE(source_quality_score,0) DESC,lower(addr)",
         (generation_id,),
     ).fetchall()
-    kept = [row[0] for row in rows[:max(0, int(limit))]]
-    tail = [row[0] for row in rows[max(0, int(limit)):]]
-    if tail:
-        placeholders = ",".join("?" for _ in tail)
-        db.execute(
-            f"UPDATE profile SET status='rejected',reason='source_quality_below_top40' "
-            f"WHERE profile_generation=? AND lower(addr) IN ({placeholders})",
-            (generation_id, *tail),
-        )
-    return kept, tail
+    return [row[0] for row in rows], []
 
 
 _MAJOR_LIQUIDATION_EVENT_TYPES = (
@@ -2186,17 +2201,173 @@ def _apply_historical_major_liquidation_gate(db, generation_id: str) -> set[str]
     return blocked
 
 
+def _store_pre_strict_evidence(
+    db, generation_id: str, addr: str, qualification: dict,
+    metrics_: dict, activity: dict, stamp: str,
+) -> None:
+    """Persist the immutable fills-only hand-off before queue ranking."""
+    source = qualification.get("sourceEconomics") or {}
+    copy = qualification.get("copyEconomics") or {}
+    copy30 = copy.get("30") or {}
+    copy7 = copy.get("7") or {}
+    copy14 = conservative_profitability(
+        metrics_.get("copy_bt_14d_closed_net_pnl"),
+        metrics_.get("copy_bt_14d_unrealized_pnl"),
+        start_equity=metrics_.get("copy_bt_14d_window_start_equity"),
+    )
+    payload = {
+        **qualification,
+        "activity": activity,
+        "copyProfitFactor": f(metrics_.get("copy_bt_profit_factor")),
+        "copyPayoffRatio": f(metrics_.get("copy_bt_payoff_ratio")),
+        "sourceProfitFactor": f(metrics_.get("source_profit_factor_30d")),
+        "sourcePayoffRatio": f(metrics_.get("source_payoff_ratio_30d")),
+    }
+    db.execute(
+        "INSERT OR REPLACE INTO pre_strict_evidence ("
+        "generation,addr,policy_version,model_version,status,first_failure,"
+        "activity_json,latest_7d_active,active_weeks_4,weekly_open_counts_json,"
+        "max_open_gap_days_28d,actionable_open_events_28d,actionable_open_events_7d,"
+        "source_closed_n_30d,source_win_rate_30d,source_gross_profit_30d,"
+        "source_gross_loss_30d,source_profit_factor_30d,source_payoff_ratio_30d,"
+        "source_top3_profit_share,source_body_net_pnl,source_body_win_rate,"
+        "copy_closed_n_30d,copy_win_rate_30d,copy_gross_profit_30d,copy_gross_loss_30d,"
+        "copy_profit_factor_30d,copy_payoff_ratio_30d,copy_top3_profit_share,"
+        "copy_body_net_pnl,copy_body_win_rate,rough_return_30d,rough_return_14d,"
+        "rough_return_7d,rough_closed_pnl_30d,rough_closed_pnl_14d,"
+        "rough_closed_pnl_7d,rough_open_loss_ratio_30d,rough_profit_priority,tier,"
+        "queue_rank,strict_status,strict_first_failure,evidence_json,created_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+        "?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            generation_id, str(addr).lower(), pre_strict.POLICY_VERSION,
+            pre_strict.SELECTION_MODEL_VERSION,
+            "passed" if qualification.get("eligible") else
+                "deferred" if qualification.get("deferred") else "rejected",
+            qualification.get("firstFailure"),
+            json.dumps(activity, sort_keys=True, separators=(",", ":")),
+            int(bool(activity.get("latest7dActive"))),
+            int(activity.get("activeWeeks4") or 0),
+            json.dumps(activity.get("weeklyOpenCountsOldestFirst") or []),
+            activity.get("maxOpenGapDays28d"),
+            int(activity.get("actionableOpenEvents28d") or 0),
+            int(activity.get("actionableOpenEvents7d") or 0),
+            int(metrics_.get("source_episode_n_30d") or 0),
+            metrics_.get("source_win_rate_30d"),
+            metrics_.get("source_gross_profit_30d"),
+            metrics_.get("source_gross_loss_30d"),
+            metrics_.get("source_profit_factor_30d"),
+            metrics_.get("source_payoff_ratio_30d"),
+            metrics_.get("source_top3_profit_share"),
+            metrics_.get("source_body_after_top3_net_pnl"),
+            metrics_.get("source_body_after_top3_win_rate"),
+            int(metrics_.get("copy_bt_closed_n") or 0),
+            metrics_.get("copy_bt_win_rate"),
+            metrics_.get("copy_bt_gross_profit"),
+            metrics_.get("copy_bt_gross_loss"),
+            metrics_.get("copy_bt_profit_factor"),
+            metrics_.get("copy_bt_payoff_ratio"),
+            metrics_.get("copy_bt_top3_profit_share"),
+            metrics_.get("copy_bt_body_after_top3_net_pnl"),
+            metrics_.get("copy_bt_body_after_top3_win_rate"),
+            copy30.get("qualificationReturn"),
+            copy14.get("qualificationReturn"),
+            copy7.get("qualificationReturn"),
+            copy30.get("closedPnl"),
+            copy14.get("closedPnl"),
+            copy7.get("closedPnl"),
+            copy30.get("openLossRatio"),
+            qualification.get("profitPriority"),
+            qualification.get("tier"),
+            None, None, None,
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=float),
+            stamp,
+        ),
+    )
+
+
+def _finalize_pre_strict_queue(
+    db, generation_id: str, *, allowed_addrs=None,
+) -> list[str]:
+    """Freeze the primary-first, reserve-fill queue independently from the Core cap."""
+    db.execute(
+        "UPDATE pre_strict_evidence SET queue_rank=NULL WHERE generation=?",
+        (generation_id,),
+    )
+    allowed = None
+    if allowed_addrs is not None:
+        allowed = {
+            str(addr or "").lower() for addr in allowed_addrs if addr
+        }
+    rows = db.execute(
+        "SELECT pse.addr FROM pre_strict_evidence pse "
+        "LEFT JOIN profile p ON lower(p.addr)=lower(pse.addr) "
+        "WHERE pse.generation=? AND pse.status='passed' "
+        "ORDER BY CASE pse.tier WHEN 'primary' THEN 0 WHEN 'reserve' THEN 1 ELSE 2 END,"
+        "pse.rough_profit_priority DESC,pse.rough_return_30d DESC,pse.rough_return_7d DESC,"
+        "pse.copy_profit_factor_30d DESC,COALESCE(p.rough_copy_score,p.score,0) DESC,"
+        "lower(pse.addr)",
+        (generation_id,),
+    ).fetchall()
+    queued = [
+        str(row[0]).lower()
+        for row in rows
+        if allowed is None or str(row[0] or "").lower() in allowed
+    ][:int(config.PRE_STRICT_QUEUE_MAX_N)]
+    for rank, addr in enumerate(queued, 1):
+        db.execute(
+            "UPDATE pre_strict_evidence SET queue_rank=? "
+            "WHERE generation=? AND lower(addr)=?",
+            (rank, generation_id, addr),
+        )
+    return queued
+
+
+def _pre_strict_counts(db, generation_id: str) -> dict:
+    row = db.execute(
+        "SELECT COUNT(*),"
+        "SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN latest_7d_active=1 "
+        "AND active_weeks_4>=? AND max_open_gap_days_28d<=? THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN status='passed' AND tier='primary' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN status='passed' AND tier='reserve' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN queue_rank IS NOT NULL THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN strict_status='qualified' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN strict_status='deferred' THEN 1 ELSE 0 END) "
+        "FROM pre_strict_evidence WHERE generation=?",
+        (
+            int(config.PRE_STRICT_ACTIVITY_MIN_ACTIVE_WEEKS),
+            float(config.PRE_STRICT_ACTIVITY_MAX_OPEN_GAP_DAYS),
+            generation_id,
+        ),
+    ).fetchone()
+    values = list(row or ()) + [0] * 8
+    return {
+        "roughCopyCompleted": int(values[0] or 0),
+        "preStrictPassed": int(values[1] or 0),
+        "persistentActivityPassed": int(values[2] or 0),
+        "preStrictPrimary": int(values[3] or 0),
+        "preStrictReserve": int(values[4] or 0),
+        "preStrictTop32": int(values[5] or 0),
+        "strictQualified": int(values[6] or 0),
+        "strictDeferred": int(values[7] or 0),
+    }
+
+
 def _rough_replay_source_pool(
     db, addrs, generation_id, now_ms, p, stamp, *, source="scan",
+    queue_allowed_addrs=None,
 ) -> dict:
-    """Run one cache-only, K-line-free Copy replay for at most the source-quality Top40."""
+    """Run one cache-only, K-line-free Copy replay for every structural survivor.
+
+    ``queue_allowed_addrs`` is set by Challenger daily refresh to the exact Core/strict-Challenger
+    universe published by the latest complete generation. Current Core and open-position wallets still
+    receive safety evidence, but cannot use the daily job as an alternative first-time promotion path.
+    """
     addrs = list(dict.fromkeys((addr or "").lower() for addr in addrs if addr))
     if not addrs:
         return {"attempted": 0, "qualified": [], "failed": []}
     follow = {**params.load_follow(db), **params.load_category(db, "scanner")}
-    source_pool_limit = load_copy_policy(follow).source_quality_max_n
-    if len(addrs) > int(source_pool_limit):
-        raise RuntimeError("rough_copy_pool_exceeds_source_quality_cap")
     valuation_marks = _current_copy_valuation_marks()
     qualified, failed = [], []
     cols = storage.PROFILE_COLS.split(",")
@@ -2241,12 +2412,14 @@ def _rough_replay_source_pool(
             sigmas=sigmas, market_ctx=market_ctx,
             strict_path=False, qualification_stage="rough",
         )
-        qualification = dict(result.get("qualification") or {})
         effective = dict(result.get("metrics") or {})
+        activity = pre_strict.copy_activity(result.get("results") or {}, int(now_ms))
+        qualification = pre_strict.evaluate(effective, activity, stage="rough")
+        qualification["copyProfitFactor"] = f(effective.get("copy_bt_profit_factor"))
         row.update(effective)
         row.update(
-            status="active",
-            reason=qualification.get("status") or "rough_copy_unqualified",
+            status="active" if qualification.get("eligible") or qualification.get("deferred") else "rejected",
+            reason=qualification.get("status") or "pre_strict_unqualified",
             score=f(result.get("score")),
             rough_copy_score=f(result.get("score")),
             sector_policy_json=result.get("sectorPolicyJson") or row.get("sector_policy_json"),
@@ -2260,15 +2433,25 @@ def _rough_replay_source_pool(
             f"VALUES ({','.join('?' * len(cols))})",
             [row.get(column) for column in cols],
         )
+        _store_pre_strict_evidence(
+            db, generation_id, addr, qualification, effective, activity, stamp,
+        )
         pipeline_audit._insert_event(
             db, stamp=stamp, source=source, stage="rough_copy", addr=addr, rank=rank,
-            status="passed" if qualification.get("coreEligible") else "rejected",
-            reason=qualification.get("firstFailure") or "rough_copy_qualified",
+            status="passed" if qualification.get("eligible") else
+                "deferred" if qualification.get("deferred") else "rejected",
+            reason=qualification.get("firstFailure") or "pre_strict_qualified",
             payload={
                 "score": result.get("score"),
-                "returns": qualification.get("returns"),
-                "winRate": qualification.get("copyWinRate"),
-                "openFillRate": qualification.get("openFillRate"),
+                "returns": {
+                    days: (qualification.get("copyEconomics") or {}).get(days, {}).get(
+                        "qualificationReturn"
+                    )
+                    for days in ("30", "7")
+                },
+                "profitFactor": effective.get("copy_bt_profit_factor"),
+                "payoffRatio": effective.get("copy_bt_payoff_ratio"),
+                "activity": activity,
                 "rawTargetOpenN": effective.get("copy_bt_raw_target_open_n"),
                 "smallOpenExcludedN": effective.get("copy_bt_small_open_excluded_n"),
                 "effectiveTargetOpenN": effective.get("copy_bt_effective_target_open_n"),
@@ -2296,15 +2479,21 @@ def _rough_replay_source_pool(
                     ),
                 },
             )
-        if qualification.get("coreEligible"):
+        if qualification.get("eligible"):
             qualified.append(addr)
         else:
             failed.append(addr)
         _set_scan_progress(
             db, stage="rough_copy", candidates_scanned=rank, candidates_total=len(addrs),
         )
+    queued = _finalize_pre_strict_queue(
+        db, generation_id, allowed_addrs=queue_allowed_addrs,
+    )
     db.commit()
-    return {"attempted": len(addrs), "qualified": qualified, "failed": failed}
+    return {
+        "attempted": len(addrs), "qualified": qualified, "failed": failed,
+        "queued": queued,
+    }
 
 
 def _prefix_eval_from_tune(count, tune_result, *, initial_balance):
@@ -2404,20 +2593,23 @@ def _formation_membership_changed(formation, current_core) -> bool:
 
 
 _FORMATION_PREPATH_CHECKS = (
-    "copyDataValid",
-    "officialPerpPassed",
+    "dataComplete",
     "sourceQualityPassed",
     "minimumClosedEvidence",
     "copyClosedProfit30d",
     "copyClosedProfit7d",
     "copyOpenLossRatio",
+    "copyConservativeProfit30d",
+    "copyConservativeProfit7d",
     "copy30dReturn",
     "copy7dReturn",
-    "copyWinRate",
+    "copyProfitFactor",
+    "copyLottery",
     "openExecution",
-    "activityWithin72h",
+    "activityOperational",
     "valuationComplete",
     "sectorExecutable",
+    "liquidationsWithinLimit",
     "singleLiquidationLossWithinLimit",
 )
 
@@ -2696,14 +2888,14 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
     formation_checks = {
         "dataValid": not bool(qualification.get("deferred"))
             and qualification.get("role") != "quarantine",
-        "officialPerpPassed": bool(checks.get("officialPerpPassed")),
         "sourceQualityPassed": bool(checks.get("sourceQualityPassed")),
         "strictCopy30dReturn": bool(checks.get("copy30dReturn")),
         "strictCopyRolling7dReturn": bool(checks.get("copy7dReturn")),
         "minimumClosedEvidence": bool(checks.get("minimumClosedEvidence")),
-        "strictCopyWinRate": bool(checks.get("copyWinRate")),
+        "copyProfitFactor": bool(checks.get("copyProfitFactor")),
+        "copyLotteryProtection": bool(checks.get("copyLottery")),
         "openExecution": bool(checks.get("openExecution")),
-        "activityWithin72h": bool(checks.get("activityWithin72h")),
+        "crossWeekActivity": bool(checks.get("activityOperational")),
         "valuationComplete": bool(checks.get("valuationComplete")),
         "pathRiskComplete": bool(checks.get("pathComplete")),
         "sectorExecutable": bool(checks.get("sectorExecutable")),
@@ -2714,14 +2906,14 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
     }
     required = (
         "dataValid",
-        "officialPerpPassed",
         "sourceQualityPassed",
         "strictCopy30dReturn",
         "strictCopyRolling7dReturn",
         "minimumClosedEvidence",
-        "strictCopyWinRate",
+        "copyProfitFactor",
+        "copyLotteryProtection",
         "openExecution",
-        "activityWithin72h",
+        "crossWeekActivity",
         "valuationComplete",
         "pathRiskComplete",
         "sectorExecutable",
@@ -2729,7 +2921,8 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "singleLiquidationLossWithinLimit",
     )
     return {
-        "eligible": all(bool(formation_checks.get(key)) for key in required),
+        "eligible": bool(qualification.get("coreEligible"))
+            and all(bool(formation_checks.get(key)) for key in required),
         "requiredChecks": list(required),
         "checks": formation_checks,
         "closedN": closed_n,
@@ -2759,14 +2952,13 @@ def _formation_prepath_candidate(row) -> bool:
 
 
 def _bounded_formation_candidates(rows, limit) -> list[dict]:
-    """Return rough-Copy winners in 70/30 dynamic-profit order, capped at 16."""
+    """Return the immutable primary-first pre-strict queue."""
     candidates = [
         row for row in rows if _formation_prepath_candidate(row)
     ]
-    candidates.sort(key=lambda row: follow_score.profit_priority_sort_key(
-        row,
-        follow_score_value=f(row.get("follow_score")),
-        addr=row.get("addr") or "",
+    candidates.sort(key=lambda row: (
+        int(row.get("pre_strict_queue_rank") or 999999),
+        row.get("addr") or "",
     ))
     return candidates[:max(0, int(limit))]
 
@@ -2892,22 +3084,73 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     current_core = (
         () if force_entry_requalification else tuple(selection.published_core_addrs(db) or ())
     )
-    upper = max(1, min(
+    core_upper = max(1, min(
         int(config.MAX_TARGETS),
         int(getattr(config, "CORE_TARGET_MAX_N", 16)),
         int(params.get(
             db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
         ) or config.CORE_INITIAL_MAX_N),
     ))
+    queue_upper = max(core_upper, int(config.PRE_STRICT_QUEUE_MAX_N))
     all_ranked_candidates = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
     )
-    # Refined candle paths are needed only after every cheaper Core gate passes. Neither incumbent status nor
-    # operator stars may move a lower-profit wallet ahead of the current 70/30 dynamic-return order.
-    ranked_candidates = _bounded_formation_candidates(
+    pre_strict_candidates = _bounded_formation_candidates(
         all_ranked_candidates,
-        upper,
+        queue_upper,
     )
+    # First strict pass owns path/data/market validity and the strict profit rerank, but intentionally does
+    # not pre-reject return magnitude, normal liquidation count, capacity or open-rate misses which unified
+    # tuning may repair. It is the only bridge from the generation-frozen Top32 into the bounded Top16.
+    prepath_rows = []
+    prepath_rejected = []
+    for row in pre_strict_candidates:
+        effective = _effective_follow_replay(
+            db, row, now_ms, generation_id=generation_id, follow=base_follow,
+            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+            strict_path=True, qualification_stage="strict",
+        )
+        qualification = dict(effective.get("qualification") or {})
+        status = str(qualification.get("status") or "strict_current_surface_unknown")
+        hard_invalid = bool(
+            qualification.get("deferred")
+            or qualification.get("role") == "quarantine"
+            or status in {
+                "copy_single_liquidation_loss_over_5pct",
+                "historical_major_liquidation",
+                "source_account_liquidated_zero",
+                "sector_not_executable",
+                "effective_sector_policy_missing",
+                "add_metrics_version_mismatch",
+            }
+        )
+        addr = row["addr"]
+        db.execute(
+            "UPDATE pre_strict_evidence SET strict_status=?,strict_first_failure=? "
+            "WHERE generation=? AND lower(addr)=?",
+            (
+                "deferred" if qualification.get("deferred") else
+                    "current_surface_hard_rejected" if hard_invalid else "current_surface_path_valid",
+                status if hard_invalid else None,
+                generation_id, addr,
+            ),
+        )
+        if hard_invalid:
+            prepath_rejected.append(addr)
+            continue
+        metrics_ = dict(effective.get("metrics") or {})
+        prepath_rows.append({
+            **row,
+            **metrics_,
+            "follow_score": f(effective.get("score")),
+            "_current_surface_qualification": qualification,
+        })
+    prepath_rows.sort(key=lambda row: follow_score.profit_priority_sort_key(
+        row,
+        follow_score_value=f(row.get("follow_score")),
+        addr=row.get("addr") or "",
+    ))
+    ranked_candidates = prepath_rows[:core_upper]
     rebalance_interval = max(1, int(params.get(
         db, "CORE_REBALANCE_INTERVAL_DAYS", config.CORE_REBALANCE_INTERVAL_DAYS,
     ) or 1))
@@ -2922,7 +3165,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # establish this rough profit order. Do not run a path-complete individual replay on the active/default surface:
     # that duplicated the expensive work and could reject a wallet for parameters the following tuner exists
     # to repair. The winning surface below receives the one authoritative per-wallet strict replay.
-    tune_ranked = ranked_candidates[:upper]
+    tune_ranked = ranked_candidates[:core_upper]
     if not tune_ranked:
         return _explicit_empty_core_formation(
             ranked_candidates, reason="no_core_qualified_wallets", tunePoolCount=0,
@@ -3117,6 +3360,19 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 key: formation.get(key)
                 for key in ("closedN", "score")
             }
+            db.execute(
+                "UPDATE pre_strict_evidence SET strict_status=?,strict_first_failure=? "
+                "WHERE generation=? AND lower(addr)=?",
+                (
+                    "qualified" if formation.get("eligible") else
+                        "deferred" if qualification.get("deferred") else "rejected",
+                    None if formation.get("eligible") else (
+                        qualification.get("firstFailure")
+                        or qualification.get("formationStatus")
+                    ),
+                    generation_id, addr,
+                ),
+            )
             if not bool(
                 (qualification.get("checks") or {}).get(
                     "singleLiquidationLossWithinLimit"
@@ -3152,6 +3408,24 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             score_details[addr] = {
                 **dict(effective.get("scoreDetail") or {}),
                 "profitPriority": priority_detail,
+                "strictQuality": {
+                    "profitFactor": metrics[addr].get("copy_bt_profit_factor"),
+                    "payoffRatio": metrics[addr].get("copy_bt_payoff_ratio"),
+                    "top3ProfitShare": metrics[addr].get("copy_bt_top3_profit_share"),
+                    "bodyAfterTop3N": metrics[addr].get("copy_bt_body_after_top3_n"),
+                    "bodyAfterTop3WinRate": metrics[addr].get(
+                        "copy_bt_body_after_top3_win_rate"
+                    ),
+                    "bodyAfterTop3NetPnl": metrics[addr].get(
+                        "copy_bt_body_after_top3_net_pnl"
+                    ),
+                },
+                "preStrict": {
+                    "policyVersion": row.get("pre_strict_policy_version"),
+                    "tier": row.get("pre_strict_tier"),
+                    "queueRank": row.get("pre_strict_queue_rank"),
+                    "activity": row.get("pre_strict_activity"),
+                },
             }
             if effective.get("sectorPolicyJson"):
                 policies[addr] = effective["sectorPolicyJson"]
@@ -3198,7 +3472,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         follow_score_value=effective_scores.get(row["addr"], 0.0),
         addr=row["addr"],
     ))
-    ordered = tuple(row["addr"] for row in effective_ranked[:upper])
+    ordered = tuple(row["addr"] for row in effective_ranked[:core_upper])
     if not ordered:
         return {
             "selected": (), "ranked": (), "params": {}, "evaluations": (),
@@ -3675,9 +3949,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
     desired = tuple(dict.fromkeys((addr or "").lower() for addr in desired_order if addr))
-    # ``eligible`` is deliberately broad: a source-Top40 wallet with positive Copy evidence, or an official
-    # evidence-deferral wallet, remains visible as Challenger.  The global Top40 cap already bounds this set;
-    # no hidden profit line, score line, incumbent identity or final-path result may change that boundary.
+    # Challenger is a strict-output role, never a synonym for the wider pre-strict reserve. Only final
+    # individual strict passes and path/data deferrals from this generation's frozen Top32 are visible.
     operational_candidate_set = set(desired)
     operational_candidate_set.update(
         (addr or "").lower() for addr in dict(effective_qualifications or {}) if addr
@@ -3688,13 +3961,12 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         if isinstance(item, dict) and item.get("addr")
     )
     operational_candidate_set.update(
-        (row.get("addr") or "").lower()
-        for row in [
-            item for item in profiles
-            if item.get("profile_generation") == generation_id
-            and item.get("status") in {"active", "qualified"}
-            and (item.get("follow_qualification") or {}).get("eligible")
-        ][:int(config.SOURCE_QUALITY_MAX_N)]
+        (addr or "").lower()
+        for (addr,) in db.execute(
+            "SELECT addr FROM pre_strict_evidence WHERE generation=? "
+            "AND queue_rank IS NOT NULL AND strict_status IN ('qualified','deferred')",
+            (generation_id,),
+        ).fetchall()
     )
     invalid = [
         addr for addr in desired
@@ -3965,7 +4237,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         search_meta={
             **dict(formation_meta or {}),
             "finalStrictCopy": final_strict_validation,
-            "membershipPolicy": "strict-score-prefix-v1",
+            "membershipPolicy": pre_strict.SELECTION_MODEL_VERSION,
             "desiredOrder": desired,
             "scoreOrder": transition["selected"],
             "looRemoved": list(transition.get("looRemoved") or ()),
@@ -4028,8 +4300,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 selection_rank=core_rank.get(addr) if role == selection.CORE else rank,
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
-                model_version="selection-realized-conservative-profit-70-30-prefix-v2",
-                policy_version=copy_policy.version,
+                model_version=pre_strict.SELECTION_MODEL_VERSION,
+                policy_version=pre_strict.POLICY_VERSION,
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
                 replay_copy_bt_net_pnl=replay.get("copy_bt_net_pnl"),
@@ -4169,6 +4441,27 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     )
     names = [desc[0] for desc in cur.description]
     profiles = [dict(zip(names, row)) for row in cur.fetchall()]
+    pre_strict_rows = {
+        (addr or "").lower(): {
+            "status": status,
+            "firstFailure": first_failure,
+            "strictStatus": strict_status,
+            "strictFirstFailure": strict_failure,
+            "activityJson": activity_json,
+            "tier": tier,
+            "queueRank": queue_rank,
+            "policyVersion": policy_version,
+        }
+        for (
+            addr, status, first_failure, strict_status, strict_failure,
+            activity_json, tier, queue_rank, policy_version,
+        ) in db.execute(
+            "SELECT addr,status,first_failure,strict_status,strict_first_failure,"
+            "activity_json,tier,queue_rank,policy_version "
+            "FROM pre_strict_evidence WHERE generation=?",
+            (generation_id,),
+        ).fetchall()
+    }
     forward_risk = {
         (addr or "").lower(): {
             "forward_net_pnl": f(net_pnl),
@@ -4193,6 +4486,11 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
     for row in profiles:
         addr = (row.get("addr") or "").lower()
         row.update(forward_risk.get(addr) or {})
+        frozen = pre_strict_rows.get(addr) or {}
+        row["pre_strict_activity_json"] = frozen.get("activityJson")
+        row["pre_strict_policy_version"] = frozen.get("policyVersion")
+        row["pre_strict_tier"] = frozen.get("tier")
+        row["pre_strict_queue_rank"] = frozen.get("queueRank")
         row["follow_score"] = (
             f(watch_scores[addr]) if addr in watch_scores
             else follow_score.compute_follow_score(row)[0]
@@ -4203,6 +4501,19 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             "copy_bt_evidence_status": row.get("evidence_status"),
         }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms,
             follow_score_value=row["follow_score"])
+        if frozen.get("strictStatus") == "deferred" and frozen.get("queueRank") is not None:
+            row["follow_qualification"] = {
+                "eligible": True,
+                "coreEligible": False,
+                "stageEligible": False,
+                "stage": "strict",
+                "status": frozen.get("strictFirstFailure") or "strict_evidence_deferred",
+                "firstFailure": frozen.get("strictFirstFailure") or "strict_evidence_deferred",
+                "role": "challenger",
+                "deferred": True,
+                "checks": {"frozenPreStrictDeferred": True},
+                "reasons": [frozen.get("strictFirstFailure") or "strict_evidence_deferred"],
+            }
     profiles.sort(key=lambda row: (-(row.get("follow_score") or 0.0), row.get("addr") or ""))
     for rank, row in enumerate(profiles, 1):
         row["rank"] = rank
@@ -4967,7 +5278,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     )
     preview = _selection_prefetch_candidates(
         db, generation_id, now_ms,
-        limit=int(params.get(db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N)),
+        limit=int(config.PRE_STRICT_QUEUE_MAX_N),
     )
     db.rollback()
     if preview:
@@ -5284,6 +5595,36 @@ def refresh_challengers(db, p) -> dict:
     if not base_generation or not workset:
         record_challenger_refresh_skip(db, "no_complete_challenger_pool")
         return {"status": "skipped", "reason": "no_complete_challenger_pool"}
+    base_policy = db.execute(
+        "SELECT COUNT(*),"
+        "SUM(CASE WHEN model_version=? AND policy_version=? THEN 1 ELSE 0 END) "
+        "FROM follow_selection WHERE generation=?",
+        (
+            pre_strict.SELECTION_MODEL_VERSION,
+            pre_strict.POLICY_VERSION,
+            base_generation,
+        ),
+    ).fetchone()
+    if (
+        not base_policy
+        or int(base_policy[0] or 0) == 0
+        or int(base_policy[0] or 0) != int(base_policy[1] or 0)
+    ):
+        record_challenger_refresh_skip(db, "legacy_generation_policy_mismatch")
+        return {"status": "skipped", "reason": "legacy_generation_policy_mismatch"}
+    base_promotion_universe = {
+        str(addr or "").lower()
+        for (addr,) in db.execute(
+            "SELECT addr FROM follow_selection WHERE generation=? "
+            "AND role IN ('core','challenger') AND model_version=? AND policy_version=?",
+            (
+                base_generation,
+                pre_strict.SELECTION_MODEL_VERSION,
+                pre_strict.POLICY_VERSION,
+            ),
+        ).fetchall()
+        if addr
+    }
 
     selection_mode = str(
         params.get(db, "FOLLOW_SELECTION_MODE", config.FOLLOW_SELECTION_MODE) or "auto"
@@ -5392,17 +5733,10 @@ def refresh_challengers(db, p) -> dict:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, "official_perp_evidence_missing",
                 )
-            official_evidence_building = False
             if gate.deferred:
-                if gate.reason in {
-                    "history_under_7d", "history_under_28d",
-                    "boundary_sample_gap", "zero_start_equity",
-                }:
-                    official_evidence_building = True
-                else:
-                    return addr, prior, _defer_profile(
-                        db, addr, prior, stamp, gate.reason,
-                    )
+                return addr, prior, _defer_profile(
+                    db, addr, prior, stamp, gate.reason,
+                )
             # The frozen daily pool already owns a complete 37-day cache, so even an official business-gate
             # failure or normal evidence-building state must consume its cheap delta. A zeroed wallet commonly
             # fails Portfolio first; skipping here would hide the liquidation fill needed by hard safety below.
@@ -5410,48 +5744,10 @@ def refresh_challengers(db, p) -> dict:
                 db, addr, now_ms - int(p.days) * 86_400_000, now_ms,
                 p, prior, lbs.get(addr, {}), stamp, universe, force_full=False,
             )
-            if gate.passed:
-                return addr, prior, result
-            status, _reason, profile, hit_cap = result
-            if (profile or {}).get("data_status") != "valid":
-                return addr, prior, result
-            gate_reason = str(
-                gate.reason or (
-                    "official_perp_evidence_incomplete"
-                    if official_evidence_building else "prefilter_rejected"
-                )
-            )[:120]
-            if official_evidence_building:
-                rejected_status = "active"
-                evidence_status = "official_evidence_building"
-            else:
-                rejected_status = (
-                    "retired"
-                    if prior and prior.get("status") in {"active", "qualified"}
-                    else "rejected"
-                )
-                evidence_status = "ineligible"
-            with _db_lock:
-                db.execute(
-                    "UPDATE profile SET status=?,reason=?,score=0,raw_quality_score=0,"
-                    "rough_copy_score=NULL,evidence_status=? "
-                    "WHERE addr=? AND profile_generation=?",
-                    (
-                        rejected_status, gate_reason, evidence_status,
-                        addr, generation_id,
-                    ),
-                )
-                db.commit()
-            profile = dict(profile or {})
-            profile.update(
-                status=rejected_status,
-                reason=gate_reason,
-                score=0.0,
-                raw_quality_score=0.0,
-                rough_copy_score=None,
-                evidence_status=evidence_status,
-            )
-            return addr, prior, (rejected_status, gate_reason, profile, hit_cap)
+            # Portfolio week volume is a new-wallet download decision only. Every frozen strict
+            # Core/Challenger already owns a complete cache and must be requalified from fills even when its
+            # current cheap-recall telemetry falls below the new-wallet floor.
+            return addr, prior, result
 
         workers = max(1, int(getattr(p, "workers", 4) or 4))
         done = 0
@@ -5563,11 +5859,8 @@ def refresh_challengers(db, p) -> dict:
         if verified_source_blowups:
             db.commit()
 
-        policy = load_copy_policy({
-            **params.load_follow(db), **params.load_category(db, "scanner"),
-        })
         source_pool, source_tail = _source_quality_pool(
-            db, generation_id, limit=int(policy.source_quality_max_n),
+            db, generation_id,
         )
         _set_scan_progress(
             db, stage="rough_copy", candidates_scanned=0,
@@ -5576,6 +5869,7 @@ def refresh_challengers(db, p) -> dict:
         rough_summary = _rough_replay_source_pool(
             db, source_pool, generation_id, now_ms, p, stamp,
             source="challenger_daily",
+            queue_allowed_addrs=base_promotion_universe,
         )
         severe_copy_liquidations = {
             str(addr or "").lower()
@@ -5598,21 +5892,20 @@ def refresh_challengers(db, p) -> dict:
                         "exit_only" if addr in previous_core
                         else "exclude_from_candidate_pool"
                     ),
-                    "thresholdPct": (
-                        policy.core_max_single_liquidation_loss_pct
-                    ),
+                    "thresholdPct": config.CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT,
                 },
             )
         p.source_only_profile = False
         pipeline_audit._insert_event(
             db, stamp=stamp, source="challenger_daily",
             stage="source_quality_pool", status="ok",
-            reason="frozen_challenger_source_quality",
+            reason="frozen_challenger_pre_strict",
             payload={
                 "baseFullGeneration": base_generation,
-                "qualifiedBeforeCap": len(source_pool) + len(source_tail),
-                "retained": len(source_pool), "tailRemoved": len(source_tail),
-                "roughCopyQualified": len(rough_summary.get("qualified") or ()),
+                "structuralPassed": len(source_pool),
+                "preStrictPassed": len(rough_summary.get("qualified") or ()),
+                "top32": len(rough_summary.get("queued") or ()),
+                "promotionUniverse": len(base_promotion_universe),
             },
         )
         db.commit()
@@ -5632,9 +5925,7 @@ def refresh_challengers(db, p) -> dict:
         )
         preview = _selection_prefetch_candidates(
             db, generation_id, now_ms,
-            limit=int(params.get(
-                db, "CORE_INITIAL_MAX_N", config.CORE_INITIAL_MAX_N,
-            )),
+            limit=int(config.PRE_STRICT_QUEUE_MAX_N),
         )
         db.rollback()
         if preview:
@@ -5895,7 +6186,9 @@ def refresh_challengers(db, p) -> dict:
             "baseFullGeneration": base_generation,
             "workset": len(workset), "profileValid": valid_profiles,
             "profileDeferred": deferred_profiles,
+            "promotionUniverse": len(base_promotion_universe),
             "roughCopyQualified": len(rough_summary.get("qualified") or ()),
+            **_pre_strict_counts(db, generation_id),
             "selectionCore": len(current_core),
             "selectionChallenger": sum(
                 1 for row in selection_rows if row.role == selection.CHALLENGER
@@ -6160,6 +6453,15 @@ def scan(db, p) -> None:
         set(core_addrs) | set(challenger_addrs)
         | set(position_addrs) | set(former_core_addrs)
     )
+    for addr in retention_addrs:
+        perp_results.setdefault(
+            addr,
+            perp_prefilter.Result(
+                "passed", "retention_evidence_refresh",
+                {"week": {"hardGate": False, "retentionRefresh": True}},
+            ),
+        )
+    p.official_perp_results = dict(perp_results)
     # Freeze the open-copy PnL surface for the generation. Worker threads use it only to distinguish a
     # profitable carried mirrored episode from a dormant/losing wallet; it never bypasses economic/risk gates.
     p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
@@ -6334,11 +6636,43 @@ def scan(db, p) -> None:
                 submit_available()
 
     _profile_batch(list(workset))
-    scan_copy_policy = load_copy_policy({
-        **params.load_follow(db), **params.load_category(db, "scanner"),
-    })
+    # A complete generation owns the same catastrophic source-risk proof as the daily safety path.  Historical
+    # fills alone identify only a possible self-liquidation; the fresh clearinghouse snapshot is what turns it
+    # into a hard source-account-zero rejection.  This check is sparse because it requests state only for
+    # wallets whose cached fills contain a recent exchange-labelled self-liquidation.
+    verified_source_blowups = _verified_zero_equity_source_liquidations(
+        db, workset, now_ms,
+    )
+    for addr, evidence in verified_source_blowups.items():
+        _record_wallet_risk_event(
+            db, addr, "source_account_liquidated_zero",
+            str(int(evidence.get("latestLiquidationMs") or now_ms)),
+            occurred_at=int(evidence.get("latestLiquidationMs") or now_ms),
+            coin=",".join(evidence.get("coins") or ()) or None,
+            evidence={
+                **evidence,
+                "generation": generation_id,
+                "stage": "complete_scan",
+            },
+        )
+        db.execute(
+            "UPDATE profile SET status='rejected',reason='source_account_liquidated_zero',"
+            "data_status='valid',evidence_status='invalid' "
+            "WHERE lower(addr)=? AND profile_generation=?",
+            (addr, generation_id),
+        )
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="scan", stage="hard_safety",
+            addr=addr, status="rejected", reason="source_account_liquidated_zero",
+            payload={
+                **evidence,
+                "action": "exclude_from_candidate_pool",
+            },
+        )
+    if verified_source_blowups:
+        db.commit()
     source_pool, source_tail = _source_quality_pool(
-        db, generation_id, limit=int(scan_copy_policy.source_quality_max_n),
+        db, generation_id,
     )
     db.commit()
     _set_scan_progress(
@@ -6350,12 +6684,12 @@ def scan(db, p) -> None:
     p.source_only_profile = False
     pipeline_audit._insert_event(
         db, stamp=stamp, source="scan", stage="source_quality_pool",
-        status="ok", reason="source_quality_top40",
+        status="ok", reason="pre_strict_queue_frozen",
         payload={
-            "qualifiedBeforeCap": len(source_pool) + len(source_tail),
-            "retained": len(source_pool),
-            "tailRemoved": len(source_tail),
-            "roughCopyQualified": len(rough_summary.get("qualified") or ()),
+            "structuralPassed": len(source_pool),
+            "roughCopyCompleted": rough_summary.get("attempted", 0),
+            "preStrictPassed": len(rough_summary.get("qualified") or ()),
+            "top32": len(rough_summary.get("queued") or ()),
         },
     )
     db.commit()
@@ -6602,6 +6936,7 @@ def scan(db, p) -> None:
             )
             n_active = len(current_core)
             duration_s = time.time() - t0
+            pre_strict_counts = _pre_strict_counts(db, generation_id)
             stage_metrics = {
                 "durationSec": round(duration_s, 3),
                 "leaderboardAndUniverseSec": round(harvest_done_at - harvest_started_at, 3),
@@ -6614,6 +6949,8 @@ def scan(db, p) -> None:
                 "coarseRecallPassed": len(recall_cand),
                 "perpPrefilterPassed": len(cand),
                 "perpPrefilterDeferred": sum(result.deferred for result in perp_results.values()),
+                "structurePassed": len(source_pool),
+                **pre_strict_counts,
                 "apiByStage": {
                     "leaderboard": harvest_api_stats,
                     "perpPrefilter": {

@@ -2,9 +2,11 @@ import { IC, Ico } from "../../lib/icons.jsx";
 
 export const SCAN_STAGES = [
   [["scan_leaderboard"], "扫描排行榜"],
-  [["fetch_history"], "拉取历史 & 算指标"],
-  [["score_filter"], "评分 · 网格/扛单过滤"],
-  [["rebuild_watchlist", "prepare_selection_candidates"], "重建被跟名单"],
+  [["perp_prefilter"], "Perp 周交易量确认"],
+  [["fetch_history"], "拉取/修复 37 天历史"],
+  [["score_filter"], "结构与重大风险筛查"],
+  [["rough_copy"], "Pre-strict 粗 Copy 与跨周活跃"],
+  [["rebuild_watchlist", "prepare_selection_candidates"], "冻结 Strict Top32"],
   [["prefetch_selection_paths", "portfolio_tune", "selection_search"], "组合回测调参"],
   [["materialize_replay", "persist"], "写库 & 校验"],
 ];

@@ -109,8 +109,12 @@ class ApiScannerStatusTests(unittest.TestCase):
 
         self.assertEqual(
             set(res["funnel"]),
-            {"leaderboard", "candidates", "perpPrefilter", "challenger",
-             "core", "finalCore", "watchlist"},
+            {
+                "leaderboard", "candidates", "perpPrefilter", "structurePassed",
+                "roughCompleted", "persistentActivity", "pfLotteryPassed",
+                "primary", "reserve", "top32", "strict", "challenger",
+                "core", "finalCore", "watchlist",
+            },
         )
         self.assertEqual(res["funnel"]["leaderboard"], 1)
         self.assertEqual(res["funnel"]["candidates"], 1)

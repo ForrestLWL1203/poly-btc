@@ -1,4 +1,4 @@
-"""Official Portfolio precheck for high-quality Perp discovery candidates."""
+"""Official Portfolio Perp-volume confirmation for newly recalled wallets."""
 
 from __future__ import annotations
 
@@ -285,8 +285,8 @@ class Result:
 def evaluate(
     payload,
     *,
-    pnl_minima: dict[str, float],
-    share_min: float,
+    pnl_minima=None,
+    share_min: float = 0.0,
     min_return_30d: float = 0.20,
     min_return_7d: float = 0.05,
     long_history_days: int = 28,
@@ -294,71 +294,44 @@ def evaluate(
     max_boundary_gap_hours: float = 36.0,
     min_week_perp_volume: float = 0.0,
 ) -> Result:
-    """Require profitable, Perp-led activity and a qualified long/short official Perp ROI."""
-    del pnl_minima
+    """Confirm only that official seven-day Perp volume reaches the cheap-recall floor.
+
+    The wider signature remains source-compatible with old callers and cached fixtures. Profit direction
+    is already checked on Leaderboard; Portfolio ROI, account history, profit share and absolute PnL are
+    audit telemetry and never qualify a wallet.
+    """
+    del (
+        pnl_minima, share_min, min_return_30d, min_return_7d,
+        long_history_days, short_history_days, max_boundary_gap_hours,
+    )
     windows = _portfolio_map(payload)
     if not windows:
         return Result("deferred_data_error", "portfolio_unavailable", {})
     metrics = {}
     for total_key, perp_key, label in WINDOWS:
         if total_key not in windows or perp_key not in windows:
-            if label == "month":
-                return Result("deferred_data_error", f"portfolio_window_missing:{label}", metrics)
+            if label == "week" and perp_key not in windows:
+                return Result("deferred_data_error", "portfolio_window_missing:week", metrics)
             metrics[label] = {"auditStatus": "missing", "hardGate": False}
             continue
         total_pnl = pnl_delta(windows[total_key])
         perp_pnl = pnl_delta(windows[perp_key])
         if total_pnl is None or perp_pnl is None:
-            if label == "month":
-                return Result("deferred_data_error", f"portfolio_history_incomplete:{label}", metrics)
             metrics[label] = {"auditStatus": "incomplete", "hardGate": False}
-            continue
-        share = (perp_pnl / total_pnl) if total_pnl > 0 else None
-        metrics[label] = {
-            "totalPnl": total_pnl, "perpPnl": perp_pnl, "perpShare": share,
-            "totalVlm": _number(windows[total_key].get("vlm")),
-            "perpVlm": _number(windows[perp_key].get("vlm")),
-            "hardGate": label == "month", "auditStatus": "complete",
-        }
+        else:
+            share = (perp_pnl / total_pnl) if total_pnl > 0 else None
+            metrics[label] = {
+                "totalPnl": total_pnl, "perpPnl": perp_pnl, "perpShare": share,
+                "totalVlm": _number(windows[total_key].get("vlm")),
+                "perpVlm": _number(windows[perp_key].get("vlm")),
+                "hardGate": label == "week", "auditStatus": "complete",
+            }
+        if label == "week":
+            metrics[label]["perpVlm"] = _number(windows[perp_key].get("vlm"))
     week = metrics.get("week") or {}
     if float(min_week_perp_volume) > 0.0:
         if week.get("perpVlm") is None:
             return Result("deferred_data_error", "portfolio_volume_incomplete:week", metrics)
         if float(week["perpVlm"]) < float(min_week_perp_volume):
             return Result("rejected", "perp_week_volume_below_floor", metrics)
-    month = metrics.get("month") or {}
-    if float(month.get("perpPnl") or 0.0) <= 0.0:
-        return Result("rejected", "perp_pnl_not_profitable:month", metrics)
-    if month.get("perpShare") is None or float(month["perpShare"]) < float(share_min):
-        return Result("rejected", "perp_share_below_floor:month", metrics)
-    official_return = official_perp_month_return(
-        windows.get("perpMonth"),
-        max_boundary_gap_hours=max_boundary_gap_hours,
-        long_history_days=long_history_days,
-        short_history_days=short_history_days,
-        min_return_30d=min_return_30d,
-        min_return_7d=min_return_7d,
-    )
-    metrics["officialPerp30d"] = official_return
-    if not official_return["evidenceSufficient"]:
-        return Result(
-            "deferred_data_error",
-            str(official_return.get("reason") or "official_perp_return_evidence_incomplete"),
-            metrics,
-        )
-    month["perpReturn"] = official_return.get("return")
-    month["perpStartEquity"] = official_return.get("startEquity")
-    required_return = float(official_return.get("minimumReturn") or min_return_30d)
-    if float(official_return.get("return") or 0.0) + 1e-12 < required_return:
-        suffix = (
-            "short_7d"
-            if official_return.get("historyTier") == "short_history_7d"
-            else "month"
-        )
-        return Result("rejected", f"official_perp_return_below_floor:{suffix}", metrics)
-    reason = (
-        "perp_prefilter_passed_short_history"
-        if official_return.get("historyTier") == "short_history_7d"
-        else "perp_prefilter_passed"
-    )
-    return Result("passed", reason, metrics)
+    return Result("passed", "perp_week_volume_confirmed", metrics)

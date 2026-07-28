@@ -1093,7 +1093,9 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "SELECT status,reason,copy_bt_open_fill_rate FROM profile WHERE addr='0xaaa'"
             ).fetchone()
             self.assertEqual(row[0], "active")
-            self.assertEqual(row[1], "rough_copy_open_rate_below_floor")
+            # Legacy regate rows have no generation-frozen pre-strict activity evidence.  The new model
+            # fails closed at that earlier gate instead of admitting the row to an obsolete open-rate gate.
+            self.assertEqual(row[1], "activity_not_operational")
             self.assertAlmostEqual(row[2], 0.4)
 
     def test_regate_keeps_weak_recent_copy_as_challenger(self):

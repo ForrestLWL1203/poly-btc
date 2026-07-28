@@ -32,15 +32,17 @@ The current runtime turns the public Hyperliquid leaderboard into a live, paper-
 Leaderboard
     ↓ staged and validated generation
 Candidate coarse filter
-    ↓ account ≥ $20k, 7d notional volume ≥ $150k, positive 7d/30d PnL
-Official Portfolio 30d Perp prefilter
-    ↓ Perp ROI ≥ 20%, positive Perp PnL, Perp-profit share ≥ 60%
-Deep fills source quality
-    ↓ closed 30d/7d profit; open loss ≤50% of closed profit; Episode quality/activity/structure; Top40
+    ↓ 7d notional volume ≥ $250k; 7d/30d PnL non-negative (ROI magnitude is ignored)
+Official Portfolio Perp prefilter
+    ↓ independently confirms Perp-only 7d notional volume ≥ $250k
+Deep fills structure + source quality
+    ↓ executable markets; no bot/grid/hedge/blow-up/data hard failure
 Fills-only rough Copy
-    ↓ conservative 30d/7d both profitable, Copy wins ≥ 60%, open follow ≥ 70%
-Composite score + conservative 70/30 Copy profit priority → unified tuning → strict K-line Copy
-    ↓ profit-ordered Top16 only; final individual/shared 10%/3%, open-loss ratio ≤50%; no minimum quota
+    ↓ 3/4 active weeks; max gap 10d; closed samples ≥7; PF ≥1.25; lottery protection; open follow ≥70%
+Primary/reserve + rough 70/30 profit priority
+    ↓ frozen Top32 → current-surface strict path → strict-profit Top16 → unified tuning
+Final strict individual/shared Copy
+    ↓ 30d/7d 10%/3%; PF ≥1.25; open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ forward-only Observer
 Paper copy positions, PnL, and execution audit
@@ -53,26 +55,28 @@ final new-entry membership once an explicit selection generation exists.
 
 Wallet quality and funded-account membership are separate decisions.
 
-- Raw recall requires useful account size/activity and positive 7/30-day PnL. Before fill download, official
-  Portfolio requires positive 30-day Perp PnL, at least 60% Perp-profit share and at least 20% dynamic Perp
-  return. Official return compounds each positive-equity operating segment on that segment's own starting
-  capital: a full withdrawal and later redeposit preserves both sides of the evidence without dividing by
-  zero or treating the transfer as a loss. A real loss to zero remains a -100% segment and cannot be erased
-  by redeposit. Incomplete official history is Challenger evidence, never a fabricated return failure.
-- Deep fills provide two source-wallet lanes: at least ten complete 30-day Episodes with at least 70% source
-  wins, or 7–9 Episodes with at least 85% wins, 30% official Perp return and positive recent-7d source PnL.
-  Both require a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
-  at 70% of gross profit; then the remaining body must still win at least 70% and not lose money. At most the
-  best 40 source wallets receive rough replay.
+- Cheap recall uses only useful activity and PnL direction: Leaderboard 7-day leveraged notional must be at
+  least `$250,000`, and 7-day/30-day PnL may not be negative. Official Portfolio independently confirms
+  Perp-only 7-day notional of at least `$250,000`. Account balance, official ROI magnitude, positive-equity
+  history length, and Perp-profit share are not admission gates.
+- Deep fills first reject structural or catastrophic risk: second-scale HFT, OID-level robot density,
+  systematic grid/heavy DCA, spot hedge, opaque markets, extreme concurrency, confirmed source-account
+  zeroing, a major Copy liquidation, or incomplete data/valuation/market scope. Fill fragments sharing one
+  OID cannot manufacture entries, adds, activity, or samples.
 - Profitability is proved only by complete closed Episodes. Positive unrealized PnL is displayed as a reference
   and has zero weight. Negative unrealized PnL is charged in full:
   `qualificationPnl = closedPnl - abs(min(unrealizedPnl, 0))`. Closed PnL must be positive in both 30-day and
   7-day windows, conservative PnL must remain positive, and 30-day open loss may not exceed 50% of closed
   profit. This definition is shared by source profiles, individual Copy, shared replay and tuning.
-- Rough Copy uses one continuously compounded `$10,000` comparison account and requires both dynamic 30d and
-  rolling-7d conservative profitability, positive closed PnL in both windows, an open-loss ratio at or below
-  50%, seven closed Copy Episodes over 30 days, 60% closed-Episode Copy wins, 70% open follow and
-  complete valuation. The rolling-7d window has no minimum closed-Episode count.
+- Activity is frozen once per generation from OID-deduplicated, source-notional-qualified flat-to-open/flip
+  opportunities: the latest seven days must contain one opportunity, at least three of four rolling seven-day
+  buckets must be active, and the maximum 28-day opening gap may not exceed ten days. The 72-hour value remains
+  display/ranking context only; it is not an admission veto.
+- Rough Copy uses one continuously compounded `$10,000` comparison account and requires positive closed and
+  conservative 30d/7d PnL, a 30-day open-loss ratio at or below 50%, at least seven complete closed source and
+  Copy Episodes over 30 days, Copy Profit Factor at least 1.25, at least 70% open follow, complete valuation,
+  and conditional lottery protection. Fixed 60%/70%/85% win-rate floors are retired: a sub-50% win wallet may
+  pass when its PF is sound, Top3 profit is not dominant, and the post-Top3 body remains profitable.
   Historical replay assumes liquidity was executable. A source flat-to-open lifecycle remains pending until its
   cumulative position reaches the tier minimum notional and is excluded only if it never does. Once confirmed,
   our open is sized independently by our margin, leverage and capacity rules instead of being capped by source
@@ -81,15 +85,15 @@ Wallet quality and funded-account membership are separate decisions.
   seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
-- The composite score remains the broad quality indicator: conservative profitability 40%,
-  source/Copy closed-Episode win stability 30%,
-  copyability 20% and activity 10%. There is no score floor. Qualified wallets instead form Core by
+- The composite score remains a broad quality indicator and deterministic tie-break; it is not a permission
+  line. Qualified wallets form the pre-strict queue and Core by
   `70% × conservative 30d dynamic Copy return + 30% × conservative 7d dynamic Copy return`, with 30d return,
-  7d return, composite score
-  and address as fixed tie-breaks. The rough form of that value bounds Top16; the final tuned surface strictly
-  replays and reranks those same finalists.
+  7d return, Copy PF, composite score and address as fixed tie-breaks. Rough 20%/5% wallets are `primary`;
+  otherwise-qualified wallets are `reserve`. Primary fills before reserve in a frozen Top32. Current-surface
+  strict path replay reranks those candidates and only its strict-profit Top16 may consume unified tuning.
 - Final individual strict replay requires conservative dynamic 30d/7d returns of 10%/3%, positive closed PnL,
-  a 30-day open-loss ratio at or below 50%, 60% closed-Episode Copy wins, 70% open follow,
+  a 30-day open-loss ratio at or below 50%, at least seven complete 30-day Copy Episodes, Copy PF at least
+  1.25, conditional lottery protection, 70% open follow, the frozen cross-week activity proof,
   complete data/path evidence and at most three proxy liquidations. A separate severity gate rejects a wallet
   from the rough candidate pool as soon as any liquidated Copy episode loses at least 5% of the dynamic account
   equity recorded when that episode opened, even if its count is only one. Final shared replay requires
@@ -124,13 +128,14 @@ Profiles are not re-downloaded from zero on every scheduled run.
   cache.
 - Only a newly discovered wallet or a missing/incomplete coverage marker bootstraps the full 37-day source
   window. Page-capped bootstraps persist a continuation cursor and resume from it on the next run.
-- Leaderboard candidates require at least `$20,000` account value, `$250,000` leveraged 7-day notional volume,
-  and positive 7-day and 30-day PnL. The cheap Portfolio precheck independently confirms at least `$250,000`
-  of Perp-only 7-day volume, positive 30-day Perp PnL, at least 60% Perp-profit share and at least 20% dynamic
-  30-day Perp return. Source quality and follower profitability are confirmed later from fills under a
+- Leaderboard candidates require at least `$250,000` leveraged 7-day notional volume and non-negative 7-day
+  and 30-day PnL. The cheap Portfolio precheck independently confirms at least `$250,000` of Perp-only 7-day
+  volume. Official ROI magnitude and account size are not used. Source quality and follower profitability are
+  confirmed later from fills under a
   standardized `$10,000` starting equity with continuous compounding.
-- Every survivor plus current Core/Challenger/open-position owners is evaluated in the same generation. There
-  is no Top-N cap, rotation shard, recovery/exploration quota or deferred candidate tail.
+- Every recall survivor plus current Core/strict-Challenger/open-position owner is refreshed in the complete
+  generation. The pre-strict replay queue is independently capped at 32; only the strict-profit Top16 can tune.
+  Generation-scoped reserve evidence stays auditable but is not a user-facing Challenger.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
   cannot prune, publish, or tune.
 
@@ -141,11 +146,17 @@ Production schedules all jobs in `Asia/Shanghai`:
   `python3 -m hyper.cli.discover --db ... challenger-refresh`.
 
 The daily job clones the last complete generation's Leaderboard staging rows; it does not access the Leaderboard
-API or discover a new wallet. It refreshes official Portfolio evidence, cached-fill deltas, positions, valuation
-and required market paths, then reruns source gates, true 72-hour open/flip activity, canonical 30/14/7 Copy,
-strict Top16 individual replay and strict shared-account replay. The first pass uses `retune=False`; a proposed
-Core addition runs a parameter-grid pass only if every incumbent remains in the fixed-surface result, and the
-tuned result must still be a strict superset before atomic publication. Daily refresh never removes or replaces
+API or discover a new wallet. Its promotion universe is exactly that complete generation's new-model Core plus
+strict Challenger rows. Current Core and open-position owners outside that universe may receive safety/exit
+evidence but can never use daily work as an alternative first-time promotion path. A legacy or policy-mismatched
+complete generation makes the daily job fail closed. Daily uses the same frozen activity, pre-strict, final
+individual strict, unified-retune and shared-account admission contract as complete discovery—anything that
+cannot enter Core under complete-scan criteria cannot enter through daily refresh.
+
+It refreshes Portfolio evidence, cached-fill deltas, positions, valuation and required market paths, then
+reruns the new pre-strict Top32 and strict-profit Top16 path. The first pass uses `retune=False`; a proposed Core
+addition runs a parameter-grid pass only if every incumbent remains in the fixed-surface result, and the tuned
+result must still be a strict superset before atomic publication. Daily refresh never removes or replaces
 an incumbent: such a proposal carries the exact prior Core snapshot into the fresh evidence generation and
 keeps proposed newcomers Challenger. Hard safety has two narrow exceptions: a recent source fill whose
 `liquidatedUser` is that wallet plus fresh standard/affected-dex snapshots showing zero equity/no positions, or
@@ -187,7 +198,7 @@ python3 -m hyper.cli.discover --db /path/to/production.db audit-pipeline \
   --generation GENERATION_ID --report /private/funnel.json
 ```
 
-To rebuild source Episode quality and run the at-most-40 fills-only rough-Copy stage directly from a cached
+To rebuild source Episode quality and run a bounded fills-only research preview directly from a cached
 published generation:
 
 ```bash
@@ -195,9 +206,9 @@ python3 -m hyper.cli.core_lab --db /path/to/production.db --max-rough 40
 ```
 
 `core_lab` opens the database with SQLite `mode=ro` plus `query_only`, emits anonymous wallet labels, and never
-migrates or writes the source database. A legacy generation without the current official Perp observed-history
-return may be used only for an explicitly marked economic preview; it always reports that a new Portfolio scan
-is required before publication.
+migrates or writes the source database. Its `--max-rough` bound is a research budget, not the production
+primary/reserve Top32 contract. A legacy generation may be used only for an explicitly marked economic preview;
+it is never valid promotion evidence.
 
 For threshold research, the non-publishing distribution collector deliberately ignores the production ROI,
 PnL, win-rate, activity, sample-depth and score gates. It recalls every Leaderboard row above the volume floor,
@@ -329,6 +340,10 @@ python3 -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-inter
 python3 -m hyper.cli.discover --db data/hl.db regate
 python3 -m hyper.cli.discover --db data/hl.db repair-watchlist
 python3 -m hyper.cli.discover --db data/hl.db watchlist --top 40
+
+# Stop Scanner/Observer first. Clear Paper history + generations/selections while retaining
+# candidate fills, path caches and durable source-risk vetoes for a fresh full generation.
+python3 -m hyper.cli.discover --db data/hl.db reset-paper --preserve-discovery-cache --yes
 
 # Forward-only Observer / report
 python3 -m hyper.cli.observe --db data/hl.db observe

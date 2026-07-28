@@ -197,6 +197,10 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_bt_raw_open_capture_rate REAL,
     copy_bt_open_audit_json TEXT,
     copy_bt_liquidations INTEGER DEFAULT 0,
+    copy_bt_max_liquidation_loss_pct REAL,
+    copy_bt_max_liquidation_loss REAL,
+    copy_bt_max_liquidation_loss_coin TEXT,
+    copy_bt_max_liquidation_loss_closed_at INTEGER,
     copy_bt_fee_drag REAL DEFAULT 0,
     copy_bt_unrealized_pnl REAL DEFAULT 0,
     copy_bt_valuation_status TEXT DEFAULT 'complete',
@@ -236,6 +240,10 @@ CREATE TABLE IF NOT EXISTS profile (
     source_body_after_top3_n INTEGER DEFAULT 0,
     source_body_after_top3_win_rate REAL,
     source_body_after_top3_net_pnl REAL,
+    source_gross_profit_30d REAL,
+    source_gross_loss_30d REAL,
+    source_profit_factor_30d REAL,
+    source_payoff_ratio_30d REAL,
     source_quality_score REAL,
     rough_copy_score REAL,
     last_copyable_open_ms INTEGER,
@@ -277,6 +285,14 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_campaign_max_drawdown REAL,
     copy_campaign_peak_positions INTEGER DEFAULT 0,
     copy_campaign_peak_margin_pct REAL,
+    copy_bt_gross_profit REAL,
+    copy_bt_gross_loss REAL,
+    copy_bt_profit_factor REAL,
+    copy_bt_payoff_ratio REAL,
+    copy_bt_top3_profit_share REAL,
+    copy_bt_body_after_top3_n INTEGER,
+    copy_bt_body_after_top3_win_rate REAL,
+    copy_bt_body_after_top3_net_pnl REAL,
     first_added      TEXT,
     last_refreshed   TEXT,
     times_seen       INTEGER DEFAULT 0,
@@ -385,6 +401,61 @@ CREATE TABLE IF NOT EXISTS wallet_risk_event (
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_risk_event_addr_type
     ON wallet_risk_event(addr, event_type, occurred_at DESC);
+
+-- Immutable generation-scoped hand-off between deep fills-only analysis and path-complete strict replay.
+-- It is intentionally separate from the mutable profile projection and from read-only research tables.
+CREATE TABLE IF NOT EXISTS pre_strict_evidence (
+    generation                   TEXT NOT NULL,
+    addr                         TEXT NOT NULL,
+    policy_version               TEXT NOT NULL,
+    model_version                TEXT NOT NULL,
+    status                       TEXT NOT NULL,
+    first_failure                TEXT,
+    activity_json                TEXT,
+    latest_7d_active             INTEGER NOT NULL DEFAULT 0,
+    active_weeks_4               INTEGER NOT NULL DEFAULT 0,
+    weekly_open_counts_json      TEXT,
+    max_open_gap_days_28d        REAL,
+    actionable_open_events_28d   INTEGER NOT NULL DEFAULT 0,
+    actionable_open_events_7d    INTEGER NOT NULL DEFAULT 0,
+    source_closed_n_30d          INTEGER NOT NULL DEFAULT 0,
+    source_win_rate_30d          REAL,
+    source_gross_profit_30d      REAL,
+    source_gross_loss_30d        REAL,
+    source_profit_factor_30d     REAL,
+    source_payoff_ratio_30d      REAL,
+    source_top3_profit_share     REAL,
+    source_body_net_pnl          REAL,
+    source_body_win_rate         REAL,
+    copy_closed_n_30d            INTEGER NOT NULL DEFAULT 0,
+    copy_win_rate_30d            REAL,
+    copy_gross_profit_30d        REAL,
+    copy_gross_loss_30d          REAL,
+    copy_profit_factor_30d       REAL,
+    copy_payoff_ratio_30d        REAL,
+    copy_top3_profit_share       REAL,
+    copy_body_net_pnl            REAL,
+    copy_body_win_rate           REAL,
+    rough_return_30d             REAL,
+    rough_return_14d             REAL,
+    rough_return_7d              REAL,
+    rough_closed_pnl_30d         REAL,
+    rough_closed_pnl_14d         REAL,
+    rough_closed_pnl_7d          REAL,
+    rough_open_loss_ratio_30d    REAL,
+    rough_profit_priority        REAL,
+    tier                         TEXT,
+    queue_rank                   INTEGER,
+    strict_status                TEXT,
+    strict_first_failure         TEXT,
+    evidence_json                TEXT,
+    created_at                   TEXT NOT NULL,
+    PRIMARY KEY (generation, addr)
+);
+CREATE INDEX IF NOT EXISTS idx_pre_strict_evidence_generation_queue
+    ON pre_strict_evidence(generation, queue_rank, tier, addr);
+CREATE INDEX IF NOT EXISTS idx_pre_strict_evidence_generation_status
+    ON pre_strict_evidence(generation, status, first_failure, addr);
 
 -- Source-wallet high-water state is independent for each execution ledger and contiguous Core membership
 -- cycle. Observer restarts therefore cannot erase a freeze/reduction/cooldown already earned by drawdown.
@@ -598,7 +669,8 @@ PROFILE_COLS = (
     "copy_bt_net_pnl,copy_bt_closed_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
     "copy_bt_raw_target_open_n,copy_bt_small_open_excluded_n,copy_bt_effective_target_open_n,"
     "copy_bt_opened_n,copy_bt_raw_open_capture_rate,copy_bt_open_audit_json,"
-    "copy_bt_liquidations,copy_bt_fee_drag,"
+    "copy_bt_liquidations,copy_bt_max_liquidation_loss_pct,copy_bt_max_liquidation_loss,"
+    "copy_bt_max_liquidation_loss_coin,copy_bt_max_liquidation_loss_closed_at,copy_bt_fee_drag,"
     "copy_bt_unrealized_pnl,copy_bt_valuation_status,copy_bt_initial_margin_equity,copy_bt_window_start_equity,"
     "copy_bt_14d_net_pnl,copy_bt_14d_closed_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,copy_bt_14d_window_start_equity,"
     "copy_bt_7d_net_pnl,copy_bt_7d_closed_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,copy_bt_7d_window_start_equity,"
@@ -609,7 +681,8 @@ PROFILE_COLS = (
     "source_episode_n_30d,source_episode_n_7d,source_win_rate_30d,source_win_rate_7d,"
     "source_net_pnl_30d,source_net_pnl_7d,source_active_days_30d,source_active_days_7d,"
     "source_top3_profit_share,source_body_after_top3_n,source_body_after_top3_win_rate,"
-    "source_body_after_top3_net_pnl,source_quality_score,rough_copy_score,last_copyable_open_ms,"
+    "source_body_after_top3_net_pnl,source_gross_profit_30d,source_gross_loss_30d,"
+    "source_profit_factor_30d,source_payoff_ratio_30d,source_quality_score,rough_copy_score,last_copyable_open_ms,"
     "open_events_7d,open_events_30d,actionable_open_events_7d,actionable_open_events_30d,"
     "open_days_30d,open_probability_48h,open_position_count,material_open_count,"
     "raw_quality_score,copy_evidence_days,execution_score,"
@@ -618,6 +691,9 @@ PROFILE_COLS = (
     "copy_path_risk_status,copy_intratrade_max_drawdown,copy_max_underwater_hours,"
     "copy_loss_over_5_time_ratio,copy_deep_bag_event_n,copy_failed_deep_bag_n,"
     "copy_deep_bag_recovery_rate,copy_max_deep_bag_hours,copy_current_open_loss_frac,copy_current_bag_hours,"
+    "copy_bt_gross_profit,copy_bt_gross_loss,copy_bt_profit_factor,copy_bt_payoff_ratio,"
+    "copy_bt_top3_profit_share,copy_bt_body_after_top3_n,copy_bt_body_after_top3_win_rate,"
+    "copy_bt_body_after_top3_net_pnl,"
     "first_added,last_refreshed,times_seen,times_active"
 )
 
@@ -1190,6 +1266,10 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN source_body_after_top3_n INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN source_body_after_top3_win_rate REAL",
     "ALTER TABLE profile ADD COLUMN source_body_after_top3_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN source_gross_profit_30d REAL",
+    "ALTER TABLE profile ADD COLUMN source_gross_loss_30d REAL",
+    "ALTER TABLE profile ADD COLUMN source_profit_factor_30d REAL",
+    "ALTER TABLE profile ADD COLUMN source_payoff_ratio_30d REAL",
     "ALTER TABLE profile ADD COLUMN source_quality_score REAL",
     "ALTER TABLE profile ADD COLUMN rough_copy_score REAL",
     "ALTER TABLE profile ADD COLUMN last_copyable_open_ms INTEGER",
@@ -1228,6 +1308,14 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_max_deep_bag_hours REAL",
     "ALTER TABLE profile ADD COLUMN copy_current_open_loss_frac REAL",
     "ALTER TABLE profile ADD COLUMN copy_current_bag_hours REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_gross_profit REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_gross_loss REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_profit_factor REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_payoff_ratio REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_top3_profit_share REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_body_after_top3_n INTEGER",
+    "ALTER TABLE profile ADD COLUMN copy_bt_body_after_top3_win_rate REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_body_after_top3_net_pnl REAL",
     "ALTER TABLE profile ADD COLUMN copy_campaign_max_drawdown REAL",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_positions INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_margin_pct REAL",
@@ -1305,6 +1393,10 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_bt_14d_window_start_equity REAL",
     "ALTER TABLE profile ADD COLUMN copy_bt_7d_unrealized_pnl REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_bt_7d_window_start_equity REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_max_liquidation_loss_pct REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_max_liquidation_loss REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_max_liquidation_loss_coin TEXT",
+    "ALTER TABLE profile ADD COLUMN copy_bt_max_liquidation_loss_closed_at INTEGER",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_unrealized_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_valuation_status TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_unrealized_pnl REAL",

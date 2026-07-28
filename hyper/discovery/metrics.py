@@ -126,9 +126,30 @@ def source_episode_quality(eps_full: list, now_ms: int) -> dict:
     top3_profit = sum(float(row.get("net_pnl") or 0.0) for row in profitable[:3])
     body = [row for row in rows30 if id(row) not in top3_ids]
     body_wins = sum(1 for row in body if float(row.get("net_pnl") or 0.0) > 0.0)
+    losses = [
+        -float(row.get("net_pnl") or 0.0)
+        for row in rows30 if float(row.get("net_pnl") or 0.0) < 0.0
+    ]
+    wins = [
+        float(row.get("net_pnl") or 0.0)
+        for row in rows30 if float(row.get("net_pnl") or 0.0) > 0.0
+    ]
+    gross_loss = sum(losses)
+    avg_win = gross_profit / len(wins) if wins else 0.0
+    avg_loss = gross_loss / len(losses) if losses else 0.0
     return {
         **result30,
         **result7,
+        "source_gross_profit_30d": gross_profit,
+        "source_gross_loss_30d": gross_loss,
+        "source_profit_factor_30d": (
+            gross_profit / gross_loss
+            if gross_loss > 0.0 else (999.0 if gross_profit > 0.0 else 0.0)
+        ),
+        "source_payoff_ratio_30d": (
+            avg_win / avg_loss
+            if avg_loss > 0.0 else (999.0 if avg_win > 0.0 else 0.0)
+        ),
         "source_top3_profit_share": (
             top3_profit / gross_profit if gross_profit > 0.0 else None
         ),
@@ -287,9 +308,4 @@ def gates_state(m: dict, now_ms: int, p) -> tuple:
         return False, "spot_hedge"                             # same coin = market-neutral hedge, NOT a
     #                                                            directional trade — copying the naked perp
     #                                                            leg loses what their spot leg offsets.
-    # Hyperliquid's portfolio endpoint is account-wide and cannot be filtered to our executable dex/market
-    # scope.  Account-wide PnL, turnover and drawdown therefore have no place in qualification.  We only need
-    # a real equity denominator here; HFT/fees/edge are judged from scoped episodes and canonical Copy replay.
-    if not (m.get("acct_value") or m.get("pf_equity")):
-        return False, "account_equity_unavailable"
     return True, "ok"

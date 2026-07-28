@@ -69,6 +69,7 @@ def ep_discovery(db):
     challenger = 0
     core = watchlist
     performance = {}
+    pre_strict_counts = {}
     if generation:
         roles = qall(
             db,
@@ -82,11 +83,56 @@ def ep_discovery(db):
             performance = json.loads(generation["metrics_json"] or "{}")
         except (TypeError, ValueError):
             performance = {}
+        try:
+            evidence = q1(
+                db,
+                "SELECT COUNT(*) rough_completed,"
+                "SUM(CASE WHEN latest_7d_active=1 AND active_weeks_4>=3 "
+                "AND max_open_gap_days_28d<=10 THEN 1 ELSE 0 END) persistent_activity,"
+                "SUM(CASE WHEN status='passed' THEN 1 ELSE 0 END) pf_lottery_passed,"
+                "SUM(CASE WHEN status='passed' AND tier='primary' THEN 1 ELSE 0 END) primary_n,"
+                "SUM(CASE WHEN status='passed' AND tier='reserve' THEN 1 ELSE 0 END) reserve_n,"
+                "SUM(CASE WHEN queue_rank IS NOT NULL THEN 1 ELSE 0 END) top32_n,"
+                "SUM(CASE WHEN strict_status='qualified' THEN 1 ELSE 0 END) strict_n "
+                "FROM pre_strict_evidence WHERE generation=?",
+                (generation["generation"],),
+            )
+            if evidence:
+                pre_strict_counts = {
+                    key: int(evidence[key] or 0)
+                    for key in evidence.keys()
+                }
+        except Exception:  # noqa: BLE001 - old read replicas may not have the new evidence table yet
+            pre_strict_counts = {}
     last_scan = q1(db, "SELECT MAX(finished_at) m FROM scan_runs")
     funnel = {
         "leaderboard": leaderboard,
-        "candidates": candidates,
+        "candidates": performance.get("coarseRecallPassed", candidates),
         "perpPrefilter": performance.get("perpPrefilterPassed", candidates),
+        "structurePassed": performance.get(
+            "structurePassed", pre_strict_counts.get("rough_completed")
+        ),
+        "roughCompleted": pre_strict_counts.get(
+            "rough_completed", performance.get("roughCopyCompleted")
+        ),
+        "persistentActivity": pre_strict_counts.get(
+            "persistent_activity", performance.get("persistentActivityPassed")
+        ),
+        "pfLotteryPassed": pre_strict_counts.get(
+            "pf_lottery_passed", performance.get("preStrictPassed")
+        ),
+        "primary": pre_strict_counts.get(
+            "primary_n", performance.get("preStrictPrimary")
+        ),
+        "reserve": pre_strict_counts.get(
+            "reserve_n", performance.get("preStrictReserve")
+        ),
+        "top32": pre_strict_counts.get(
+            "top32_n", performance.get("preStrictTop32")
+        ),
+        "strict": pre_strict_counts.get(
+            "strict_n", performance.get("strictQualified")
+        ),
         "challenger": challenger,
         "core": core,
         "finalCore": core,
