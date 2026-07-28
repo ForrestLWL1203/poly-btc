@@ -18,8 +18,83 @@ RETURN_TIERS = (
     ("50_10", 0.50, 0.10),
     ("40_7_5", 0.40, 0.075),
     ("30_5", 0.30, 0.05),
+    ("25_5", 0.25, 0.05),
+    ("20_5", 0.20, 0.05),
 )
 QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99)
+
+# These are analysis probes, not production policy.  They quantify which cheap official fields or progressively
+# deeper fill-derived fields can reduce work without discarding the operational high-return cohorts.  Missing
+# evidence is counted fail-open because the production collector must defer/collect it rather than silently
+# reject a potentially strong wallet.
+GATE_SWEEPS = (
+    {
+        "stage": "leaderboard",
+        "feature": "leaderboardMonthRoi",
+        "direction": "minimum",
+        "thresholds": (0.0, 0.02, 0.05, 0.10, 0.20),
+    },
+    {
+        "stage": "leaderboard",
+        "feature": "leaderboardWeekRoi",
+        "direction": "minimum",
+        "thresholds": (0.0, 0.01, 0.025, 0.05, 0.10),
+    },
+    {
+        "stage": "portfolio",
+        "feature": "officialPerpWeekVolume",
+        "direction": "minimum",
+        "thresholds": (250_000, 300_000, 500_000, 1_000_000, 5_000_000),
+    },
+    {
+        "stage": "portfolio",
+        "feature": "accountValue",
+        "direction": "minimum",
+        "thresholds": (0, 20_000, 50_000, 100_000, 250_000),
+    },
+    {
+        "stage": "fills_structure",
+        "feature": "medianHoldHours",
+        "direction": "minimum",
+        "thresholds": (1, 2, 4, 12),
+    },
+    {
+        "stage": "fills_profile",
+        "feature": "sourceEpisodes30",
+        "direction": "minimum",
+        "thresholds": (1, 4, 8, 12, 20),
+    },
+    {
+        "stage": "fills_profile",
+        "feature": "sourceEpisodes7",
+        "direction": "minimum",
+        "thresholds": (1, 2, 3, 5, 10),
+    },
+    {
+        "stage": "fills_profile",
+        "feature": "sourceWinRate30",
+        "direction": "minimum",
+        "thresholds": (0.30, 0.50, 0.60, 0.70, 0.80),
+    },
+    {
+        "stage": "activity",
+        "feature": "activeWeeks4",
+        "direction": "minimum",
+        "thresholds": (3, 4),
+    },
+    {
+        "stage": "activity",
+        "feature": "actionableOpenEvents28",
+        "direction": "minimum",
+        "thresholds": (4, 8, 12, 20),
+    },
+    {
+        "stage": "activity",
+        "feature": "actionableOpenEvents7",
+        "direction": "minimum",
+        "thresholds": (1, 2, 3, 5),
+    },
+)
 
 
 def _quantile(values, q):
@@ -233,6 +308,67 @@ def _sample_depth_grid(rows):
     return output
 
 
+def _gate_sensitivity(rows):
+    """Measure retention and operational high-return recall for possible pre-strict gates."""
+    tier_targets = {
+        name: [
+            row for row in rows
+            if row["operationalActivity"] is True
+            and _tier_pass(row, floor30, floor7)
+        ]
+        for name, floor30, floor7 in RETURN_TIERS
+    }
+    output = []
+    for sweep in GATE_SWEEPS:
+        feature = str(sweep["feature"])
+        direction = str(sweep["direction"])
+        for threshold in sweep["thresholds"]:
+            known = [row for row in rows if row.get(feature) is not None]
+            missing = [row for row in rows if row.get(feature) is None]
+            if direction == "minimum":
+                passed = [
+                    row for row in known
+                    if f(row.get(feature)) >= f(threshold)
+                ]
+            else:
+                passed = [
+                    row for row in known
+                    if f(row.get(feature)) <= f(threshold)
+                ]
+            passed_ids = {row["wallet"] for row in passed}
+            tier_pass = {
+                name: sum(row["wallet"] in passed_ids for row in targets)
+                for name, targets in tier_targets.items()
+            }
+            output.append({
+                "stage": sweep["stage"],
+                "feature": feature,
+                "direction": direction,
+                "threshold": threshold,
+                "roughPopulation": len(rows),
+                "knownEvidence": len(known),
+                "missingEvidence": len(missing),
+                "knownPass": len(passed),
+                "knownFail": len(known) - len(passed),
+                "failOpenCandidates": len(passed) + len(missing),
+                "operationalPass": sum(
+                    row["operationalActivity"] is True for row in passed
+                ),
+                "tierOperationalTotals": {
+                    name: len(targets) for name, targets in tier_targets.items()
+                },
+                "tierOperationalPass": tier_pass,
+                "tierOperationalRecall": {
+                    name: (
+                        tier_pass[name] / len(targets)
+                        if targets else None
+                    )
+                    for name, targets in tier_targets.items()
+                },
+            })
+    return output
+
+
 def analyze(
     research_db_path: str,
     report_path: str,
@@ -291,6 +427,9 @@ def analyze(
             "return7Floor": floor7,
             "roughPassed": len(passed),
             "operationalPassed": len(active),
+            "continuous4WeeksPassed": sum(
+                int(row.get("activeWeeks4") or 0) >= 4 for row in active
+            ),
             "activitySparse": len(sparse),
             "activityNotYetAudited": sum(not row["activityAudited"] for row in passed),
             "operationalWallets": [row for row in active[:64]],
@@ -330,6 +469,7 @@ def analyze(
         "returnTiers": tiers,
         "featureBuckets": _bucket_analysis(rough),
         "sampleDepthGrid": _sample_depth_grid(rough),
+        "gateSensitivity": _gate_sensitivity(rough),
         "topRoughCandidates": ranked[:64],
         "referenceWallet": next(
             (row for row in rows if row["wallet"] == reference_wallet), None,

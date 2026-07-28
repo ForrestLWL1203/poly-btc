@@ -108,6 +108,71 @@ class ProfitAnalysisTests(unittest.TestCase):
         self.assertEqual(cell["tierCounts"]["50_10"], 1)
         self.assertEqual(cell["tierRecall"]["50_10"], 0.5)
 
+    def test_lower_return_tiers_keep_five_percent_recent_floor(self):
+        rows = [
+            profit_analysis._wallet_view(
+                "twenty_five", "rough_complete", "ok",
+                _record(
+                    "twenty_five", 0.25, 0.15, 0.05,
+                    operational=True, episodes30=10, episodes7=3,
+                ),
+            ),
+            profit_analysis._wallet_view(
+                "twenty", "rough_complete", "ok",
+                _record(
+                    "twenty", 0.20, 0.12, 0.05,
+                    operational=True, episodes30=10, episodes7=3,
+                ),
+            ),
+            profit_analysis._wallet_view(
+                "recent_too_low", "rough_complete", "ok",
+                _record(
+                    "recent_too_low", 0.40, 0.20, 0.049,
+                    operational=True, episodes30=10, episodes7=3,
+                ),
+            ),
+        ]
+        tiers = {
+            name: sum(
+                profit_analysis._tier_pass(row, floor30, floor7)
+                for row in rows
+            )
+            for name, floor30, floor7 in profit_analysis.RETURN_TIERS
+        }
+        self.assertEqual(tiers["25_5"], 1)
+        self.assertEqual(tiers["20_5"], 2)
+
+    def test_gate_sensitivity_reports_false_negative_recall_and_missing_fail_open(self):
+        high = profit_analysis._wallet_view(
+            "high", "rough_complete", "ok",
+            _record(
+                "high", 0.60, 0.30, 0.12,
+                operational=True, episodes30=20, episodes7=5,
+            ),
+        )
+        high["leaderboardMonthRoi"] = 0.04
+        lower = profit_analysis._wallet_view(
+            "lower", "rough_complete", "ok",
+            _record(
+                "lower", 0.10, 0.05, 0.02,
+                operational=True, episodes30=20, episodes7=5,
+            ),
+        )
+        lower["leaderboardMonthRoi"] = 0.20
+        missing = dict(lower, wallet="missing", leaderboardMonthRoi=None)
+        sweeps = profit_analysis._gate_sensitivity([high, lower, missing])
+        cell = next(
+            row for row in sweeps
+            if row["feature"] == "leaderboardMonthRoi"
+            and row["threshold"] == 0.05
+        )
+        self.assertEqual(cell["knownPass"], 1)
+        self.assertEqual(cell["missingEvidence"], 1)
+        self.assertEqual(cell["failOpenCandidates"], 2)
+        self.assertEqual(cell["tierOperationalTotals"]["50_10"], 1)
+        self.assertEqual(cell["tierOperationalPass"]["50_10"], 0)
+        self.assertEqual(cell["tierOperationalRecall"]["50_10"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
