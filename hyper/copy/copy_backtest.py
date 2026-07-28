@@ -1063,6 +1063,7 @@ class Backtest:
             "target_add_notl": 0.0,
             "target_adds": 0,
             "entry_px": px,
+            "risk_equity_at_open": risk_equity,
             "size": size,
             "rem_size": size,
             "peak_size": size,
@@ -1427,6 +1428,10 @@ class Backtest:
         if closing:
             ep["closed_at"] = t
             ep["status"] = status
+            if status == "liquidated":
+                # Keep the actual forced-close loss separate from cumulative episode PnL. Earlier partial
+                # profit must not hide a material liquidation on the remaining isolated position.
+                ep["liquidation_loss"] = max(0.0, -pnl)
             self.closed.append(ep)
             self.open.pop(key, None)
             if status == "liquidated":
@@ -1524,6 +1529,9 @@ class Backtest:
             ))
         closed_positions = [summarize_position(p, sigma=self.sigma(p.get("coin"))) for p in self.closed]
         all_positions = closed_positions + open_positions
+        liquidation_risk = liquidation_loss_metrics(
+            closed_positions, fallback_equity=self.initial_balance,
+        )
         closed_net = sum(p["realized_net"] for p in self.closed)
         wins = sum(1 for p in self.closed if p["realized_net"] > 0)
         liquidations = sum(1 for p in self.closed if p.get("status") == "liquidated")
@@ -1725,6 +1733,7 @@ class Backtest:
             "positions": closed_positions,
             "open_positions": open_positions,
         }
+        result.update(liquidation_risk)
         result.update(add_metrics)
         result.update(profit_metrics)
         result.update(path_metrics)
@@ -1759,6 +1768,8 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
         "master_leverage": p.get("master_leverage"),
         "leverage": p["leverage"],
         "margin": p["margin"],
+        "risk_equity_at_open": p.get("risk_equity_at_open"),
+        "liquidation_loss": p.get("liquidation_loss"),
         "remaining_size": p.get("rem_size"),
     }
     if p.get("target_adds"):
@@ -1778,6 +1789,39 @@ def summarize_position(p, *, mark_px=None, unrealized_pnl=None, valuation_comple
     if valuation_complete is not None:
         out["valuation_complete"] = bool(valuation_complete)
     return out
+
+
+def liquidation_loss_metrics(positions, *, fallback_equity):
+    """Return the worst liquidated Copy episode loss relative to equity when that episode opened."""
+    rolling_equity = max(1.0, f(fallback_equity))
+    worst = {
+        "max_liquidation_loss_pct": 0.0,
+        "max_liquidation_loss": 0.0,
+        "max_liquidation_loss_coin": None,
+        "max_liquidation_loss_closed_at": None,
+    }
+    for position in sorted(
+        (dict(row) for row in (positions or ())),
+        key=lambda row: int(row.get("closed_at") or 0),
+    ):
+        pnl = f(position.get("net_pnl"))
+        if position.get("status") == "liquidated":
+            loss = f(position.get("liquidation_loss"))
+            if loss <= 0.0:
+                loss = max(0.0, -pnl)
+            denominator = f(position.get("risk_equity_at_open")) or rolling_equity
+            loss_pct = loss / max(1.0, denominator)
+            if loss_pct > worst["max_liquidation_loss_pct"]:
+                worst = {
+                    "max_liquidation_loss_pct": loss_pct,
+                    "max_liquidation_loss": loss,
+                    "max_liquidation_loss_coin": position.get("coin"),
+                    "max_liquidation_loss_closed_at": int(
+                        position.get("closed_at") or 0
+                    ) or None,
+                }
+        rolling_equity = max(1.0, rolling_equity + pnl)
+    return worst
 
 
 def run_backtest(addr, fills, sigmas=None, initial_balance=None, overrides=None, price_path=None,
@@ -1963,6 +2007,9 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
             if int(f(value)) >= int(start_ms)
         ],
     )
+    liquidation_risk = liquidation_loss_metrics(
+        positions, fallback_equity=window_start_equity,
+    )
     if str(out.get("path_risk_status") or "") != "complete":
         path_risk["path_risk_status"] = str(out.get("path_risk_status") or "missing")
     deploy_samples = [
@@ -2034,6 +2081,7 @@ def slice_backtest_result(result: dict, start_ms: int, *, window_days=None) -> d
         "_window_days": int(window_days) if window_days is not None else None,
         "_warmup_applied": True,
     })
+    out.update(liquidation_risk)
     out.update(add_metrics)
     out.update(profit_structure_metrics(
         positions + open_positions,

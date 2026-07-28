@@ -8,7 +8,7 @@ from hyper.selection.core_formation import (
 
 def value(
     count, utility, *, feasible=True, liquidations=0, capacity_fit=.95,
-    return30=.20, return7=.08, require_return=False,
+    return30=.20, return7=.08, require_return=False, open_loss_ratio=None,
 ):
     drawdown = 0.02
     net = utility + drawdown * 10_000
@@ -26,6 +26,7 @@ def value(
             "return30d": return30,
             "return7d": return7,
             "requireReturnFit": require_return,
+            "openLossRatio30d": open_loss_ratio,
         },
     )
 
@@ -39,6 +40,15 @@ class QualityPrefixSearchTests(unittest.TestCase):
     def test_final_membership_rejects_weak_rolling_return(self):
         result = validate_final_membership(
             value(3, 1300, return7=.029, require_return=True),
+        )
+        self.assertFalse(result["eligible"])
+        self.assertIn(
+            "membership_dynamic_return_or_execution_failed", result["reasons"],
+        )
+
+    def test_final_membership_rejects_open_loss_over_half_of_closed_profit(self):
+        result = validate_final_membership(
+            value(3, 1300, require_return=True, open_loss_ratio=.5001),
         )
         self.assertFalse(result["eligible"])
         self.assertIn(

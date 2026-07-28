@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -93,7 +94,7 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertEqual(base, "g-full")
         self.assertEqual(pool, ["0xchallenge", "0xcore"])
 
-    def test_refresh_promotes_challenger_without_harvest_bootstrap_or_retune(self):
+    def test_refresh_promotes_challenger_without_harvest_or_bootstrap_and_retunes(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             passed = perp_prefilter.Result("passed", "passed", {})
@@ -105,22 +106,22 @@ class ChallengerRefreshTests(unittest.TestCase):
                 }, False
 
             formation = {
-                "selected": ("0xchallenge",),
+                "selected": ("0xchallenge", "0xcore"),
                 "params": {},
                 "qualifications": {}, "scores": {}, "policies": {},
                 "walletMetrics": {}, "scoreDetails": {},
                 "replayParamsHash": "fixed",
                 "search": {
                     "retuned": True,
-                    "robustAllowedMemberships": [["0xchallenge"]],
-                    "tunePoolCount": 1,
+                    "robustAllowedMemberships": [["0xchallenge", "0xcore"]],
+                    "tunePoolCount": 2,
                     "formationTuneEligible": True,
                     "formationTuneReason": "proposal_selected",
                 },
             }
             rows = [
                 selection.SelectionRow("0xchallenge", "core", follow_score=.9),
-                selection.SelectionRow("0xcore", "challenger", follow_score=.8),
+                selection.SelectionRow("0xcore", "core", follow_score=.8),
             ]
             marginal = SimpleNamespace(search_meta={})
             resolver = SimpleNamespace()
@@ -188,7 +189,7 @@ class ChallengerRefreshTests(unittest.TestCase):
                 ))
                 stack.enter_context(patch.object(
                     scanner, "_record_explicit_follow_history",
-                    return_value={"0xchallenge"},
+                    return_value={"0xchallenge", "0xcore"},
                 ))
                 stack.enter_context(patch.object(
                     scanner.strategy_revision, "create_revision",
@@ -216,10 +217,10 @@ class ChallengerRefreshTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "published")
         self.assertEqual(result["coreAdded"], 1)
-        self.assertEqual(result["coreRemoved"], 1)
+        self.assertEqual(result["coreRemoved"], 0)
         self.assertEqual(current[1], "challenger_daily")
         self.assertEqual(selected, [
-            ("0xcore", "challenger"), ("0xchallenge", "core")
+            ("0xchallenge", "core"), ("0xcore", "core")
         ])
         self.assertEqual(run, ("challenger_refresh", 1, 0))
         self.assertEqual(profile_one.call_count, 2)
@@ -228,10 +229,139 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertTrue(form.call_args_list[1].kwargs["retune"])
         self.assertTrue(form.call_args_list[1].kwargs["force_retune"])
 
-    def test_current_core_data_error_aborts_and_retains_generation(self):
+    def test_daily_replacement_proposal_carries_incumbent_and_demotes_new_core(self):
+        previous = [
+            selection.SelectionRow(
+                "0xcore", "core", follow_score=.8, selection_rank=1,
+                sector_policy_json='{"allowed":["crypto"]}',
+            ),
+            selection.SelectionRow("0xoldchallenge", "challenger", follow_score=.7),
+        ]
+        proposed = [
+            selection.SelectionRow(
+                "0xchallenge", "core", follow_score=.9, selection_rank=1,
+                sector_policy_json='{"allowed":["crypto"]}',
+            ),
+            selection.SelectionRow("0xcore", "challenger", follow_score=.8),
+        ]
+
+        decision = scanner._challenger_daily_membership_decision(
+            ("0xcore",), ("0xchallenge",),
+        )
+        carried = scanner._carry_challenger_daily_core_rows(
+            previous, proposed, ("0xcore",),
+        )
+        roles = {row.addr: row.role for row in carried}
+        reasons = {row.addr: row.reason for row in carried}
+
+        self.assertEqual(decision["mode"], "carry")
+        self.assertEqual(decision["removed"], ("0xcore",))
+        self.assertEqual(decision["added"], ("0xchallenge",))
+        self.assertEqual(roles["0xcore"], "core")
+        self.assertEqual(roles["0xchallenge"], "challenger")
+        self.assertEqual(
+            reasons["0xcore"], "challenger_daily_core_carried",
+        )
+        self.assertEqual(
+            reasons["0xchallenge"], "challenger_daily_promotion_not_published",
+        )
+
+    def test_daily_same_membership_preserves_incumbent_order(self):
+        decision = scanner._challenger_daily_membership_decision(
+            ("0xcoreb", "0xcorea"),
+            ("0xcorea", "0xcoreb"),
+        )
+
+        self.assertEqual(decision["mode"], "refresh")
+        self.assertEqual(decision["selected"], ("0xcoreb", "0xcorea"))
+
+    def test_recent_self_liquidation_and_zero_equity_is_hard_safety_exit(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            now_ms = 1_000_000
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                (
+                    "0xcore", 1, now_ms - 1_000,
+                    json.dumps({
+                        "coin": "xyz:SKHX",
+                        "liquidation": {"liquidatedUser": "0xcore"},
+                    }),
+                ),
+            )
+            zero = {
+                "marginSummary": {"accountValue": "0"},
+                "assetPositions": [],
+            }
+            with patch.object(
+                scanner.rest, "clearinghouse_state", return_value=zero,
+            ) as clearinghouse:
+                result = scanner._verified_zero_equity_source_liquidations(
+                    db, ["0xcore"], now_ms,
+                )
+
+        self.assertIn("0xcore", result)
+        self.assertEqual(result["0xcore"]["coins"], ["xyz:SKHX"])
+        self.assertEqual(result["0xcore"]["liquidationFills"], 1)
+        self.assertEqual(clearinghouse.call_count, 2)
+
+    def test_liquidation_with_remaining_equity_is_not_zero_equity_exit(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            now_ms = 1_000_000
+            db.execute(
+                "INSERT INTO candidate_fills(addr,tid,time,fill_json) VALUES (?,?,?,?)",
+                (
+                    "0xcore", 1, now_ms - 1_000,
+                    json.dumps({
+                        "coin": "BTC",
+                        "liquidation": {"liquidatedUser": "0xcore"},
+                    }),
+                ),
+            )
+            funded = {
+                "marginSummary": {"accountValue": "2500"},
+                "assetPositions": [],
+            }
+            with patch.object(
+                scanner.rest, "clearinghouse_state", return_value=funded,
+            ):
+                result = scanner._verified_zero_equity_source_liquidations(
+                    db, ["0xcore"], now_ms,
+                )
+
+        self.assertEqual(result, {})
+
+    def test_severe_copy_liquidation_wallet_is_not_carried_with_promotion_floor(self):
+        previous = [
+            selection.SelectionRow("0xkeep", "core", selection_rank=1),
+            selection.SelectionRow("0xblown", "core", selection_rank=2),
+        ]
+        proposed = [
+            selection.SelectionRow("0xkeep", "challenger", selection_rank=3),
+            selection.SelectionRow(
+                "0xblown", "exit_only",
+                reason="copy_single_liquidation_loss_over_5pct:exit_pending",
+            ),
+            selection.SelectionRow("0xnew", "core", selection_rank=1),
+        ]
+
+        carried = scanner._carry_challenger_daily_core_rows(
+            previous, proposed, ("0xkeep",),
+        )
+        roles = {row.addr: row.role for row in carried}
+
+        self.assertEqual(roles["0xkeep"], "core")
+        self.assertEqual(roles["0xblown"], "exit_only")
+        self.assertEqual(roles["0xnew"], "challenger")
+
+    def test_current_core_delta_error_after_zero_equity_gate_aborts_and_retains_generation(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             passed = perp_prefilter.Result("passed", "passed", {})
+            zero_equity_gate = perp_prefilter.Result(
+                "deferred_data_error", "zero_start_equity", {},
+            )
 
             def profile(_db, addr, *_args, **_kwargs):
                 if addr == "0xcore":
@@ -247,11 +377,15 @@ class ChallengerRefreshTests(unittest.TestCase):
                     patch.object(scanner.generation_market, "fetch_context_snapshot", return_value={}), \
                     patch.object(scanner.generation_market, "Resolver", return_value=SimpleNamespace()), \
                     patch.object(scanner, "_run_perp_prefilter",
-                                 return_value={"0xcore": passed, "0xchallenge": passed}), \
+                                 return_value={
+                                     "0xcore": zero_equity_gate,
+                                     "0xchallenge": passed,
+                                 }), \
                     patch.object(scanner, "_incomplete_fill_cache_addrs", return_value=[]), \
-                    patch.object(scanner, "_profile_one", side_effect=profile):
+                    patch.object(scanner, "_profile_one", side_effect=profile) as profile_one:
                 with self.assertRaisesRegex(RuntimeError, "core_data_incomplete"):
                     scanner.refresh_challengers(db, self.ns())
+                self.assertEqual(profile_one.call_count, 2)
 
             current = db.execute(
                 "SELECT generation FROM scan_generation WHERE is_current=1"

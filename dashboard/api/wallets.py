@@ -3,6 +3,10 @@
 import json
 import time
 
+from hyper.copy.economics import (
+    PROFITABILITY_BASIS,
+    conservative_profitability,
+)
 from hyper.copy.sector import apply_allowed_sector_copy_metrics
 from hyper.selection import follow_score
 from .common import iso_epoch, q1, qall, recent_roi_pct, score100
@@ -54,18 +58,33 @@ def _selection_reason_text(row):
         "source_concentrated_body_win_rate_low": "大赢家集中且其余交易胜率低于70%",
         "source_concentrated_body_unprofitable": "大赢家集中且其余交易手续费后亏损",
         "source_quality_below_top40": "源质量排序未进入前40",
+        "source_30d_closed_pnl_not_positive": "源钱包30日已平净利润不为正",
+        "source_7d_closed_pnl_not_positive": "源钱包7日已平净利润不为正",
+        "source_open_loss_over_50pct": "源钱包当前浮亏超过30日已平利润的50%",
+        "source_30d_conservative_pnl_not_positive": "源钱包扣除当前浮亏后30日不盈利",
+        "source_7d_conservative_pnl_not_positive": "源钱包扣除当前浮亏后7日不盈利",
         "copy_episode_evidence_insufficient": "Copy完整已平回合少于7个",
         "rough_copy_30d_not_profitable": "粗略Copy 30日未盈利",
         "rough_copy_7d_not_profitable": "粗略Copy最近7日未盈利",
+        "copy_30d_closed_pnl_not_positive": "Copy 30日已平净利润不为正",
+        "copy_7d_closed_pnl_not_positive": "Copy 7日已平净利润不为正",
+        "copy_open_loss_over_50pct": "Copy当前浮亏超过30日已平利润的50%",
+        "rough_copy_30d_conservative_not_profitable": "粗略Copy扣除浮亏后30日未盈利",
+        "rough_copy_7d_conservative_not_profitable": "粗略Copy扣除浮亏后7日未盈利",
         "rough_copy_win_rate_below_floor": "粗略Copy胜率低于60%",
         "rough_copy_open_rate_below_floor": "粗略Copy开仓跟随率低于70%",
         "strict_copy_30d_return_below_floor": "严格Copy 30日动态收益低于10%",
         "strict_copy_7d_return_below_floor": "严格Copy最近7日动态收益低于3%",
+        "strict_copy_30d_conservative_return_below_floor": "严格Copy保守30日收益低于10%",
+        "strict_copy_7d_conservative_return_below_floor": "严格Copy保守7日收益低于3%",
         "strict_copy_win_rate_below_floor": "严格Copy胜率低于60%",
         "strict_copy_open_rate_below_floor": "严格Copy开仓跟随率低于70%",
         "activity_over_72h": "最近72小时没有真实新开仓",
         "copy_path_incomplete": "精细价格路径证据尚未完整",
         "strict_copy_liquidations_over_3": "最终参数模拟逐仓爆仓超过3次",
+        "copy_single_liquidation_loss_over_5pct": "单次逐仓爆仓损失达到开仓时动态权益的5%",
+        "historical_major_liquidation": "历史重大爆仓记录（永久排除候选）",
+        "source_account_liquidated_zero": "源钱包本人清算且Perp权益归零",
         "sector_not_executable": "没有数据完整且可执行的Crypto/Stock板块",
         "copy_valuation_incomplete": "开放仓位末端估值待确认",
         "copy_data_error": "严格Copy数据无效，等待重建",
@@ -78,6 +97,22 @@ def _selection_reason_text(row):
         text = labels[reason]
         return f"{text} · 旧仓退出中" if exit_pending else text
     return "未满足实跟条件" if reason else None
+
+
+def _copy_economics(metrics, days):
+    prefix = "copy_bt" if int(days) == 30 else f"copy_bt_{int(days)}d"
+    marked = _col(metrics, f"{prefix}_net_pnl")
+    unrealized = _col(metrics, f"{prefix}_unrealized_pnl") or 0.0
+    closed = _col(metrics, f"{prefix}_closed_net_pnl")
+    if closed is None and marked is not None:
+        closed = float(marked) - float(unrealized)
+    equity_key = (
+        "copy_bt_window_start_equity"
+        if int(days) == 30 else f"copy_bt_{int(days)}d_window_start_equity"
+    )
+    return conservative_profitability(
+        closed, unrealized, start_equity=_col(metrics, equity_key),
+    )
 
 
 def _sector_policy(row):
@@ -119,11 +154,15 @@ def _score_breakdown(row):
             "open_events_30d": _col(row, "open_events_30d"),
             "last_copyable_open_ms": _col(row, "last_copyable_open_ms"),
             "copy_bt_net_pnl": _col(row, "copy_bt_net_pnl"),
+            "copy_bt_closed_net_pnl": _col(row, "copy_bt_closed_net_pnl"),
+            "copy_bt_unrealized_pnl": _col(row, "copy_bt_unrealized_pnl"),
             "copy_bt_window_start_equity": _col(row, "copy_bt_window_start_equity"),
             "copy_bt_win_rate": _col(row, "copy_bt_win_rate"),
             "copy_bt_closed_n": _col(row, "copy_bt_closed_n"),
             "copy_bt_open_fill_rate": _col(row, "copy_bt_open_fill_rate"),
             "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
+            "copy_bt_7d_closed_net_pnl": _col(row, "copy_bt_7d_closed_net_pnl"),
+            "copy_bt_7d_unrealized_pnl": _col(row, "copy_bt_7d_unrealized_pnl"),
             "copy_bt_7d_window_start_equity": _col(row, "copy_bt_7d_window_start_equity"),
             "actionable_open_rate": _col(
                 row, "copy_bt_open_fill_rate", _col(row, "actionable_open_rate")
@@ -218,7 +257,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         db,
         "WITH page_selected AS ("
         "  SELECT fs.addr,fs.role AS selection_role,fs.reason AS selection_reason,fs.utility,"
-        "         fs.selection_rank,fs.replay_profit_priority,"
+        "         fs.selection_rank,fs.replay_profit_priority,fs.model_version,"
         "         COALESCE(tc.pinned,0) AS pinned,tc.pinned_at,"
         "         fs.follow_score AS selection_follow_score,"
         "         CASE WHEN fs.follow_score IS NOT NULL THEN fs.follow_score "
@@ -226,7 +265,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "              WHEN sfh.last_followed_generation=fs.generation THEN sfh.last_followed_score "
         "              ELSE NULL END AS legacy_follow_score,"
         "         fs.data_status AS selection_data_status,"
-        "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_window_start_equity,"
+        "         fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_closed_net_pnl,"
+        "         fs.replay_copy_bt_window_start_equity,"
         "         fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,"
         "         fs.replay_copy_bt_open_fill_rate,fs.replay_copy_bt_liquidations,"
         "         fs.replay_copy_bt_raw_target_open_n,fs.replay_copy_bt_small_open_excluded_n,"
@@ -234,7 +274,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.replay_copy_bt_raw_open_capture_rate,fs.replay_copy_bt_open_audit_json,"
         "         fs.replay_copy_bt_fee_drag,"
         "         fs.replay_copy_bt_unrealized_pnl,fs.replay_copy_bt_valuation_status,"
-        "         fs.replay_copy_bt_7d_net_pnl,fs.replay_copy_bt_7d_window_start_equity,"
+        "         fs.replay_copy_bt_7d_net_pnl,fs.replay_copy_bt_7d_closed_net_pnl,"
+        "         fs.replay_copy_bt_7d_window_start_equity,"
         "         fs.replay_copy_bt_7d_unrealized_pnl,"
         "         fs.replay_copy_bt_7d_closed_n,fs.replay_sector_copy_json,"
         "         fs.sector_policy_json AS selection_sector_policy_json,"
@@ -262,12 +303,13 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  GROUP BY f.addr"
         ") "
         "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
-        "s.replay_profit_priority,"
+        "s.replay_profit_priority,s.model_version,"
         "s.pinned,s.pinned_at,"
         "s.selection_follow_score,s.legacy_follow_score,"
         "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,s.replayed_at AS strict_replayed_at,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_closed_net_pnl ELSE p.copy_bt_closed_net_pnl END AS copy_bt_closed_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_window_start_equity ELSE p.copy_bt_window_start_equity END AS copy_bt_window_start_equity,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_valuation_status ELSE p.copy_bt_valuation_status END AS copy_bt_valuation_status,"
@@ -283,6 +325,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_net_pnl ELSE p.copy_bt_7d_closed_net_pnl END AS copy_bt_7d_closed_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_window_start_equity ELSE p.copy_bt_7d_window_start_equity END AS copy_bt_7d_window_start_equity,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
@@ -292,12 +335,17 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "p.official_perp_status,p.official_perp_reason,p.official_perp_evidence_json,"
         "p.official_perp_return_30d,p.official_perp_pnl_30d,p.official_perp_pnl_share,"
         "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,p.source_win_rate_7d,"
-        "p.source_net_pnl_30d,p.source_net_pnl_7d,p.source_top3_profit_share,"
+        "p.source_net_pnl_30d,p.source_net_pnl_7d,p.open_unrealized,p.source_top3_profit_share,"
         "p.source_body_after_top3_n,p.source_body_after_top3_win_rate,"
         "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
         "p.last_copyable_open_ms,p.open_events_30d,p.open_events_7d,p.actionable_open_events_7d,"
-        "p.copy_bt_net_pnl AS rough_copy_net_pnl,p.copy_bt_window_start_equity AS rough_copy_start_equity,"
-        "p.copy_bt_7d_net_pnl AS rough_copy_7d_net_pnl,"
+        "p.copy_bt_net_pnl AS rough_copy_marked_net_pnl,"
+        "p.copy_bt_closed_net_pnl AS rough_copy_closed_net_pnl,"
+        "p.copy_bt_unrealized_pnl AS rough_copy_unrealized_pnl,"
+        "p.copy_bt_window_start_equity AS rough_copy_start_equity,"
+        "p.copy_bt_7d_net_pnl AS rough_copy_7d_marked_net_pnl,"
+        "p.copy_bt_7d_closed_net_pnl AS rough_copy_7d_closed_net_pnl,"
+        "p.copy_bt_7d_unrealized_pnl AS rough_copy_7d_unrealized_pnl,"
         "p.copy_bt_7d_window_start_equity AS rough_copy_7d_start_equity,"
         "p.copy_bt_win_rate AS rough_copy_win_rate,p.copy_bt_closed_n AS rough_copy_closed_n,"
         "p.copy_bt_open_fill_rate AS rough_copy_open_fill_rate,"
@@ -332,8 +380,22 @@ def _ep_selected_wallets(db, generation, role, page, size):
         if equity30 is None:
             equity30 = _col(display_metrics, "copy_bt_initial_margin_equity")
         equity7 = _col(display_metrics, "copy_bt_7d_window_start_equity")
-        net30 = _col(display_metrics, "copy_bt_net_pnl")
-        net7 = _col(display_metrics, "copy_bt_7d_net_pnl")
+        marked30 = _col(display_metrics, "copy_bt_net_pnl")
+        marked7 = _col(display_metrics, "copy_bt_7d_net_pnl")
+        economic30 = _copy_economics(display_metrics, 30)
+        economic7 = _copy_economics(display_metrics, 7)
+        rough_economic30 = conservative_profitability(
+            _col(r, "rough_copy_closed_net_pnl"),
+            _col(r, "rough_copy_unrealized_pnl"),
+            start_equity=_col(r, "rough_copy_start_equity"),
+        )
+        rough_economic7 = conservative_profitability(
+            _col(r, "rough_copy_7d_closed_net_pnl"),
+            _col(r, "rough_copy_7d_unrealized_pnl"),
+            start_equity=_col(r, "rough_copy_7d_start_equity"),
+        )
+        net30 = economic30["qualificationPnl"]
+        net7 = economic7["qualificationPnl"]
         official_evidence = _json_obj(_col(r, "official_perp_evidence_json"))
         official_window = (
             (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
@@ -353,6 +415,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "rankingMode": (
                 follow_score.PROFIT_PRIORITY_MODE
                 if _col(r, "replay_profit_priority") is not None else None
+            ),
+            "profitabilityBasis": (
+                PROFITABILITY_BASIS
+                if str(_col(r, "model_version") or "").endswith("v2")
+                else "legacy_marked_pnl"
             ),
             # The list describes the strategy we can actually copy, not the target's raw account win rate.
             # A missing immutable replay/profile value is unknown and must never be rendered as 0%.
@@ -377,6 +444,14 @@ def _ep_selected_wallets(db, generation, role, page, size):
                 else (_col(r, "actionable_open_events_7d") or 0)
             ),
             "copyBacktestNetPnl": net30,
+            "copyBacktestMarkedNetPnl": marked30,
+            "copyBacktestClosedNetPnl": economic30["closedPnl"],
+            "copyBacktestOpenProfitReference": economic30["openProfitReference"],
+            "copyBacktestOpenLoss": economic30["openLoss"],
+            "copyBacktestOpenLossRatioPct": (
+                economic30["openLossRatio"] * 100
+                if economic30["openLossRatio"] is not None else None
+            ),
             "copyBacktestStartEquity": equity30,
             "copyBacktestReturnPct": (
                 net30 / equity30 * 100 if net30 is not None and equity30 else None
@@ -385,6 +460,10 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "copyBacktestValuationStatus": _col(display_metrics, "copy_bt_valuation_status"),
             "copyBacktestClosedN": _col(display_metrics, "copy_bt_closed_n") or 0,
             "copyBacktest7dNetPnl": net7,
+            "copyBacktest7dMarkedNetPnl": marked7,
+            "copyBacktest7dClosedNetPnl": economic7["closedPnl"],
+            "copyBacktest7dOpenProfitReference": economic7["openProfitReference"],
+            "copyBacktest7dOpenLoss": economic7["openLoss"],
             "copyBacktest7dStartEquity": equity7,
             "copyBacktest7dReturnPct": (
                 net7 / equity7 * 100 if net7 is not None and equity7 else None
@@ -415,17 +494,27 @@ def _ep_selected_wallets(db, generation, role, page, size):
             )),
             "liquidations30d": _col(display_metrics, "copy_bt_liquidations"),
             "roughCopyScore": score100(_col(r, "rough_copy_score")),
-            "roughCopyNetPnl": _col(r, "rough_copy_net_pnl"),
-            "roughCopyReturnPct": (
-                _col(r, "rough_copy_net_pnl") / _col(r, "rough_copy_start_equity") * 100
-                if _col(r, "rough_copy_net_pnl") is not None
-                and _col(r, "rough_copy_start_equity") else None
+            "roughCopyNetPnl": rough_economic30["qualificationPnl"],
+            "roughCopyMarkedNetPnl": _col(r, "rough_copy_marked_net_pnl"),
+            "roughCopyClosedNetPnl": rough_economic30["closedPnl"],
+            "roughCopyOpenProfitReference": rough_economic30["openProfitReference"],
+            "roughCopyOpenLoss": rough_economic30["openLoss"],
+            "roughCopyOpenLossRatioPct": (
+                rough_economic30["openLossRatio"] * 100
+                if rough_economic30["openLossRatio"] is not None else None
             ),
-            "roughCopy7dNetPnl": _col(r, "rough_copy_7d_net_pnl"),
+            "roughCopyReturnPct": (
+                rough_economic30["qualificationReturn"] * 100
+                if rough_economic30["qualificationReturn"] is not None else None
+            ),
+            "roughCopy7dNetPnl": rough_economic7["qualificationPnl"],
+            "roughCopy7dMarkedNetPnl": _col(r, "rough_copy_7d_marked_net_pnl"),
+            "roughCopy7dClosedNetPnl": rough_economic7["closedPnl"],
+            "roughCopy7dOpenProfitReference": rough_economic7["openProfitReference"],
+            "roughCopy7dOpenLoss": rough_economic7["openLoss"],
             "roughCopy7dReturnPct": (
-                _col(r, "rough_copy_7d_net_pnl") / _col(r, "rough_copy_7d_start_equity") * 100
-                if _col(r, "rough_copy_7d_net_pnl") is not None
-                and _col(r, "rough_copy_7d_start_equity") else None
+                rough_economic7["qualificationReturn"] * 100
+                if rough_economic7["qualificationReturn"] is not None else None
             ),
             "roughCopyWinRatePct": (
                 _col(r, "rough_copy_win_rate") * 100
@@ -555,6 +644,7 @@ def ep_wallet_detail(db, addr, qs=None):
     pr = q1(db,
             "SELECT p.score,p.win_rate,p.n_trades,p.market_type,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_closed_net_pnl ELSE p.copy_bt_closed_net_pnl END AS copy_bt_closed_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_window_start_equity ELSE p.copy_bt_window_start_equity END AS copy_bt_window_start_equity,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_win_rate ELSE p.copy_bt_win_rate END AS copy_bt_win_rate,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
@@ -570,16 +660,18 @@ def ep_wallet_detail(db, addr, qs=None):
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_valuation_status ELSE p.copy_bt_valuation_status END AS copy_bt_valuation_status,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_net_pnl ELSE p.copy_bt_14d_net_pnl END AS copy_bt_14d_net_pnl,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_closed_net_pnl ELSE p.copy_bt_14d_closed_net_pnl END AS copy_bt_14d_closed_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_unrealized_pnl ELSE p.copy_bt_14d_unrealized_pnl END AS copy_bt_14d_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_closed_n ELSE p.copy_bt_14d_closed_n END AS copy_bt_14d_closed_n,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
+            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_closed_net_pnl ELSE p.copy_bt_7d_closed_net_pnl END AS copy_bt_7d_closed_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_window_start_equity ELSE p.copy_bt_7d_window_start_equity END AS copy_bt_7d_window_start_equity,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
             "p.official_perp_return_30d,p.official_perp_status,p.official_perp_reason,"
             "p.official_perp_evidence_json,"
             "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,"
-            "p.source_win_rate_7d,p.source_net_pnl_30d,p.source_net_pnl_7d,"
+            "p.source_win_rate_7d,p.source_net_pnl_30d,p.source_net_pnl_7d,p.open_unrealized,"
             "p.source_top3_profit_share,p.source_body_after_top3_n,"
             "p.source_body_after_top3_win_rate,p.source_body_after_top3_net_pnl,"
             "p.source_quality_score,p.rough_copy_score,p.last_copyable_open_ms,"
@@ -587,7 +679,7 @@ def ep_wallet_detail(db, addr, qs=None):
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
             "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"
-            "fs.replay_profit_priority,fs.selection_rank,"
+            "fs.replay_profit_priority,fs.selection_rank,fs.model_version,"
             "fh.last_followed_score,fh.last_followed_generation,"
             "fs.replay_params_hash,fs.replay_score_detail_json,fs.replayed_at "
             "FROM profile p LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=p.addr "
@@ -635,6 +727,17 @@ def ep_wallet_detail(db, addr, qs=None):
     official_window = (
         (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
     )
+    display_metrics = apply_allowed_sector_copy_metrics(dict(pr)) if pr else {}
+    copy_economic30 = _copy_economics(display_metrics, 30)
+    copy_economic7 = _copy_economics(display_metrics, 7)
+    source_economic30 = conservative_profitability(
+        _col(pr, "source_net_pnl_30d") if pr else None,
+        _col(pr, "open_unrealized") if pr else None,
+    )
+    source_economic7 = conservative_profitability(
+        _col(pr, "source_net_pnl_7d") if pr else None,
+        _col(pr, "open_unrealized") if pr else None,
+    )
     return {
         "address": addr, "rank": (w["rank"] if w else None),
         "role": (_col(pr, "selection_role") if pr else None),
@@ -651,6 +754,19 @@ def ep_wallet_detail(db, addr, qs=None):
             follow_score.PROFIT_PRIORITY_MODE
             if pr and _col(pr, "replay_profit_priority") is not None else None
         ),
+        "profitabilityBasis": (
+            PROFITABILITY_BASIS
+            if str(_col(pr, "model_version") or "").endswith("v2")
+            else "legacy_marked_pnl"
+        ),
+        "copyProfitability": {
+            "30d": copy_economic30,
+            "7d": copy_economic7,
+            "markedPnl": {
+                "30d": _col(display_metrics, "copy_bt_net_pnl"),
+                "7d": _col(display_metrics, "copy_bt_7d_net_pnl"),
+            },
+        },
         "scoreBreakdown": _score_breakdown(pr) if pr else {},
         "copyReplayParamsHash": (_col(pr, "replay_params_hash") if pr else None),
         "copyReplayedAt": iso_epoch(_col(pr, "replayed_at")) if pr else None,
@@ -710,6 +826,9 @@ def ep_wallet_detail(db, addr, qs=None):
             ),
             "netPnl30d": _col(pr, "source_net_pnl_30d") if pr else None,
             "netPnl7d": _col(pr, "source_net_pnl_7d") if pr else None,
+            "currentUnrealizedPnl": _col(pr, "open_unrealized") if pr else None,
+            "economics30d": source_economic30,
+            "economics7d": source_economic7,
             "top3ProfitSharePct": (
                 _col(pr, "source_top3_profit_share") * 100
                 if pr and _col(pr, "source_top3_profit_share") is not None else None

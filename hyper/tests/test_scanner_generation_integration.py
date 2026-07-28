@@ -822,6 +822,34 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(tail, ["0x28", "0x29"])
         self.assertEqual(rejected, 2)
 
+    def test_source_quality_pool_permanently_rejects_recorded_major_liquidation(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.executemany(
+                "INSERT INTO profile "
+                "(addr,status,reason,source_quality_score,profile_generation,data_status,"
+                "official_perp_status) VALUES(?,?,?,?,?,?,?)",
+                [
+                    ("0xsafe", "active", "source_quality_passed", 90, "g-new", "valid", "passed"),
+                    ("0xblown", "active", "source_quality_passed", 99, "g-new", "valid", "passed"),
+                ],
+            )
+            scanner._record_wallet_risk_event(
+                db, "0xblown", "copy_single_liquidation_loss_over_5pct",
+                "SKHX:123", occurred_at=123, coin="SKHX",
+                loss_usd=527.92, loss_pct=.052,
+            )
+            db.commit()
+
+            kept, tail = scanner._source_quality_pool(db, "g-new", limit=40)
+            blocked = db.execute(
+                "SELECT status,reason FROM profile WHERE addr='0xblown'"
+            ).fetchone()
+
+        self.assertEqual(kept, ["0xsafe"])
+        self.assertEqual(tail, [])
+        self.assertEqual(blocked, ("rejected", "historical_major_liquidation"))
+
     def test_prepath_candidate_uses_frozen_rough_copy_contract_only(self):
         row = {
             "follow_qualification": {

@@ -47,12 +47,18 @@ def _profile_row(addr, status, score, **overrides):
         source_body_after_top3_n=17,
         source_body_after_top3_win_rate=.75,
         source_body_after_top3_net_pnl=500,
+        source_episode_n_7d=6,
+        source_net_pnl_30d=2_400,
+        source_net_pnl_7d=700,
+        open_unrealized=0,
         source_quality_score=.80,
         copy_bt_closed_n=16,
         copy_bt_net_pnl=2_000,
+        copy_bt_closed_net_pnl=2_000,
         copy_bt_win_rate=.75,
         copy_bt_window_start_equity=10_000,
         copy_bt_7d_net_pnl=600,
+        copy_bt_7d_closed_net_pnl=600,
         copy_bt_7d_window_start_equity=10_000,
         copy_bt_open_fill_rate=.90,
         copy_bt_valuation_status="complete",
@@ -939,6 +945,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "last_copyable_open_ms": now_ms,
             }), patch.object(scanner, "_copy_bt_results", return_value={
                 "copy_net_pnl": -25.0,
+                "closed_net_pnl": -25.0,
                 "copy_win_rate": 0.3,
                 "closed_n": 9,
                 "opened_n": 9,
@@ -953,7 +960,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(
                 tuple(row),
-                ("active", "rough_copy_30d_not_profitable", -25.0, 9),
+                ("retired", "copy_30d_closed_pnl_not_positive", -25.0, 9),
             )
 
     def test_regate_reactivates_obsolete_low_quality_outcome_when_copy_gates_pass(self):
@@ -1072,6 +1079,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "last_copyable_open_ms": now_ms,
             }), patch.object(scanner, "_copy_bt_results", return_value={
                 "copy_net_pnl": 2_000.0,
+                "closed_net_pnl": 2_000.0,
                 "copy_win_rate": 0.6,
                 "closed_n": 9,
                 "opened_n": 4,
@@ -1149,10 +1157,13 @@ class ScannerWatchlistTests(unittest.TestCase):
                 "last_copyable_open_ms": now_ms,
             }), patch.object(scanner, "_copy_bt_results", return_value={
                 30: {"copy_net_pnl": 2_000.0, "copy_win_rate": 0.6, "closed_n": 9,
+                     "closed_net_pnl": 2_000.0,
                      "opened_n": 9, "target_open_events": 9, "liquidations": 0, "fee_drag": 4.0},
                 14: {"copy_net_pnl": 50.0, "copy_win_rate": 0.5, "closed_n": 4,
+                     "closed_net_pnl": 50.0,
                      "opened_n": 4, "target_open_events": 4, "liquidations": 0, "fee_drag": 2.0},
                 7: {"copy_net_pnl": -5.0, "copy_win_rate": 0.0, "closed_n": 1,
+                    "closed_net_pnl": -5.0,
                     "opened_n": 1, "target_open_events": 1, "liquidations": 0, "fee_drag": 1.0},
             }):
                 scanner.regate(db, p)
@@ -1162,7 +1173,7 @@ class ScannerWatchlistTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(
                 tuple(row),
-                ("active", "rough_copy_7d_not_profitable", -5.0, 1),
+                ("retired", "copy_7d_closed_pnl_not_positive", -5.0, 1),
             )
 
     def test_ensure_watchlist_current_rebuilds_stale_derived_rows(self):

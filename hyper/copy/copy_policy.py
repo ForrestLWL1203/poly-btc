@@ -17,7 +17,8 @@ COPY_POLICY_PARAM_KEYS = (
     "SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE", "SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN",
     "SOURCE_BODY_MIN_WIN_RATE", "ROUGH_COPY_MIN_CLOSED_30D",
     "ROUGH_COPY_MIN_WIN_RATE", "CORE_COPY_MIN_WIN_RATE",
-    "CORE_COPY_MAX_LIQUIDATIONS_30D", "COPY_DEEP_BAG_EVENT_PCT",
+    "CORE_COPY_MAX_LIQUIDATIONS_30D", "CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT",
+    "COPY_DEEP_BAG_EVENT_PCT",
     "COPY_DEEP_BAG_EVENT_MIN_HOURS", "COPY_DEEP_BAG_LONG_HOURS",
     "OFFICIAL_PERP_MIN_RETURN_30D", "OFFICIAL_PERP_MIN_RETURN_7D",
     "OFFICIAL_PERP_LONG_HISTORY_DAYS", "OFFICIAL_PERP_SHORT_HISTORY_DAYS",
@@ -46,6 +47,7 @@ class CopyPolicy:
     rough_min_win_rate: float
     core_min_copy_win_rate: float
     core_max_liquidations_30d: int
+    core_max_single_liquidation_loss_pct: float
     deep_bag_event_pct: float
     deep_bag_event_min_hours: float
     deep_bag_long_hours: float
@@ -118,6 +120,9 @@ def load_copy_policy(values: Mapping | None = None) -> CopyPolicy:
         core_max_liquidations_30d=int(_value(
             values, "CORE_COPY_MAX_LIQUIDATIONS_30D", 3,
         ) or 0),
+        core_max_single_liquidation_loss_pct=float(_value(
+            values, "CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT", 0.05,
+        )),
         deep_bag_event_pct=float(_value(values, "COPY_DEEP_BAG_EVENT_PCT", 0.08)),
         deep_bag_event_min_hours=float(_value(values, "COPY_DEEP_BAG_EVENT_MIN_HOURS", 4.0)),
         deep_bag_long_hours=float(_value(values, "COPY_DEEP_BAG_LONG_HOURS", 24.0)),

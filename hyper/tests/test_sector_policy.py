@@ -370,6 +370,9 @@ class SectorPolicyTests(unittest.TestCase):
                     "30": {
                         **bt(1500, 10), "initial_margin_equity": 10_000,
                         "window_start_equity": 12_000,
+                        "max_liquidation_loss_pct": 0.061,
+                        "max_liquidation_loss": 610,
+                        "max_liquidation_loss_coin": "BTC",
                     },
                     "14": {**bt(700, 6), "window_start_equity": 13_000},
                     "7": {**bt(300, 5), "window_start_equity": 14_000},
@@ -395,6 +398,9 @@ class SectorPolicyTests(unittest.TestCase):
         self.assertEqual(adjusted["copy_bt_window_start_equity"], 12_000)
         self.assertEqual(adjusted["copy_bt_14d_window_start_equity"], 13_000)
         self.assertEqual(adjusted["copy_bt_7d_window_start_equity"], 14_000)
+        self.assertEqual(adjusted["copy_bt_max_liquidation_loss_pct"], 0.061)
+        self.assertEqual(adjusted["copy_bt_max_liquidation_loss"], 610)
+        self.assertEqual(adjusted["copy_bt_max_liquidation_loss_coin"], "BTC")
 
     def test_mix_wallet_uses_joint_account_replay_instead_of_summing_two_accounts(self):
         metrics = {

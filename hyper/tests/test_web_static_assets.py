@@ -315,7 +315,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn("Copy / 源胜率", wallets)
         self.assertIn("30日已平", wallets)
         self.assertIn("持仓估值待确认", wallets)
-        self.assertIn("7日合计", wallets)
+        self.assertIn("7日保守", wallets)
         self.assertIn("实际跟单", wallets)
         self.assertIn("forwardNetPnl", wallets)
         self.assertIn("共 {w.followCount} 笔", wallets)

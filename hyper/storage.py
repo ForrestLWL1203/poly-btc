@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS profile (
     pf_equity        REAL,                -- v7: current account value (portfolio, combined perp+spot+vault)
     pf_turnover      REAL,                -- v7: 7d vlm / equity — frequency proxy (trend traders <~50x, bots >>100x)
     copy_bt_net_pnl  REAL,                -- copy replay net PnL under current observer rules (fees included)
+    copy_bt_closed_net_pnl REAL,           -- exact fee-paid PnL from complete closed Copy Episodes
     copy_bt_win_rate REAL,                -- copy replay closed-position win rate
     copy_bt_closed_n INTEGER DEFAULT 0,   -- copy replay closed positions
     copy_bt_open_fill_rate REAL,          -- copied opens / economically effective target opens
@@ -202,10 +203,12 @@ CREATE TABLE IF NOT EXISTS profile (
     copy_bt_initial_margin_equity REAL,    -- replay account equity before warm-up
     copy_bt_window_start_equity REAL,     -- actual floating equity at the 30d boundary
     copy_bt_14d_net_pnl REAL,             -- recent copy replay net PnL (14d confirmation)
+    copy_bt_14d_closed_net_pnl REAL,
     copy_bt_14d_unrealized_pnl REAL DEFAULT 0,
     copy_bt_14d_closed_n INTEGER DEFAULT 0,
     copy_bt_14d_window_start_equity REAL, -- actual floating equity at the 14d boundary
     copy_bt_7d_net_pnl REAL,              -- short-term copy replay net PnL (7d confirmation)
+    copy_bt_7d_closed_net_pnl REAL,
     copy_bt_7d_unrealized_pnl REAL DEFAULT 0,
     copy_bt_7d_closed_n INTEGER DEFAULT 0,
     copy_bt_7d_window_start_equity REAL,  -- actual floating equity at the 7d boundary
@@ -365,6 +368,24 @@ CREATE INDEX IF NOT EXISTS idx_wallet_registry_state_role
 CREATE INDEX IF NOT EXISTS idx_wallet_registry_last_evaluated
     ON wallet_registry(last_evaluated_generation, addr);
 
+-- Durable admission vetoes. Unlike rolling fill/profile caches, confirmed major-loss events survive
+-- discovery pruning so a wallet cannot quietly re-enter after the offending replay window ages out.
+CREATE TABLE IF NOT EXISTS wallet_risk_event (
+    addr          TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    event_key     TEXT NOT NULL,
+    occurred_at   INTEGER,
+    coin          TEXT,
+    loss_usd      REAL,
+    loss_pct      REAL,
+    evidence_json TEXT,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at  TEXT NOT NULL,
+    PRIMARY KEY (addr, event_type, event_key)
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_risk_event_addr_type
+    ON wallet_risk_event(addr, event_type, occurred_at DESC);
+
 -- Source-wallet high-water state is independent for each execution ledger and contiguous Core membership
 -- cycle. Observer restarts therefore cannot erase a freeze/reduction/cooldown already earned by drawdown.
 CREATE TABLE IF NOT EXISTS wallet_risk_state (
@@ -408,6 +429,7 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     acct_value      REAL,
     sector_policy_json TEXT,
     replay_copy_bt_net_pnl        REAL,
+    replay_copy_bt_closed_net_pnl REAL,
     replay_copy_bt_window_start_equity REAL,
     replay_copy_bt_win_rate       REAL,
     replay_copy_bt_closed_n       INTEGER,
@@ -423,9 +445,11 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     replay_copy_bt_unrealized_pnl REAL,
     replay_copy_bt_valuation_status TEXT,
     replay_copy_bt_14d_net_pnl    REAL,
+    replay_copy_bt_14d_closed_net_pnl REAL,
     replay_copy_bt_14d_unrealized_pnl REAL,
     replay_copy_bt_14d_closed_n   INTEGER,
     replay_copy_bt_7d_net_pnl     REAL,
+    replay_copy_bt_7d_closed_net_pnl REAL,
     replay_copy_bt_7d_window_start_equity REAL,
     replay_copy_bt_7d_unrealized_pnl REAL,
     replay_copy_bt_7d_closed_n    INTEGER,
@@ -571,13 +595,13 @@ PROFILE_COLS = (
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
     "net_7d,net_14d,net_30d,net_life,"
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_turnover,"
-    "copy_bt_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
+    "copy_bt_net_pnl,copy_bt_closed_net_pnl,copy_bt_win_rate,copy_bt_closed_n,copy_bt_open_fill_rate,"
     "copy_bt_raw_target_open_n,copy_bt_small_open_excluded_n,copy_bt_effective_target_open_n,"
     "copy_bt_opened_n,copy_bt_raw_open_capture_rate,copy_bt_open_audit_json,"
     "copy_bt_liquidations,copy_bt_fee_drag,"
     "copy_bt_unrealized_pnl,copy_bt_valuation_status,copy_bt_initial_margin_equity,copy_bt_window_start_equity,"
-    "copy_bt_14d_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,copy_bt_14d_window_start_equity,"
-    "copy_bt_7d_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,copy_bt_7d_window_start_equity,"
+    "copy_bt_14d_net_pnl,copy_bt_14d_closed_net_pnl,copy_bt_14d_unrealized_pnl,copy_bt_14d_closed_n,copy_bt_14d_window_start_equity,"
+    "copy_bt_7d_net_pnl,copy_bt_7d_closed_net_pnl,copy_bt_7d_unrealized_pnl,copy_bt_7d_closed_n,copy_bt_7d_window_start_equity,"
     "sector_copy_json,sector_policy_json,"
     "profile_generation,evaluated_at,data_status,evidence_status,"
     "official_perp_status,official_perp_reason,official_perp_evidence_json,"
@@ -1285,6 +1309,12 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_valuation_status TEXT",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_unrealized_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_unrealized_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_closed_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_14d_closed_net_pnl REAL",
+    "ALTER TABLE profile ADD COLUMN copy_bt_7d_closed_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_closed_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_closed_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_closed_net_pnl REAL",
     "ALTER TABLE target_controls ADD COLUMN pinned_at TEXT",
     "ALTER TABLE fill_cache_state ADD COLUMN backfill_start_ms INTEGER",
     "ALTER TABLE fill_cache_state ADD COLUMN backfill_cursor_ms INTEGER",

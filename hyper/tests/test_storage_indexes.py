@@ -61,6 +61,7 @@ class StorageIndexTests(unittest.TestCase):
             "idx_pipeline_audit_stamp_source_stage_id",
             "idx_pipeline_audit_stage_id",
             "idx_pipeline_audit_addr_id",
+            "idx_wallet_risk_event_addr_type",
             "idx_cp_status_opened",
             "idx_cp_closed_closed_at",
             "idx_cp_addr_status_opened",

@@ -120,6 +120,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("CORE_COPY_WIN_RATE_FLOORS", scanner_keys)
             self.assertNotIn("CORE_COPY_WIN_RATE_LCB", scanner_keys)
             self.assertIn("CORE_COPY_MAX_LIQUIDATIONS_30D", scanner_keys)
+            self.assertIn(
+                "CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT", scanner_keys,
+            )
             self.assertEqual(levels["CORE_PROFITABILITY_CONTRACT"], "black")
             self.assertIn("CORE_INITIAL_MAX_N", scanner_keys)
             self.assertEqual(levels["CORE_INITIAL_MAX_N"], "green")

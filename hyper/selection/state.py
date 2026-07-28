@@ -201,6 +201,9 @@ def current_selection_rows(db) -> list:
         + "," + expr("replay_copy_bt_raw_open_capture_rate", "NULL")
         + "," + expr("replay_copy_bt_open_audit_json", "NULL")
         + "," + expr("replay_profit_priority", "NULL")
+        + "," + expr("replay_copy_bt_closed_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_14d_closed_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_7d_closed_net_pnl", "NULL")
         + " FROM follow_selection WHERE generation=? ORDER BY addr",
         (generation,),
     ).fetchall()
@@ -227,6 +230,9 @@ def current_selection_rows(db) -> list:
             replay_copy_bt_raw_open_capture_rate=row[37],
             replay_copy_bt_open_audit_json=row[38],
             replay_profit_priority=row[39],
+            replay_copy_bt_closed_net_pnl=row[40],
+            replay_copy_bt_14d_closed_net_pnl=row[41],
+            replay_copy_bt_7d_closed_net_pnl=row[42],
         )
         for row in rows
     ]
@@ -249,6 +255,7 @@ class SelectionRow:
     acct_value: Optional[float] = None
     sector_policy_json: Optional[str] = None
     replay_copy_bt_net_pnl: Optional[float] = None
+    replay_copy_bt_closed_net_pnl: Optional[float] = None
     replay_copy_bt_window_start_equity: Optional[float] = None
     replay_copy_bt_win_rate: Optional[float] = None
     replay_copy_bt_closed_n: Optional[int] = None
@@ -258,9 +265,11 @@ class SelectionRow:
     replay_copy_bt_unrealized_pnl: Optional[float] = None
     replay_copy_bt_valuation_status: Optional[str] = None
     replay_copy_bt_14d_net_pnl: Optional[float] = None
+    replay_copy_bt_14d_closed_net_pnl: Optional[float] = None
     replay_copy_bt_14d_unrealized_pnl: Optional[float] = None
     replay_copy_bt_14d_closed_n: Optional[int] = None
     replay_copy_bt_7d_net_pnl: Optional[float] = None
+    replay_copy_bt_7d_closed_net_pnl: Optional[float] = None
     replay_copy_bt_7d_window_start_equity: Optional[float] = None
     replay_copy_bt_7d_unrealized_pnl: Optional[float] = None
     replay_copy_bt_7d_closed_n: Optional[int] = None
@@ -333,6 +342,7 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("acct_value", lambda r: r.acct_value),
         ("sector_policy_json", lambda r: r.sector_policy_json),
         ("replay_copy_bt_net_pnl", lambda r: r.replay_copy_bt_net_pnl),
+        ("replay_copy_bt_closed_net_pnl", lambda r: r.replay_copy_bt_closed_net_pnl),
         ("replay_copy_bt_window_start_equity", lambda r: r.replay_copy_bt_window_start_equity),
         ("replay_copy_bt_win_rate", lambda r: r.replay_copy_bt_win_rate),
         ("replay_copy_bt_closed_n", lambda r: r.replay_copy_bt_closed_n),
@@ -342,9 +352,11 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("replay_copy_bt_unrealized_pnl", lambda r: r.replay_copy_bt_unrealized_pnl),
         ("replay_copy_bt_valuation_status", lambda r: r.replay_copy_bt_valuation_status),
         ("replay_copy_bt_14d_net_pnl", lambda r: r.replay_copy_bt_14d_net_pnl),
+        ("replay_copy_bt_14d_closed_net_pnl", lambda r: r.replay_copy_bt_14d_closed_net_pnl),
         ("replay_copy_bt_14d_unrealized_pnl", lambda r: r.replay_copy_bt_14d_unrealized_pnl),
         ("replay_copy_bt_14d_closed_n", lambda r: r.replay_copy_bt_14d_closed_n),
         ("replay_copy_bt_7d_net_pnl", lambda r: r.replay_copy_bt_7d_net_pnl),
+        ("replay_copy_bt_7d_closed_net_pnl", lambda r: r.replay_copy_bt_7d_closed_net_pnl),
         ("replay_copy_bt_7d_window_start_equity", lambda r: r.replay_copy_bt_7d_window_start_equity),
         ("replay_copy_bt_7d_unrealized_pnl", lambda r: r.replay_copy_bt_7d_unrealized_pnl),
         ("replay_copy_bt_7d_closed_n", lambda r: r.replay_copy_bt_7d_closed_n),

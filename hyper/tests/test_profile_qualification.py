@@ -19,12 +19,18 @@ def qualified(**overrides):
         "source_body_after_top3_n": 17,
         "source_body_after_top3_win_rate": .75,
         "source_body_after_top3_net_pnl": 500,
+        "source_episode_n_7d": 6,
+        "source_net_pnl_30d": 2_400,
+        "source_net_pnl_7d": 700,
+        "open_unrealized": 0,
         "data_status": "valid",
         "evidence_status": "qualified",
         "copy_bt_closed_n": 16,
         "copy_bt_win_rate": .75,
         "copy_bt_net_pnl": 1_800,
+        "copy_bt_closed_net_pnl": 1_800,
         "copy_bt_7d_net_pnl": 600,
+        "copy_bt_7d_closed_net_pnl": 600,
         "copy_bt_window_start_equity": 10_000,
         "copy_bt_7d_window_start_equity": 10_000,
         "copy_bt_open_fill_rate": .90,
@@ -55,22 +61,27 @@ class ProfileQualificationTests(unittest.TestCase):
             (True, "rough_copy_qualified"),
         )
 
-    def test_rough_failures_remain_active_challengers(self):
+    def test_evidence_failures_remain_challengers_but_economic_loss_rejects(self):
         cases = (
-            ({"copy_bt_closed_n": 6}, "copy_episode_evidence_insufficient"),
-            ({"copy_bt_net_pnl": -1}, "rough_copy_30d_not_profitable"),
+            ({"copy_bt_closed_n": 6}, True, "copy_episode_evidence_insufficient"),
+            (
+                {"copy_bt_net_pnl": -1, "copy_bt_closed_net_pnl": -1},
+                False,
+                "copy_30d_closed_pnl_not_positive",
+            ),
             (
                 {"last_copyable_open_ms": NOW - 90 * 3_600_000},
+                True,
                 "source_activity_stale",
             ),
-            ({"copy_bt_win_rate": .59}, "rough_copy_win_rate_below_floor"),
+            ({"copy_bt_win_rate": .59}, True, "rough_copy_win_rate_below_floor"),
         )
-        for overrides, expected in cases:
+        for overrides, expected_ok, expected in cases:
             with self.subTest(expected=expected):
                 ok, reason = scanner._profile_copy_qualification(
                     qualified(**overrides), NOW, self.params,
                 )
-                self.assertTrue(ok)
+                self.assertEqual(ok, expected_ok)
                 self.assertEqual(reason, expected)
 
     def test_historical_max_drawdown_is_audit_only(self):

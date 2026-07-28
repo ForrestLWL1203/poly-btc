@@ -20,14 +20,17 @@ const openSkipLabel = (reason) => ({
   skip_coin_blacklist: "策略禁用市场",
 }[reason] || reason || "未执行");
 
-const copyWindowRows = (breakdown) => {
+const copyWindowRows = (breakdown, profitability) => {
   const pnl = breakdown.copyPnl || {};
   const closed = breakdown.closedN || {};
   const returns = breakdown.economicReturnsPct || {};
   const equities = breakdown.windowStartEquity || {};
+  const economics = profitability || breakdown.copyEconomics || {};
+  const e30 = economics["30d"] || {};
+  const e7 = economics["7d"] || {};
   return [
-    ["30 天", pnl["30d"], closed["30d"], returns["30d"], equities["30d"]],
-    ["7 天", pnl["7d"], closed["7d"], returns["7d"], equities["7d"]],
+    ["30 天", e30.qualificationPnl ?? pnl["30d"], closed["30d"], e30.qualificationReturn != null ? e30.qualificationReturn * 100 : returns["30d"], equities["30d"], e30],
+    ["7 天", e7.qualificationPnl ?? pnl["7d"], closed["7d"], e7.qualificationReturn != null ? e7.qualificationReturn * 100 : returns["7d"], equities["7d"], e7],
   ].filter((row) => Number(row[2] || 0) > 0 || Math.abs(Number(row[1] || 0)) > 0);
 };
 
@@ -71,7 +74,7 @@ export function WalletDrawer({ address, onClose }) {
   const officialRoiLabel = officialIsShort
     ? `官方 Perp 短历史 ROI（累计${fNum(officialFundedDays, 0)}日有资金运行）`
     : `官方 Perp ${officialEvidence.windowDays != null ? fNum(officialEvidence.windowDays, 0) : "约30"}日 ROI`;
-  const copyRows = copyWindowRows(scoreBreakdown);
+  const copyRows = copyWindowRows(scoreBreakdown, d && d.copyProfitability);
   const copy30 = copyRows.find(([label]) => label === "30 天");
   const roleView = !d ? null : d.role === "core"
     ? { label: "跟单中", detail: "已通过钱包质量筛选与组合回放，当前允许新开仓。", tone: "good" }
@@ -114,19 +117,20 @@ export function WalletDrawer({ address, onClose }) {
               <div><span>实际盈亏</span><b className={cls(d.netPnl)}>{fSign(d.netPnl, 1)}</b><em>含在持浮动</em></div>
               <div><span>实际跟单</span><b>{d.recordsTotal}</b><em>{d.closedN} 已平 · {d.openN} 在持</em></div>
               <div><span>实盘胜率</span><b>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}</b><em>{d.closedN} 平仓</em></div>
-              <div><span>30日回放</span><b className={copy30 ? cls(copy30[1]) : ""}>{copy30 ? fSign(copy30[1] || 0, 0) : "—"}</b><em>{copy30 ? (copy30[2] || 0) + " 笔" : "暂无数据"}</em></div>
+              <div><span>30日保守收益</span><b className={copy30 ? cls(copy30[1]) : ""}>{copy30 ? fSign(copy30[1] || 0, 0) : "—"}</b><em>{copy30 ? (copy30[2] || 0) + " 个已平回合" : "暂无数据"}</em></div>
               <div><span>盈利优先值</span><b className={(d.profitPriorityPct || 0) < 0 ? "down" : "up"}>{d.profitPriorityPct != null ? fSign(d.profitPriorityPct, 1) + "%" : "—"}</b><em>70%×30日 + 30%×7日{d.profitRank != null ? ` · #${d.profitRank}` : ""}</em></div>
             </div>
 
             <div className="wallet-decision-grid">
-              <DecisionCard title={d.copyReplayStage === "strict" ? "最终严格 Copy" : "粗略 fills-only Copy"} tone={copyRows.length ? "good" : "muted"}>
+              <DecisionCard title={d.copyReplayStage === "strict" ? "最终严格 Copy · 保守资格" : "粗略 fills-only Copy · 保守资格"} tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
                   <div className="score-window-grid">
-                    {copyRows.map(([label, pnl, n, returnPct, startEquity]) => (
+                    {copyRows.map(([label, pnl, n, returnPct, startEquity, economics]) => (
                       <div className="score-window" key={label}>
                         <span>{label}</span>
                         <b className={(pnl || 0) >= 0 ? "up" : "down"}>{fSign(pnl || 0, 0)}</b>
                         <small>{returnPct != null ? `${fSign(returnPct, 1)}% · ` : ""}{n || 0} 回合{startEquity != null ? ` · 期初 $${fNum(startEquity, 0)}` : ""}</small>
+                        {economics && <small>已平 {fSign(economics.closedPnl, 0)} · 浮亏 {fSign(-Number(economics.openLoss || 0), 0)}{Number(economics.openProfitReference || 0) > 0 ? ` · 浮盈参考 ${fSign(economics.openProfitReference, 0)}` : ""}</small>}
                       </div>
                     ))}
                   </div>
@@ -140,6 +144,8 @@ export function WalletDrawer({ address, onClose }) {
                     <div className="wallet-risk"><span>30日完整回合 / 胜率</span><b>{sourceQuality.episodeN30d} / {sourceQuality.winRate30dPct != null ? fNum(sourceQuality.winRate30dPct, 1) + "%" : "—"}</b></div>
                     <div className="wallet-risk"><span>最近7日回合 / 胜率</span><b>{sourceQuality.episodeN7d ?? "—"} / {sourceQuality.winRate7dPct != null ? fNum(sourceQuality.winRate7dPct, 1) + "%" : "—"}</b></div>
                     <div className="wallet-risk"><span>源钱包30日 / 7日净利</span><b>{fSign(sourceQuality.netPnl30d, 0)} / {fSign(sourceQuality.netPnl7d, 0)}</b></div>
+                    <div className="wallet-risk"><span>当前浮盈参考 / 当前浮亏</span><b>{fSign((sourceQuality.economics30d || {}).openProfitReference, 0)} / {fSign(-Number((sourceQuality.economics30d || {}).openLoss || 0), 0)}</b></div>
+                    <div className="wallet-risk"><span>浮亏占30日已平利润 / 保守资格利润</span><b>{(sourceQuality.economics30d || {}).openLossRatio != null ? fNum(sourceQuality.economics30d.openLossRatio * 100, 1) + "%" : "—"} / {fSign((sourceQuality.economics30d || {}).qualificationPnl, 0)}</b></div>
                     <div className="wallet-risk"><span>前三大赢家占毛利</span><b>{sourceQuality.top3ProfitSharePct != null ? fNum(sourceQuality.top3ProfitSharePct, 1) + "%" : "—"}</b></div>
                     {sourceQuality.top3ProfitSharePct >= 70 && <div className="wallet-risk"><span>去前三后胜率 / 净利</span><b>{sourceQuality.bodyAfterTop3WinRatePct != null ? fNum(sourceQuality.bodyAfterTop3WinRatePct, 1) + "%" : "—"} / {fSign(sourceQuality.bodyAfterTop3NetPnl, 0)}</b></div>}
                   </div>
@@ -167,7 +173,7 @@ export function WalletDrawer({ address, onClose }) {
               {Object.keys(scoreComponents).length > 0 && (
                 <DecisionCard title="综合评分构成" tone="neutral">
                   <div className="wallet-risk-list">
-                    <div className="wallet-risk"><span>官方资格窗口 / Copy 30日 / Copy 7日</span><b>{fNum(scoreComponents.officialPerp30d, 1)} / {fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
+                    <div className="wallet-risk"><span>Copy保守30日 / Copy保守7日</span><b>{fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
                     <div className="wallet-risk"><span>源胜率 / Copy胜率</span><b>{fNum(scoreComponents.sourceWinRate, 1)} / {fNum(scoreComponents.copyWinRate, 1)}</b></div>
                     <div className="wallet-risk"><span>开仓跟随 / 行为复制</span><b>{fNum(scoreComponents.openFollowRate, 1)} / {fNum(scoreComponents.behaviorReplication, 1)}</b></div>
                     <div className="wallet-risk"><span>活跃度 / 独立开仓</span><b>{fNum(scoreComponents.activityRecency, 1)} / {fNum(scoreComponents.independentOpens, 1)}</b></div>

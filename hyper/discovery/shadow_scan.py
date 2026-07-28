@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from hyper import params, storage
+from hyper.copy.economics import replay_result_profitability
 from hyper.market import rest
 from . import scanner
 
@@ -176,8 +177,10 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
     core_rows = []
     cur = db.execute(
         "SELECT fs.addr,lb.week_roi,lb.mon_roi,lb.all_roi,lb.week_pnl,lb.mon_pnl,lb.all_pnl,"
-        "p.market_type,fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_window_start_equity,"
-        "fs.replay_copy_bt_7d_net_pnl,fs.replay_copy_bt_7d_window_start_equity,"
+        "p.market_type,fs.replay_copy_bt_net_pnl,fs.replay_copy_bt_closed_net_pnl,"
+        "fs.replay_copy_bt_unrealized_pnl,fs.replay_copy_bt_window_start_equity,"
+        "fs.replay_copy_bt_7d_net_pnl,fs.replay_copy_bt_7d_closed_net_pnl,"
+        "fs.replay_copy_bt_7d_unrealized_pnl,fs.replay_copy_bt_7d_window_start_equity,"
         "fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,fs.replay_copy_bt_7d_closed_n,"
         "fs.replay_copy_bt_open_fill_rate,fs.replay_copy_bt_liquidations,"
         "p.official_perp_return_30d,p.source_episode_n_30d,p.source_win_rate_30d,"
@@ -190,10 +193,24 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
     )
     for row in cur.fetchall():
         (addr, week_roi, month_roi, all_roi, week_pnl, month_pnl, all_pnl, market_type,
-         net30, equity30, net7, equity7, copy_win, closed30, closed7, open_rate, liquidations,
+         marked30, closed_pnl30, unrealized30, equity30,
+         marked7, closed_pnl7, unrealized7, equity7,
+         copy_win, closed30, closed7, open_rate, liquidations,
          official_perp_return, source_n, source_win, top3_share, body_win, body_net,
          last_open, sector_json) = row
         windows = (perp_payload.get(addr) or {}).get("windows") or {}
+        economic30 = replay_result_profitability({
+            "copy_net_pnl": marked30,
+            "closed_net_pnl": closed_pnl30,
+            "unrealized_pnl": unrealized30,
+            "window_start_equity": equity30,
+        })
+        economic7 = replay_result_profitability({
+            "copy_net_pnl": marked7,
+            "closed_net_pnl": closed_pnl7,
+            "unrealized_pnl": unrealized7,
+            "window_start_equity": equity7,
+        })
         core_rows.append({
             "wallet": _mask(addr),
             "official": {"roi": {"7d": week_roi, "30d": month_roi, "all": all_roi},
@@ -203,10 +220,28 @@ def _build_report(db, *, started_at, duration_s, source_before, source_after):
             "marketType": market_type,
             "allowedMarkets": (json.loads(sector_json or "{}").get("allowed") if sector_json else []),
             "strictCopy": {
-                "netPnl": {"7d": net7, "30d": net30},
+                "profitabilityBasis": economic30["basis"],
+                "netPnl": {
+                    "7d": economic7["qualificationPnl"],
+                    "30d": economic30["qualificationPnl"],
+                },
+                "markedNetPnl": {"7d": marked7, "30d": marked30},
+                "closedNetPnl": {"7d": closed_pnl7, "30d": closed_pnl30},
+                "openProfitReference": {
+                    "7d": economic7["openProfitReference"],
+                    "30d": economic30["openProfitReference"],
+                },
+                "openLoss": {
+                    "7d": economic7["openLoss"],
+                    "30d": economic30["openLoss"],
+                },
+                "openLossRatio": {
+                    "7d": economic7["openLossRatio"],
+                    "30d": economic30["openLossRatio"],
+                },
                 "return": {
-                    "7d": (net7 / equity7) if net7 is not None and equity7 else None,
-                    "30d": (net30 / equity30) if net30 is not None and equity30 else None,
+                    "7d": economic7["qualificationReturn"],
+                    "30d": economic30["qualificationReturn"],
                 },
                 "winRate": copy_win, "openFillRate": open_rate,
                 "liquidations": liquidations,

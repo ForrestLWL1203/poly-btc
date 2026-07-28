@@ -82,10 +82,16 @@ for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enum
         "source_body_after_top3_net_pnl": 600 - rank * 35,
         "actionable_open_rate": max(.62, .92 - rank * .04),
         "capacity_fit": max(.75, .96 - rank * .025),
-        "copy_bt_net_pnl": 1800 - rank * 150, "copy_bt_win_rate": max(.60, wr),
+        "copy_bt_net_pnl": 1800 - rank * 150,
+        "copy_bt_closed_net_pnl": 1800 - rank * 150,
+        "copy_bt_win_rate": max(.60, wr),
         "copy_bt_closed_n": 24 - rank, "copy_bt_window_start_equity": 10_000,
-        "copy_bt_14d_net_pnl": 900 - rank * 70, "copy_bt_14d_closed_n": 12 - rank,
-        "copy_bt_7d_net_pnl": 420 - rank * 35, "copy_bt_7d_closed_n": 7 - min(rank, 2),
+        "copy_bt_14d_net_pnl": 900 - rank * 70,
+        "copy_bt_14d_closed_net_pnl": 900 - rank * 70,
+        "copy_bt_14d_closed_n": 12 - rank,
+        "copy_bt_7d_net_pnl": 420 - rank * 35,
+        "copy_bt_7d_closed_net_pnl": 420 - rank * 35,
+        "copy_bt_7d_closed_n": 7 - min(rank, 2),
         "copy_bt_7d_window_start_equity": 10_000, "copy_evidence_days": 18 - rank,
     }
     profile_cols = tuple(profile)
@@ -108,19 +114,23 @@ for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enum
     db.execute("INSERT INTO follow_selection "
                "(generation,addr,role,enabled,reason,utility,follow_score,replay_profit_priority,"
                "selection_rank,data_status,evidence_status,model_version,policy_version,"
-               "replay_copy_bt_net_pnl,replay_copy_bt_window_start_equity,"
+               "replay_copy_bt_net_pnl,replay_copy_bt_closed_net_pnl,"
+               "replay_copy_bt_window_start_equity,"
                "replay_copy_bt_win_rate,replay_copy_bt_closed_n,replay_copy_bt_open_fill_rate,"
-               "replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_window_start_equity,"
+               "replay_copy_bt_7d_net_pnl,replay_copy_bt_7d_closed_net_pnl,"
+               "replay_copy_bt_7d_window_start_equity,"
                "replay_copy_bt_7d_closed_n,replay_score_detail_json,replayed_at,selected_at) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (GEN, addr, role, en, "core_keep" if role == "core" else "challenger_evidence",
                 .18 - rank * .025, score, profit_priority, rank,
                 "valid", "qualified" if rank <= 4 else "thin",
-                "selection-profit-70-30-prefix-v1", "copy-policy-mock",
-                profile["copy_bt_net_pnl"], profile["copy_bt_window_start_equity"],
+                "selection-realized-conservative-profit-70-30-prefix-v2", "copy-policy-mock",
+                profile["copy_bt_net_pnl"], profile["copy_bt_closed_net_pnl"],
+                profile["copy_bt_window_start_equity"],
                 profile["copy_bt_win_rate"], profile["copy_bt_closed_n"],
                 profile["actionable_open_rate"],
-                profile["copy_bt_7d_net_pnl"], profile["copy_bt_7d_window_start_equity"],
+                profile["copy_bt_7d_net_pnl"], profile["copy_bt_7d_closed_net_pnl"],
+                profile["copy_bt_7d_window_start_equity"],
                 profile["copy_bt_7d_closed_n"], json.dumps({
                     "stage": "strict",
                     "economicReturns": {

@@ -2,6 +2,7 @@ import unittest
 
 from hyper.copy.copy_backtest import (
     PreparedPricePath,
+    liquidation_loss_metrics,
     path_risk_metrics,
     prepare_price_path,
     profit_structure_metrics,
@@ -32,6 +33,29 @@ def user_fill(user, t, coin, side, sz, start, px, oid, crossed=True):
 
 
 class CopyBacktestTests(unittest.TestCase):
+    def test_liquidation_loss_is_normalized_to_episode_open_equity(self):
+        metrics = liquidation_loss_metrics(
+            [
+                {
+                    "status": "closed", "net_pnl": 500,
+                    "closed_at": 1_000, "risk_equity_at_open": 10_000,
+                },
+                {
+                    # Earlier trims left the whole episode profitable, but the forced close itself still
+                    # consumed 5% and must not disappear inside cumulative net PnL.
+                    "status": "liquidated", "net_pnl": 100,
+                    "liquidation_loss": 525,
+                    "closed_at": 2_000, "risk_equity_at_open": 10_500,
+                    "coin": "BTC",
+                },
+            ],
+            fallback_equity=10_000,
+        )
+
+        self.assertAlmostEqual(metrics["max_liquidation_loss_pct"], 0.05)
+        self.assertEqual(metrics["max_liquidation_loss"], 525)
+        self.assertEqual(metrics["max_liquidation_loss_coin"], "BTC")
+
     def test_retired_source_high_water_overrides_cannot_block_later_entries(self):
         fills = [
             fill(1_000, "BTC", "B", 100, 0, 100, 1),
@@ -673,6 +697,10 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertGreater(fills_only["copy_net_pnl"], 0)
         self.assertEqual(with_path["positions"][0]["status"], "liquidated")
         self.assertEqual(with_path["liquidations"], 1)
+        self.assertGreater(with_path["max_liquidation_loss_pct"], 0.0)
+        self.assertEqual(
+            with_path["positions"][0]["risk_equity_at_open"], 10_000,
+        )
         self.assertEqual(with_path["path_completion_rate"], 0.0)
         self.assertEqual(with_path["behavior_replication_rate"], 0.0)
         self.assertLess(with_path["copy_net_pnl"], 0)

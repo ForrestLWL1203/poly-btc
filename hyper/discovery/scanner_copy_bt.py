@@ -220,6 +220,7 @@ def record_primary_copy_bt(metrics, result):
     )
     metrics.update(
         copy_bt_net_pnl=result.get("copy_net_pnl"),
+        copy_bt_closed_net_pnl=result.get("closed_net_pnl"),
         copy_bt_unrealized_pnl=result.get("unrealized_pnl"),
         copy_bt_valuation_status=result.get("valuation_status"),
         copy_bt_win_rate=result.get("copy_win_rate"),
@@ -242,6 +243,16 @@ def record_primary_copy_bt(metrics, result):
             sort_keys=True, separators=(",", ":"),
         ),
         copy_bt_liquidations=int(result.get("liquidations") or 0),
+        copy_bt_max_liquidation_loss_pct=result.get(
+            "max_liquidation_loss_pct"
+        ),
+        copy_bt_max_liquidation_loss=result.get("max_liquidation_loss"),
+        copy_bt_max_liquidation_loss_coin=result.get(
+            "max_liquidation_loss_coin"
+        ),
+        copy_bt_max_liquidation_loss_closed_at=result.get(
+            "max_liquidation_loss_closed_at"
+        ),
         copy_bt_fee_drag=result.get("fee_drag"),
         initial_margin_equity=result.get("initial_margin_equity"),
         copy_bt_initial_margin_equity=result.get("initial_margin_equity"),
@@ -317,6 +328,7 @@ def record_recent_copy_bt(metrics, days, result):
         return
     if days == 14:
         metrics["copy_bt_14d_net_pnl"] = result.get("copy_net_pnl")
+        metrics["copy_bt_14d_closed_net_pnl"] = result.get("closed_net_pnl")
         metrics["copy_bt_14d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_14d_closed_n"] = int(result.get("closed_n") or 0)
         metrics["copy_bt_14d_win_rate"] = result.get("copy_win_rate")
@@ -327,6 +339,7 @@ def record_recent_copy_bt(metrics, days, result):
         )
     elif days == 7:
         metrics["copy_bt_7d_net_pnl"] = result.get("copy_net_pnl")
+        metrics["copy_bt_7d_closed_net_pnl"] = result.get("closed_net_pnl")
         metrics["copy_bt_7d_unrealized_pnl"] = result.get("unrealized_pnl")
         metrics["copy_bt_7d_closed_n"] = int(result.get("closed_n") or 0)
         metrics["copy_bt_7d_win_rate"] = result.get("copy_win_rate")

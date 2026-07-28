@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, Mapping
 
 from hyper import config
+from hyper.copy.economics import OPEN_LOSS_RATIO_LIMIT
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,11 @@ class PrefixEvaluation:
                 >= float(config.CORE_PORTFOLIO_MIN_RETURN_30D)
                 and float(self.payload.get("return7d") or 0.0)
                 >= float(config.CORE_PORTFOLIO_MIN_RETURN_7D)
+                and (
+                    self.payload.get("openLossRatio30d") is None
+                    or float(self.payload.get("openLossRatio30d") or 0.0)
+                    <= OPEN_LOSS_RATIO_LIMIT
+                )
             )
         )
         return self.net_pnl > 0 and congestion_ok and return_fit

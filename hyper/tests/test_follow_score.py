@@ -29,11 +29,16 @@ def evidence(**overrides):
         "source_body_after_top3_n": 17,
         "source_body_after_top3_win_rate": 0.76,
         "source_body_after_top3_net_pnl": 1_000.0,
+        "open_unrealized": 0.0,
         "copy_bt_closed_n": 12,
         "copy_bt_7d_closed_n": 4,
         "copy_bt_win_rate": 0.75,
         "copy_bt_net_pnl": 3_000.0,
+        "copy_bt_closed_net_pnl": 3_000.0,
+        "copy_bt_unrealized_pnl": 0.0,
         "copy_bt_7d_net_pnl": 1_000.0,
+        "copy_bt_7d_closed_net_pnl": 1_000.0,
+        "copy_bt_7d_unrealized_pnl": 0.0,
         "copy_bt_window_start_equity": 10_000.0,
         "copy_bt_7d_window_start_equity": 12_000.0,
         "copy_bt_open_fill_rate": 0.90,
@@ -49,6 +54,15 @@ def evidence(**overrides):
         "sector_policy_json": json.dumps({"allowed": ["crypto"]}),
     }
     row.update(overrides)
+    if "copy_bt_net_pnl" in overrides and "copy_bt_closed_net_pnl" not in overrides:
+        row["copy_bt_closed_net_pnl"] = (
+            float(row["copy_bt_net_pnl"]) - float(row.get("copy_bt_unrealized_pnl") or 0.0)
+        )
+    if "copy_bt_7d_net_pnl" in overrides and "copy_bt_7d_closed_net_pnl" not in overrides:
+        row["copy_bt_7d_closed_net_pnl"] = (
+            float(row["copy_bt_7d_net_pnl"])
+            - float(row.get("copy_bt_7d_unrealized_pnl") or 0.0)
+        )
     return row
 
 
@@ -93,7 +107,7 @@ class SourceQualityTests(unittest.TestCase):
             (
                 {"source_episode_n_30d": 8, "source_win_rate_30d": 0.875,
                  "official_perp_return_30d": 0.35, "source_net_pnl_7d": 0},
-                "source_low_frequency_recent_not_profitable",
+                "source_7d_closed_pnl_not_positive",
             ),
         )
         for overrides, reason in cases:
@@ -142,7 +156,7 @@ class SourceQualityTests(unittest.TestCase):
         ), as_of_ms=NOW)[0]
         self.assertGreater(high, low)
 
-    def test_short_history_uses_its_five_percent_official_floor_for_scoring(self):
+    def test_official_return_is_recall_context_not_source_score_input(self):
         short_evidence = json.dumps({
             "windows": {
                 "officialPerp30d": {
@@ -153,27 +167,46 @@ class SourceQualityTests(unittest.TestCase):
                 },
             },
         })
-        _score, detail = compute_source_quality_score(evidence(
+        low_score, detail = compute_source_quality_score(evidence(
             official_perp_return_30d=.05,
             official_perp_evidence_json=short_evidence,
         ), as_of_ms=NOW)
+        high_score, _ = compute_source_quality_score(evidence(
+            official_perp_return_30d=.80,
+            official_perp_evidence_json=short_evidence,
+        ), as_of_ms=NOW)
 
-        self.assertAlmostEqual(detail["officialPerp30dScore"], .60)
-        self.assertEqual(detail["officialPerpHistoryTier"], "short_history_7d")
-        self.assertEqual(detail["officialPerpWindowDays"], 7)
+        self.assertEqual(detail["officialPerpContribution"], 0.0)
+        self.assertAlmostEqual(low_score, high_score)
+
+    def test_source_closed_profit_and_open_loss_are_hard_gates(self):
+        self.assertEqual(
+            evaluate_source_quality(evidence(
+                source_net_pnl_30d=-1,
+            ), as_of_ms=NOW)["firstFailure"],
+            "source_30d_closed_pnl_not_positive",
+        )
+        ratio = evaluate_source_quality(evidence(
+            source_net_pnl_30d=1_000,
+            source_net_pnl_7d=700,
+            open_unrealized=-501,
+        ), as_of_ms=NOW)
+        self.assertEqual(ratio["firstFailure"], "source_open_loss_over_50pct")
 
 
 class FollowScoreTests(unittest.TestCase):
     def test_profit_priority_uses_dynamic_window_equities_and_fixed_70_30_weights(self):
         priority, detail = compute_profit_priority(evidence(
             copy_bt_net_pnl=4_000,
+            copy_bt_closed_net_pnl=4_000,
             copy_bt_window_start_equity=20_000,
             copy_bt_7d_net_pnl=1_000,
+            copy_bt_7d_closed_net_pnl=1_000,
             copy_bt_7d_window_start_equity=10_000,
         ))
 
         self.assertAlmostEqual(priority, .70 * .20 + .30 * .10)
-        self.assertEqual(detail["mode"], "profit_70_30")
+        self.assertEqual(detail["mode"], "conservative_realized_profit_70_30")
         self.assertEqual(detail["weights"], {"30d": .70, "7d": .30})
         self.assertEqual(detail["returns"], {"30d": .20, "7d": .10})
 
@@ -205,13 +238,13 @@ class FollowScoreTests(unittest.TestCase):
         self.assertTrue(profitable["coreEligible"])
         self.assertEqual(
             judge("rough", copy_bt_net_pnl=0)["firstFailure"],
-            "rough_copy_30d_not_profitable",
+            "copy_30d_closed_pnl_not_positive",
         )
         self.assertEqual(
             judge("rough", copy_bt_7d_net_pnl=0, copy_bt_7d_window_start_equity=12_000)[
                 "firstFailure"
             ],
-            "rough_copy_7d_not_profitable",
+            "copy_7d_closed_pnl_not_positive",
         )
 
     def test_strict_copy_uses_dynamic_window_equities(self):
@@ -228,11 +261,17 @@ class FollowScoreTests(unittest.TestCase):
         result = judge(
             "strict", copy_bt_net_pnl=999, copy_bt_window_start_equity=10_000,
         )
-        self.assertEqual(result["firstFailure"], "strict_copy_30d_return_below_floor")
+        self.assertEqual(
+            result["firstFailure"],
+            "strict_copy_30d_conservative_return_below_floor",
+        )
         recent = judge(
             "strict", copy_bt_7d_net_pnl=599, copy_bt_7d_window_start_equity=20_000,
         )
-        self.assertEqual(recent["firstFailure"], "strict_copy_7d_return_below_floor")
+        self.assertEqual(
+            recent["firstFailure"],
+            "strict_copy_7d_conservative_return_below_floor",
+        )
         self.assertAlmostEqual(recent["returns"]["7"], 599 / 20_000)
 
     def test_seven_day_closed_count_is_not_an_admission_gate(self):
@@ -243,6 +282,30 @@ class FollowScoreTests(unittest.TestCase):
             copy_bt_7d_window_start_equity=10_000,
         )
         self.assertTrue(result["coreEligible"])
+
+    def test_positive_open_pnl_never_creates_copy_qualification(self):
+        result = judge(
+            "rough",
+            copy_bt_closed_net_pnl=-100,
+            copy_bt_unrealized_pnl=5_000,
+            copy_bt_net_pnl=4_900,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["firstFailure"], "copy_30d_closed_pnl_not_positive")
+
+    def test_open_loss_is_fully_deducted_and_fifty_percent_is_hard_limit(self):
+        result = judge(
+            "strict",
+            copy_bt_closed_net_pnl=2_000,
+            copy_bt_unrealized_pnl=-1_001,
+            copy_bt_net_pnl=999,
+            copy_bt_7d_closed_net_pnl=1_000,
+            copy_bt_7d_unrealized_pnl=-100,
+            copy_bt_7d_net_pnl=900,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["firstFailure"], "copy_open_loss_over_50pct")
+        self.assertEqual(result["economics"]["30"]["qualificationPnl"], 999)
 
     def test_copy_win_rate_open_rate_and_sample_are_independent(self):
         self.assertEqual(
@@ -287,6 +350,32 @@ class FollowScoreTests(unittest.TestCase):
             "strict_copy_liquidations_over_3",
         )
         self.assertTrue(judge("rough", copy_bt_liquidations=99)["coreEligible"])
+
+    def test_single_five_pct_liquidation_is_hard_reject_even_in_rough_pool(self):
+        below = judge(
+            "strict",
+            copy_bt_liquidations=3,
+            copy_bt_max_liquidation_loss_pct=0.0499,
+        )
+        severe_rough = judge(
+            "rough",
+            copy_bt_liquidations=1,
+            copy_bt_max_liquidation_loss_pct=0.05,
+        )
+        severe_strict = judge(
+            "strict",
+            copy_bt_liquidations=1,
+            copy_bt_max_liquidation_loss_pct=0.08,
+        )
+
+        self.assertTrue(below["coreEligible"])
+        self.assertFalse(severe_rough["eligible"])
+        self.assertEqual(severe_rough["role"], "rejected")
+        self.assertEqual(
+            severe_rough["firstFailure"],
+            "copy_single_liquidation_loss_over_5pct",
+        )
+        self.assertFalse(severe_strict["coreEligible"])
 
     def test_score_is_ranking_only_with_exact_weight_components(self):
         low_score, low = compute_follow_score(evidence(

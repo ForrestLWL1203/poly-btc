@@ -90,9 +90,9 @@ export function Wallets({ confirm }) {
           <table>
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
-              <th className="num" title="70% × 严格Copy 30日动态收益率 + 30% × 严格Copy 7日动态收益率">盈利优先</th>
+              <th className="num" title="70% × 严格Copy保守30日收益率 + 30% × 保守7日收益率；正浮盈权重为0，浮亏全额扣除">盈利优先</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
-              <th className="num" title="Core展示调参后的严格K线路径回放；Challenger展示Top40阶段的fills-only粗略回放。收益率使用各窗口真实浮动期初权益。">Copy回放</th>
+              <th className="num" title="主结果为完整已平净利润减当前浮亏；正浮盈只作参考。Core展示严格路径，Challenger展示粗略回放。">Copy回放</th>
               <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
               <th className="num" title="上行为我们Copy回放的完整已平回合胜率；下行为源钱包30日完整Episode胜率">Copy / 源胜率</th><th>主力</th>
               {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
@@ -132,16 +132,17 @@ export function Wallets({ confirm }) {
                     <td className="num mono"><b>{w.openEvents7d ?? "—"}</b> <span className="muted">/</span> {w.closed7d ?? "—"}</td>
                     <td className="num">
                       <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>
-                        {w.copyReplayStage === "strict" ? "最终严格" : "粗略fills-only"}
+                        {w.copyReplayStage === "strict" ? "最终严格 · 保守资格" : "粗略fills-only · 保守资格"}
                       </div>
                       <b style={{ color: (w.copyBacktestNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{w.copyBacktestNetPnl != null ? fSign(w.copyBacktestNetPnl, 0) : "—"}</b>
                       {w.copyBacktestReturnPct != null && <span className="muted"> · {fSign(w.copyBacktestReturnPct, 1)}%</span>}
                       <div className="muted" style={{ fontSize: 11, marginTop: 3 }}>
-                        30日已平 {w.copyBacktestNetPnl != null ? fSign((w.copyBacktestNetPnl || 0) - (w.copyBacktestUnrealizedPnl || 0), 0) : "—"}
-                        {Math.abs(w.copyBacktestUnrealizedPnl || 0) >= 0.5 && <React.Fragment> · {(w.copyBacktestUnrealizedPnl || 0) < 0 ? "持仓亏损" : "持仓盈利"} <span style={{ color: (w.copyBacktestUnrealizedPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>{fSign(w.copyBacktestUnrealizedPnl, 0)}</span></React.Fragment>}
+                        30日已平 {w.copyBacktestClosedNetPnl != null ? fSign(w.copyBacktestClosedNetPnl, 0) : "—"}
+                        {(w.copyBacktestOpenLoss || 0) > 0 && <React.Fragment> · 当前浮亏 <span className="down">{fSign(-w.copyBacktestOpenLoss, 0)}</span>{w.copyBacktestOpenLossRatioPct != null && <> ({fNum(w.copyBacktestOpenLossRatioPct, 0)}%)</>}</React.Fragment>}
+                        {(w.copyBacktestOpenProfitReference || 0) > 0 && <React.Fragment> · 浮盈参考 <span className="up">{fSign(w.copyBacktestOpenProfitReference, 0)}</span></React.Fragment>}
                       </div>
                       <div style={{ fontSize: 11, marginTop: 2, color: (w.copyBacktest7dNetPnl || 0) < 0 ? "var(--red-l)" : "var(--t2)" }}>
-                        7日合计 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"}
+                        7日保守 {w.copyBacktest7dNetPnl != null ? fSign(w.copyBacktest7dNetPnl, 0) : "—"}
                         {w.copyBacktest7dReturnPct != null && <> · {fSign(w.copyBacktest7dReturnPct, 1)}%</>} · {w.copyBacktest7dClosedN || 0}笔
                       </div>
                       {w.openFollowRatePct != null && <div className="muted" style={{ fontSize: 10, marginTop: 2 }}>

@@ -189,6 +189,59 @@ class AutoTuneTests(unittest.TestCase):
         self.assertTrue(auto_tune._candidate_valid(preserved, baseline))
         self.assertFalse(auto_tune._candidate_valid(degraded, baseline))
 
+    def test_tuning_ignores_positive_open_profit_and_charges_open_loss(self):
+        self.assertEqual(auto_tune._result_pnl({
+            "copy_net_pnl": 1500,
+            "closed_net_pnl": 1000,
+            "unrealized_pnl": 500,
+        }), 1000)
+        self.assertEqual(auto_tune._result_pnl({
+            "copy_net_pnl": 600,
+            "closed_net_pnl": 1000,
+            "unrealized_pnl": -400,
+        }), 600)
+
+    def test_tuning_rejects_open_loss_over_half_of_closed_profit(self):
+        baseline = {
+            "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},
+            "windows": {
+                30: {
+                    "copy_net_pnl": 1000, "closed_net_pnl": 1000,
+                    "unrealized_pnl": 0, "closed_n": 10,
+                    "open_fill_rate": .90, "capacity_open_fit": .95,
+                    "target_open_events": 10, "skip_reasons": {},
+                },
+            },
+        }
+        candidate = {
+            **baseline,
+            "windows": {30: {
+                **baseline["windows"][30],
+                "copy_net_pnl": 400,
+                "unrealized_pnl": -600,
+            }},
+        }
+        self.assertFalse(auto_tune._candidate_valid(candidate, baseline))
+
+    def test_open_loss_ratio_policy_uses_thirty_day_closed_profit_denominator(self):
+        window30 = {
+            "copy_net_pnl": 1000, "closed_net_pnl": 1000,
+            "unrealized_pnl": 0, "closed_n": 10,
+            "open_fill_rate": .90, "capacity_open_fit": .95,
+            "target_open_events": 10, "skip_reasons": {},
+        }
+        window7 = {
+            "copy_net_pnl": 40, "closed_net_pnl": 100,
+            "unrealized_pnl": -60, "closed_n": 3,
+            "open_fill_rate": .90, "capacity_open_fit": .95,
+            "target_open_events": 3, "skip_reasons": {},
+        }
+        baseline = {
+            "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},
+            "windows": {30: window30, 7: window7},
+        }
+        self.assertTrue(auto_tune._candidate_valid(baseline, baseline))
+
     def test_walk_forward_validation_uses_relative_execution_floor_below_absolute_floor(self):
         policy = auto_tune.load_copy_policy()
         folds = [{

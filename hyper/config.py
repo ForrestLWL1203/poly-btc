@@ -343,6 +343,10 @@ COPY_BT_MIN_CLOSED_14D = 5  # 14d 近期窗口最低样本数; 不再只用 30d 
 # not proof that the source wallet itself liquidated. Admit up to three and let the portfolio tuner prefer
 # fewer while preserving profit; the fourth remains a final-surface rejection.
 CORE_COPY_MAX_LIQUIDATIONS_30D = 3
+# Count alone is too coarse: one isolated liquidation that consumes a material share of the standardized
+# account is a wallet-level risk signature, not a sizing nuisance. The denominator is the floating Copy
+# equity recorded when that copied episode opened, so compounding and account scale cannot hide the loss.
+CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT = 0.05
 
 # Intratrade path evidence is retained for diagnostics only. Historical maximum drawdown is not a wallet,
 # sector, score, tuning or Core admission input: live account drawdown protection belongs in Observer.

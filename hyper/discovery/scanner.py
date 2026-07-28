@@ -32,6 +32,12 @@ from hyper.copy.copy_data import (
     out_of_scope_fills,
 )
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
+from hyper.copy.economics import (
+    OPEN_LOSS_RATIO_LIMIT,
+    PROFITABILITY_BASIS,
+    open_loss_ratio_within_limit,
+    replay_result_profitability,
+)
 from hyper.copy.sector import (
     SECTORS,
     apply_allowed_sector_copy_metrics,
@@ -884,7 +890,12 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
             as_of_ms=now_ms,
         )
         if not result.get("coreEligible"):
-            return True, result.get("status") or "rough_copy_unqualified"
+            reason = result.get("status") or "rough_copy_unqualified"
+            # Evidence gaps remain observable Challenger material. A wallet whose
+            # closed/conservative economics fail is outside the candidate pool;
+            # keeping it active would let legacy watchlist projections present
+            # an economically rejected wallet as a Challenger.
+            return not follow_score.is_economic_rejection(reason), reason
     # Activity is a Core permission, not a Profile deletion rule.  The eligibility evaluator records stale
     # or missing flat->open activity as a Challenger reason, so its evidence remains visible and a later
     # actionable signal can restore Core candidacy without rebuilding the wallet from scratch.
@@ -1351,6 +1362,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         # previous-generation Copy result now so it cannot bypass the new Top40 rough-replay boundary.
         m.update(
             copy_bt_net_pnl=None,
+            copy_bt_closed_net_pnl=None,
             copy_bt_win_rate=None,
             copy_bt_closed_n=0,
             copy_bt_open_fill_rate=None,
@@ -1361,10 +1373,12 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             copy_bt_initial_margin_equity=None,
             copy_bt_window_start_equity=None,
             copy_bt_14d_net_pnl=None,
+            copy_bt_14d_closed_net_pnl=None,
             copy_bt_14d_unrealized_pnl=0.0,
             copy_bt_14d_closed_n=0,
             copy_bt_14d_window_start_equity=None,
             copy_bt_7d_net_pnl=None,
+            copy_bt_7d_closed_net_pnl=None,
             copy_bt_7d_unrealized_pnl=0.0,
             copy_bt_7d_closed_n=0,
             copy_bt_7d_window_start_equity=None,
@@ -1564,6 +1578,7 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
         "p.official_perp_return_30d,p.official_perp_pnl_30d,p.official_perp_pnl_share,"
         "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,p.source_win_rate_7d,"
         "p.source_net_pnl_30d,p.source_net_pnl_7d,p.source_active_days_30d,p.source_active_days_7d,"
+        "p.open_unrealized,"
         "p.source_top3_profit_share,p.source_body_after_top3_n,p.source_body_after_top3_win_rate,"
         "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
         "p.copy_evidence_days,p.execution_score,p.actionable_open_rate,p.capacity_fit,p.open_probability_48h "
@@ -1627,6 +1642,7 @@ def _quality_first_core_transition(
     desired_order,
     strict_evaluate,
     robust_allowed_memberships=None,
+    allow_loo=True,
 ):
     """Publish exactly the currently qualified profit-ordered Core prefix.
 
@@ -1675,7 +1691,7 @@ def _quality_first_core_transition(
         tuple(sorted((addr or "").lower() for addr in membership if addr))
         for membership in (robust_allowed_memberships or ())
     }
-    while len(published) > 1 and len(removed_by_loo) < max_removals:
+    while allow_loo and len(published) > 1 and len(removed_by_loo) < max_removals:
         base = strict_evaluate(tuple(sorted(published)))
         ranked_order = tuple(addr for addr in profit_order if addr in published)
         removable = next(reversed(ranked_order), None)
@@ -1752,8 +1768,11 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
             drawdown_dollars=float(config.INITIAL_BALANCE), risk_adjusted_utility=-1e12,
         )
     primary = next((row for row in usable if row[0] == 30), max(usable, key=lambda row: row[0]))
-    net_pnl = f(primary[1].get("copy_net_pnl"))
-    stress_net = min(f(row[1].get("copy_net_pnl")) for row in usable)
+    net_pnl = f(replay_result_profitability(primary[1]).get("qualificationPnl"))
+    stress_net = min(
+        f(replay_result_profitability(row[1]).get("qualificationPnl"))
+        for row in usable
+    )
     liquidations = max(int(row[1].get("liquidations") or 0) for row in usable)
     def num(value, default=0.0):
         return default if value is None else f(value)
@@ -1839,6 +1858,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         "p.official_perp_return_30d,p.official_perp_pnl_30d,p.official_perp_pnl_share,"
         "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,p.source_win_rate_7d,"
         "p.source_net_pnl_30d,p.source_net_pnl_7d,p.source_active_days_30d,p.source_active_days_7d,"
+        "p.open_unrealized,"
         "p.source_top3_profit_share,p.source_body_after_top3_n,p.source_body_after_top3_win_rate,"
         "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
@@ -2064,6 +2084,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
 
 def _source_quality_pool(db, generation_id: str, *, limit: int) -> tuple[list[str], list[str]]:
     """Freeze the global source-quality Top40 and retire its lower-ranked tail."""
+    _apply_historical_major_liquidation_gate(db, generation_id)
     rows = db.execute(
         "SELECT lower(addr),COALESCE(source_quality_score,0) FROM profile "
         "WHERE profile_generation=? AND status='active' AND data_status='valid' "
@@ -2081,6 +2102,83 @@ def _source_quality_pool(db, generation_id: str, *, limit: int) -> tuple[list[st
             (generation_id, *tail),
         )
     return kept, tail
+
+
+_MAJOR_LIQUIDATION_EVENT_TYPES = (
+    "copy_single_liquidation_loss_over_5pct",
+    "source_account_liquidated_zero",
+)
+
+
+def _record_wallet_risk_event(
+    db, addr: str, event_type: str, event_key: str, *,
+    occurred_at=None, coin=None, loss_usd=None, loss_pct=None, evidence=None,
+) -> None:
+    """Persist a confirmed admission veto independently from rolling discovery caches."""
+    stamp = now_iso()
+    db.execute(
+        "INSERT INTO wallet_risk_event "
+        "(addr,event_type,event_key,occurred_at,coin,loss_usd,loss_pct,evidence_json,"
+        "first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(addr,event_type,event_key) DO UPDATE SET "
+        "occurred_at=COALESCE(excluded.occurred_at,wallet_risk_event.occurred_at),"
+        "coin=COALESCE(excluded.coin,wallet_risk_event.coin),"
+        "loss_usd=COALESCE(excluded.loss_usd,wallet_risk_event.loss_usd),"
+        "loss_pct=COALESCE(excluded.loss_pct,wallet_risk_event.loss_pct),"
+        "evidence_json=COALESCE(excluded.evidence_json,wallet_risk_event.evidence_json),"
+        "last_seen_at=excluded.last_seen_at",
+        (
+            str(addr or "").lower(), str(event_type), str(event_key),
+            int(occurred_at) if occurred_at is not None else None,
+            str(coin) if coin else None,
+            f(loss_usd) if loss_usd is not None else None,
+            f(loss_pct) if loss_pct is not None else None,
+            json.dumps(evidence or {}, ensure_ascii=False, sort_keys=True, default=float),
+            stamp, stamp,
+        ),
+    )
+
+
+def _historical_major_liquidation_addrs(db, addrs=None) -> set[str]:
+    clauses = [
+        f"event_type IN ({','.join('?' for _ in _MAJOR_LIQUIDATION_EVENT_TYPES)})",
+    ]
+    args = list(_MAJOR_LIQUIDATION_EVENT_TYPES)
+    normalized = sorted({
+        str(addr or "").lower() for addr in (addrs or ()) if addr
+    })
+    if addrs is not None:
+        if not normalized:
+            return set()
+        clauses.append(f"lower(addr) IN ({','.join('?' for _ in normalized)})")
+        args.extend(normalized)
+    return {
+        str(addr or "").lower()
+        for (addr,) in db.execute(
+            f"SELECT DISTINCT lower(addr) FROM wallet_risk_event WHERE {' AND '.join(clauses)}",
+            args,
+        ).fetchall()
+        if addr
+    }
+
+
+def _apply_historical_major_liquidation_gate(db, generation_id: str) -> set[str]:
+    generation_addrs = [
+        addr for (addr,) in db.execute(
+            "SELECT lower(addr) FROM profile WHERE profile_generation=?",
+            (generation_id,),
+        ).fetchall()
+        if addr
+    ]
+    blocked = _historical_major_liquidation_addrs(db, generation_addrs)
+    if blocked:
+        marks = ",".join("?" for _ in blocked)
+        db.execute(
+            "UPDATE profile SET status='rejected',reason='historical_major_liquidation' "
+            f"WHERE profile_generation=? AND lower(addr) IN ({marks})",
+            (generation_id, *sorted(blocked)),
+        )
+    return blocked
 
 
 def _rough_replay_source_pool(
@@ -2173,6 +2271,26 @@ def _rough_replay_source_pool(
                 "closedN": qualification.get("closedN"),
             },
         )
+        if qualification.get("firstFailure") == "copy_single_liquidation_loss_over_5pct":
+            loss_pct = f(effective.get("copy_bt_max_liquidation_loss_pct"))
+            loss_usd = f(effective.get("copy_bt_max_liquidation_loss"))
+            coin = str(effective.get("copy_bt_max_liquidation_loss_coin") or "")
+            closed_at = int(f(effective.get("copy_bt_max_liquidation_loss_closed_at")))
+            _record_wallet_risk_event(
+                db, addr, "copy_single_liquidation_loss_over_5pct",
+                f"{coin or 'unknown'}:{closed_at or 'unknown'}",
+                occurred_at=closed_at or None,
+                coin=coin or None,
+                loss_usd=loss_usd,
+                loss_pct=loss_pct,
+                evidence={
+                    "generation": generation_id,
+                    "stage": "rough",
+                    "thresholdPct": (
+                        load_copy_policy(follow).core_max_single_liquidation_loss_pct
+                    ),
+                },
+            )
         if qualification.get("coreEligible"):
             qualified.append(addr)
         else:
@@ -2285,6 +2403,9 @@ _FORMATION_PREPATH_CHECKS = (
     "officialPerpPassed",
     "sourceQualityPassed",
     "minimumClosedEvidence",
+    "copyClosedProfit30d",
+    "copyClosedProfit7d",
+    "copyOpenLossRatio",
     "copy30dReturn",
     "copy7dReturn",
     "copyWinRate",
@@ -2292,6 +2413,7 @@ _FORMATION_PREPATH_CHECKS = (
     "activityWithin72h",
     "valuationComplete",
     "sectorExecutable",
+    "singleLiquidationLossWithinLimit",
 )
 
 
@@ -2391,8 +2513,10 @@ def _select_formation_finalist_surface(
             passed = all(bool(checks.get(key)) for key in _FORMATION_PREPATH_CHECKS)
             if passed:
                 qualified.append(row["addr"])
+                replay_metrics = replay.get("metrics") or {}
                 individual_net += f(
-                    (replay.get("metrics") or {}).get("copy_bt_net_pnl")
+                    follow_score.compute_profit_priority(replay_metrics)[1]
+                    .get("netPnl", {}).get("30d")
                 )
             else:
                 reason = str(
@@ -2431,8 +2555,10 @@ def _select_formation_finalist_surface(
                 recent.get("window_start_equity")
                 or recent.get("initial_margin_equity")
             )
-            portfolio_net = f(primary.get("copy_net_pnl"))
-            recent_net = f(recent.get("copy_net_pnl"))
+            primary_economics = replay_result_profitability(primary)
+            recent_economics = replay_result_profitability(recent)
+            portfolio_net = f(primary_economics.get("qualificationPnl"))
+            recent_net = f(recent_economics.get("qualificationPnl"))
             return_30d = (
                 portfolio_net / start_30d if start_30d > 0.0 else float("-inf")
             )
@@ -2468,12 +2594,14 @@ def _select_formation_finalist_surface(
                     paper_recent.get("window_start_equity")
                     or paper_recent.get("initial_margin_equity")
                 )
+                paper_primary_economics = replay_result_profitability(paper_primary)
+                paper_recent_economics = replay_result_profitability(paper_recent)
                 paper_return_30d = (
-                    f(paper_primary.get("copy_net_pnl")) / paper_equity_30d
+                    f(paper_primary_economics.get("qualificationPnl")) / paper_equity_30d
                     if paper_equity_30d > 0.0 else float("-inf")
                 )
                 paper_return_7d = (
-                    f(paper_recent.get("copy_net_pnl")) / paper_equity_7d
+                    f(paper_recent_economics.get("qualificationPnl")) / paper_equity_7d
                     if paper_equity_7d > 0.0 else float("-inf")
                 )
                 del paper_windows
@@ -2492,8 +2620,10 @@ def _select_formation_finalist_surface(
                 and return_30d >= policy.portfolio_min_return_30d
                 and return_7d >= policy.portfolio_min_return_7d
                 and open_rate >= policy.min_actionable_open_rate
-                and f(paper_primary.get("copy_net_pnl")) > 0.0
-                and f(paper_recent.get("copy_net_pnl")) > 0.0
+                and f(replay_result_profitability(paper_primary).get("qualificationPnl")) > 0.0
+                and f(replay_result_profitability(paper_recent).get("qualificationPnl")) > 0.0
+                and open_loss_ratio_within_limit(primary_economics)
+                and open_loss_ratio_within_limit(replay_result_profitability(paper_primary))
                 and paper_return_30d >= policy.portfolio_min_return_30d
                 and paper_return_7d >= policy.portfolio_min_return_7d
                 and path_complete
@@ -2573,6 +2703,9 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "pathRiskComplete": bool(checks.get("pathComplete")),
         "sectorExecutable": bool(checks.get("sectorExecutable")),
         "liquidationsWithinLimit": bool(checks.get("liquidationsWithinLimit")),
+        "singleLiquidationLossWithinLimit": bool(
+            checks.get("singleLiquidationLossWithinLimit")
+        ),
     }
     required = (
         "dataValid",
@@ -2588,6 +2721,7 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
         "pathRiskComplete",
         "sectorExecutable",
         "liquidationsWithinLimit",
+        "singleLiquidationLossWithinLimit",
     )
     return {
         "eligible": all(bool(formation_checks.get(key)) for key in required),
@@ -2978,6 +3112,33 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 key: formation.get(key)
                 for key in ("closedN", "score")
             }
+            if not bool(
+                (qualification.get("checks") or {}).get(
+                    "singleLiquidationLossWithinLimit"
+                )
+            ):
+                severe_metrics = dict(effective.get("metrics") or {})
+                loss_pct = f(severe_metrics.get("copy_bt_max_liquidation_loss_pct"))
+                loss_usd = f(severe_metrics.get("copy_bt_max_liquidation_loss"))
+                coin = str(
+                    severe_metrics.get("copy_bt_max_liquidation_loss_coin") or ""
+                )
+                closed_at = int(f(
+                    severe_metrics.get("copy_bt_max_liquidation_loss_closed_at")
+                ))
+                _record_wallet_risk_event(
+                    db, addr, "copy_single_liquidation_loss_over_5pct",
+                    f"{coin or 'unknown'}:{closed_at or 'unknown'}",
+                    occurred_at=closed_at or None,
+                    coin=coin or None,
+                    loss_usd=loss_usd,
+                    loss_pct=loss_pct,
+                    evidence={
+                        "generation": generation_id,
+                        "stage": "strict",
+                        "paramsHash": surface_key,
+                    },
+                )
             qualifications[addr] = qualification
             scores[addr] = f(effective.get("score"))
             metrics[addr] = dict(effective.get("metrics") or {})
@@ -3115,18 +3276,25 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             recent.get("window_start_equity")
             or recent.get("initial_margin_equity")
         )
+        primary_economics = replay_result_profitability(primary)
+        recent_economics = replay_result_profitability(recent)
         return_30d = (
-            f(primary.get("copy_net_pnl")) / start_equity
+            f(primary_economics.get("qualificationPnl")) / start_equity
             if start_equity > 0.0 else float("-inf")
         )
         return_7d = (
-            f(recent.get("copy_net_pnl")) / recent_start_equity
+            f(recent_economics.get("qualificationPnl")) / recent_start_equity
             if recent_start_equity > 0.0 else float("-inf")
         )
         replay_summary = {
             "pnlConcentration": primary.get("pnl_concentration") or {},
+            "profitabilityBasis": PROFITABILITY_BASIS,
             "return30d": return_30d,
             "return7d": return_7d,
+            "closedNetPnl30d": primary_economics.get("closedPnl"),
+            "openProfitReference30d": primary_economics.get("openProfitReference"),
+            "openLoss30d": primary_economics.get("openLoss"),
+            "openLossRatio30d": primary_economics.get("openLossRatio"),
         }
         del windows
         value = core_formation.PrefixEvaluation(
@@ -3142,6 +3310,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "recentStartEquity": recent_start_equity,
                 "return30d": return_30d,
                 "return7d": return_7d,
+                "openLossRatio30d": primary_economics.get("openLossRatio"),
                 "requireReturnFit": True,
             },
         )
@@ -3454,7 +3623,8 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    effective_qualifications=None, effective_scores=None,
                                    effective_policies=None, effective_metrics=None,
                                    effective_score_details=None,
-                                   effective_replay_params_hash=None):
+                                   effective_replay_params_hash=None,
+                                   allow_loo=True):
     """Materialize the fill-searched membership after one final strict 30-day portfolio replay."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -3581,6 +3751,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         desired_order=desired,
         strict_evaluate=strict_evaluate,
         robust_allowed_memberships=(formation_meta or {}).get("robustAllowedMemberships") or (),
+        allow_loo=allow_loo,
     )
     final_addrs = tuple(transition["selected"])
     if final_addrs:
@@ -3619,12 +3790,14 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             final_recent.get("window_start_equity")
             or final_recent.get("initial_margin_equity")
         )
+        final_economics = replay_result_profitability(final_result)
+        final_recent_economics = replay_result_profitability(final_recent)
         return_30d = (
-            f(final_result.get("copy_net_pnl")) / initial_equity
+            f(final_economics.get("qualificationPnl")) / initial_equity
             if initial_equity > 0.0 else float("-inf")
         )
         return_7d = (
-            f(final_recent.get("copy_net_pnl")) / recent_start_equity
+            f(final_recent_economics.get("qualificationPnl")) / recent_start_equity
             if recent_start_equity > 0.0 else float("-inf")
         )
         paper_start_equity = _paper_account_equity(db)
@@ -3652,12 +3825,14 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             paper_recent.get("window_start_equity")
             or paper_recent.get("initial_margin_equity")
         )
+        paper_economics = replay_result_profitability(paper_result)
+        paper_recent_economics = replay_result_profitability(paper_recent)
         paper_return_30d = (
-            f(paper_result.get("copy_net_pnl")) / paper_start_30d
+            f(paper_economics.get("qualificationPnl")) / paper_start_30d
             if paper_start_30d > 0.0 else float("-inf")
         )
         paper_return_7d = (
-            f(paper_recent.get("copy_net_pnl")) / paper_start_7d
+            f(paper_recent_economics.get("qualificationPnl")) / paper_start_7d
             if paper_start_7d > 0.0 else float("-inf")
         )
         failures = []
@@ -3665,16 +3840,20 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             failures.append("dynamic_return_30d")
         if return_7d < float(config.CORE_PORTFOLIO_MIN_RETURN_7D):
             failures.append("dynamic_return_7d")
-        if f(final_recent.get("copy_net_pnl")) <= 0.0:
+        if f(final_recent_economics.get("qualificationPnl")) <= 0.0:
             failures.append("recent_net_not_positive")
+        if not open_loss_ratio_within_limit(final_economics):
+            failures.append("open_loss_over_50pct")
         if f(final_metrics.actionable_open_rate) < load_copy_policy().min_actionable_open_rate:
             failures.append("open_follow_rate")
         if paper_return_30d < float(config.CORE_PORTFOLIO_MIN_RETURN_30D):
             failures.append("paper_dynamic_return_30d")
         if paper_return_7d < float(config.CORE_PORTFOLIO_MIN_RETURN_7D):
             failures.append("paper_dynamic_return_7d")
-        if f(paper_recent.get("copy_net_pnl")) <= 0.0:
+        if f(paper_recent_economics.get("qualificationPnl")) <= 0.0:
             failures.append("paper_recent_net_not_positive")
+        if not open_loss_ratio_within_limit(paper_economics):
+            failures.append("paper_open_loss_over_50pct")
         if f(paper_metrics.actionable_open_rate) < load_copy_policy().min_actionable_open_rate:
             failures.append("paper_open_follow_rate")
         if f(final_result.get("price_path_coverage")) < float(config.CORE_PRICE_PATH_MIN_COVERAGE):
@@ -3686,11 +3865,20 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         final_strict_validation = {
             "status": "failed" if failures else "passed",
             "selectedCount": len(final_addrs),
+            "profitabilityBasis": PROFITABILITY_BASIS,
             "netPnl30d": f(final_metrics.net_pnl),
+            "markedNetPnl30d": f(final_result.get("copy_net_pnl")),
+            "closedNetPnl30d": f(final_economics.get("closedPnl")),
+            "openProfitReference30d": f(final_economics.get("openProfitReference")),
+            "openLoss30d": f(final_economics.get("openLoss")),
+            "openLossRatio30d": final_economics.get("openLossRatio"),
             "startEquity30d": initial_equity,
             "endEquity30d": f(final_result.get("window_end_equity")),
             "dynamicReturn30d": return_30d,
-            "netPnl7d": f(final_recent.get("copy_net_pnl")),
+            "netPnl7d": f(final_recent_economics.get("qualificationPnl")),
+            "markedNetPnl7d": f(final_recent.get("copy_net_pnl")),
+            "closedNetPnl7d": f(final_recent_economics.get("closedPnl")),
+            "openLoss7d": f(final_recent_economics.get("openLoss")),
             "startEquity7d": recent_start_equity,
             "endEquity7d": f(final_recent.get("window_end_equity")),
             "dynamicReturn7d": return_7d,
@@ -3700,22 +3888,38 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             },
             "standardizedAccount": {
                 "initialEquity": float(config.INITIAL_BALANCE),
-                "netPnl30d": f(final_result.get("copy_net_pnl")),
+                "netPnl30d": f(final_economics.get("qualificationPnl")),
+                "markedNetPnl30d": f(final_result.get("copy_net_pnl")),
+                "closedNetPnl30d": f(final_economics.get("closedPnl")),
+                "openProfitReference30d": f(final_economics.get("openProfitReference")),
+                "openLoss30d": f(final_economics.get("openLoss")),
+                "openLossRatio30d": final_economics.get("openLossRatio"),
                 "startEquity30d": initial_equity,
                 "endEquity30d": f(final_result.get("window_end_equity")),
                 "dynamicReturn30d": return_30d,
-                "netPnl7d": f(final_recent.get("copy_net_pnl")),
+                "netPnl7d": f(final_recent_economics.get("qualificationPnl")),
+                "markedNetPnl7d": f(final_recent.get("copy_net_pnl")),
+                "closedNetPnl7d": f(final_recent_economics.get("closedPnl")),
+                "openLoss7d": f(final_recent_economics.get("openLoss")),
                 "startEquity7d": recent_start_equity,
                 "endEquity7d": f(final_recent.get("window_end_equity")),
                 "dynamicReturn7d": return_7d,
             },
             "paperAccount": {
                 "initialEquity": paper_start_equity,
-                "netPnl30d": f(paper_result.get("copy_net_pnl")),
+                "netPnl30d": f(paper_economics.get("qualificationPnl")),
+                "markedNetPnl30d": f(paper_result.get("copy_net_pnl")),
+                "closedNetPnl30d": f(paper_economics.get("closedPnl")),
+                "openProfitReference30d": f(paper_economics.get("openProfitReference")),
+                "openLoss30d": f(paper_economics.get("openLoss")),
+                "openLossRatio30d": paper_economics.get("openLossRatio"),
                 "startEquity30d": paper_start_30d,
                 "endEquity30d": f(paper_result.get("window_end_equity")),
                 "dynamicReturn30d": paper_return_30d,
-                "netPnl7d": f(paper_recent.get("copy_net_pnl")),
+                "netPnl7d": f(paper_recent_economics.get("qualificationPnl")),
+                "markedNetPnl7d": f(paper_recent.get("copy_net_pnl")),
+                "closedNetPnl7d": f(paper_recent_economics.get("closedPnl")),
+                "openLoss7d": f(paper_recent_economics.get("openLoss")),
                 "startEquity7d": paper_start_7d,
                 "endEquity7d": f(paper_recent.get("window_end_equity")),
                 "dynamicReturn7d": paper_return_7d,
@@ -3819,11 +4023,12 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 selection_rank=core_rank.get(addr) if role == selection.CORE else rank,
                 data_status=selection_data_status,
                 evidence_status=row.get("evidence_status") or "",
-                model_version="selection-profit-70-30-prefix-v1",
+                model_version="selection-realized-conservative-profit-70-30-prefix-v2",
                 policy_version=copy_policy.version,
                 acct_value=row.get("acct_value"),
                 sector_policy_json=row.get("sector_policy_json"),
                 replay_copy_bt_net_pnl=replay.get("copy_bt_net_pnl"),
+                replay_copy_bt_closed_net_pnl=replay.get("copy_bt_closed_net_pnl"),
                 replay_copy_bt_window_start_equity=replay.get(
                     "copy_bt_window_start_equity"
                 ),
@@ -3849,11 +4054,17 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 replay_copy_bt_unrealized_pnl=replay.get("copy_bt_unrealized_pnl"),
                 replay_copy_bt_valuation_status=replay.get("copy_bt_valuation_status"),
                 replay_copy_bt_14d_net_pnl=replay.get("copy_bt_14d_net_pnl"),
+                replay_copy_bt_14d_closed_net_pnl=replay.get(
+                    "copy_bt_14d_closed_net_pnl"
+                ),
                 replay_copy_bt_14d_unrealized_pnl=replay.get(
                     "copy_bt_14d_unrealized_pnl"
                 ),
                 replay_copy_bt_14d_closed_n=replay.get("copy_bt_14d_closed_n"),
                 replay_copy_bt_7d_net_pnl=replay.get("copy_bt_7d_net_pnl"),
+                replay_copy_bt_7d_closed_net_pnl=replay.get(
+                    "copy_bt_7d_closed_net_pnl"
+                ),
                 replay_copy_bt_7d_window_start_equity=replay.get(
                     "copy_bt_7d_window_start_equity"
                 ),
@@ -3911,7 +4122,8 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                               effective_qualifications=None, effective_scores=None,
                               effective_policies=None, effective_metrics=None,
                               effective_score_details=None,
-                              effective_replay_params_hash=None):
+                              effective_replay_params_hash=None,
+                              allow_loo=True):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -3937,6 +4149,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "p.official_perp_return_30d,p.official_perp_pnl_30d,p.official_perp_pnl_share,"
         "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,p.source_win_rate_7d,"
         "p.source_net_pnl_30d,p.source_net_pnl_7d,p.source_active_days_30d,p.source_active_days_7d,"
+        "p.open_unrealized,"
         "p.source_top3_profit_share,p.source_body_after_top3_n,p.source_body_after_top3_win_rate,"
         "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
@@ -4005,6 +4218,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             effective_metrics=effective_metrics,
             effective_score_details=effective_score_details,
             effective_replay_params_hash=effective_replay_params_hash,
+            allow_loo=allow_loo,
         )
     raise RuntimeError("explicit selection builder requires forced score-prefix formation")
 
@@ -4383,7 +4597,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         "SELECT p.addr,status,n_trades,n_fills,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
         "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,median_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
-        "roi_total,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
+        "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
         "p.official_perp_status,p.official_perp_reason,p.official_perp_return_30d,"
         "p.official_perp_pnl_30d,p.official_perp_pnl_share,"
         "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,p.source_win_rate_7d,"
@@ -4441,7 +4655,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     for r in rows:
         (addr, old, n_tr, n_fills, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
          ad, ar, meps, avgnotl, pdr, conc, skew, uw, mxadds, mdadds, wloss, mhold, wr,
-         roi_tot, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
+         roi_tot, open_unreal, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
          official_status, official_reason, official_return, official_pnl, official_share,
          source_n30, source_n7, source_win30, source_win7,
          source_net30, source_net7, source_days30, source_days7,
@@ -4468,6 +4682,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              "worst_loss_pct": wloss or 0.0,
              # v4 open-position character (stored from the last scan; regate doesn't re-fetch live state)
              "roi_total": roi_tot if roi_tot is not None else (roi_eq or 0.0),
+             "open_unrealized": open_unreal or 0.0,
              "open_loss_frac": oloss or 0.0, "open_win_frac": owin or 0.0,
              "bag_count": bagn or 0, "max_bag_days": bagd or 0.0, "liq_count": liqc or 0,
              "hedge_ratio": hedge or 0.0,
@@ -4591,14 +4806,14 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         )
         db.execute(
             "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
-            "copy_bt_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
+            "copy_bt_net_pnl=?,copy_bt_closed_net_pnl=?,copy_bt_win_rate=?,copy_bt_closed_n=?,copy_bt_open_fill_rate=?,"
             "copy_bt_raw_target_open_n=?,copy_bt_small_open_excluded_n=?,"
             "copy_bt_effective_target_open_n=?,copy_bt_opened_n=?,"
             "copy_bt_raw_open_capture_rate=?,copy_bt_open_audit_json=?,"
             "copy_bt_liquidations=?,copy_bt_fee_drag=?,copy_bt_unrealized_pnl=?,copy_bt_valuation_status=?,"
             "copy_bt_initial_margin_equity=?,copy_bt_window_start_equity=?,"
-            "copy_bt_14d_net_pnl=?,copy_bt_14d_unrealized_pnl=?,copy_bt_14d_closed_n=?,copy_bt_14d_window_start_equity=?,"
-            "copy_bt_7d_net_pnl=?,copy_bt_7d_unrealized_pnl=?,copy_bt_7d_closed_n=?,copy_bt_7d_window_start_equity=?,"
+            "copy_bt_14d_net_pnl=?,copy_bt_14d_closed_net_pnl=?,copy_bt_14d_unrealized_pnl=?,copy_bt_14d_closed_n=?,copy_bt_14d_window_start_equity=?,"
+            "copy_bt_7d_net_pnl=?,copy_bt_7d_closed_net_pnl=?,copy_bt_7d_unrealized_pnl=?,copy_bt_7d_closed_n=?,copy_bt_7d_window_start_equity=?,"
             "sector_copy_json=?,sector_policy_json=?,"
             "copy_evidence_days=?,execution_score=?,model_coverage=?,oos_net_pnl=?,oos_max_drawdown=?,oos_cvar95=?,"
             "actionable_open_rate=?,capacity_fit=?,"
@@ -4607,16 +4822,19 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             "copy_deep_bag_recovery_rate=?,copy_max_deep_bag_hours=?,copy_current_open_loss_frac=?,"
             "copy_current_bag_hours=?,data_status=?,evidence_status=? WHERE addr=?",
             (status, reason, score, m.get("raw_quality_score"), m["loss_pain"], concw.get(addr, 0), winptw.get(addr, 0.0),
-             m.get("copy_bt_net_pnl"), m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
+             m.get("copy_bt_net_pnl"), m.get("copy_bt_closed_net_pnl"),
+             m.get("copy_bt_win_rate"), m.get("copy_bt_closed_n"),
              m.get("copy_bt_open_fill_rate"), m.get("copy_bt_raw_target_open_n"),
              m.get("copy_bt_small_open_excluded_n"), m.get("copy_bt_effective_target_open_n"),
              m.get("copy_bt_opened_n"), m.get("copy_bt_raw_open_capture_rate"),
              m.get("copy_bt_open_audit_json"), m.get("copy_bt_liquidations"), m.get("copy_bt_fee_drag"),
              m.get("copy_bt_unrealized_pnl"), m.get("copy_bt_valuation_status"),
              m.get("copy_bt_initial_margin_equity"), m.get("copy_bt_window_start_equity"),
-             m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_unrealized_pnl"),
+             m.get("copy_bt_14d_net_pnl"), m.get("copy_bt_14d_closed_net_pnl"),
+             m.get("copy_bt_14d_unrealized_pnl"),
              m.get("copy_bt_14d_closed_n"), m.get("copy_bt_14d_window_start_equity"),
-             m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_unrealized_pnl"),
+             m.get("copy_bt_7d_net_pnl"), m.get("copy_bt_7d_closed_net_pnl"),
+             m.get("copy_bt_7d_unrealized_pnl"),
              m.get("copy_bt_7d_closed_n"), m.get("copy_bt_7d_window_start_equity"),
              m.get("sector_copy_json"), m.get("sector_policy_json"),
              m.get("copy_evidence_days"), m.get("execution_score"), m.get("model_coverage"),
@@ -4903,11 +5121,154 @@ def challenger_refresh_pool(db, base_generation=None):
     return base_generation, sorted(frozen | current | held)
 
 
+def _verified_zero_equity_source_liquidations(
+    db, addrs, now_ms, *, lookback_ms=3 * 86_400_000,
+) -> dict:
+    """Confirm a recent exchange-labelled self-liquidation followed by an empty Perp account.
+
+    A normal losing close, low rolling return or one Paper loss is deliberately insufficient.  The safety
+    exception requires both the source fill's ``liquidatedUser`` identity and a fresh clearinghouse snapshot
+    with zero equity and no remaining positions across the standard and affected executable dexes.
+    """
+    addrs = sorted({
+        str(addr or "").lower() for addr in (addrs or ()) if addr
+    })
+    if not addrs:
+        return {}
+    marks = ",".join("?" for _ in addrs)
+    recent = {}
+    for addr, stamp_ms, fill_json in db.execute(
+        f"SELECT lower(addr),time,fill_json FROM candidate_fills "
+        f"WHERE lower(addr) IN ({marks}) AND time>=? ORDER BY time",
+        (*addrs, int(now_ms) - max(1, int(lookback_ms))),
+    ).fetchall():
+        try:
+            fill = json.loads(fill_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        liquidation = fill.get("liquidation")
+        if not isinstance(liquidation, dict):
+            continue
+        if str(liquidation.get("liquidatedUser") or "").lower() != addr:
+            continue
+        item = recent.setdefault(addr, {
+            "latestLiquidationMs": 0,
+            "liquidationFills": 0,
+            "coins": set(),
+            "dexes": {None},
+        })
+        item["latestLiquidationMs"] = max(
+            int(item["latestLiquidationMs"]), int(stamp_ms or 0),
+        )
+        item["liquidationFills"] += 1
+        coin = str(fill.get("coin") or "")
+        if coin:
+            item["coins"].add(coin)
+            if ":" in coin:
+                item["dexes"].add(coin.split(":", 1)[0])
+
+    verified = {}
+    for addr, item in recent.items():
+        account_values = []
+        open_positions = 0
+        for dex in sorted(item["dexes"], key=lambda value: value or ""):
+            state = rest.clearinghouse_state(addr, dex=dex)
+            if not isinstance(state, dict):
+                raise RuntimeError("verified_source_blowup_state_unavailable")
+            account_values.append(f((state.get("marginSummary") or {}).get("accountValue")))
+            for wrapped in state.get("assetPositions") or ():
+                position = wrapped.get("position") or wrapped
+                if abs(f(position.get("szi"))) >= config.FLAT:
+                    open_positions += 1
+        max_equity = max(account_values, default=0.0)
+        if max_equity <= max(float(config.FLAT), 1e-6) and open_positions == 0:
+            verified[addr] = {
+                "latestLiquidationMs": int(item["latestLiquidationMs"]),
+                "liquidationFills": int(item["liquidationFills"]),
+                "coins": sorted(item["coins"]),
+                "maxAccountValue": max_equity,
+                "openPositions": open_positions,
+            }
+    return verified
+
+
+def _challenger_daily_membership_decision(previous_order, proposed_order) -> dict:
+    """Allow daily publication to add Core wallets, but never remove or reshuffle incumbents alone."""
+    previous = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (previous_order or ()) if addr
+    ))
+    proposed = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (proposed_order or ()) if addr
+    ))
+    previous_set = set(previous)
+    proposed_set = set(proposed)
+    removed = tuple(addr for addr in previous if addr not in proposed_set)
+    added = tuple(addr for addr in proposed if addr not in previous_set)
+    if removed:
+        mode = "carry"
+        selected = previous
+        reason = "daily_proposal_would_remove_core"
+    elif added:
+        mode = "promote"
+        selected = proposed
+        reason = "daily_strict_superset_promotion"
+    else:
+        mode = "refresh"
+        selected = previous
+        reason = "daily_evidence_refresh_membership_unchanged"
+    return {
+        "mode": mode,
+        "reason": reason,
+        "selected": selected,
+        "previous": previous,
+        "proposed": proposed,
+        "added": added,
+        "removed": removed,
+    }
+
+
+def _carry_challenger_daily_core_rows(previous_rows, proposed_rows, previous_core_order):
+    """Publish fresh Challenger evidence while carrying the exact incumbent Core snapshot."""
+    previous_by_addr = {
+        str(row.addr or "").lower(): row for row in (previous_rows or ()) if row.addr
+    }
+    previous_order = tuple(
+        str(addr or "").lower() for addr in (previous_core_order or ()) if addr
+    )
+    missing = [addr for addr in previous_order if addr not in previous_by_addr]
+    if missing:
+        raise RuntimeError(f"challenger_daily_previous_core_snapshot_missing:{len(missing)}")
+    previous_core = set(previous_order)
+    rows = []
+    for row in proposed_rows or ():
+        addr = str(row.addr or "").lower()
+        if addr in previous_core:
+            continue
+        if row.role == selection.CORE:
+            row = replace(
+                row,
+                role=selection.CHALLENGER,
+                reason="challenger_daily_promotion_not_published",
+            )
+        rows.append(row)
+    rows.extend(
+        replace(
+            previous_by_addr[addr],
+            role=selection.CORE,
+            reason="challenger_daily_core_carried",
+            selection_rank=rank,
+        )
+        for rank, addr in enumerate(previous_order, 1)
+    )
+    return rows
+
+
 def refresh_challengers(db, p) -> dict:
-    """Refresh the frozen Core/Challenger cohort and publish strict membership on active parameters."""
+    """Refresh frozen evidence and publish only strict-superset Core promotions."""
     now_ms = int(time.time() * 1000)
     started, t0, stamp = now_iso(), time.time(), now_iso()
     previous_generation = selection.latest_published_generation(db)
+    previous_selection_rows = selection.current_selection_rows(db)
     previous_core_order = tuple(
         str(addr or "").lower()
         for addr in (selection.published_core_addrs(db) or ())
@@ -4950,6 +5311,9 @@ def refresh_challengers(db, p) -> dict:
     rest.reset_request_stats()
     profiled = failed = valid_profiles = deferred_profiles = rejected = 0
     outcomes = {}
+    verified_source_blowups = {}
+    hard_safety_core = set()
+    severe_copy_liquidations = set()
     published = False
 
     try:
@@ -5023,23 +5387,66 @@ def refresh_challengers(db, p) -> dict:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, "official_perp_evidence_missing",
                 )
+            official_evidence_building = False
             if gate.deferred:
                 if gate.reason in {
                     "history_under_7d", "history_under_28d",
                     "boundary_sample_gap", "zero_start_equity",
                 }:
-                    return addr, prior, _defer_official_evidence_profile(
-                        db, addr, prior, stamp, generation_id, gate,
+                    official_evidence_building = True
+                else:
+                    return addr, prior, _defer_profile(
+                        db, addr, prior, stamp, gate.reason,
                     )
-                return addr, prior, _defer_profile(db, addr, prior, stamp, gate.reason)
-            if not gate.passed:
-                return addr, prior, _reject_prefilter_profile(
-                    db, addr, prior, stamp, generation_id, gate.reason,
-                )
-            return addr, prior, _profile_one(
+            # The frozen daily pool already owns a complete 37-day cache, so even an official business-gate
+            # failure or normal evidence-building state must consume its cheap delta. A zeroed wallet commonly
+            # fails Portfolio first; skipping here would hide the liquidation fill needed by hard safety below.
+            result = _profile_one(
                 db, addr, now_ms - int(p.days) * 86_400_000, now_ms,
                 p, prior, lbs.get(addr, {}), stamp, universe, force_full=False,
             )
+            if gate.passed:
+                return addr, prior, result
+            status, _reason, profile, hit_cap = result
+            if (profile or {}).get("data_status") != "valid":
+                return addr, prior, result
+            gate_reason = str(
+                gate.reason or (
+                    "official_perp_evidence_incomplete"
+                    if official_evidence_building else "prefilter_rejected"
+                )
+            )[:120]
+            if official_evidence_building:
+                rejected_status = "active"
+                evidence_status = "official_evidence_building"
+            else:
+                rejected_status = (
+                    "retired"
+                    if prior and prior.get("status") in {"active", "qualified"}
+                    else "rejected"
+                )
+                evidence_status = "ineligible"
+            with _db_lock:
+                db.execute(
+                    "UPDATE profile SET status=?,reason=?,score=0,raw_quality_score=0,"
+                    "rough_copy_score=NULL,evidence_status=? "
+                    "WHERE addr=? AND profile_generation=?",
+                    (
+                        rejected_status, gate_reason, evidence_status,
+                        addr, generation_id,
+                    ),
+                )
+                db.commit()
+            profile = dict(profile or {})
+            profile.update(
+                status=rejected_status,
+                reason=gate_reason,
+                score=0.0,
+                raw_quality_score=0.0,
+                rough_copy_score=None,
+                evidence_status=evidence_status,
+            )
+            return addr, prior, (rejected_status, gate_reason, profile, hit_cap)
 
         workers = max(1, int(getattr(p, "workers", 4) or 4))
         done = 0
@@ -5107,6 +5514,50 @@ def refresh_challengers(db, p) -> dict:
         if invalid_core:
             raise RuntimeError(f"challenger_refresh_core_data_incomplete:{len(invalid_core)}")
 
+        verified_source_blowups = _verified_zero_equity_source_liquidations(
+            db, workset, now_ms,
+        )
+        historical_major_liquidations = _apply_historical_major_liquidation_gate(
+            db, generation_id,
+        )
+        hard_safety_core = previous_core & historical_major_liquidations
+        for addr, evidence in verified_source_blowups.items():
+            _record_wallet_risk_event(
+                db, addr, "source_account_liquidated_zero",
+                str(int(evidence.get("latestLiquidationMs") or now_ms)),
+                occurred_at=int(evidence.get("latestLiquidationMs") or now_ms),
+                coin=",".join(evidence.get("coins") or ()) or None,
+                evidence=evidence,
+            )
+            if (outcomes.get(addr) or {}).get("status") not in {"rejected", "retired"}:
+                rejected += 1
+            outcomes.setdefault(addr, {}).update({
+                "status": "rejected",
+                "reason": "source_account_liquidated_zero",
+                "data_status": "valid",
+            })
+            db.execute(
+                "UPDATE profile SET status='rejected',reason='source_account_liquidated_zero' "
+                "WHERE addr=? AND profile_generation=?",
+                (addr, generation_id),
+            )
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="hard_safety", addr=addr, status="rejected",
+                reason="source_account_liquidated_zero",
+                payload={
+                    **evidence,
+                    "wasCore": addr in previous_core,
+                    "action": (
+                        "exit_only" if addr in previous_core else "exclude_from_promotion"
+                    ),
+                },
+            )
+        historical_major_liquidations |= set(verified_source_blowups)
+        hard_safety_core |= previous_core & set(verified_source_blowups)
+        if verified_source_blowups:
+            db.commit()
+
         policy = load_copy_policy({
             **params.load_follow(db), **params.load_category(db, "scanner"),
         })
@@ -5121,6 +5572,32 @@ def refresh_challengers(db, p) -> dict:
             db, source_pool, generation_id, now_ms, p, stamp,
             source="challenger_daily",
         )
+        severe_copy_liquidations = {
+            str(addr or "").lower()
+            for (addr,) in db.execute(
+                "SELECT addr FROM profile WHERE profile_generation=? "
+                "AND reason='copy_single_liquidation_loss_over_5pct'",
+                (generation_id,),
+            ).fetchall()
+        }
+        severe_copy_core = previous_core & severe_copy_liquidations
+        hard_safety_core |= severe_copy_core
+        for addr in sorted(severe_copy_liquidations):
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="hard_safety", addr=addr, status="rejected",
+                reason="copy_single_liquidation_loss_over_5pct",
+                payload={
+                    "wasCore": addr in previous_core,
+                    "action": (
+                        "exit_only" if addr in previous_core
+                        else "exclude_from_candidate_pool"
+                    ),
+                    "thresholdPct": (
+                        policy.core_max_single_liquidation_loss_pct
+                    ),
+                },
+            )
         p.source_only_profile = False
         pipeline_audit._insert_event(
             db, stamp=stamp, source="challenger_daily",
@@ -5172,26 +5649,93 @@ def refresh_challengers(db, p) -> dict:
             if addr
         )
         fixed_core = set(fixed_core_order)
-        membership_retune_triggered = fixed_core_order != previous_core_order
+        daily_floor_order = tuple(
+            addr for addr in previous_core_order if addr not in hard_safety_core
+        )
+        fixed_decision = _challenger_daily_membership_decision(
+            daily_floor_order, fixed_core_order,
+        )
+        membership_retune_triggered = False
+        retune_attempted = False
+        promotion_blocked_reason = None
         formation = fixed_formation
-        if membership_retune_triggered:
+        publish_core_order = fixed_decision["selected"]
+        if hard_safety_core:
+            promotion_blocked_reason = (
+                "challenger_daily_hard_safety_removal"
+            )
+            publish_core_order = fixed_core_order
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="promotion_review", status="blocked",
+                reason=promotion_blocked_reason,
+                payload={
+                    "previousCore": len(previous_core),
+                    "hardSafetyRemoved": len(hard_safety_core),
+                    "protectedCore": len(daily_floor_order),
+                    "fixedSurfaceCore": len(fixed_core),
+                    "promotionSuppressed": len(fixed_core - set(daily_floor_order)),
+                },
+            )
+            db.commit()
+        elif fixed_decision["mode"] == "promote":
+            retune_attempted = True
             _set_scan_progress(
                 db, stage="challenger_membership_retune",
                 candidates_scanned=len(workset), candidates_total=len(workset),
             )
-            formation = form_quality_prefix(
+            tuned_formation = form_quality_prefix(
                 db, generation_id, stamp, now_ms,
                 retune=True, force_retune=True,
             )
+            tuned_core_order = tuple(
+                str(addr or "").lower()
+                for addr in (tuned_formation.get("selected") or ())
+                if addr
+            )
+            tuned_decision = _challenger_daily_membership_decision(
+                daily_floor_order, tuned_core_order,
+            )
+            if tuned_decision["mode"] == "promote":
+                formation = tuned_formation
+                publish_core_order = tuned_decision["selected"]
+                membership_retune_triggered = True
+            else:
+                promotion_blocked_reason = (
+                    "retuned_proposal_not_strict_superset"
+                )
+                formation = fixed_formation
+                publish_core_order = fixed_core_order
             pipeline_audit._insert_event(
                 db, stamp=stamp, source="challenger_daily",
-                stage="membership_retune", status="ok",
-                reason="core_membership_change_requires_retune",
+                stage="membership_retune",
+                status="ok" if membership_retune_triggered else "blocked",
+                reason=(
+                    "challenger_promotion_retuned"
+                    if membership_retune_triggered
+                    else promotion_blocked_reason
+                ),
                 payload={
                     "previousCore": len(previous_core),
                     "fixedSurfaceCore": len(fixed_core),
                     "added": len(fixed_core - previous_core),
                     "removed": len(previous_core - fixed_core),
+                    "tunedCore": len(tuned_core_order),
+                },
+            )
+            db.commit()
+        elif fixed_decision["mode"] == "carry":
+            promotion_blocked_reason = fixed_decision["reason"]
+            publish_core_order = fixed_core_order
+            pipeline_audit._insert_event(
+                db, stamp=stamp, source="challenger_daily",
+                stage="promotion_review", status="blocked",
+                reason=promotion_blocked_reason,
+                payload={
+                    "previousCore": len(previous_core),
+                    "fixedSurfaceCore": len(fixed_core),
+                    "proposedAdded": len(fixed_core - previous_core),
+                    "proposedRemoved": len(previous_core - fixed_core),
                 },
             )
             db.commit()
@@ -5205,9 +5749,9 @@ def refresh_challengers(db, p) -> dict:
             leaderboard_generation=generation_id, commit=False,
         )
         _apply_formation_params(db, formation, publication_stamp)
-        selection_rows, marginal = _build_explicit_selection(
+        proposed_selection_rows, marginal = _build_explicit_selection(
             db, generation_id, publication_stamp, now_ms,
-            forced_core_order=formation.get("selected") or (),
+            forced_core_order=publish_core_order,
             formation_meta=formation.get("search") or {},
             effective_qualifications=formation.get("qualifications") or {},
             effective_scores=formation.get("scores") or {},
@@ -5216,7 +5760,38 @@ def refresh_challengers(db, p) -> dict:
             effective_score_details=formation.get("scoreDetails") or {},
             effective_replay_params_hash=formation.get("replayParamsHash"),
             audit_stamp=stamp,
+            allow_loo=False,
         )
+        if promotion_blocked_reason:
+            selection_rows = _carry_challenger_daily_core_rows(
+                previous_selection_rows,
+                proposed_selection_rows,
+                daily_floor_order,
+            )
+            marginal = None
+            affected = previous_core | {
+                row.addr for row in proposed_selection_rows
+                if row.role == selection.CORE
+            }
+            final_by_addr = {row.addr: row for row in selection_rows}
+            last_open = {
+                str(addr or "").lower(): value
+                for addr, value in db.execute(
+                    "SELECT addr,last_copyable_open_ms FROM profile"
+                ).fetchall()
+            }
+            for addr in sorted(affected):
+                row = final_by_addr.get(addr)
+                if not row:
+                    continue
+                upsert_wallet_registry(
+                    db, addr, generation=generation_id, seen_at=publication_stamp,
+                    state=row.role, role=row.role,
+                    data_status=row.data_status, reason=row.reason,
+                    last_actionable_open_ms=last_open.get(addr),
+                )
+        else:
+            selection_rows = proposed_selection_rows
         generation.mark_generation_ready(
             db, generation_id, profile_total=len(workset),
             profile_valid=valid_profiles, profile_deferred=deferred_profiles,
@@ -5236,17 +5811,40 @@ def refresh_challengers(db, p) -> dict:
         current_core = _record_explicit_follow_history(
             db, selection_rows, publication_stamp, previous_core, generation_id,
         )
+        removed_core = sorted(previous_core - set(current_core))
+        unexpected_removed = set(removed_core) - hard_safety_core
+        if unexpected_removed:
+            raise RuntimeError(
+                f"challenger_daily_demotion_invariant:{len(unexpected_removed)}"
+            )
+        strategy_reason = (
+            "challenger_daily_hard_safety_exit"
+            if hard_safety_core
+            else (
+                "challenger_daily_promotion_retune"
+                if membership_retune_triggered
+                else (
+                    "challenger_daily_promotion_only_core_carried"
+                    if promotion_blocked_reason
+                    else "challenger_daily_evidence_refresh"
+                )
+            )
+        )
         active_strategy = strategy_revision.create_revision(
             db, generation_id, source="challenger_daily",
-            reason=(
-                "challenger_daily_membership_retune"
-                if membership_retune_triggered
-                else "challenger_daily_strict_membership"
-            ),
+            reason=strategy_reason,
             validation={
-                **(marginal.search_meta or {}),
+                **((marginal.search_meta or {}) if marginal is not None else {}),
                 "marketSnapshot": market_validation,
                 "baseFullGeneration": base_generation,
+                "promotionOnly": True,
+                "promotionBlockedReason": promotion_blocked_reason,
+                "verifiedSourceBlowups": len(verified_source_blowups),
+                "severeCopyLiquidations": len(severe_copy_liquidations),
+                "hardSafetyCoreRemoved": len(hard_safety_core),
+                "carriedCoreEvidenceGeneration": (
+                    previous_generation if promotion_blocked_reason else None
+                ),
             },
             stamp=publication_stamp,
         )
@@ -5265,15 +5863,10 @@ def refresh_challengers(db, p) -> dict:
                 },
             )
         added_core = sorted(set(current_core) - previous_core)
-        removed_core = sorted(previous_core - set(current_core))
         pipeline_audit._insert_event(
             db, stamp=stamp, source="challenger_daily",
             stage="selection_summary", status="ok",
-            reason=(
-                "challenger_daily_membership_retune"
-                if membership_retune_triggered
-                else "challenger_daily_strict_membership"
-            ),
+            reason=strategy_reason,
             payload={
                 "generation": generation_id,
                 "baseFullGeneration": base_generation,
@@ -5283,6 +5876,12 @@ def refresh_challengers(db, p) -> dict:
                 ),
                 "coreAdded": len(added_core), "coreRemoved": len(removed_core),
                 "membershipRetuneTriggered": membership_retune_triggered,
+                "retuneAttempted": retune_attempted,
+                "promotionOnly": True,
+                "promotionBlockedReason": promotion_blocked_reason,
+                "verifiedSourceBlowups": len(verified_source_blowups),
+                "severeCopyLiquidations": len(severe_copy_liquidations),
+                "hardSafetyCoreRemoved": len(hard_safety_core),
                 "strategyRevision": active_strategy["revision"],
             },
         )
@@ -5299,6 +5898,12 @@ def refresh_challengers(db, p) -> dict:
             "coreAdded": len(added_core), "coreRemoved": len(removed_core),
             "retuned": membership_retune_triggered,
             "membershipRetuneTriggered": membership_retune_triggered,
+            "retuneAttempted": retune_attempted,
+            "promotionOnly": True,
+            "promotionBlockedReason": promotion_blocked_reason,
+            "verifiedSourceBlowups": len(verified_source_blowups),
+            "severeCopyLiquidations": len(severe_copy_liquidations),
+            "hardSafetyCoreRemoved": len(hard_safety_core),
             "marketSnapshot": market_snapshot,
             "marketValidation": market_validation, "marketScopeAudit": scope_audit,
             **rest.request_stats(),
@@ -5338,6 +5943,11 @@ def refresh_challengers(db, p) -> dict:
                 1 for row in selection_rows if row.role == selection.CHALLENGER
             ),
             "coreAdded": len(added_core), "coreRemoved": len(removed_core),
+            "promotionOnly": True,
+            "promotionBlockedReason": promotion_blocked_reason,
+            "verifiedSourceBlowups": len(verified_source_blowups),
+            "severeCopyLiquidations": len(severe_copy_liquidations),
+            "hardSafetyCoreRemoved": len(hard_safety_core),
             "portfolioReplay": portfolio_replay,
             "selectionReplay": selection_replay,
             "strategyRevision": active_strategy["revision"],

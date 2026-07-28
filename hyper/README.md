@@ -36,11 +36,11 @@ Candidate coarse filter
 Official Portfolio 30d Perp prefilter
     ↓ Perp ROI ≥ 20%, positive Perp PnL, Perp-profit share ≥ 60%
 Deep fills source quality
-    ↓ standard ≥10 Episodes/70% wins or strong low-frequency 7–9/85%; activity and structural copyability; Top40
+    ↓ closed 30d/7d profit; open loss ≤50% of closed profit; Episode quality/activity/structure; Top40
 Fills-only rough Copy
-    ↓ dynamic 30d/7d both profitable, Copy wins ≥ 60%, open follow ≥ 70%
-Composite score + 70/30 Copy profit priority → unified tuning → strict K-line Copy
-    ↓ profit-ordered Top16 only; final individual 10%/3%, shared 10%/3%; no minimum quota
+    ↓ conservative 30d/7d both profitable, Copy wins ≥ 60%, open follow ≥ 70%
+Composite score + conservative 70/30 Copy profit priority → unified tuning → strict K-line Copy
+    ↓ profit-ordered Top16 only; final individual/shared 10%/3%, open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ forward-only Observer
 Paper copy positions, PnL, and execution audit
@@ -64,8 +64,14 @@ Wallet quality and funded-account membership are separate decisions.
   Both require a true new open within 72 hours and structural copyability. A Top3 concentration check triggers only
   at 70% of gross profit; then the remaining body must still win at least 70% and not lose money. At most the
   best 40 source wallets receive rough replay.
+- Profitability is proved only by complete closed Episodes. Positive unrealized PnL is displayed as a reference
+  and has zero weight. Negative unrealized PnL is charged in full:
+  `qualificationPnl = closedPnl - abs(min(unrealizedPnl, 0))`. Closed PnL must be positive in both 30-day and
+  7-day windows, conservative PnL must remain positive, and 30-day open loss may not exceed 50% of closed
+  profit. This definition is shared by source profiles, individual Copy, shared replay and tuning.
 - Rough Copy uses one continuously compounded `$10,000` comparison account and requires both dynamic 30d and
-  rolling-7d profitability, seven closed Copy Episodes over 30 days, 60% Copy wins, 70% open follow and
+  rolling-7d conservative profitability, positive closed PnL in both windows, an open-loss ratio at or below
+  50%, seven closed Copy Episodes over 30 days, 60% closed-Episode Copy wins, 70% open follow and
   complete valuation. The rolling-7d window has no minimum closed-Episode count.
   Historical replay assumes liquidity was executable. A source flat-to-open lifecycle remains pending until its
   cumulative position reaches the tier minimum notional and is excluded only if it never does. Once confirmed,
@@ -75,15 +81,23 @@ Wallet quality and funded-account membership are separate decisions.
   seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.
   Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
-- The composite score remains the broad quality indicator: profitability 40%, source/Copy win stability 30%,
+- The composite score remains the broad quality indicator: conservative profitability 40%,
+  source/Copy closed-Episode win stability 30%,
   copyability 20% and activity 10%. There is no score floor. Qualified wallets instead form Core by
-  `70% × 30d dynamic Copy return + 30% × 7d dynamic Copy return`, with 30d return, 7d return, composite score
+  `70% × conservative 30d dynamic Copy return + 30% × conservative 7d dynamic Copy return`, with 30d return,
+  7d return, composite score
   and address as fixed tie-breaks. The rough form of that value bounds Top16; the final tuned surface strictly
   replays and reranks those same finalists.
-- Final individual strict replay requires dynamic 30d/7d returns of 10%/3%, 60% Copy wins, 70% open follow,
-  complete data/path evidence and at most three proxy liquidations. Final shared replay requires 10%/3% and
-  70% open follow on both standardized and actual Paper capital. Campaign, weekly-fold, per-close, cost-multiple,
-  maximum-drawdown and 75-point gates do not exist.
+- Final individual strict replay requires conservative dynamic 30d/7d returns of 10%/3%, positive closed PnL,
+  a 30-day open-loss ratio at or below 50%, 60% closed-Episode Copy wins, 70% open follow,
+  complete data/path evidence and at most three proxy liquidations. A separate severity gate rejects a wallet
+  from the rough candidate pool as soon as any liquidated Copy episode loses at least 5% of the dynamic account
+  equity recorded when that episode opened, even if its count is only one. Final shared replay requires
+  conservative 10%/3%, a 30-day open-loss ratio at or below 50%, and 70% open follow on both standardized and
+  actual Paper capital. Campaign, weekly-fold, per-close,
+  cost-multiple, maximum-drawdown and 75-point gates do not exist.
+- Confirmed source-account zeroing liquidations and those >=5% Copy liquidation events are persisted in
+  `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
 - Wallet count and parameters are tuned together over profit-ranked prefixes. The winning surface requalifies every
   individual and receives exactly one conservative path-complete shared replay before publication.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
@@ -129,11 +143,19 @@ The daily job clones the last complete generation's Leaderboard staging rows; it
 API or discover a new wallet. It refreshes official Portfolio evidence, cached-fill deltas, positions, valuation
 and required market paths, then reruns source gates, true 72-hour open/flip activity, canonical 30/14/7 Copy,
 strict Top16 individual replay and strict shared-account replay. The first pass uses `retune=False`; a proposed
-Core addition or removal forces a parameter-grid pass and a second strict certification before atomic
-publication. Missing or incomplete 37-day caches are deferred to the next complete run. A current-Core
-data/path failure prevents publication; an individual Challenger failure remains eligible for the next daily
-attempt because the pool stays anchored to the last successful complete generation. Daily runs never prune
-discovery caches, and an unchanged-Core run does not reset the periodic parameter-retune age.
+Core addition runs a parameter-grid pass only if every incumbent remains in the fixed-surface result, and the
+tuned result must still be a strict superset before atomic publication. Daily refresh never removes or replaces
+an incumbent: such a proposal carries the exact prior Core snapshot into the fresh evidence generation and
+keeps proposed newcomers Challenger. Hard safety has two narrow exceptions: a recent source fill whose
+`liquidatedUser` is that wallet plus fresh standard/affected-dex snapshots showing zero equity/no positions, or
+one canonical Copy liquidation losing at least 5% of its episode-opening dynamic equity. Either removes new-open
+authority immediately and becomes Exit-only while an existing copy is managed. Ordinary losses, sub-5% Paper
+liquidations and rolling-return declines do not trigger these exceptions. Other Core
+demotion is reserved for the Monday/Thursday complete scan. Missing or incomplete 37-day caches are deferred
+to the next complete run. A current-Core data/path failure prevents publication; an individual Challenger
+failure remains eligible for the next daily attempt because the pool stays anchored to the last successful
+complete generation. Daily runs never prune discovery caches, and an unchanged-Core run preserves Core order
+and does not reset the periodic parameter-retune age.
 
 Previously known wallets remain history-incremental, and only complete discovery runs bootstrap or repair 37
 days. The Dashboard rescan button queues the same complete reevaluation; changing scanner settings only persists
@@ -182,16 +204,19 @@ The replay uses the same copyable-fill normalization and shared execution state 
 shared available balance, isolated margin, volatility-tier sizing, leverage caps, deployment and per-coin caps,
 fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 
-A replay starts with standardized `$10,000` equity and continuously compounds it; dynamic return divides net PnL
-by the applicable window-start floating equity. Rough replay uses fills only and is capped at 40 source-quality
+A replay starts with standardized `$10,000` equity and continuously compounds it. Conservative dynamic return
+divides complete closed-Episode PnL minus all current open loss by the applicable window-start floating equity;
+positive open PnL remains reference-only. Rough replay uses fills only and is capped at 40 source-quality
 wallets. Strict replay loads K-line paths only for the profit-ordered Top16 and uses the final tuned parameters.
 There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
 -5%, deep-loss events, recovery and conservative proxy liquidations at our leverage ceiling. Historical maximum
-drawdown is diagnostic only. A wallet may enter tuning with proxy liquidation evidence, then the final tuned
-30-day strict replay permits at most three proxy liquidations per Core wallet. Live account loss is controlled
-separately by the global equity high-water stop (15% by default), which pauses and flattens the account.
+drawdown is diagnostic only. A wallet may enter tuning with sub-5% proxy liquidation evidence, then the final
+tuned 30-day strict replay permits at most three proxy liquidations per Core wallet. One liquidated episode
+losing 5% or more of its opening dynamic Copy equity is a hard rejection regardless of count. Live account loss
+is controlled separately by the global equity high-water stop (15% by default), which pauses and flattens the
+account.
 
 Source-wallet profit high-water is not used as an admission or execution gate. Static per-wallet and
 per-sector slices are also retired: wallets compete only when their positions actually overlap. New opens

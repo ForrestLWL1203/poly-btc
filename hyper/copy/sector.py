@@ -13,6 +13,11 @@ from typing import Mapping
 
 from hyper import config
 from .copy_data import is_copyable_coin
+from .economics import (
+    OPEN_LOSS_RATIO_LIMIT,
+    open_loss_ratio_within_limit,
+    replay_result_profitability,
+)
 from .copy_policy import load_copy_policy
 
 SECTORS = ("crypto", "stock")
@@ -107,7 +112,14 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     policy = load_copy_policy()
     results = {days: _window_result(windows, days) for days in (30, 14, 7)}
     closed = {days: _int(results[days].get("closed_n")) for days in results}
-    pnl = {days: _num(results[days].get("copy_net_pnl")) for days in results}
+    economics = {
+        days: replay_result_profitability(
+            results[days], start_equity=_window_equity(windows, days),
+        )
+        for days in results
+    }
+    pnl = {days: _num(economics[days].get("qualificationPnl")) for days in results}
+    closed_pnl = {days: _num(economics[days].get("closedPnl")) for days in results}
     wins = {
         days: max(0, min(closed[days], _int(results[days].get("wins"))))
         for days in results
@@ -132,12 +144,33 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
     base = {
         "closed": {str(days): closed[days] for days in (30, 14, 7)},
         "pnl": {str(days): pnl[days] for days in (30, 14, 7)},
+        "closedPnl": {str(days): closed_pnl[days] for days in (30, 14, 7)},
+        "openProfitReference": {
+            str(days): _num(economics[days].get("openProfitReference"))
+            for days in (30, 14, 7)
+        },
+        "openLoss": {
+            str(days): _num(economics[days].get("openLoss"))
+            for days in (30, 14, 7)
+        },
+        "openLossRatio": {
+            str(days): economics[days].get("openLossRatio")
+            for days in (30, 14, 7)
+        },
+        "profitabilityBasis": economics[30].get("basis"),
         "returns": {"30": return30, "14": return14, "7": return7},
         "winRate": {str(days): win_rate[days] for days in (30, 14, 7)},
         "evidenceDays": evidence_days,
         "simulatedPathRisk": {
             "liquidations30d": _int(primary.get("liquidations")),
             "liquidations7d": _int(results[7].get("liquidations")),
+            "maxLiquidationLossPct30d": _num(
+                primary.get("max_liquidation_loss_pct")
+            ),
+            "maxLiquidationLoss30d": _num(primary.get("max_liquidation_loss")),
+            "maxLiquidationLossCoin30d": primary.get(
+                "max_liquidation_loss_coin"
+            ),
             "intratradeMaxDrawdown": _num(primary.get("intratrade_max_drawdown")),
             "deepBagEvents": _int(primary.get("deep_bag_event_n")),
             "failedDeepBagEvents": _int(primary.get("failed_deep_bag_n")),
@@ -172,6 +205,17 @@ def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
             "reason": "板块30天严格Copy净收益不为正",
             "watch": False,
         }
+    if not open_loss_ratio_within_limit(economics[30]):
+        return {
+            **base,
+            "allow": False,
+            "status": "sector_open_loss_over_50pct",
+            "reason": (
+                "板块当前浮亏超过30日已平净利润的"
+                f"{OPEN_LOSS_RATIO_LIMIT * 100:.0f}%"
+            ),
+            "watch": False,
+        }
     if closed[30] < 2:
         return {
             **base,
@@ -194,6 +238,8 @@ def _compact_result(result: Mapping) -> dict:
     keys = (
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "valuation_status",
         "valuation_coverage", "closed_n", "wins", "liquidations", "fee_drag",
+        "max_liquidation_loss_pct", "max_liquidation_loss",
+        "max_liquidation_loss_coin", "max_liquidation_loss_closed_at",
         "target_open_events", "raw_target_open_events", "small_open_excluded_n",
         "effective_target_open_events", "opened_n", "raw_open_capture_rate",
         "effective_open_follow_rate", "open_execution_audit",
@@ -541,6 +587,18 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
             if key in primary:
                 out[f"copy_bt_{key}"] = primary[key]
         out["copy_bt_liquidations"] = _int(primary.get("liquidations"))
+        out["copy_bt_max_liquidation_loss_pct"] = _num(
+            primary.get("max_liquidation_loss_pct")
+        )
+        out["copy_bt_max_liquidation_loss"] = _num(
+            primary.get("max_liquidation_loss")
+        )
+        out["copy_bt_max_liquidation_loss_coin"] = primary.get(
+            "max_liquidation_loss_coin"
+        )
+        out["copy_bt_max_liquidation_loss_closed_at"] = primary.get(
+            "max_liquidation_loss_closed_at"
+        )
         out["copy_bt_fee_drag"] = _num(primary.get("fee_drag"))
         out["copy_bt_unrealized_pnl"] = _num(primary.get("unrealized_pnl"))
         out["copy_bt_valuation_status"] = primary.get("valuation_status") or "complete"
@@ -587,6 +645,10 @@ def apply_allowed_sector_copy_metrics(metrics: Mapping) -> dict:
         agg = _evidence_window(copy_json, evidence_sectors, days)
         if agg:
             out[net_key] = agg["copy_net_pnl"]
+            out[f"copy_bt_{days}d_closed_net_pnl"] = agg.get(
+                "closed_net_pnl",
+                _num(agg.get("copy_net_pnl")) - _num(agg.get("unrealized_pnl")),
+            )
             out[n_key] = agg["closed_n"]
             out[f"copy_bt_{days}d_wins"] = _int(agg.get("wins"))
             out[f"copy_bt_{days}d_win_rate"] = (

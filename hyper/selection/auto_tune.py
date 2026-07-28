@@ -23,6 +23,10 @@ from hyper.copy.copy_backtest import (
 )
 from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy.economics import (
+    open_loss_ratio_within_limit,
+    replay_result_profitability,
+)
 from hyper.copy.sector import parse_json_obj
 from hyper.market import generation_market, price_path
 from hyper.util import f, now_iso
@@ -163,7 +167,7 @@ def _enough_sample(result: dict, days: int) -> bool:
 
 
 def _result_pnl(result: dict) -> float:
-    return float(result.get("copy_net_pnl") or 0.0)
+    return float(replay_result_profitability(result).get("qualificationPnl") or 0.0)
 
 
 def _candidate_score(candidate: dict) -> float:
@@ -222,8 +226,12 @@ def _candidate_valid(candidate: dict, baseline: dict) -> bool:
         return False
 
     for days, result in windows.items():
-        if _enough_sample(result, int(days)) and _result_pnl(result) <= 0:
-            return False
+        if _enough_sample(result, int(days)):
+            economics = replay_result_profitability(result)
+            if _result_pnl(result) <= 0:
+                return False
+            if int(days) == 30 and not open_loss_ratio_within_limit(economics):
+                return False
     return True
 
 
@@ -1089,7 +1097,10 @@ def _enqueue_reload(db, source: str) -> None:
 
 def _compact_backtest(result: dict) -> dict:
     keys = (
-        "closed_n", "open_n", "wins", "liquidations", "copy_win_rate",
+        "closed_n", "open_n", "wins", "liquidations",
+        "max_liquidation_loss_pct", "max_liquidation_loss",
+        "max_liquidation_loss_coin", "max_liquidation_loss_closed_at",
+        "copy_win_rate",
         "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "fee_drag",
         "margin_equity_pct", "initial_margin_equity", "window_start_equity",
         "window_end_equity",
