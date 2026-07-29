@@ -124,6 +124,59 @@ class AutoTuneTests(unittest.TestCase):
         self.assertGreater(starts[2], starts[1])
         self.assertGreater(starts[3], starts[2])
 
+    def test_walk_forward_batch_replays_baseline_once_and_deduplicates_finalists(self):
+        prepared = {
+            "fills": [], "path": [], "startMs": 0, "totalDays": 30,
+            "foldDays": 10, "foldCount": 3, "foldFillCounts": [0, 0, 0],
+        }
+        follow = {
+            key: float(index + 1)
+            for index, key in enumerate(auto_tune.TUNE_KEYS + auto_tune.ADD_TUNE_KEYS)
+        }
+        proposal_a = {**follow, "STABLE_LEV_CAP": 20.0}
+        proposal_b = {**follow, "STABLE_LEV_CAP": 25.0}
+
+        def surface(overrides, **_kwargs):
+            value = float(overrides["STABLE_LEV_CAP"])
+            return {
+                "folds": [
+                    {
+                        "startMs": index * 10, "endMs": (index + 1) * 10,
+                        "startEquity": 10_000.0, "endEquity": 10_000.0 + value,
+                        "netPnl": value, "maxDrawdown": 0.0, "liquidations": 0,
+                    }
+                    for index in range(3)
+                ],
+                "openRate": .95, "capacityFit": .95,
+                "masterLeverageCoverage": 1.0,
+                "maintenanceMarginCoverage": 1.0,
+                "pricePathCoverage": 1.0,
+            }
+
+        def ordered(fn, rows, *, initializer, initargs, **_kwargs):
+            initializer(*initargs)
+            return [fn(row) for row in rows]
+
+        with patch.object(
+            auto_tune, "_prepare_walk_forward_context", return_value=prepared,
+        ), patch.object(
+            auto_tune, "_walk_forward_surface", side_effect=surface,
+        ) as replay, patch.object(
+            auto_tune.replay_parallel, "map_ordered", side_effect=ordered,
+        ):
+            results = auto_tune._walk_forward_validation_batch(
+                ["0xaaa"], follow, [proposal_a, proposal_a, proposal_b],
+                {}, {30: []}, 30 * 86_400_000,
+            )
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(replay.call_count, 3)  # one baseline + two unique proposals
+        self.assertEqual(results[0], results[1])
+        self.assertNotEqual(
+            results[0]["folds"][0]["challengerNet"],
+            results[2]["folds"][0]["challengerNet"],
+        )
+
     def test_recent_tune_windows_slice_one_compounding_account(self):
         day = 86_400_000
 
@@ -618,6 +671,41 @@ class AutoTuneTests(unittest.TestCase):
             {row["marker"] for row in selected},
             {"baseline", "profit", "safest", "capacity"},
         )
+
+    def test_candidate_batch_cache_reuses_identical_parameter_surface(self):
+        db = self._db()
+        params.seed_params(db)
+        follow = params.load_follow(db)
+        values = {key: float(follow[key]) for key in auto_tune.TUNE_KEYS}
+        candidates = [
+            auto_tune._candidate_from_params(values, axis="first"),
+            auto_tune._candidate_from_params(values, axis="duplicate"),
+        ]
+
+        def evaluate(_db, _addrs, _follow, candidate, **_kwargs):
+            return {
+                **candidate,
+                "params": dict(candidate["params"]),
+                "windows": {30: {
+                    "copy_net_pnl": 1000.0, "closed_n": 10,
+                    "open_fill_rate": .95, "capacity_open_fit": .95,
+                    "liquidations": 0, "skip_reasons": {},
+                }},
+            }
+
+        with patch.object(
+            auto_tune, "evaluate_tune_candidate", side_effect=evaluate,
+        ) as replay:
+            result = auto_tune._evaluate_candidates_parallel(
+                candidates,
+                kind="tune", addrs=["0xaaa"], follow=follow, sigmas={},
+                now_ms=1, window_fills={30: []}, path_rows=None,
+                path_meta={}, market_ctx={}, primary_only=True, result_cache={},
+            )
+
+        self.assertEqual(replay.call_count, 1)
+        self.assertEqual([row["axis"] for row in result], ["first", "duplicate"])
+        self.assertEqual(result[0]["windows"], result[1]["windows"])
 
     def test_leverage_polish_changes_one_tier_at_a_time(self):
         base = {

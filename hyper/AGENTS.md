@@ -440,6 +440,12 @@ closure rounds when the final surface changes ranking. Generation-scoped prefix 
 metrics keyed by the membership hash and parameter surface, so a retry resumes completed strict prefix work
 without retaining full trajectories or raw membership addresses.
 
+Within one exact-membership tune, identical parameter surfaces are replayed once even if several search stages
+rediscover them. Final path validation prepares one immutable fills/candle context, replays the active baseline
+once, and evaluates all distinct Pareto finalists as one CPU-bounded batch. Baseline and finalist paths still use
+the complete continuous account, liquidation, capacity and fold contract; batching changes scheduling and reuse,
+not the objective or evidence.
+
 Current Paper defaults deliberately allow the full closed loop:
 
 - `AUTO_TUNE_MODE=apply`;

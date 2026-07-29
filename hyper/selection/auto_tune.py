@@ -77,6 +77,17 @@ def _evaluate_candidate_process(task):
     )
 
 
+def _evaluate_walk_forward_surface_process(overrides):
+    context = _PROCESS_REPLAY_CONTEXT
+    return _walk_forward_surface(
+        overrides,
+        sigmas=context["sigmas"],
+        market_ctx=context["market_ctx"],
+        path_meta=context["path_meta"],
+        prepared=context["walk_forward"],
+    )
+
+
 def margin_add_capacity_ceilings(follow: dict) -> dict[str, float]:
     """Per-tier margin ceilings that preserve four executable smart-add slots."""
     margin_equity_pct = max(1e-9, float(
@@ -1148,10 +1159,61 @@ def _evaluate_candidates_parallel(
     path_meta: dict,
     market_ctx: dict,
     primary_only: bool = False,
+    result_cache: dict | None = None,
 ) -> list[dict]:
     """Evaluate one independent candidate batch using CPU-count-aware pure workers."""
     rows = list(candidates)
     evaluator = evaluate_add_candidate if kind == "add" else evaluate_tune_candidate
+    if result_cache is not None:
+        def marker(candidate):
+            proposal = (
+                follow_overrides_for_add_candidate(follow, candidate)
+                if kind == "add" else
+                follow_overrides_for_tune_candidate(follow, candidate)
+            )
+            return (
+                str(kind), bool(primary_only),
+                tuple(
+                    round(float(proposal.get(key, 0.0)), 12)
+                    for key in (*TUNE_KEYS, *ADD_TUNE_KEYS)
+                ),
+            )
+
+        def hydrate(cached, candidate):
+            out = dict(cached)
+            # Preserve the current search-axis provenance while reusing the immutable economics.
+            for key in (
+                "axis", "mult", "gap_k", "pos_gap_k", "shrink_g", "max_hard",
+                "distance_keys",
+            ):
+                if key in candidate:
+                    out[key] = candidate[key]
+            return out
+
+        markers = [marker(candidate) for candidate in rows]
+        missing = []
+        missing_markers = []
+        seen_missing = set()
+        for candidate, key in zip(rows, markers):
+            if key in result_cache or key in seen_missing:
+                continue
+            seen_missing.add(key)
+            missing.append(candidate)
+            missing_markers.append(key)
+        if missing:
+            evaluated = _evaluate_candidates_parallel(
+                missing,
+                kind=kind, addrs=addrs, follow=follow, sigmas=sigmas,
+                now_ms=now_ms, window_fills=window_fills,
+                path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+                primary_only=primary_only, result_cache=None,
+            )
+            for key, value in zip(missing_markers, evaluated):
+                result_cache[key] = value
+        return [
+            hydrate(result_cache[key], candidate)
+            for key, candidate in zip(markers, rows)
+        ]
     if getattr(evaluator, "__module__", None) != __name__:
         # Unit tests and operator diagnostics may temporarily inject an evaluator.  Such callables are not
         # importable in spawned workers; preserve the injected contract in-process.
@@ -1327,21 +1389,10 @@ def _proposal_direction(current: dict, proposed: dict) -> tuple[int, ...]:
     return tuple(out)
 
 
-def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms,
-                             path_rows=None, path_meta=None, market_ctx=None, *,
-                             fold_days=10, fold_count=3) -> dict:
-    """Reject overfit proposals on disjoint folds of one continuous capital path.
-
-    The old implementation started a fresh ``INITIAL_BALANCE`` account for every fold.  That made later
-    weeks ignore profits already banked by the same 30-day strategy, so margin sizing, deploy room,
-    capacity fit and open rate were all evaluated on the wrong account size.  Replay each surface once,
-    then slice its realized/marked equity path into adjacent folds.
-    """
+def _prepare_walk_forward_context(window_fills, now_ms, path_rows, *,
+                                  fold_days=10, fold_count=3) -> dict:
     max_days = max(window_fills) if window_fills else 30
     fills = prepare_replay_fills((window_fills or {}).get(max_days) or [])
-    market_ctx = market_ctx or {}
-    base_overrides = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
-    proposal_overrides = {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"}
     warmup_ms = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0) * 86400_000
     fold_days = max(1, int(fold_days))
     fold_count = max(1, int(fold_count))
@@ -1355,97 +1406,117 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         path_rows, continuous_fills,
         start_ms=start_ms - warmup_ms, end_ms=int(now_ms),
     )
+    fold_fill_counts = []
+    for index in range(fold_count):
+        lo = start_ms + index * fold_days * 86_400_000
+        hi = lo + fold_days * 86_400_000
+        fold_fill_counts.append(sum(
+            lo <= int(row.get("time") or 0) < hi for row in continuous_fills
+        ))
+    return {
+        "fills": continuous_fills,
+        "path": continuous_path,
+        "startMs": start_ms,
+        "totalDays": total_days,
+        "foldDays": fold_days,
+        "foldCount": fold_count,
+        "foldFillCounts": fold_fill_counts,
+    }
 
-    def replay(overrides):
-        warm = run_backtest(
-            "portfolio", continuous_fills, sigmas=sigmas, overrides=overrides,
-            market_ctx=market_ctx, price_path=continuous_path, price_path_meta=path_meta,
-        )
-        return slice_backtest_result(warm, start_ms, window_days=total_days)
 
-    baseline = replay(base_overrides)
-    challenger = replay(proposal_overrides)
+def _walk_forward_surface(overrides, *, sigmas, market_ctx, path_meta, prepared) -> dict:
+    warm = run_backtest(
+        "portfolio", prepared["fills"], sigmas=sigmas, overrides=overrides,
+        market_ctx=market_ctx or {}, price_path=prepared["path"], price_path_meta=path_meta,
+    )
+    result = slice_backtest_result(
+        warm, prepared["startMs"], window_days=prepared["totalDays"],
+    )
+    positions = list(result.get("positions") or ())
+    path_samples = sorted(
+        (
+            (int(row.get("time") or 0), float(row.get("equity") or 0.0))
+            for row in (result.get("path_equity_samples") or ())
+            if int(row.get("time") or 0) > 0 and float(row.get("equity") or 0.0) > 0
+        ),
+        key=lambda row: row[0],
+    )
+    initial_equity = float(
+        result.get("window_start_equity")
+        or result.get("initial_margin_equity")
+        or config.INITIAL_BALANCE
+    )
 
-    def continuous_folds(result):
-        positions = list(result.get("positions") or ())
-        path_samples = sorted(
+    def equity_at(stamp, *, fallback):
+        value = fallback
+        for sample_stamp, equity in path_samples:
+            if sample_stamp > stamp:
+                break
+            value = equity
+        return value
+
+    rows = []
+    carried_equity = initial_equity
+    fold_days = int(prepared["foldDays"])
+    for index in range(int(prepared["foldCount"])):
+        lo = int(prepared["startMs"]) + index * fold_days * 86_400_000
+        hi = lo + fold_days * 86_400_000
+        start_equity = max(1.0, equity_at(lo, fallback=carried_equity))
+        end_equity = max(1.0, equity_at(hi, fallback=start_equity))
+        fold_positions = sorted(
             (
-                (int(row.get("time") or 0), float(row.get("equity") or 0.0))
-                for row in (result.get("path_equity_samples") or ())
-                if int(row.get("time") or 0) > 0 and float(row.get("equity") or 0.0) > 0
+                position for position in positions
+                if lo <= int(position.get("closed_at") or 0) < hi
             ),
-            key=lambda row: row[0],
+            key=lambda position: int(position.get("closed_at") or 0),
         )
-        initial_equity = float(
-            result.get("window_start_equity")
-            or result.get("initial_margin_equity")
-            or config.INITIAL_BALANCE
-        )
-
-        def equity_at(stamp, *, fallback):
-            value = fallback
-            for sample_stamp, equity in path_samples:
-                if sample_stamp > stamp:
-                    break
-                value = equity
-            return value
-
-        rows = []
-        carried_equity = initial_equity
-        for index in range(fold_count):
-            lo = start_ms + index * fold_days * 86_400_000
-            hi = lo + fold_days * 86_400_000
-            start_equity = max(1.0, equity_at(lo, fallback=carried_equity))
-            end_equity = max(1.0, equity_at(hi, fallback=start_equity))
-            fold_positions = sorted(
-                (
-                    position for position in positions
-                    if lo <= int(position.get("closed_at") or 0) < hi
-                ),
-                key=lambda position: int(position.get("closed_at") or 0),
+        points = [start_equity]
+        points.extend(equity for stamp, equity in path_samples if lo < stamp <= hi)
+        if len(points) == 1:
+            running = start_equity
+            for position in fold_positions:
+                running += float(position.get("net_pnl") or 0.0)
+                points.append(running)
+            end_equity = running
+        peak = points[0]
+        max_drawdown = 0.0
+        for equity in points:
+            peak = max(peak, equity)
+            max_drawdown = max(
+                max_drawdown, (peak - equity) / peak if peak > 0 else 0.0,
             )
-            points = [start_equity]
-            points.extend(equity for stamp, equity in path_samples if lo < stamp <= hi)
-            if len(points) == 1:
-                running = start_equity
-                for position in fold_positions:
-                    running += float(position.get("net_pnl") or 0.0)
-                    points.append(running)
-                end_equity = running
-            peak = points[0]
-            max_drawdown = 0.0
-            for equity in points:
-                peak = max(peak, equity)
-                max_drawdown = max(
-                    max_drawdown, (peak - equity) / peak if peak > 0 else 0.0,
-                )
-            carried_equity = end_equity
-            rows.append({
-                "startMs": lo,
-                "endMs": hi,
-                "startEquity": start_equity,
-                "endEquity": end_equity,
-                "netPnl": end_equity - start_equity,
-                "maxDrawdown": max_drawdown,
-                "liquidations": sum(
-                    1 for position in fold_positions
-                    if position.get("status") == "liquidated"
-                ),
-            })
-        return rows
+        carried_equity = end_equity
+        rows.append({
+            "startMs": lo,
+            "endMs": hi,
+            "startEquity": start_equity,
+            "endEquity": end_equity,
+            "netPnl": end_equity - start_equity,
+            "maxDrawdown": max_drawdown,
+            "liquidations": sum(
+                1 for position in fold_positions
+                if position.get("status") == "liquidated"
+            ),
+        })
+    return {
+        "folds": rows,
+        "openRate": float(
+            result.get("actionable_open_rate", result.get("open_fill_rate")) or 0.0
+        ),
+        "capacityFit": float(result.get("capacity_open_fit") or 0.0),
+        "masterLeverageCoverage": float(result.get("master_leverage_coverage") or 0.0),
+        "maintenanceMarginCoverage": float(
+            result.get("maintenance_margin_coverage") or 0.0
+        ),
+        "pricePathCoverage": float(result.get("price_path_coverage") or 0.0),
+    }
 
-    baseline_folds = continuous_folds(baseline)
-    challenger_folds = continuous_folds(challenger)
+
+def _compose_walk_forward_validation(baseline, challenger, prepared) -> dict:
+    baseline_folds = list(baseline.get("folds") or ())
+    challenger_folds = list(challenger.get("folds") or ())
     compact_folds = []
     wins = 0
-    baseline_open_rate = float(
-        baseline.get("actionable_open_rate", baseline.get("open_fill_rate")) or 0.0
-    )
-    challenger_open_rate = float(
-        challenger.get("actionable_open_rate", challenger.get("open_fill_rate")) or 0.0
-    )
-    baseline_capacity = float(baseline.get("capacity_open_fit") or 0.0)
-    challenger_capacity = float(challenger.get("capacity_open_fit") or 0.0)
     for index, (base_fold, challenger_fold) in enumerate(zip(
         baseline_folds, challenger_folds,
     )):
@@ -1453,22 +1524,19 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         challenger_net = float(challenger_fold.get("netPnl") or 0.0)
         win = challenger_net > base_net
         wins += int(win)
-        lo, hi = int(base_fold["startMs"]), int(base_fold["endMs"])
         compact_folds.append({
             "fold": index + 1,
-            "fills": sum(
-                lo <= int(row.get("time") or 0) < hi for row in continuous_fills
-            ),
+            "fills": int((prepared.get("foldFillCounts") or [])[index]),
             "baselineNet": base_net,
             "challengerNet": challenger_net,
             "baselineStartEquity": float(base_fold.get("startEquity") or 0.0),
             "challengerStartEquity": float(challenger_fold.get("startEquity") or 0.0),
             "baselineMaxDD": float(base_fold.get("maxDrawdown") or 0.0),
             "challengerMaxDD": float(challenger_fold.get("maxDrawdown") or 0.0),
-            "baselineOpenRate": baseline_open_rate,
-            "challengerOpenRate": challenger_open_rate,
-            "baselineCapacityFit": baseline_capacity,
-            "challengerCapacityFit": challenger_capacity,
+            "baselineOpenRate": float(baseline.get("openRate") or 0.0),
+            "challengerOpenRate": float(challenger.get("openRate") or 0.0),
+            "baselineCapacityFit": float(baseline.get("capacityFit") or 0.0),
+            "challengerCapacityFit": float(challenger.get("capacityFit") or 0.0),
             "baselineLiquidations": int(base_fold.get("liquidations") or 0),
             "challengerLiquidations": int(challenger_fold.get("liquidations") or 0),
             "win": win,
@@ -1477,14 +1545,98 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
         "folds": compact_folds,
         "foldWins": wins,
         "holdout": compact_folds[-1] if compact_folds else {},
-        "masterLeverageCoverage": float(challenger.get("master_leverage_coverage") or 0.0),
+        "masterLeverageCoverage": float(challenger.get("masterLeverageCoverage") or 0.0),
         "maintenanceMarginCoverage": float(
-            challenger.get("maintenance_margin_coverage") or 0.0
+            challenger.get("maintenanceMarginCoverage") or 0.0
         ),
-        "pricePathCoverage": float(challenger.get("price_path_coverage") or 0.0),
-        "foldDays": fold_days,
-        "foldCount": fold_count,
+        "pricePathCoverage": float(challenger.get("pricePathCoverage") or 0.0),
+        "foldDays": int(prepared["foldDays"]),
+        "foldCount": int(prepared["foldCount"]),
     }
+
+
+def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_ms,
+                             path_rows=None, path_meta=None, market_ctx=None, *,
+                             fold_days=10, fold_count=3,
+                             prepared_context=None, baseline_surface=None) -> dict:
+    """Reject overfit proposals on disjoint folds of one continuous capital path.
+
+    Each parameter surface is replayed exactly once.  Callers evaluating several finalists may reuse the
+    prepared fills/path and one active-baseline surface; shorter folds are views of those continuous paths,
+    never independent reset-to-$10k accounts.
+    """
+    prepared = prepared_context or _prepare_walk_forward_context(
+        window_fills, now_ms, path_rows,
+        fold_days=fold_days, fold_count=fold_count,
+    )
+    market_ctx = market_ctx or {}
+    baseline = baseline_surface or _walk_forward_surface(
+        {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"},
+        sigmas=sigmas, market_ctx=market_ctx, path_meta=path_meta, prepared=prepared,
+    )
+    challenger = _walk_forward_surface(
+        {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"},
+        sigmas=sigmas, market_ctx=market_ctx, path_meta=path_meta, prepared=prepared,
+    )
+    return _compose_walk_forward_validation(baseline, challenger, prepared)
+
+
+def _walk_forward_validation_batch(addrs, follow, proposals, sigmas, window_fills, now_ms,
+                                   path_rows=None, path_meta=None, market_ctx=None, *,
+                                   fold_days=10, fold_count=3) -> list[dict]:
+    """Replay the active baseline once and all unique finalist surfaces in one CPU-bounded batch."""
+    proposals = [dict(proposal or {}) for proposal in proposals]
+    if not proposals:
+        return []
+    if getattr(_walk_forward_validation, "__module__", None) != __name__:
+        # Preserve monkey-patched diagnostics/tests without spawning an unimportable callable.
+        return [
+            _walk_forward_validation(
+                addrs, follow, proposal, sigmas, window_fills, now_ms,
+                path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+                fold_days=fold_days, fold_count=fold_count,
+            )
+            for proposal in proposals
+        ]
+    prepared = _prepare_walk_forward_context(
+        window_fills, now_ms, path_rows,
+        fold_days=fold_days, fold_count=fold_count,
+    )
+    def surface_marker(overrides):
+        return tuple(
+            round(float(overrides.get(key, follow.get(key, 0.0))), 12)
+            for key in (*TUNE_KEYS, *ADD_TUNE_KEYS)
+        )
+
+    baseline_overrides = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
+    all_overrides = [baseline_overrides]
+    baseline_marker = surface_marker(baseline_overrides)
+    unique_index = {baseline_marker: 0}
+    proposal_indices = []
+    for proposal in proposals:
+        overrides = {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"}
+        marker = surface_marker(overrides)
+        if marker not in unique_index:
+            unique_index[marker] = len(all_overrides)
+            all_overrides.append(overrides)
+        proposal_indices.append(unique_index[marker])
+    context = {
+        "sigmas": sigmas,
+        "market_ctx": market_ctx or {},
+        "path_meta": path_meta,
+        "walk_forward": prepared,
+    }
+    surfaces = replay_parallel.map_ordered(
+        _evaluate_walk_forward_surface_process,
+        all_overrides,
+        initializer=_init_process_replay_context,
+        initargs=(context,),
+    )
+    baseline = surfaces[0]
+    return [
+        _compose_walk_forward_validation(baseline, surfaces[index], prepared)
+        for index in proposal_indices
+    ]
 
 
 def _proposal_apply_eligibility(db, addrs, follow, current, proposal, validation, stamp) -> dict:
@@ -2007,6 +2159,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         )
         path_rows = prepare_price_path(path_rows)
         validation_path_rows, validation_path_meta = path_rows, path_meta
+    candidate_result_cache = {}
     # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
     # for a full leverage Cartesian grid.
@@ -2021,6 +2174,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=True, market_ctx=market_ctx,
+        result_cache=candidate_result_cache,
     )
     quick_baseline = next(
         (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
@@ -2057,6 +2211,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=True, market_ctx=market_ctx,
+        result_cache=candidate_result_cache,
     )
     joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
@@ -2083,6 +2238,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=(coarse_search or efficient_search), market_ctx=market_ctx,
+        result_cache=candidate_result_cache,
     )
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
@@ -2109,6 +2265,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=(coarse_search or efficient_search), market_ctx=market_ctx,
+        result_cache=candidate_result_cache,
     ))
     selected_margin_seed = choose_margin_candidate(
         [selected_joint, *margin_candidates], baseline,
@@ -2132,6 +2289,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
             primary_only=efficient_search, market_ctx=market_ctx,
+            result_cache=candidate_result_cache,
         )
         if not round_candidates:
             break
@@ -2178,6 +2336,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
             path_rows=path_rows, path_meta=path_meta,
             primary_only=efficient_search, market_ctx=market_ctx,
+            result_cache=candidate_result_cache,
         )
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
                             add_candidates[0] if add_candidates else None)
@@ -2224,6 +2383,16 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             seen_sizing.add(key)
             combined_sizing.append(candidate)
         sizing_options = combined_sizing[:max(1, finalist_limit)]
+    if not any(
+        _same_tune_values(candidate.get("params") or {}, base)
+        for candidate in sizing_options
+    ):
+        # The active baseline is a required Pareto control. Admission leaders may reorder the shortlist,
+        # but they may not evict the only exact baseline before path validation.
+        sizing_options = [
+            *sizing_options[:max(0, finalist_limit - 1)],
+            baseline,
+        ]
     if add_candidates and add_baseline:
         ranked_add = sorted(
             add_candidates,
@@ -2250,28 +2419,57 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                 break
     else:
         add_options = [selected_add_params]
-    combined_options = sorted(
+    all_combined_options = sorted(
         (
             (sizing_rank + add_rank, sizing_rank, add_rank, sizing_candidate, add_params)
             for sizing_rank, sizing_candidate in enumerate(sizing_options)
             for add_rank, add_params in enumerate(add_options)
         ),
         key=lambda row: (row[0], row[1], row[2]),
-    )[:max(1, finalist_limit)]
+    )
+    combined_options = all_combined_options[:max(1, finalist_limit)]
+    baseline_option = next((
+        row for row in all_combined_options
+        if _same_tune_values(row[3].get("params") or {}, base)
+        and _same_add_values(row[4], current_add)
+    ), None)
+    if baseline_option is not None and baseline_option not in combined_options:
+        combined_options = [
+            *combined_options[:max(0, finalist_limit - 1)],
+            baseline_option,
+        ]
+    prepared_options = []
+    for row in combined_options:
+        check_budget("walk_forward")
+        sizing_candidate, finalist_add_params = row[3], row[4]
+        sizing_params = sizing_candidate.get("params") or base
+        prepared_options.append((
+            row, sizing_candidate, sizing_params, finalist_add_params,
+            {**sizing_params, **finalist_add_params},
+        ))
+    batched_validations = (
+        _walk_forward_validation_batch(
+            addrs, follow, [item[4] for item in prepared_options],
+            sigmas, window_fills, now_ms,
+            path_rows=validation_path_rows, path_meta=validation_path_meta,
+            market_ctx=market_ctx, fold_days=10, fold_count=3,
+        )
+        if formation_admission else
+        [None] * len(prepared_options)
+    )
     finalist_results = []
     chosen = None
     eligible_choices = []
-    for _rank, _sizing_rank, _add_rank, sizing_candidate, finalist_add_params in combined_options:
-        check_budget("walk_forward")
-        sizing_params = sizing_candidate.get("params") or base
-        combined = {**sizing_params, **finalist_add_params}
-        validation = _walk_forward_validation(
-            addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=validation_path_rows, path_meta=validation_path_meta,
-            market_ctx=market_ctx,
-            fold_days=10,
-            fold_count=3,
-        )
+    for option, validation in zip(prepared_options, batched_validations):
+        _row, sizing_candidate, sizing_params, finalist_add_params, combined = option
+        if validation is None:
+            validation = _walk_forward_validation(
+                addrs, follow, combined, sigmas, window_fills, now_ms,
+                path_rows=validation_path_rows, path_meta=validation_path_meta,
+                market_ctx=market_ctx,
+                fold_days=10,
+                fold_count=3,
+            )
         model = (
             _formation_model_validation(validation, load_copy_policy(follow))
             if formation_admission else _model_validation(validation, load_copy_policy(follow))
@@ -2333,13 +2531,21 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         selected_params = {key: float(current[key]) for key in TUNE_KEYS}
         selected_add_params = {key: float(current_add[key]) for key in ADD_TUNE_KEYS}
         combined = {**selected_params, **selected_add_params}
-        validation = _walk_forward_validation(
-            addrs, follow, combined, sigmas, window_fills, now_ms,
-            path_rows=validation_path_rows, path_meta=validation_path_meta,
-            market_ctx=market_ctx,
-            fold_days=10,
-            fold_count=3,
-        )
+        validation = next((
+            value for item, value in zip(prepared_options, batched_validations)
+            if _same_tune_values(item[4], combined)
+            and _same_add_values(item[4], combined)
+        ), None)
+        if validation is None:
+            validation = _walk_forward_validation_batch(
+                addrs, follow, [combined], sigmas, window_fills, now_ms,
+                path_rows=validation_path_rows, path_meta=validation_path_meta,
+                market_ctx=market_ctx, fold_days=10, fold_count=3,
+            )[0] if formation_admission else _walk_forward_validation(
+                addrs, follow, combined, sigmas, window_fills, now_ms,
+                path_rows=validation_path_rows, path_meta=validation_path_meta,
+                market_ctx=market_ctx, fold_days=10, fold_count=3,
+            )
         chosen = (selected, selected_params, selected_add_params, combined, validation)
     selected, selected_params, selected_add_params, proposal_combined, walk_forward = chosen
     selected_margins = {key: selected_params[key] for key in MARGIN_KEYS}

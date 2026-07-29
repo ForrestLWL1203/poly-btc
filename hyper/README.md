@@ -304,6 +304,12 @@ strict 30-day portfolio certification supplies the estimated shared-account resu
 list. Publication also persists the exact final-surface individual 30/14/7 replay fields used for score and
 admission, so Dashboard score and wallet economics never fall back to a different parameter surface.
 
+An exact-membership tune memoizes duplicate parameter surfaces across its axis, combination, margin-polish and
+finalist stages. Final walk-forward certification replays the active baseline once and all unique finalists in
+one CPU-aware batch over the same prepared fills/candle path; it does not rerun the identical baseline for every
+candidate. One-core hosts execute the same batch serially, while larger hosts scale to their configured worker
+ceiling without changing ordering or results.
+
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
 margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;
 the exact best-profit surface is always retained. Only inside the configured near-best profit band does the tuner
