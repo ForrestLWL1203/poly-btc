@@ -620,6 +620,18 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("db.commit()", first_tail)
         self.assertIn("db.commit()", second_tail)
 
+    def test_auto_tune_releases_seed_write_before_expensive_grid(self):
+        source = inspect.getsource(scanner.auto_tune.maybe_tune_margins)
+        seed = source.index("params.seed_params(db)")
+        fill_load = source.index("window_fills = _portfolio_window_fills(")
+        between = source[seed:fill_load]
+
+        self.assertIn("db.commit()", between)
+        self.assertLess(
+            between.index("db.commit()"),
+            between.index("window_fills") if "window_fills" in between else len(between),
+        )
+
     def test_pre_strict_queue_uses_the_same_score_before_legacy_tiers(self):
         source = inspect.getsource(scanner._finalize_pre_strict_queue)
 

@@ -1684,6 +1684,10 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
 
     stamp = stamp or now_iso()
     params.seed_params(db)
+    # ``seed_params`` uses INSERT OR IGNORE and therefore opens a SQLite writer transaction even when every
+    # row already exists. Parameter evaluation can run for tens of minutes; never carry that harmless seed
+    # write across the grid or block Observer/full/daily runtime writes for the entire search.
+    db.commit()
     expected_strategy_revision = None
     if expected_generation:
         db.commit()
