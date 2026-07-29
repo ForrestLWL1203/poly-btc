@@ -204,6 +204,12 @@ def current_selection_rows(db) -> list:
         + "," + expr("replay_copy_bt_closed_net_pnl", "NULL")
         + "," + expr("replay_copy_bt_14d_closed_net_pnl", "NULL")
         + "," + expr("replay_copy_bt_7d_closed_net_pnl", "NULL")
+        + "," + expr("replay_copy_bt_max_liquidation_loss_pct", "NULL")
+        + "," + expr("entry_eligible", "1")
+        + "," + expr("retention_status", "'healthy'")
+        + "," + expr("retention_failure_reason", "NULL")
+        + "," + expr("retention_failure_streak", "0")
+        + "," + expr("retained_by_hysteresis", "0")
         + " FROM follow_selection WHERE generation=? ORDER BY addr",
         (generation,),
     ).fetchall()
@@ -233,6 +239,12 @@ def current_selection_rows(db) -> list:
             replay_copy_bt_closed_net_pnl=row[40],
             replay_copy_bt_14d_closed_net_pnl=row[41],
             replay_copy_bt_7d_closed_net_pnl=row[42],
+            replay_copy_bt_max_liquidation_loss_pct=row[43],
+            entry_eligible=bool(row[44]),
+            retention_status=row[45] or "healthy",
+            retention_failure_reason=row[46],
+            retention_failure_streak=int(row[47] or 0),
+            retained_by_hysteresis=bool(row[48]),
         )
         for row in rows
     ]
@@ -283,6 +295,12 @@ class SelectionRow:
     replay_copy_bt_opened_n: Optional[int] = None
     replay_copy_bt_raw_open_capture_rate: Optional[float] = None
     replay_copy_bt_open_audit_json: Optional[str] = None
+    replay_copy_bt_max_liquidation_loss_pct: Optional[float] = None
+    entry_eligible: bool = True
+    retention_status: str = "healthy"
+    retention_failure_reason: Optional[str] = None
+    retention_failure_streak: int = 0
+    retained_by_hysteresis: bool = False
 
 
 def _coerce_selection_row(value) -> SelectionRow:
@@ -370,6 +388,13 @@ def replace_selection_rows(db, generation: str, rows: Iterable, *, selected_at: 
         ("replay_copy_bt_opened_n", lambda r: r.replay_copy_bt_opened_n),
         ("replay_copy_bt_raw_open_capture_rate", lambda r: r.replay_copy_bt_raw_open_capture_rate),
         ("replay_copy_bt_open_audit_json", lambda r: r.replay_copy_bt_open_audit_json),
+        ("replay_copy_bt_max_liquidation_loss_pct",
+         lambda r: r.replay_copy_bt_max_liquidation_loss_pct),
+        ("entry_eligible", lambda r: 1 if r.entry_eligible else 0),
+        ("retention_status", lambda r: r.retention_status),
+        ("retention_failure_reason", lambda r: r.retention_failure_reason),
+        ("retention_failure_streak", lambda r: r.retention_failure_streak),
+        ("retained_by_hysteresis", lambda r: 1 if r.retained_by_hysteresis else 0),
         ("selected_at", lambda r: selected_at),
     )
     fields = [(name, getter) for name, getter in field_values if name in cols]

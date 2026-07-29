@@ -377,6 +377,11 @@ CREATE TABLE IF NOT EXISTS wallet_registry (
     last_valid_generation      TEXT,
     last_evaluated_generation  TEXT,
     last_actionable_open_ms    INTEGER,
+    core_retention_status      TEXT NOT NULL DEFAULT 'healthy',
+    core_retention_fail_streak INTEGER NOT NULL DEFAULT 0,
+    core_retention_reason      TEXT,
+    core_retention_started_generation TEXT,
+    last_core_retention_generation TEXT,
     updated_at                 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_registry_state_role
@@ -401,6 +406,21 @@ CREATE TABLE IF NOT EXISTS wallet_risk_event (
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_risk_event_addr_type
     ON wallet_risk_event(addr, event_type, occurred_at DESC);
+
+-- Fast execution-side safety freezes are deliberately separate from permanent admission vetoes.
+-- A pending source liquidation blocks new exposure while clearinghouse confirmation is retried.
+CREATE TABLE IF NOT EXISTS execution_wallet_safety (
+    addr          TEXT PRIMARY KEY,
+    state         TEXT NOT NULL,       -- pending / confirmed / cleared
+    event_key     TEXT,
+    occurred_at   INTEGER,
+    reason        TEXT,
+    evidence_json TEXT,
+    first_seen_at TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_wallet_safety_state
+    ON execution_wallet_safety(state, updated_at, addr);
 
 -- Immutable generation-scoped hand-off between deep fills-only analysis and path-complete strict replay.
 -- It is intentionally separate from the mutable profile projection and from read-only research tables.
@@ -528,6 +548,12 @@ CREATE TABLE IF NOT EXISTS follow_selection (
     replay_params_hash            TEXT,
     replay_score_detail_json      TEXT,
     replayed_at                   TEXT,
+    replay_copy_bt_max_liquidation_loss_pct REAL,
+    entry_eligible                INTEGER NOT NULL DEFAULT 1,
+    retention_status              TEXT NOT NULL DEFAULT 'healthy',
+    retention_failure_reason      TEXT,
+    retention_failure_streak      INTEGER NOT NULL DEFAULT 0,
+    retained_by_hysteresis        INTEGER NOT NULL DEFAULT 0,
     selected_at     TEXT NOT NULL,
     PRIMARY KEY (generation, addr)
 );
@@ -624,7 +650,14 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     generation  TEXT,
     api_requests INTEGER DEFAULT 0,
     api_weight  INTEGER DEFAULT 0,
-    outcome_reason TEXT
+    outcome_reason TEXT,
+    core_added INTEGER DEFAULT 0,
+    core_removed INTEGER DEFAULT 0,
+    core_probation INTEGER DEFAULT 0,
+    core_recovered INTEGER DEFAULT 0,
+    core_confirmed_demotion INTEGER DEFAULT 0,
+    core_safety_exit INTEGER DEFAULT 0,
+    replacement_blocked INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_scan_runs_finished ON scan_runs(finished_at DESC);
 
@@ -1232,6 +1265,13 @@ _MIGRATIONS = (
     "ALTER TABLE scan_runs ADD COLUMN api_requests INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN api_weight INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN outcome_reason TEXT",
+    "ALTER TABLE scan_runs ADD COLUMN core_added INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN core_removed INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN core_probation INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN core_recovered INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN core_confirmed_demotion INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN core_safety_exit INTEGER DEFAULT 0",
+    "ALTER TABLE scan_runs ADD COLUMN replacement_blocked INTEGER DEFAULT 0",
     "ALTER TABLE follow_history ADD COLUMN first_followed_at TEXT",
     "ALTER TABLE follow_history ADD COLUMN first_followed_generation TEXT",
     "ALTER TABLE follow_history ADD COLUMN last_followed_generation TEXT",
@@ -1407,6 +1447,17 @@ _MIGRATIONS = (
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_closed_net_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_14d_closed_net_pnl REAL",
     "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_7d_closed_net_pnl REAL",
+    "ALTER TABLE follow_selection ADD COLUMN replay_copy_bt_max_liquidation_loss_pct REAL",
+    "ALTER TABLE follow_selection ADD COLUMN entry_eligible INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE follow_selection ADD COLUMN retention_status TEXT NOT NULL DEFAULT 'healthy'",
+    "ALTER TABLE follow_selection ADD COLUMN retention_failure_reason TEXT",
+    "ALTER TABLE follow_selection ADD COLUMN retention_failure_streak INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE follow_selection ADD COLUMN retained_by_hysteresis INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_registry ADD COLUMN core_retention_status TEXT NOT NULL DEFAULT 'healthy'",
+    "ALTER TABLE wallet_registry ADD COLUMN core_retention_fail_streak INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_registry ADD COLUMN core_retention_reason TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN core_retention_started_generation TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN last_core_retention_generation TEXT",
     "ALTER TABLE target_controls ADD COLUMN pinned_at TEXT",
     "ALTER TABLE fill_cache_state ADD COLUMN backfill_start_ms INTEGER",
     "ALTER TABLE fill_cache_state ADD COLUMN backfill_cursor_ms INTEGER",

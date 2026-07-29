@@ -113,9 +113,12 @@ class SelectionTests(unittest.TestCase):
         db.execute(
             "INSERT INTO follow_selection "
             "(generation,addr,role,enabled,reason,utility,replay_profit_priority,"
-            "data_status,evidence_status,model_version,policy_version,selected_at) "
+            "data_status,evidence_status,model_version,policy_version,"
+            "entry_eligible,retention_status,retention_failure_reason,"
+            "retention_failure_streak,retained_by_hysteresis,selected_at) "
             "VALUES ('g1','0xmanual','core',0,'operator_pick',12.5,.42,"
-            "'valid','qualified','m1','p1','now')"
+            "'valid','qualified','m1','p1',0,'probation','copy_profit_factor_below_1_25',"
+            "1,1,'now')"
         )
         db.commit()
 
@@ -125,6 +128,9 @@ class SelectionTests(unittest.TestCase):
             "0xmanual", "core", enabled=False, reason="operator_pick", utility=12.5,
             replay_profit_priority=.42,
             data_status="valid", evidence_status="qualified", model_version="m1", policy_version="p1",
+            entry_eligible=False, retention_status="probation",
+            retention_failure_reason="copy_profit_factor_below_1_25",
+            retention_failure_streak=1, retained_by_hysteresis=True,
         )])
 
     def test_core_normal_rebalance_is_weekly(self):

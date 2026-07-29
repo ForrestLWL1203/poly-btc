@@ -59,7 +59,7 @@ STRICT_RETUNE_MAX_N = 16
 CORE_INITIAL_MAX_N = 16
 CORE_TARGET_MAX_N = 16
 CORE_REBALANCE_INTERVAL_DAYS = 7 # expensive parameter-grid cadence; each complete strict replay may update membership.
-FORMER_CORE_EVIDENCE_RECHECK_DAYS = 14
+FORMER_CORE_EVIDENCE_RECHECK_DAYS = 7
 CORE_PREFIX_UTILITY_RETENTION = 0.97
 CORE_PREFIX_NET_RETENTION = 0.95
 CORE_PREFIX_STRESS_RETENTION = 0.90
@@ -354,7 +354,16 @@ CORE_COPY_MAX_LIQUIDATIONS_30D = 3
 # Count alone is too coarse: one isolated liquidation that consumes a material share of the standardized
 # account is a wallet-level risk signature, not a sizing nuisance. The denominator is the floating Copy
 # equity recorded when that copied episode opened, so compounding and account scale cannot hide the loss.
-CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT = 0.05
+# One isolated Copy liquidation becomes a permanent wallet-level catastrophe only when it consumes at
+# least 8% of the episode-opening dynamic equity. Losses below this line remain fully charged to PnL/PF
+# and liquidation counts, but are not an admission veto by themselves.
+COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT = 0.08
+# Rolling-deploy compatibility for older snapshots/readers. New policy code and UI use the explicit
+# catastrophic name above; this alias is intentionally hidden from the parameter surface.
+CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT = COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT
+CORE_REPLACEMENT_MIN_SHARED_GAIN = 0.10
+CORE_RETENTION_CONFIRMATIONS = 2
+CORE_RETENTION_RECOVERY_DAYS = FORMER_CORE_EVIDENCE_RECHECK_DAYS
 
 # Intratrade path evidence is retained for diagnostics only. Historical maximum drawdown is not a wallet,
 # sector, score, tuning or Core admission input: live account drawdown protection belongs in Observer.
@@ -381,6 +390,11 @@ AUTO_TUNE_PRICE_PATH_MIN_COVERAGE = 0.94      # Paper: current bounded path cach
 # fast candidate search, but a new selection is not publishable when its final shared-account path is thin.
 CORE_PRICE_PATH_MIN_COVERAGE = 0.94
 CORE_MAINTENANCE_META_MIN_COVERAGE = 0.95
+# One transient candle error must not defer an otherwise strict-quality wallet on a cold host.  The normal
+# cache request runs once; final selection prefetch then retries only still-missing markets at low frequency
+# before any expensive Strict/grid work starts.
+SELECTION_PATH_RETRY_ATTEMPTS = 5
+SELECTION_PATH_RETRY_INTERVAL_SEC = 10.0
 # The path tuner searches a compact neighbourhood around the profitable fills-only Core. It must not drive
 # the entire portfolio to ultra-low leverage merely to reach zero proxy liquidations. Candidate selection
 # requires preserved conservative profit and targets a 20% reduction from the effective path baseline.

@@ -64,6 +64,24 @@ class PricePathTest(unittest.TestCase):
         self.assertEqual(1, second["deferred"])
         self.assertEqual(1, fetch.call_count)
 
+    def test_forced_retry_bypasses_background_backoff(self):
+        now = 4_000_000_000_000
+        fills = [{"coin": "OLD", "time": now - 60_000, "side": "B", "sz": "10",
+                  "startPosition": "0", "px": "10"}]
+        candles = [{"t": now - 900_000, "T": now - 1, "o": "10", "h": "11",
+                    "l": "9", "c": "10"}]
+        with mock.patch("hyper.market.price_path.time.time", return_value=now / 1000), mock.patch(
+            "hyper.market.price_path.rest.candle_snapshot_range",
+            side_effect=[None, candles],
+        ) as fetch:
+            first = price_path.ensure(self.db, fills, now - 86_400_000, now)
+            retry = price_path.ensure(
+                self.db, fills, now - 86_400_000, now, force_retry=True,
+            )
+        self.assertEqual(["OLD"], first["failed"])
+        self.assertEqual(1, retry["fetched"])
+        self.assertEqual(2, fetch.call_count)
+
     def test_multi_coin_fetch_releases_writer_lock_before_each_rest_call(self):
         now = 4_000_000_000_000
         fills = [

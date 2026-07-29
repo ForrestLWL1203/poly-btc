@@ -255,9 +255,18 @@ class FollowScoreTests(unittest.TestCase):
             judge("strict", copy_bt_liquidations=4)["firstFailure"],
             "strict_copy_liquidations_over_3",
         )
+        for loss_pct in (.0499, .05, .0799):
+            self.assertTrue(
+                judge(
+                    "rough", copy_bt_max_liquidation_loss_pct=loss_pct
+                )["coreEligible"]
+            )
         self.assertEqual(
-            judge("rough", copy_bt_max_liquidation_loss_pct=.05)["firstFailure"],
-            "copy_single_liquidation_loss_over_5pct",
+            judge("rough", copy_bt_max_liquidation_loss_pct=.08)["firstFailure"],
+            "copy_single_liquidation_loss_over_8pct",
+        )
+        self.assertEqual(
+            judge("rough")["maxSingleLiquidationLossLimitPct"], 0.08,
         )
 
     def test_score_remains_ranking_only(self):

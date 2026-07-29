@@ -425,8 +425,11 @@ def _known_major_risk(db: sqlite3.Connection) -> set[str]:
     try:
         rows = db.execute(
             "SELECT DISTINCT lower(addr) FROM wallet_risk_event "
-            "WHERE event_type IN ('copy_single_liquidation_loss_over_5pct',"
-            "'source_account_liquidated_zero')"
+            "WHERE (event_type='copy_single_liquidation_loss_over_8pct' OR "
+            "(event_type='copy_single_liquidation_loss_over_5pct' AND "
+            "(loss_pct IS NULL OR loss_pct>=?)) OR "
+            "event_type='source_account_liquidated_zero')",
+            (float(config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT),),
         ).fetchall()
     except sqlite3.Error:
         return set()
@@ -780,7 +783,7 @@ def _rough_wallet(
             **base, "status": "rejected",
             "reason": "source_account_liquidated_zero",
         })
-    major_loss_limit = float(config.CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT)
+    major_loss_limit = float(config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT)
     if liquidation_count and abs(f(worst_liquidation_pct)) / 100.0 > major_loss_limit:
         return done({
             **base, "status": "rejected",

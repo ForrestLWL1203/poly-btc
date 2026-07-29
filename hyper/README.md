@@ -98,12 +98,12 @@ Wallet quality and funded-account membership are separate decisions.
   a 30-day open-loss ratio at or below 50%, at least seven complete 30-day Copy Episodes, Copy PF at least
   1.25, conditional lottery protection, 70% open follow, the frozen cross-week activity proof,
   complete data/path evidence and at most three proxy liquidations. A separate severity gate rejects a wallet
-  from the rough candidate pool as soon as any liquidated Copy episode loses at least 5% of the dynamic account
+  from the rough candidate pool as soon as any liquidated Copy episode loses at least 8% of the dynamic account
   equity recorded when that episode opened, even if its count is only one. Final shared replay requires
   conservative 10%/3%, a 30-day open-loss ratio at or below 50%, and 70% open follow on both standardized and
   actual Paper capital. Campaign, weekly-fold, per-close,
   cost-multiple, maximum-drawdown and 75-point gates do not exist.
-- Confirmed source-account zeroing liquidations and those >=5% Copy liquidation events are persisted in
+- Confirmed source-account zeroing liquidations and those >=8% Copy liquidation events are persisted in
   `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
 - Wallet count and parameters are tuned together over profit-aligned score prefixes. The initial winning surface
   requalifies every path-valid Top32 wallet. After the shared prefix chooses the proposed Core, that exact
@@ -113,7 +113,11 @@ Wallet quality and funded-account membership are separate decisions.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
   five days. Daily refresh first certifies with the active parameters. If the proposed Core changes, it runs
   parameter optimization and repeats strict certification before publishing membership and parameters
-  together; an unchanged Core skips the grid. There is no promotion delay, tenure, old-Core retention, star
+  together; an unchanged Core skips the grid. Existing Core uses two-complete-scan retention hysteresis for
+  ordinary short-term failures; the first failure remains enabled as probation. Healthy/probation replacement
+  requires at least 10% shared 30-day conservative-profit gain on both standardized and Paper accounts with no
+  7-day regression. Normally demoted Core stays in the complete-scan recovery lane for seven days, while daily
+  Challenger refresh excludes it. There is no promotion delay, star
   priority or minimum count.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
@@ -165,8 +169,8 @@ result must still be a strict superset before atomic publication. Daily refresh 
 an incumbent: such a proposal carries the exact prior Core snapshot into the fresh evidence generation and
 keeps proposed newcomers Challenger. Hard safety has two narrow exceptions: a recent source fill whose
 `liquidatedUser` is that wallet plus fresh standard/affected-dex snapshots showing zero equity/no positions, or
-one canonical Copy liquidation losing at least 5% of its episode-opening dynamic equity. Either removes new-open
-authority immediately and becomes Exit-only while an existing copy is managed. Ordinary losses, sub-5% Paper
+one canonical Copy liquidation losing at least 8% of its episode-opening dynamic equity. Either removes new-open
+authority immediately and becomes Exit-only while an existing copy is managed. Ordinary losses, sub-8% Paper
 liquidations and rolling-return declines do not trigger these exceptions. Other Core
 demotion is reserved for the Monday/Thursday complete scan. Missing or incomplete 37-day caches are deferred
 to the next complete run. A current-Core data/path failure prevents publication; an individual Challenger
@@ -255,10 +259,11 @@ seed; the final tuned surface certifies the complete path-valid Top32 before for
 There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
--5%, deep-loss events, recovery and conservative proxy liquidations at our leverage ceiling. Historical maximum
-drawdown is diagnostic only. A wallet may enter tuning with sub-5% proxy liquidation evidence, then the final
+-8%, deep-loss events, recovery and conservative proxy liquidations at our leverage ceiling. Historical maximum
+drawdown is diagnostic only. A wallet may enter tuning with sub-8% proxy liquidation evidence, then the final
 tuned 30-day strict replay permits at most three proxy liquidations per Core wallet. One liquidated episode
-losing 5% or more of its opening dynamic Copy equity is a hard rejection regardless of count. Live account loss
+losing 8% or more of its opening dynamic Copy equity is a hard rejection regardless of count. A 5%–8% liquidation
+remains fully reflected in profit, PF and ordinary liquidation count but is not a permanent veto. Live account loss
 is controlled separately by the global equity high-water stop (15% by default), which pauses and flattens the
 account.
 
@@ -277,7 +282,11 @@ and then optimizes:
 `python3 -m hyper.cli.discover --db data/hl.db optimize` first applies the deployed score model to the current
 generation's frozen pre-strict evidence and rebuilds Top32, then replays Strict/Core formation at that
 generation's sealed as-of time. It does not refetch Leaderboard, Portfolio, or wallet fills. A newly ranked
-wallet may require a bounded public K-line path completion. The command shares the scanner lock with full and
+wallet may require a bounded public K-line path completion. Before strict/grid work begins, only missing markets
+are retried up to five times at ten-second intervals; the scan is not stopped while retrying. The
+`--reuse-tuned-surface` repair mode replays on the published parameter surface and tunes only the exact changed
+Core membership, avoiding a second coarse wallet-count grid after a transient path repair. The command shares
+the scanner lock with full and
 daily refreshes, but it can run beside Observer; Observer keeps the old immutable strategy revision until the
 new selection, tuned parameters, and revision publish atomically.
 

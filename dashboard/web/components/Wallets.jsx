@@ -120,6 +120,13 @@ export function Wallets({ confirm }) {
                     <td className="addr">
                       <span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span>
                       {warning && <span className={"tint " + warning[1]} style={{ marginLeft: 6 }} title="本轮画像数据不完整">{warning[0]}</span>}
+                      {tab === "followed" && w.retentionStatus === "probation" &&
+                        <span className="tint tint-amber" style={{ marginLeft: 6 }}
+                          title={w.retentionFailureReason || "首次普通留任失败，仍正常跟单"}>
+                          观察中 {w.retentionFailureStreak || 1}/2
+                        </span>}
+                      {tab === "followed" && (w.retentionStatus === "safety_frozen" || w.retentionStatus === "safety_pending") &&
+                        <span className="tint tint-red" style={{ marginLeft: 6 }}>安全冻结</span>}
                     </td>
                     <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{marketLabel(w.marketType)}</span></td>
                     <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
@@ -145,6 +152,9 @@ export function Wallets({ confirm }) {
                             : "—"}
                           <span> · 胜率 {w.winRatePct != null ? fNum(w.winRatePct, 0) + "%" : "—"}</span>
                         </div>
+                        {w.largeSingleLiquidation && <div className="muted" style={{ fontSize: 11, marginTop: 2, color: "var(--amber)" }}>
+                          较大单次清算 {fNum(w.maxSingleLiquidationLossPct, 1)}%
+                        </div>}
                       </React.Fragment> : <span className="muted">严格回放待完成</span>}
                     </td>
                     <td className="num">

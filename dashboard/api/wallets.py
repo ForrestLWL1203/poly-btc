@@ -89,7 +89,8 @@ def _selection_reason_text(row):
         "activity_over_72h": "最近72小时没有真实新开仓",
         "copy_path_incomplete": "精细价格路径证据尚未完整",
         "strict_copy_liquidations_over_3": "最终参数模拟逐仓爆仓超过3次",
-        "copy_single_liquidation_loss_over_5pct": "单次逐仓爆仓损失达到开仓时动态权益的5%",
+        "copy_single_liquidation_loss_over_8pct": "单次逐仓清算损失达到开仓时动态权益的8%",
+        "copy_single_liquidation_loss_over_5pct": "历史单次较大清算记录（仅8%以上继续永久排除）",
         "historical_major_liquidation": "历史重大爆仓记录（永久排除候选）",
         "source_account_liquidated_zero": "源钱包本人清算且Perp权益归零",
         "sector_not_executable": "没有数据完整且可执行的Crypto/Stock板块",
@@ -287,6 +288,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "WITH page_selected AS ("
         "  SELECT fs.addr,fs.role AS selection_role,fs.reason AS selection_reason,fs.utility,"
         "         fs.selection_rank,fs.replay_profit_priority,fs.model_version,"
+        "         fs.entry_eligible,fs.retention_status,fs.retention_failure_reason,"
+        "         fs.retention_failure_streak,fs.retained_by_hysteresis,"
+        "         ews.state AS execution_safety_state,ews.reason AS execution_safety_reason,"
         "         COALESCE(tc.pinned,0) AS pinned,tc.pinned_at,"
         "         fs.follow_score AS selection_follow_score,"
         "         CASE WHEN fs.follow_score IS NOT NULL THEN fs.follow_score "
@@ -298,6 +302,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.replay_copy_bt_window_start_equity,"
         "         fs.replay_copy_bt_win_rate,fs.replay_copy_bt_closed_n,"
         "         fs.replay_copy_bt_open_fill_rate,fs.replay_copy_bt_liquidations,"
+        "         fs.replay_copy_bt_max_liquidation_loss_pct,"
         "         fs.replay_copy_bt_raw_target_open_n,fs.replay_copy_bt_small_open_excluded_n,"
         "         fs.replay_copy_bt_effective_target_open_n,fs.replay_copy_bt_opened_n,"
         "         fs.replay_copy_bt_raw_open_capture_rate,fs.replay_copy_bt_open_audit_json,"
@@ -312,6 +317,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  FROM follow_selection fs "
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
         "  LEFT JOIN follow_history sfh ON sfh.addr=fs.addr "
+        "  LEFT JOIN execution_wallet_safety ews ON lower(ews.addr)=lower(fs.addr) "
         "  WHERE fs.generation=? AND fs.role=? "
         "  ORDER BY COALESCE(fs.selection_rank,999999),fs.addr LIMIT ? OFFSET ?"
         "), ep7 AS ("
@@ -332,7 +338,9 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  GROUP BY f.addr"
         ") "
         "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
-        "s.replay_profit_priority,s.model_version,"
+        "s.replay_profit_priority,s.model_version,s.entry_eligible,s.retention_status,"
+        "s.retention_failure_reason,s.retention_failure_streak,s.retained_by_hysteresis,"
+        "s.execution_safety_state,s.execution_safety_reason,"
         "s.pinned,s.pinned_at,"
         "s.selection_follow_score,s.legacy_follow_score,"
         "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
@@ -352,6 +360,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_raw_open_capture_rate ELSE p.copy_bt_raw_open_capture_rate END AS copy_bt_raw_open_capture_rate,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_open_audit_json ELSE p.copy_bt_open_audit_json END AS copy_bt_open_audit_json,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
+        "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_max_liquidation_loss_pct ELSE p.copy_bt_max_liquidation_loss_pct END AS copy_bt_max_liquidation_loss_pct,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_7d_closed_net_pnl ELSE p.copy_bt_7d_closed_net_pnl END AS copy_bt_7d_closed_net_pnl,"
@@ -441,6 +450,24 @@ def _ep_selected_wallets(db, generation, role, page, size):
                 if _col(r, "replay_profit_priority") is not None else None
             ),
             "profitRank": _col(r, "selection_rank"),
+            "entryEligible": bool(_col(r, "entry_eligible", True)),
+            "retentionStatus": (
+                "safety_frozen"
+                if _col(r, "execution_safety_state") == "confirmed"
+                else "safety_pending"
+                if _col(r, "execution_safety_state") == "pending"
+                else _col(r, "retention_status") or "healthy"
+            ),
+            "retentionFailureReason": (
+                _col(r, "execution_safety_reason")
+                or _col(r, "retention_failure_reason")
+            ),
+            "retentionFailureStreak": int(
+                _col(r, "retention_failure_streak") or 0
+            ),
+            "retainedByHysteresis": bool(
+                _col(r, "retained_by_hysteresis", False)
+            ),
             "rankingMode": (
                 follow_score.FOLLOW_SCORE_MODE
                 if _col(r, "replay_profit_priority") is not None else None
@@ -525,6 +552,14 @@ def _ep_selected_wallets(db, generation, role, page, size):
                 None, str(_col(r, "live_liquidity_skip_coins") or "").split(","),
             )),
             "liquidations30d": _col(display_metrics, "copy_bt_liquidations"),
+            "maxSingleLiquidationLossPct": (
+                _col(r, "copy_bt_max_liquidation_loss_pct") * 100
+                if _col(r, "copy_bt_max_liquidation_loss_pct") is not None else None
+            ),
+            "largeSingleLiquidation": bool(
+                _col(r, "copy_bt_max_liquidation_loss_pct") is not None
+                and 0.05 <= _col(r, "copy_bt_max_liquidation_loss_pct") < 0.08
+            ),
             "roughCopyScore": score100(_col(r, "rough_copy_score")),
             "roughCopyNetPnl": rough_economic30["qualificationPnl"],
             "roughCopyMarkedNetPnl": _col(r, "rough_copy_marked_net_pnl"),

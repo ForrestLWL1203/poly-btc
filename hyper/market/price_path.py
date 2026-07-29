@@ -91,7 +91,15 @@ def _upsert(db, coin: str, interval: str, rows, fetched_at: int) -> int:
     return len(values)
 
 
-def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERVAL) -> dict:
+def ensure(
+    db,
+    fills,
+    start_ms: int,
+    end_ms: int,
+    *,
+    interval: str = BASE_INTERVAL,
+    force_retry: bool = False,
+) -> dict:
     """Incrementally ensure a shared path for the markets present in fills."""
     step = INTERVAL_MS[interval]
     now_ms = int(time.time() * 1000)
@@ -104,7 +112,12 @@ def ensure(db, fills, start_ms: int, end_ms: int, *, interval: str = BASE_INTERV
             "SELECT status,error_count,retry_after FROM coin_price_path_state "
             "WHERE coin=? AND interval=?", (coin, interval),
         ).fetchone()
-        if state and state[0] == "failed" and int(state[2] or 0) > now_ms:
+        if (
+            not force_retry
+            and state
+            and state[0] == "failed"
+            and int(state[2] or 0) > now_ms
+        ):
             deferred += 1
             continue
         row = db.execute(

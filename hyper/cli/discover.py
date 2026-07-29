@@ -286,6 +286,10 @@ def main() -> int:
     )
     opt.add_argument("--generation")
     opt.add_argument("--stamp")
+    opt.add_argument(
+        "--reuse-tuned-surface", action="store_true",
+        help="repair cached paths on the active surface, then tune only the exact changed membership",
+    )
     rs = sub.add_parser("repair-selection", help=argparse.SUPPRESS)
     rs.add_argument("--generation")
     rs.add_argument("--stamp")
@@ -503,6 +507,7 @@ def main() -> int:
             with scan_lock.acquire(args.db):
                 result = scanner.optimize_published_generation(
                     db, args.generation, stamp=args.stamp,
+                    reuse_tuned_surface=bool(args.reuse_tuned_surface),
                 )
         except scan_lock.ScanBusyError:
             raise RuntimeError("scanner_run_already_active")

@@ -11,11 +11,19 @@ export function ScanHistoryTable({ runs }) {
               <tr key={i} title={[
                 r.complete === false ? `未发布${r.reason ? `：${r.reason}` : ""}` : (r.kind === "challenger_refresh" ? "Challenger 日更" : "完整候选重评"),
                 `API ${r.apiRequests || 0} 次 / 权重 ${r.apiWeight || 0}`,
-              ].join(" · ")}>
+                `Core +${r.coreAdded || 0}/-${r.coreRemoved || 0}`,
+                `观察 ${r.coreProbation || 0} · 恢复 ${r.coreRecovered || 0} · 确认降级 ${r.coreConfirmedDemotion || 0} · 安全退出 ${r.coreSafetyExit || 0}`,
+                r.replacementBlocked ? "显著增益不足，替换已阻止" : "",
+              ].filter(Boolean).join(" · ")}>
                 <td className="addr">{r.at ? r.at.replace("T", " ").replace("Z", "") : "—"}{r.complete === false ? " ⚠" : ""}</td>
                 <td>{r.kind === "challenger_refresh" ? "Challenger 日更" : "全量重评"}</td>
                 <td className="num">{r.candidates}</td><td className="num">{r.profiled ?? "—"}{r.failed ? ` / ${r.failed}失败` : ""}</td><td className="num up">+{r.added}</td>
-                <td className="num">{r.retired}</td><td className="num">{r.rejected}</td><td className="num">{r.active}</td></tr>
+                <td className="num">{r.retired}</td><td className="num">{r.rejected}</td><td className="num">
+                  {r.active}
+                  {(r.coreProbation > 0 || r.coreSafetyExit > 0) && <div className="muted" style={{ fontSize: 10 }}>
+                    观察 {r.coreProbation || 0} / 安退 {r.coreSafetyExit || 0}
+                  </div>}
+                </td></tr>
             ))}
           </tbody>
         </table>

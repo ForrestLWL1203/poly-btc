@@ -398,7 +398,7 @@ class ChallengerRefreshTests(unittest.TestCase):
             selection.SelectionRow("0xkeep", "challenger", selection_rank=3),
             selection.SelectionRow(
                 "0xblown", "exit_only",
-                reason="copy_single_liquidation_loss_over_5pct:exit_pending",
+                reason="copy_single_liquidation_loss_over_8pct:exit_pending",
             ),
             selection.SelectionRow("0xnew", "core", selection_rank=1),
         ]

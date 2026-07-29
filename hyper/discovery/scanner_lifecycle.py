@@ -8,6 +8,7 @@ import time
 from typing import Iterable
 
 from hyper import config
+from hyper.selection import core_retention
 
 
 WALLET_STATES = {
@@ -155,6 +156,52 @@ def upsert_wallet_registry(
         tuple(values[column] for column in columns),
     )
     return values
+
+
+def wallet_retention_state(db: sqlite3.Connection, addr: str) -> dict:
+    row = db.execute(
+        "SELECT COALESCE(core_retention_status,'healthy'),"
+        "COALESCE(core_retention_fail_streak,0),core_retention_reason,"
+        "core_retention_started_generation,last_core_retention_generation "
+        "FROM wallet_registry WHERE lower(addr)=lower(?)",
+        (addr,),
+    ).fetchone()
+    if not row:
+        return {
+            "status": core_retention.HEALTHY, "failureStreak": 0,
+            "failureReason": None, "startedGeneration": None,
+            "lastGeneration": None,
+        }
+    return {
+        "status": row[0] or core_retention.HEALTHY,
+        "failureStreak": int(row[1] or 0),
+        "failureReason": row[2],
+        "startedGeneration": row[3],
+        "lastGeneration": row[4],
+    }
+
+
+def apply_wallet_retention_decision(
+    db: sqlite3.Connection,
+    addr: str,
+    decision: core_retention.RetentionDecision,
+    *,
+    generation: str,
+    stamp: str | None = None,
+) -> None:
+    """Persist a decision without committing the enclosing publication transaction."""
+    stamp = stamp or _now_iso()
+    db.execute(
+        "UPDATE wallet_registry SET core_retention_status=?,"
+        "core_retention_fail_streak=?,core_retention_reason=?,"
+        "core_retention_started_generation=?,last_core_retention_generation=?,"
+        "updated_at=? WHERE lower(addr)=lower(?)",
+        (
+            decision.status, int(decision.failure_streak),
+            decision.failure_reason, decision.started_generation,
+            decision.last_generation or generation, stamp, addr,
+        ),
+    )
 
 
 def schedule_profile_workset(

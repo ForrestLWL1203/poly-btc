@@ -25,7 +25,7 @@ from . import pre_strict
 PROFIT_PRIORITY_30_WEIGHT = 0.70
 PROFIT_PRIORITY_7_WEIGHT = 0.30
 PROFIT_PRIORITY_MODE = "conservative_realized_profit_70_30"
-FOLLOW_SCORE_MODE = "profit_priority_confidence_haircut_v1"
+FOLLOW_SCORE_MODE = "profit_priority_confidence_haircut_v2"
 FOLLOW_SCORE_PROFIT_SCALE = 0.35
 FOLLOW_SCORE_CONFIDENCE_FLOOR = 0.85
 ECONOMIC_REJECTION_REASONS = frozenset({
@@ -485,8 +485,8 @@ def evaluate_follow_eligibility(
         "maxSingleLiquidationLossPct": _num(
             scoped.get("copy_bt_max_liquidation_loss_pct")
         ),
-        "maxSingleLiquidationLossLimitPct": (
-            0.05
+        "maxSingleLiquidationLossLimitPct": float(
+            config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT
         ),
         "reasons": [] if stage_eligible else [str(first_failure or "copy_not_qualified")],
     }
@@ -573,8 +573,11 @@ def compute_follow_score(
     )
     liquidations = int(_num(scoped.get("copy_bt_liquidations")))
     max_liquidation_loss = _num(scoped.get("copy_bt_max_liquidation_loss_pct"))
+    catastrophic_liquidation_loss_pct = max(
+        1e-9, float(config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT)
+    )
     liquidation_score = 0.50 * _clamp(1.0 - liquidations / 4.0) + 0.50 * _clamp(
-        1.0 - max_liquidation_loss / 0.05
+        1.0 - max_liquidation_loss / catastrophic_liquidation_loss_pct
     )
     components = {
         "profitPriority": profit_component,

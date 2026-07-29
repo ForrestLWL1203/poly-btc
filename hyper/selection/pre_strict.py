@@ -14,8 +14,8 @@ from hyper.copy.economics import conservative_profitability, open_loss_ratio_wit
 
 
 DAY_MS = 86_400_000
-POLICY_VERSION = "pre-strict32-pf125-activity-v1"
-SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-prefix-v5"
+POLICY_VERSION = "pre-strict32-pf125-activity-retention-v2"
+SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-retention-v6"
 
 
 def _num(value, default=0.0):
@@ -225,12 +225,13 @@ def evaluate(
             not strict or int(_num(metrics.get("copy_bt_liquidations"))) <= 3
         ),
         "singleLiquidationLossWithinLimit": (
-            _num(metrics.get("copy_bt_max_liquidation_loss_pct")) + 1e-12 < 0.05
+            _num(metrics.get("copy_bt_max_liquidation_loss_pct")) + 1e-12
+            < float(config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT)
         ),
     }
     failures = (
         ("copy_data_error", "dataComplete", True),
-        ("copy_single_liquidation_loss_over_5pct", "singleLiquidationLossWithinLimit", False),
+        ("copy_single_liquidation_loss_over_8pct", "singleLiquidationLossWithinLimit", False),
         ("source_episode_evidence_insufficient", "sourceClosedSample", False),
         ("copy_episode_evidence_insufficient", "copyClosedSample", False),
         ("source_30d_closed_pnl_not_positive", "sourceClosedProfit30d", False),

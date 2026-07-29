@@ -1318,6 +1318,84 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_pending_wallet_safety_blocks_open_and_add_exposure(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO execution_wallet_safety "
+            "(addr,state,event_key,reason,first_seen_at,updated_at) "
+            "VALUES ('0xfrozen','pending','tid-1','source_liquidation_pending','now','now')"
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+        self.assertEqual(
+            "wallet_safety_frozen",
+            obs._new_exposure_block_reason("0xfrozen", "BTC"),
+        )
+        self.assertTrue(obs._target_self_liquidation(
+            "0xfrozen",
+            {"liquidation": {"liquidatedUser": "0xFROZEN"}},
+        ))
+        self.assertFalse(obs._target_self_liquidation(
+            "0xfrozen",
+            {"liquidation": {"liquidatedUser": "0xother"}},
+        ))
+
+    def test_source_liquidation_confirmation_requires_zero_equity_and_no_positions(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            obs._set_wallet_safety(
+                "0xliq", "pending", event_key="tid-2", occurred_at=123,
+                reason="source_liquidation_pending", evidence={"coin": "BTC"},
+            )
+            zero = {
+                "marginSummary": {"accountValue": "0"},
+                "assetPositions": [],
+            }
+            with patch(
+                "hyper.execution.observer.rest.clearinghouse_state",
+                return_value=zero,
+            ), patch.object(obs, "_reconcile_open", new=AsyncMock()) as reconcile:
+                self.assertTrue(await obs._confirm_wallet_safety("0xliq", "BTC"))
+            state = db.execute(
+                "SELECT state,reason FROM execution_wallet_safety WHERE addr='0xliq'"
+            ).fetchone()
+            self.assertEqual((state["state"], state["reason"]),
+                             ("confirmed", "source_account_liquidated_zero"))
+            self.assertEqual(
+                1,
+                db.execute(
+                    "SELECT COUNT(*) FROM wallet_risk_event "
+                    "WHERE addr='0xliq' AND event_type='source_account_liquidated_zero'"
+                ).fetchone()[0],
+            )
+            reconcile.assert_awaited_once()
+
+            obs._set_wallet_safety(
+                "0xfunded", "pending", event_key="tid-3", occurred_at=124,
+                reason="source_liquidation_pending", evidence={"coin": "BTC"},
+            )
+            funded = {
+                "marginSummary": {"accountValue": "1"},
+                "assetPositions": [],
+            }
+            with patch(
+                "hyper.execution.observer.rest.clearinghouse_state",
+                return_value=funded,
+            ):
+                self.assertTrue(
+                    await obs._confirm_wallet_safety("0xfunded", "BTC")
+                )
+            self.assertEqual(
+                "cleared",
+                db.execute(
+                    "SELECT state FROM execution_wallet_safety WHERE addr='0xfunded'"
+                ).fetchone()[0],
+            )
+            self.assertNotIn("0xfunded", obs.safety_frozen)
+
+        asyncio.run(run())
+
 
 if __name__ == "__main__":
     unittest.main()

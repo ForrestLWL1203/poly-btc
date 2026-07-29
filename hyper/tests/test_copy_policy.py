@@ -39,6 +39,12 @@ class CopyPolicyTests(unittest.TestCase):
         })
         self.assertNotEqual(baseline.version, changed.version)
 
+    def test_legacy_five_percent_liquidation_setting_cannot_restore_old_cutoff(self):
+        policy = load_copy_policy({
+            "CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT": 0.05,
+        })
+        self.assertEqual(policy.catastrophic_liquidation_loss_pct, 0.08)
+
 
 if __name__ == "__main__":
     unittest.main()

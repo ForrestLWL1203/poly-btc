@@ -129,8 +129,9 @@ class ApiScannerStatusTests(unittest.TestCase):
             db.execute(
                 "INSERT INTO scan_runs "
                 "(started_at,finished_at,duration_s,candidates,probed_new,profiled,added,retired,kept,"
-                "rejected,n_active,api_requests,api_weight,outcome_reason) "
-                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8,19,54,'example')"
+                "rejected,n_active,api_requests,api_weight,outcome_reason,core_added,core_removed,"
+                "core_probation,core_recovered,core_confirmed_demotion,core_safety_exit,replacement_blocked) "
+                "VALUES ('t0','t1',1.0,100,88,42,3,1,5,33,8,19,54,'example',2,1,1,1,0,1,1)"
             )
             db.commit()
 
@@ -142,6 +143,12 @@ class ApiScannerStatusTests(unittest.TestCase):
         self.assertEqual(res["runs"][0]["apiRequests"], 19)
         self.assertEqual(res["runs"][0]["apiWeight"], 54)
         self.assertEqual(res["runs"][0]["reason"], "example")
+        self.assertEqual(res["runs"][0]["coreAdded"], 2)
+        self.assertEqual(res["runs"][0]["coreRemoved"], 1)
+        self.assertEqual(res["runs"][0]["coreProbation"], 1)
+        self.assertEqual(res["runs"][0]["coreRecovered"], 1)
+        self.assertEqual(res["runs"][0]["coreSafetyExit"], 1)
+        self.assertTrue(res["runs"][0]["replacementBlocked"])
 
 
 if __name__ == "__main__":

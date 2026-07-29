@@ -148,7 +148,13 @@ def ep_scan_runs(db, limit):
                     "added,retired,kept,rejected,n_active,COALESCE(failed,0) AS failed,"
                     "COALESCE(complete,1) AS complete,COALESCE(full,0) AS full,"
                     "COALESCE(kind,'complete') AS kind,COALESCE(api_requests,0) AS api_requests,"
-                    "COALESCE(api_weight,0) AS api_weight,outcome_reason "
+                    "COALESCE(api_weight,0) AS api_weight,outcome_reason,"
+                    "COALESCE(core_added,0) AS core_added,COALESCE(core_removed,0) AS core_removed,"
+                    "COALESCE(core_probation,0) AS core_probation,"
+                    "COALESCE(core_recovered,0) AS core_recovered,"
+                    "COALESCE(core_confirmed_demotion,0) AS core_confirmed_demotion,"
+                    "COALESCE(core_safety_exit,0) AS core_safety_exit,"
+                    "COALESCE(replacement_blocked,0) AS replacement_blocked "
                     "FROM scan_runs ORDER BY id DESC LIMIT ?", (limit,))
     return {"runs": [{"at": _col(r, "started_at", 0), "finishedAt": _col(r, "finished_at", 1),
                       "candidates": _col(r, "candidates", 2), "profiled": _col(r, "profiled", 3),
@@ -159,7 +165,14 @@ def ep_scan_runs(db, limit):
                       "kind": _col(r, "kind", 12) or "complete",
                       "apiRequests": _col(r, "api_requests", 13) or 0,
                       "apiWeight": _col(r, "api_weight", 14) or 0,
-                      "reason": _col(r, "outcome_reason", 15)}
+                      "reason": _col(r, "outcome_reason", 15),
+                      "coreAdded": _col(r, "core_added", 16) or 0,
+                      "coreRemoved": _col(r, "core_removed", 17) or 0,
+                      "coreProbation": _col(r, "core_probation", 18) or 0,
+                      "coreRecovered": _col(r, "core_recovered", 19) or 0,
+                      "coreConfirmedDemotion": _col(r, "core_confirmed_demotion", 20) or 0,
+                      "coreSafetyExit": _col(r, "core_safety_exit", 21) or 0,
+                      "replacementBlocked": bool(_col(r, "replacement_blocked", 22))}
                      for r in rows]}
 
 

@@ -215,6 +215,14 @@ class Observer:
         self._proc_owner = f"observer:{os.getpid()}"
         self.risk_radar = RiskRadar(db)
         self._portfolio_risk_last_persist = 0.0
+        self.safety_frozen = {
+            str(row[0] or "").lower()
+            for row in self.db.execute(
+                "SELECT addr FROM execution_wallet_safety "
+                "WHERE state IN ('pending','confirmed')"
+            ).fetchall()
+            if row[0]
+        }
 
     # -- paper account ------------------------------------------------------
     def _available(self, book=None) -> float:
@@ -462,6 +470,8 @@ class Observer:
 
     def _new_exposure_block_reason(self, addr: str, coin: str, book=None, side=None):
         book = book or self.taker
+        if str(addr or "").lower() in self.safety_frozen:
+            return "wallet_safety_frozen"
         wallet_open_n = sum(
             1 for position in book.open_ep.values()
             if str(position.get("addr") or "").lower() == str(addr or "").lower()
@@ -473,6 +483,125 @@ class Observer:
         ) >= self.wallet_stock_side_max_positions:
             return "wallet_stock_side_position_cap"
         return None
+
+    @staticmethod
+    def _target_self_liquidation(addr: str, fill: dict) -> bool:
+        liquidation = fill.get("liquidation")
+        return bool(
+            isinstance(liquidation, dict)
+            and str(liquidation.get("liquidatedUser") or "").lower()
+            == str(addr or "").lower()
+        )
+
+    def _set_wallet_safety(
+        self, addr: str, state: str, *, event_key=None, occurred_at=None,
+        reason=None, evidence=None,
+    ):
+        addr = str(addr or "").lower()
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO execution_wallet_safety "
+            "(addr,state,event_key,occurred_at,reason,evidence_json,first_seen_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
+            "state=excluded.state,event_key=COALESCE(excluded.event_key,execution_wallet_safety.event_key),"
+            "occurred_at=COALESCE(excluded.occurred_at,execution_wallet_safety.occurred_at),"
+            "reason=excluded.reason,evidence_json=excluded.evidence_json,updated_at=excluded.updated_at",
+            (
+                addr, state, str(event_key) if event_key is not None else None,
+                int(occurred_at) if occurred_at is not None else None,
+                reason, json.dumps(evidence or {}, sort_keys=True, separators=(",", ":")),
+                stamp, stamp,
+            ),
+        )
+        if state in {"pending", "confirmed"}:
+            self.safety_frozen.add(addr)
+        else:
+            self.safety_frozen.discard(addr)
+        self.db.commit()
+
+    async def _confirm_wallet_safety(self, addr: str, coin: str = None):
+        """Confirm target self-liquidation without turning API failure into a blacklist."""
+        addr = str(addr or "").lower()
+        dexes = [None]
+        if coin and ":" in coin:
+            dexes.append(coin.split(":", 1)[0])
+        states = []
+        try:
+            for dex in dexes:
+                state = await asyncio.to_thread(rest.clearinghouse_state, addr, dex)
+                if not isinstance(state, dict):
+                    return False
+                states.append(state)
+        except Exception:  # noqa: BLE001 - pending remains fail-closed and is retried
+            self._rollback_db()
+            return False
+        equity = sum(
+            max(0.0, f((state.get("marginSummary") or {}).get("accountValue")))
+            for state in states
+        )
+        positions = [
+            position
+            for state in states
+            for position in (state.get("assetPositions") or ())
+            if abs(f((position.get("position") or {}).get("szi"))) >= config.FLAT
+        ]
+        if equity > 1e-9 or positions:
+            self._set_wallet_safety(
+                addr, "cleared", reason="source_liquidation_not_zero",
+                evidence={"equity": equity, "positionCount": len(positions)},
+            )
+            return True
+
+        row = self.db.execute(
+            "SELECT event_key,occurred_at FROM execution_wallet_safety WHERE addr=?",
+            (addr,),
+        ).fetchone()
+        event_key = row[0] if row else f"observer:{now_ms()}"
+        occurred_at = row[1] if row else now_ms()
+        self._set_wallet_safety(
+            addr, "confirmed", event_key=event_key, occurred_at=occurred_at,
+            reason="source_account_liquidated_zero",
+            evidence={"equity": equity, "positionCount": 0},
+        )
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO wallet_risk_event "
+            "(addr,event_type,event_key,occurred_at,evidence_json,first_seen_at,last_seen_at) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(addr,event_type,event_key) DO UPDATE SET "
+            "last_seen_at=excluded.last_seen_at,evidence_json=excluded.evidence_json",
+            (
+                addr, "source_account_liquidated_zero", str(event_key), int(occurred_at),
+                json.dumps({"confirmedBy": "observer", "equity": equity, "positionCount": 0},
+                           sort_keys=True, separators=(",", ":")),
+                stamp, stamp,
+            ),
+        )
+        self.db.commit()
+        await self._reconcile_open()
+        _log(f"SAFETY-FROZEN {addr[:10]} confirmed source liquidation + zero perp equity")
+        return True
+
+    async def wallet_safety_retry_loop(self):
+        while not self.stop:
+            active = {
+                str(row[0] or "").lower()
+                for row in self.db.execute(
+                    "SELECT addr FROM execution_wallet_safety "
+                    "WHERE state IN ('pending','confirmed')"
+                ).fetchall()
+                if row[0]
+            }
+            self.safety_frozen = active
+            rows = self.db.execute(
+                "SELECT addr,evidence_json FROM execution_wallet_safety WHERE state='pending'"
+            ).fetchall()
+            for addr, evidence_json in rows:
+                try:
+                    evidence = json.loads(evidence_json or "{}")
+                except (TypeError, ValueError):
+                    evidence = {}
+                await self._confirm_wallet_safety(addr, evidence.get("coin"))
+            await asyncio.sleep(60)
 
     def _wallet_group_cap_pct(self, book, addr, coin, side, tier, *, exclude=None):
         positions = (position for position in book.open_ep.values() if position is not exclude)
@@ -1531,6 +1660,7 @@ class Observer:
         asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
         asyncio.create_task(self.reconcile_loop())    # periodic orphan-check: close copies whose master exited
+        asyncio.create_task(self.wallet_safety_retry_loop())  # confirm/retry source self-liquidations
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.risk_radar.assessment_loop())  # 15m AI+local risk assessment (shadow-only)
         asyncio.create_task(self.risk_radar.balance_loop())     # low-frequency DeepSeek balance/runway check
@@ -1607,6 +1737,14 @@ class Observer:
         key = (addr, coin)
         liq = bool(x.get("liquidation"))
         oid = x.get("oid")
+        if self._target_self_liquidation(addr, x):
+            event_key = x.get("tid") or f"{coin}:{t}"
+            self._set_wallet_safety(
+                addr, "pending", event_key=event_key, occurred_at=t,
+                reason="source_liquidation_pending",
+                evidence={"coin": coin, "tid": x.get("tid")},
+            )
+            asyncio.create_task(self._confirm_wallet_safety(addr, coin))
         if coin not in self.sub_coins and coin not in self.stock_coins:
             asyncio.create_task(self.ensure_coin(coin))   # route to its pricing source (bbo / l2Book)
 
@@ -2006,6 +2144,9 @@ class Observer:
         """
         book = book or self.taker
         async with ep["lock"]:
+            if str(addr or "").lower() in self.safety_frozen:
+                self._tally("skip_wallet_safety_frozen", book)
+                return False
             try:
                 await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
             except asyncio.TimeoutError:

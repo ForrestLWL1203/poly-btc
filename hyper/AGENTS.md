@@ -49,8 +49,8 @@ Repository boundaries:
   a removal or replacement. Expensive optimization runs only for a proven daily promotion or when explicitly
   requested; an evidence-only refresh must not silently start a parameter grid. Automatic daily removal has
   two hard-safety exceptions: a recent exchange-labelled self-liquidation followed by a fresh zero-equity/no-
-  position clearinghouse snapshot, or a canonical Copy liquidation losing at least 5% of its episode-opening
-  dynamic equity. Ordinary losses, sub-5% Paper liquidations and rolling-return declines never satisfy them.
+  position clearinghouse snapshot, or a canonical Copy liquidation losing at least 8% of its episode-opening
+  dynamic equity. Ordinary losses, sub-8% Paper liquidations and rolling-return declines never satisfy them.
 - Dashboard business failures are not data errors. Reserve “数据异常” for collection, cache, replay, valuation-
   pipeline, or immutable-strategy integrity failures; an incomplete open-position mark is the explicit
   “开放仓位估值待确认” observation state, not a generic data-error badge.
@@ -169,7 +169,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   next daily run. Core demotion otherwise remains the responsibility of complete Monday/Thursday discovery
   scans. A recent source self-liquidation may bypass the membership floor only when the fill identifies that
   wallet as `liquidatedUser` and fresh standard/affected-dex snapshots all show zero equity and no positions.
-  A canonical Copy liquidation at or above the 5% episode-opening-equity limit may also bypass it. The same
+  A canonical Copy liquidation at or above the 8% episode-opening-equity limit may also bypass it. The same
   daily publication makes either wallet Exit-only when an existing copy still needs management.
 - Complete scans, manual scans and Challenger refreshes share `data/run/scanner.lock`. A busy daily job records
   `skipped_scan_busy` and exits successfully. Workset and fill transport remain separate: complete worksets are
@@ -248,7 +248,7 @@ closed PnL in both windows, a 30-day open-loss ratio at or below 50%, at least s
 Episodes, Copy PF at least 1.25, conditional lottery protection, at least 70% open follow rate, the frozen
 cross-week activity evidence, complete data/valuation/sector/path evidence and no more than three simulated
 isolated liquidations. Count tolerance applies only to small isolated sizing events: any single liquidated Copy
-episode whose net loss reaches 5% of the dynamic account equity recorded when that episode opened is a hard
+episode whose net loss reaches 8% of the dynamic account equity recorded when that episode opened is a hard
 rejection in both rough and strict qualification. Path/data gaps in a Top32 wallet may remain deferred
 Challenger evidence and cannot enter Core. Campaigns, weekly Copy folds, per-close returns, cost
 multiples/stress, LCB/probability, maximum drawdown and score floors are not Core gates. Payoff remains audit
@@ -296,11 +296,13 @@ There is no zero-liquidation rule and no historical maximum-drawdown admission t
 disclose their true margin/leverage, so both values are conservative reconstructions at our leverage ceiling.
 The active surface may enter tuning with any proxy count; the final tuned 30-day strict replay permits at most
 three isolated proxy liquidations per Core wallet. Four or more remain Challenger-only. Independently of count,
-a single liquidation loss of 5% or more of that episode's opening Copy equity is rejected before the bounded
+a single liquidation loss of 8% or more of that episode's opening Copy equity is rejected before the bounded
 candidate pool and can use the Challenger-daily hard-safety removal path. Confirmed source-account zeroing
 liquidations and these major Copy liquidation events are persisted in `wallet_risk_event`; discovery cache
 pruning and rolling-window expiry cannot make those wallets eligible again. Liquidation losses still reduce net PnL
-and receive a bounded score penalty; path drawdown remains visible for diagnostics only. An allowed sub-5% proxy
+and receive a bounded score penalty; path drawdown remains visible for diagnostics only. A 5%–8% proxy
+liquidation is a non-catastrophic large-loss audit event: it remains fully included in PnL, PF and the ordinary
+liquidation count, but is not a permanent veto. An allowed sub-8% proxy
 liquidation must not trigger a hidden 24-hour/seven-day wallet freeze that then lowers open-follow rate and rejects
 the wallet a second time. Live Paper execution likewise records the actual isolated loss without inventing a
 source-wallet-wide re-entry ban.
@@ -355,7 +357,7 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
    Require conservative dynamic 30-day return at least 10%, conservative rolling-7-day return at least 3%,
    a 30-day open-loss ratio at or below 50%, at least 70% open follow, positive closed and conservative PnL in
    both windows and complete price-path coverage. Every member must remain at or below three
-   simulated liquidations and below 5% loss on every individual liquidated episode.
+   simulated liquidations and below 8% loss on every individual liquidated episode.
 7. Persist both the standardized `$10,000` starting-account result and the result using current Paper equity.
    Any failed qualification or final replay aborts the proposal atomically; it cannot publish a partial list.
 
@@ -369,15 +371,25 @@ managed exit-only.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
 per-coin limits. Core and Challenger order is the final profit-aligned score order. Leave-one-out economics may remove
-only the current low-profit suffix and remains audit telemetry for every other member. Complete discovery has no
-promotion confirmation, soft tenure, stable-retention bypass or minimum count. Challenger daily refresh instead
+only the current low-profit suffix and remains audit telemetry for every other member. Complete discovery gives
+existing Core an independent retention lane. A first ordinary 7d/return/PF/activity/sample/open-rate or normal
+liquidation-count failure publishes that wallet as enabled `probation`; only a second consecutive successful
+Monday/Thursday complete generation confirms demotion. Recovery clears the streak. Data/path failures do not
+publish and do not advance the streak. Structural failures, non-positive 30d closed/conservative profit,
+open-loss ratio above 50%, no executable sector, verified source zeroing, and an 8% Copy liquidation bypass
+hysteresis. Healthy/probation Core may be replaced only when both standardized and Paper shared 30d conservative
+net profit improve at least 10% and neither 7d conservative return declines; the exact final membership is
+retuned before publication. A normally demoted Core stays on the complete-scan delta/evidence recovery lane for
+seven days but does not enter the daily Challenger pool. Challenger daily refresh instead
 uses the current Core as a membership floor: it may add a strictly certified wallet, but it cannot remove or
 replace an incumbent or reshuffle the unchanged set. Its promotion candidates must already be Core or strict
 Challenger rows of the latest complete new-model generation and must pass the exact same final strict/shared
 contract as a complete scan. Hard safety is limited to a verified source
 self-liquidation plus a fresh zero-equity/no-position account snapshot, or one canonical Copy liquidation loss
-at or above 5% of its episode-opening equity. Either immediately removes new-open authority without treating an
-ordinary loss or smaller isolated liquidation as a blow-up.
+at or above 8% of its episode-opening equity. Either immediately removes new-open authority without treating an
+ordinary loss or a 5%–8% isolated liquidation as a blow-up. Observer persists `pending/confirmed/cleared`
+execution freezes separately from permanent risk evidence: a target self-liquidation fill blocks new opens/adds
+until standard and affected-DEX clearinghouse snapshots prove either recovery or zero equity with no positions.
 
 `FOLLOW_SELECTION_MODE=auto` lets the scanner publish this selection. `manual` carries the current selection
 rows into the next generation and leaves membership operator-owned; it does not silently rewrite the Core.
@@ -437,6 +449,9 @@ Completed profiles/fill cache remain on the failed generation as `leaderboard_va
 can retry without another network sweep. A post-publication summary-replay failure is audited but cannot undo the
 already atomic strategy. `auto_tune_state.effective_portfolio_replay` is valid only when its generation matches
 the current published generation.
+Before strict replay or any parameter grid starts, bounded selection-path prefetch retries only still-missing
+markets five times at ten-second intervals, bypassing the longer background cache backoff. The scan continues
+through those retries; only markets still missing after all five attempts are classified incomplete.
 
 ## Observer and execution model
 
@@ -560,6 +575,9 @@ re-scores/re-ranks the current generation's frozen pre-strict evidence with the 
 and jointly tunes that generation at its sealed as-of time without Leaderboard, Portfolio, or wallet-fill
 refetch. A missing bounded public K-line path may still be completed before strict replay. Optimize,
 selection-repair, and finalize commands share the full/daily scanner process lock but may run with Observer.
+`optimize --reuse-tuned-surface` is the narrow post-scan repair path: it reuses the current tuned surface,
+replays the repaired bounded pool, and runs full tuning only for the exact changed membership instead of
+repeating the coarse count grid.
 `finalize-profiled` retries an
 already-complete but unpublished generation after a finalization failure. `finalize-profiled --no-retune` is the
 explicit operational fallback for sealing the active parameter surface when expensive tuning exceeds host

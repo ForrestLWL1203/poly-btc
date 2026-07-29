@@ -1042,7 +1042,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(kept, [f"0x{index:02x}" for index in range(42)])
         self.assertEqual(tail, [])
 
-    def test_source_quality_pool_permanently_rejects_recorded_major_liquidation(self):
+    def test_legacy_five_to_eight_pct_event_is_audit_only(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             db.executemany(
@@ -1066,8 +1066,31 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 "SELECT status,reason FROM profile WHERE addr='0xblown'"
             ).fetchone()
 
-        self.assertEqual(kept, ["0xsafe"])
+        self.assertEqual(kept, ["0xblown", "0xsafe"])
         self.assertEqual(tail, [])
+        self.assertEqual(blocked, ("active", "source_structure_passed"))
+
+    def test_eight_pct_event_remains_permanent_major_risk(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile "
+                "(addr,status,reason,source_quality_score,profile_generation,data_status,"
+                "official_perp_status) VALUES(?,?,?,?,?,?,?)",
+                ("0xblown", "active", "source_structure_passed", 99, "g-new",
+                 "valid", "passed"),
+            )
+            scanner._record_wallet_risk_event(
+                db, "0xblown", "copy_single_liquidation_loss_over_8pct",
+                "SKHX:123", occurred_at=123, coin="SKHX",
+                loss_usd=801, loss_pct=.08,
+            )
+            db.commit()
+            kept, _tail = scanner._source_quality_pool(db, "g-new", limit=40)
+            blocked = db.execute(
+                "SELECT status,reason FROM profile WHERE addr='0xblown'"
+            ).fetchone()
+        self.assertEqual(kept, [])
         self.assertEqual(blocked, ("rejected", "historical_major_liquidation"))
 
     def test_prepath_candidate_uses_frozen_rough_copy_contract_only(self):
@@ -1119,6 +1142,97 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result["fills"], 1)
         self.assertEqual(result["coverage"], 1.0)
+
+    def test_selection_path_prefetch_retries_only_missing_markets_before_strict(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,sector_policy_json) VALUES (?,?,?)",
+                (
+                    "0xretry", "active",
+                    json.dumps({"allowed": ["crypto"], "crypto": {"allow": True}}),
+                ),
+            )
+            db.commit()
+            fills = [
+                {"user": "0xretry", "coin": "BTC", "time": 1},
+                {"user": "0xretry", "coin": "ZRO", "time": 2},
+            ]
+            prepared = [
+                ([{"coin": "BTC"}], {
+                    "coverage": .5, "missingCoins": ["ZRO"],
+                }),
+                ([{"coin": "BTC"}, {"coin": "ZRO"}], {
+                    "coverage": 1.0, "missingCoins": [],
+                }),
+            ]
+            with patch.object(scanner, "load_copyable_fills", return_value=fills), \
+                    patch.object(scanner.params, "load_follow", return_value={}), \
+                    patch.object(scanner.auto_tune, "_load_sigmas", return_value={
+                        "BTC": .05, "ZRO": .08,
+                    }), patch.object(scanner.auto_tune, "_load_market_ctx", return_value={
+                        "BTC": {"max_leverage": 20}, "ZRO": {"max_leverage": 10},
+                    }), patch.object(
+                        scanner.auto_tune, "prepare_refined_price_path",
+                        side_effect=prepared,
+                    ), patch.object(scanner.price_path, "ensure") as ensure, \
+                    patch.object(
+                        scanner.price_path, "coverage",
+                        return_value={"coverage": 1.0, "missingCoins": []},
+                    ), patch.object(scanner.time, "sleep") as sleep:
+                result = scanner._prefetch_selection_paths(
+                    db, ["0xretry"], 40 * 86_400_000, "g1",
+                )
+
+        self.assertEqual(result["pathRetryAttempts"], 1)
+        self.assertEqual(result["missingCoins"], 0)
+        self.assertEqual(
+            [row["coin"] for row in ensure.call_args.args[1]], ["ZRO"],
+        )
+        self.assertTrue(ensure.call_args.kwargs["force_retry"])
+        sleep.assert_called_once_with(10.0)
+
+    def test_selection_path_prefetch_exhausts_five_low_frequency_retries(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile(addr,status,sector_policy_json) VALUES (?,?,?)",
+                (
+                    "0xmissing", "active",
+                    json.dumps({"allowed": ["crypto"], "crypto": {"allow": True}}),
+                ),
+            )
+            db.commit()
+            fills = [{"user": "0xmissing", "coin": "ZRO", "time": 1}]
+            incomplete = {
+                "coverage": 0.0, "missingCoins": ["ZRO"],
+            }
+            with patch.object(scanner, "load_copyable_fills", return_value=fills), \
+                    patch.object(scanner.params, "load_follow", return_value={}), \
+                    patch.object(scanner.auto_tune, "_load_sigmas", return_value={
+                        "ZRO": .08,
+                    }), patch.object(scanner.auto_tune, "_load_market_ctx", return_value={
+                        "ZRO": {"max_leverage": 10},
+                    }), patch.object(
+                        scanner.auto_tune, "prepare_refined_price_path",
+                        side_effect=[
+                            ([], incomplete), ([], incomplete),
+                        ],
+                    ), patch.object(scanner.price_path, "ensure") as ensure, \
+                    patch.object(
+                        scanner.price_path, "coverage", return_value=incomplete,
+                    ), patch.object(scanner.time, "sleep") as sleep:
+                result = scanner._prefetch_selection_paths(
+                    db, ["0xmissing"], 40 * 86_400_000, "g1",
+                )
+
+        self.assertEqual(result["pathRetryAttempts"], 5)
+        self.assertEqual(result["missingCoins"], 1)
+        self.assertEqual(ensure.call_count, 5)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertTrue(all(
+            call.args == (10.0,) for call in sleep.call_args_list
+        ))
 
     def test_path_prefetch_and_formation_share_bounded_candidate_pool(self):
         formation_source = inspect.getsource(scanner.form_quality_prefix)
@@ -1999,7 +2113,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(marginal.selected, ())
             self.assertEqual(
                 marginal.search_meta["membershipPolicy"],
-                "selection-pre-strict32-pf125-profit-score-prefix-v5",
+                scanner.pre_strict.SELECTION_MODEL_VERSION,
             )
             self.assertEqual(rows, [])
 
