@@ -89,7 +89,7 @@ export function Wallets({ confirm }) {
         {explicit ? (
           <table>
             <thead><tr>
-              <th>#</th><th>地址</th><th>市场</th><th className="num" title="跟单形成主排序：盈利优先映射分 × 85%–100%可信度系数">评分</th>
+              <th>#</th><th>地址</th><th>市场</th><th className="num" title="最终Strict评分：60分资格基线 + 35分盈利能力 + 5分综合可信度；评分只排序，不替代准入门槛">评分</th>
               <th className="num" title="70% × 严格Copy保守30日收益率 + 30% × 保守7日收益率；正浮盈权重为0，浮亏全额扣除">盈利优先</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
               <th className="num" title="仅显示当前 generation 的最终严格 Copy 证据；缺少严格回放时不以粗回放替代。">回放数据</th>

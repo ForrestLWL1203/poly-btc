@@ -448,6 +448,11 @@ not the objective or evidence.
 The leverage, margin, and smart-add batches in that tune also reuse one worker session and immutable 30-day
 context. Do not recreate a spawn pool for each dependent axis; a one-core host must remain serial-safe.
 
+Final-Strict display/ranking score is qualification-anchored: 60% records completion of the full strict
+contract, 35% is the bounded profit-priority mapping, and 5% is PF/sample/execution/repeatability/activity/
+liquidation reliability. Rough/pre-strict scores remain unanchored so uncertified wallets never inherit the
+strict baseline. Score orders already-qualified wallets and never grants admission.
+
 Current Paper defaults deliberately allow the full closed loop:
 
 - `AUTO_TUNE_MODE=apply`;

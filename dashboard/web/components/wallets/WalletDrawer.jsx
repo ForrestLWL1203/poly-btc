@@ -197,7 +197,7 @@ export function WalletDrawer({ address, onClose }) {
                   <div className="wallet-risk-list">
                     {scoreComponents.profitPriority != null ? <React.Fragment>
                       <div className="wallet-risk"><span>盈利优先 / 盈利映射分</span><b>{scoreBreakdown.profitPriorityPct != null ? fSign(scoreBreakdown.profitPriorityPct, 1) + "%" : "—"} / {fNum(scoreComponents.profitPriority, 1)}</b></div>
-                      <div className="wallet-risk"><span>综合可信度 / 评分系数</span><b>{fNum(scoreBreakdown.reliability, 1)} / {scoreBreakdown.confidenceMultiplier != null ? fNum(scoreBreakdown.confidenceMultiplier, 3) : "—"}</b></div>
+                      <div className="wallet-risk"><span>综合可信度 / Strict资格基线</span><b>{fNum(scoreBreakdown.reliability, 1)} / {scoreBreakdown.scoreFormula && scoreBreakdown.scoreFormula.qualificationBase != null ? fNum(scoreBreakdown.scoreFormula.qualificationBase * 100, 0) : "—"}</b></div>
                       <div className="wallet-risk"><span>PF可信度 / 样本可信度</span><b>{fNum(scoreComponents.profitFactorConfidence, 1)} / {fNum(scoreComponents.sampleConfidence, 1)}</b></div>
                       <div className="wallet-risk"><span>执行可信度 / 重复性</span><b>{fNum(scoreComponents.executionConfidence, 1)} / {fNum(scoreComponents.repeatabilityConfidence, 1)}</b></div>
                       <div className="wallet-risk"><span>跨周活跃 / 清算安全</span><b>{fNum(scoreComponents.activityConfidence, 1)} / {fNum(scoreComponents.liquidationSafety, 1)}</b></div>

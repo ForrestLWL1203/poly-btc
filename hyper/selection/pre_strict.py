@@ -15,7 +15,7 @@ from hyper.copy.economics import conservative_profitability, open_loss_ratio_wit
 
 DAY_MS = 86_400_000
 POLICY_VERSION = "pre-strict32-pf125-activity-retention-v2"
-SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-retention-v6"
+SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-retention-v7"
 
 
 def _num(value, default=0.0):

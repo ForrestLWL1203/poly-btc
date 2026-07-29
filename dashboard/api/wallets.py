@@ -203,6 +203,7 @@ def _score_breakdown(row):
         "profitComponent": score100(detail.get("profitComponent")),
         "reliability": score100(detail.get("reliability")),
         "confidenceMultiplier": detail.get("confidenceMultiplier"),
+        "scoreFormula": detail.get("scoreFormula") or {},
         "economicReturnsPct": {
             key: round(float(value) * 100, 2)
             for key, value in (detail.get("economicReturns") or {}).items()

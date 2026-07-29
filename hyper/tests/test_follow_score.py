@@ -144,10 +144,30 @@ class FollowScoreTests(unittest.TestCase):
         for score, detail in (
             (weak_score, weak_detail), (strong_score, strong_detail),
         ):
-            self.assertLessEqual(score, detail["profitComponent"] + 1e-12)
-            self.assertGreaterEqual(
-                score, detail["profitComponent"] * .85 - 1e-12,
+            formula = detail["scoreFormula"]
+            self.assertAlmostEqual(
+                score,
+                formula["qualificationBase"]
+                + formula["profitWeight"] * detail["profitComponent"]
+                + formula["reliabilityWeight"] * detail["reliability"],
             )
+
+    def test_strict_score_anchors_qualified_wallets_without_inflating_rough_pool(self):
+        metrics = evidence(
+            copy_bt_net_pnl=1_000,
+            copy_bt_closed_net_pnl=1_000,
+            copy_bt_window_start_equity=10_000,
+            copy_bt_7d_net_pnl=300,
+            copy_bt_7d_closed_net_pnl=300,
+            copy_bt_7d_window_start_equity=10_000,
+        )
+        strict_score, strict_detail = compute_follow_score(metrics, stage="strict")
+        rough_score, rough_detail = compute_follow_score(metrics, stage="rough")
+
+        self.assertGreaterEqual(strict_score, .60)
+        self.assertEqual(strict_detail["scoreFormula"]["qualificationBase"], .60)
+        self.assertEqual(rough_detail["scoreFormula"]["qualificationBase"], 0.0)
+        self.assertLess(rough_score, strict_score)
 
     def test_final_sort_is_monotonic_with_displayed_score(self):
         rows = []

@@ -25,9 +25,12 @@ from . import pre_strict
 PROFIT_PRIORITY_30_WEIGHT = 0.70
 PROFIT_PRIORITY_7_WEIGHT = 0.30
 PROFIT_PRIORITY_MODE = "conservative_realized_profit_70_30"
-FOLLOW_SCORE_MODE = "profit_priority_confidence_haircut_v2"
+FOLLOW_SCORE_MODE = "strict_qualification_anchor_profit_confidence_v3"
 FOLLOW_SCORE_PROFIT_SCALE = 0.35
 FOLLOW_SCORE_CONFIDENCE_FLOOR = 0.85
+STRICT_SCORE_QUALIFICATION_BASE = 0.60
+STRICT_SCORE_PROFIT_WEIGHT = 0.35
+STRICT_SCORE_RELIABILITY_WEIGHT = 0.05
 ECONOMIC_REJECTION_REASONS = frozenset({
     "source_30d_closed_pnl_not_positive",
     "source_7d_closed_pnl_not_positive",
@@ -600,7 +603,29 @@ def compute_follow_score(
         FOLLOW_SCORE_CONFIDENCE_FLOOR
         + (1.0 - FOLLOW_SCORE_CONFIDENCE_FLOOR) * reliability
     )
-    score = profit_component * confidence_multiplier
+    if strict:
+        # A final-Strict wallet has already passed the complete source, activity, PF, execution, path and
+        # liquidation contract.  Give that certification a visible baseline, then preserve profit-led order
+        # inside the qualified pool.  Reliability remains a small differentiator instead of duplicating
+        # hard gates or making a valid Core look like a failing 48/100 wallet. Rough/pre-strict ranking keeps
+        # the unanchored economic score so unverified wallets cannot inherit the qualification baseline.
+        score = (
+            STRICT_SCORE_QUALIFICATION_BASE
+            + STRICT_SCORE_PROFIT_WEIGHT * profit_component
+            + STRICT_SCORE_RELIABILITY_WEIGHT * reliability
+        )
+        score_formula = {
+            "qualificationBase": STRICT_SCORE_QUALIFICATION_BASE,
+            "profitWeight": STRICT_SCORE_PROFIT_WEIGHT,
+            "reliabilityWeight": STRICT_SCORE_RELIABILITY_WEIGHT,
+        }
+    else:
+        score = profit_component * confidence_multiplier
+        score_formula = {
+            "qualificationBase": 0.0,
+            "profitWeight": confidence_multiplier,
+            "reliabilityWeight": 0.0,
+        }
     return _clamp(score), {
         "sourceOnly": False,
         "stage": "strict" if strict else "rough",
@@ -610,6 +635,7 @@ def compute_follow_score(
         "profitComponent": profit_component,
         "reliability": reliability,
         "confidenceMultiplier": confidence_multiplier,
+        "scoreFormula": score_formula,
         "profitabilityBasis": PROFITABILITY_BASIS,
         "economicReturns": {"30d": return30, "7d": return7},
         "economicEquities": {

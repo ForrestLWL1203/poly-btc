@@ -313,6 +313,10 @@ Its adaptive leverage, margin and smart-add batches keep one worker session aliv
 30-day fills/market context, avoiding repeated process startup and context serialization without pruning a
 candidate surface.
 
+最终 Strict 评分采用“60分完整资格基线 + 35分严格盈利映射 + 5分综合可信度”。这样已通过源画像、
+跨周活跃、PF、执行、路径和清算认证的钱包不会显示成不及格，同时仍按盈利能力拉开顺序；
+Pre-strict 粗评分没有60分基线，评分也始终不能替代任何准入门槛。
+
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
 margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;
 the exact best-profit surface is always retained. Only inside the configured near-best profit band does the tuner
