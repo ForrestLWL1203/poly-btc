@@ -19,7 +19,6 @@ class OpenSizingParams:
     tier_min_notional: dict
     tier_coin_cap: dict
     min_lev: float
-    stock_max_lev: float
     deploy_full_pct: float
     max_deploy_pct: float
     min_open_margin_pct: float
@@ -475,8 +474,6 @@ def plan_open_sizing(
 ) -> OpenSizingPlan:
     tier = tier_for_sigma(sigma, params.stable_sigma_max, params.high_sigma_min, coin)
     lev = max(params.min_lev, float(int(params.tier_lev_cap[tier])))
-    if coin.startswith("xyz:"):
-        lev = max(params.min_lev, min(lev, params.stock_max_lev))
     # `maintenance_leverage` comes from the venue's per-market maxLeverage metadata. It determines both
     # the first maintenance tier and the maximum leverage that can actually be opened. Simulating above
     # it creates impossible notionals and false liquidations (for example ETH/XRP under a 35x stable cap).

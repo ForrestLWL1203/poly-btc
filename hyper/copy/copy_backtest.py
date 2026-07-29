@@ -529,7 +529,6 @@ class Backtest:
             "high": int(overrides.get("HIGH_MAX_ADDS", config.HIGH_MAX_ADDS)),
         }
         self.min_lev = overrides.get("MIN_LEV", config.MIN_LEV)
-        self.stock_max_lev = overrides.get("STOCK_MAX_LEV", config.STOCK_MAX_LEV)
         self.add_strategy = overrides.get("ADD_STRATEGY", config.ADD_STRATEGY)
         self.add_gap_k = overrides.get("ADD_GAP_K", config.ADD_GAP_K)
         self.pos_add_gap_k = overrides.get("POS_ADD_GAP_K", config.POS_ADD_GAP_K)
@@ -611,7 +610,6 @@ class Backtest:
             tier_min_notional=self.tier_min_notional,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
-            stock_max_lev=self.stock_max_lev,
             deploy_full_pct=self.max_deploy_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,

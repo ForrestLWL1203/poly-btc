@@ -151,8 +151,8 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #              initial strategy allocation a bounded sqrt curve slows shrinkage. Real risk equity still owns
 #              coin/deploy caps, and free cash remains the final hard backstop.
 #   leverage = the σ-tier's LEV CAP (v10: σ-scaled RISK_BUDGET/σ dropped as redundant with tier cap +
-#              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV; the caller
-#              further caps to the master's own leverage and the stock cap. σ still selects the tier.
+#              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV and the
+#              master's own leverage. σ still selects the tier.
 #   notional = margin × leverage. The source's cumulative flat→open position must first cross the tier floor,
 #              but once confirmed it does not cap our independently sized notional.
 STABLE_SIGMA_MAX = 0.05     # compatibility/audit only: BTC is always stable-tier; non-BTC never enters stable.
@@ -203,11 +203,6 @@ SMART_TP_CLOSE_3_PCT = 0.25
 SMART_TP_TAIL_REMAIN_PCT = 0.30
 SMART_TP_TARGET_REDUCE_EXIT_PCT = 0.30  # once only the tail remains, this cumulative target cut exits all.
 SMART_TP_MIN_FEE_MULT = 2.0             # current floating profit must cover this multiple of the cut's exit fee.
-STOCK_MAX_LEV = 10.0        # HARD leverage ceiling for stock/builder perps (xyz:*), regardless of σ-tier or
-#                           master lev. Stocks GAP (earnings/news) and their calm realized σ (e.g. TSLA 4%)
-#                           badly understates tail risk — mean-daily-range σ let TSLA into the STABLE tier at
-#                           20x, and one 10% day ate our profit. No σ statistic reliably catches stock gaps →
-#                           cap by instrument class. (2026-07-02, after the TSLA 20x blow-up.)
 COIN_BLACKLIST = ""         # comma/newline separated exact coin ids to never open anew (e.g. XYZ:SHKX).
 BLOCK_KOREAN_STOCKS = False # preset: block EWY/KR200/Samsung/SK hynix/Hyundai new opens and adds.
 #                           Existing copy positions still reduce/close normally; flips close old side, then skip

@@ -241,7 +241,6 @@ class WebStaticAssetsTests(unittest.TestCase):
             "settings/AddSettingsPanel.jsx": "export function AddSettingsPanel(",
             "settings/FollowSettingsPanel.jsx": "export function FollowSettingsPanel(",
             "settings/ScannerSettingsPanel.jsx": "export function ScannerSettingsPanel(",
-            "settings/SizingPreview.jsx": "export function SizingPreview(",
         }
         internal_parts = {
             "settings/paramMeta.js": "export const PARAM_META",
@@ -261,6 +260,10 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn('from "./CoinBlacklistEditor.jsx"', (ROOT / "dashboard" / "web" / "components" / "settings/FollowSettingsPanel.jsx").read_text(encoding="utf-8"))
 
         self.assertNotIn("const PARAM_META = {", settings)
+        self.assertNotIn("SizingPreview", settings)
+        self.assertFalse(
+            (ROOT / "dashboard" / "web" / "components" / "settings" / "SizingPreview.jsx").exists()
+        )
 
     def test_settings_hooks_are_not_after_loading_return(self):
         settings = (ROOT / "dashboard" / "web" / "components" / "Settings.jsx").read_text(encoding="utf-8")

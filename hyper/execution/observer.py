@@ -122,7 +122,6 @@ class Observer:
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
         self.min_lev = config.MIN_LEV
-        self.stock_max_lev = config.STOCK_MAX_LEV            # hard lev ceiling for stock/builder perps (xyz:*)
         self.coin_blacklist = parse_coin_blacklist(config.COIN_BLACKLIST)
         self.block_korean_stocks = bool(config.BLOCK_KOREAN_STOCKS)
         self.low_liquidity_filter_enable = config.LOW_LIQUIDITY_FILTER_ENABLE
@@ -564,7 +563,6 @@ class Observer:
             if f.get("ADD_FRAC") is not None: self.add_frac = f["ADD_FRAC"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
-            if f.get("STOCK_MAX_LEV"): self.stock_max_lev = f["STOCK_MAX_LEV"]
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
             if f.get("PORTFOLIO_DRAWDOWN_STOP_ENABLE") is not None:
                 self.portfolio_drawdown_stop_enable = bool(f["PORTFOLIO_DRAWDOWN_STOP_ENABLE"])
@@ -915,7 +913,6 @@ class Observer:
             tier_min_notional=self.tier_min_notional,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
-            stock_max_lev=self.stock_max_lev,
             deploy_full_pct=self.max_deploy_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
@@ -1841,7 +1838,7 @@ class Observer:
         )
         # v10 sizing: σ → tier (stable/mid/high) → margin% + leverage = the tier's LEV CAP
         #  margin = adaptive sizing equity × <tier>_margin_pct
-        #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ master lev + stock cap)
+        #  lev    = <tier>_lev_cap (clipped MIN/MAX_LEV, then ≤ venue and master leverage)
         #  notional = margin·lev. NOT mirrored from the master (σ alone sizes us). A calm coin (BTC, GOLD)
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         sigma = self._sigma(coin)

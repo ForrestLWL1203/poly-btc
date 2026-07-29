@@ -214,15 +214,15 @@ PARAM_SPEC = [
         "中档·单币上限", "中档(ETH/SOL等)单币保证金上限(占账户%)"),
     ("HIGH_COIN_CAP_PCT",    "follow",  "yellow", "pct",     "immediate", config.HIGH_COIN_CAP_PCT * 100,
         "剧烈档·单币上限", "剧烈档(meme/野币/高波股)单币保证金上限——波动大,绝不给到稳定档那么高"),
-    ("TAIL_CLOSE_ENABLE",    "follow",  "green",  "bool",    "immediate", config.TAIL_CLOSE_ENABLE,
+    ("TAIL_CLOSE_ENABLE",    "follow",  "hidden", "bool",    "immediate", config.TAIL_CLOSE_ENABLE,
         "盈利尾仓保护", "智能动态止盈关闭时，目标分批减仓后按剩余比例和强平风险决定是否一次性锁定利润"),
-    ("TAIL_CLOSE_HARD_REMAIN_PCT", "follow", "yellow", "pct", "immediate",
+    ("TAIL_CLOSE_HARD_REMAIN_PCT", "follow", "hidden", "pct", "immediate",
         config.TAIL_CLOSE_HARD_REMAIN_PCT * 100,
         "尾仓直接清理线", "整笔仍盈利时，剩余仓位不超过历史峰值此比例就直接全平"),
-    ("TAIL_CLOSE_RISK_REMAIN_PCT", "follow", "yellow", "pct", "immediate",
+    ("TAIL_CLOSE_RISK_REMAIN_PCT", "follow", "hidden", "pct", "immediate",
         config.TAIL_CLOSE_RISK_REMAIN_PCT * 100,
         "尾仓风险评估线", "剩余仓位低于此比例后，按当前价到该币种强平价的利润回吐风险评估"),
-    ("TAIL_CLOSE_PROFIT_GIVEBACK_PCT", "follow", "yellow", "pct", "immediate",
+    ("TAIL_CLOSE_PROFIT_GIVEBACK_PCT", "follow", "hidden", "pct", "immediate",
         config.TAIL_CLOSE_PROFIT_GIVEBACK_PCT * 100,
         "尾仓最大利润回吐", "尾仓继续持有至强平可能吃掉当前整笔利润达到此比例时，立即全平"),
     ("SMART_TP_ENABLE", "follow", "green", "bool", "immediate", config.SMART_TP_ENABLE,
@@ -257,8 +257,6 @@ PARAM_SPEC = [
     ("HIGH_SIGMA_MIN",       "follow",  "hidden", "pct",     "immediate", config.HIGH_SIGMA_MIN * 100, "剧烈档σ下界", ""),
     ("MAX_LEV",              "follow",  "hidden", "x",       "immediate", config.MAX_LEV, "杠杆硬上限", ""),
     ("MIN_LEV",              "follow",  "hidden", "x",       "immediate", config.MIN_LEV, "杠杆硬下限", ""),
-    ("STOCK_MAX_LEV",        "follow",  "yellow", "x",       "immediate", config.STOCK_MAX_LEV,
-        "股票杠杆上限", "股票/大宗 perp(xyz:*)的硬性杠杆上限,不管 σ 落哪档、目标用多少倍。股票会跳空,平静的 σ 低估尾部风险,必须按品类一刀切"),
     ("MAX_DEPLOY_PCT",       "follow",  "yellow", "pct",     "immediate", config.MAX_DEPLOY_PCT * 100,
         "组合部署上限", "总占用保证金到此比例就停开新仓,留下(100-此)%干火药给加仓+新信号+缓冲。加仓可动用这部分储备。防权益开单一路铺满"),
     ("MIN_OPEN_MARGIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100, "单笔最小开仓额", ""),
@@ -365,7 +363,8 @@ def seed_params(db):
         "'CORE_COPY_CAMPAIGN_FLOOR','CORE_COPY_MIN_CAMPAIGN_WIN_RATE',"
         "'CORE_COPY_MIN_BODY_WIN_RATE','CORE_MIN_FOLLOW_SCORE',"
         "'OFFICIAL_PERP_FOLD_DAYS','OFFICIAL_PERP_FOLD_COUNT',"
-        "'OFFICIAL_PERP_MIN_FOLD_RETURN','COPY_CAMPAIGN_ZERO_RETURN_PRIOR')"
+        "'OFFICIAL_PERP_MIN_FOLD_RETURN','COPY_CAMPAIGN_ZERO_RETURN_PRIOR',"
+        "'STOCK_MAX_LEV')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)

@@ -448,8 +448,8 @@ the current published generation.
   remain hard execution boundaries.
 - BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
-  high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). `xyz:*` additionally obeys the hard
-  stock leverage ceiling.
+  high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use
+  the same tier leverage cap, plus the venue maximum and source-wallet leverage cap.
 - `MARGIN_EQUITY_PCT` is a manual-only sizing base (default 100%, UI range 10–100%). It scales each new
   position's drawdown-adjusted equity base without freezing the remainder; real cash, per-coin caps and total
   deployment still use full risk equity. Auto-tune and Core-count selection must not modify this value.

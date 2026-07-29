@@ -2,7 +2,6 @@ import { api } from "../lib/api.js";
 import { AddSettingsPanel } from "./settings/AddSettingsPanel.jsx";
 import { FollowSettingsPanel } from "./settings/FollowSettingsPanel.jsx";
 import { ScannerSettingsPanel } from "./settings/ScannerSettingsPanel.jsx";
-import { SizingPreview } from "./settings/SizingPreview.jsx";
 import { ConnectionsPanel } from "./settings/ConnectionsPanel.jsx";
 import { ADD_KEYS } from "./settings/paramMeta.js";
 import { useSettingsParams } from "./settings/useSettingsParams.js";
@@ -107,8 +106,6 @@ export function Settings({ confirm }) {
           style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12, padding: "4px 12px" }}>↺ 恢复默认</button>
         }
       </div>
-
-      {tab === "follow" && <SizingPreview vals={vals} />}
 
       {tab === "connections" ? <ConnectionsPanel confirm={confirm} /> : <div className="tbl-wrap">
         {tab === "scanner" && <ScannerSettingsPanel list={list} vals={vals} dirty={dirty} onChange={setValue} />}

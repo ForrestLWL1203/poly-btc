@@ -60,7 +60,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
             min_lev=1.0,
-            stock_max_lev=10.0,
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
@@ -103,7 +102,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.40, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            stock_max_lev=10.0,
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
@@ -157,7 +155,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            stock_max_lev=10.0,
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
@@ -199,7 +196,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            stock_max_lev=10.0,
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
@@ -243,7 +239,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            stock_max_lev=10.0,
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
@@ -280,7 +275,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            stock_max_lev=10.0,
             deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
@@ -296,6 +290,35 @@ class CopyEngineTests(unittest.TestCase):
         self.assertTrue(plan.ok)
         self.assertEqual(plan.tier, "mid")
         self.assertEqual(plan.leverage, 12.0)
+
+    def test_stock_uses_volatility_tier_leverage_without_a_separate_cap(self):
+        params = OpenSizingParams(
+            stable_sigma_max=0.05,
+            high_sigma_min=0.09,
+            tier_margin={"stable": 0.04, "mid": 0.03, "high": 0.02},
+            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.012},
+            tier_lev_cap={"stable": 25.0, "mid": 12.0, "high": 4.0},
+            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
+            tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
+            min_lev=1.0,
+            deploy_full_pct=0.40,
+            max_deploy_pct=0.80,
+            min_open_margin_pct=0.001,
+        )
+
+        mid = plan_open_sizing(
+            coin="xyz:MU", side="long", entry_px=100.0, sigma=0.07,
+            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=20.0, params=params,
+        )
+        high = plan_open_sizing(
+            coin="xyz:MU", side="long", entry_px=100.0, sigma=0.12,
+            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=20.0, params=params,
+        )
+
+        self.assertEqual((mid.tier, mid.leverage), ("mid", 12.0))
+        self.assertEqual((high.tier, high.leverage), ("high", 4.0))
 
     def test_only_btc_is_eligible_for_stable_tier(self):
         from hyper.copy.copy_engine import tier_for_sigma

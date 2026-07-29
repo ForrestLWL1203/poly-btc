@@ -25,6 +25,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual(config.WALLET_MAX_OPEN_POSITIONS, 15)
         self.assertEqual(config.WALLET_STOCK_SIDE_MAX_POSITIONS, 15)
         self.assertFalse(hasattr(config, "MAX_TOTAL_MARGIN_PCT"))
+        self.assertFalse(hasattr(config, "STOCK_MAX_LEV"))
         self.assertFalse(hasattr(config, "HARVEST_WEEK_VLM_MAX"))
         self.assertFalse(hasattr(config, "HARVEST_PNL_VOL_MIN"))
 
@@ -56,6 +57,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("WALLET_STOCK_SIDE_CAP_PCT", follow)
             self.assertNotIn("WALLET_MAX_OPEN_POSITIONS", follow)
             self.assertNotIn("MAX_TOTAL_MARGIN_PCT", follow)
+            self.assertNotIn("STOCK_MAX_LEV", follow)
             self.assertFalse(follow["SMART_TP_ENABLE"])
             self.assertEqual(follow["SMART_TP_GIVEBACK_1_PCT"], 0.20)
             self.assertEqual(follow["SMART_TP_CLOSE_3_PCT"], 0.25)
@@ -69,6 +71,11 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("WALLET_SECTOR_SIDE_CAP_PCT", visible_follow)
             self.assertNotIn("WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", visible_follow)
             self.assertNotIn("WALLET_STOCK_SIDE_CAP_PCT", visible_follow)
+            self.assertNotIn("STOCK_MAX_LEV", visible_follow)
+            self.assertNotIn("TAIL_CLOSE_ENABLE", visible_follow)
+            self.assertNotIn("TAIL_CLOSE_HARD_REMAIN_PCT", visible_follow)
+            self.assertNotIn("TAIL_CLOSE_RISK_REMAIN_PCT", visible_follow)
+            self.assertNotIn("TAIL_CLOSE_PROFIT_GIVEBACK_PCT", visible_follow)
             self.assertFalse(visible_follow["SMART_TP_ENABLE"]["value"])
             self.assertEqual(visible_follow["SMART_TP_ENABLE"]["level"], "green")
             self.assertNotIn("SMART_TP_GIVEBACK_1_PCT", visible_follow)
@@ -236,6 +243,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 ("WALLET_MARGIN_CAP_PCT", "25"),
                 ("WALLET_MAX_OPEN_POSITIONS", "3"),
                 ("MAX_TOTAL_MARGIN_PCT", "85"),
+                ("STOCK_MAX_LEV", "10"),
             ):
                 db.execute(
                     "INSERT INTO params "
@@ -250,7 +258,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM params WHERE key IN "
                 "('WALLET_SECTOR_SIDE_CAP_PCT','WALLET_MARGIN_CAP_PCT',"
-                "'WALLET_MAX_OPEN_POSITIONS','MAX_TOTAL_MARGIN_PCT')"
+                "'WALLET_MAX_OPEN_POSITIONS','MAX_TOTAL_MARGIN_PCT','STOCK_MAX_LEV')"
             ).fetchone()[0], 0)
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
