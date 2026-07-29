@@ -34,7 +34,13 @@ const { useState } = React;
 export function ScanMask({ status, onStop, stopping = false, stopError = null }) {
   const [confirmStop, setConfirmStop] = useState(false);
   const stage = status && status.stage;
-  const curIdx = SCAN_STAGES.findIndex(([keys]) => keys.includes(stage));
+  const scanned = (status && status.candidatesScanned) || 0;
+  const total = (status && status.candidatesTotal) || 0;
+  // The scanner fetches/repairs fills and computes source structure inside the same per-wallet worker.
+  // Older scanner builds emit score_filter after the first completed wallet, so keep the history row active
+  // until the linear wallet batch is actually done.
+  const visualStage = stage === "score_filter" && total > 0 && scanned < total ? "fetch_history" : stage;
+  const curIdx = SCAN_STAGES.findIndex(([keys]) => keys.includes(visualStage));
   const pct = POST_PROFILE_PROGRESS[stage] ?? ((status && status.progressPct) || 0);
   const el = (status && status.elapsedSec) || 0;
   const mm = String(Math.floor(el / 60)).padStart(2, "0"), ss = String(el % 60).padStart(2, "0");
@@ -51,7 +57,7 @@ export function ScanMask({ status, onStop, stopping = false, stopError = null })
       <div className="mask-prog"><div className="pf" style={{ width: pct + "%" }} /></div>
       <div className="mask-meta">
         <span>{pct}%</span>
-        <span>已扫描 {(status && status.candidatesScanned) || 0} / {(status && status.candidatesTotal) || "—"}</span>
+        <span>已扫描 {scanned} / {total || "—"}</span>
       </div>
       <div className="stage-list">
         {SCAN_STAGES.map(([keys, label], i) => {
