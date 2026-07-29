@@ -18,6 +18,7 @@ import threading
 from hyper import config, params, storage
 from hyper.discovery import frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
+from hyper.market import rest
 from hyper.ops import paper_reset, procman, scan_lock
 from hyper.util import now_iso
 
@@ -56,13 +57,23 @@ def _start_adaptive_pace(db_path, slow_interval):
         except Exception:  # old/in-flight DB: preserve observer priority conservatively
             return True
 
-    def _pace():
-        return slow_interval if _observer_has_work() else config.SCAN_IDLE_INTERVAL
-    config.MIN_POST_INTERVAL = _pace()                      # set the starting pace before the sweep begins
+    def _apply_pace():
+        observer_busy = _observer_has_work()
+        config.MIN_POST_INTERVAL = slow_interval if observer_busy else config.SCAN_IDLE_INTERVAL
+        rest.configure_post_budget(
+            weight_per_min=(
+                None if observer_busy else
+                config.INFO_WEIGHT_BUDGET_PER_MIN * config.SCAN_IDLE_WEIGHT_BUDGET_FRACTION
+            ),
+            burst_weight=config.SCAN_IDLE_WEIGHT_BURST,
+            min_interval=config.SCAN_IDLE_MIN_REQUEST_INTERVAL,
+        )
+
+    _apply_pace()
     def _tick():
         while True:
             time.sleep(20)
-            config.MIN_POST_INTERVAL = _pace()
+            _apply_pace()
     threading.Thread(target=_tick, daemon=True).start()
 
 

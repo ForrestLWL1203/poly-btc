@@ -2,6 +2,8 @@
 
 Pure data access: no episode/metric logic (that lives in fills.py / metrics.py).
 """
+from __future__ import annotations
+
 import json
 import threading
 import time
@@ -14,22 +16,152 @@ _last_post = [0.0]
 _pace_lock = threading.Lock()   # serialize POST spacing across worker threads (the network call
 #                                 itself runs OUTSIDE the lock, so RTTs overlap = real concurrency)
 _stats_lock = threading.Lock()
-_request_stats = {"requests": 0, "retries": 0, "estimated_weight": 0}
+_request_stats = {
+    "requests": 0, "retries": 0, "estimated_weight": 0,
+    "rate_limited": 0, "budget_wait_s": 0.0,
+}
 _WEIGHT_ESTIMATE = {
     "userFills": 20, "userFillsByTime": 20, "portfolio": 20,
     "clearinghouseState": 2, "spotClearinghouseState": 2,
     "candleSnapshot": 2, "meta": 2, "metaAndAssetCtxs": 2,
 }
+_RESULT_WEIGHTED_TYPES = {"userFills", "userFillsByTime", "frontendOpenOrders"}
+_budget = {
+    "enabled": False,
+    "weight_per_min": 0.0,
+    "burst_weight": 0.0,
+    "min_interval": 0.0,
+    "tokens": 0.0,
+    "updated_at": 0.0,
+    "scale": 1.0,
+    "successes": 0,
+    "cooldown_until": 0.0,
+}
 
 
 def reset_request_stats():
     with _stats_lock:
-        _request_stats.update(requests=0, retries=0, estimated_weight=0)
+        _request_stats.update(
+            requests=0, retries=0, estimated_weight=0,
+            rate_limited=0, budget_wait_s=0.0,
+        )
 
 
 def request_stats():
     with _stats_lock:
-        return dict(_request_stats)
+        out = dict(_request_stats)
+    with _pace_lock:
+        out["budget_enabled"] = bool(_budget["enabled"])
+        out["budget_scale"] = float(_budget["scale"])
+        out["budget_weight_per_min"] = float(_budget["weight_per_min"])
+    return out
+
+
+def configure_post_budget(*, weight_per_min: float | None, burst_weight: float = 20.0,
+                          min_interval: float = 0.02) -> None:
+    """Switch the process-local POST pacer between weighted scan mode and legacy interval mode.
+
+    Hyperliquid accounts ``/info`` traffic by request weight, so one fixed sleep wastes most of the
+    allowance on weight-2 metadata calls while still being too aggressive for weight-20 fill calls.  The
+    scanner enables this weighted leaky bucket only while Observer has no work.  Observer-active scans and
+    the Observer process itself retain the conservative ``MIN_POST_INTERVAL`` contract.
+    """
+    with _pace_lock:
+        enabled = weight_per_min is not None and float(weight_per_min) > 0.0
+        _budget.update(
+            enabled=enabled,
+            weight_per_min=max(0.0, float(weight_per_min or 0.0)),
+            burst_weight=max(0.0, float(burst_weight or 0.0)),
+            min_interval=max(0.0, float(min_interval or 0.0)),
+            tokens=max(0.0, float(burst_weight or 0.0)),
+            updated_at=time.monotonic(),
+            scale=1.0,
+            successes=0,
+            cooldown_until=0.0,
+        )
+        _last_post[0] = 0.0
+
+
+def _reserve_post(weight: float) -> float:
+    """Reserve one weighted request slot and return the sleep required before sending it."""
+    with _pace_lock:
+        now = time.monotonic()
+        if not _budget["enabled"]:
+            wait = max(0.0, float(config.MIN_POST_INTERVAL) - (time.time() - _last_post[0]))
+            if wait > 0.0:
+                time.sleep(wait)
+            _last_post[0] = time.time()
+            return wait
+
+        rate_per_s = (
+            float(_budget["weight_per_min"]) * max(0.05, float(_budget["scale"])) / 60.0
+        )
+        elapsed = max(0.0, now - float(_budget["updated_at"]))
+        tokens = min(
+            float(_budget["burst_weight"]),
+            float(_budget["tokens"]) + elapsed * rate_per_s,
+        )
+        required = max(1.0, float(weight))
+        token_wait = max(0.0, required - tokens) / max(rate_per_s, 1e-9)
+        interval_wait = max(
+            0.0,
+            float(_budget["min_interval"]) - (time.time() - _last_post[0]),
+        )
+        wait = max(
+            token_wait,
+            interval_wait,
+            float(_budget["cooldown_until"]) - now,
+        )
+        if wait > 0.0:
+            time.sleep(wait)
+            now = time.monotonic()
+            elapsed = max(0.0, now - float(_budget["updated_at"]))
+            tokens = min(
+                float(_budget["burst_weight"]),
+                float(_budget["tokens"]) + elapsed * rate_per_s,
+            )
+        _budget["tokens"] = max(0.0, tokens - required)
+        _budget["updated_at"] = now
+        _last_post[0] = time.time()
+    if wait > 0.0:
+        with _stats_lock:
+            _request_stats["budget_wait_s"] += wait
+    return wait
+
+
+def _rate_limit_feedback(*, limited: bool) -> None:
+    """Back off sharply on 429 and recover conservatively after sustained successful requests."""
+    with _pace_lock:
+        if not _budget["enabled"]:
+            return
+        if limited:
+            _budget["scale"] = max(0.25, float(_budget["scale"]) * 0.70)
+            _budget["successes"] = 0
+            _budget["cooldown_until"] = max(
+                float(_budget["cooldown_until"]), time.monotonic() + 2.0,
+            )
+            return
+        _budget["successes"] = int(_budget["successes"]) + 1
+        if _budget["successes"] >= 20 and float(_budget["scale"]) < 1.0:
+            _budget["scale"] = min(1.0, float(_budget["scale"]) + 0.05)
+            _budget["successes"] = 0
+
+
+def _charge_result_weight(body: dict, result) -> int:
+    """Charge response-sized weight after the server reveals the returned row count."""
+    if body.get("type") not in _RESULT_WEIGHTED_TYPES or not isinstance(result, list):
+        return 0
+    extra = (len(result) + 19) // 20
+    if extra <= 0:
+        return 0
+    with _stats_lock:
+        _request_stats["estimated_weight"] += extra
+    with _pace_lock:
+        if _budget["enabled"]:
+            # A negative balance is deliberate debt.  The next reservation waits for both its own request
+            # and the extra response-sized weight consumed by this result.
+            _budget["tokens"] = float(_budget["tokens"]) - float(extra)
+    return extra
 
 
 def _get(url: str, retries: int = 3):
@@ -54,24 +186,28 @@ def post(body: dict, retries: int = 7):
     """POST to the info endpoint, globally paced and with 429-aware backoff."""
     data = json.dumps(body).encode()
     err = None
+    weight = _WEIGHT_ESTIMATE.get(body.get("type"), 1)
     with _stats_lock:
         _request_stats["requests"] += 1
-        _request_stats["estimated_weight"] += _WEIGHT_ESTIMATE.get(body.get("type"), 1)
+        _request_stats["estimated_weight"] += weight
     for attempt in range(retries):
         if attempt:
             with _stats_lock:
                 _request_stats["retries"] += 1
-        with _pace_lock:                                   # only the spacing is serialized ...
-            wait = config.MIN_POST_INTERVAL - (time.time() - _last_post[0])
-            if wait > 0:
-                time.sleep(wait)
-            _last_post[0] = time.time()
+        _reserve_post(weight)
         try:                                               # ... the request below runs concurrently
             req = urllib.request.Request(config.INFO_URL, data=data, headers=config.UA)
             with urllib.request.urlopen(req, timeout=30) as r:
-                return json.loads(r.read().decode())
+                result = json.loads(r.read().decode())
+                _charge_result_weight(body, result)
+                _rate_limit_feedback(limited=False)
+                return result
         except urllib.error.HTTPError as exc:
             err = exc
+            if exc.code == 429:
+                with _stats_lock:
+                    _request_stats["rate_limited"] += 1
+                _rate_limit_feedback(limited=True)
             time.sleep(min(2.0 ** attempt, 20.0) if exc.code == 429 else 0.5 * (attempt + 1))
         except Exception as exc:  # noqa: BLE001
             err = exc

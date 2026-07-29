@@ -395,6 +395,12 @@ the local mock dashboard and inspect the rendered result.
 
 - Dashboard writes only commands/params; workers own business-state writes.
 - Observer is forward-only and has priority for Hyperliquid REST weight.
+- With no executable Observer work, Scanner switches from a fixed request interval to a 95%-budget weighted
+  token bucket and backs off automatically on HTTP 429. Once Observer has a Core target or open position, Scanner
+  immediately returns to its configured slow interval.
+- Profile workers return cache/profile/Episode artifacts; the scanner parent commits them in bounded SQLite
+  batches. Strict per-wallet replay and independent tune candidates use CPU-affinity-aware process workers
+  (`1 core → serial`, up to four workers), while all database writes remain in the parent process.
 - Do not restart `hl-scan.service` to deploy code: it starts a real scan when activated. Restart only the
   affected long-running service, normally `hl-dashboard.service` and/or `hl-observe.service`.
 - Before diagnosing a manual “full” scan, verify the command payload has `full=true`, the CLI used `--full`, or

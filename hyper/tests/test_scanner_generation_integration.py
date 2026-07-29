@@ -598,7 +598,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertNotIn("_rank_formation_candidates_for_surface", source)
-        self.assertEqual(source.count("_effective_follow_replay("), 2)
+        self.assertEqual(source.count("_parallel_effective_follow_replays("), 2)
         self.assertIn("tune_ranked = ranked_candidates[:core_upper]", source)
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
         self.assertIn('"finalSurfaceUniverseCount": len(tuned_candidate_rows)', source)

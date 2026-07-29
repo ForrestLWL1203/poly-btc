@@ -17,12 +17,14 @@ from typing import Iterable
 from hyper import config, params
 from hyper.copy.copy_backtest import (
     prepare_price_path,
+    prepare_replay_fills,
     run_backtest,
     slice_backtest_result,
     subset_price_path,
 )
 from hyper.copy.copy_data import load_copyable_fills
 from hyper.copy.copy_policy import load_copy_policy
+from hyper.copy import replay_parallel
 from hyper.copy.economics import (
     open_loss_ratio_within_limit,
     replay_result_profitability,
@@ -45,6 +47,33 @@ CAPACITY_SKIP_KEYS = (
     "skip_wallet_full", "skip_wallet_sector_side_full", "skip_wallet_position_cap",
     "skip_wallet_stock_side_position_cap",
 )
+_PROCESS_REPLAY_CONTEXT = {}
+
+
+def _init_process_replay_context(context: dict) -> None:
+    global _PROCESS_REPLAY_CONTEXT
+    _PROCESS_REPLAY_CONTEXT = context
+
+
+def _evaluate_candidate_process(task):
+    kind, follow, candidate, primary_only = task
+    context = _PROCESS_REPLAY_CONTEXT
+    common = {
+        "sigmas": context["sigmas"],
+        "now_ms": context["now_ms"],
+        "window_fills": context["window_fills"],
+        "path_rows": context["path_rows"],
+        "path_meta": context["path_meta"],
+        "market_ctx": context["market_ctx"],
+    }
+    if kind == "add":
+        return evaluate_add_candidate(
+            None, context["addrs"], follow, candidate, **common,
+        )
+    return evaluate_tune_candidate(
+        None, context["addrs"], follow, candidate,
+        primary_only=bool(primary_only), **common,
+    )
 
 
 def margin_add_capacity_ceilings(follow: dict) -> dict[str, float]:
@@ -529,14 +558,18 @@ def _portfolio_window_fills(db, addrs: list[str], now_ms: int, *, include_watch=
     windows = {}
     for day in days:
         start_ms = now_ms - (day + warmup_days) * 86400_000
-        windows[day] = [x for x in fills if int(x.get("time") or 0) >= start_ms]
+        windows[day] = prepare_replay_fills(
+            x for x in fills if int(x.get("time") or 0) >= start_ms
+        )
     return windows
 
 
 def _filter_window_fills_by_addr(window_fills: dict[int, list[dict]], addrs: Iterable[str]) -> dict[int, list[dict]]:
     allowed = {(a or "").lower() for a in addrs if a}
     return {
-        int(days): [x for x in fills if (x.get("user") or "").lower() in allowed]
+        int(days): prepare_replay_fills(
+            x for x in fills if (x.get("user") or "").lower() in allowed
+        )
         for days, fills in (window_fills or {}).items()
     }
 
@@ -845,12 +878,12 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
     market_ctx = _load_market_ctx(db) if market_ctx is None else market_ctx
     days_values = _tune_days()
     max_days = max(days_values)
-    fills = list((window_fills or {}).get(max_days) or [])
+    fills = prepare_replay_fills((window_fills or {}).get(max_days) or [])
     if window_fills is None:
         warmup_days = int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
-        fills = _load_portfolio_fills(
+        fills = prepare_replay_fills(_load_portfolio_fills(
             db, addrs, now_ms - (max_days + warmup_days) * 86_400_000,
-        )
+        ))
     replay_path = path_rows
     if path_rows and fills:
         first_fill = min(int(row.get("time") or 0) for row in fills)
@@ -885,7 +918,7 @@ def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dic
                               path_meta: dict | None = None) -> dict:
     """Replay one portfolio/window and immediately discard heavy position/equity details."""
     days = int(days)
-    fills = list((window_fills or {}).get(days) or [])
+    fills = prepare_replay_fills((window_fills or {}).get(days) or [])
     warm_result = run_backtest(
         "portfolio",
         fills,
@@ -1037,6 +1070,63 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     return out
 
 
+def _evaluate_candidates_parallel(
+    candidates: Iterable[dict],
+    *,
+    kind: str,
+    addrs: list[str],
+    follow: dict,
+    sigmas: dict,
+    now_ms: int,
+    window_fills: dict[int, list[dict]],
+    path_rows,
+    path_meta: dict,
+    market_ctx: dict,
+    primary_only: bool = False,
+) -> list[dict]:
+    """Evaluate one independent candidate batch using CPU-count-aware pure workers."""
+    rows = list(candidates)
+    evaluator = evaluate_add_candidate if kind == "add" else evaluate_tune_candidate
+    if getattr(evaluator, "__module__", None) != __name__:
+        # Unit tests and operator diagnostics may temporarily inject an evaluator.  Such callables are not
+        # importable in spawned workers; preserve the injected contract in-process.
+        common = {
+            "sigmas": sigmas, "now_ms": now_ms, "window_fills": window_fills,
+            "path_rows": path_rows, "path_meta": path_meta, "market_ctx": market_ctx,
+        }
+        if kind == "add":
+            return [
+                evaluator(None, addrs, follow, candidate, **common)
+                for candidate in rows
+            ]
+        return [
+            evaluator(
+                None, addrs, follow, candidate,
+                primary_only=primary_only, **common,
+            )
+            for candidate in rows
+        ]
+    context = {
+        "addrs": list(addrs),
+        "sigmas": sigmas,
+        "now_ms": int(now_ms),
+        "window_fills": window_fills,
+        "path_rows": path_rows,
+        "path_meta": path_meta,
+        "market_ctx": market_ctx,
+    }
+    tasks = [
+        (kind, dict(follow), candidate, bool(primary_only))
+        for candidate in rows
+    ]
+    return replay_parallel.map_ordered(
+        _evaluate_candidate_process,
+        tasks,
+        initializer=_init_process_replay_context,
+        initargs=(context,),
+    )
+
+
 def _write_tune_params(db, vals: dict) -> None:
     stamp = now_iso()
     for key in TUNE_KEYS:
@@ -1180,7 +1270,7 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
     then slice its realized/marked equity path into adjacent folds.
     """
     max_days = max(window_fills) if window_fills else 30
-    fills = list((window_fills or {}).get(max_days) or [])
+    fills = prepare_replay_fills((window_fills or {}).get(max_days) or [])
     market_ctx = market_ctx or {}
     base_overrides = {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}
     proposal_overrides = {**follow, **proposal, "AMBIGUOUS_PATH_MODE": "liquidate"}
@@ -1189,10 +1279,10 @@ def _walk_forward_validation(addrs, follow, proposal, sigmas, window_fills, now_
     fold_count = max(1, int(fold_count))
     total_days = fold_days * fold_count
     start_ms = int(now_ms) - total_days * 86_400_000
-    continuous_fills = [
+    continuous_fills = prepare_replay_fills([
         row for row in fills
         if int(row.get("time") or 0) >= start_ms - warmup_ms
-    ]
+    ])
     continuous_path = subset_price_path(
         path_rows, continuous_fills,
         start_ms=start_ms - warmup_ms, end_ms=int(now_ms),
@@ -1843,18 +1933,18 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
     # for a full leverage Cartesian grid.
-    axis_quick = []
     leverage_axis_candidates = (
         coarse_leverage_candidates(base, follow)
         if coarse_search else independent_leverage_candidates(base, follow)
     )
-    for candidate in leverage_axis_candidates:
+    for _candidate in leverage_axis_candidates:
         check_budget("leverage_axes")
-        axis_quick.append(evaluate_tune_candidate(
-            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            primary_only=True, market_ctx=market_ctx,
-        ))
+    axis_quick = _evaluate_candidates_parallel(
+        leverage_axis_candidates,
+        kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
+        window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        primary_only=True, market_ctx=market_ctx,
+    )
     quick_baseline = next(
         (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
         axis_quick[0],
@@ -1866,18 +1956,19 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         key: _tier_leverage_shortlist(axis_quick, quick_baseline, key, limit=shortlist_limit)
         for key in LEV_KEYS
     }
-    combo_quick = []
+    combo_candidates = []
     for values in itertools.product(*(tier_values[key] for key in LEV_KEYS)):
         check_budget("leverage_combinations")
-        candidate = _candidate_from_params(
+        combo_candidates.append(_candidate_from_params(
             _pair_margins_for_leverage(base, dict(zip(LEV_KEYS, values)), follow),
             axis="notional_paired_leverage_combination",
-        )
-        combo_quick.append(evaluate_tune_candidate(
-            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            primary_only=True, market_ctx=market_ctx,
         ))
+    combo_quick = _evaluate_candidates_parallel(
+        combo_candidates,
+        kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
+        window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        primary_only=True, market_ctx=market_ctx,
+    )
     joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
     sizing_limit = 2 if coarse_search else max(
@@ -1889,15 +1980,18 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )[:sizing_limit]
     if not any(_same_tune_values(candidate.get("params") or {}, base) for candidate in quick_finalists):
         quick_finalists.append(quick_baseline)
-    joint_candidates = []
+    joint_inputs = []
     for candidate in quick_finalists:
         check_budget("joint_finalists")
-        joint_candidates.append(evaluate_tune_candidate(
-            db, addrs, follow,
-            _candidate_from_params(candidate.get("params") or base, axis="joint_finalist"),
-            sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
-            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
-        ))
+        joint_inputs.append(
+            _candidate_from_params(candidate.get("params") or base, axis="joint_finalist")
+        )
+    joint_candidates = _evaluate_candidates_parallel(
+        joint_inputs,
+        kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
+        window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        market_ctx=market_ctx,
+    )
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
         joint_candidates[-1],
@@ -1910,21 +2004,20 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     # tier moves and remains finite even when every move improves in-sample profit.
     margin_candidates = []
     margin_rounds = []
-    for candidate in capacity_margin_candidates(joint_params, follow):
+    margin_seed_inputs = list(capacity_margin_candidates(joint_params, follow))
+    for _candidate in margin_seed_inputs:
         check_budget("capacity_margin_grid")
-        margin_candidates.append(evaluate_tune_candidate(
-            db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            market_ctx=market_ctx,
-        ))
     if formation_admission and not coarse_search:
-        for candidate in global_margin_candidates(joint_params, follow):
+        global_inputs = list(global_margin_candidates(joint_params, follow))
+        for _candidate in global_inputs:
             check_budget("global_margin_polish")
-            margin_candidates.append(evaluate_tune_candidate(
-                db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-                market_ctx=market_ctx,
-            ))
+        margin_seed_inputs.extend(global_inputs)
+    margin_candidates.extend(_evaluate_candidates_parallel(
+        margin_seed_inputs,
+        kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
+        window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+        market_ctx=market_ctx,
+    ))
     selected_margin_seed = choose_margin_candidate(
         [selected_joint, *margin_candidates], baseline,
     )
@@ -1933,14 +2026,15 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2)
     )
     for round_index in range(margin_round_limit):
-        round_candidates = []
-        for candidate in independent_margin_candidates(margin_params, follow):
+        round_inputs = list(independent_margin_candidates(margin_params, follow))
+        for _candidate in round_inputs:
             check_budget("margin_polish")
-            round_candidates.append(evaluate_tune_candidate(
-                db, addrs, follow, candidate, sigmas=sigmas, now_ms=now_ms,
-                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-                market_ctx=market_ctx,
-            ))
+        round_candidates = _evaluate_candidates_parallel(
+            round_inputs,
+            kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
+            window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
+            market_ctx=market_ctx,
+        )
         if not round_candidates:
             break
         margin_candidates.extend(round_candidates)
@@ -1977,13 +2071,15 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     selected_add = None
     selected_add_params = add_base
     if follow_for_add.get("SMART_ADD", True) and not coarse_search:
-        for candidate in add_candidates_from_axes(add_base):
+        add_inputs = list(add_candidates_from_axes(add_base))
+        for _candidate in add_inputs:
             check_budget("add_polish")
-            add_candidates.append(evaluate_add_candidate(
-                db, addrs, follow_for_add, candidate, sigmas=sigmas, now_ms=now_ms,
-                window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-                market_ctx=market_ctx,
-            ))
+        add_candidates = _evaluate_candidates_parallel(
+            add_inputs,
+            kind="add", addrs=addrs, follow=follow_for_add,
+            sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
+            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+        )
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
                             add_candidates[0] if add_candidates else None)
         selected_add = choose_margin_candidate(add_candidates, add_baseline) if add_baseline else None

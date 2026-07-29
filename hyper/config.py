@@ -40,6 +40,11 @@ SCAN_IDLE_INTERVAL = 1.2    # scan REST pace when NO copy-trading is running —
 #                             isn't competing for the IP's weight budget). Adaptive: the scan uses the
 #                             slow --scan-interval only while the observer is live; idle → this. ~15min sweep.
 #                             The scanner overrides this to --scan-interval in its own process.
+INFO_WEIGHT_BUDGET_PER_MIN = 1200.0
+SCAN_IDLE_WEIGHT_BUDGET_FRACTION = 0.95  # leave a small cushion for dashboard/ops reads on the same IP
+SCAN_IDLE_WEIGHT_BURST = 20.0            # at most one heavy wallet-history request may burst immediately
+SCAN_IDLE_MIN_REQUEST_INTERVAL = 0.02    # low-weight metadata calls need not inherit the weight-20 cadence
+REPLAY_PROCESS_MAX_WORKERS = 4           # auto-scales 1→1, 2→2, 4+→4; replay stays bounded on small VPSes
 
 # Copy engine: SIGNAL via REST poll (per-wallet userFills — REST has no 10-user cap, so we can
 # watch the whole watchlist); PRICING via WS bbo (per-COIN top-of-book — NOT subject to the

@@ -385,6 +385,25 @@ def _row_price(row: dict, *keys: str) -> float:
     return 0.0
 
 
+class PreparedReplayFills(list):
+    """Canonical, sorted fill rows carrying the owner normalization they were prepared for."""
+
+    def __init__(self, rows=(), *, owner=None):
+        super().__init__(rows)
+        self.owner = owner
+
+
+def prepare_replay_fills(fills, *, addr=None) -> PreparedReplayFills:
+    """Normalize/sort a fill surface once so repeated parameter candidates can reuse it."""
+    owner = None if not addr or str(addr).lower() == "portfolio" else str(addr).lower()
+    if isinstance(fills, PreparedReplayFills) and fills.owner == owner:
+        return fills
+    return PreparedReplayFills(
+        normalize_copyable_fills(fills, addr=owner),
+        owner=owner,
+    )
+
+
 class PreparedPricePath(list):
     """Normalized, sorted candle events that are safe to reuse across replay candidates.
 
@@ -392,6 +411,10 @@ class PreparedPricePath(list):
     membership candidate.  A 37-day, hundred-market surface contains roughly 400k candles, so the conversion
     itself dominated the optimizer and produced hundreds of megabytes of short-lived objects.
     """
+
+    def __init__(self, rows=()):
+        super().__init__(rows)
+        self._subset_cache = {}
 
 
 def _price_events(price_path) -> list[dict]:
@@ -453,12 +476,20 @@ def subset_price_path(price_path, fills, *, start_ms=None, end_ms=None) -> Prepa
         return PreparedPricePath()
     lower = None if start_ms is None else int(start_ms)
     upper = None if end_ms is None else int(end_ms)
-    return PreparedPricePath(
+    cache_key = (tuple(sorted(str(coin) for coin in coins)), lower, upper)
+    cached = prepared._subset_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    subset = PreparedPricePath(
         row for row in prepared
         if row.get("coin") in coins
         and (lower is None or int(row.get("close_time") or row.get("time") or 0) >= lower)
         and (upper is None or int(row.get("open_time") or row.get("time") or 0) <= upper)
     )
+    if len(prepared._subset_cache) >= 16:
+        prepared._subset_cache.clear()
+    prepared._subset_cache[cache_key] = subset
+    return subset
 
 
 class Backtest:
@@ -695,9 +726,8 @@ class Backtest:
         )
 
     def run(self, fills, price_path=None):
-        fills = normalize_copyable_fills(
-            fills,
-            addr=None if self.addr == "portfolio" else self.addr,
+        fills = prepare_replay_fills(
+            fills, addr=None if self.addr == "portfolio" else self.addr,
         )
         path_events = prepare_price_path(price_path)
         self.price_path_points = len(path_events)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from hyper import config, params
-from hyper.copy.copy_backtest import run_backtest, slice_backtest_result
+from hyper.copy.copy_backtest import prepare_replay_fills, run_backtest, slice_backtest_result
 from hyper.copy.copy_data import market_evidence_key, normalize_copyable_fills
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy.sector import SECTORS, compact_sector_results, evaluate_sector_policy, filter_fills
@@ -72,14 +72,14 @@ def copy_bt_result(addr, fills, now_ms, p, days=None, *, valuation_marks=None,
                    sigmas=None, market_ctx=None):
     days = int(days if days is not None else (getattr(p, "copy_bt_days", config.COPY_BT_DAYS) or config.COPY_BT_DAYS))
     start_ms = now_ms - days * 86400_000
-    replay_fills = [
+    replay_fills = prepare_replay_fills([
         x for x in normalize_copyable_fills(
             fills,
             addr=addr,
             universe=getattr(p, "copyable_universe", None),
         )
         if start_ms <= x.get("time", 0) <= now_ms
-    ]
+    ], addr=addr)
     if not replay_fills:
         return {
             "valid": True,

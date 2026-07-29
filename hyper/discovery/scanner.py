@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -31,6 +32,7 @@ from hyper.copy.copy_data import (
     normalize_copyable_fills,
 )
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
+from hyper.copy import replay_parallel
 from hyper.copy.economics import (
     OPEN_LOSS_RATIO_LIMIT,
     PROFITABILITY_BASIS,
@@ -71,6 +73,7 @@ from .scanner_lifecycle import (
 from hyper.util import f, now_iso
 
 _db_lock = threading.Lock()   # serializes sqlite writes across scanner worker threads
+_STRICT_REPLAY_PROCESS_CONTEXT = {}
 
 _SECTOR_RECOVERABLE_STRUCTURE_REASONS = {
     "bot_frequency", "hft_uncopyable", "grid_dca", "heavy_dca",
@@ -167,17 +170,7 @@ def _load_cached_fills(db, addr, since):
     return normalize_copyable_fills(out, addr=addr)
 
 
-def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=False, coverage_end=None,
-                        universe=None):
-    """Persist only executable Crypto/stock contracts; caller holds ``_db_lock``.
-
-    This is a second fail-closed boundary behind the response-time filter.  A
-    future caller cannot accidentally put spot, outcome or private-dex history
-    back into the canonical replay cache.
-    """
-    # Heal rows written by an older release, and rows for a plain perp that has since been delisted.
-    # Without this cleanup the publication audit would correctly fail, but could never self-recover on
-    # a delta scan because an immutable stale row would remain in the cache forever.
+def _invalid_cached_fill_tids(db, addr, universe=None) -> list:
     cached = db.execute(
         "SELECT tid,fill_json FROM candidate_fills WHERE addr=?", (addr,),
     ).fetchall()
@@ -190,6 +183,24 @@ def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=Fals
             continue
         if not is_copyable_coin(row.get("coin"), universe=universe):
             invalid_tids.append(tid)
+    return invalid_tids
+
+
+def _store_cached_fills(db, addr, fills, window_start, *, coverage_complete=False, coverage_end=None,
+                        universe=None, invalid_tids=None):
+    """Persist only executable Crypto/stock contracts; caller holds ``_db_lock``.
+
+    This is a second fail-closed boundary behind the response-time filter.  A
+    future caller cannot accidentally put spot, outcome or private-dex history
+    back into the canonical replay cache.
+    """
+    # Heal rows written by an older release, and rows for a plain perp that has since been delisted.
+    # Without this cleanup the publication audit would correctly fail, but could never self-recover on
+    # a delta scan because an immutable stale row would remain in the cache forever.
+    invalid_tids = (
+        _invalid_cached_fill_tids(db, addr, universe)
+        if invalid_tids is None else list(invalid_tids)
+    )
     if invalid_tids:
         db.executemany(
             "DELETE FROM candidate_fills WHERE addr=? AND tid=?",
@@ -317,6 +328,77 @@ def _replace_episode_rows(db, addr: str, eps: list) -> None:
         raise RuntimeError(f"episode consistency failed for {addr}: stored {stored}, built {len(eps)}")
 
 
+def _queue_profile_persist(row: dict, **artifact) -> dict:
+    row["_profile_persist"] = {"profile": True, **artifact}
+    return row
+
+
+def _persist_profile_batch(db, rows) -> int:
+    """Persist completed worker artifacts in one parent-owned SQLite transaction."""
+    pending = [row for row in rows if isinstance(row, dict) and row.get("_profile_persist")]
+    if not pending:
+        return 0
+    cols = storage.PROFILE_COLS.split(",")
+    invalid_cache_tids = {}
+    try:
+        with _db_lock:
+            # Decode/audit old cache rows before the write transaction starts. Holding SQLite's single
+            # writer slot while parsing several wallets' JSON would erase the benefit of bounded batching.
+            for row in pending:
+                cache = (row.get("_profile_persist") or {}).get("cache")
+                if cache:
+                    invalid_cache_tids[row["addr"]] = _invalid_cached_fill_tids(
+                        db, row["addr"], cache.get("universe"),
+                    )
+        with _db_lock:
+            for row in pending:
+                artifact = dict(row.get("_profile_persist") or {})
+                cache = artifact.get("cache")
+                if cache:
+                    _store_cached_fills(
+                        db,
+                        row["addr"],
+                        cache.get("fills") or (),
+                        int(cache["window_start"]),
+                        coverage_complete=bool(cache.get("coverage_complete")),
+                        coverage_end=cache.get("coverage_end"),
+                        universe=cache.get("universe"),
+                        invalid_tids=invalid_cache_tids.get(row["addr"], ()),
+                    )
+                    cursor = cache.get("backfill_cursor")
+                    if cursor is not None:
+                        db.execute(
+                            "INSERT INTO fill_cache_state"
+                            "(addr,backfill_start_ms,backfill_cursor_ms,updated_at) "
+                            "VALUES (?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
+                            "backfill_start_ms=excluded.backfill_start_ms,"
+                            "backfill_cursor_ms=MAX("
+                            "COALESCE(fill_cache_state.backfill_cursor_ms,0),"
+                            "excluded.backfill_cursor_ms),updated_at=excluded.updated_at",
+                            (
+                                row["addr"],
+                                int(cache.get("backfill_start") or cache["window_start"]),
+                                int(cursor),
+                                now_iso(),
+                            ),
+                        )
+                if "episodes" in artifact:
+                    _replace_episode_rows(db, row["addr"], artifact.get("episodes") or [])
+                db.execute(
+                    f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
+                    f"VALUES ({','.join('?' * len(cols))})",
+                    [row.get(column) for column in cols],
+                )
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        for row in pending:
+            row.pop("_profile_persist", None)
+    return len(pending)
+
+
 def repair_missing_episode_rows(db, addrs) -> int:
     """Rebuild missing episode rows from cached fills.
 
@@ -355,7 +437,8 @@ def _copy_bt_cached_fills(db, addr, now_ms, p):
     return normalize_copyable_fills(_load_cached_fills(db, addr, start_ms), addr=addr)
 
 
-def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
+def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None,
+                         defer_persist=False):
     """Fetch history, then cross the market-scope boundary immediately.
 
     Hyperliquid's ``userFillsByTime`` has no coin/dex filter.  The returned
@@ -388,7 +471,8 @@ def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
                     (x for x in merged.values() if x["time"] >= window_start),
                     key=lambda x: x["time"],
                 )
-                return scoped_full, False, scoped_delta, False
+                result = (scoped_full, False, scoped_delta, False)
+                return (*result, None) if defer_persist else result
             # An unexpectedly capped delta becomes a resumable heal instead of repeatedly restarting.
     cached = normalize_copyable_fills(
         _load_cached_fills(db, addr, window_start), addr=addr, universe=universe,
@@ -405,21 +489,24 @@ def _fetch_profile_fills(db, addr, window_start, p, full, *, universe=None):
     scoped_full = sorted(
         (x for x in merged.values() if x["time"] >= window_start), key=lambda x: x["time"],
     )
-    if hit_cap:
+    cache_cursor = (
+        {"backfill_start": int(resume_start), "backfill_cursor": int(next_cursor)}
+        if hit_cap else None
+    )
+    if hit_cap and not defer_persist:
         with _db_lock:
             db.execute(
                 "INSERT INTO fill_cache_state(addr,backfill_start_ms,backfill_cursor_ms,updated_at) "
                 "VALUES (?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
                 "backfill_start_ms=excluded.backfill_start_ms,"
-                "backfill_cursor_ms=MAX(COALESCE(fill_cache_state.backfill_cursor_ms,0),excluded.backfill_cursor_ms),"
+                "backfill_cursor_ms=MAX("
+                "COALESCE(fill_cache_state.backfill_cursor_ms,0),excluded.backfill_cursor_ms),"
                 "updated_at=excluded.updated_at",
                 (addr, resume_start, int(next_cursor), now_iso()),
             )
-            # Do not carry a write transaction into the caller's potentially expensive metric/replay work.
-            # Scanner and Observer intentionally share this WAL database; even a resumable cursor write must
-            # release the single SQLite writer slot immediately.
             db.commit()
-    return scoped_full, hit_cap, scoped_delta, True
+    result = (scoped_full, hit_cap, scoped_delta, True)
+    return (*result, cache_cursor) if defer_persist else result
 
 
 # -- dashboard status (best-effort; a status write must never break a real scan) ----------
@@ -929,19 +1016,13 @@ def _finalize_profile_qualification(m, ok: bool, reason: str) -> tuple[bool, str
     return ok, reason, score
 
 
-def _defer_profile(db, addr, prior, stamp, reason, *, generation_id=None):
+def _defer_profile(db, addr, prior, stamp, reason, *, generation_id=None, persist=True):
     """Persist a tri-state data error while preserving the last usable market snapshot."""
     reason = str(reason or "data_error")[:120]
     if prior:
-        with _db_lock:
-            db.execute(
-                "UPDATE profile SET data_status='deferred_data_error',evidence_status='invalid',"
-                "evaluated_at=?,reason=?,profile_generation=COALESCE(?,profile_generation) WHERE addr=?",
-                (stamp, reason, generation_id, addr),
-            )
-            db.commit()
         m = dict(prior)
         m.update(
+            addr=addr,
             data_status="deferred_data_error",
             evidence_status="invalid",
             evaluated_at=stamp,
@@ -949,6 +1030,9 @@ def _defer_profile(db, addr, prior, stamp, reason, *, generation_id=None):
         )
         if generation_id:
             m["profile_generation"] = generation_id
+        _queue_profile_persist(m)
+        if persist:
+            _persist_profile_batch(db, [m])
         return (prior.get("status") or "quarantine"), reason, m, False
     row = {
         "addr": addr,
@@ -963,17 +1047,13 @@ def _defer_profile(db, addr, prior, stamp, reason, *, generation_id=None):
         "times_seen": 1,
         "times_active": 0,
     }
-    cols = storage.PROFILE_COLS.split(",")
-    with _db_lock:
-        db.execute(
-            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * len(cols))})",
-            [row.get(c) for c in cols],
-        )
-        db.commit()
+    _queue_profile_persist(row)
+    if persist:
+        _persist_profile_batch(db, [row])
     return "quarantine", reason, row, False
 
 
-def _reject_prefilter_profile(db, addr, prior, stamp, generation_id, reason):
+def _reject_prefilter_profile(db, addr, prior, stamp, generation_id, reason, *, persist=True):
     """Publish a current-generation front-funnel failure without an old-Core or star bypass."""
     row = dict(prior or {})
     row.update(
@@ -988,17 +1068,13 @@ def _reject_prefilter_profile(db, addr, prior, stamp, generation_id, reason):
         evaluated_at=stamp,
         times_seen=int((prior or {}).get("times_seen") or 0) + 1,
     )
-    cols = storage.PROFILE_COLS.split(",")
-    with _db_lock:
-        db.execute(
-            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) VALUES ({','.join('?' * len(cols))})",
-            [row.get(column) for column in cols],
-        )
-        db.commit()
+    _queue_profile_persist(row)
+    if persist:
+        _persist_profile_batch(db, [row])
     return row["status"], row["reason"], row, False
 
 
-def _defer_official_evidence_profile(db, addr, prior, stamp, generation_id, gate):
+def _defer_official_evidence_profile(db, addr, prior, stamp, generation_id, gate, *, persist=True):
     """Keep a normal but incomplete official month history visible as Challenger.
 
     This is not a transport/data corruption path: young accounts and trustworthy boundary gaps are useful
@@ -1028,14 +1104,9 @@ def _defer_official_evidence_profile(db, addr, prior, stamp, generation_id, gate
         evaluated_at=stamp,
         times_seen=int((prior or {}).get("times_seen") or 0) + 1,
     )
-    cols = storage.PROFILE_COLS.split(",")
-    with _db_lock:
-        db.execute(
-            f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-            f"VALUES ({','.join('?' * len(cols))})",
-            [row.get(column) for column in cols],
-        )
-        db.commit()
+    _queue_profile_persist(row)
+    if persist:
+        _persist_profile_batch(db, [row])
     return "active", row["reason"], row, False
 
 
@@ -1194,7 +1265,8 @@ def _retry_missing_copy_valuation_marks(current_marks, *result_groups, attempts:
     return marks
 
 
-def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
+def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False,
+                 persist=None):
     # ONE aggregated fetch per wallet (aggregateByTime -> ~1 page, trade-level). No separate
     # pre-screen call: the response crosses the executable-market boundary before cache/metrics,
     # and gates reject dormant/no-copyable-contract evidence on that same scoped data.
@@ -1203,23 +1275,35 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     # at 2000 AND returned newest-first unsorted, which broke window_days/trades_per_day/last_fill_ms and
     # over-rejected as hit_page_cap). We slice the 14d window for the existing scoring metrics (behaviour
     # unchanged) and use the full fetch for the multi-window / lifetime nets — still ONE fetch per wallet.
+    persist = (
+        not bool(getattr(p, "defer_profile_persist", False))
+        if persist is None else bool(persist)
+    )
     if not universe:
         return _defer_profile(
             db, addr, prior, stamp, "universe_unavailable",
             generation_id=getattr(p, "scan_generation", None),
+            persist=persist,
         )
     window_start = now_ms - config.PROFILE_FETCH_DAYS * 86400_000
     # Workset scope and fill-fetch mode are independent.  A UI "full scan" may evaluate every candidate
     # while only the scheduler-selected migration/repair wallets perform a complete historical refetch.
     full = bool(force_full or not config.INCREMENTAL_SCAN)
     try:
-        raw_full, hit_cap, new_fills, fetched_full_window = _fetch_profile_fills(
+        fetched = _fetch_profile_fills(
             db, addr, window_start, p, full, universe=universe,
+            defer_persist=not persist,
         )
+        if persist:
+            raw_full, hit_cap, new_fills, _fetched_full_window = fetched
+            cache_cursor = None
+        else:
+            raw_full, hit_cap, new_fills, _fetched_full_window, cache_cursor = fetched
     except Exception as exc:  # noqa: BLE001 - network failures are a first-class deferred outcome
         return _defer_profile(
             db, addr, prior, stamp, f"fills_error:{type(exc).__name__}",
             generation_id=getattr(p, "scan_generation", None),
+            persist=persist,
         )
     for x in raw_full:
         x["user"] = addr
@@ -1306,16 +1390,24 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         # A capped history is a real data-integrity failure, never a business rejection. Persist the
         # partial cache without marking coverage complete so the next scan is forced to heal it, then
         # quarantine/defer the profile while preserving any previously published usable snapshot.
-        with _db_lock:
-            _store_cached_fills(
-                db, addr, new_fills, window_start,
-                coverage_complete=False, coverage_end=now_ms, universe=universe,
-            )
-            db.commit()
         status, deferred_reason, deferred, _ = _defer_profile(
             db, addr, prior, stamp, "hit_page_cap",
             generation_id=getattr(p, "scan_generation", None),
+            persist=False,
         )
+        _queue_profile_persist(
+            deferred,
+            cache={
+                "fills": new_fills,
+                "window_start": window_start,
+                "coverage_complete": False,
+                "coverage_end": now_ms,
+                "universe": universe,
+                **dict(cache_cursor or {}),
+            },
+        )
+        if persist:
+            _persist_profile_batch(db, [deferred])
         return status, deferred_reason, deferred, True
     else:
         ok, reason = metrics.gates_structural(m, p)
@@ -1339,6 +1431,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             return _defer_profile(
                 db, addr, prior, stamp, "clearinghouse_unavailable",
                 generation_id=getattr(p, "scan_generation", None),
+                persist=persist,
             )
         m["margin_type"] = snap["margin_type"]
         m["cur_leverage"] = snap["cur_leverage"]
@@ -1470,6 +1563,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             return _defer_profile(
                 db, addr, prior, stamp, str(exc),
                 generation_id=getattr(p, "scan_generation", None),
+                persist=persist,
             )
         # Qualification is anchored to the generation's scan-start context, not whichever target snapshot
         # happens to finish first.  A target can close between its history fetch and clearinghouse snapshot;
@@ -1538,6 +1632,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             return _defer_profile(
                 db, addr, prior, stamp, "copy_replay_unavailable",
                 generation_id=getattr(p, "scan_generation", None),
+                persist=persist,
             )
         if ok:
             _attach_open_copy_activity_context(
@@ -1563,21 +1658,23 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                evidence_status=m.get("evidence_status") or ("qualified" if ok else "rejected"),
                first_added=(prior or {}).get("first_added") or (stamp if ok else None),
                times_seen=(prior or {}).get("times_seen", 0) + 1)
-    cols = storage.PROFILE_COLS.split(",")
-    with _db_lock:
-        _store_cached_fills(
-            db, addr, new_fills, window_start,
+    _queue_profile_persist(
+        row,
+        cache={
+            "fills": new_fills,
+            "window_start": window_start,
             # A delta fetch is only attempted from an already-complete cache. A successful response
             # therefore preserves that proof and advances its source cursor even when it contains no
             # in-scope fills. This avoids repeatedly downloading the same quiet/excluded-market interval.
-            coverage_complete=not hit_cap, coverage_end=now_ms,
-            universe=universe,
-        )   # persist the delta + prune the window
-        _replace_episode_rows(db, addr, eps)
-        db.execute(f"INSERT OR REPLACE INTO profile ({storage.PROFILE_COLS}) "
-                   f"VALUES ({','.join('?' * len(cols))})", [row.get(c) for c in cols])
-        db.commit()
-    return status, reason, m, hit_cap
+            "coverage_complete": not hit_cap,
+            "coverage_end": now_ms,
+            "universe": universe,
+        },
+        episodes=eps,
+    )
+    if persist:
+        _persist_profile_batch(db, [row])
+    return status, reason, row, hit_cap
 
 
 # ------------------------------------------------------------------ curated outputs
@@ -2137,6 +2234,87 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         "sectorPolicyJson": effective.get("sector_policy_json"),
         "results": results,
     }
+
+
+def _init_strict_replay_process(context: dict) -> None:
+    global _STRICT_REPLAY_PROCESS_CONTEXT
+    db_path = str(context["db_path"])
+    read_db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30)
+    read_db.row_factory = sqlite3.Row
+    _STRICT_REPLAY_PROCESS_CONTEXT = {**context, "db": read_db}
+
+
+def _strict_replay_process(task):
+    row, strict_path, qualification_stage = task
+    context = _STRICT_REPLAY_PROCESS_CONTEXT
+    return _effective_follow_replay(
+        context["db"], row, context["now_ms"],
+        generation_id=context["generation_id"],
+        follow=context["follow"],
+        valuation_marks=context["valuation_marks"],
+        sigmas=context["sigmas"],
+        market_ctx=context["market_ctx"],
+        strict_path=bool(strict_path),
+        qualification_stage=str(qualification_stage),
+    )
+
+
+def _parallel_effective_follow_replays(
+    db,
+    rows,
+    now_ms,
+    *,
+    generation_id,
+    follow,
+    valuation_marks,
+    sigmas,
+    market_ctx,
+    strict_path=True,
+    qualification_stage="strict",
+) -> list[dict]:
+    """Replay independent wallets on CPU-count-aware read-only workers in stable score order."""
+    rows = list(rows)
+    if len(rows) <= 1 or replay_parallel.effective_worker_count(len(rows)) <= 1:
+        return [
+            _effective_follow_replay(
+                db, row, now_ms, generation_id=generation_id, follow=follow,
+                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                strict_path=strict_path, qualification_stage=qualification_stage,
+            )
+            for row in rows
+        ]
+    db_path = next(
+        (path for _seq, name, path in db.execute("PRAGMA database_list") if name == "main"),
+        "",
+    )
+    if not db_path:
+        return [
+            _effective_follow_replay(
+                db, row, now_ms, generation_id=generation_id, follow=follow,
+                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+                strict_path=strict_path, qualification_stage=qualification_stage,
+            )
+            for row in rows
+        ]
+    context = {
+        "db_path": db_path,
+        "now_ms": int(now_ms),
+        "generation_id": generation_id,
+        "follow": dict(follow),
+        "valuation_marks": dict(valuation_marks or {}),
+        "sigmas": dict(sigmas or {}),
+        "market_ctx": dict(market_ctx or {}),
+    }
+    tasks = [
+        (row, bool(strict_path), str(qualification_stage))
+        for row in rows
+    ]
+    return replay_parallel.map_ordered(
+        _strict_replay_process,
+        tasks,
+        initializer=_init_strict_replay_process,
+        initargs=(context,),
+    )
 
 
 def _source_quality_pool(db, generation_id: str, *, limit=None) -> tuple[list[str], list[str]]:
@@ -3201,12 +3379,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # tuning may repair. It is the only bridge from the generation-frozen Top32 into the bounded Top16.
     prepath_rows = []
     prepath_rejected = []
-    for row in pre_strict_candidates:
-        effective = _effective_follow_replay(
-            db, row, now_ms, generation_id=generation_id, follow=base_follow,
-            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-            strict_path=True, qualification_stage="strict",
-        )
+    prepath_results = _parallel_effective_follow_replays(
+        db, pre_strict_candidates, now_ms,
+        generation_id=generation_id, follow=base_follow,
+        valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+        strict_path=True, qualification_stage="strict",
+    )
+    for row, effective in zip(pre_strict_candidates, prepath_results):
         qualification = dict(effective.get("qualification") or {})
         status = str(qualification.get("status") or "strict_current_surface_unknown")
         hard_invalid = bool(
@@ -3439,11 +3618,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             {**follow_surface, "AMBIGUOUS_PATH_MODE": "liquidate"},
             sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
-        for row in tuned_candidate_rows:
-            effective = _effective_follow_replay(
-                db, row, now_ms, generation_id=generation_id, follow=follow_surface,
-                valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-            )
+        replay_results = _parallel_effective_follow_replays(
+            db, tuned_candidate_rows, now_ms,
+            generation_id=generation_id, follow=follow_surface,
+            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+        )
+        for row, effective in zip(tuned_candidate_rows, replay_results):
             qualification = dict(effective.get("qualification") or {})
             addr = row["addr"]
             formation = _formation_entry_eligibility(
@@ -6045,6 +6225,7 @@ def refresh_challengers(db, p) -> dict:
             ).fetchall()
         }
         p.open_copy_pnl_by_addr = dict(open_copy_pnl_by_addr)
+        p.defer_profile_persist = True
         cols = storage.PROFILE_COLS.split(",")
         priors = {
             str(row[0] or "").lower(): dict(zip(cols, row))
@@ -6067,18 +6248,18 @@ def refresh_challengers(db, p) -> dict:
             if addr in incomplete_cache:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, "daily_cache_incomplete_full_scan_required",
-                    generation_id=generation_id,
+                    generation_id=generation_id, persist=False,
                 )
             gate = perp_results.get(addr)
             if gate is None:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, "official_perp_evidence_missing",
-                    generation_id=generation_id,
+                    generation_id=generation_id, persist=False,
                 )
             if gate.deferred:
                 return addr, prior, _defer_profile(
                     db, addr, prior, stamp, gate.reason,
-                    generation_id=generation_id,
+                    generation_id=generation_id, persist=False,
                 )
             # The frozen daily pool already owns a complete 37-day cache, so even an official business-gate
             # failure or normal evidence-building state must consume its cheap delta. A zeroed wallet commonly
@@ -6094,6 +6275,14 @@ def refresh_challengers(db, p) -> dict:
 
         workers = max(1, int(getattr(p, "workers", 4) or 4))
         done = 0
+        persist_rows = []
+        persist_batch_size = max(8, workers * 2)
+
+        def flush_daily_profiles():
+            if persist_rows:
+                _persist_profile_batch(db, persist_rows)
+                persist_rows.clear()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {executor.submit(work, addr): addr for addr in workset}
             for future in concurrent.futures.as_completed(futures):
@@ -6116,8 +6305,9 @@ def refresh_challengers(db, p) -> dict:
                     else:
                         status, reason, profile, _hit_cap = _defer_profile(
                             db, addr, priors.get(addr), stamp, reason,
-                            generation_id=generation_id,
+                            generation_id=generation_id, persist=False,
                         )
+                        persist_rows.append(profile)
                         profiled += 1
                         deferred_profiles += 1
                         outcomes[addr] = {
@@ -6131,6 +6321,7 @@ def refresh_challengers(db, p) -> dict:
                         )
                 else:
                     profiled += 1
+                    persist_rows.append(profile)
                     data_status = profile.get("data_status") or "valid"
                     outcomes[addr] = {
                         "status": status, "data_status": data_status, "reason": reason,
@@ -6141,6 +6332,8 @@ def refresh_challengers(db, p) -> dict:
                         valid_profiles += 1
                     if status in {"rejected", "retired"}:
                         rejected += 1
+                if len(persist_rows) >= persist_batch_size:
+                    flush_daily_profiles()
                 _set_scan_progress(
                     db, stage="challenger_score", candidates_scanned=done,
                     candidates_total=len(workset),
@@ -6150,6 +6343,7 @@ def refresh_challengers(db, p) -> dict:
                         db, "scanning",
                         {"stage": "challenger_score", "scanned": done, "total": len(workset)},
                     )
+        flush_daily_profiles()
         if failed:
             raise RuntimeError(f"challenger_profile_failures:{failed}")
         invalid_core = [
@@ -6887,6 +7081,7 @@ def scan(db, p) -> None:
     profiled_addrs = []
     workers = max(1, getattr(p, "workers", 8))      # I/O-bound; the REST pacer still caps total rate
     p.source_only_profile = True
+    p.defer_profile_persist = True
 
     def _work(addr):
         prior = priors.get(addr)
@@ -6894,6 +7089,7 @@ def scan(db, p) -> None:
         if gate is None:
             return addr, prior, _reject_prefilter_profile(
                 db, addr, prior, stamp, generation_id, "official_roi_below_floor",
+                persist=False,
             )
         if gate.deferred:
             if gate.reason in {
@@ -6901,15 +7097,15 @@ def scan(db, p) -> None:
                 "boundary_sample_gap", "zero_start_equity",
             }:
                 return addr, prior, _defer_official_evidence_profile(
-                    db, addr, prior, stamp, generation_id, gate,
+                    db, addr, prior, stamp, generation_id, gate, persist=False,
                 )
             return addr, prior, _defer_profile(
                 db, addr, prior, stamp, gate.reason,
-                generation_id=generation_id,
+                generation_id=generation_id, persist=False,
             )
         if not gate.passed:
             return addr, prior, _reject_prefilter_profile(
-                db, addr, prior, stamp, generation_id, gate.reason,
+                db, addr, prior, stamp, generation_id, gate.reason, persist=False,
             )
         return addr, prior, _profile_one(
             db, addr, start_ms, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
@@ -6923,6 +7119,14 @@ def scan(db, p) -> None:
         nonlocal profiled_ok, deferred_profiles, valid_profiles
         if not batch:
             return
+        persist_rows = []
+        persist_batch_size = max(8, workers * 2)
+
+        def flush_persist():
+            if persist_rows:
+                _persist_profile_batch(db, persist_rows)
+                persist_rows.clear()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             pending = {}
             next_index = 0
@@ -6953,6 +7157,9 @@ def scan(db, p) -> None:
                         continue
                     profiled_ok += 1
                     profiled_addrs.append(addr)
+                    persist_rows.append(m)
+                    if len(persist_rows) >= persist_batch_size:
+                        flush_persist()
                     data_status = m.get("data_status")
                     if data_status == "deferred_data_error":
                         deferred_profiles += 1
@@ -6981,6 +7188,7 @@ def scan(db, p) -> None:
                             {"stage": "score_filter", "scanned": done, "total": len(workset)},
                         )
                 submit_available()
+        flush_persist()
 
     _profile_batch(list(workset))
     # A complete generation owns the same catastrophic source-risk proof as the daily safety path.  Historical
