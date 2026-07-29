@@ -3003,6 +3003,7 @@ def _select_formation_finalist_surface(
                 window_fills=filtered, market_ctx=market_ctx,
                 path_rows=finalist_path, path_meta=finalist_path_meta,
                 initial_balance=float(config.INITIAL_BALANCE),
+                compact=True,
             )
             primary = windows.get(30) or windows.get(max(windows)) or {}
             recent = windows.get(7) or {}
@@ -3042,6 +3043,7 @@ def _select_formation_finalist_surface(
                     window_fills=filtered, market_ctx=market_ctx,
                     path_rows=finalist_path, path_meta=finalist_path_meta,
                     initial_balance=paper_start_equity,
+                    compact=True,
                 )
                 paper_primary = (
                     paper_windows.get(30)
@@ -3888,7 +3890,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         windows = auto_tune._candidate_windows(
             db, list(key), sigmas, fixed_follow, now_ms,
             window_fills=filtered, market_ctx=market_ctx,
-            path_rows=None, path_meta=None,
+            path_rows=None, path_meta=None, compact=True,
         )
         metrics_ = _portfolio_selection_metrics(windows, selected_n=len(key))
         primary = windows.get(30) or windows.get(max(windows)) or {}
@@ -4726,7 +4728,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                     db, list(key), sigmas,
                     {**follow, "AMBIGUOUS_PATH_MODE": "liquidate"}, int(now_ms),
                     window_fills=filtered, market_ctx=market_ctx,
-                    path_rows=None, path_meta=None,
+                    path_rows=None, path_meta=None, compact=True,
                 )
                 value = _portfolio_selection_metrics(windows, selected_n=len(key))
             eval_cache[key] = value
@@ -4802,6 +4804,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 window_fills=final_fills_by_window, market_ctx=market_ctx,
                 path_rows=final_path, path_meta=final_path_meta,
                 initial_balance=paper_start_equity,
+                compact=True,
             )
         paper_result = paper_windows.get(30) or paper_windows.get(max(paper_windows)) or {}
         paper_recent = paper_windows.get(7) or {}

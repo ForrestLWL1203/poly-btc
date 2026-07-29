@@ -867,7 +867,8 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
                        window_fills: dict[int, list[dict]] | None = None,
                        market_ctx: dict | None = None, path_rows: list[dict] | None = None,
                        path_meta: dict | None = None,
-                       initial_balance: float | None = None) -> dict:
+                       initial_balance: float | None = None,
+                       compact: bool = False) -> dict:
     """Return 30/14/7 views sliced from one continuously compounding account.
 
     Replaying every window independently reset the recent views to ``INITIAL_BALANCE``.  A strategy that had
@@ -908,7 +909,7 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
             for row in fills
         )
         result["continuous_replay_days"] = int(max_days)
-        windows[int(days)] = result
+        windows[int(days)] = _compact_backtest(result) if compact else result
     return windows
 
 
@@ -1042,6 +1043,7 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
             for days, result in _candidate_windows(
                 db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
                 market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
+                compact=True,
             ).items()
         }
     return out
@@ -1065,6 +1067,7 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
         for days, result in _candidate_windows(
             db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
             market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
+            compact=True,
         ).items()
     }
     return out
@@ -1191,7 +1194,7 @@ def _compact_backtest(result: dict) -> dict:
         "max_liquidation_loss_pct", "max_liquidation_loss",
         "max_liquidation_loss_coin", "max_liquidation_loss_closed_at",
         "copy_win_rate",
-        "copy_net_pnl", "closed_net_pnl", "unrealized_pnl", "fee_drag",
+        "copy_net_pnl", "copy_gross_pnl", "closed_net_pnl", "unrealized_pnl", "fee_drag",
         "margin_equity_pct", "initial_margin_equity", "window_start_equity",
         "window_end_equity",
         "target_open_events", "raw_target_open_events", "small_open_excluded_n",

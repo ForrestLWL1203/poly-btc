@@ -163,6 +163,39 @@ class AutoTuneTests(unittest.TestCase):
         self.assertEqual(windows[7]["target_open_events"], 1)
         self.assertEqual(windows[7]["continuous_replay_days"], 30)
 
+    def test_compact_candidate_windows_discard_heavy_replay_trajectories(self):
+        day = 86_400_000
+        fills = [
+            {
+                "user": "0xaaa", "time": day, "tid": 1, "coin": "BTC",
+                "side": "B", "sz": "10000", "startPosition": "0",
+                "px": "100", "oid": 1, "crossed": True,
+            },
+            {
+                "user": "0xaaa", "time": 2 * day, "tid": 2, "coin": "BTC",
+                "side": "A", "sz": "10000", "startPosition": "10000",
+                "px": "110", "oid": 2, "crossed": True,
+            },
+        ]
+        windows = auto_tune._candidate_windows(
+            None, ["0xaaa"], {"BTC": .04},
+            {
+                "STABLE_MARGIN_PCT": .03,
+                "STABLE_MARGIN_MIN_PCT": .03,
+                "STABLE_LEV_CAP": 10,
+                "STABLE_MIN_NOTIONAL": 0.0,
+            },
+            30 * day,
+            window_fills={30: fills, 14: [], 7: []},
+            market_ctx={},
+            compact=True,
+        )
+
+        self.assertGreater(windows[30]["copy_gross_pnl"], 0.0)
+        self.assertNotIn("positions", windows[30])
+        self.assertNotIn("equity_curve", windows[30])
+        self.assertNotIn("open_events", windows[30])
+
     def test_candidate_can_improve_a_baseline_already_below_absolute_open_floor(self):
         baseline = {
             "params": {key: 1.0 for key in auto_tune.TUNE_KEYS},
