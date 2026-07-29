@@ -178,12 +178,12 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("chosen_addrs = ()", failure_branch)
         self.assertIn('"explicitEmptyCore": True', failure_branch)
 
-    def test_core_formation_searches_count_coarsely_then_full_tunes_the_winner(self):
+    def test_core_formation_searches_count_coarsely_then_efficient_tunes_the_winner(self):
         source = inspect.getsource(scanner.form_quality_prefix)
 
         self.assertEqual(source.count("auto_tune.maybe_tune_margins("), 2)
         self.assertIn('search_profile="coarse"', source)
-        self.assertIn('search_profile="full"', source)
+        self.assertIn('search_profile="efficient"', source)
         self.assertIn("addrs_override=list(tune_ordered[:winning_count])", source)
         self.assertIn("search_quality_prefix(", source)
         self.assertIn("except TimeoutError as exc", source)
@@ -198,6 +198,41 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("tuned_candidate_addrs", source)
         self.assertIn("_retune_exact_membership_surface(", source)
         self.assertIn("core_formation_membership_parameter_not_converged", source)
+        self.assertEqual(scanner.config.CORE_PREFIX_EXHAUSTIVE_MAX_N, 0)
+        self.assertFalse(scanner.config.CORE_FORMATION_ENABLE_LOO)
+        self.assertIn(
+            'getattr(config, "CORE_FORMATION_ENABLE_LOO", False)',
+            source,
+        )
+        self.assertIn("_load_formation_prefix_evidence(", source)
+        self.assertIn("_store_formation_prefix_evidence(", source)
+
+    def test_compact_prefix_evidence_round_trips_without_member_addresses(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            value = scanner.core_formation.PrefixEvaluation(
+                count=2, net_pnl=1200.0, stress_net_pnl=300.0,
+                max_drawdown=.12, actionable_open_rate=.91, capacity_fit=.94,
+                liquidations=1, params={"MID_LEV_CAP": 10.0},
+                payload={"return30d": .12, "return7d": .04},
+            )
+            scanner._store_formation_prefix_evidence(
+                db, "g1", "surface1", ["0xaaa", "0xbbb"], value,
+                {"return30d": .12, "return7d": .04},
+            )
+            loaded = scanner._load_formation_prefix_evidence(
+                db, "g1", "surface1", ["0xbbb", "0xaaa"],
+            )
+            raw = db.execute(
+                "SELECT evaluation_json,replay_json FROM formation_prefix_evidence"
+            ).fetchone()
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded[0].count, 2)
+        self.assertEqual(loaded[0].net_pnl, 1200.0)
+        self.assertEqual(loaded[1]["return7d"], .04)
+        self.assertNotIn("0xaaa", raw[0] + raw[1])
+        self.assertNotIn("0xbbb", raw[0] + raw[1])
 
     def test_normal_scan_honors_auto_tune_switch_before_publication(self):
         scan_source = inspect.getsource(scanner.scan)
@@ -654,7 +689,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             "core_formation_membership_parameter_not_converged", source,
         )
         self.assertIn('addrs_override=list(ordered_addrs)', helper)
-        self.assertIn('search_profile="full"', helper)
+        self.assertIn('search_profile="efficient"', helper)
         self.assertIn("_select_formation_finalist_surface(", helper)
 
     def test_exact_membership_closure_full_tunes_only_the_actual_core(self):
@@ -695,7 +730,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertTrue(result["eligible"])
             kwargs = tune.call_args.kwargs
             self.assertEqual(kwargs["addrs_override"], ["0xaaa", "0xbbb"])
-            self.assertEqual(kwargs["search_profile"], "full")
+            self.assertEqual(kwargs["search_profile"], "efficient")
             self.assertTrue(kwargs["formation_admission"])
 
     def test_effective_replay_keeps_one_sector_scoped_surface(self):

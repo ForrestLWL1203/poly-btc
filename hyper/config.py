@@ -406,13 +406,14 @@ AUTO_TUNE_MARGIN_CEILING_FRACTIONS = (0.50, 0.75, 1.00)
 AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9, 8, 6)
 AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25, 20)
 AUTO_TUNE_COORD_HIGH_LEV_CAPS = (6, 4, 3)
-AUTO_TUNE_LEVERAGE_SHORTLIST = 3  # 每档保留当前/最高盈利/最少清算，完整调参组合最多 3^3=27
+AUTO_TUNE_LEVERAGE_SHORTLIST = 3  # 每档保留当前/最高盈利/最少清算；efficient 模式不做 3^3 笛卡尔积
 AUTO_TUNE_SIZING_FINALISTS = 12  # 避免高杠杆+配对低保证金组合在严格路径认证前被过早剪枝
 AUTO_TUNE_MARGIN_COORD_ROUNDS = 2  # bounded closure can combine two profitable tier moves without 3-D grid
 # Prefix-count discovery uses a sparse grid; the winning count receives one complete tune. Bound both modes
 # so a large fills/path set cannot swap-thrash the production host indefinitely.
 AUTO_TUNE_TIME_BUDGET_SEC = 1800
 AUTO_TUNE_COARSE_TIME_BUDGET_SEC = 600
+AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC = 1200
 AUTO_TUNE_ADD_GAP_KS = (0.04, 0.08, 0.12)
 AUTO_TUNE_POS_ADD_GAP_KS = (0.06, 0.09, 0.12)
 AUTO_TUNE_ADD_SHRINK_GS = (1.1, 1.3)
@@ -420,13 +421,18 @@ AUTO_TUNE_ADD_MAX_HARDS = (6, 8, 10)
 AUTO_TUNE_MARGIN_DAYS = (30, 14, 7)
 AUTO_TUNE_FINALIST_LIMIT = 6  # 粗网格只让少量Pareto候选进入昂贵的非重叠折叠验证
 AUTO_TUNE_ADD_FINALISTS = 3
+AUTO_TUNE_EFFICIENT_SIZING_FINALISTS = 6  # 30d 粗面保留盈利/风险/容量方向
+AUTO_TUNE_EFFICIENT_FINALIST_LIMIT = 4  # 仅四个 Pareto 代表进入昂贵路径/走期验证
+AUTO_TUNE_EFFICIENT_ADD_FINALISTS = 2
+AUTO_TUNE_EFFICIENT_MARGIN_COORD_ROUNDS = 1
 
-CORE_PREFIX_EXHAUSTIVE_MAX_N = 8  # small quality pools tune every 1..N prefix; larger pools use binary search
+CORE_PREFIX_EXHAUSTIVE_MAX_N = 0  # never exhaustively replay every prefix; use bounded boundary search
 CORE_FORMATION_CLOSURE_MAX_ROUNDS = 2  # final membership and its parameter surface must converge boundedly
 # Backward elimination stops naturally when every remaining wallet has positive conditional economics.
 # The cap only bounds a pathological run; it is not a stability quota or a promise to retain weak wallets.
 CORE_LOO_MAX_REMOVALS = MAX_TARGETS - 1
 CORE_LOO_MIN_NET_GAIN = 1.0
+CORE_FORMATION_ENABLE_LOO = False  # membership must remain a strict profit prefix; LOO is diagnostic only
 AUTO_TUNE_FILL_CACHE_MAX_BYTES = 64 * 1024 * 1024  # raw fill_json cache guard for 1GB VPS; fallback if exceeded
 AUTO_TUNE_MARGIN_MIN_OPEN_FIT = 0.70
 AUTO_TUNE_MARGIN_MAX_OPEN_FIT_DROP = 0.08

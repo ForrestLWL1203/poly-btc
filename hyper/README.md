@@ -290,20 +290,27 @@ the scanner lock with full and
 daily refreshes, but it can run beside Observer; Observer keeps the old immutable strategy revision until the
 new selection, tuned parameters, and revision publish atomically.
 
-The search evaluates independent grid axes, finalist combinations, continuous-capital walk-forward folds,
-holdout, and stress scenarios from fills. Each count node is tuned independently so an 8-wallet portfolio never
-inherits parameters fitted to a congested 16-wallet account. It never changes Core membership using stale
-profiles and never runs a candle replay for every parameter or membership proposal. After the winning parameters
-and membership are fixed, the one final
+The search evaluates independent parameter axes, a bounded Pareto finalist set, continuous-capital walk-forward
+folds, holdout, and stress scenarios from fills. Production formation does not enumerate arbitrary wallet
+subsets, leave-one-out variants, every `1..N` prefix, or the three-tier leverage Cartesian product. It uses a
+bounded strict-prefix boundary search; each tested count gets a sparse 30-day probe, and the winning exact
+membership gets an efficient tune with at most four path finalists representing profit, liquidation risk,
+capacity/open capture, and the active baseline. Each count node is still tuned independently so an 8-wallet
+portfolio never inherits parameters fitted to a congested 16-wallet account. Completed strict-prefix summaries
+are cached by generation, parameter surface and membership hash, so a retry resumes without keeping full
+trajectories in memory. It never changes Core membership using stale profiles and never runs a candle replay for
+every parameter or membership proposal. After the winning parameters and membership are fixed, the one final
 strict 30-day portfolio certification supplies the estimated shared-account result shown above the “跟单中”
 list. Publication also persists the exact final-surface individual 30/14/7 replay fields used for score and
 admission, so Dashboard score and wallet economics never fall back to a different parameter surface.
 
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
 margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;
-inside the near-best profit band the tuner prefers fewer liquidations, less balance congestion, better open
-capture, and then stronger measured add fidelity. A profit-retaining proposal that strictly reduces liquidation
-evidence can be accepted as a safety repair even when it does not claim the ordinary minimum relative gain.
+the exact best-profit surface is always retained. Only inside the configured near-best profit band does the tuner
+prefer fewer liquidations, less balance congestion, better open capture, and then stronger measured add fidelity;
+a low-risk surface outside that band cannot win merely by under-deploying. A profit-retaining proposal that
+strictly reduces liquidation evidence can be accepted as a safety repair even when it does not claim the ordinary
+minimum relative gain.
 
 The current Paper defaults allow automatic application after the validation gates:
 

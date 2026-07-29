@@ -414,9 +414,14 @@ rather than reach the OOM killer.
 The compact portfolio tuner searches all three volatility-tier margins and leverage caps,
 and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
 not tune per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
-or stop/risk-owner settings. A full run retains current, highest-profit and fewest-liquidation leverage values
-per tier (at most 27 cross-tier combinations) and carries up to 12 sizing finalists into strict validation;
-coarse count probes remain sparse. Any optimizer walk-forward folds compare parameter robustness only; they do not
+or stop/risk-owner settings. Production Core formation uses the efficient profile: it tests every tier
+independently, keeps current/highest-profit/fewest-liquidation directions, but does not expand them into a
+three-tier Cartesian product. Its 30-day search retains Pareto representatives for highest profit, fewest
+liquidations, best capacity/open capture and the active baseline; only four distinct surfaces enter expensive
+path/walk-forward validation. Risk and capacity representatives must remain inside the configured near-best
+profit band, so an under-deployed surface cannot win merely by avoiding trades. The legacy full profile remains
+available for offline diagnostics; coarse count probes remain sparse. Any optimizer walk-forward folds compare
+parameter robustness only; they do not
 decide wallet admission. The selected set separately passes the official 30-day Perp screen, source Episode
 contract and dynamic strict-Copy 30d/rolling-7d returns. There is no weekly, Campaign, per-close-density or
 cost-stress admission rule.
@@ -427,6 +432,13 @@ approximately constant before capacity caps. Selection is profit-led, but candid
 near-best profit band are ordered by fewer liquidations, better capacity/open fit, then measured add fidelity.
 A proposal which retains the configured share of profit and strictly reduces liquidation evidence may apply as a
 safety repair without pretending to clear the ordinary relative-profit-gain hurdle.
+
+Core membership remains a strict profit-ranked prefix: production formation never searches arbitrary wallet
+subsets, never runs leave-one-out membership elimination, and never exhaustively replays every `1..N` prefix.
+It uses bounded boundary search plus neighbouring counts, then exact-membership efficient retune and at most two
+closure rounds when the final surface changes ranking. Generation-scoped prefix evidence stores only compact
+metrics keyed by the membership hash and parameter surface, so a retry resumes completed strict prefix work
+without retaining full trajectories or raw membership addresses.
 
 Current Paper defaults deliberately allow the full closed loop:
 

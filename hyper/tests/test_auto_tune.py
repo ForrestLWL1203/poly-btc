@@ -589,6 +589,36 @@ class AutoTuneTests(unittest.TestCase):
             {(12, 5, 3), (18, 7, 4), (20, 8, 4)},
         )
 
+    def test_efficient_pareto_finalists_preserve_profit_risk_capacity_and_baseline(self):
+        def candidate(marker, pnl, liquidations, capacity, stable_lev):
+            tune_params = {key: 1.0 for key in auto_tune.TUNE_KEYS}
+            tune_params["STABLE_LEV_CAP"] = stable_lev
+            return {
+                "marker": marker,
+                "params": tune_params,
+                "windows": {30: {
+                    "copy_net_pnl": pnl, "closed_n": 20,
+                    "open_fill_rate": capacity, "capacity_open_fit": capacity,
+                    "liquidations": liquidations, "target_open_events": 20,
+                    "skip_reasons": {},
+                }},
+            }
+
+        baseline = candidate("baseline", 1000, 2, .90, 20)
+        profit = candidate("profit", 1100, 2, .90, 25)
+        safest = candidate("safest", 1040, 0, .91, 30)
+        capacity = candidate("capacity", 1030, 1, .99, 35)
+        under_deployed = candidate("under_deployed", 700, 0, 1.0, 40)
+
+        selected = auto_tune._efficient_pareto_sizing_candidates(
+            [baseline, profit, safest, capacity, under_deployed], baseline, 4,
+        )
+
+        self.assertEqual(
+            {row["marker"] for row in selected},
+            {"baseline", "profit", "safest", "capacity"},
+        )
+
     def test_leverage_polish_changes_one_tier_at_a_time(self):
         base = {
             "STABLE_MARGIN_PCT": 0.0644, "MID_MARGIN_PCT": 0.0552,

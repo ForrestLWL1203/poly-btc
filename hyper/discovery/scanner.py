@@ -1940,6 +1940,84 @@ def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
     )
 
 
+_FORMATION_PREFIX_CACHE_POLICY = "portfolio-prefix-compact-v1"
+
+
+def _formation_prefix_membership_hash(addrs) -> str:
+    return hashlib.sha256(
+        "\n".join(sorted({str(addr or "").lower() for addr in addrs if addr})).encode("utf-8")
+    ).hexdigest()
+
+
+def _load_formation_prefix_evidence(db, generation_id, params_hash, addrs):
+    membership_hash = _formation_prefix_membership_hash(addrs)
+    row = db.execute(
+        "SELECT evaluation_json,replay_json FROM formation_prefix_evidence "
+        "WHERE generation=? AND policy_version=? AND params_hash=? AND membership_hash=?",
+        (
+            generation_id, _FORMATION_PREFIX_CACHE_POLICY,
+            str(params_hash), membership_hash,
+        ),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        raw = json.loads(row[0] or "{}")
+        replay = json.loads(row[1] or "{}")
+        value = core_formation.PrefixEvaluation(
+            count=int(raw["count"]),
+            net_pnl=f(raw.get("netPnl")),
+            stress_net_pnl=f(raw.get("stressNetPnl")),
+            max_drawdown=f(raw.get("maxDrawdown")),
+            actionable_open_rate=f(raw.get("actionableOpenRate")),
+            capacity_fit=f(raw.get("capacityFit")),
+            liquidations=int(raw.get("liquidations") or 0),
+            params=dict(raw.get("params") or {}),
+            payload=dict(raw.get("payload") or {}),
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if value.count != len({str(addr or "").lower() for addr in addrs if addr}):
+        return None
+    return value, replay
+
+
+def _store_formation_prefix_evidence(
+    db, generation_id, params_hash, addrs, evaluation, replay,
+) -> None:
+    membership_hash = _formation_prefix_membership_hash(addrs)
+    stamp = now_iso()
+    payload = {
+        "count": int(evaluation.count),
+        "netPnl": f(evaluation.net_pnl),
+        "stressNetPnl": f(evaluation.stress_net_pnl),
+        "maxDrawdown": f(evaluation.max_drawdown),
+        "actionableOpenRate": f(evaluation.actionable_open_rate),
+        "capacityFit": f(evaluation.capacity_fit),
+        "liquidations": int(evaluation.liquidations),
+        "params": dict(evaluation.params or {}),
+        "payload": dict(evaluation.payload or {}),
+    }
+    db.execute(
+        "INSERT INTO formation_prefix_evidence "
+        "(generation,policy_version,params_hash,membership_hash,member_count,"
+        "evaluation_json,replay_json,created_at,updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT("
+        "generation,policy_version,params_hash,membership_hash"
+        ") DO UPDATE SET member_count=excluded.member_count,"
+        "evaluation_json=excluded.evaluation_json,replay_json=excluded.replay_json,"
+        "updated_at=excluded.updated_at",
+        (
+            generation_id, _FORMATION_PREFIX_CACHE_POLICY, str(params_hash),
+            membership_hash, int(evaluation.count),
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=float),
+            json.dumps(replay or {}, sort_keys=True, separators=(",", ":"), default=float),
+            stamp, stamp,
+        ),
+    )
+    db.commit()
+
+
 def _paper_account_equity(db) -> float:
     """Current Paper equity used for the second publication-scale replay."""
     row = db.execute(
@@ -3367,8 +3445,8 @@ def _retune_exact_membership_surface(
         dry_run=True, mode="apply", follow_values=base_follow,
         data_complete=True, addrs_override=list(ordered_addrs),
         record_run=False, formation_admission=True,
-        market_generation=generation_id, search_profile="full",
-        time_budget_s=float(config.AUTO_TUNE_TIME_BUDGET_SEC),
+        market_generation=generation_id, search_profile="efficient",
+        time_budget_s=float(config.AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC),
     )
     if full_run.get("status") != "ok":
         raise RuntimeError(
@@ -3618,8 +3696,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 dry_run=True, mode="apply", follow_values=base_follow, data_complete=True,
                 addrs_override=list(tune_ordered[:winning_count]), record_run=False,
                 formation_admission=True, market_generation=generation_id,
-                search_profile="full",
-                time_budget_s=float(config.AUTO_TUNE_TIME_BUDGET_SEC),
+                search_profile="efficient",
+                time_budget_s=float(config.AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC),
             )
             if full_run.get("status") != "ok":
                 raise RuntimeError(
@@ -3839,7 +3917,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "explicitEmptyCore": True,
                 "tunePoolCount": len(tune_ordered),
                 "tunedInputCount": winning_count,
-                "fullTuneRuns": 1 if chosen_run.get("search_profile") == "full" else 0,
+                "fullTuneRuns": 1 if chosen_run.get("search_profile") in {"efficient", "full"} else 0,
                 "effectiveRejected": qualification_rejected,
                 "formationTuneEligible": tune_eligible,
                 "formationTuneReason": tune_reason,
@@ -3883,8 +3961,21 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "return7d": 0.0,
             }
             return value
+        cached = _load_formation_prefix_evidence(
+            db, generation_id, effective_surface_hash, key,
+        )
+        if cached is not None:
+            value, replay_summary = cached
+            membership_eval_cache[key] = value
+            membership_replay_cache[key] = replay_summary
+            _set_scan_progress(
+                db, stage="portfolio_prefix_cache_hit",
+                candidates_scanned=len(key), candidates_total=len(ordered),
+            )
+            return value
         _set_scan_progress(
-            db, stage="portfolio_tune", candidates_scanned=len(key), candidates_total=len(ordered),
+            db, stage="portfolio_prefix_strict",
+            candidates_scanned=len(key), candidates_total=len(ordered),
         )
         filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
         windows = auto_tune._candidate_windows(
@@ -3948,6 +4039,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         # open positions and equity curves) exhausted the 1GB production host. Robust validation needs only
         # these contribution/outlier summaries; all ranking metrics already live in ``value``.
         membership_replay_cache[key] = replay_summary
+        _store_formation_prefix_evidence(
+            db, generation_id, effective_surface_hash, key, value, replay_summary,
+        )
         return value
 
     def evaluate(count):
@@ -3975,10 +4069,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         replay_summary = membership_replay_cache[key]
         check = core_formation.validate_final_membership(value)
         loo_marginals = {}
-        for addr in key:
-            without = tuple(item for item in key if item != addr)
-            without_value = evaluate_members(without)
-            loo_marginals[addr] = value.net_pnl - without_value.net_pnl
+        if bool(getattr(config, "CORE_FORMATION_ENABLE_LOO", False)):
+            for addr in key:
+                without = tuple(item for item in key if item != addr)
+                without_value = evaluate_members(without)
+                loo_marginals[addr] = value.net_pnl - without_value.net_pnl
         nonpositive_loo = [
             addr for addr, marginal in loo_marginals.items() if marginal <= 0.0
         ]
@@ -4110,7 +4205,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "tunePoolCount": len(tune_ordered),
             "tunedInputCount": winning_count,
             "coarseTuneRuns": len(tune_runs),
-            "fullTuneRuns": 1 if chosen_run.get("search_profile") == "full" else 0,
+            "fullTuneRuns": 1 if chosen_run.get("search_profile") in {"efficient", "full"} else 0,
             "tuneBoundary": tune_search.boundary if tune_search is not None else None,
             "tuneEvaluatedCounts": (
                 [value.count for value in tune_search.evaluated]
@@ -4186,7 +4281,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "tunedInputCount": len(closure_expected),
                 "coarseTuneRuns": len(tune_runs),
                 "fullTuneRuns": (
-                    (1 if chosen_run.get("search_profile") == "full" else 0)
+                    (1 if chosen_run.get("search_profile") in {"efficient", "full"} else 0)
                     + round_index
                 ),
                 "formationTuneEligible": exact.get("eligible"),
@@ -4600,7 +4695,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                                    effective_policies=None, effective_metrics=None,
                                    effective_score_details=None,
                                    effective_replay_params_hash=None,
-                                   allow_loo=True):
+                                   allow_loo=False):
     """Materialize the fill-searched membership after one final strict 30-day portfolio replay."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)
@@ -5139,7 +5234,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
                               effective_policies=None, effective_metrics=None,
                               effective_score_details=None,
                               effective_replay_params_hash=None,
-                              allow_loo=True):
+                              allow_loo=False):
     """Build Core/Challenger roles and optimize shared-account membership to a stable set."""
     policy_values = {**params.load_follow(db), **params.load_category(db, "scanner")}
     copy_policy = load_copy_policy(policy_values)

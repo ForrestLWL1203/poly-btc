@@ -477,6 +477,23 @@ CREATE INDEX IF NOT EXISTS idx_pre_strict_evidence_generation_queue
 CREATE INDEX IF NOT EXISTS idx_pre_strict_evidence_generation_status
     ON pre_strict_evidence(generation, status, first_failure, addr);
 
+-- Compact, resumable shared-prefix replay evidence. Membership addresses are represented only by a stable
+-- hash; full trajectories never enter this table. A generation/model/parameter change creates a new key.
+CREATE TABLE IF NOT EXISTS formation_prefix_evidence (
+    generation       TEXT NOT NULL,
+    policy_version   TEXT NOT NULL,
+    params_hash      TEXT NOT NULL,
+    membership_hash  TEXT NOT NULL,
+    member_count     INTEGER NOT NULL,
+    evaluation_json  TEXT NOT NULL,
+    replay_json      TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (generation, policy_version, params_hash, membership_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_formation_prefix_evidence_generation
+    ON formation_prefix_evidence(generation, policy_version, params_hash, member_count);
+
 -- Source-wallet high-water state is independent for each execution ledger and contiguous Core membership
 -- cycle. Observer restarts therefore cannot erase a freeze/reduction/cooldown already earned by drawdown.
 CREATE TABLE IF NOT EXISTS wallet_risk_state (

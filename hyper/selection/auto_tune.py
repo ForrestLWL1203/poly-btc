@@ -68,7 +68,8 @@ def _evaluate_candidate_process(task):
     }
     if kind == "add":
         return evaluate_add_candidate(
-            None, context["addrs"], follow, candidate, **common,
+            None, context["addrs"], follow, candidate,
+            primary_only=bool(primary_only), **common,
         )
     return evaluate_tune_candidate(
         None, context["addrs"], follow, candidate,
@@ -422,6 +423,58 @@ def _diverse_sizing_candidates(candidates: list[dict], baseline: dict, limit: in
         if not added:
             break
         depth += 1
+    return selected
+
+
+def _efficient_pareto_sizing_candidates(
+    candidates: list[dict], baseline: dict, limit: int,
+) -> list[dict]:
+    """Reserve final validation slots for profit, liquidation, capacity and the active baseline.
+
+    Risk/capacity champions must remain inside the configured near-best-profit band.  A globally safest
+    surface that gives away materially more profit cannot consume one of the few expensive path-validation
+    slots merely by under-deploying the account.
+    """
+    rows = [candidate for candidate in candidates if _candidate_valid(candidate, baseline)]
+    if not rows:
+        rows = [baseline]
+    best_profit = max(_candidate_score(candidate) for candidate in rows)
+    tolerance = abs(best_profit) * float(
+        getattr(config, "AUTO_TUNE_NEAR_BEST_PROFIT_REL", 0.08)
+    )
+    near_best = [
+        candidate for candidate in rows
+        if _candidate_score(candidate) + tolerance + 1e-9 >= best_profit
+    ]
+    champions = [
+        max(rows, key=lambda candidate: (
+            _candidate_score(candidate),
+            -_candidate_liquidations(candidate),
+            *_candidate_execution_priority(candidate),
+        )),
+        min(near_best, key=lambda candidate: (
+            _candidate_liquidations(candidate),
+            -_candidate_score(candidate),
+        )),
+        max(near_best, key=lambda candidate: (
+            *_candidate_execution_priority(candidate),
+            _candidate_score(candidate),
+            -_candidate_liquidations(candidate),
+        )),
+        baseline,
+    ]
+    champions.extend(_diverse_sizing_candidates(near_best, baseline, limit))
+    selected = []
+    seen = set()
+    for candidate in champions:
+        params_ = candidate.get("params") or {}
+        key = tuple(round(float(params_.get(name, 0.0)), 12) for name in TUNE_KEYS)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(candidate)
+        if len(selected) >= max(1, int(limit)):
+            break
     return selected
 
 
@@ -1053,7 +1106,8 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
                            sigmas: dict | None = None, now_ms: int | None = None,
                            window_fills: dict[int, list[dict]] | None = None,
                            path_rows: list[dict] | None = None, path_meta: dict | None = None,
-                           market_ctx: dict | None = None) -> dict:
+                           market_ctx: dict | None = None,
+                           primary_only: bool = False) -> dict:
     now_ms = now_ms or int(time.time() * 1000)
     overrides = {**follow_overrides_for_add_candidate(follow, candidate),
                  "AMBIGUOUS_PATH_MODE": "liquidate"}
@@ -1062,14 +1116,22 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     out = dict(candidate)
     out["params"] = params_
     out["add_params"] = params_
-    out["windows"] = {
-        days: _compact_backtest(result)
-        for days, result in _candidate_windows(
-            db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
-            market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
-            compact=True,
-        ).items()
-    }
+    if primary_only:
+        result = evaluate_portfolio_window(
+            db, addrs, sigmas, overrides, now_ms,
+            window_fills={30: list((window_fills or {}).get(30) or [])},
+            days=30, market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
+        )
+        out["windows"] = {30: _compact_backtest(result)}
+    else:
+        out["windows"] = {
+            days: _compact_backtest(result)
+            for days, result in _candidate_windows(
+                db, addrs, sigmas, overrides, now_ms, window_fills=window_fills,
+                market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
+                compact=True,
+            ).items()
+        }
     return out
 
 
@@ -1099,7 +1161,10 @@ def _evaluate_candidates_parallel(
         }
         if kind == "add":
             return [
-                evaluator(None, addrs, follow, candidate, **common)
+                evaluator(
+                    None, addrs, follow, candidate,
+                    primary_only=primary_only, **common,
+                )
                 for candidate in rows
             ]
         return [
@@ -1759,12 +1824,21 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     if ephemeral and expected_generation:
         raise ValueError("addrs_override cannot target a published generation")
     search_profile = str(search_profile or "full").strip().lower()
-    if search_profile not in {"coarse", "full"}:
-        raise ValueError("search_profile must be coarse or full")
+    if search_profile not in {"coarse", "efficient", "full"}:
+        raise ValueError("search_profile must be coarse, efficient or full")
     coarse_search = search_profile == "coarse"
+    efficient_search = search_profile == "efficient"
     tune_started = time.monotonic()
     time_budget_s = float(
-        getattr(config, "AUTO_TUNE_TIME_BUDGET_SEC", 1800)
+        getattr(
+            config,
+            (
+                "AUTO_TUNE_COARSE_TIME_BUDGET_SEC" if coarse_search
+                else "AUTO_TUNE_EFFICIENT_TIME_BUDGET_SEC" if efficient_search
+                else "AUTO_TUNE_TIME_BUDGET_SEC"
+            ),
+            600 if coarse_search else 1200 if efficient_search else 1800,
+        )
         if time_budget_s is None else time_budget_s
     )
     deadline = (
@@ -1960,7 +2034,19 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         for key in LEV_KEYS
     }
     combo_candidates = []
-    for values in itertools.product(*(tier_values[key] for key in LEV_KEYS)):
+    if efficient_search:
+        # Keep the active, best-profit and lowest-liquidation coordinated directions without expanding
+        # their tier choices into a 3^3 Cartesian grid. Independent tier moves remain in ``axis_quick``.
+        combination_values = [
+            tuple(
+                tier_values[key][min(level, len(tier_values[key]) - 1)]
+                for key in LEV_KEYS
+            )
+            for level in range(max(len(tier_values[key]) for key in LEV_KEYS))
+        ]
+    else:
+        combination_values = itertools.product(*(tier_values[key] for key in LEV_KEYS))
+    for values in combination_values:
         check_budget("leverage_combinations")
         combo_candidates.append(_candidate_from_params(
             _pair_margins_for_leverage(base, dict(zip(LEV_KEYS, values)), follow),
@@ -1974,8 +2060,11 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     )
     joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
-    sizing_limit = 2 if coarse_search else max(
-        2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12)
+    sizing_limit = (
+        2 if coarse_search else
+        max(2, int(getattr(config, "AUTO_TUNE_EFFICIENT_SIZING_FINALISTS", 6) or 6))
+        if efficient_search else
+        max(2, int(getattr(config, "AUTO_TUNE_SIZING_FINALISTS", 12) or 12))
     )
     quick_finalists = sorted(
         quick_valid or [quick_baseline],
@@ -1993,7 +2082,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         joint_inputs,
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-        market_ctx=market_ctx,
+        primary_only=(coarse_search or efficient_search), market_ctx=market_ctx,
     )
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
@@ -2019,14 +2108,20 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         margin_seed_inputs,
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-        market_ctx=market_ctx,
+        primary_only=(coarse_search or efficient_search), market_ctx=market_ctx,
     ))
     selected_margin_seed = choose_margin_candidate(
         [selected_joint, *margin_candidates], baseline,
     )
     margin_params = dict(selected_margin_seed.get("params") or joint_params)
-    margin_round_limit = 0 if coarse_search else max(
-        1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2)
+    margin_round_limit = (
+        0 if coarse_search else
+        max(
+            1,
+            int(getattr(config, "AUTO_TUNE_EFFICIENT_MARGIN_COORD_ROUNDS", 1) or 1),
+        )
+        if efficient_search else
+        max(1, int(getattr(config, "AUTO_TUNE_MARGIN_COORD_ROUNDS", 2) or 2))
     )
     for round_index in range(margin_round_limit):
         round_inputs = list(independent_margin_candidates(margin_params, follow))
@@ -2036,7 +2131,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             round_inputs,
             kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
-            market_ctx=market_ctx,
+            primary_only=efficient_search, market_ctx=market_ctx,
         )
         if not round_candidates:
             break
@@ -2081,7 +2176,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             add_inputs,
             kind="add", addrs=addrs, follow=follow_for_add,
             sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
-            path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
+            path_rows=path_rows, path_meta=path_meta,
+            primary_only=efficient_search, market_ctx=market_ctx,
         )
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
                             add_candidates[0] if add_candidates else None)
@@ -2096,11 +2192,20 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     for candidate in sorted(candidates, key=lambda item: _candidate_rank_key(item, baseline), reverse=True):
         key = tuple(round(float((candidate.get("params") or {})[name]), 12) for name in TUNE_KEYS)
         unique_finalists.setdefault(key, candidate)
-    finalist_limit = 2 if coarse_search else int(
-        getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16
+    finalist_limit = (
+        2 if coarse_search else
+        max(2, int(getattr(config, "AUTO_TUNE_EFFICIENT_FINALIST_LIMIT", 4) or 4))
+        if efficient_search else
+        int(getattr(config, "AUTO_TUNE_FINALIST_LIMIT", 16) or 16)
     )
-    sizing_options = _diverse_sizing_candidates(
-        list(unique_finalists.values()), baseline, max(1, finalist_limit),
+    sizing_options = (
+        _efficient_pareto_sizing_candidates(
+            list(unique_finalists.values()), baseline, max(1, finalist_limit),
+        )
+        if efficient_search else
+        _diverse_sizing_candidates(
+            list(unique_finalists.values()), baseline, max(1, finalist_limit),
+        )
     )
     if formation_admission and unique_finalists:
         # Reserve validation space for the best capacity-restoring surfaces.  Keep ordering stable and
@@ -2135,8 +2240,11 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             if key not in seen_add:
                 seen_add.add(key)
                 add_options.append(params_)
-            add_limit = 1 if coarse_search else max(
-                1, int(getattr(config, "AUTO_TUNE_ADD_FINALISTS", 3) or 3)
+            add_limit = (
+                1 if coarse_search else
+                max(1, int(getattr(config, "AUTO_TUNE_EFFICIENT_ADD_FINALISTS", 2) or 2))
+                if efficient_search else
+                max(1, int(getattr(config, "AUTO_TUNE_ADD_FINALISTS", 3) or 3))
             )
             if len(add_options) >= add_limit:
                 break
