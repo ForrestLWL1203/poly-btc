@@ -3232,6 +3232,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 generation_id, addr,
             ),
         )
+        # Each path replay may take seconds and the next wallet must not inherit this writer transaction.
+        # Observer keeps publishing fills/heartbeats while cached Strict/Core formation runs beside it.
+        db.commit()
         if hard_invalid:
             prepath_rejected.append(addr)
             continue
@@ -3549,6 +3552,9 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 qualified_rows.append(row)
             else:
                 rejected.append(addr)
+            # Release strict-status/risk-event writes before replaying the next wallet. The final
+            # selection/params/revision publication remains one separate atomic transaction.
+            db.commit()
         return (
             qualifications, scores, score_details, profit_priorities,
             policies, metrics, qualified_rows,

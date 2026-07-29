@@ -604,6 +604,22 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn('"finalSurfaceUniverseCount": len(tuned_candidate_rows)', source)
         self.assertEqual(source.count("follow_score.follow_score_sort_key("), 2)
 
+    def test_cached_strict_formation_releases_writer_lock_between_wallets(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+        update_sql = (
+            '"UPDATE pre_strict_evidence SET strict_status=?,strict_first_failure=? "'
+        )
+        updates = [
+            index for index in range(len(source))
+            if source.startswith(update_sql, index)
+        ]
+
+        self.assertEqual(len(updates), 2)
+        first_tail = source[updates[0]:source.index("if hard_invalid:", updates[0])]
+        second_tail = source[updates[1]:source.index("        return (", updates[1])]
+        self.assertIn("db.commit()", first_tail)
+        self.assertIn("db.commit()", second_tail)
+
     def test_pre_strict_queue_uses_the_same_score_before_legacy_tiers(self):
         source = inspect.getsource(scanner._finalize_pre_strict_queue)
 
