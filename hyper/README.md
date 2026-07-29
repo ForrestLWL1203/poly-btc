@@ -316,6 +316,8 @@ candidate surface.
 最终 Strict 评分采用“60分完整资格基线 + 35分严格盈利映射 + 5分综合可信度”。这样已通过源画像、
 跨周活跃、PF、执行、路径和清算认证的钱包不会显示成不及格，同时仍按盈利能力拉开顺序；
 Pre-strict 粗评分没有60分基线，评分也始终不能替代任何准入门槛。
+旧 generation 已封存的 Strict 构成可由 Dashboard 按当前公式即时投影，原始审计分仍保留且不改写；
+下一次完整扫描会把新公式作为正式不可变分数发布。
 
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
 margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;

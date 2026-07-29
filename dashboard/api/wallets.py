@@ -203,7 +203,14 @@ def _score_breakdown(row):
         "profitComponent": score100(detail.get("profitComponent")),
         "reliability": score100(detail.get("reliability")),
         "confidenceMultiplier": detail.get("confidenceMultiplier"),
-        "scoreFormula": detail.get("scoreFormula") or {},
+        "scoreFormula": (
+            detail.get("scoreFormula")
+            or (
+                follow_score.strict_score_formula()
+                if str(detail.get("stage") or "").lower() in {"strict", "final"}
+                else {}
+            )
+        ),
         "economicReturnsPct": {
             key: round(float(value) * 100, 2)
             for key, value in (detail.get("economicReturns") or {}).items()
@@ -313,6 +320,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.replay_copy_bt_7d_window_start_equity,"
         "         fs.replay_copy_bt_7d_unrealized_pnl,"
         "         fs.replay_copy_bt_7d_closed_n,fs.replay_sector_copy_json,"
+        "         fs.replay_score_detail_json,"
         "         fs.sector_policy_json AS selection_sector_policy_json,"
         "         fs.replayed_at "
         "  FROM follow_selection fs "
@@ -343,7 +351,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "s.retention_failure_reason,s.retention_failure_streak,s.retained_by_hysteresis,"
         "s.execution_safety_state,s.execution_safety_reason,"
         "s.pinned,s.pinned_at,"
-        "s.selection_follow_score,s.legacy_follow_score,"
+        "s.selection_follow_score,s.legacy_follow_score,s.replay_score_detail_json,"
         "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,s.replayed_at AS strict_replayed_at,"
         "CASE WHEN s.replayed_at IS NOT NULL THEN s.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
@@ -411,6 +419,10 @@ def _ep_selected_wallets(db, generation, role, page, size):
         published_score = _col(r, "selection_follow_score")
         if published_score is None:
             published_score = _col(r, "legacy_follow_score")
+        projected_score = follow_score.project_strict_score_detail(
+            _json_obj(_col(r, "replay_score_detail_json"))
+        )
+        display_score = projected_score if projected_score is not None else published_score
         closed7d = _col(r, "closed_7d") or 0
         if closed7d == 0 and (_col(r, "episode_total") or 0) == 0:
             closed7d = _col(r, "copy_bt_7d_closed_n") or 0
@@ -445,7 +457,11 @@ def _ep_selected_wallets(db, generation, role, page, size):
             "address": _col(r, "addr"),
             "selectionReasonText": _selection_reason_text(r),
             "marketType": _market_type_from_sector_policy(r),
-            "score": score100(published_score) if published_score is not None else None,
+            "score": score100(display_score) if display_score is not None else None,
+            "auditScore": (
+                score100(published_score) if published_score is not None else None
+            ),
+            "scoreProjected": projected_score is not None,
             "profitPriorityPct": (
                 _col(r, "replay_profit_priority") * 100
                 if _col(r, "replay_profit_priority") is not None else None
@@ -818,6 +834,10 @@ def ep_wallet_detail(db, addr, qs=None):
         _col(pr, "open_unrealized") if pr else None,
     )
     score_breakdown = _score_breakdown(pr) if pr else {}
+    projected_score = follow_score.project_strict_score_detail(
+        _json_obj(_col(pr, "replay_score_detail_json")) if pr else {}
+    )
+    display_score = projected_score if projected_score is not None else final_score
     strict_quality = dict(score_breakdown.get("strictQuality") or {})
     copy_quality = {
         "profitFactor": strict_quality.get(
@@ -861,7 +881,9 @@ def ep_wallet_detail(db, addr, qs=None):
         "selectionReason": (_col(pr, "selection_reason") if pr else None),
         "selectionReasonText": (_selection_reason_text(pr) if pr else None),
         "marketType": (pr["market_type"] if pr else None),
-        "score": score100(final_score) if final_score is not None else None,
+        "score": score100(display_score) if display_score is not None else None,
+        "auditScore": score100(final_score) if final_score is not None else None,
+        "scoreProjected": projected_score is not None,
         "profitPriorityPct": (
             _col(pr, "replay_profit_priority") * 100
             if pr and _col(pr, "replay_profit_priority") is not None else None

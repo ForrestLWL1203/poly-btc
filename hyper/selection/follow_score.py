@@ -65,6 +65,29 @@ def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(value)))
 
 
+def strict_score_formula() -> dict:
+    return {
+        "qualificationBase": STRICT_SCORE_QUALIFICATION_BASE,
+        "profitWeight": STRICT_SCORE_PROFIT_WEIGHT,
+        "reliabilityWeight": STRICT_SCORE_RELIABILITY_WEIGHT,
+    }
+
+
+def project_strict_score_detail(detail: Mapping | None) -> float | None:
+    """Project frozen Strict evidence through the current display formula without mutating its generation."""
+    detail = dict(detail or {})
+    if str(detail.get("stage") or "").lower() not in {"strict", "final"}:
+        return None
+    if detail.get("profitComponent") is None or detail.get("reliability") is None:
+        return None
+    formula = strict_score_formula()
+    return _clamp(
+        formula["qualificationBase"]
+        + formula["profitWeight"] * _clamp(_num(detail.get("profitComponent")))
+        + formula["reliabilityWeight"] * _clamp(_num(detail.get("reliability")))
+    )
+
+
 def _quality_above_floor(value: float, floor: float, span: float) -> float:
     """Give a qualified boundary 60%, then continue monotonically to a transparent cap."""
     return _clamp(0.60 + 0.40 * (float(value) - float(floor)) / max(1e-9, float(span)))
@@ -614,11 +637,7 @@ def compute_follow_score(
             + STRICT_SCORE_PROFIT_WEIGHT * profit_component
             + STRICT_SCORE_RELIABILITY_WEIGHT * reliability
         )
-        score_formula = {
-            "qualificationBase": STRICT_SCORE_QUALIFICATION_BASE,
-            "profitWeight": STRICT_SCORE_PROFIT_WEIGHT,
-            "reliabilityWeight": STRICT_SCORE_RELIABILITY_WEIGHT,
-        }
+        score_formula = strict_score_formula()
     else:
         score = profit_component * confidence_multiplier
         score_formula = {

@@ -129,7 +129,7 @@ export function Wallets({ confirm }) {
                         <span className="tint tint-red" style={{ marginLeft: 6 }}>安全冻结</span>}
                     </td>
                     <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{marketLabel(w.marketType)}</span></td>
-                    <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
+                    <td className="num"><b style={{ color: "var(--green-l)" }} title={w.scoreProjected ? `按当前V7公式投影；本代审计原分 ${fNum(w.auditScore, 1)}` : ""}>{fNum(w.score, 1)}</b></td>
                     <td className="num">
                       <b className={(w.profitPriorityPct || 0) < 0 ? "down" : "up"}>
                         {w.profitPriorityPct != null ? fSign(w.profitPriorityPct, 1) + "%" : "—"}

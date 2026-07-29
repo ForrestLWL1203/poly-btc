@@ -452,6 +452,8 @@ Final-Strict display/ranking score is qualification-anchored: 60% records comple
 contract, 35% is the bounded profit-priority mapping, and 5% is PF/sample/execution/repeatability/activity/
 liquidation reliability. Rough/pre-strict scores remain unanchored so uncertified wallets never inherit the
 strict baseline. Score orders already-qualified wallets and never grants admission.
+Dashboard may project a legacy immutable Strict score detail through the current formula for display, but must
+retain and expose the generation's original score as audit evidence; never rewrite an old selection row.
 
 Current Paper defaults deliberately allow the full closed loop:
 

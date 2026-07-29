@@ -8,6 +8,7 @@ from hyper.selection.follow_score import (
     compute_source_quality_score,
     evaluate_follow_eligibility,
     follow_score_sort_key,
+    project_strict_score_detail,
     profit_priority_sort_key,
 )
 
@@ -168,6 +169,18 @@ class FollowScoreTests(unittest.TestCase):
         self.assertEqual(strict_detail["scoreFormula"]["qualificationBase"], .60)
         self.assertEqual(rough_detail["scoreFormula"]["qualificationBase"], 0.0)
         self.assertLess(rough_score, strict_score)
+
+    def test_current_formula_can_project_legacy_frozen_strict_detail(self):
+        projected = project_strict_score_detail({
+            "stage": "strict",
+            "profitComponent": .50,
+            "reliability": .90,
+            "mode": "profit_priority_confidence_haircut_v2",
+        })
+        self.assertAlmostEqual(projected, .60 + .35 * .50 + .05 * .90)
+        self.assertIsNone(project_strict_score_detail({
+            "stage": "rough", "profitComponent": .50, "reliability": .90,
+        }))
 
     def test_final_sort_is_monotonic_with_displayed_score(self):
         rows = []
