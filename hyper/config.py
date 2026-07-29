@@ -160,19 +160,19 @@ HIGH_SIGMA_MIN   = 0.09     # σ ≥ this → HIGH-VOL tier; between the two →
 STABLE_MARGIN_MIN_PCT = 0.020  # legacy snapshot compatibility; firepower-line shrinking is retired
 MID_MARGIN_MIN_PCT    = 0.020
 HIGH_MARGIN_MIN_PCT   = 0.012
-STABLE_MARGIN_PCT = 0.035      # tuned first-open margin until the aggregate deployment cap
+STABLE_MARGIN_PCT = 0.050      # tuned first-open margin until the aggregate deployment cap
 MID_MARGIN_PCT    = 0.030
-HIGH_MARGIN_PCT   = 0.020
-STABLE_LEV_CAP = 25.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 25x)
-MID_LEV_CAP    = 10.0       # ...for MID-tier coins
-HIGH_LEV_CAP   = 4.0        # ...for HIGH-VOL-tier coins
+HIGH_MARGIN_PCT   = 0.030
+STABLE_LEV_CAP = 30.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 30x)
+MID_LEV_CAP    = 12.0       # ...for MID-tier coins
+HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
 # PER-TIER minimum order notional: the source's cumulative flat→open position and our final independently
 # sized open must each reach the tier floor. A sub-floor source open remains pending while it grows; once
 # confirmed, later adds use the existing smart-add rules without another hard notional gate. Per-tier only —
 # the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
-STABLE_MIN_NOTIONAL = 2500.0   # BTC only: below this it's not worth opening
-MID_MIN_NOTIONAL    = 1000.0   # mid-vol coins
-HIGH_MIN_NOTIONAL   = 250.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
+STABLE_MIN_NOTIONAL = 5000.0   # BTC only: below this it's not worth opening
+MID_MIN_NOTIONAL    = 1500.0   # mid-vol coins
+HIGH_MIN_NOTIONAL   = 600.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
 REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge position out in 100s of tiny
@@ -223,9 +223,9 @@ MIN_LEV = 1.0               # leverage floor — ultra-volatile coin → ~spot (
 ADD_STRATEGY = "smart"       # "smart" | "hardcap"  —— B 逆向加仓的模式(A 正向加仓固定用 hardcap)
 # 智能模式三闸:①波动闸 x = k×σ(目标加仓相对我们上次加仓价 移动≥x 才跟;逆向/顺势各自有 k)
 #              ②每跟一次 x ×ADD_GAP_SHRINK_G(逐步收紧,加仓次数自然收口)③单币预算封顶(下面三档)+ 硬顶
-ADD_GAP_K = 0.12            # 逆向摊价波动闸 σ 系数(逐币:x = k×该币σ)
+ADD_GAP_K = 0.05            # 逆向摊价波动闸 σ 系数(逐币:x = k×该币σ)
 POS_ADD_GAP_K = 0.08        # 顺势加仓波动闸 σ 系数; FOLLOW_POS_ADD 开时也要过此闸,避免小碎单全跟
-ADD_GAP_SHRINK_G = 1.2      # 收缩因子(每加一次门槛×此)
+ADD_GAP_SHRINK_G = 1.3      # 收缩因子(每加一次门槛×此)
 ADD_MAX_HARD = 8           # 智能模式硬顶(兜底;通常单币预算先触顶)
 SMART_ADD_MIN_CAPACITY = 4 # 首仓必须为至少4次后续加仓保留单币容量；第4次允许用剩余额度部分成交
 FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有利方向、拉高成本)时是否跟。开=过 POS_ADD_GAP_K 才跟;
@@ -236,7 +236,7 @@ FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有
 # 而是封住"N 个钱包碰巧全压同一币同向 → 一次波动最多吃掉账户的百分之几"。实测极少堆币(最集中仅~9%),故设宽
 # (2026-07-02: 20/12/6 → 40/30/20),日常不触发,只拦真·极端堆仓;高波动币仍比 BTC 更严。
 STABLE_COIN_CAP_PCT = 0.30
-MID_COIN_CAP_PCT    = 0.22
+MID_COIN_CAP_PCT    = 0.20
 HIGH_COIN_CAP_PCT   = 0.15
 MARGIN_EQUITY_PCT = 1.00    # manual sizing base: each new open uses this share of drawdown-adjusted equity.
 #                            The remainder is NOT reserved/frozen: real available cash, per-coin caps and

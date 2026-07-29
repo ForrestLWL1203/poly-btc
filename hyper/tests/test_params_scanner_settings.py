@@ -63,6 +63,18 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(follow["SMART_TP_CLOSE_3_PCT"], 0.25)
             self.assertEqual(follow["SMART_TP_TAIL_REMAIN_PCT"], 0.30)
             self.assertEqual(follow["SMART_TP_TARGET_REDUCE_EXIT_PCT"], 0.30)
+            self.assertEqual(follow["STABLE_MARGIN_PCT"], 0.05)
+            self.assertEqual(follow["MID_MARGIN_PCT"], 0.03)
+            self.assertEqual(follow["HIGH_MARGIN_PCT"], 0.03)
+            self.assertEqual(follow["STABLE_LEV_CAP"], 30.0)
+            self.assertEqual(follow["MID_LEV_CAP"], 12.0)
+            self.assertEqual(follow["HIGH_LEV_CAP"], 5.0)
+            self.assertEqual(follow["STABLE_MIN_NOTIONAL"], 5000.0)
+            self.assertEqual(follow["MID_MIN_NOTIONAL"], 1500.0)
+            self.assertEqual(follow["HIGH_MIN_NOTIONAL"], 600.0)
+            self.assertEqual(follow["MID_COIN_CAP_PCT"], 0.20)
+            self.assertEqual(follow["ADD_GAP_K"], 0.05)
+            self.assertEqual(follow["ADD_GAP_SHRINK_G"], 1.3)
 
             visible_follow = {p["key"]: p for p in params.get_all(db)["follow"]}
             self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["value"], 100.0)
@@ -78,6 +90,10 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("TAIL_CLOSE_PROFIT_GIVEBACK_PCT", visible_follow)
             self.assertFalse(visible_follow["SMART_TP_ENABLE"]["value"])
             self.assertEqual(visible_follow["SMART_TP_ENABLE"]["level"], "green")
+            self.assertEqual(visible_follow["STABLE_MARGIN_PCT"]["value"], 5.0)
+            self.assertEqual(visible_follow["HIGH_MARGIN_PCT"]["value"], 3.0)
+            self.assertEqual(visible_follow["STABLE_LEV_CAP"]["value"], 30.0)
+            self.assertEqual(visible_follow["STABLE_MIN_NOTIONAL"]["value"], 5000.0)
             self.assertNotIn("SMART_TP_GIVEBACK_1_PCT", visible_follow)
 
     def test_scanner_settings_expose_extreme_quality_contract(self):
@@ -209,6 +225,42 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='HARVEST_MONTH_PNL_MIN'"
             ).fetchone()[0]), 8_000.0)
+
+    def test_seed_params_migrates_previous_follow_sizing_defaults_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            previous = {
+                "STABLE_MARGIN_PCT": "3.5000000000000004",
+                "HIGH_MARGIN_PCT": "2.0",
+                "STABLE_LEV_CAP": "25.0",
+                "MID_LEV_CAP": "10.0",
+                "HIGH_LEV_CAP": "4.0",
+                "STABLE_MIN_NOTIONAL": "2500.0",
+                "HIGH_MIN_NOTIONAL": "250.0",
+                "MID_COIN_CAP_PCT": "22.0",
+                "ADD_GAP_K": "0.12",
+                "ADD_GAP_SHRINK_G": "1.2",
+            }
+            for key, value in previous.items():
+                db.execute("UPDATE params SET value=?,default_value=? WHERE key=?", (value, value, key))
+            db.execute("UPDATE params SET value='777',default_value='1000.0' WHERE key='MID_MIN_NOTIONAL'")
+            db.commit()
+
+            params.seed_params(db)
+
+            follow = params.load_follow(db)
+            self.assertEqual(follow["STABLE_MARGIN_PCT"], 0.05)
+            self.assertEqual(follow["HIGH_MARGIN_PCT"], 0.03)
+            self.assertEqual(follow["STABLE_LEV_CAP"], 30.0)
+            self.assertEqual(follow["MID_LEV_CAP"], 12.0)
+            self.assertEqual(follow["HIGH_LEV_CAP"], 5.0)
+            self.assertEqual(follow["STABLE_MIN_NOTIONAL"], 5000.0)
+            self.assertEqual(follow["HIGH_MIN_NOTIONAL"], 600.0)
+            self.assertEqual(follow["MID_COIN_CAP_PCT"], 0.20)
+            self.assertEqual(follow["ADD_GAP_K"], 0.05)
+            self.assertEqual(follow["ADD_GAP_SHRINK_G"], 1.3)
+            self.assertEqual(follow["MID_MIN_NOTIONAL"], 777.0)
 
     def test_seed_params_migrates_immediately_previous_harvest_surface(self):
         with tempfile.TemporaryDirectory() as td:

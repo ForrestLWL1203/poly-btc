@@ -714,7 +714,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             with patch.object(obs, "_open_position") as open_position:
                 obs._dispatch_fill(
                     "0xaaa", "BTC", ("0xaaa", "BTC"), now_ms(),
-                    30.0, 0.0, 30.0, 109.0, False, 125,
+                    50.0, 0.0, 50.0, 109.0, False, 125,
                 )
             open_position.assert_called_once()
 
@@ -848,7 +848,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
 
                 obs._dispatch_fill(
                     "0xaaa", "BTC", key, 1_050,
-                    2.0, 1.0, 3.0, 1_000.0, False, 77,
+                    5.0, 1.0, 6.0, 1_000.0, False, 77,
                 )
 
             open_position.assert_called_once()
@@ -949,9 +949,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                     "BTC",
                     ("0xaaa", "BTC"),
                     1_000,
-                    30,
+                    60,
                     0,
-                    30,
+                    60,
                     100,
                     False,
                     1,

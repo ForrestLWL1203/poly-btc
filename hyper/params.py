@@ -285,8 +285,19 @@ _HARVEST_PREVIOUS_DEFAULTS = {
 }
 
 _RISK_PREVIOUS_DEFAULTS = {
+    "ADD_GAP_K": ("0.12",),
+    "ADD_GAP_SHRINK_G": ("1.2",),
     "DEPLOY_FULL_PCT": ("30", "30.0", "40", "40.0", "50", "50.0", "60", "60.0"),
+    "HIGH_LEV_CAP": ("4", "4.0"),
+    "HIGH_MARGIN_PCT": ("2", "2.0"),
+    "HIGH_MIN_NOTIONAL": ("250", "250.0"),
+    "MID_COIN_CAP_PCT": ("22", "22.0"),
+    "MID_LEV_CAP": ("10", "10.0"),
+    "MID_MIN_NOTIONAL": ("1000", "1000.0"),
     "MAX_CONCURRENT_POS": ("15", "15.0"),
+    "STABLE_LEV_CAP": ("25", "25.0"),
+    "STABLE_MARGIN_PCT": ("3.5", "3.5000000000000004"),
+    "STABLE_MIN_NOTIONAL": ("2500", "2500.0"),
 }
 
 
