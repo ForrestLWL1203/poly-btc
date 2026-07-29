@@ -309,6 +309,9 @@ finalist stages. Final walk-forward certification replays the active baseline on
 one CPU-aware batch over the same prepared fills/candle path; it does not rerun the identical baseline for every
 candidate. One-core hosts execute the same batch serially, while larger hosts scale to their configured worker
 ceiling without changing ordering or results.
+Its adaptive leverage, margin and smart-add batches keep one worker session alive and reuse the same immutable
+30-day fills/market context, avoiding repeated process startup and context serialization without pruning a
+candidate surface.
 
 Leverage candidates preserve approximate tier exposure by pairing lower leverage with reciprocally higher
 margin (`margin × leverage` stays near the active notional before caps). Profit remains the primary objective;

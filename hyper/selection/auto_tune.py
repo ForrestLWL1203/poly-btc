@@ -1160,6 +1160,7 @@ def _evaluate_candidates_parallel(
     market_ctx: dict,
     primary_only: bool = False,
     result_cache: dict | None = None,
+    worker_pool: replay_parallel.ReusableOrderedPool | None = None,
 ) -> list[dict]:
     """Evaluate one independent candidate batch using CPU-count-aware pure workers."""
     rows = list(candidates)
@@ -1206,7 +1207,7 @@ def _evaluate_candidates_parallel(
                 kind=kind, addrs=addrs, follow=follow, sigmas=sigmas,
                 now_ms=now_ms, window_fills=window_fills,
                 path_rows=path_rows, path_meta=path_meta, market_ctx=market_ctx,
-                primary_only=primary_only, result_cache=None,
+                primary_only=primary_only, result_cache=None, worker_pool=worker_pool,
             )
             for key, value in zip(missing_markers, evaluated):
                 result_cache[key] = value
@@ -1249,11 +1250,11 @@ def _evaluate_candidates_parallel(
         (kind, dict(follow), candidate, bool(primary_only))
         for candidate in rows
     ]
+    if worker_pool is not None:
+        return worker_pool.map_ordered(_evaluate_candidate_process, tasks)
     return replay_parallel.map_ordered(
-        _evaluate_candidate_process,
-        tasks,
-        initializer=_init_process_replay_context,
-        initargs=(context,),
+        _evaluate_candidate_process, tasks,
+        initializer=_init_process_replay_context, initargs=(context,),
     )
 
 
@@ -2160,6 +2161,20 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         path_rows = prepare_price_path(path_rows)
         validation_path_rows, validation_path_meta = path_rows, path_meta
     candidate_result_cache = {}
+    # These adaptive batches all consume the same immutable fills and market context. Keep it resident in
+    # one worker set instead of respawning processes and copying the 30-day context for every search axis.
+    candidate_worker_pool = replay_parallel.ReusableOrderedPool(
+        initializer=_init_process_replay_context,
+        initargs=({
+            "addrs": list(addrs),
+            "sigmas": sigmas,
+            "now_ms": int(now_ms),
+            "window_fills": window_fills,
+            "path_rows": path_rows,
+            "path_meta": path_meta,
+            "market_ctx": market_ctx,
+        },),
+    )
     # First tune stable/mid/high independently, including upward high-tier probes, then combine only each
     # tier's current/best-profit/fewest-liquidation values. This preserves tier attribution without paying
     # for a full leverage Cartesian grid.
@@ -2174,7 +2189,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=True, market_ctx=market_ctx,
-        result_cache=candidate_result_cache,
+        result_cache=candidate_result_cache, worker_pool=candidate_worker_pool,
     )
     quick_baseline = next(
         (candidate for candidate in axis_quick if _same_tune_values(candidate.get("params") or {}, base)),
@@ -2211,7 +2226,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=True, market_ctx=market_ctx,
-        result_cache=candidate_result_cache,
+        result_cache=candidate_result_cache, worker_pool=candidate_worker_pool,
     )
     joint_quick = axis_quick + combo_quick
     quick_valid = [candidate for candidate in joint_quick if _candidate_valid(candidate, quick_baseline)]
@@ -2238,7 +2253,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=(coarse_search or efficient_search), market_ctx=market_ctx,
-        result_cache=candidate_result_cache,
+        result_cache=candidate_result_cache, worker_pool=candidate_worker_pool,
     )
     baseline = next(
         (candidate for candidate in joint_candidates if _same_tune_values(candidate.get("params") or {}, base)),
@@ -2265,7 +2280,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
         kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
         window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
         primary_only=(coarse_search or efficient_search), market_ctx=market_ctx,
-        result_cache=candidate_result_cache,
+        result_cache=candidate_result_cache, worker_pool=candidate_worker_pool,
     ))
     selected_margin_seed = choose_margin_candidate(
         [selected_joint, *margin_candidates], baseline,
@@ -2289,7 +2304,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             kind="tune", addrs=addrs, follow=follow, sigmas=sigmas, now_ms=now_ms,
             window_fills=window_fills, path_rows=path_rows, path_meta=path_meta,
             primary_only=efficient_search, market_ctx=market_ctx,
-            result_cache=candidate_result_cache,
+            result_cache=candidate_result_cache, worker_pool=candidate_worker_pool,
         )
         if not round_candidates:
             break
@@ -2336,7 +2351,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
             sigmas=sigmas, now_ms=now_ms, window_fills=window_fills,
             path_rows=path_rows, path_meta=path_meta,
             primary_only=efficient_search, market_ctx=market_ctx,
-            result_cache=candidate_result_cache,
+            result_cache=candidate_result_cache, worker_pool=candidate_worker_pool,
         )
         add_baseline = next((c for c in add_candidates if _same_add_values(c.get("params") or {}, add_base)),
                             add_candidates[0] if add_candidates else None)
@@ -2419,6 +2434,8 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                 break
     else:
         add_options = [selected_add_params]
+    # Walk-forward uses a different compact context and therefore starts its own one-shot batch below.
+    candidate_worker_pool.close()
     all_combined_options = sorted(
         (
             (sizing_rank + add_rank, sizing_rank, add_rank, sizing_candidate, add_params)

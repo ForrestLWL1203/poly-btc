@@ -445,6 +445,8 @@ rediscover them. Final path validation prepares one immutable fills/candle conte
 once, and evaluates all distinct Pareto finalists as one CPU-bounded batch. Baseline and finalist paths still use
 the complete continuous account, liquidation, capacity and fold contract; batching changes scheduling and reuse,
 not the objective or evidence.
+The leverage, margin, and smart-add batches in that tune also reuse one worker session and immutable 30-day
+context. Do not recreate a spawn pool for each dependent axis; a one-core host must remain serial-safe.
 
 Current Paper defaults deliberately allow the full closed loop:
 

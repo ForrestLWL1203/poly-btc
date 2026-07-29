@@ -107,6 +107,38 @@ class RuntimeAccelerationTests(unittest.TestCase):
                 [4, 9, 16],
             )
 
+    def test_reusable_replay_pool_initializes_once_across_dependent_batches(self):
+        initialized = []
+
+        class FakeExecutor:
+            created = 0
+
+            def __init__(self, *, initializer=None, initargs=(), **_kwargs):
+                type(self).created += 1
+                if initializer:
+                    initializer(*initargs)
+
+            def map(self, fn, rows, chunksize=1):
+                return map(fn, rows)
+
+            def shutdown(self, **_kwargs):
+                return None
+
+        with patch.object(
+            replay_parallel.os, "sched_getaffinity", return_value={0, 1}, create=True,
+        ), patch.object(
+            replay_parallel.concurrent.futures, "ProcessPoolExecutor", FakeExecutor,
+        ):
+            with replay_parallel.ReusableOrderedPool(
+                initializer=lambda value: initialized.append(value),
+                initargs=("context",),
+            ) as pool:
+                self.assertEqual(pool.map_ordered(_square, [2, 3]), [4, 9])
+                self.assertEqual(pool.map_ordered(_square, [4, 5]), [16, 25])
+
+        self.assertEqual(FakeExecutor.created, 1)
+        self.assertEqual(initialized, ["context"])
+
     def test_profile_artifacts_are_written_only_by_parent_batch(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(
