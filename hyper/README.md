@@ -39,9 +39,10 @@ Deep fills structure + source quality
     ↓ executable markets; no bot/grid/hedge/blow-up/data hard failure
 Fills-only rough Copy
     ↓ 3/4 active weeks; max gap 10d; closed samples ≥7; PF ≥1.25; lottery protection; open follow ≥70%
-Primary/reserve + rough 70/30 profit priority
-    ↓ frozen Top32 → current-surface strict path → strict-profit Top16 → unified tuning
+Profit-aligned score (70/30 return with bounded confidence haircut)
+    ↓ frozen Top32 → current-surface strict path → score Top16 tune seed
 Final strict individual/shared Copy
+    ↓ tuned-surface Top32 certification → final Top16/prefix → exact-Core retune/closure
     ↓ 30d/7d 10%/3%; PF ≥1.25; open-loss ratio ≤50%; no minimum quota
 跟单中 (Core) · 候选 (Challenger) · exit-only for held positions
     ↓ forward-only Observer
@@ -84,13 +85,15 @@ Wallet quality and funded-account membership are separate decisions.
   smart adds. A later add OID may wait for cumulative slices to become actionable, but its first Copy execution
   seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.
-  Return magnitude orders the pool and does not pre-empt the later unified parameter tune.
-- The composite score remains a broad quality indicator and deterministic tie-break; it is not a permission
-  line. Qualified wallets form the pre-strict queue and Core by
-  `70% × conservative 30d dynamic Copy return + 30% × conservative 7d dynamic Copy return`, with 30d return,
-  7d return, Copy PF, composite score and address as fixed tie-breaks. Rough 20%/5% wallets are `primary`;
-  otherwise-qualified wallets are `reserve`. Primary fills before reserve in a frozen Top32. Current-surface
-  strict path replay reranks those candidates and only its strict-profit Top16 may consume unified tuning.
+  Return magnitude owns the score and does not pre-empt the later unified parameter tune.
+- Qualified wallets form both Top32 and Core through one profit-aligned score. Conservative
+  `70% × 30d + 30% × 7d` Copy return is mapped monotonically, then multiplied by an 85%–100% confidence factor
+  derived from PF, samples, execution, repeatability, cross-week activity and liquidation safety. Confidence can
+  only haircut profitability and cannot manufacture a high score for a weak-return wallet. Raw profit priority,
+  30d, 7d, PF and address are stable tie-breaks. Rough 20%/5% wallets remain labelled `primary`; other qualified
+  wallets are `reserve`, but those tiers no longer create a conflicting sort order. Current-surface strict path
+  replay reranks candidates by the same score and its Top16 seeds unified tuning. The winning surface then
+  certifies the complete path-valid Top32 before the final Top16 is formed.
 - Final individual strict replay requires conservative dynamic 30d/7d returns of 10%/3%, positive closed PnL,
   a 30-day open-loss ratio at or below 50%, at least seven complete 30-day Copy Episodes, Copy PF at least
   1.25, conditional lottery protection, 70% open follow, the frozen cross-week activity proof,
@@ -102,8 +105,10 @@ Wallet quality and funded-account membership are separate decisions.
   cost-multiple, maximum-drawdown and 75-point gates do not exist.
 - Confirmed source-account zeroing liquidations and those >=5% Copy liquidation events are persisted in
   `wallet_risk_event`. Discovery cache pruning and 30/37-day window expiry cannot make the wallet eligible again.
-- Wallet count and parameters are tuned together over profit-ranked prefixes. The winning surface requalifies every
-  individual and receives exactly one conservative path-complete shared replay before publication.
+- Wallet count and parameters are tuned together over profit-aligned score prefixes. The initial winning surface
+  requalifies every path-valid Top32 wallet. After the shared prefix chooses the proposed Core, that exact
+  membership is full-tuned and the Top32 ranking/prefix is certified again. Membership/order and parameters must
+  stabilize within two rounds before publication.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
   five days. Daily refresh first certifies with the active parameters. If the proposed Core changes, it runs
@@ -134,7 +139,7 @@ Profiles are not re-downloaded from zero on every scheduled run.
   confirmed later from fills under a
   standardized `$10,000` starting equity with continuous compounding.
 - Every recall survivor plus current Core/strict-Challenger/open-position owner is refreshed in the complete
-  generation. The pre-strict replay queue is independently capped at 32; only the strict-profit Top16 can tune.
+  generation. The pre-strict replay queue is independently capped at 32; only the score Top16 can tune.
   Generation-scoped reserve evidence stays auditable but is not a user-facing Challenger.
 - A valid generation is published atomically. A truncated/invalid leaderboard retains the old generation and
   cannot prune, publish, or tune.
@@ -154,7 +159,7 @@ individual strict, unified-retune and shared-account admission contract as compl
 cannot enter Core under complete-scan criteria cannot enter through daily refresh.
 
 It refreshes Portfolio evidence, cached-fill deltas, positions, valuation and required market paths, then
-reruns the new pre-strict Top32 and strict-profit Top16 path. The first pass uses `retune=False`; a proposed Core
+reruns the new pre-strict Top32 and profit-aligned-score Top16 path. The first pass uses `retune=False`; a proposed Core
 addition runs a parameter-grid pass only if every incumbent remains in the fixed-surface result, and the tuned
 result must still be a strict superset before atomic publication. Daily refresh never removes or replaces
 an incumbent: such a proposal carries the exact prior Core snapshot into the fresh evidence generation and
@@ -245,7 +250,8 @@ fees/slippage, skipped opens, add pressure, and liquidation/price-path outcomes.
 A replay starts with standardized `$10,000` equity and continuously compounds it. Conservative dynamic return
 divides complete closed-Episode PnL minus all current open loss by the applicable window-start floating equity;
 positive open PnL remains reference-only. Rough replay uses fills only and is capped at 40 source-quality
-wallets. Strict replay loads K-line paths only for the profit-ordered Top16 and uses the final tuned parameters.
+wallets. Strict replay reuses the bounded Top32 K-line path cache. The current-surface Top16 is only the tune
+seed; the final tuned surface certifies the complete path-valid Top32 before forming the final Top16.
 There is no Campaign, weekly-fold, per-close, cost-multiple, maximum-drawdown or score-floor admission rule.
 
 The same 15-minute price path records wallet intratrade drawdown, underwater duration, time below
@@ -267,6 +273,13 @@ and then optimizes:
 - stable/mid/high volatility first-open margins;
 - leverage caps;
 - smart-add gap, shrink, and hard-count parameters.
+
+`python3 -m hyper.cli.discover --db data/hl.db optimize` first applies the deployed score model to the current
+generation's frozen pre-strict evidence and rebuilds Top32, then replays Strict/Core formation at that
+generation's sealed as-of time. It does not refetch Leaderboard, Portfolio, or wallet fills. A newly ranked
+wallet may require a bounded public K-line path completion. The command shares the scanner lock with full and
+daily refreshes, but it can run beside Observer; Observer keeps the old immutable strategy revision until the
+new selection, tuned parameters, and revision publish atomically.
 
 The search evaluates independent grid axes, finalist combinations, continuous-capital walk-forward folds,
 holdout, and stress scenarios from fills. Each count node is tuned independently so an 8-wallet portfolio never

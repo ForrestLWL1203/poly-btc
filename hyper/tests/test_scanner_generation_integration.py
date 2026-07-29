@@ -193,8 +193,11 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             "_select_formation_finalist_surface(\n                    db, full_run, tune_ranked,",
             source,
         )
-        self.assertIn("tuned_candidate_rows = list(ranked_candidates)", source)
+        self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
+        self.assertNotIn("tuned_candidate_rows = list(ranked_candidates)", source)
         self.assertNotIn("tuned_candidate_addrs", source)
+        self.assertIn("_retune_exact_membership_surface(", source)
+        self.assertIn("core_formation_membership_parameter_not_converged", source)
 
     def test_normal_scan_honors_auto_tune_switch_before_publication(self):
         scan_source = inspect.getsource(scanner.scan)
@@ -499,8 +502,97 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         forced_source = inspect.getsource(scanner._build_forced_prefix_selection)
 
         self.assertIn("force_entry_requalification=True", source)
+        self.assertIn("_rerank_cached_pre_strict_queue(", source)
+        self.assertIn("generation_asof_ms", source)
         self.assertNotIn("force_promotion", forced_source)
         self.assertNotIn("core_retention_eligible", forced_source)
+
+    def test_cached_pre_strict_rerank_upgrades_score_and_queue_without_replay(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            cols = storage.PROFILE_COLS.split(",")
+            activity = qualifying_source_fields()["pre_strict_activity"]
+            profiles = [
+                {
+                    "addr": "0xprofit",
+                    "status": "active",
+                    "score": .10,
+                    "rough_copy_score": .10,
+                    "profile_generation": "g-rerank",
+                    "copy_bt_closed_n": 12,
+                    "copy_bt_net_pnl": 5000,
+                    "copy_bt_closed_net_pnl": 5000,
+                    "copy_bt_window_start_equity": 10_000,
+                    "copy_bt_7d_net_pnl": 1000,
+                    "copy_bt_7d_closed_net_pnl": 1000,
+                    "copy_bt_7d_window_start_equity": 15_000,
+                    "copy_bt_profit_factor": 2.0,
+                    "copy_bt_open_fill_rate": .90,
+                    "copy_bt_top3_profit_share": .30,
+                    "copy_bt_body_after_top3_n": 9,
+                    "copy_bt_body_after_top3_net_pnl": 1200,
+                },
+                {
+                    "addr": "0xquality",
+                    "status": "active",
+                    "score": .90,
+                    "rough_copy_score": .90,
+                    "profile_generation": "g-rerank",
+                    "copy_bt_closed_n": 20,
+                    "copy_bt_net_pnl": 1000,
+                    "copy_bt_closed_net_pnl": 1000,
+                    "copy_bt_window_start_equity": 10_000,
+                    "copy_bt_7d_net_pnl": 400,
+                    "copy_bt_7d_closed_net_pnl": 400,
+                    "copy_bt_7d_window_start_equity": 11_000,
+                    "copy_bt_profit_factor": 3.0,
+                    "copy_bt_open_fill_rate": 1.0,
+                    "copy_bt_top3_profit_share": .20,
+                    "copy_bt_body_after_top3_n": 17,
+                    "copy_bt_body_after_top3_net_pnl": 600,
+                },
+            ]
+            for rank, profile in enumerate(profiles, 1):
+                db.execute(
+                    f"INSERT INTO profile ({storage.PROFILE_COLS}) "
+                    f"VALUES ({','.join('?' for _ in cols)})",
+                    [profile.get(column) for column in cols],
+                )
+                db.execute(
+                    "INSERT INTO pre_strict_evidence "
+                    "(generation,addr,policy_version,model_version,status,activity_json,"
+                    "tier,queue_rank,rough_profit_priority,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "g-rerank", profile["addr"],
+                        scanner.pre_strict.POLICY_VERSION, "legacy-score-v4",
+                        "passed", json.dumps(activity), "primary", rank, .01, "now",
+                    ),
+                )
+            db.commit()
+
+            result = scanner._rerank_cached_pre_strict_queue(
+                db, "g-rerank", now_ms=2_000_000_000_000,
+            )
+            ranked = db.execute(
+                "SELECT addr,queue_rank FROM pre_strict_evidence "
+                "WHERE generation=? ORDER BY queue_rank",
+                ("g-rerank",),
+            ).fetchall()
+            model_versions = {
+                row[0] for row in db.execute(
+                    "SELECT DISTINCT model_version FROM pre_strict_evidence "
+                    "WHERE generation=?",
+                    ("g-rerank",),
+                ).fetchall()
+            }
+
+        self.assertEqual(result["scored"], 2)
+        self.assertEqual(result["queued"], 2)
+        self.assertEqual(ranked[0][0], "0xprofit")
+        self.assertEqual(
+            model_versions, {scanner.pre_strict.SELECTION_MODEL_VERSION},
+        )
 
     def test_formation_runs_one_path_bridge_and_one_final_surface_replay(self):
         source = inspect.getsource(scanner.form_quality_prefix)
@@ -508,6 +600,75 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertNotIn("_rank_formation_candidates_for_surface", source)
         self.assertEqual(source.count("_effective_follow_replay("), 2)
         self.assertIn("tune_ranked = ranked_candidates[:core_upper]", source)
+        self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
+        self.assertIn('"finalSurfaceUniverseCount": len(tuned_candidate_rows)', source)
+        self.assertEqual(source.count("follow_score.follow_score_sort_key("), 2)
+
+    def test_pre_strict_queue_uses_the_same_score_before_legacy_tiers(self):
+        source = inspect.getsource(scanner._finalize_pre_strict_queue)
+
+        score_order = source.index("COALESCE(p.rough_copy_score,p.score,0) DESC")
+        tier_order = source.index("CASE pse.tier WHEN 'primary'")
+        profit_order = source.index("pse.rough_profit_priority DESC")
+        self.assertLess(score_order, tier_order)
+        self.assertLess(tier_order, profit_order)
+
+    def test_final_membership_parameter_closure_is_bounded_and_fail_closed(self):
+        source = inspect.getsource(scanner.form_quality_prefix)
+        helper = inspect.getsource(scanner._retune_exact_membership_surface)
+
+        self.assertEqual(scanner.config.AUTO_TUNE_LEVERAGE_SHORTLIST, 3)
+        self.assertGreaterEqual(scanner.config.AUTO_TUNE_SIZING_FINALISTS, 12)
+        self.assertIn("CORE_FORMATION_CLOSURE_MAX_ROUNDS", source)
+        self.assertIn("for round_index in range(1, max_rounds + 1)", source)
+        self.assertIn("actual == closure_expected", source)
+        self.assertIn(
+            "core_formation_membership_parameter_not_converged", source,
+        )
+        self.assertIn('addrs_override=list(ordered_addrs)', helper)
+        self.assertIn('search_profile="full"', helper)
+        self.assertIn("_select_formation_finalist_surface(", helper)
+
+    def test_exact_membership_closure_full_tunes_only_the_actual_core(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            base = {
+                key: 1.0 for key in (
+                    *scanner.auto_tune.TUNE_KEYS,
+                    *scanner.auto_tune.ADD_TUNE_KEYS,
+                )
+            }
+            proposal = {**base, "STABLE_MARGIN_PCT": 0.031}
+            tune_result = {
+                "status": "ok",
+                "eligible_to_apply": True,
+                "proposal": proposal,
+            }
+            with patch.object(
+                scanner.auto_tune, "_portfolio_window_fills",
+                return_value={30: [{"addr": "0xaaa"}], 14: [], 7: []},
+            ), patch.object(
+                scanner.auto_tune, "maybe_tune_margins",
+                return_value=tune_result,
+            ) as tune, patch.object(
+                scanner, "_select_formation_finalist_surface",
+                return_value=(proposal, [{"feasible": True}]),
+            ):
+                result = scanner._retune_exact_membership_surface(
+                    db, ("0xAAA", "0xBBB"),
+                    [{"addr": "0xaaa"}, {"addr": "0xbbb"}, {"addr": "0xccc"}],
+                    generation_id="g1", stamp="s1", round_index=1,
+                    now_ms=1_800_000_000_000, base_follow=base,
+                    valuation_marks={}, sigmas={}, market_ctx={},
+                )
+
+            self.assertEqual(result["addrs"], ("0xaaa", "0xbbb"))
+            self.assertEqual(result["params"]["STABLE_MARGIN_PCT"], 0.031)
+            self.assertTrue(result["eligible"])
+            kwargs = tune.call_args.kwargs
+            self.assertEqual(kwargs["addrs_override"], ["0xaaa", "0xbbb"])
+            self.assertEqual(kwargs["search_profile"], "full")
+            self.assertTrue(kwargs["formation_admission"])
 
     def test_effective_replay_keeps_one_sector_scoped_surface(self):
         source = inspect.getsource(scanner._effective_follow_replay)
@@ -1810,7 +1971,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             self.assertEqual(marginal.selected, ())
             self.assertEqual(
                 marginal.search_meta["membershipPolicy"],
-                "selection-pre-strict32-pf125-strict-profit-prefix-v3",
+                "selection-pre-strict32-pf125-profit-score-prefix-v5",
             )
             self.assertEqual(rows, [])
 

@@ -25,6 +25,9 @@ from . import pre_strict
 PROFIT_PRIORITY_30_WEIGHT = 0.70
 PROFIT_PRIORITY_7_WEIGHT = 0.30
 PROFIT_PRIORITY_MODE = "conservative_realized_profit_70_30"
+FOLLOW_SCORE_MODE = "profit_priority_confidence_haircut_v1"
+FOLLOW_SCORE_PROFIT_SCALE = 0.35
+FOLLOW_SCORE_CONFIDENCE_FLOOR = 0.85
 ECONOMIC_REJECTION_REASONS = frozenset({
     "source_30d_closed_pnl_not_positive",
     "source_7d_closed_pnl_not_positive",
@@ -160,22 +163,34 @@ def compute_profit_priority(metrics: Mapping) -> tuple[float | None, dict]:
     }
 
 
+def follow_score_sort_key(
+    metrics: Mapping,
+    *,
+    follow_score_value: float = 0.0,
+    addr: str = "",
+) -> tuple:
+    """Exact formation order: published score, then its raw economic and quality tie-breaks."""
+    priority, detail = compute_profit_priority(metrics)
+    returns = detail["returns"]
+    return (
+        -_num(follow_score_value),
+        -(priority if priority is not None else float("-inf")),
+        -returns["30d"],
+        -returns["7d"],
+        -_num(metrics.get("copy_bt_profit_factor")),
+        str(addr or "").lower(),
+    )
+
+
 def profit_priority_sort_key(
     metrics: Mapping,
     *,
     follow_score_value: float = 0.0,
     addr: str = "",
 ) -> tuple:
-    """Exact strict formation order: 70/30 priority, 30d, 7d, PF, quality, address."""
-    priority, detail = compute_profit_priority(metrics)
-    returns = detail["returns"]
-    return (
-        -(priority if priority is not None else float("-inf")),
-        -returns["30d"],
-        -returns["7d"],
-        -_num(metrics.get("copy_bt_profit_factor")),
-        -_num(follow_score_value),
-        str(addr or "").lower(),
+    """Backward-compatible alias for the V5 profit-aligned score order."""
+    return follow_score_sort_key(
+        metrics, follow_score_value=follow_score_value, addr=addr,
     )
 
 
@@ -483,9 +498,12 @@ def compute_follow_score(
     policy_values: Mapping | None = None,
     stage: str | None = None,
 ) -> tuple[float, dict]:
-    """Return the exact 40/30/20/10 monotonic ranking score; never a permission line."""
+    """Return the profit-aligned score used by both the funnel and final formation.
+
+    Conservative 70/30 Copy return owns the score. Qualified execution/repeatability evidence may only
+    haircut it by at most 15%; it can never manufacture a high score for a low-return wallet.
+    """
     scoped = apply_allowed_sector_copy_metrics(metrics)
-    policy = load_copy_policy(policy_values)
     c30 = int(_num(scoped.get("copy_bt_closed_n")))
     if c30 <= 0 or scoped.get("copy_bt_net_pnl") is None:
         source_score = scoped.get("source_quality_score")
@@ -499,14 +517,22 @@ def compute_follow_score(
         }
     stage = str(stage or scoped.get("copy_replay_stage") or "rough").lower()
     strict = stage in {"strict", "final"}
-    floor30 = policy.core_min_dynamic_copy_return_30d if strict else 0.0
-    floor7 = policy.core_min_dynamic_copy_return_7d if strict else 0.0
     economic30 = _copy_window_economics(scoped, 30)
     economic7 = _copy_window_economics(scoped, 7)
     pnl30 = economic30["qualificationPnl"]
     pnl7 = economic7["qualificationPnl"]
     return30 = _num(economic30.get("qualificationReturn"))
     return7 = _num(economic7.get("qualificationReturn"))
+    profit_priority = (
+        PROFIT_PRIORITY_30_WEIGHT * return30
+        + PROFIT_PRIORITY_7_WEIGHT * return7
+    )
+    profit_component = _clamp(
+        1.0 - math.exp(
+            -max(0.0, profit_priority)
+            / max(1e-9, FOLLOW_SCORE_PROFIT_SCALE)
+        )
+    )
     source_win = _num(scoped.get("source_win_rate_30d"))
     copy_win = _num(scoped.get("copy_bt_win_rate"))
     open_rate = _clamp(_num(
@@ -517,42 +543,70 @@ def compute_follow_score(
         scoped.get("copy_bt_add_fidelity"),
     )
     behavior_score = 0.50 if behavior is None else _clamp(_num(behavior))
+    profit_factor = _num(scoped.get("copy_bt_profit_factor"))
+    profit_factor_score = _quality_above_floor(profit_factor, 1.25, 2.75)
+    sample_score = _quality_above_floor(c30, 7, 23)
+    execution_score = (
+        0.75 * _quality_above_floor(open_rate, 0.70, 0.30)
+        + 0.25 * behavior_score
+    )
+    top3_share = _clamp(_num(scoped.get("copy_bt_top3_profit_share"), 0.50))
+    body_n = int(_num(scoped.get("copy_bt_body_after_top3_n")))
+    body_net_raw = scoped.get("copy_bt_body_after_top3_net_pnl")
+    body_score = (
+        0.50 if body_net_raw is None or body_n <= 0
+        else 1.0 if _num(body_net_raw) >= 0.0 else 0.0
+    )
+    repeatability_score = 0.65 * _clamp(1.0 - top3_share) + 0.35 * body_score
+    activity = scoped.get("pre_strict_activity")
+    if not isinstance(activity, dict):
+        activity = parse_json_obj(scoped.get("pre_strict_activity_json"))
     as_of_ms = int(_num(scoped.get("score_as_of_ms"), time.time() * 1000))
     activity_age = _activity_age_hours(scoped, as_of_ms)
-    activity_score = 0.0 if activity_age is None else _clamp(1.0 - activity_age / 180.0)
-    source_opens = int(_num(scoped.get("open_events_30d")))
-    components = {
-        "copy30d": _quality_above_floor(return30, floor30, 0.60),
-        "copy7d": _quality_above_floor(return7, floor7, 0.25),
-        "sourceWinRate": _quality_above_floor(
-            source_win, policy.source_min_episode_win_rate, 0.25,
-        ),
-        "copyWinRate": _quality_above_floor(
-            copy_win,
-            policy.core_min_copy_win_rate if strict else policy.rough_min_win_rate,
-            0.35,
-        ),
-        "openFollowRate": _quality_above_floor(
-            open_rate, policy.min_actionable_open_rate, 0.30,
-        ),
-        "behaviorReplication": behavior_score,
-        "activityRecency": activity_score,
-        "independentOpens": _quality_above_floor(source_opens, 10, 30),
-    }
-    score = (
-        0.25 * components["copy30d"]
-        + 0.15 * components["copy7d"]
-        + 0.20 * components["sourceWinRate"]
-        + 0.10 * components["copyWinRate"]
-        + 0.15 * components["openFollowRate"]
-        + 0.05 * components["behaviorReplication"]
-        + 0.05 * components["activityRecency"]
-        + 0.05 * components["independentOpens"]
+    active_weeks = _clamp(_num(activity.get("activeWeeks4")) / 4.0)
+    latest_active = 1.0 if activity.get("latest7dActive") else 0.0
+    max_gap_days = _num(activity.get("maxOpenGapDays28d"), 10.0)
+    activity_score = (
+        0.50 * active_weeks
+        + 0.25 * latest_active
+        + 0.25 * _clamp(1.0 - max_gap_days / 10.0)
     )
+    liquidations = int(_num(scoped.get("copy_bt_liquidations")))
+    max_liquidation_loss = _num(scoped.get("copy_bt_max_liquidation_loss_pct"))
+    liquidation_score = 0.50 * _clamp(1.0 - liquidations / 4.0) + 0.50 * _clamp(
+        1.0 - max_liquidation_loss / 0.05
+    )
+    components = {
+        "profitPriority": profit_component,
+        "profitFactorConfidence": profit_factor_score,
+        "sampleConfidence": sample_score,
+        "executionConfidence": execution_score,
+        "repeatabilityConfidence": repeatability_score,
+        "activityConfidence": activity_score,
+        "liquidationSafety": liquidation_score,
+    }
+    reliability = (
+        0.25 * profit_factor_score
+        + 0.20 * sample_score
+        + 0.20 * execution_score
+        + 0.15 * repeatability_score
+        + 0.10 * activity_score
+        + 0.10 * liquidation_score
+    )
+    confidence_multiplier = (
+        FOLLOW_SCORE_CONFIDENCE_FLOOR
+        + (1.0 - FOLLOW_SCORE_CONFIDENCE_FLOOR) * reliability
+    )
+    score = profit_component * confidence_multiplier
     return _clamp(score), {
         "sourceOnly": False,
         "stage": "strict" if strict else "rough",
+        "mode": FOLLOW_SCORE_MODE,
         "components": components,
+        "profitPriorityValue": profit_priority,
+        "profitComponent": profit_component,
+        "reliability": reliability,
+        "confidenceMultiplier": confidence_multiplier,
         "profitabilityBasis": PROFITABILITY_BASIS,
         "economicReturns": {"30d": return30, "7d": return7},
         "economicEquities": {
@@ -565,15 +619,17 @@ def compute_follow_score(
         "sourceWinRate": source_win,
         "copyWinRate": copy_win,
         "openFillRate": open_rate,
+        "activity": activity,
         "activityAgeHours": activity_age,
-        "liquidations": int(_num(scoped.get("copy_bt_liquidations"))),
+        "liquidations": liquidations,
         "maxSingleLiquidationLossPct": _num(
             scoped.get("copy_bt_max_liquidation_loss_pct")
         ),
         "feeDrag": scoped.get("copy_bt_fee_drag"),
         "reasons": [
-            f"保守Copy 30d {return30 * 100:+.1f}% / 7d {return7 * 100:+.1f}%",
-            f"源胜率 {source_win * 100:.1f}% / Copy胜率 {copy_win * 100:.1f}%",
-            f"开仓跟随率 {open_rate * 100:.1f}%",
+            f"盈利优先 {profit_priority * 100:+.1f}%"
+            f"（30d {return30 * 100:+.1f}% / 7d {return7 * 100:+.1f}%）",
+            f"可信度 {reliability * 100:.1f}% / 系数 {confidence_multiplier:.3f}",
+            f"PF {profit_factor:.2f} / 开仓跟随率 {open_rate * 100:.1f}%",
         ],
     }

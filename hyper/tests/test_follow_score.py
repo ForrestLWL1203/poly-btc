@@ -7,6 +7,7 @@ from hyper.selection.follow_score import (
     compute_profit_priority,
     compute_source_quality_score,
     evaluate_follow_eligibility,
+    follow_score_sort_key,
     profit_priority_sort_key,
 )
 
@@ -110,7 +111,7 @@ class FollowScoreTests(unittest.TestCase):
         self.assertAlmostEqual(priority, .70 * .20 + .30 * .10)
         self.assertEqual(detail["weights"], {"30d": .70, "7d": .30})
 
-    def test_profit_priority_tie_breaks_include_profit_factor(self):
+    def test_follow_score_is_primary_then_profit_tie_breaks_are_stable(self):
         rows = [
             (evidence(copy_bt_profit_factor=1.3), .9, "0xb"),
             (evidence(copy_bt_profit_factor=2.0), .2, "0xc"),
@@ -119,7 +120,52 @@ class FollowScoreTests(unittest.TestCase):
         ordered = sorted(rows, key=lambda item: profit_priority_sort_key(
             item[0], follow_score_value=item[1], addr=item[2],
         ))
-        self.assertEqual([item[2] for item in ordered], ["0xa", "0xc", "0xb"])
+        self.assertEqual([item[2] for item in ordered], ["0xb", "0xa", "0xc"])
+
+    def test_profit_aligned_score_cannot_reward_low_return_with_quality_points(self):
+        weak = evidence(
+            copy_bt_net_pnl=1_500, copy_bt_closed_net_pnl=1_500,
+            copy_bt_7d_net_pnl=600, copy_bt_7d_closed_net_pnl=600,
+            copy_bt_win_rate=.99, copy_bt_profit_factor=9.0,
+            copy_bt_closed_n=80, actionable_open_rate=1.0,
+            copy_bt_open_fill_rate=1.0,
+        )
+        strong = evidence(
+            copy_bt_net_pnl=5_000, copy_bt_closed_net_pnl=5_000,
+            copy_bt_7d_net_pnl=1_500, copy_bt_7d_closed_net_pnl=1_500,
+            copy_bt_win_rate=.51, copy_bt_profit_factor=1.30,
+            copy_bt_closed_n=8, actionable_open_rate=.71,
+            copy_bt_open_fill_rate=.71,
+        )
+        weak_score, weak_detail = compute_follow_score(weak, stage="strict")
+        strong_score, strong_detail = compute_follow_score(strong, stage="strict")
+
+        self.assertGreater(strong_score, weak_score)
+        for score, detail in (
+            (weak_score, weak_detail), (strong_score, strong_detail),
+        ):
+            self.assertLessEqual(score, detail["profitComponent"] + 1e-12)
+            self.assertGreaterEqual(
+                score, detail["profitComponent"] * .85 - 1e-12,
+            )
+
+    def test_final_sort_is_monotonic_with_displayed_score(self):
+        rows = []
+        for index, metrics in enumerate((
+            evidence(copy_bt_net_pnl=2_000, copy_bt_7d_net_pnl=500),
+            evidence(copy_bt_net_pnl=4_000, copy_bt_7d_net_pnl=1_000),
+            evidence(copy_bt_net_pnl=3_000, copy_bt_7d_net_pnl=800),
+        )):
+            score, _detail = compute_follow_score(metrics, stage="strict")
+            rows.append((metrics, score, f"0x{index}"))
+        ordered = sorted(rows, key=lambda item: follow_score_sort_key(
+            item[0], follow_score_value=item[1], addr=item[2],
+        ))
+
+        self.assertEqual(
+            [item[1] for item in ordered],
+            sorted((item[1] for item in rows), reverse=True),
+        )
 
     def test_rough_requires_closed_profit_pf_execution_and_activity(self):
         self.assertTrue(judge("rough")["coreEligible"])

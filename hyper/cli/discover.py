@@ -479,21 +479,42 @@ def main() -> int:
     elif args.cmd == "tune":
         # Keep the legacy hidden verb as a compatibility alias. Formation ranks one bounded pre-Core pool,
         # searches count-specific parameter surfaces, and seals only the winning strict membership.
-        result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
+        try:
+            with scan_lock.acquire(args.db):
+                result = scanner.optimize_published_generation(
+                    db, args.generation, stamp=args.stamp,
+                )
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "optimize":
-        result = scanner.optimize_published_generation(db, args.generation, stamp=args.stamp)
+        try:
+            with scan_lock.acquire(args.db):
+                result = scanner.optimize_published_generation(
+                    db, args.generation, stamp=args.stamp,
+                )
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "repair-selection":
-        result = scanner.repair_published_selection(
-            db, args.generation, stamp=args.stamp, replace_existing=args.replace_existing,
-        )
+        try:
+            with scan_lock.acquire(args.db):
+                result = scanner.repair_published_selection(
+                    db, args.generation, stamp=args.stamp,
+                    replace_existing=args.replace_existing,
+                )
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "finalize-profiled":
-        result = scanner.finalize_profiled_generation(
-            db, generation_id=args.generation, stamp=args.stamp,
-            retune=not bool(args.no_retune),
-        )
+        try:
+            with scan_lock.acquire(args.db):
+                result = scanner.finalize_profiled_generation(
+                    db, generation_id=args.generation, stamp=args.stamp,
+                    retune=not bool(args.no_retune),
+                )
+        except scan_lock.ScanBusyError:
+            raise RuntimeError("scanner_run_already_active")
         print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "reset-paper":
         if not args.yes:

@@ -2332,9 +2332,10 @@ def _finalize_pre_strict_queue(
         "SELECT pse.addr FROM pre_strict_evidence pse "
         "LEFT JOIN profile p ON lower(p.addr)=lower(pse.addr) "
         "WHERE pse.generation=? AND pse.status='passed' "
-        "ORDER BY CASE pse.tier WHEN 'primary' THEN 0 WHEN 'reserve' THEN 1 ELSE 2 END,"
+        "ORDER BY COALESCE(p.rough_copy_score,p.score,0) DESC,"
+        "CASE pse.tier WHEN 'primary' THEN 0 WHEN 'reserve' THEN 1 ELSE 2 END,"
         "pse.rough_profit_priority DESC,pse.rough_return_30d DESC,pse.rough_return_7d DESC,"
-        "pse.copy_profit_factor_30d DESC,COALESCE(p.rough_copy_score,p.score,0) DESC,"
+        "pse.copy_profit_factor_30d DESC,"
         "lower(pse.addr)",
         (generation_id,),
     ).fetchall()
@@ -3096,8 +3097,73 @@ def _explicit_empty_core_formation(ranked_rows, *, reason: str, **search_meta) -
     }
 
 
+def _retune_exact_membership_surface(
+    db, addrs, candidate_rows, *, generation_id, stamp, round_index,
+    now_ms, base_follow, valuation_marks, sigmas, market_ctx,
+) -> dict:
+    """Full-tune the exact proposed Core instead of inheriting a larger pool's congestion surface."""
+    ordered_addrs = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (addrs or ()) if addr
+    ))
+    if not ordered_addrs:
+        raise RuntimeError("core_formation_closure_empty_membership")
+    row_by_addr = {
+        str(row.get("addr") or "").lower(): row for row in (candidate_rows or ())
+        if row.get("addr")
+    }
+    exact_rows = [row_by_addr[addr] for addr in ordered_addrs if addr in row_by_addr]
+    if len(exact_rows) != len(ordered_addrs):
+        raise RuntimeError("core_formation_closure_candidate_missing")
+    window_fills = auto_tune._portfolio_window_fills(
+        db, list(ordered_addrs), now_ms, include_watch=True,
+    )
+    if window_fills is None or not any(window_fills.values()):
+        raise RuntimeError("core_formation_closure_fills_unavailable")
+    full_run = auto_tune.maybe_tune_margins(
+        db, source="core_formation_closure",
+        stamp=f"{stamp}:closure:r{int(round_index)}:k{len(ordered_addrs)}",
+        dry_run=True, mode="apply", follow_values=base_follow,
+        data_complete=True, addrs_override=list(ordered_addrs),
+        record_run=False, formation_admission=True,
+        market_generation=generation_id, search_profile="full",
+        time_budget_s=float(config.AUTO_TUNE_TIME_BUDGET_SEC),
+    )
+    if full_run.get("status") != "ok":
+        raise RuntimeError(
+            "core_formation_closure_tune_failed:"
+            + str(full_run.get("reason") or full_run.get("status"))
+        )
+    db.commit()
+    finalist_surface, finalist_audit = _select_formation_finalist_surface(
+        db, full_run, exact_rows,
+        base_follow=base_follow, generation_id=generation_id,
+        now_ms=now_ms, valuation_marks=valuation_marks,
+        sigmas=sigmas, market_ctx=market_ctx, window_fills=window_fills,
+    )
+    chosen_run = {**full_run, "proposal": finalist_surface}
+    tuned_params, eligible, reason = _formation_param_surface(
+        base_follow, chosen_run, retune=True,
+    )
+    if eligible is not True:
+        raise RuntimeError(f"core_formation_closure_not_eligible:{reason}")
+    return {
+        "addrs": ordered_addrs,
+        "follow": {
+            **base_follow,
+            **tuned_params,
+            "AMBIGUOUS_PATH_MODE": "liquidate",
+        },
+        "params": tuned_params,
+        "eligible": eligible,
+        "reason": reason,
+        "run": chosen_run,
+        "finalistAudit": finalist_audit,
+    }
+
+
 def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
-                        force_entry_requalification=False, force_retune=False) -> dict:
+                        force_entry_requalification=False, force_retune=False,
+                        _follow_override=None) -> dict:
     """Certify wallets once, search fills quickly, then seal one final strict surface."""
     now_ms = int(now_ms or time.time() * 1000)
     base_follow = params.load_follow(db)
@@ -3105,6 +3171,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     base_follow.update({
         key: scanner_values[key] for key in COPY_POLICY_PARAM_KEYS if key in scanner_values
     })
+    if _follow_override:
+        base_follow.update(dict(_follow_override))
     if "SMART_ADD" in base_follow:
         base_follow["ADD_STRATEGY"] = "smart" if base_follow["SMART_ADD"] else "hardcap"
     sigmas = auto_tune._load_sigmas(db, generation_id)
@@ -3174,7 +3242,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "follow_score": f(effective.get("score")),
             "_current_surface_qualification": qualification,
         })
-    prepath_rows.sort(key=lambda row: follow_score.profit_priority_sort_key(
+    prepath_rows.sort(key=lambda row: follow_score.follow_score_sort_key(
         row,
         follow_score_value=f(row.get("follow_score")),
         addr=row.get("addr") or "",
@@ -3191,7 +3259,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # set with the previous Core merely because the parameter-retune interval has not elapsed.
     retune = bool(retune and (force_retune or rebalance_due))
     # Profile construction already performed the cheap profitability, evidence and valuation checks that
-    # establish this rough profit order. Do not run a path-complete individual replay on the active/default surface:
+    # establish this rough profit-aligned score order. Do not run a path-complete individual replay on the active/default surface:
     # that duplicated the expensive work and could reject a wallet for parameters the following tuner exists
     # to repair. The winning surface below receives the one authoritative per-wallet strict replay.
     tune_ranked = ranked_candidates[:core_upper]
@@ -3349,7 +3417,10 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     # delete the rest of the bounded Top16 before strict replay.  Every Top16 wallet receives the winning
     # surface, individual failures are removed, and only then may the shared-account prefix search choose
     # its final count.  Otherwise fitting k=9 silently made ranks 10–16 ineligible without evaluating them.
-    tuned_candidate_rows = list(ranked_candidates)
+    # The current-surface Top16 is only the bounded tune seed. Once a parameter surface exists, every
+    # path-valid Top32 wallet must receive final individual strict replay on that same surface. Otherwise
+    # ranks 17-32 can never prove that parameter changes made them stronger than the original seed.
+    tuned_candidate_rows = list(prepath_rows)
 
     def replay_effective_surface(follow_surface):
         qualifications = {}
@@ -3496,7 +3567,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         qualification_follow
     )
     tune_coverage_fallback = False
-    effective_ranked.sort(key=lambda row: follow_score.profit_priority_sort_key(
+    effective_ranked.sort(key=lambda row: follow_score.follow_score_sort_key(
         effective_metrics.get(row["addr"]) or {},
         follow_score_value=effective_scores.get(row["addr"], 0.0),
         addr=row["addr"],
@@ -3638,11 +3709,11 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         exhaustive_below=int(getattr(config, "CORE_PREFIX_EXHAUSTIVE_MAX_N", 8) or 0),
         required_count=0,
     )
-    # Core membership is a strict prefix of final-surface 70/30 profit order. An arbitrary add/swap search
+    # Core membership is a strict prefix of the final profit-aligned score order. An arbitrary add/swap search
     # would turn the deterministic ranking contract into an overfit subset search.
     chosen = prefix_search.selected
     chosen_addrs = tuple(ordered[:chosen.count])
-    membership_algorithm = "strict_profit_prefix"
+    membership_algorithm = "profit_aligned_score_prefix"
 
     robust_cache = {}
 
@@ -3719,7 +3790,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         robust_members = set(robust_key)
         chosen_addrs = tuple(addr for addr in ordered if addr in robust_members)
     # Pre-validate any strict LOO result. Publication may remove a negative incremental member only when
-    # the resulting set has passed these same membership stress rules. Only the profit-ranked suffix is removable.
+    # the resulting set has passed these same membership stress rules. Only the lowest-score suffix is removable.
     robust_allowed = {tuple(sorted(chosen_addrs))}
     outgoing = next(
         reversed(chosen_addrs), None,
@@ -3754,7 +3825,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "utility": value.utility,
         "feasible": bool(value.feasible),
     } for value in (tune_search.evaluated if tune_search is not None else ()))
-    return {
+    result = {
         "selected": chosen_addrs, "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,
         "qualifications": effective_qualifications, "scores": effective_scores,
@@ -3763,12 +3834,12 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "policies": effective_policies, "walletMetrics": effective_metrics,
         "replayParamsHash": effective_surface_hash,
         "search": {
-            "algorithm": "adaptive_count_continuous_equity_v7", "initialCount": len(ordered),
+            "algorithm": "adaptive_count_continuous_equity_v8", "initialCount": len(ordered),
             "selectedCount": len(chosen_addrs), "boundary": prefix_search.boundary,
             "evaluatedCounts": [value.count for value in prefix_search.evaluated],
             "evaluations": evaluations,
             "membershipAlgorithm": membership_algorithm,
-            "rankingMode": follow_score.PROFIT_PRIORITY_MODE,
+            "rankingMode": follow_score.FOLLOW_SCORE_MODE,
             "rankingWeights": {
                 "30d": follow_score.PROFIT_PRIORITY_30_WEIGHT,
                 "7d": follow_score.PROFIT_PRIORITY_7_WEIGHT,
@@ -3805,8 +3876,91 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             "formationFinalistAdmission": finalist_admission_audit,
             "qualificationRejected": qualification_rejected,
             "admission": admission_audit,
+            "finalSurfaceUniverseCount": len(tuned_candidate_rows),
+            "finalSurfaceQualifiedCount": len(effective_ranked),
+            "closureRounds": [],
+            "closureStable": True,
         },
     }
+    initial_tuned_members = tuple(tune_ordered[:winning_count])
+    needs_exact_closure = bool(
+        retune
+        and chosen_addrs
+        and tuple(chosen_addrs) != initial_tuned_members
+    )
+    if not needs_exact_closure:
+        return result
+
+    # Count search and individual strict may shrink or reorder the pool which produced the winning surface.
+    # Re-optimize that exact Core, then replay the complete path-valid Top32 on the new surface so excluded
+    # wallets can compete fairly. Membership and parameters must reach a bounded fixed point before publish.
+    closure_expected = tuple(chosen_addrs)
+    closure_follow = dict(fixed_follow)
+    closure_audit = []
+    max_rounds = max(
+        1, int(getattr(config, "CORE_FORMATION_CLOSURE_MAX_ROUNDS", 2) or 2),
+    )
+    last_result = result
+    for round_index in range(1, max_rounds + 1):
+        exact = _retune_exact_membership_surface(
+            db, closure_expected, tuned_candidate_rows,
+            generation_id=generation_id, stamp=stamp, round_index=round_index,
+            now_ms=now_ms, base_follow=closure_follow,
+            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+        )
+        last_result = form_quality_prefix(
+            db, generation_id, stamp, now_ms,
+            retune=False,
+            force_entry_requalification=force_entry_requalification,
+            force_retune=False,
+            _follow_override=exact["follow"],
+        )
+        actual = tuple(last_result.get("selected") or ())
+        stable = actual == closure_expected
+        closure_audit.append({
+            "round": round_index,
+            "tunedInputCount": len(closure_expected),
+            "selectedCount": len(actual),
+            "membershipStable": stable,
+            "params": dict(exact.get("params") or {}),
+            "reason": exact.get("reason"),
+            "finalistAdmission": list(exact.get("finalistAudit") or ()),
+        })
+        if stable:
+            search = dict(last_result.get("search") or {})
+            exact_run = dict(exact.get("run") or {})
+            search.update({
+                "algorithm": "adaptive_count_continuous_equity_v8",
+                "retuneApplied": True,
+                "tunePoolCount": len(tune_ordered),
+                "tunedInputCount": len(closure_expected),
+                "coarseTuneRuns": len(tune_runs),
+                "fullTuneRuns": (
+                    (1 if chosen_run.get("search_profile") == "full" else 0)
+                    + round_index
+                ),
+                "formationTuneEligible": exact.get("eligible"),
+                "formationTuneReason": exact.get("reason"),
+                "formationTuneFinalists": list(exact_run.get("finalists") or ()),
+                "formationMarginRounds": list(exact_run.get("margin_rounds") or ()),
+                "formationFinalistAdmission": list(
+                    exact.get("finalistAudit") or ()
+                ),
+                "initialTunedInputCount": winning_count,
+                "closureRounds": closure_audit,
+                "closureStable": True,
+            })
+            last_result["search"] = search
+            return last_result
+        if not actual:
+            break
+        closure_expected = actual
+        closure_follow = dict(exact["follow"])
+
+    raise RuntimeError(
+        "core_formation_membership_parameter_not_converged:"
+        f"{len(closure_expected)}:{len(tuple(last_result.get('selected') or ()))}"
+    )
 
 
 def _apply_formation_params(db, formation, stamp) -> bool:
@@ -3970,7 +4124,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         priority, priority_detail = follow_score.compute_profit_priority(ranking_metrics)
         row["replay_profit_priority"] = priority
         score_detail_by_addr.setdefault(addr, {})["profitPriority"] = priority_detail
-    profiles.sort(key=lambda row: follow_score.profit_priority_sort_key(
+    profiles.sort(key=lambda row: follow_score.follow_score_sort_key(
         replay_by_addr.get((row.get("addr") or "").lower()) or row,
         follow_score_value=f(row.get("follow_score")),
         addr=row.get("addr") or "",
@@ -4645,11 +4799,18 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     if not current or generation_id != current:
         raise RuntimeError("selection_repair_requires_current_generation")
     meta = db.execute(
-        "SELECT complete,profile_complete FROM scan_generation WHERE generation=? AND status='published'",
+        "SELECT sg.complete,sg.profile_complete,"
+        "COALESCE(gmm.asof_ms,CAST(strftime('%s',sg.started_at) AS INTEGER)*1000) "
+        "FROM scan_generation sg LEFT JOIN generation_market_manifest gmm "
+        "ON gmm.generation=sg.generation "
+        "WHERE sg.generation=? AND sg.status='published'",
         (generation_id,),
     ).fetchone()
     if not meta or not int(meta[0] or 0) or not int(meta[1] or 0):
         raise RuntimeError("selection_repair_requires_complete_generation")
+    repair_now_ms = int(meta[2] or 0)
+    if repair_now_ms <= 0:
+        raise RuntimeError("selection_repair_generation_asof_missing")
     existing_core = selection.published_core_addrs(db) or []
     expected_strategy_revision = strategy_revision.active_revision_id(db)
     if existing_core and not replace_existing:
@@ -4682,7 +4843,6 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
         db.commit()
 
     stamp = stamp or now_iso()
-    repair_now_ms = int(time.time() * 1000)
     db.commit()
     refresh_watchlist(
         db,
@@ -4818,10 +4978,71 @@ def repair_published_selection(db, generation_id=None, stamp=None, *, replace_ex
     }
 
 
+def _rerank_cached_pre_strict_queue(db, generation_id: str, *, now_ms: int) -> dict:
+    """Apply the current score model to one generation's frozen rough evidence.
+
+    This is deliberately narrower than rough replay: it never fetches or rewrites fills, economics,
+    activity or qualification status. It only upgrades the derived score/order before a manual cached
+    Strict -> Core re-formation, so a newly deployed ranking model is not trapped behind the old Top32.
+    """
+    profile_columns = storage.PROFILE_COLS.split(",")
+    selected_columns = ",".join(f"p.{column}" for column in profile_columns)
+    rows = db.execute(
+        f"SELECT {selected_columns},pse.activity_json "
+        "FROM profile p JOIN pre_strict_evidence pse "
+        "ON pse.generation=? AND lower(pse.addr)=lower(p.addr) "
+        "WHERE p.profile_generation=? AND pse.status='passed'",
+        (generation_id, generation_id),
+    ).fetchall()
+    scored = 0
+    for raw in rows:
+        row = dict(zip(profile_columns, raw[:len(profile_columns)]))
+        try:
+            activity = json.loads(raw[len(profile_columns)] or "{}")
+        except (TypeError, ValueError):
+            activity = {}
+        row["pre_strict_activity"] = activity if isinstance(activity, dict) else {}
+        row["pre_strict_activity_json"] = raw[len(profile_columns)]
+        row["score_as_of_ms"] = int(now_ms)
+        score, detail = follow_score.compute_follow_score(row, stage="rough")
+        if (detail or {}).get("sourceOnly"):
+            raise RuntimeError("pre_strict_rerank_missing_copy_evidence")
+        db.execute(
+            "UPDATE profile SET score=?,rough_copy_score=? "
+            "WHERE profile_generation=? AND lower(addr)=?",
+            (score, score, generation_id, str(row.get("addr") or "").lower()),
+        )
+        scored += 1
+    db.execute(
+        "UPDATE pre_strict_evidence SET model_version=? WHERE generation=?",
+        (pre_strict.SELECTION_MODEL_VERSION, generation_id),
+    )
+    queued = _finalize_pre_strict_queue(db, generation_id)
+    db.commit()
+    return {
+        "scored": scored,
+        "queued": len(queued),
+        "modelVersion": pre_strict.SELECTION_MODEL_VERSION,
+    }
+
+
 def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
     """Re-form one published generation with the synchronous quality-prefix tuner."""
     generation_id = generation_id or selection.latest_published_generation(db)
     stamp = stamp or now_iso()
+    meta = db.execute(
+        "SELECT COALESCE(gmm.asof_ms,CAST(strftime('%s',sg.started_at) AS INTEGER)*1000) "
+        "FROM scan_generation sg LEFT JOIN generation_market_manifest gmm "
+        "ON gmm.generation=sg.generation "
+        "WHERE sg.generation=? AND sg.status='published'",
+        (generation_id,),
+    ).fetchone()
+    generation_asof_ms = int(meta[0] or 0) if meta else 0
+    if generation_asof_ms <= 0:
+        raise RuntimeError("selection_repair_generation_asof_missing")
+    rerank = _rerank_cached_pre_strict_queue(
+        db, generation_id, now_ms=generation_asof_ms,
+    )
     selection_result = repair_published_selection(
         db, generation_id, stamp=stamp, replace_existing=True,
         retune_formation=True, force_entry_requalification=True,
@@ -4829,6 +5050,7 @@ def optimize_published_generation(db, generation_id=None, stamp=None) -> dict:
     return {
         "status": "ok" if selection_result.get("status") == "repaired" else selection_result.get("status"),
         "generation": generation_id,
+        "preStrictRerank": rerank,
         "selection": selection_result,
         "tune": selection_result.get("tuner"),
     }

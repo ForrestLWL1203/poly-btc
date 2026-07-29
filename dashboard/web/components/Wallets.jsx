@@ -89,7 +89,7 @@ export function Wallets({ confirm }) {
         {explicit ? (
           <table>
             <thead><tr>
-              <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th>
+              <th>#</th><th>地址</th><th>市场</th><th className="num" title="跟单形成主排序：盈利优先映射分 × 85%–100%可信度系数">评分</th>
               <th className="num" title="70% × 严格Copy保守30日收益率 + 30% × 保守7日收益率；正浮盈权重为0，浮亏全额扣除">盈利优先</th>
               <th className="num" title="目标钱包自己近7天的新开仓次数 / 已平仓回合数">近7日钱包 开 / 平</th>
               <th className="num" title="仅显示当前 generation 的最终严格 Copy 证据；缺少严格回放时不以粗回放替代。">回放数据</th>
@@ -127,7 +127,7 @@ export function Wallets({ confirm }) {
                       <b className={(w.profitPriorityPct || 0) < 0 ? "down" : "up"}>
                         {w.profitPriorityPct != null ? fSign(w.profitPriorityPct, 1) + "%" : "—"}
                       </b>
-                      {w.profitRank != null && <div className="muted" style={{ fontSize: 10 }}>盈利序 #{w.profitRank}</div>}
+                      {w.profitRank != null && <div className="muted" style={{ fontSize: 10 }}>跟单序 #{w.profitRank}</div>}
                     </td>
                     <td className="num mono"><b>{w.openEvents7d ?? "—"}</b> <span className="muted">/</span> {w.closed7d ?? "—"}</td>
                     <td className="num">

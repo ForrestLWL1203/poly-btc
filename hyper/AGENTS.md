@@ -84,10 +84,11 @@ Repository boundaries:
 The production flow is:
 
 `Leaderboard staging → $250k Perp-volume/PnL-direction recall → executable-market fill cache → structural hard
-gates → generation-frozen activity + fills-only conservative Copy/PF/lottery gates → primary/reserve Top32 →
-current-surface strict path and strict-profit Top16 → count-specific adaptive tune → final individual strict →
-strict-profit prefix shared replay → atomic generation/selection/strategy revision publish → Observer reload →
-replay-summary materialization`
+gates → generation-frozen activity + fills-only conservative Copy/PF/lottery gates → scored Top32 →
+current-surface strict path and profit-aligned-score Top16 tune seed → count-specific adaptive tune → tuned-surface
+individual strict across the complete path-valid Top32 → score Top16/prefix shared replay → exact-Core
+retune and bounded membership/parameter closure → atomic generation/selection/strategy revision publish →
+Observer reload → replay-summary materialization`
 
 ### 1. Generation safety
 
@@ -234,10 +235,13 @@ Every structural survivor receives fills-only rough Copy. Rough admission also r
 when its post-Top3 body loses, or a wallet whose Top3 contributes at least 70% of gross profit while the body
 loses or wins below 50%. A low-win, high-PF, non-concentrated wallet with a profitable body may pass.
 
-Rough 30d/7d returns of at least 20%/5% form `primary`; otherwise-qualified wallets form `reserve`. Primary
-fills before reserve under rough 70/30 profit priority, then 30d return, 7d return, Copy PF, composite score and
-stable address. At most 32 receive a queue rank and strict path. Current-surface strict reranks valid paths by
-strict 70/30 profit priority; at most 16 proceed to unified tuning.
+Rough 30d/7d returns of at least 20%/5% form `primary`; otherwise-qualified wallets form `reserve`. These tiers
+remain audit labels. Top32 and final formation share one profit-aligned score: conservative
+`70%×30d + 30%×7d` return is mapped monotonically, then multiplied by an 85%–100% confidence factor from PF,
+samples, execution, repeatability, cross-week activity and liquidation safety. Confidence can only haircut
+profitability; it cannot award bonus points to a low-return wallet. Raw profit priority, 30d, 7d, PF and stable
+address are tie-breaks. At most 32 receive a queue rank and strict path; current-surface strict reranks them by
+the same score and sends at most 16 to unified tuning.
 
 Final per-wallet strict admission requires conservative dynamic 30d/rolling-7d returns of 10%/3%, positive
 closed PnL in both windows, a 30-day open-loss ratio at or below 50%, at least seven 30-day closed Copy
@@ -250,7 +254,7 @@ Challenger evidence and cannot enter Core. Campaigns, weekly Copy folds, per-clo
 multiples/stress, LCB/probability, maximum drawdown and score floors are not Core gates. Payoff remains audit
 telemetry; PF and conditional concentration protection are gates.
 
-Formation ranks qualified wallets by final strict 70/30 profit priority and considers only profit prefixes up
+Formation ranks qualified wallets by the final profit-aligned score and considers only score prefixes up
 to 16. No star,
 prior Core role, tenure, minimum count, forced fill or lower-ranked substitution may alter that order. Each
 prefix is tuned with one continuous floating-equity account. The optimizer first maximizes 30-day net profit,
@@ -333,22 +337,26 @@ The user-facing roles are:
 `CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count, service quota or
 forced replacement count: zero to sixteen wallets may publish. Complete discovery formation is:
 
-1. Freeze cross-week activity and fills-only economics for every structural survivor. Fill a primary-first,
-   reserve-second Top32 using rough 70/30 priority.
+1. Freeze cross-week activity and fills-only economics for every structural survivor. Fill Top32 by the unified
+   rough profit-aligned score; primary/reserve remains visible evidence, not a conflicting sort order.
 2. Build current-surface individual evidence from cached fills and one refined 15-minute path per Top32
-   candidate, rerank by strict 70/30 priority, and pass at most 16 to tuning. Stars remain
+   candidate, rerank by the strict profit-aligned score, and use at most 16 as the initial tuning seed. Stars remain
    operator attention metadata only.
-3. Search only strict-profit prefixes. Each count node uses the same normalized cached fills with continuous
+3. Search only strict score prefixes. Each count node uses the same normalized cached fills with continuous
    floating equity. A combination may shorten the lowest-profit suffix, but may never skip a higher-profit
    wallet to insert a lower-profit wallet.
-4. Recompute each wallet's complete strict qualification on the tuned surface. Failures are removed without
-   pulling replacements from rank 17 or below.
-5. Run exactly one final path-complete 30-day shared-account replay after parameters and membership are fixed.
+4. Recompute every path-valid Top32 wallet's complete strict qualification on the tuned surface, rerank the
+   qualified universe, and form a fresh score Top16. A wallet outside the initial seed may therefore
+   enter when the tuned surface proves it stronger.
+5. Search the shared strict score prefix, then full-tune the exact proposed Core. Replay the complete path-valid
+   Top32 and shared prefix again on that surface. Membership/order and parameters must converge within two exact-
+   Core rounds; a non-convergent generation fails closed and does not publish.
+6. Run the final path-complete 30-day shared-account replay only after parameters and membership have converged.
    Require conservative dynamic 30-day return at least 10%, conservative rolling-7-day return at least 3%,
    a 30-day open-loss ratio at or below 50%, at least 70% open follow, positive closed and conservative PnL in
    both windows and complete price-path coverage. Every member must remain at or below three
    simulated liquidations and below 5% loss on every individual liquidated episode.
-6. Persist both the standardized `$10,000` starting-account result and the result using current Paper equity.
+7. Persist both the standardized `$10,000` starting-account result and the result using current Paper equity.
    Any failed qualification or final replay aborts the proposal atomically; it cannot publish a partial list.
 
 An operator may star a wallet through the Dashboard for attention and manual review. The durable
@@ -360,7 +368,7 @@ context but has no permission effect. Existing copied positions whose source los
 managed exit-only.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
-per-coin limits. Core and Challenger order is final strict 70/30 profit order. Leave-one-out economics may remove
+per-coin limits. Core and Challenger order is the final profit-aligned score order. Leave-one-out economics may remove
 only the current low-profit suffix and remains audit telemetry for every other member. Complete discovery has no
 promotion confirmation, soft tenure, stable-retention bypass or minimum count. Challenger daily refresh instead
 uses the current Core as a membership floor: it may add a strictly certified wallet, but it cannot remove or
@@ -377,10 +385,12 @@ rows into the next generation and leaves membership operator-owned; it does not 
 ### 6. Atomic publication and tuning
 
 The scanner prefetches only the bounded candidate market path outside the final SQLite publication transaction.
-Complete formation runs the bounded Top16 unified parameter search required by the current generation, then
-strictly replays individual and shared-account membership on the winning execution surface and seals eligibility,
-explicit selection, generation, follow history and its immutable strategy revision as one atomic decision. A
-failed optimizer aborts a promotion or complete-scan publication; it may not publish a partial promoted list.
+Complete formation uses the current-surface Top16 only as its bounded initial tune seed. It then strictly
+replays the complete path-valid Top32 on the winning execution surface, reranks the final Top16, chooses a shared
+profit prefix, and full-tunes that exact proposed Core. This membership/parameter closure is bounded to two
+rounds and must stabilize before eligibility, explicit selection, generation, follow history and the immutable
+strategy revision are sealed atomically. A failed or non-convergent optimizer aborts a promotion or complete-
+scan publication; it may not publish a partial promoted list.
 An evidence-only Challenger generation may explicitly carry the prior Core snapshot, but cannot claim a new
 portfolio certification or apply tuned parameters.
 
@@ -392,7 +402,9 @@ rather than reach the OOM killer.
 The compact portfolio tuner searches all three volatility-tier margins and leverage caps,
 and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
 not tune per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
-or stop/risk-owner settings. Any optimizer walk-forward folds compare parameter robustness only; they do not
+or stop/risk-owner settings. A full run retains current, highest-profit and fewest-liquidation leverage values
+per tier (at most 27 cross-tier combinations) and carries up to 12 sizing finalists into strict validation;
+coarse count probes remain sparse. Any optimizer walk-forward folds compare parameter robustness only; they do not
 decide wallet admission. The selected set separately passes the official 30-day Perp screen, source Episode
 contract and dynamic strict-Copy 30d/rolling-7d returns. There is no weekly, Campaign, per-close-density or
 cost-stress admission rule.
@@ -543,8 +555,12 @@ DASH_PASSWORD=mock123 python3 -m dashboard.server --db data/hl_mock.db --static 
 Portfolio prefilter cache. It does not re-download a complete wallet fill cache; only new or incomplete
 wallets fetch the 37-day bootstrap window. Except for the forced
 first-generation `cold_full`, a Dashboard manual rescan is incremental unless its command payload requests
-`full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` re-forms
-and jointly tunes the current published generation without wallet fill refetch; `finalize-profiled` retries an
+`full=true` or the CLI uses `--full`. `regate` re-applies current gates and rebuilds sector policy from cached evidence; `optimize` first
+re-scores/re-ranks the current generation's frozen pre-strict evidence with the deployed model, then re-forms
+and jointly tunes that generation at its sealed as-of time without Leaderboard, Portfolio, or wallet-fill
+refetch. A missing bounded public K-line path may still be completed before strict replay. Optimize,
+selection-repair, and finalize commands share the full/daily scanner process lock but may run with Observer.
+`finalize-profiled` retries an
 already-complete but unpublished generation after a finalization failure. `finalize-profiled --no-retune` is the
 explicit operational fallback for sealing the active parameter surface when expensive tuning exceeds host
 capacity; it does not skip strict individual, path, cost, capacity, or shared-membership gates.

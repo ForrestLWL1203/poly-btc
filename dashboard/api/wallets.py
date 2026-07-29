@@ -177,12 +177,31 @@ def _score_breakdown(row):
             "copy_bt_behavior_replication_rate": _col(
                 row, "copy_bt_behavior_replication_rate"
             ),
+            "copy_bt_profit_factor": _col(row, "copy_bt_profit_factor"),
+            "copy_bt_top3_profit_share": _col(row, "copy_bt_top3_profit_share"),
+            "copy_bt_body_after_top3_n": _col(row, "copy_bt_body_after_top3_n"),
+            "copy_bt_body_after_top3_net_pnl": _col(
+                row, "copy_bt_body_after_top3_net_pnl"
+            ),
+            "copy_bt_liquidations": _col(row, "copy_bt_liquidations"),
+            "copy_bt_max_liquidation_loss_pct": _col(
+                row, "copy_bt_max_liquidation_loss_pct"
+            ),
+            "pre_strict_activity_json": _col(row, "pre_strict_activity_json"),
         })
     return {
         "stage": detail.get("stage"),
+        "mode": detail.get("mode"),
         "components": {
             key: score100(value) for key, value in (detail.get("components") or {}).items()
         },
+        "profitPriorityPct": (
+            round(float(detail["profitPriorityValue"]) * 100, 2)
+            if detail.get("profitPriorityValue") is not None else None
+        ),
+        "profitComponent": score100(detail.get("profitComponent")),
+        "reliability": score100(detail.get("reliability")),
+        "confidenceMultiplier": detail.get("confidenceMultiplier"),
         "economicReturnsPct": {
             key: round(float(value) * 100, 2)
             for key, value in (detail.get("economicReturns") or {}).items()
@@ -423,7 +442,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
             ),
             "profitRank": _col(r, "selection_rank"),
             "rankingMode": (
-                follow_score.PROFIT_PRIORITY_MODE
+                follow_score.FOLLOW_SCORE_MODE
                 if _col(r, "replay_profit_priority") is not None else None
             ),
             "profitabilityBasis": (
@@ -813,7 +832,7 @@ def ep_wallet_detail(db, addr, qs=None):
         ),
         "profitRank": (_col(pr, "selection_rank") if pr else None),
         "rankingMode": (
-            follow_score.PROFIT_PRIORITY_MODE
+            follow_score.FOLLOW_SCORE_MODE
             if pr and _col(pr, "replay_profit_priority") is not None else None
         ),
         "profitabilityBasis": (

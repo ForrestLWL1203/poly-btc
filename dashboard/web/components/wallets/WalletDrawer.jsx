@@ -125,7 +125,7 @@ export function WalletDrawer({ address, onClose }) {
               <div><span>实际跟单</span><b>{d.recordsTotal}</b><em>{d.closedN} 已平 · {d.openN} 在持</em></div>
               <div><span>实盘胜率</span><b>{d.forwardWinRatePct != null ? fNum(d.forwardWinRatePct, 0) + "%" : "—"}</b><em>{d.closedN} 平仓</em></div>
               <div><span>30日保守收益</span><b className={copy30 ? cls(copy30[1]) : ""}>{copy30 ? fSign(copy30[1] || 0, 0) : "—"}</b><em>{copy30 ? (copy30[2] || 0) + " 个已平回合" : "暂无数据"}</em></div>
-              <div><span>盈利优先值</span><b className={(d.profitPriorityPct || 0) < 0 ? "down" : "up"}>{d.profitPriorityPct != null ? fSign(d.profitPriorityPct, 1) + "%" : "—"}</b><em>70%×30日 + 30%×7日{d.profitRank != null ? ` · #${d.profitRank}` : ""}</em></div>
+              <div><span>盈利优先值</span><b className={(d.profitPriorityPct || 0) < 0 ? "down" : "up"}>{d.profitPriorityPct != null ? fSign(d.profitPriorityPct, 1) + "%" : "—"}</b><em>70%×30日 + 30%×7日{d.profitRank != null ? ` · 跟单序 #${d.profitRank}` : ""}</em></div>
             </div>
 
             <div className="wallet-decision-grid">
@@ -193,12 +193,20 @@ export function WalletDrawer({ address, onClose }) {
               )}
 
               {Object.keys(scoreComponents).length > 0 && (
-                <DecisionCard title="综合评分构成" tone="neutral">
+                <DecisionCard title="跟单评分构成" tone="neutral">
                   <div className="wallet-risk-list">
-                    <div className="wallet-risk"><span>Copy保守30日 / Copy保守7日</span><b>{fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
-                    <div className="wallet-risk"><span>源胜率 / Copy胜率</span><b>{fNum(scoreComponents.sourceWinRate, 1)} / {fNum(scoreComponents.copyWinRate, 1)}</b></div>
-                    <div className="wallet-risk"><span>开仓跟随 / 行为复制</span><b>{fNum(scoreComponents.openFollowRate, 1)} / {fNum(scoreComponents.behaviorReplication, 1)}</b></div>
-                    <div className="wallet-risk"><span>活跃度 / 独立开仓</span><b>{fNum(scoreComponents.activityRecency, 1)} / {fNum(scoreComponents.independentOpens, 1)}</b></div>
+                    {scoreComponents.profitPriority != null ? <React.Fragment>
+                      <div className="wallet-risk"><span>盈利优先 / 盈利映射分</span><b>{scoreBreakdown.profitPriorityPct != null ? fSign(scoreBreakdown.profitPriorityPct, 1) + "%" : "—"} / {fNum(scoreComponents.profitPriority, 1)}</b></div>
+                      <div className="wallet-risk"><span>综合可信度 / 评分系数</span><b>{fNum(scoreBreakdown.reliability, 1)} / {scoreBreakdown.confidenceMultiplier != null ? fNum(scoreBreakdown.confidenceMultiplier, 3) : "—"}</b></div>
+                      <div className="wallet-risk"><span>PF可信度 / 样本可信度</span><b>{fNum(scoreComponents.profitFactorConfidence, 1)} / {fNum(scoreComponents.sampleConfidence, 1)}</b></div>
+                      <div className="wallet-risk"><span>执行可信度 / 重复性</span><b>{fNum(scoreComponents.executionConfidence, 1)} / {fNum(scoreComponents.repeatabilityConfidence, 1)}</b></div>
+                      <div className="wallet-risk"><span>跨周活跃 / 清算安全</span><b>{fNum(scoreComponents.activityConfidence, 1)} / {fNum(scoreComponents.liquidationSafety, 1)}</b></div>
+                    </React.Fragment> : <React.Fragment>
+                      <div className="wallet-risk"><span>Copy保守30日 / Copy保守7日</span><b>{fNum(scoreComponents.copy30d, 1)} / {fNum(scoreComponents.copy7d, 1)}</b></div>
+                      <div className="wallet-risk"><span>源胜率 / Copy胜率</span><b>{fNum(scoreComponents.sourceWinRate, 1)} / {fNum(scoreComponents.copyWinRate, 1)}</b></div>
+                      <div className="wallet-risk"><span>开仓跟随 / 行为复制</span><b>{fNum(scoreComponents.openFollowRate, 1)} / {fNum(scoreComponents.behaviorReplication, 1)}</b></div>
+                      <div className="wallet-risk"><span>活跃度 / 独立开仓</span><b>{fNum(scoreComponents.activityRecency, 1)} / {fNum(scoreComponents.independentOpens, 1)}</b></div>
+                    </React.Fragment>}
                   </div>
                 </DecisionCard>
               )}

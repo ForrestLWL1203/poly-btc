@@ -1,7 +1,7 @@
-"""Profit-priority Core formation.
+"""Profit-aligned-score Core formation.
 
-Individual qualification builds one bounded 70/30 dynamic-return ordered pool without a minimum-wallet quota.
-That pool receives one shared parameter tune; portfolio economics may shorten only its low-profit suffix.
+Individual qualification builds one bounded profit-with-confidence ordered pool without a minimum-wallet quota.
+That pool receives one shared parameter tune; portfolio economics may shorten only its lowest-score suffix.
 """
 from __future__ import annotations
 

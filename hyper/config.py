@@ -387,8 +387,8 @@ AUTO_TUNE_MARGIN_CEILING_FRACTIONS = (0.50, 0.75, 1.00)
 AUTO_TUNE_COORD_MID_LEV_CAPS = (12, 10, 9, 8, 6)
 AUTO_TUNE_COORD_STABLE_LEV_CAPS = (35, 30, 25, 20)
 AUTO_TUNE_COORD_HIGH_LEV_CAPS = (6, 4, 3)
-AUTO_TUNE_LEVERAGE_SHORTLIST = 2  # 每档保留当前/最佳代表值；组合网格最多 2^3=8，而不是 3^3=27
-AUTO_TUNE_SIZING_FINALISTS = 5
+AUTO_TUNE_LEVERAGE_SHORTLIST = 3  # 每档保留当前/最高盈利/最少清算，完整调参组合最多 3^3=27
+AUTO_TUNE_SIZING_FINALISTS = 12  # 避免高杠杆+配对低保证金组合在严格路径认证前被过早剪枝
 AUTO_TUNE_MARGIN_COORD_ROUNDS = 2  # bounded closure can combine two profitable tier moves without 3-D grid
 # Prefix-count discovery uses a sparse grid; the winning count receives one complete tune. Bound both modes
 # so a large fills/path set cannot swap-thrash the production host indefinitely.
@@ -403,6 +403,7 @@ AUTO_TUNE_FINALIST_LIMIT = 6  # 粗网格只让少量Pareto候选进入昂贵的
 AUTO_TUNE_ADD_FINALISTS = 3
 
 CORE_PREFIX_EXHAUSTIVE_MAX_N = 8  # small quality pools tune every 1..N prefix; larger pools use binary search
+CORE_FORMATION_CLOSURE_MAX_ROUNDS = 2  # final membership and its parameter surface must converge boundedly
 # Backward elimination stops naturally when every remaining wallet has positive conditional economics.
 # The cap only bounds a pathological run; it is not a stability quota or a promise to retain weak wallets.
 CORE_LOO_MAX_REMOVALS = MAX_TARGETS - 1
