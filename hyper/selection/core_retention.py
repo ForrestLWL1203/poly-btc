@@ -121,7 +121,10 @@ def qualification_failure(qualification: Optional[Mapping]) -> tuple[str, Option
     for key, reason in HARD_CHECK_REASONS:
         if key in checks and not bool(checks[key]):
             return "hard", reason
-    reason = qualification.get("firstFailure") or qualification.get("status")
+    reason = qualification.get("firstFailure")
+    if qualification.get("eligible") is True and not reason:
+        return HEALTHY, None
+    reason = reason or qualification.get("status")
     return failure_class(reason), reason
 
 

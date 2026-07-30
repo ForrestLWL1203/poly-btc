@@ -129,6 +129,20 @@ class CoreRetentionTest(unittest.TestCase):
         self.assertEqual("hard", classification)
         self.assertEqual("copy_30d_closed_pnl_not_positive", reason)
 
+    def test_qualified_status_is_healthy_for_core_retention(self):
+        classification, reason = core_retention.qualification_failure({
+            "eligible": True,
+            "status": "strict_copy_qualified",
+            "firstFailure": None,
+            "checks": {
+                "copyClosedProfit30d": True,
+                "copyConservativeProfit30d": True,
+                "singleLiquidationLossWithinLimit": True,
+            },
+        })
+        self.assertEqual(core_retention.HEALTHY, classification)
+        self.assertIsNone(reason)
+
     def test_unsafe_shared_baseline_has_no_replacement_protection(self):
         self.assertFalse(core_retention.baseline_protectable({
             "standardizedAccount": {
