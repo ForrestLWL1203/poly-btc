@@ -27,6 +27,7 @@ import websockets
 from hyper import config
 from hyper.copy.copy_engine import (OpenSizingParams, isolated_liq_px, plan_open_sizing,
                           profit_tail_close_decision, reduce_leaves_dust,
+                          rebase_isolated_position,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
                           margin_cap_room, wallet_margin,
                           wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
@@ -778,6 +779,13 @@ class Observer:
         loaded = 0
         closed_dust = 0
         reconstructed_peaks = []
+        rebased_positions = []
+        maintenance_by_coin = {
+            coin: max_leverage
+            for coin, max_leverage in self.db.execute(
+                "SELECT coin,max_leverage FROM coin_vol"
+            ).fetchall()
+        }
         for r in rows:
             (pid, addr, coin, side, mo, mpx, peak, lev, mgn, notl, epx, sz, rem, peak_sz, liq, rpnl, adds, mae, na,
              m_mgn, m_lev, master_open_notional, master_current, smart_armed, smart_stage, smart_peak, smart_base,
@@ -789,6 +797,26 @@ class Observer:
                 self._close_reloaded_dust(book, pid, addr, coin, side, rem, dust_px)
                 closed_dust += 1
                 continue
+            maintenance_leverage = maintenance_by_coin.get(coin)
+            if epx is not None and f(epx) > 0.0 and f(lev) > 0.0 and rem > 0.0:
+                basis = rebase_isolated_position(
+                    epx, side, rem, lev, maintenance_leverage,
+                )
+                if any(
+                    abs(f(current) - f(basis[key])) > 1e-9
+                    for current, key in (
+                        (sz, "size"), (mgn, "margin"),
+                        (notl, "notional"), (liq, "liq_px"),
+                    )
+                ):
+                    rebased_positions.append((
+                        basis["size"], basis["margin"], basis["notional"],
+                        basis["liq_px"], pid,
+                    ))
+                sz = basis["size"]
+                mgn = basis["margin"]
+                notl = basis["notional"]
+                liq = basis["liq_px"]
             ev = asyncio.Event()
             if epx is not None:
                 ev.set()
@@ -846,6 +874,7 @@ class Observer:
                 ),
                 "source_open_oids": source_open_oids,
                 "last_target_add_px": exact_last_target_add_px,
+                "maintenance_leverage": maintenance_leverage,
                 "mae": mae or 0.0, "num_actions": na or 0, "gap": False, "add_orders": {},
                 "smart_tp_armed": bool(smart_armed),
                 "smart_tp_stage": int(smart_stage or 0),
@@ -863,8 +892,17 @@ class Observer:
                 reconstructed_peaks,
             )
             self.db.commit()
+        if rebased_positions:
+            self.db.executemany(
+                f"UPDATE {book.pos_table} SET size=?,margin=?,notional=?,liq_px=? "
+                "WHERE pos_id=? AND status='open'",
+                rebased_positions,
+            )
+            self.db.commit()
         if loaded or closed_dust:
             extra = f", closed {closed_dust} dust" if closed_dust else ""
+            if rebased_positions:
+                extra += f", rebased {len(rebased_positions)} liquidation bases"
             _log(f"reloaded {loaded} open {book.name} copy positions from db{extra}")
 
     def _close_reloaded_dust(self, book, pos_id, addr, coin, side, rem_size, px):
@@ -2257,6 +2295,7 @@ class Observer:
             liq_px = plan.liq_px
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
                       size=size, rem_size=size, peak_size=size, liq_px=liq_px,
+                      maintenance_leverage=maintenance_leverage,
                       master_first_notl=target_notl,      # confirmed source opening → smart-add ratio anchor
                       last_target_add_px=master_px)       # 波动闸只比较目标成交价；我方BBO只负责执行/PnL
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
@@ -2502,6 +2541,22 @@ class Observer:
             l2_average_px = f(liquidity.get("average_px"))
             if forced_px is None and l2_average_px > 0.0:
                 px = l2_average_px
+            margin_row = self.db.execute(
+                "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
+            ).fetchone()
+            maintenance_leverage = (
+                margin_row[0] if margin_row and margin_row[0]
+                else ep.get("maintenance_leverage")
+            )
+            basis = rebase_isolated_position(
+                ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
+                maintenance_leverage,
+            )
+            ep.update(
+                size=basis["size"], margin=basis["margin"],
+                notional=basis["notional"], liq_px=basis["liq_px"],
+                maintenance_leverage=maintenance_leverage,
+            )
             add_size = (add_margin * lev / px) if px else 0.0
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
@@ -2511,12 +2566,9 @@ class Observer:
             ep["peak_size"] = max(ep.get("peak_size", 0.0), new_size)
             ep["margin"] += add_margin
             ep["notional"] += add_margin * lev
-            margin_row = self.db.execute(
-                "SELECT max_leverage FROM coin_vol WHERE coin=?", (coin,),
-            ).fetchone()
             ep["liq_px"] = isolated_liq_px(
                 ep["entry_px"], ep["side"], ep["size"], ep["margin"],
-                margin_row[0] if margin_row and margin_row[0] else None,
+                maintenance_leverage,
             )
             first_copy_for_order = not (order and order["counted"])
             if first_copy_for_order:
@@ -2651,6 +2703,15 @@ class Observer:
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl
             book.balance += pnl                       # realize (net of fee) into the paper account
+            if not closing and ep["rem_size"] > config.FLAT:
+                basis = rebase_isolated_position(
+                    ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
+                    ep.get("maintenance_leverage"),
+                )
+                ep.update(
+                    size=basis["size"], margin=basis["margin"],
+                    notional=basis["notional"], liq_px=basis["liq_px"],
+                )
             if smart_cut:
                 ep["smart_tp_stage"] = int(smart_tp_stage) + 1
                 if int(smart_tp_stage) == 0 and not ep.get("smart_tp_master_anchor"):
@@ -2678,10 +2739,12 @@ class Observer:
             was_liq = 1 if (closing and liq) else 0
             ep["was_liq"] = was_liq
             self.db.execute(
-                f"UPDATE {book.pos_table} SET rem_size=?,realized_pnl=?,mae_pct=?,was_liq=?,status=?,"
+                f"UPDATE {book.pos_table} SET size=?,rem_size=?,margin=?,notional=?,liq_px=?,"
+                "realized_pnl=?,mae_pct=?,was_liq=?,status=?,"
                 "closed_at=?,smart_tp_armed=?,smart_tp_stage=?,smart_tp_peak_pnl=?,smart_tp_base_size=?,"
                 "smart_tp_master_anchor=? WHERE pos_id=?",
-                (ep["rem_size"], ep["realized_pnl"], ep["mae"], was_liq, status,
+                (ep["size"], ep["rem_size"], ep["margin"], ep["notional"], ep.get("liq_px", 0.0),
+                 ep["realized_pnl"], ep["mae"], was_liq, status,
                  now_iso() if closing else None, 1 if ep.get("smart_tp_armed") else 0,
                  int(ep.get("smart_tp_stage") or 0), float(ep.get("smart_tp_peak_pnl") or 0.0),
                  float(ep.get("smart_tp_base_size") or 0.0) or None,

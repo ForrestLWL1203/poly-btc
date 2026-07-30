@@ -16,6 +16,7 @@ from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from .copy_data import normalize_copyable_fills
 from .copy_engine import (OpenSizingParams, extract_master_leverage, isolated_liq_px,
                           plan_open_sizing, profit_tail_close_decision, reduce_leaves_dust,
+                          rebase_isolated_position,
                           smart_add_order_margin, smart_take_profit_decision, tier_for_sigma,
                           margin_cap_room, wallet_margin,
                           wallet_sector_side_effective_cap_pct, wallet_sector_side_margin,
@@ -1305,6 +1306,14 @@ class Backtest:
                     reason = "coin_cap_blocked" if coin_room <= risk_available else "cash_blocked"
                 return self._observe_add(ep, oid, reason, t=t)
 
+        basis = rebase_isolated_position(
+            ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
+            ep.get("maintenance_leverage"),
+        )
+        ep.update(
+            size=basis["size"], margin=basis["margin"],
+            notional=basis["notional"], liq_px=basis["liq_px"],
+        )
         add_size = (add_margin * ep["leverage"] / px) if px else 0.0
         new_size = ep["rem_size"] + add_size
         ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size if new_size else px)
@@ -1425,6 +1434,15 @@ class Backtest:
         self.gross_pnl += gross
         self.fee_drag += fee
         self.balance += pnl
+        if not closing and ep["rem_size"] > config.FLAT:
+            basis = rebase_isolated_position(
+                ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
+                ep.get("maintenance_leverage"),
+            )
+            ep.update(
+                size=basis["size"], margin=basis["margin"],
+                notional=basis["notional"], liq_px=basis["liq_px"],
+            )
         if smart_tp_stage is not None:
             ep["smart_tp_stage"] = int(smart_tp_stage) + 1
             if int(smart_tp_stage) == 0 and not ep.get("smart_tp_master_anchor"):

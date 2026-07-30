@@ -469,6 +469,94 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_reload_repairs_liquidation_basis_after_reduce_then_add(self):
+        db = self._db()
+        pos_id = db.execute(
+            "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+        ).fetchone()["pos_id"]
+        db.execute(
+            "INSERT OR REPLACE INTO coin_vol (coin,max_leverage) VALUES ('BTC',40)"
+        )
+        db.execute(
+            "UPDATE copy_position SET side='short',entry_px=?,leverage=30,margin=?,notional=?,"
+            "size=?,rem_size=?,liq_px=?,add_count=5 WHERE pos_id=?",
+            (
+                64_019.93288094258,
+                2_180.857254838225,
+                65_425.717645146746,
+                1.0237671431979045,
+                0.5756738995010446,
+                65_333.49205532649,
+                pos_id,
+            ),
+        )
+        db.commit()
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {})
+            obs._reload_open()
+
+            row = db.execute(
+                "SELECT size,rem_size,margin,notional,liq_px FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertAlmostEqual(row["size"], row["rem_size"])
+            self.assertAlmostEqual(row["notional"], 36_854.60440736736)
+            self.assertAlmostEqual(row["margin"], 1_228.4868135789122)
+            self.assertAlmostEqual(row["liq_px"], 65_337.2154505093)
+            ep = obs.taker.open_ep[("0xaaa", "BTC")]
+            self.assertAlmostEqual(ep["liq_px"], row["liq_px"])
+            self.assertEqual(ep["maintenance_leverage"], 40)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+    def test_partial_reduce_persists_current_liquidation_basis(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            ep = self._live_ep(pos_id, "long", 100.0, 2.0)
+            ep.update(
+                leverage=5.0,
+                margin=40.0,
+                notional=200.0,
+                liq_px=80.0,
+                maintenance_leverage=None,
+            )
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            await obs._apply_reduce(
+                "0xaaa",
+                "BTC",
+                ep,
+                now_ms(),
+                110.0,
+                0.0,
+                2.0,
+                closing=False,
+                liq=False,
+                forced_px=110.0,
+                forced_frac=0.5,
+                book=obs.taker,
+            )
+
+            row = db.execute(
+                "SELECT size,rem_size,margin,notional,liq_px FROM copy_position WHERE pos_id=?",
+                (pos_id,),
+            ).fetchone()
+            self.assertAlmostEqual(row["size"], 1.0)
+            self.assertAlmostEqual(row["rem_size"], 1.0)
+            self.assertAlmostEqual(row["margin"], 20.0)
+            self.assertAlmostEqual(row["notional"], 100.0)
+            self.assertAlmostEqual(row["liq_px"], 80.0)
+
+        asyncio.run(run())
+
     def test_reload_reconstructs_exact_smart_add_anchors_from_actions(self):
         db = self._db()
         pos_id = db.execute(

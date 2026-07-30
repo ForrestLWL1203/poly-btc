@@ -31,7 +31,7 @@ export function OpenPositionsTable({
             <th className="num sortable" onClick={cyclePnlSort} title="点击按浮动盈亏排序(浮亏在前 / 浮盈在前 / 默认新开在前)">
               浮动盈亏 <span className={"sort-ind" + (pnlSort ? " active" : "")}>{pnlSort === "asc" ? "▲" : pnlSort === "desc" ? "▼" : "⇅"}</span>
             </th>
-            <th>钱包</th><th className="num">lag</th><th className="num">爆仓价</th><th></th>
+            <th>钱包</th><th className="num">lag</th><th className="num">清算触发价</th><th></th>
           </tr></thead>
           <tbody>
             {open === null && <tr><td colSpan="10" className="loading">加载中…</td></tr>}
@@ -78,7 +78,7 @@ export function OpenPositionsTable({
                     </React.Fragment>
                   : <span className="tint tint-gray" title="当前不在跟单集(仅平仓)">脱榜</span>}</td>
                 <td className="num" title="跟单延迟:目标开仓 → 我们检测并跟开的秒数(旧仓未记录显示 —)">{p.lagSec != null ? fNum(p.lagSec, 1) + "s" : "—"}</td>
-                <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}
+                <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="按维持保证金触发清算；不是保证金归零价">{fPrice(p.liqPx)}
                   {p.liqDistancePct != null && <div className="muted">差 {fNum(Math.abs(p.liqDistancePct), 1)}%</div>}</td>
                 <td>{(() => { const busy = closing[Number(p.id.replace("pos_", ""))];
                   return <button className="btn btn-stop btn-sm" disabled={busy} onClick={e => { e.stopPropagation(); doClose(p); }}>

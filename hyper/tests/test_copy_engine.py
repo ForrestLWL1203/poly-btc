@@ -2,6 +2,7 @@ import unittest
 from dataclasses import replace
 
 from hyper.copy.copy_engine import (OpenSizingParams, plan_open_sizing, profit_tail_close_decision,
+                            rebase_isolated_position,
                             smart_add_order_margin, smart_take_profit_decision,
                             wallet_sector_side_cap_pct, wallet_sector_side_effective_cap_pct,
                             wallet_sector_side_margin,
@@ -10,6 +11,20 @@ from hyper.copy.sizing import sizing_equity_for_drawdown
 
 
 class CopyEngineTests(unittest.TestCase):
+    def test_rebase_isolated_position_uses_current_weighted_entry_and_remaining_size(self):
+        basis = rebase_isolated_position(
+            64_019.93288094258,
+            "short",
+            0.5756738995010446,
+            30.0,
+            40.0,
+        )
+
+        self.assertAlmostEqual(basis["size"], 0.5756738995010446)
+        self.assertAlmostEqual(basis["notional"], 36_854.60440736736)
+        self.assertAlmostEqual(basis["margin"], 1_228.4868135789122)
+        self.assertAlmostEqual(basis["liq_px"], 65_337.2154505093)
+
     def test_dynamic_wallet_basket_caps_follow_board_and_volatility(self):
         self.assertEqual(wallet_sector_side_cap_pct("BTC", "stable"), 1.0)
         self.assertEqual(wallet_sector_side_cap_pct("ETH", "mid"), 1.0)

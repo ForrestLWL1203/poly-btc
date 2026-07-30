@@ -272,6 +272,37 @@ def isolated_liq_px(entry_px: float, side: str, size: float, margin: float,
     return max(0.0, (entry_px + margin_per_unit) / (1.0 + mmr))
 
 
+def rebase_isolated_position(
+    entry_px: float,
+    side: str,
+    rem_size: float,
+    leverage: float,
+    maintenance_leverage: float | None,
+) -> dict:
+    """Return the current isolated basis after one or more partial reductions.
+
+    ``size``/``margin`` historically accumulated every followed add while
+    ``rem_size`` alone shrank on reductions.  A later add then mixed the current
+    weighted entry with that historical basis, making liquidation drift toward
+    the pre-reduction position.  Peak exposure already has its own field, so an
+    open position's sizing basis should always describe only the remaining
+    exposure.
+    """
+    entry = max(0.0, float(entry_px or 0.0))
+    size = max(0.0, abs(float(rem_size or 0.0)))
+    lev = max(0.0, float(leverage or 0.0))
+    notional = entry * size
+    margin = notional / lev if lev > 0.0 else 0.0
+    return {
+        "size": size,
+        "margin": margin,
+        "notional": notional,
+        "liq_px": isolated_liq_px(
+            entry, side, size, margin, maintenance_leverage,
+        ),
+    }
+
+
 def reduce_leaves_dust(rem_size: float, reduce_frac: float, px: float,
                        dust_notional: float = config.DUST_CLOSE_NOTIONAL) -> bool:
     if not dust_notional or dust_notional <= 0 or reduce_frac >= 1.0:
