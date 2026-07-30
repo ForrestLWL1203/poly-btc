@@ -55,18 +55,15 @@ SOURCE_QUALITY_MAX_N = 40   # legacy database compatibility; no longer an admiss
 # A complete generation rough-replays every structurally valid recalled wallet, freezes at most 32
 # pre-strict candidates, then sends at most 16 path-valid strict candidates into unified tuning.
 PRE_STRICT_QUEUE_MAX_N = 32
-STRICT_RETUNE_MAX_N = 16
 CORE_INITIAL_MAX_N = 16
 CORE_TARGET_MAX_N = 16
 CORE_REBALANCE_INTERVAL_DAYS = 7 # expensive parameter-grid cadence; each complete strict replay may update membership.
 FORMER_CORE_EVIDENCE_RECHECK_DAYS = 7
 CORE_PREFIX_UTILITY_RETENTION = 0.97
 CORE_PREFIX_NET_RETENTION = 0.95
-CORE_PREFIX_STRESS_RETENTION = 0.90
 CORE_PREFIX_TIE_TOLERANCE = 0.02
 CORE_PREFIX_ABS_UTILITY_SLACK = 50.0
 CORE_PREFIX_ABS_NET_SLACK = 100.0
-CORE_PREFIX_ABS_STRESS_SLACK = 100.0
 FOLLOW_SELECTION_MODE = "auto"       # auto | manual
 OFFICIAL_PERP_BOUNDARY_MAX_GAP_HOURS = 36
 OFFICIAL_PERP_MIN_RETURN_30D = 0.20
@@ -83,7 +80,6 @@ SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.70
 SOURCE_BODY_MIN_WIN_RATE = 0.70
 ROUGH_COPY_MIN_CLOSED_30D = 7
 ROUGH_COPY_MIN_WIN_RATE = 0.60       # legacy compatibility; not an admission gate.
-PRE_STRICT_MIN_PROFIT_FACTOR = 1.25
 PRE_STRICT_PRIMARY_RETURN_30D = 0.20
 PRE_STRICT_PRIMARY_RETURN_7D = 0.05
 PRE_STRICT_ACTIVITY_LOOKBACK_DAYS = 28
@@ -100,19 +96,10 @@ CORE_COPY_MIN_WIN_RATE = 0.60        # legacy compatibility; not an admission ga
 # The shared final account, after all wallets are jointly tuned, still needs material rolling returns.
 CORE_PORTFOLIO_MIN_RETURN_30D = 0.10
 CORE_PORTFOLIO_MIN_RETURN_7D = 0.03
-SELECTION_MIN_RELATIVE_GAIN = 0.05
-CORE_REPLACEMENT_MIN_NET_RETURN = 0.02
 SELECTION_MIN_ACTIONABLE_RATE = 0.70
 SELECTION_MIN_CAPACITY_FIT = 0.75  # hard floor after joint tuning; lower means too many fundable opens were skipped
-CORE_SEARCH_TIME_BUDGET_SEC = 0    # 0 = no wall-clock cutoff; the finite search graph remains bounded.
 # Production score-prefix search: fills-only discovery -> strict finalists -> one final shared path replay.
-CORE_SEARCH_VALIDATION_FINALISTS = 12
-CORE_SEARCH_STRICT_MOVE_SHORTLIST = 8
-CORE_SEARCH_MAX_STRICT_MOVES = MAX_TARGETS
-CORE_SEARCH_PAIR_ADD_LIMIT = 4
 CORE_SEARCH_ROBUST_FINALISTS = 12
-CORE_SEARCH_MAX_OPEN_RATE_DROP = 0.05  # Reject an addition that materially reduces executable opens.
-CORE_SEARCH_MAX_CAPACITY_FIT_DROP = 0.05  # Reject material shared-balance contention before the floor.
 OBSERVER_UNIT = "hl-observe"  # systemd unit the scan-trigger supervisor starts/stops on dashboard command
 WATCHLIST_RELOAD_S = 300   # re-read the watchlist table this often (track rolling discovery)
 POLL_OVERLAP_MS = 12000    # re-fetch this far behind each wallet's in-memory cursor (tid-dedup absorbs
@@ -160,8 +147,7 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #              master's own leverage. σ still selects the tier.
 #   notional = margin × leverage. The source's cumulative flat→open position must first cross the tier floor,
 #              but once confirmed it does not cap our independently sized notional.
-STABLE_SIGMA_MAX = 0.05     # compatibility/audit only: BTC is always stable-tier; non-BTC never enters stable.
-HIGH_SIGMA_MIN   = 0.09     # σ ≥ this → HIGH-VOL tier; between the two → MID tier
+HIGH_SIGMA_MIN   = 0.09     # non-BTC σ ≥ this → HIGH-VOL tier; otherwise → MID tier
 STABLE_MARGIN_MIN_PCT = 0.020  # legacy snapshot compatibility; firepower-line shrinking is retired
 MID_MARGIN_MIN_PCT    = 0.020
 HIGH_MARGIN_MIN_PCT   = 0.012
@@ -263,14 +249,6 @@ WALLET_CRYPTO_HIGH_SIDE_CAP_PCT = 1.00
 WALLET_STOCK_SIDE_CAP_PCT = 1.00
 WALLET_MAX_OPEN_POSITIONS = 15     # matches the structural concurrency ceiling; no extra funded-account veto.
 WALLET_STOCK_SIDE_MAX_POSITIONS = 15
-# Retired source-wallet breaker constants remain import-compatible for old offline records only. They are not
-# included in strategy revisions and neither Observer nor canonical replay reads them.
-WALLET_FORWARD_LOSS_FREEZE_PCT = 0.03
-WALLET_HWM_FREEZE_DD_PCT = 0.03
-WALLET_HWM_REDUCE_DD_PCT = 0.06
-WALLET_HWM_EXIT_DD_PCT = 0.10
-WALLET_HWM_RELEASE_DD_PCT = 0.02
-WALLET_HWM_EXIT_COOLDOWN_DAYS = 7
 MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is below this fraction of margin-calculation equity:
 #                             once free balance is too low to fund a MEANINGFUL
 #                             position, just skip the signal (don't open dust). Existing positions stay
@@ -363,7 +341,6 @@ COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT = 0.08
 CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT = COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT
 CORE_REPLACEMENT_MIN_SHARED_GAIN = 0.10
 CORE_RETENTION_CONFIRMATIONS = 2
-CORE_RETENTION_RECOVERY_DAYS = FORMER_CORE_EVIDENCE_RECHECK_DAYS
 
 # Intratrade path evidence is retained for diagnostics only. Historical maximum drawdown is not a wallet,
 # sector, score, tuning or Core admission input: live account drawdown protection belongs in Observer.

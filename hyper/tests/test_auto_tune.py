@@ -44,7 +44,7 @@ class AutoTuneTests(unittest.TestCase):
             baseline_capacity=.70, challenger_capacity=.80,
         )
 
-        model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
+        model = auto_tune._formation_model_validation(validation)
 
         self.assertTrue(model["eligible"])
         self.assertTrue(model["baselineFeasible"])
@@ -55,7 +55,7 @@ class AutoTuneTests(unittest.TestCase):
             baseline_capacity=.90, challenger_capacity=.92,
         )
 
-        model = auto_tune._formation_model_validation(validation, auto_tune.load_copy_policy())
+        model = auto_tune._formation_model_validation(validation)
 
         self.assertTrue(model["eligible"])
         self.assertTrue(model["baselineFeasible"])
@@ -70,7 +70,7 @@ class AutoTuneTests(unittest.TestCase):
         validation["holdout"] = validation["folds"][-1]
 
         model = auto_tune._formation_model_validation(
-            validation, auto_tune.load_copy_policy(),
+            validation,
         )
 
         self.assertTrue(model["eligible"])
@@ -82,7 +82,7 @@ class AutoTuneTests(unittest.TestCase):
             baseline_net=100, challenger_net=-1,
         )
         model = auto_tune._formation_model_validation(
-            validation, auto_tune.load_copy_policy(),
+            validation,
         )
         self.assertFalse(model["eligible"])
         self.assertIn("formation_profit_not_positive", model["reasons"])

@@ -52,15 +52,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_open_sizing_shrinks_then_blocks_at_wallet_sector_side_cap(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.09,
             tier_margin={"stable": 0.03, "mid": 0.03, "high": 0.02},
-            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.01},
             tier_lev_cap={"stable": 20.0, "mid": 10.0, "high": 4.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
         )
@@ -94,15 +91,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_all_tiers_reserve_four_adds_and_last_add_fills_remaining_cap(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.09,
             tier_margin={"stable": 0.085, "mid": 0.05274, "high": 0.03625},
-            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.012},
             tier_lev_cap={"stable": 20.0, "mid": 9.0, "high": 6.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.40, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
         )
@@ -147,15 +141,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_open_sizing_uses_smoothed_base_but_real_equity_caps(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.10,
             tier_margin={"stable": 0.01, "mid": 0.01, "high": 0.01},
-            tier_margin_min={"stable": 0.01, "mid": 0.01, "high": 0.01},
             tier_lev_cap={"stable": 25.0, "mid": 10.0, "high": 4.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
             capital_anchor=10_000.0,
@@ -188,15 +179,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_margin_equity_pct_scales_open_only_and_keeps_full_account_caps(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.10,
             tier_margin={"stable": 0.01, "mid": 0.01, "high": 0.01},
-            tier_margin_min={"stable": 0.01, "mid": 0.01, "high": 0.01},
             tier_lev_cap={"stable": 10.0, "mid": 10.0, "high": 4.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
             margin_equity_pct=0.50,
@@ -231,15 +219,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_open_sizing_caps_leverage_but_not_notional_to_master(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.10,
             tier_margin={"stable": 0.015, "mid": 0.02, "high": 0.01},
-            tier_margin_min={"stable": 0.015, "mid": 0.02, "high": 0.01},
             tier_lev_cap={"stable": 25.0, "mid": 10.0, "high": 4.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
         )
@@ -267,15 +252,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_open_sizing_never_exceeds_market_max_leverage(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.10,
             tier_margin={"stable": 0.04, "mid": 0.03, "high": 0.02},
-            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.012},
             tier_lev_cap={"stable": 35.0, "mid": 12.0, "high": 4.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
         )
@@ -293,15 +275,12 @@ class CopyEngineTests(unittest.TestCase):
 
     def test_stock_uses_volatility_tier_leverage_without_a_separate_cap(self):
         params = OpenSizingParams(
-            stable_sigma_max=0.05,
             high_sigma_min=0.09,
             tier_margin={"stable": 0.04, "mid": 0.03, "high": 0.02},
-            tier_margin_min={"stable": 0.02, "mid": 0.02, "high": 0.012},
             tier_lev_cap={"stable": 25.0, "mid": 12.0, "high": 4.0},
             tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            deploy_full_pct=0.40,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
         )
@@ -323,14 +302,14 @@ class CopyEngineTests(unittest.TestCase):
     def test_only_btc_is_eligible_for_stable_tier(self):
         from hyper.copy.copy_engine import tier_for_sigma
 
-        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "BTC"), "stable")
-        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "ETH"), "mid")
-        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "XRP"), "mid")
-        self.assertEqual(tier_for_sigma(0.04, 0.05, 0.10, "xyz:GOLD"), "mid")
-        self.assertEqual(tier_for_sigma(0.07, 0.05, 0.10, "BTC"), "stable")
-        self.assertEqual(tier_for_sigma(0.20, 0.05, 0.10, "BTC"), "stable")
-        self.assertEqual(tier_for_sigma(0.07, 0.05, 0.09, "ETH"), "mid")
-        self.assertEqual(tier_for_sigma(0.10, 0.05, 0.09, "ETH"), "high")
+        self.assertEqual(tier_for_sigma(0.04, 0.10, "BTC"), "stable")
+        self.assertEqual(tier_for_sigma(0.04, 0.10, "ETH"), "mid")
+        self.assertEqual(tier_for_sigma(0.04, 0.10, "XRP"), "mid")
+        self.assertEqual(tier_for_sigma(0.04, 0.10, "xyz:GOLD"), "mid")
+        self.assertEqual(tier_for_sigma(0.07, 0.10, "BTC"), "stable")
+        self.assertEqual(tier_for_sigma(0.20, 0.10, "BTC"), "stable")
+        self.assertEqual(tier_for_sigma(0.07, 0.09, "ETH"), "mid")
+        self.assertEqual(tier_for_sigma(0.10, 0.09, "ETH"), "high")
 
     def test_profit_tail_uses_percentages_and_asset_liquidation_risk(self):
         decision = profit_tail_close_decision(

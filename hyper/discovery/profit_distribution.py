@@ -704,7 +704,7 @@ def _rough_wallet(
         })
 
     structure = scanner._current_sector_structure_policy(
-        scoped, now_ms, namespace, source=MODEL_VERSION,
+        scoped, namespace, source=MODEL_VERSION,
     )
     artifact["structurePolicy"] = structure
     base["structure"] = {
@@ -750,7 +750,7 @@ def _rough_wallet(
     artifact["allowedReplayFills"] = replay_fills
     episodes, open_episodes = build_episodes(replay_fills)
     source = metrics.source_episode_quality(episodes, now_ms)
-    computed = metrics.compute_metrics(replay_fills, episodes, now_ms, 30) or {}
+    computed = metrics.compute_metrics(replay_fills, episodes, 30) or {}
     artifact["sourceEpisodeQuality"] = source
     artifact["computedMetrics"] = computed
     dexes = {

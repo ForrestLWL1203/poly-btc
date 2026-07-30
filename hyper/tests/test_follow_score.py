@@ -91,7 +91,7 @@ def evidence(**overrides):
 
 
 def judge(stage="strict", **overrides):
-    return evaluate_follow_eligibility(evidence(**overrides), stage=stage, as_of_ms=NOW)
+    return evaluate_follow_eligibility(evidence(**overrides), stage=stage)
 
 
 class FollowScoreTests(unittest.TestCase):
@@ -311,7 +311,7 @@ class FollowScoreTests(unittest.TestCase):
         ), stage="rough")
         self.assertGreater(high_score, low_score)
         self.assertTrue(evaluate_follow_eligibility(
-            evidence(), stage="strict", follow_score_value=.01,
+            evidence(), stage="strict",
         )["coreEligible"])
 
     def test_official_return_is_not_source_score_input(self):

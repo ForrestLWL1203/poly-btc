@@ -105,21 +105,21 @@ class ScannerWatchlistTests(unittest.TestCase):
     def test_regate_reactivates_complete_cached_snapshot_but_not_incomplete_profile(self):
         self.assertEqual(
             scanner._regate_profile_status(
-                "rejected", "normalized_evidence_missing", True,
+                "rejected", True,
                 complete_cached_snapshot=True,
             ),
             "active",
         )
         self.assertEqual(
             scanner._regate_profile_status(
-                "rejected", "grid_dca", True,
+                "rejected", True,
                 complete_cached_snapshot=False,
             ),
             "rejected",
         )
         self.assertEqual(
             scanner._regate_profile_status(
-                "rejected", "no_portfolio", True,
+                "rejected", True,
                 complete_cached_snapshot=False,
             ),
             "rejected",
@@ -364,7 +364,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                 patch.object(scanner.metrics, "gates_structural", side_effect=[
                     (True, "ok"), (False, "grid_dca"),
                 ]):
-            policy = scanner._current_sector_structure_policy(fills, 1_000, p)
+            policy = scanner._current_sector_structure_policy(fills, p)
 
         self.assertEqual(policy["source"], "current_generation")
         self.assertEqual(policy["allowed"], ["crypto"])
@@ -378,9 +378,9 @@ class ScannerWatchlistTests(unittest.TestCase):
 
         with patch.object(scanner, "build_episodes", return_value=([], [])), \
                 patch.object(scanner.metrics, "compute_metrics", return_value=None) as compute:
-            scanner._current_sector_structure_policy(fills, 1_000, p)
+            scanner._current_sector_structure_policy(fills, p)
 
-        self.assertEqual(compute.call_args.args[3], 14)
+        self.assertEqual(compute.call_args.args[2], 14)
 
     def test_single_complete_heavy_dca_sector_is_rejected(self):
         p = SimpleNamespace(days=14, max_single_adds=30, grid_max_adds=3)
@@ -397,7 +397,7 @@ class ScannerWatchlistTests(unittest.TestCase):
                     "max_adds_per_ep": 31,
                 }), \
                 patch.object(scanner.metrics, "gates_structural", return_value=(False, "heavy_dca")):
-            policy = scanner._current_sector_structure_policy(fills, 1_000, p)
+            policy = scanner._current_sector_structure_policy(fills, p)
 
         self.assertEqual(policy["allowed"], [])
         self.assertFalse(policy["crypto"]["allow"])

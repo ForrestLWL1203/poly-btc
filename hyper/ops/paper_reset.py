@@ -14,7 +14,6 @@ DISCOVERY_CACHE_TABLES = frozenset({
     # Catastrophic-risk vetoes are source evidence, not Paper trading history.  They intentionally survive
     # rolling cache expiry and must also survive an execution/selection cold reset.
     "wallet_risk_event",
-    "wallet_risk_state",
 })
 
 

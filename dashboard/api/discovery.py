@@ -34,7 +34,7 @@ def scanner_status(db):
             "heartbeatAt": r["heartbeat_at"], "detail": detail}
 
 
-def followed_count(db, line=None):
+def followed_count(db):
     """Count the explicit published Core wallets the observer will actually copy."""
     try:
         selected = q1(

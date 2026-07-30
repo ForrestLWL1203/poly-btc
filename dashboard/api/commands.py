@@ -101,7 +101,7 @@ def exec_process_command(db_path, ctype, payload=None):
         elif ctype == "scan_stop":
             res = procman.stop_scan(db_path)
         else:
-            procman.start_scan(db_path, full=bool((payload or {}).get("full")))
+            procman.start_scan(db_path)
             return cmd_id, "pending"
         _resolve_command(db_path, cmd_id, "done", res)
         return cmd_id, "done"

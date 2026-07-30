@@ -1072,7 +1072,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.commit()
 
-            kept, tail = scanner._source_quality_pool(db, "g-source", limit=40)
+            kept, tail = scanner._source_quality_pool(db, "g-source")
 
         self.assertEqual(kept, [f"0x{index:02x}" for index in range(42)])
         self.assertEqual(tail, [])
@@ -1096,7 +1096,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.commit()
 
-            kept, tail = scanner._source_quality_pool(db, "g-new", limit=40)
+            kept, tail = scanner._source_quality_pool(db, "g-new")
             blocked = db.execute(
                 "SELECT status,reason FROM profile WHERE addr='0xblown'"
             ).fetchone()
@@ -1121,7 +1121,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 loss_usd=801, loss_pct=.08,
             )
             db.commit()
-            kept, _tail = scanner._source_quality_pool(db, "g-new", limit=40)
+            kept, _tail = scanner._source_quality_pool(db, "g-new")
             blocked = db.execute(
                 "SELECT status,reason FROM profile WHERE addr='0xblown'"
             ).fetchone()
@@ -1811,7 +1811,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
                 now_calls += 1
                 return "2026-01-01T00:00:00Z" if now_calls <= 2 else "2026-01-01T00:01:00Z"
 
-            def fake_profile(db_, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
+            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
                     "addr": addr,
                     "status": "active",
@@ -1864,7 +1864,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
 
-            def fake_profile(db_, addr, start_ms, now_ms, p, prior, lb, stamp, universe,
+            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe,
                              force_full=False):
                 row = {
                     "addr": addr, "status": "active", "reason": "ok", "score": .8,
@@ -1903,7 +1903,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
 
-            def fake_profile(db_, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
+            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
                     "addr": addr, "status": "active", "reason": "ok", "score": 0.9,
                     "raw_quality_score": 0.9, "profile_generation": p.scan_generation,
@@ -2171,7 +2171,7 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
             )
             db.commit()
 
-            def fake_profile(db_, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False):
+            def fake_profile(db_, addr, now_ms, p, prior, lb, stamp, universe, force_full=False):
                 row = {
                     "addr": addr, "status": "active", "reason": "ok", "score": 0.99,
                     "raw_quality_score": 0.99, "profile_generation": p.scan_generation,

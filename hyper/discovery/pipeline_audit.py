@@ -12,7 +12,7 @@ import json
 import sqlite3
 from typing import Iterable
 
-from hyper import config, params, storage
+from hyper import params, storage
 from hyper.copy.copy_policy import load_copy_policy
 from hyper.selection.follow_score import evaluate_follow_eligibility
 from hyper.util import now_iso
@@ -112,7 +112,6 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
         policy_values = {}
     policy = load_copy_policy(policy_values)
     thresholds = asdict(policy)
-    margin_equity_pct = float(policy_values.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT))
     for r in rows:
         try:
             sector_policy = json.loads(r.get("sector_policy_json") or "{}")
@@ -125,8 +124,6 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "copy_bt_evidence_status": r.get("evidence_status"),
             },
             stage="rough",
-            margin_equity_pct=margin_equity_pct,
-            policy_values=policy_values,
         )
         reason = str(r.get("reason") or qualification.get("status") or "unknown")
         structural_reasons = {

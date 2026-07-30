@@ -173,7 +173,7 @@ def _hold_skew(eps: list) -> float:
     return statistics.median(losers) / max(statistics.median(winners), 1.0)
 
 
-def compute_metrics(fills: list, eps: list, now_ms: int, lookback_days: float):
+def compute_metrics(fills: list, eps: list, lookback_days: float):
     """Aggregate perp fills + reconstructed episodes into one metrics dict (or None). All metrics
     here are account-value-independent; roi_equity/dd are added by the caller (it has acct_value)."""
     if not fills or not eps:
@@ -296,7 +296,7 @@ def gates_structural(m: dict, p) -> tuple:
     return True, "ok"
 
 
-def gates_state(m: dict, now_ms: int, p) -> tuple:
+def gates_state(m: dict) -> tuple:
     """Hard state gates only.
 
     Profit sign, recency, activity, sample depth, win rate and thin-but-real

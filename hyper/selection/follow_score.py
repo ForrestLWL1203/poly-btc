@@ -12,7 +12,6 @@ from typing import Mapping
 
 from hyper import config
 from hyper.copy.economics import (
-    OPEN_LOSS_RATIO_LIMIT,
     PROFITABILITY_BASIS,
     conservative_profitability,
     open_loss_ratio_within_limit,
@@ -403,21 +402,8 @@ def evaluate_follow_eligibility(
     metrics: Mapping,
     *,
     stage: str = "rough",
-    min_closed30: int | None = None,
-    min_closed14: int | None = None,
-    min_closed7: int | None = None,
-    min_open_fill_rate: float | None = None,
-    min_evidence_days: int | None = None,
-    margin_equity_pct: float | None = None,
-    policy_values: Mapping | None = None,
-    as_of_ms: int | None = None,
-    follow_score_value: float | None = None,
 ) -> dict:
     """Classify rough/final Copy exclusively through the versioned pre-strict policy."""
-    del (
-        min_closed30, min_closed14, min_closed7, min_evidence_days,
-        margin_equity_pct, follow_score_value, policy_values, as_of_ms,
-    )
     stage = "strict" if str(stage).lower() in {"strict", "final"} else "rough"
     scoped = apply_allowed_sector_copy_metrics(metrics)
     policy_json = parse_json_obj(scoped.get("sector_policy_json"))

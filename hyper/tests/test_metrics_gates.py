@@ -127,8 +127,6 @@ class MetricsGateTests(unittest.TestCase):
     def test_recent_copyable_loss_is_left_for_authoritative_copy_profile_gate(self):
         ok, reason = metrics.gates_state(
             state_metrics(net_pnl=-1.0, roi_total=0.1, net_30d=100.0, pf_mon_pnl=20_000.0),
-            1000,
-            state_params(),
         )
 
         self.assertTrue(ok)
@@ -137,7 +135,7 @@ class MetricsGateTests(unittest.TestCase):
     def test_target_account_edge_is_ignored_in_favor_of_scoped_copy_replay(self):
         values = state_metrics(pf_mon_pnl=500.0, pf_mon_vlm=1_000_000.0)
 
-        ok, reason = metrics.gates_state(values, 1000, state_params())
+        ok, reason = metrics.gates_state(values)
 
         self.assertTrue(ok)
         self.assertEqual(reason, "ok")

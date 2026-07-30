@@ -102,7 +102,7 @@ def _window_equity(windows: Mapping, days: int) -> float:
     )
 
 
-def _sector_economic_gate(windows: Mapping, *, min_net: float) -> dict:
+def _sector_economic_gate(windows: Mapping) -> dict:
     """Admit only positive, Challenger-grade sectors into wallet-level aggregation.
 
     Sector isolation prevents a profitable Crypto side from masking a losing Stock side. It must not repeat
@@ -437,7 +437,7 @@ def evaluate_sector_policy(
     evidence_watch = []
     for sector in SECTORS:
         windows = sector_results.get(sector) or {}
-        economic = _sector_economic_gate(windows, min_net=min_net)
+        economic = _sector_economic_gate(windows)
         closed = {days: _int((economic.get("closed") or {}).get(str(days))) for days in (30, 14, 7)}
         pnl = {days: _num((economic.get("pnl") or {}).get(str(days))) for days in (30, 14, 7)}
         recent_assessment = assess_recent_copy_loss(windows, min_net=min_net)

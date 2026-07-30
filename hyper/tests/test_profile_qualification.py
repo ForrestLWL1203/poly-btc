@@ -71,7 +71,7 @@ class ProfileQualificationTests(unittest.TestCase):
 
     def test_rough_copy_qualified_profile_remains_active(self):
         self.assertEqual(
-            scanner._profile_copy_qualification(qualified(), NOW, self.params),
+            scanner._profile_copy_qualification(qualified(), self.params),
             (True, "rough_copy_qualified"),
         )
 
@@ -99,14 +99,14 @@ class ProfileQualificationTests(unittest.TestCase):
         for overrides, expected_ok, expected in cases:
             with self.subTest(expected=expected):
                 ok, reason = scanner._profile_copy_qualification(
-                    qualified(**overrides), NOW, self.params,
+                    qualified(**overrides), self.params,
                 )
                 self.assertEqual(ok, expected_ok)
                 self.assertEqual(reason, expected)
 
     def test_historical_max_drawdown_is_audit_only(self):
         ok, reason = scanner._profile_copy_qualification(
-            qualified(copy_intratrade_max_drawdown=.90), NOW, self.params,
+            qualified(copy_intratrade_max_drawdown=.90), self.params,
         )
         self.assertTrue(ok)
         self.assertEqual(reason, "rough_copy_qualified")
@@ -122,7 +122,7 @@ class ProfileQualificationTests(unittest.TestCase):
         params = SimpleNamespace(copy_bt_gate_enable=False, inactive_days=1)
         self.assertEqual(
             scanner._profile_copy_qualification(
-                qualified(copy_bt_net_pnl=-1), NOW, params,
+                qualified(copy_bt_net_pnl=-1), params,
             ),
             (True, "copy_gate_disabled"),
         )

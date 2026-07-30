@@ -285,25 +285,14 @@ class Result:
 def evaluate(
     payload,
     *,
-    pnl_minima=None,
-    share_min: float = 0.0,
-    min_return_30d: float = 0.20,
-    min_return_7d: float = 0.05,
-    long_history_days: int = 28,
-    short_history_days: int = 7,
-    max_boundary_gap_hours: float = 36.0,
     min_week_perp_volume: float = 0.0,
 ) -> Result:
     """Confirm only that official seven-day Perp volume reaches the cheap-recall floor.
 
-    The wider signature remains source-compatible with old callers and cached fixtures. Profit direction
-    is already checked on Leaderboard; Portfolio ROI, account history, profit share and absolute PnL are
-    audit telemetry and never qualify a wallet.
+    Profit direction is already checked on Leaderboard; Portfolio ROI, account
+    history, profit share and absolute PnL are audit telemetry and never qualify
+    a wallet.
     """
-    del (
-        pnl_minima, share_min, min_return_30d, min_return_7d,
-        long_history_days, short_history_days, max_boundary_gap_hours,
-    )
     windows = _portfolio_map(payload)
     if not windows:
         return Result("deferred_data_error", "portfolio_unavailable", {})

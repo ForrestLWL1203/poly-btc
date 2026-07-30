@@ -1,6 +1,5 @@
 import json
 import tempfile
-import time
 import unittest
 from contextlib import ExitStack
 from pathlib import Path

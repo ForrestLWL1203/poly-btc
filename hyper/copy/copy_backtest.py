@@ -527,17 +527,11 @@ class Backtest:
         self.add_event_by_order = {}
         self.fee_drag = 0.0
         self.gross_pnl = 0.0
-        self.stable_sigma_max = overrides.get("STABLE_SIGMA_MAX", config.STABLE_SIGMA_MAX)
         self.high_sigma_min = overrides.get("HIGH_SIGMA_MIN", config.HIGH_SIGMA_MIN)
         self.tier_margin = {
             "stable": overrides.get("STABLE_MARGIN_PCT", config.STABLE_MARGIN_PCT),
             "mid": overrides.get("MID_MARGIN_PCT", config.MID_MARGIN_PCT),
             "high": overrides.get("HIGH_MARGIN_PCT", config.HIGH_MARGIN_PCT),
-        }
-        self.tier_margin_min = {
-            "stable": overrides.get("STABLE_MARGIN_MIN_PCT", config.STABLE_MARGIN_MIN_PCT),
-            "mid": overrides.get("MID_MARGIN_MIN_PCT", config.MID_MARGIN_MIN_PCT),
-            "high": overrides.get("HIGH_MARGIN_MIN_PCT", config.HIGH_MARGIN_MIN_PCT),
         }
         self.tier_lev_cap = {
             "stable": overrides.get("STABLE_LEV_CAP", config.STABLE_LEV_CAP),
@@ -633,15 +627,12 @@ class Backtest:
 
     def open_sizing_params(self):
         return OpenSizingParams(
-            stable_sigma_max=self.stable_sigma_max,
             high_sigma_min=self.high_sigma_min,
             tier_margin=self.tier_margin,
-            tier_margin_min=self.tier_margin_min,
             tier_lev_cap=self.tier_lev_cap,
             tier_min_notional=self.tier_min_notional,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
-            deploy_full_pct=self.max_deploy_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
             capital_anchor=self.initial_balance,
@@ -654,7 +645,7 @@ class Backtest:
         return self.sigmas.get(coin) or config.VOL_FALLBACK_SIGMA
 
     def tier(self, sigma: float, coin: str | None = None) -> str:
-        return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin)
+        return tier_for_sigma(sigma, self.high_sigma_min, coin)
 
     def available(self):
         locked = sum(p["margin"] * (p["rem_size"] / p["size"] if p["size"] else 1.0) for p in self.open.values())
@@ -1324,7 +1315,7 @@ class Backtest:
         ep["notional"] += add_margin * ep["leverage"]
         ep["liq_px"] = isolated_liq_px(
             ep["entry_px"], ep["side"], ep["size"], ep["margin"],
-            ep.get("maintenance_leverage"), ep["leverage"],
+            ep.get("maintenance_leverage"),
         )
         first_copy_for_order = not (order and order["counted"])
         if first_copy_for_order:

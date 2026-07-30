@@ -2,7 +2,6 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from hyper import config, params, storage
 

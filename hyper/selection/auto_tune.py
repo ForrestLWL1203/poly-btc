@@ -517,7 +517,7 @@ def _load_market_ctx(db, generation_id: str | None = None) -> dict:
     return {r[0]: {"day_ntl_vlm": r[1], "oi_notional": r[2], "max_leverage": r[3]} for r in rows}
 
 
-def _load_followed_wallets(db, follow: dict) -> list[str]:
+def _load_followed_wallets(db) -> list[str]:
     explicit = selection.published_core_addrs(db, int(config.MAX_TARGETS))
     return explicit or []
 
@@ -977,7 +977,7 @@ def _candidate_windows(db, addrs: list[str], sigmas: dict, overrides: dict, now_
     return windows
 
 
-def evaluate_portfolio_window(db, addrs: list[str], sigmas: dict, overrides: dict, now_ms: int,
+def evaluate_portfolio_window(db, sigmas: dict, overrides: dict, now_ms: int,
                               *, window_fills: dict[int, list[dict]], days: int = 30,
                               market_ctx: dict | None = None, path_rows: list[dict] | None = None,
                               path_meta: dict | None = None) -> dict:
@@ -1097,7 +1097,7 @@ def evaluate_tune_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     # compact summary below.
     if primary_only:
         result = evaluate_portfolio_window(
-            db, addrs, sigmas, overrides, now_ms, window_fills={30: list((window_fills or {}).get(30) or [])},
+            db, sigmas, overrides, now_ms, window_fills={30: list((window_fills or {}).get(30) or [])},
             days=30, market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
         )
         out["windows"] = {30: _compact_backtest(result)}
@@ -1129,7 +1129,7 @@ def evaluate_add_candidate(db, addrs: list[str], follow: dict, candidate: dict,
     out["add_params"] = params_
     if primary_only:
         result = evaluate_portfolio_window(
-            db, addrs, sigmas, overrides, now_ms,
+            db, sigmas, overrides, now_ms,
             window_fills={30: list((window_fills or {}).get(30) or [])},
             days=30, market_ctx=market_ctx, path_rows=path_rows, path_meta=path_meta,
         )
@@ -1364,7 +1364,6 @@ def _compact_candidate(candidate: dict) -> dict:
         "max_hard": candidate.get("max_hard"),
         "margins": candidate.get("margins"),
         "lev_caps": candidate.get("lev_caps"),
-        "deploy_full_pct": candidate.get("deploy_full_pct"),
         "add_params": candidate.get("add_params"),
         "params": candidate.get("params"),
         "score": _candidate_score(candidate),
@@ -1806,7 +1805,7 @@ def _model_validation(validation: dict, policy) -> dict:
     }
 
 
-def _formation_model_validation(validation: dict, policy) -> dict:
+def _formation_model_validation(validation: dict) -> dict:
     """Validate one count-specific tuning proposal before the final strict replay.
 
     Formation tuning ranks aggregate continuously compounded profit. Wallet admission and final publication
@@ -2083,7 +2082,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
 
     addrs = (
         list(dict.fromkeys((addr or "").lower() for addr in addrs_override if addr))
-        if ephemeral else _load_followed_wallets(db, follow)
+        if ephemeral else _load_followed_wallets(db)
     )
     if len(addrs) < int(getattr(config, "AUTO_TUNE_MARGIN_MIN_FOLLOWED", 1)):
         result = {"status": "no_followed_wallets", "applied": False, "followed_n": len(addrs)}
@@ -2488,7 +2487,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
                 fold_count=3,
             )
         model = (
-            _formation_model_validation(validation, load_copy_policy(follow))
+            _formation_model_validation(validation)
             if formation_admission else _model_validation(validation, load_copy_policy(follow))
         )
         finalist_results.append({
@@ -2569,7 +2568,7 @@ def maybe_tune_margins(db, source: str = "scan", stamp: str | None = None, dry_r
     follow_for_add = follow_overrides_for_tune_candidate(follow, selected)
     if ephemeral:
         model = (
-            _formation_model_validation(walk_forward, load_copy_policy(follow))
+            _formation_model_validation(walk_forward)
             if formation_admission else _model_validation(walk_forward, load_copy_policy(follow))
         )
         validation_reasons = list(model.get("reasons") or ())

@@ -28,16 +28,10 @@ def sizing_equity_for_drawdown(
     return min(smoothed, equity * multiplier)
 
 
-def margin_pct_for_deploy(max_pct: float, min_pct: float, deploy_full_pct: float,
-                          max_deploy_pct: float, locked_margin: float, equity: float) -> float:
+def margin_pct_for_deploy(max_pct: float) -> float:
     """Return the tuned first-open margin until the aggregate deploy cap.
 
-    ``min_pct`` and ``deploy_full_pct`` are retained in the call signature only
-    so older immutable strategy snapshots remain replayable.  The former
-    firepower line duplicated the aggregate deploy cap and made otherwise valid
-    opens too small before any real account contention occurred.
+    The former firepower line duplicated the aggregate deploy cap and made
+    otherwise valid opens too small before any real account contention occurred.
     """
-    upper = max(0.0, float(max_pct or 0.0))
-    if equity <= 0:
-        return 0.0
-    return upper
+    return max(0.0, float(max_pct or 0.0))

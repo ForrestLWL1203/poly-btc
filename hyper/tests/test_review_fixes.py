@@ -45,7 +45,7 @@ class ReviewFixTests(unittest.TestCase):
             db.close()
             self.assertEqual("pending", status)
             self.assertEqual({"full": True}, json.loads(payload))
-            start.assert_called_once_with(path, full=True)
+            start.assert_called_once_with(path)
         finally:
             os.remove(path)
 

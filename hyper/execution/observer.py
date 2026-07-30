@@ -113,11 +113,8 @@ class Observer:
         # v8 sizing (UI-tunable): 3 σ-tiers, each with margin% + lev cap. Margin uses the adaptive strategy
         # equity base; real risk equity and available cash enforce coin/deployment caps.
         self.add_frac = config.ADD_FRAC if add_frac is None else add_frac  # each ADD = first-open margin × this
-        self.stable_sigma_max = config.STABLE_SIGMA_MAX   # σ≤this → stable tier (also lev-formula σ ref)
         self.high_sigma_min = config.HIGH_SIGMA_MIN       # σ≥this → high-vol tier; between → mid tier
         self.tier_margin = {"stable": config.STABLE_MARGIN_PCT, "mid": config.MID_MARGIN_PCT, "high": config.HIGH_MARGIN_PCT}
-        self.tier_margin_min = {"stable": config.STABLE_MARGIN_MIN_PCT, "mid": config.MID_MARGIN_MIN_PCT,
-                                "high": config.HIGH_MARGIN_MIN_PCT}
         self.tier_lev_cap = {"stable": config.STABLE_LEV_CAP, "mid": config.MID_LEV_CAP, "high": config.HIGH_LEV_CAP}
         # UI-tunable sizing knobs (refreshed from the params table by _reload_params; config = fallback)
         self.max_lev = config.MAX_LEV
@@ -608,7 +605,7 @@ class Observer:
         return wallet_sector_side_effective_cap_pct(
             positions, addr=addr, coin=coin, side=side, candidate_tier=tier,
             tier_for_coin=lambda current_coin: tier_for_sigma(
-                self._sigma(current_coin), self.stable_sigma_max, self.high_sigma_min, current_coin,
+                self._sigma(current_coin), self.high_sigma_min, current_coin,
             ),
             crypto_stable=self.wallet_sector_side_caps["stable"],
             crypto_mid=self.wallet_sector_side_caps["mid"],
@@ -698,13 +695,13 @@ class Observer:
             if f.get("PORTFOLIO_DRAWDOWN_STOP_PCT") is not None:
                 self.portfolio_drawdown_stop_pct = f["PORTFOLIO_DRAWDOWN_STOP_PCT"]
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
-            if f.get("STABLE_SIGMA_MAX") is not None: self.stable_sigma_max = f["STABLE_SIGMA_MAX"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
-            for tier, mk, min_mk, lk, nk, ak in (("stable", "STABLE_MARGIN_PCT", "STABLE_MARGIN_MIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
-                                                 ("mid", "MID_MARGIN_PCT", "MID_MARGIN_MIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"),
-                                                 ("high", "HIGH_MARGIN_PCT", "HIGH_MARGIN_MIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS")):
+            for tier, mk, lk, nk, ak in (
+                ("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
+                ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"),
+                ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS"),
+            ):
                 if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
-                if f.get(min_mk) is not None: self.tier_margin_min[tier] = f[min_mk]
                 if f.get(lk): self.tier_lev_cap[tier] = f[lk]
                 if f.get(nk) is not None: self.tier_min_notional[tier] = f[nk]
                 if f.get(ak) is not None: self.tier_max_adds[tier] = int(f[ak])
@@ -1029,20 +1026,17 @@ class Observer:
 
     def _tier(self, sigma: float, coin: str = None) -> str:
         """BTC alone may enter stable; every other market starts at mid and can rise to high by σ."""
-        return tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin)
+        return tier_for_sigma(sigma, self.high_sigma_min, coin)
 
     def _open_sizing_params(self, book=None):
         book = book or self.taker
         return OpenSizingParams(
-            stable_sigma_max=self.stable_sigma_max,
             high_sigma_min=self.high_sigma_min,
             tier_margin=self.tier_margin,
-            tier_margin_min=self.tier_margin_min,
             tier_lev_cap=self.tier_lev_cap,
             tier_min_notional=self.tier_min_notional,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
-            deploy_full_pct=self.max_deploy_pct,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
             capital_anchor=book.initial_balance,
@@ -1999,7 +1993,7 @@ class Observer:
             )
             group_cap = self._wallet_group_cap_pct(
                 book, addr, coin, ep["side"],
-                tier_for_sigma(sigma, self.stable_sigma_max, self.high_sigma_min, coin),
+                tier_for_sigma(sigma, self.high_sigma_min, coin),
                 exclude=ep,
             )
             group_room = wallet_sector_side_margin_room(
@@ -2363,7 +2357,7 @@ class Observer:
             ).fetchone()
             ep["liq_px"] = isolated_liq_px(
                 ep["entry_px"], ep["side"], ep["size"], ep["margin"],
-                margin_row[0] if margin_row and margin_row[0] else None, lev,
+                margin_row[0] if margin_row and margin_row[0] else None,
             )
             first_copy_for_order = not (order and order["counted"])
             if first_copy_for_order:
@@ -2809,7 +2803,7 @@ def report(db) -> None:
             lag, format(o_entry, "g"), format(o_mgn, ",.0f"), format(o_lev, ".0f") + "x", pnl, lbl))
     print("\n  列: 编号=watchlist排名 · tgt_*=目标(保证金/均价/杠杆,在持为实时) · lag=跟单延迟 · "
           "our_*=我方(均价/保证金/杠杆) · pnl 浮=未平(mark) 实=已平(realized)")
-    print(f"\n(sizing: σ-tiers margin/lev-cap [stable BTC-only σ≤{config.STABLE_SIGMA_MAX*100:g}%: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
+    print(f"\n(sizing: σ-tiers margin/lev-cap [stable BTC-only: {config.STABLE_MARGIN_PCT*100:g}%/{config.STABLE_LEV_CAP:g}x · "
           f"mid: {config.MID_MARGIN_PCT*100:g}%/{config.MID_LEV_CAP:g}x · high σ≥{config.HIGH_SIGMA_MIN*100:g}%: {config.HIGH_MARGIN_PCT*100:g}%/{config.HIGH_LEV_CAP:g}x], "
           f"lev=tier cap clipped by market/master max, add={config.ADD_FRAC:g}×first "
           f"(max {config.STABLE_MAX_ADDS}/{config.MID_MAX_ADDS}/{config.HIGH_MAX_ADDS} by tier), isolated)")

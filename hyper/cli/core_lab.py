@@ -174,7 +174,7 @@ def _source_record(db, row: dict, official: dict, now_ms: int, p, follow: dict) 
     addr = str(row.get("addr") or "").lower()
     start_ms = int(now_ms) - 37 * DAY_MS
     fills = load_copyable_fills(db, [addr], start_ms)
-    structure = scanner._current_sector_structure_policy(fills, int(now_ms), p)
+    structure = scanner._current_sector_structure_policy(fills, p)
     episodes, _open = build_episodes(fills)
     source = scanner._source_quality_surface(fills, episodes, structure, int(now_ms))
     # The immutable prefilter decision already applied the history-tier-specific floor: full-history

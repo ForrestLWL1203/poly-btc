@@ -298,7 +298,7 @@ def scan_running(db_path):
     return _scan_progress_scanning(db_path)
 
 
-def start_scan(db_path, full=False):
+def start_scan(db_path):
     """'重新扫描' → kick a scan now (systemd oneshot on the VPS, detached child locally). scanner.scan
     reads the 'full' flag from the queued rescan command + marks manual=1 itself."""
     if scan_running(db_path):

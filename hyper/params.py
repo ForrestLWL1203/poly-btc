@@ -253,7 +253,6 @@ PARAM_SPEC = [
         config.SMART_TP_MIN_FEE_MULT, "智能止盈·最低手续费覆盖倍数", ""),
     # (COIN_MARGIN_CAP_PCT removed 2026-07-02 — superseded by the σ-tiered 分档单笔上限 in the 加仓策略 tab)
     # —— hidden 跟单底层(sizing/执行细节,引擎读取,UI 不显示)——
-    ("STABLE_SIGMA_MAX",     "follow",  "hidden", "pct",     "immediate", config.STABLE_SIGMA_MAX * 100, "BTC稳定档σ上界", ""),
     ("HIGH_SIGMA_MIN",       "follow",  "hidden", "pct",     "immediate", config.HIGH_SIGMA_MIN * 100, "剧烈档σ下界", ""),
     ("MAX_LEV",              "follow",  "hidden", "x",       "immediate", config.MAX_LEV, "杠杆硬上限", ""),
     ("MIN_LEV",              "follow",  "hidden", "x",       "immediate", config.MIN_LEV, "杠杆硬下限", ""),
@@ -339,7 +338,7 @@ def seed_params(db):
         "('MIN_ACTIVE_SCORE','COPY_STOP_ENABLE','STOP_MARGIN_PCT','HARVEST_WEEK_VLM_MAX',"
         "'HARVEST_PNL_VOL_MIN','HARVEST_PNL_VOL_MAX','DAILY_PROFILE_BUDGET',"
         "'FULL_REFRESH_SHARDS','RANDOM_EXPLORATION_RATIO','DISCOVERY_MAX_EXTRA_SHARDS',"
-        "'CANDIDATE_MAX_RECHECK_DAYS','WALLET_HWM_FREEZE_DD_PCT',"
+        "'CANDIDATE_MAX_RECHECK_DAYS','STABLE_SIGMA_MAX','WALLET_HWM_FREEZE_DD_PCT',"
         "'WALLET_HWM_REDUCE_DD_PCT','WALLET_HWM_EXIT_DD_PCT',"
         "'WALLET_HWM_RELEASE_DD_PCT','WALLET_HWM_EXIT_COOLDOWN_DAYS',"
         "'WALLET_FORWARD_LOSS_FREEZE_PCT','CORE_COPY_SAMPLE_FLOORS',"

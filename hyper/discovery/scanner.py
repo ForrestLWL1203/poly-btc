@@ -1,8 +1,7 @@
-"""Discovery domain: the rolling scanner that maintains the live watchlist.
+"""Discovery domain: the generation-safe scanner that maintains selection evidence.
 
-harvest leaderboard -> coarse candidates -> profile work-set (actives + new + top rechecks)
-over a short window -> perp episodes/metrics -> upsert active/rejected/retired.
-Composes rest + fills + metrics + storage; holds no infra of its own.
+Leaderboard recall feeds a bounded profile workset, a 37-day fill cache, canonical
+Copy replay, and atomic Core/Challenger publication.
 """
 import calendar
 import concurrent.futures
@@ -21,9 +20,6 @@ from hyper import config, params, storage
 from hyper.copy.copy_backtest import (
     ADD_METRICS_VERSION,
     prepare_price_path,
-    run_backtest,
-    slice_backtest_result,
-    subset_price_path,
 )
 from hyper.copy.fills import build_episodes
 from hyper.copy.copy_data import (
@@ -34,7 +30,6 @@ from hyper.copy.copy_data import (
 from hyper.copy.copy_policy import COPY_POLICY_PARAM_KEYS, load_copy_policy
 from hyper.copy import replay_parallel
 from hyper.copy.economics import (
-    OPEN_LOSS_RATIO_LIMIT,
     PROFITABILITY_BASIS,
     conservative_profitability,
     open_loss_ratio_within_limit,
@@ -46,7 +41,7 @@ from hyper.copy.sector import (
     classify_coin,
 )
 from hyper.copy.fill_transition import classify_fill_transition
-from hyper.market import generation_market, price_path, rest, volatility
+from hyper.market import generation_market, price_path, rest
 from hyper.selection import (
     auto_tune,
     core_retention,
@@ -58,7 +53,6 @@ from hyper.selection import (
 )
 from . import generation, metrics, perp_prefilter, pipeline_audit
 from .scanner_copy_bt import (
-    apply_copy_bt_gate as _apply_copy_bt_gate,
     apply_sector_copy_bt_gate as _apply_sector_copy_bt_gate,
     copy_bt_market_ctx as _copy_bt_market_ctx,
     copy_bt_overrides as _copy_bt_overrides,
@@ -85,7 +79,7 @@ _SECTOR_RECOVERABLE_STRUCTURE_REASONS = {
 _SECTOR_RECOVERABLE_STATE_REASONS = set()
 
 
-def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_generation"):
+def _current_sector_structure_policy(perp_fills, p, *, source="current_generation"):
     """Build this generation's sector specialization without consulting prior profile state.
 
     Whole-wallet structure can be contaminated by a disabled specialty (for example stock DCA beside
@@ -103,7 +97,7 @@ def _current_sector_structure_policy(perp_fills, now_ms, p, *, source="current_g
             continue
         episodes, _open = build_episodes(fills)
         current = metrics.compute_metrics(
-            fills, episodes, now_ms, int(getattr(p, "days", 14) or 14),
+            fills, episodes, int(getattr(p, "days", 14) or 14),
         )
         if not current:
             out[sector] = {
@@ -732,23 +726,12 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
     # The delete starts a SQLite write transaction.  Release it before the first network request: holding the
     # single writer slot across a batch of rate-paced Portfolio calls freezes Observer marks and commands.
     db.commit()
-    minima = {
-        "week": getattr(p, "week_pnl_min", config.HARVEST_WEEK_PNL_MIN),
-        "month": getattr(p, "month_pnl_min", config.HARVEST_MONTH_PNL_MIN),
-        "all": getattr(p, "all_pnl_min", config.HARVEST_ALL_PNL_MIN),
-    }
-    share_min = getattr(p, "perp_pnl_share_min", config.HARVEST_PERP_PNL_SHARE_MIN)
     week_perp_volume_min = getattr(
         p, "week_vlm_min", config.HARVEST_WEEK_VLM_MIN,
     )
-    copy_policy = load_copy_policy(getattr(p, "copy_bt_overrides", None))
     cache_policy = {
-        "version": "official_perp_week_volume_v9",
+        "version": "official_perp_week_volume_v10",
         "weekPerpVolumeMin": float(week_perp_volume_min),
-        "auditPnlMinima": {key: float(value) for key, value in minima.items()},
-        "roiMagnitudeGateEnabled": False,
-        "accountValueGateEnabled": False,
-        "perpProfitShareGateEnabled": False,
     }
     addr_set = {str(addr).lower() for addr in addrs}
     cached_results = {}
@@ -797,15 +780,6 @@ def _run_perp_prefilter(db, addrs, p, stamp, *, allow_cache=True, source="scan")
             else:
                 result = perp_prefilter.evaluate(
                     payload,
-                    pnl_minima=minima,
-                    share_min=share_min,
-                    min_return_30d=copy_policy.official_perp_min_return_30d,
-                    min_return_7d=copy_policy.official_perp_min_return_7d,
-                    long_history_days=copy_policy.official_perp_long_history_days,
-                    short_history_days=copy_policy.official_perp_short_history_days,
-                    max_boundary_gap_hours=(
-                        copy_policy.official_perp_boundary_max_gap_hours
-                    ),
                     min_week_perp_volume=week_perp_volume_min,
                 )
         results[addr] = result
@@ -910,7 +884,7 @@ def _source_quality_surface(fills: list, episodes: list, structure: dict, now_ms
     }
 
 
-def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
+def _copy_profile_evidence(m, results, p):
     """Derive normalized OOS evidence from canonical replay positions."""
     if not isinstance(results, dict):
         results = {}
@@ -966,7 +940,7 @@ def _copy_profile_evidence(m, results, p, *, addr="", now_ms=None):
             m[f"actionable_open_events_{days}d"] = int(result.get("opened_n") or 0)
 
 
-def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
+def _profile_copy_qualification(m, p) -> tuple[bool, str]:
     """One authoritative Profile qualification for evidence, activity and economics."""
     copy_gate_enabled = getattr(p, "copy_bt_gate_enable", config.COPY_BT_GATE_ENABLE)
     if copy_gate_enabled:
@@ -976,8 +950,6 @@ def _profile_copy_qualification(m, now_ms: int, p) -> tuple[bool, str]:
         result = follow_score.evaluate_follow_eligibility(
             enriched,
             stage="rough",
-            policy_values=getattr(p, "copy_bt_overrides", None),
-            as_of_ms=now_ms,
         )
         if not result.get("coreEligible"):
             reason = result.get("status") or "rough_copy_unqualified"
@@ -1268,7 +1240,7 @@ def _retry_missing_copy_valuation_marks(current_marks, *result_groups, attempts:
     return marks
 
 
-def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, force_full=False,
+def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=False,
                  persist=None):
     # ONE aggregated fetch per wallet (aggregateByTime -> ~1 page, trade-level). No separate
     # pre-screen call: the response crosses the executable-market boundary before cache/metrics,
@@ -1323,7 +1295,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         if episode.get("open_complete", True)
         and int(episode.get("close_ms") or 0) >= source_start_ms
     ]
-    m = metrics.compute_metrics(perp, eps, now_ms, p.days)
+    m = metrics.compute_metrics(perp, eps, p.days)
     if m is None:
         m = {"n_fills": len(perp), "n_trades": 0, "window_days": 0, "trades_per_day": 0,
              "taker_frac_notl": 0, "median_hold_s": 0, "win_rate": 0, "net_pnl": 0,
@@ -1377,7 +1349,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
     # STAGE A — cheap structural copyability (NO api). Front-of-funnel rejects (MM/HFT/grid/spot) that do
     # NOT kill a genuine trend trader. n_trades==0 (pure-hold) skips the episode-based checks → judged on
     # live positions in stage B. (Old behaviour auto-rejected n_trades==0 as 'no_closed_episode'.)
-    sector_structure = _current_sector_structure_policy(perp_full, now_ms, p)
+    sector_structure = _current_sector_structure_policy(perp_full, p)
     # Source win-rate, Top3 concentration and 72-hour activity must describe markets we can actually follow.
     # A recent open or winning Episode in a structurally rejected specialty may not qualify the wallet.
     m.update(_source_quality_surface(perp_full, eps_full, sector_structure, now_ms))
@@ -1452,7 +1424,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
         m["pf_week_pnl"] = m["pf_week_vlm"] = None
         m["pf_mon_pnl"] = m["pf_mon_vlm"] = None
         m["pf_turnover"] = None
-        ok, reason = metrics.gates_state(m, now_ms, p)
+        ok, reason = metrics.gates_state(m)
         if (
             not ok
             and reason in _SECTOR_RECOVERABLE_STATE_REASONS
@@ -1624,7 +1596,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
                 sigmas=replay_sigmas, market_ctx=replay_market_ctx,
             )
         m.update(_open_flow_metrics(evidence_fills, now_ms))
-        _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now_ms)
+        _copy_profile_evidence(m, evidence_results, p)
         if (
             not sector_policy.get("allowed")
             and not sector_policy.get("watch")
@@ -1641,7 +1613,7 @@ def _profile_one(db, addr, start_ms, now_ms, p, prior, lb, stamp, universe, forc
             _attach_open_copy_activity_context(
                 m, addr, getattr(p, "open_copy_pnl_by_addr", {}),
             )
-            ok, reason = _profile_copy_qualification(m, now_ms, p)
+            ok, reason = _profile_copy_qualification(m, p)
     m["times_active"] += 1 if ok else 0
     # age is NOT fetched (a full-history call just for account age = wasteful, and would penalise a
     # new wallet with strong recent performance). Survival now leans on times_active (our own observed
@@ -1687,7 +1659,6 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
     """
     if commit:
         params.seed_params(db)
-    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     db.execute("DELETE FROM watchlist")
     leaderboard_join = (
         "LEFT JOIN leaderboard_staging l ON l.addr=p.addr AND l.generation=?"
@@ -1722,18 +1693,11 @@ def refresh_watchlist(db, stamp, *, leaderboard_generation=None, commit=True) ->
     )
     row_cols = [d[0] for d in cur.description]
     rows = [dict(zip(row_cols, r)) for r in cur.fetchall()]
-    policy_values = {
-        **params.load_follow(db), **params.load_category(db, "scanner"),
-    }
     ranked = []
     for r in rows:
-        r["margin_equity_pct"] = margin_equity_pct
         score, detail = follow_score.compute_follow_score(r)
         detail = dict(detail or {})
-        eligibility = follow_score.evaluate_follow_eligibility(
-            r, margin_equity_pct=margin_equity_pct, policy_values=policy_values,
-            follow_score_value=score,
-        )
+        eligibility = follow_score.evaluate_follow_eligibility(r)
         if not eligibility.get("eligible"):
             detail.setdefault("reasons", []).extend(eligibility.get("reasons") or [])
         r["follow_detail"] = detail
@@ -1876,7 +1840,7 @@ def _quality_first_core_transition(
     }
 
 
-def _portfolio_selection_metrics(windows, baseline_n=0, selected_n=0):
+def _portfolio_selection_metrics(windows, selected_n=0):
     """Compact shared-account replay into actual-dollar selection economics.
 
     Isolated liquidations already lose their full allocated margin in ``copy_net_pnl``. Historical maximum
@@ -2126,7 +2090,6 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
     rows = []
     current_core = set(selection.published_core_addrs(db) or ())
     follow_values = params.load_follow(db)
-    margin_equity_pct = follow_values.get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     policy_values = {**follow_values, **params.load_category(db, "scanner")}
     for raw in cur.fetchall():
         row = dict(zip(names, raw))
@@ -2134,7 +2097,6 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         row["addr"] = addr
         row["retention_lane"] = addr in current_core
         row.update(forward_risk.get(addr) or {})
-        row["margin_equity_pct"] = margin_equity_pct
         try:
             row["pre_strict_activity"] = json.loads(
                 row.get("pre_strict_activity_json") or "{}"
@@ -2287,7 +2249,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
         structural_policy=structural_policy,
     )
     effective.update(_open_flow_metrics(evidence_fills, int(now_ms)))
-    _copy_profile_evidence(effective, results, replay_ctx, addr=addr, now_ms=int(now_ms))
+    _copy_profile_evidence(effective, results, replay_ctx)
     for key in (
         "official_perp_status", "official_perp_reason", "official_perp_evidence_json",
     ):
@@ -2320,10 +2282,6 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
             ),
         },
         stage=qualification_stage,
-        margin_equity_pct=replay_ctx.margin_equity_pct,
-        policy_values=follow,
-        as_of_ms=now_ms,
-        follow_score_value=score,
     )
     return {
         "metrics": scoring_metrics,
@@ -2416,9 +2374,8 @@ def _parallel_effective_follow_replays(
     )
 
 
-def _source_quality_pool(db, generation_id: str, *, limit=None) -> tuple[list[str], list[str]]:
+def _source_quality_pool(db, generation_id: str) -> tuple[list[str], list[str]]:
     """Return every structurally valid deep-fill profile for fills-only pre-strict evaluation."""
-    del limit
     _apply_historical_major_liquidation_gate(db, generation_id)
     rows = db.execute(
         "SELECT lower(addr),COALESCE(source_quality_score,0) FROM profile "
@@ -3213,7 +3170,7 @@ def _select_formation_finalist_surface(
     return dict(winner["params"]), audits
 
 
-def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dict:
+def _formation_entry_eligibility(effective, score) -> dict:
     """Apply the final path-complete individual contract before shared formation."""
     metrics_ = apply_allowed_sector_copy_metrics(dict(effective or {}))
     qualification = follow_score.evaluate_follow_eligibility(
@@ -3227,8 +3184,6 @@ def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dic
             ),
         },
         stage="strict",
-        policy_values=policy_values,
-        follow_score_value=f(score),
     )
     checks = dict(qualification.get("checks") or {})
     closed_n = int(f(metrics_.get("copy_bt_closed_n")))
@@ -3317,10 +3272,8 @@ def _core_prefix_retention() -> dict:
     return {
         "utility_retention": float(config.CORE_PREFIX_UTILITY_RETENTION),
         "net_retention": float(config.CORE_PREFIX_NET_RETENTION),
-        "stress_retention": float(config.CORE_PREFIX_STRESS_RETENTION),
         "utility_slack": float(config.CORE_PREFIX_ABS_UTILITY_SLACK),
         "net_slack": float(config.CORE_PREFIX_ABS_NET_SLACK),
-        "stress_slack": float(config.CORE_PREFIX_ABS_STRESS_SLACK),
     }
 
 
@@ -3770,7 +3723,6 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             addr = row["addr"]
             formation = _formation_entry_eligibility(
                 effective.get("metrics") or {}, effective.get("score"),
-                policy_values=follow_surface,
             )
             qualification["individualCoreEligible"] = bool(
                 formation.get("individualCoreEligible")
@@ -4334,7 +4286,7 @@ def _apply_formation_params(db, formation, stamp) -> bool:
 
 
 def _complete_retention_decisions(
-    db, generation_id, previous_core, formation, *, stamp,
+    db, generation_id, previous_core, formation,
 ) -> dict[str, core_retention.RetentionDecision]:
     """Classify frozen current-generation evidence for every prior Core."""
     qualifications = {
@@ -4549,13 +4501,11 @@ def _apply_shared_retention_failure(
 
 
 def _build_retained_selection(
-    db, generation_id, stamp, now_ms, retained_formation, *,
-    audit_stamp,
+    db, generation_id, stamp, now_ms, retained_formation,
 ):
     """Materialize the exact-retuned hysteresis membership."""
     return _build_explicit_selection(
         db, generation_id, stamp, now_ms,
-        audit_stamp=audit_stamp,
         forced_core_order=retained_formation.get("selected") or (),
         formation_meta=retained_formation.get("search") or {},
         effective_qualifications=retained_formation.get("qualifications") or {},
@@ -5228,7 +5178,6 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
 
 
 def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bootstrap=False,
-                              validate_price_path=True, audit_stamp=None,
                               forced_core_order=None, formation_meta=None,
                               effective_qualifications=None, effective_scores=None,
                               effective_policies=None, effective_metrics=None,
@@ -5316,7 +5265,6 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         (addr or "").lower(): score
         for addr, score in db.execute("SELECT addr,score FROM watchlist").fetchall()
     }
-    margin_equity_pct = params.load_follow(db).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT)
     for row in profiles:
         addr = (row.get("addr") or "").lower()
         row.update(forward_risk.get(addr) or {})
@@ -5333,8 +5281,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
             **row,
             "copy_bt_data_status": row.get("data_status"),
             "copy_bt_evidence_status": row.get("evidence_status"),
-        }, margin_equity_pct=margin_equity_pct, policy_values=policy_values, as_of_ms=now_ms,
-            follow_score_value=row["follow_score"])
+        })
         if frozen.get("strictStatus") == "deferred" and frozen.get("queueRank") is not None:
             row["follow_qualification"] = {
                 "eligible": True,
@@ -5880,7 +5827,7 @@ def record_challenger_refresh_skip(db, reason="skipped_scan_busy"):
     db.commit()
 
 
-def _regate_profile_status(old_status, old_reason, ok, *, complete_cached_snapshot=False):
+def _regate_profile_status(old_status, ok, *, complete_cached_snapshot=False):
     """Resolve cache-only qualification without reviving profiles that never got a full market snapshot."""
     if old_status == "active" or (ok and complete_cached_snapshot):
         return "active" if ok else "retired"
@@ -6073,7 +6020,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         structural_start = now - int(getattr(p, "days", 14)) * 86_400_000
         structural_fills = [fill for fill in replay_fills if int(fill.get("time") or 0) >= structural_start]
         sector_structure = _current_sector_structure_policy(
-            structural_fills, now, p, source="current_generation_regate",
+            structural_fills, p, source="current_generation_regate",
         )
         m["sector_policy_json"] = json.dumps(
             _structural_specialization_snapshot(sector_structure), sort_keys=True,
@@ -6086,7 +6033,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
         ):
             ok, reason = True, "ok"
         if ok:
-            ok, reason = metrics.gates_state(m, now, p)        # uses the stored open-position metrics
+            ok, reason = metrics.gates_state(m)        # uses the stored open-position metrics
             if (
                 not ok
                 and reason in _SECTOR_RECOVERABLE_STATE_REASONS
@@ -6122,7 +6069,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
                 evidence_fills = allowed_fills
                 evidence_results = _copy_bt_results(addr, allowed_fills, now, p)
             m.update(_open_flow_metrics(evidence_fills, now))
-            _copy_profile_evidence(m, evidence_results, p, addr=addr, now_ms=now)
+            _copy_profile_evidence(m, evidence_results, p)
             if (
                 not current_policy.get("allowed")
                 and not current_policy.get("watch")
@@ -6130,7 +6077,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             ):
                 m["evidence_status"] = "economically_disqualified"
             _attach_open_copy_activity_context(m, addr, open_copy_pnl_by_addr)
-            ok, reason = _profile_copy_qualification(m, now, p)
+            ok, reason = _profile_copy_qualification(m, p)
         ok, reason, score = _finalize_profile_qualification(m, ok, reason)
         # Only policy-only outcomes removed by this release may be safely reactivated from the current
         # cached replay. Structural/data failures still require a fresh network generation.
@@ -6140,7 +6087,7 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
             and str(m.get("evidence_status") or "").lower() not in {"invalid", "missing"}
         )
         status = _regate_profile_status(
-            old, old_reason, ok, complete_cached_snapshot=complete_cached_snapshot,
+            old, ok, complete_cached_snapshot=complete_cached_snapshot,
         )
         db.execute(
             "UPDATE profile SET status=?,reason=?,score=?,raw_quality_score=?,loss_pain=?,max_concurrent=?,win_pt=?,"
@@ -6375,11 +6322,9 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
             effective_metrics=formation.get("walletMetrics") or {},
             effective_score_details=formation.get("scoreDetails") or {},
             effective_replay_params_hash=formation.get("replayParamsHash"),
-            audit_stamp=stamp,
         )
         retention_decisions = _complete_retention_decisions(
             db, generation_id, previous_core, formation,
-            stamp=publication_stamp,
         )
         proposed_core = {
             item.addr for item in rows
@@ -6426,7 +6371,6 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
                     _apply_formation_params(db, formation, publication_stamp)
                     rows, marginal = _build_retained_selection(
                         db, generation_id, publication_stamp, now_ms, formation,
-                        audit_stamp=stamp,
                     )
         retention_decisions = _apply_shared_retention_failure(
             db, generation_id, previous_core, retention_decisions, marginal,
@@ -6934,8 +6878,8 @@ def refresh_challengers(db, p) -> dict:
             # failure or normal evidence-building state must consume its cheap delta. A zeroed wallet commonly
             # fails Portfolio first; skipping here would hide the liquidation fill needed by hard safety below.
             result = _profile_one(
-                db, addr, now_ms - int(p.days) * 86_400_000, now_ms,
-                p, prior, lbs.get(addr, {}), stamp, universe, force_full=False,
+                db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
+                force_full=False,
             )
             # Portfolio week volume is a new-wallet download decision only. Every frozen strict
             # Core/Challenger already owns a complete cache and must be requalified from fills even when its
@@ -7262,7 +7206,6 @@ def refresh_challengers(db, p) -> dict:
             effective_metrics=formation.get("walletMetrics") or {},
             effective_score_details=formation.get("scoreDetails") or {},
             effective_replay_params_hash=formation.get("replayParamsHash"),
-            audit_stamp=stamp,
             allow_loo=False,
         )
         if promotion_blocked_reason:
@@ -7777,7 +7720,7 @@ def scan(db, p) -> None:
                 db, addr, prior, stamp, generation_id, gate.reason, persist=False,
             )
         return addr, prior, _profile_one(
-            db, addr, start_ms, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
+            db, addr, now_ms, p, prior, lbs.get(addr, {}), stamp, universe,
             force_full=addr in full_refetch,
         )
 
@@ -8070,7 +8013,7 @@ def scan(db, p) -> None:
             else:
                 _apply_formation_params(db, formation, selection_stamp)
                 selection_rows, marginal = _build_explicit_selection(
-                    db, generation_id, selection_stamp, now_ms, audit_stamp=stamp,
+                    db, generation_id, selection_stamp, now_ms,
                     forced_core_order=(formation or {}).get("selected") or (),
                     formation_meta=(formation or {}).get("search") or {},
                     effective_qualifications=(formation or {}).get("qualifications") or {},
@@ -8082,7 +8025,6 @@ def scan(db, p) -> None:
                 )
                 retention_decisions = _complete_retention_decisions(
                     db, generation_id, previous_core, formation,
-                    stamp=selection_stamp,
                 )
                 proposed_core = {
                     row.addr for row in selection_rows
@@ -8137,7 +8079,7 @@ def scan(db, p) -> None:
                             )
                             selection_rows, marginal = _build_retained_selection(
                                 db, generation_id, selection_stamp, now_ms,
-                                retained_formation, audit_stamp=stamp,
+                                retained_formation,
                             )
                             formation = retained_formation
                 retention_decisions = _apply_shared_retention_failure(

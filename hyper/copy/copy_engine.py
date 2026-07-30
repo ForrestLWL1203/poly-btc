@@ -11,15 +11,12 @@ from hyper.util import f
 
 @dataclass(frozen=True)
 class OpenSizingParams:
-    stable_sigma_max: float
     high_sigma_min: float
     tier_margin: dict
-    tier_margin_min: dict
     tier_lev_cap: dict
     tier_min_notional: dict
     tier_coin_cap: dict
     min_lev: float
-    deploy_full_pct: float
     max_deploy_pct: float
     min_open_margin_pct: float
     capital_anchor: float = config.INITIAL_BALANCE
@@ -166,10 +163,6 @@ def wallet_margin(positions, *, addr: str) -> float:
     )
 
 
-def total_effective_margin(positions) -> float:
-    return sum(effective_position_margin(position) for position in positions)
-
-
 def wallet_sector_side_margin_room(
     *, cap_pct: float, risk_equity: float, existing_margin: float,
 ) -> float:
@@ -257,8 +250,7 @@ def margin_cap_room(*, cap_pct: float, risk_equity: float, existing_margin: floa
     )
 
 
-def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
-                   coin: str | None = None) -> str:
+def tier_for_sigma(sigma: float, high_sigma_min: float, coin: str | None = None) -> str:
     # Product policy: BTC always uses the stable tier.  Its real sigma is still collected for smart-add
     # spacing and audit, but it never migrates to mid/high sizing.  Every non-BTC market starts at mid and
     # can only move upward to high; low-vol altcoins/stocks never inherit BTC-sized risk.
@@ -268,7 +260,7 @@ def tier_for_sigma(sigma: float, stable_sigma_max: float, high_sigma_min: float,
 
 
 def isolated_liq_px(entry_px: float, side: str, size: float, margin: float,
-                    maintenance_leverage: float | None, leverage: float) -> float:
+                    maintenance_leverage: float | None) -> float:
     """Estimate Hyperliquid isolated liquidation including first-tier maintenance margin."""
     if entry_px <= 0 or size <= 0 or margin <= 0:
         return 0.0
@@ -472,7 +464,7 @@ def plan_open_sizing(
     wallet_sector_side_room: float | None = None,
     wallet_room: float | None = None,
 ) -> OpenSizingPlan:
-    tier = tier_for_sigma(sigma, params.stable_sigma_max, params.high_sigma_min, coin)
+    tier = tier_for_sigma(sigma, params.high_sigma_min, coin)
     lev = max(params.min_lev, float(int(params.tier_lev_cap[tier])))
     # `maintenance_leverage` comes from the venue's per-market maxLeverage metadata. It determines both
     # the first maintenance tier and the maximum leverage that can actually be opened. Simulating above
@@ -492,15 +484,7 @@ def plan_open_sizing(
     )
     margin_equity_pct = max(0.0, min(1.0, float(params.margin_equity_pct)))
     margin_equity = sizing_equity * margin_equity_pct
-    locked = max(0.0, risk_equity - risk_available)
-    margin_pct = margin_pct_for_deploy(
-        params.tier_margin[tier],
-        params.tier_margin_min[tier],
-        params.deploy_full_pct,
-        params.max_deploy_pct,
-        locked,
-        risk_equity,
-    )
+    margin_pct = margin_pct_for_deploy(params.tier_margin[tier])
     wanted_margin = max(0.0, margin_equity * margin_pct)
     room = max(0.0, params.tier_coin_cap[tier] * risk_equity - existing_coin_margin)
     deploy_room = max(0.0, risk_available - (1.0 - params.max_deploy_pct) * risk_equity)
@@ -548,7 +532,7 @@ def plan_open_sizing(
                               risk_equity, sizing_equity, margin_equity)
 
     size = notional / entry_px if entry_px else 0.0
-    liq = isolated_liq_px(entry_px, side, size, margin, maintenance_leverage, lev)
+    liq = isolated_liq_px(entry_px, side, size, margin, maintenance_leverage)
     return OpenSizingPlan(True, "", tier, side, margin_pct, margin, notional, lev, size, liq,
                           room, deploy_room, risk_available, wanted_margin, master_notional,
                           risk_equity, sizing_equity, margin_equity)

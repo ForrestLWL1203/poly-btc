@@ -40,10 +40,6 @@ class PerpPrefilterTests(unittest.TestCase):
         )
         passed = perp_prefilter.evaluate(
             _portfolio(perp_week_volume=250_000, perp_month_pnl=-999_999),
-            pnl_minima={"week": 9e9, "month": 9e9, "all": 9e9},
-            share_min=1.0,
-            min_return_30d=99.0,
-            min_return_7d=99.0,
             min_week_perp_volume=250_000,
         )
         self.assertTrue(passed.passed)

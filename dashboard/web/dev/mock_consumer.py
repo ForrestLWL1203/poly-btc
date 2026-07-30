@@ -6,7 +6,7 @@ Usage (from repo root):  python3 dashboard/web/dev/mock_consumer.py data/hl_mock
 NOTE: production replaces this — the real Scanner must write process_status('scanner','rolling',...)
 per profiled wallet, consume rescan commands, and write scan_progress.
 """
-import asyncio, json, os, sys
+import asyncio, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from hyper import storage

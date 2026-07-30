@@ -4,7 +4,7 @@ Usage (from repo root):  python3 dashboard/web/dev/seed_mock.py data/hl_mock.db
 - equity curve with a midday drawdown then recovery
 - open positions: long/short, crypto+stock, one near liquidation; rejects covering all funnel buckets
 """
-import json, math, os, sys, time
+import json, math, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from hyper import storage, params

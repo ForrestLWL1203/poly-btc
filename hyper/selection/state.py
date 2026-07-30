@@ -7,7 +7,7 @@ must distinguish that from a database which has never published a selection.
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Optional, Tuple
 
-from hyper.util import f, now_iso
+from hyper.util import now_iso
 
 
 CORE = "core"

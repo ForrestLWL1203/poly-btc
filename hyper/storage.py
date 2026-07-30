@@ -494,30 +494,6 @@ CREATE TABLE IF NOT EXISTS formation_prefix_evidence (
 CREATE INDEX IF NOT EXISTS idx_formation_prefix_evidence_generation
     ON formation_prefix_evidence(generation, policy_version, params_hash, member_count);
 
--- Source-wallet high-water state is independent for each execution ledger and contiguous Core membership
--- cycle. Observer restarts therefore cannot erase a freeze/reduction/cooldown already earned by drawdown.
-CREATE TABLE IF NOT EXISTS wallet_risk_state (
-    execution_book       TEXT NOT NULL DEFAULT 'paper',
-    addr                 TEXT NOT NULL,
-    membership_cycle     TEXT NOT NULL,
-    selection_generation TEXT,
-    baseline_equity      REAL NOT NULL,
-    high_water_equity    REAL NOT NULL,
-    current_equity       REAL NOT NULL,
-    drawdown_frac        REAL NOT NULL DEFAULT 0,
-    breaker_stage        INTEGER NOT NULL DEFAULT 0,
-    reduced_in_cycle     INTEGER NOT NULL DEFAULT 0,
-    cooldown_until_ms    INTEGER,
-    params_hash          TEXT,
-    pnl_baseline         REAL NOT NULL DEFAULT 0,
-    active_member        INTEGER NOT NULL DEFAULT 1,
-    started_at           TEXT NOT NULL,
-    updated_at           TEXT NOT NULL,
-    PRIMARY KEY (execution_book, addr)
-);
-CREATE INDEX IF NOT EXISTS idx_wallet_risk_state_stage
-    ON wallet_risk_state(execution_book, breaker_stage, updated_at DESC, addr);
-
 -- Explicit generation-scoped Observer target set.  Roles are core/challenger/exit_only; only enabled core
 -- rows from the current published generation may originate new positions.
 CREATE TABLE IF NOT EXISTS follow_selection (
@@ -1376,8 +1352,6 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_campaign_max_drawdown REAL",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_positions INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_margin_pct REAL",
-    "ALTER TABLE wallet_risk_state ADD COLUMN pnl_baseline REAL NOT NULL DEFAULT 0",
-    "ALTER TABLE wallet_risk_state ADD COLUMN active_member INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE copy_account ADD COLUMN equity_high_water REAL",
     "ALTER TABLE copy_account ADD COLUMN drawdown_stop_active INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE copy_account ADD COLUMN drawdown_stopped_at TEXT",

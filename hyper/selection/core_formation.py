@@ -63,17 +63,8 @@ class PrefixEvaluation:
 
 def validate_final_membership(
     candidate: PrefixEvaluation,
-    *,
-    baseline: PrefixEvaluation | None = None,
-    membership_changed: bool = False,
-    replacing_qualified_core: bool = False,
-    initial_margin_equity: float = 10_000.0,
-    min_relative_utility_gain: float = 0.05,
-    min_net_return_gain: float = 0.02,
 ) -> dict:
     """Validate the shared account without repeating individual-wallet outlier gates."""
-    del baseline, membership_changed, replacing_qualified_core
-    del initial_margin_equity, min_relative_utility_gain, min_net_return_gain
     reasons = []
     if not candidate.feasible:
         reasons.append("membership_dynamic_return_or_execution_failed")
@@ -101,8 +92,7 @@ class PrefixSearchResult:
 
 def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, *,
                       utility_retention: float = .97, net_retention: float = .95,
-                      stress_retention: float = .90, utility_slack: float = 50.0,
-                      net_slack: float = 100.0, stress_slack: float = 100.0) -> bool:
+                      utility_slack: float = 50.0, net_slack: float = 100.0) -> bool:
     """Whether a smaller quality prefix preserves the full-prefix portfolio.
 
     Absolute slack keeps the predicate stable near zero; relative retention governs meaningful portfolios.
@@ -112,7 +102,6 @@ def retains_reference(reference: PrefixEvaluation, candidate: PrefixEvaluation, 
         return False
     utility_floor = reference.utility - max(abs(reference.utility) * (1.0 - utility_retention), utility_slack)
     net_floor = reference.net_pnl - max(abs(reference.net_pnl) * (1.0 - net_retention), net_slack)
-    del stress_retention, stress_slack
     return (
         candidate.utility >= utility_floor
         and candidate.net_pnl >= net_floor

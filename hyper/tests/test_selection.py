@@ -351,7 +351,7 @@ class SelectionTests(unittest.TestCase):
                 "fee_drag": 5.0,
                 "copy_gross_pnl": 100.0,
             },
-        }, baseline_n=0, selected_n=1)
+        }, selected_n=1)
 
         self.assertEqual(result.actionable_open_rate, 0.8)
         self.assertEqual(result.capacity_fit, 0.8)
