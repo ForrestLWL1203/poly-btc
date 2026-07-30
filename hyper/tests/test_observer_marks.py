@@ -1288,6 +1288,63 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_probation_target_stays_tracked_but_blocks_open_and_add(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO watchlist (rank,addr,score,acct_value,sector_policy_json,updated_at) "
+            "VALUES (1,'0xprobation',0.9,10000,?,'now')",
+            ('{"crypto":{"allow":true},"allowed":["crypto"]}',),
+        )
+        db.execute(
+            "INSERT INTO scan_generation "
+            "(generation,status,complete,publishable,is_current,started_at,published_at) "
+            "VALUES ('g1','published',1,1,1,'2026-01-01T00:00:00Z','2026-01-02T00:00:00Z')"
+        )
+        db.execute(
+            "INSERT INTO follow_selection "
+            "(generation,addr,role,enabled,entry_eligible,retention_status,"
+            "retention_failure_streak,selected_at) "
+            "VALUES ('g1','0xprobation','core',1,0,'probation',1,'now')"
+        )
+        db.commit()
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            obs = Observer(db, [], {}, top_n=10)
+            obs.selection_generation = "g1"
+            obs._reload_targets(init=True)
+
+            self.assertIn("0xprobation", obs.addrs)
+            self.assertIn("0xprobation", obs.entry_frozen)
+            self.assertEqual(
+                "retention_probation",
+                obs._new_exposure_block_reason("0xprobation", "BTC"),
+            )
+
+            pos_id = db.execute(
+                "INSERT INTO copy_position "
+                "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
+                "VALUES ('0xprobation','BTC','long','open',100,5,100,500,5,5,'now')"
+            ).lastrowid
+            db.commit()
+            ep = self._live_ep(pos_id, "long", 100, 5)
+            ep.update({
+                "master_open_px": 100,
+                "master_current": 5,
+                "source_open_oids": set(),
+                "seen_oids": set(),
+                "add_orders": {},
+            })
+            obs.taker.open_ep[("0xprobation", "BTC")] = ep
+            obs._dispatch_fill(
+                "0xprobation", "BTC", ("0xprobation", "BTC"),
+                1_000, 1, 5, 6, 99, False, 99,
+            )
+            self.assertEqual(obs.hb.get("skip_retention_probation_add"), 1)
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
     def test_disallowed_sector_open_is_skipped(self):
         db = self._db()
         loop = asyncio.new_event_loop()

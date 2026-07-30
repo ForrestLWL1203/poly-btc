@@ -64,7 +64,14 @@ export function OpenPositionsTable({
                 <td className="num">{fPrice(p.mark)}</td>
                 <td className={"num " + cls(p.unrealizedPnl)}>{fSign(p.unrealizedPnl, 1)}<div className="muted">{fPct(p.unrealizedPctOfMargin, 0)} 保证金</div></td>
                 <td className="addr">{short(p.wallet)} {p.followPos != null
-                  ? <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
+                  ? <React.Fragment>
+                      <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
+                      {p.retentionStatus === "probation" &&
+                        <span className="tint tint-amber" style={{ marginLeft: 6 }}
+                          title="Core 观察期：禁止新开仓和加仓，当前仓位继续减仓、平仓及风控管理">
+                          观察中
+                        </span>}
+                    </React.Fragment>
                   : <span className="tint tint-gray" title="当前不在跟单集(仅平仓)">脱榜</span>}</td>
                 <td className="num" title="跟单延迟:目标开仓 → 我们检测并跟开的秒数(旧仓未记录显示 —)">{p.lagSec != null ? fNum(p.lagSec, 1) + "s" : "—"}</td>
                 <td className={"num " + (p.liqDistancePct != null && p.liqDistancePct > -8 ? "down" : "")} title="距现价多少就触发强平">{fPrice(p.liqPx)}

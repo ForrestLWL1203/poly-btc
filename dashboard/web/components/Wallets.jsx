@@ -122,8 +122,8 @@ export function Wallets({ confirm }) {
                       {warning && <span className={"tint " + warning[1]} style={{ marginLeft: 6 }} title="本轮画像数据不完整">{warning[0]}</span>}
                       {tab === "followed" && w.retentionStatus === "probation" &&
                         <span className="tint tint-amber" style={{ marginLeft: 6 }}
-                          title={w.retentionFailureReason || "首次普通留任失败，仍正常跟单"}>
-                          观察中 {w.retentionFailureStreak || 1}/2
+                          title={`${w.retentionFailureReason || "首次普通留任失败"}；已冻结新开仓和加仓，存量仓位继续管理`}>
+                          观察中 · 禁开/禁加 {w.retentionFailureStreak || 1}/2
                         </span>}
                       {tab === "followed" && (w.retentionStatus === "safety_frozen" || w.retentionStatus === "safety_pending") &&
                         <span className="tint tint-red" style={{ marginLeft: 6 }}>安全冻结</span>}

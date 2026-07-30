@@ -54,6 +54,8 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertNotEqual(active["params"]["STABLE_MARGIN_PCT"], .09)
         self.assertEqual(active["targets"][0]["acctValue"], 12345)
         self.assertEqual(active["targets"][0]["seedCoins"], ["BTC"])
+        self.assertTrue(active["targets"][0]["entryEligible"])
+        self.assertEqual(active["targets"][0]["retentionStatus"], "healthy")
         self.assertIn("COPY_POLICY_VERSION", active["params"])
         self.assertEqual(active["params"]["CORE_MIN_DYNAMIC_COPY_RETURN_30D"], 0.10)
         self.assertEqual(active["params"]["CORE_MIN_DYNAMIC_COPY_RETURN_7D"], 0.03)
@@ -137,6 +139,42 @@ class StrategyRevisionTests(unittest.TestCase):
         active = strategy_revision.load_active(db)
         self.assertEqual(len(active["targets"]), 1)
         self.assertEqual(strategy_revision.resolved_targets(db, active), [])
+
+    def test_probation_entry_freeze_is_part_of_immutable_target_snapshot(self):
+        db = self._db()
+        db.execute(
+            "UPDATE follow_selection SET entry_eligible=0,retention_status='probation',"
+            "retention_failure_reason='strict_copy_7d_conservative_return_below_floor',"
+            "retention_failure_streak=1 WHERE generation='g1' AND addr='0xaaa'"
+        )
+        strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        db.commit()
+
+        target = strategy_revision.load_active(db)["targets"][0]
+        self.assertFalse(target["entryEligible"])
+        self.assertEqual(target["retentionStatus"], "probation")
+        self.assertEqual(target["retentionFailureStreak"], 1)
+
+    def test_legacy_target_snapshot_resolves_current_probation_policy(self):
+        db = self._db()
+        strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        db.execute(
+            "UPDATE follow_selection SET entry_eligible=0,retention_status='probation',"
+            "retention_failure_streak=1 WHERE generation='g1' AND addr='0xaaa'"
+        )
+        db.commit()
+        legacy = strategy_revision.load_active(db)
+        legacy["targets"] = [{
+            key: value for key, value in legacy["targets"][0].items()
+            if key not in {
+                "entryEligible", "retentionStatus",
+                "retentionFailureReason", "retentionFailureStreak",
+            }
+        }]
+
+        target = strategy_revision.resolved_targets(db, legacy)[0]
+        self.assertFalse(target["entryEligible"])
+        self.assertEqual(target["retentionStatus"], "probation")
 
     def test_wallet_star_command_persists_original_order_timestamp(self):
         db = self._db()

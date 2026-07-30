@@ -43,8 +43,9 @@ Repository boundaries:
   builder namespaces are out of scope.
 - Settings saves must not start a scan. A scan starts from the explicit Dashboard action or the configured
   automatic cadence.
-- Every complete discovery scan may publish exactly its currently proven score-prefix membership. There is no
-  promotion confirmation, minimum tenure or incumbent bypass in those Monday/Thursday rebuilds. Challenger
+- Every complete discovery scan may publish its currently proven score-prefix membership subject to the
+  explicit incumbent-retention contract below. There is no promotion confirmation or forced minimum tenure.
+  Challenger
   daily refresh is the deliberate exception: it may publish only the same Core set or a strict superset, never
   a removal or replacement. Expensive optimization runs only for a proven daily promotion or when explicitly
   requested; an evidence-only refresh must not silently start a parameter grid. Automatic daily removal has
@@ -373,8 +374,10 @@ Shared replay evaluates real balance contention, open capture, capacity, deploym
 per-coin limits. Core and Challenger order is the final profit-aligned score order. Leave-one-out economics may remove
 only the current low-profit suffix and remains audit telemetry for every other member. Complete discovery gives
 existing Core an independent retention lane. A first ordinary 7d/return/PF/activity/sample/open-rate or normal
-liquidation-count failure publishes that wallet as enabled `probation`; only a second consecutive successful
-Monday/Thursday complete generation confirms demotion. Recovery clears the streak. Data/path failures do not
+liquidation-count failure publishes that wallet as Core `probation`, but `entry_eligible=false` immediately
+blocks Observer new opens and adds while reductions, closes and risk management continue. Only a second
+successful complete generation at least 72 hours later confirms demotion; adjacent manual and scheduled scans
+cannot count as independent confirmations. Recovery clears the streak. Data/path failures do not
 publish and do not advance the streak. Structural failures, non-positive 30d closed/conservative profit,
 open-loss ratio above 50%, no executable sector, verified source zeroing, and an 8% Copy liquidation bypass
 hysteresis. Healthy/probation Core may be replaced only when both standardized and Paper shared 30d conservative

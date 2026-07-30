@@ -1,5 +1,7 @@
+import sqlite3
 import unittest
 
+from hyper.discovery import scanner
 from hyper.selection import core_retention
 
 
@@ -41,6 +43,41 @@ class CoreRetentionTest(unittest.TestCase):
         self.assertEqual(core_retention.PROBATION, incomplete.status)
         self.assertEqual(1, incomplete.failure_streak)
         self.assertIsNone(incomplete.last_generation)
+
+    def test_back_to_back_complete_scan_does_not_confirm_probation(self):
+        pending = core_retention.advance(
+            previous_status=core_retention.PROBATION,
+            previous_streak=1,
+            previous_reason="strict_copy_7d_conservative_return_below_floor",
+            previous_started_generation="g0",
+            generation="g1",
+            scan_kind="complete",
+            scan_successful=True,
+            reason="strict_copy_7d_conservative_return_below_floor",
+            confirmation_eligible=False,
+        )
+        self.assertEqual(core_retention.PROBATION, pending.status)
+        self.assertEqual(1, pending.failure_streak)
+        self.assertTrue(pending.retain_enabled)
+        self.assertEqual("confirmation_interval_pending", pending.action)
+
+    def test_confirmation_interval_uses_generation_start_times(self):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE scan_generation (generation TEXT, started_at TEXT)")
+        db.executemany(
+            "INSERT INTO scan_generation VALUES (?,?)",
+            [
+                ("g0", "2026-01-01T04:00:00Z"),
+                ("g-soon", "2026-01-02T04:00:00Z"),
+                ("g-ready", "2026-01-04T04:00:00Z"),
+            ],
+        )
+        self.assertFalse(scanner._retention_confirmation_eligible(
+            db, "g0", "g-soon", previous_streak=1,
+        ))
+        self.assertTrue(scanner._retention_confirmation_eligible(
+            db, "g0", "g-ready", previous_streak=1,
+        ))
 
     def test_recovery_clears_probation_and_hard_failure_is_immediate(self):
         recovered = core_retention.advance(
@@ -101,6 +138,14 @@ class CoreRetentionTest(unittest.TestCase):
                 "netPnl30d": 100, "openLossRatio30d": 0.0,
             },
         }))
+
+    def test_missing_shared_baseline_fails_closed_into_retention_replay(self):
+        gate = core_retention.replacement_gate({}, {
+            "standardizedAccount": {"netPnl30d": 200, "dynamicReturn7d": .08},
+            "paperAccount": {"netPnl30d": 200, "dynamicReturn7d": .08},
+        })
+        self.assertFalse(gate["eligible"])
+        self.assertEqual("baseline_shared_validation_missing", gate["reason"])
 
 
 if __name__ == "__main__":

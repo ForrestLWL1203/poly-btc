@@ -148,6 +148,7 @@ def advance(
     scan_successful: bool,
     reason: Optional[str],
     deferred: bool = False,
+    confirmation_eligible: bool = True,
 ) -> RetentionDecision:
     """Advance one Core retention state.
 
@@ -187,6 +188,12 @@ def advance(
             generation, False, False, "immediate_demotion",
         )
 
+    if previous_streak > 0 and not confirmation_eligible:
+        return RetentionDecision(
+            PROBATION, previous_streak, reason, previous_started_generation,
+            None, True, True, "confirmation_interval_pending",
+        )
+
     streak = previous_streak + 1
     started = previous_started_generation or generation
     if streak >= int(config.CORE_RETENTION_CONFIRMATIONS):
@@ -222,6 +229,34 @@ def baseline_protectable(validation: Optional[Mapping]) -> bool:
         if ratio is not None and float(ratio) > 0.50:
             return False
     return True
+
+
+def replacement_gate(
+    baseline_validation: Optional[Mapping],
+    proposal_validation: Optional[Mapping],
+) -> dict:
+    """Distinguish missing shared proof from a baseline proven unsafe.
+
+    Parameter-only revisions intentionally do not claim that an old replay
+    validates new parameters. Missing validation therefore fails closed into
+    exact retained-membership replay instead of waiving probation protection.
+    """
+    baseline_validation = dict(baseline_validation or {})
+    has_account_proof = all(
+        _account_metrics(baseline_validation, key).get("netPnl30d") is not None
+        for key in ("standardizedAccount", "paperAccount")
+    )
+    if not has_account_proof:
+        return {
+            "eligible": False,
+            "reason": "baseline_shared_validation_missing",
+        }
+    if not baseline_protectable(baseline_validation):
+        return {
+            "eligible": True,
+            "reason": "baseline_shared_safety_unprotectable",
+        }
+    return replacement_gain(baseline_validation, proposal_validation)
 
 
 def replacement_gain(

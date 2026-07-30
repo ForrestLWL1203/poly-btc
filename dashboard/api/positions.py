@@ -10,7 +10,9 @@ def _follow_set_cte() -> str:
         "ORDER BY id DESC LIMIT 1"
         "), follow_set AS ("
         "SELECT fs.addr,COALESCE(fs.selection_rank,"
-        "ROW_NUMBER() OVER (ORDER BY COALESCE(fs.utility,-1e999) DESC,fs.addr)) AS follow_pos "
+        "ROW_NUMBER() OVER (ORDER BY COALESCE(fs.utility,-1e999) DESC,fs.addr)) AS follow_pos,"
+        "COALESCE(fs.retention_status,'healthy') AS retention_status,"
+        "COALESCE(fs.retention_failure_streak,0) AS retention_failure_streak "
         "FROM follow_selection fs JOIN current_selection sg ON sg.generation=fs.generation "
         "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
         "WHERE fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1"
@@ -127,7 +129,8 @@ def ep_positions(db, qs):
         "cp.master_open_px,cp.master_leverage,cp.master_peak_sz,cp.strategy_revision_id,"
         "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
         "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl,"
-        "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos "
+        "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos,"
+        "fs.retention_status,fs.retention_failure_streak "
         "FROM copy_position cp "
         "LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "
         "LEFT JOIN market_risk_episode re ON re.pos_id=cp.pos_id "
@@ -152,6 +155,8 @@ def ep_positions(db, qs):
             "unrealizedPnl": upnl,
             "unrealizedPctOfMargin": (upnl / margin * 100) if margin else 0.0,
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": r["follow_pos"],
+            "retentionStatus": r["retention_status"] or "healthy",
+            "retentionFailureStreak": int(r["retention_failure_streak"] or 0),
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
             "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),

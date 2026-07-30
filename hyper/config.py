@@ -341,6 +341,9 @@ COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT = 0.08
 CORE_COPY_MAX_SINGLE_LIQUIDATION_LOSS_PCT = COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT
 CORE_REPLACEMENT_MIN_SHARED_GAIN = 0.10
 CORE_RETENTION_CONFIRMATIONS = 2
+# Back-to-back manual/scheduled complete scans are one observation regime, not two independent confirmations.
+# Monday -> Thursday is 72 hours, so the normal cadence still confirms an unresolved probation at the next run.
+CORE_RETENTION_MIN_CONFIRMATION_HOURS = 72
 
 # Intratrade path evidence is retained for diagnostics only. Historical maximum drawdown is not a wallet,
 # sector, score, tuning or Core admission input: live account drawdown protection belongs in Observer.

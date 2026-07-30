@@ -75,9 +75,17 @@ class ApiPositionsPerfTests(unittest.TestCase):
         return db
 
     def test_open_positions_embed_follow_positions_without_extra_query(self):
-        res = api_positions.ep_positions(GuardedDb(self._db()), {"status": ["open"]})
+        db = self._db()
+        db.execute(
+            "UPDATE follow_selection SET entry_eligible=0,retention_status='probation',"
+            "retention_failure_streak=1 WHERE generation='g1' AND addr='0xaaa'"
+        )
+        db.commit()
+        res = api_positions.ep_positions(GuardedDb(db), {"status": ["open"]})
 
         self.assertEqual(res["positions"][0]["followPos"], 1)
+        self.assertEqual(res["positions"][0]["retentionStatus"], "probation")
+        self.assertEqual(res["positions"][0]["retentionFailureStreak"], 1)
 
     def test_closed_positions_embed_follow_positions_without_extra_query(self):
         res = api_positions.ep_positions(GuardedDb(self._db()), {"status": ["closed"]})

@@ -51,7 +51,9 @@ def params_snapshot(db, values: Optional[dict] = None) -> tuple[dict, str]:
 def target_snapshot(db, generation: str) -> list[dict]:
     """Capture immutable Core execution context for one explicit selection generation."""
     rows = db.execute(
-        "SELECT lower(fs.addr) FROM follow_selection fs "
+        "SELECT lower(fs.addr),COALESCE(fs.entry_eligible,1),"
+        "COALESCE(fs.retention_status,'healthy'),fs.retention_failure_reason,"
+        "COALESCE(fs.retention_failure_streak,0) FROM follow_selection fs "
         "LEFT JOIN target_controls tc ON tc.addr=fs.addr WHERE fs.generation=? "
         "AND lower(fs.role)='core' AND COALESCE(fs.enabled,1)=1 "
         "ORDER BY COALESCE(tc.pinned,0) DESC,"
@@ -61,11 +63,18 @@ def target_snapshot(db, generation: str) -> list[dict]:
         (generation,),
     ).fetchall()
     addrs = []
+    execution_policy = {}
     seen = set()
     for row in rows:
         addr = (row[0] or "").strip().lower()
         if addr and addr not in seen:
             addrs.append(addr)
+            execution_policy[addr] = {
+                "entryEligible": bool(row[1]),
+                "retentionStatus": row[2] or "healthy",
+                "retentionFailureReason": row[3],
+                "retentionFailureStreak": int(row[4] or 0),
+            }
             seen.add(addr)
     if not addrs:
         return []
@@ -99,6 +108,7 @@ def target_snapshot(db, generation: str) -> list[dict]:
             "acctValue": wallet.get(addr, {}).get("acctValue"),
             "sectorPolicy": wallet.get(addr, {}).get("sectorPolicy") or {},
             "seedCoins": seed.get(addr) or [],
+            **execution_policy.get(addr, {}),
         }
         for addr in addrs
     ]
@@ -138,6 +148,28 @@ def load_active(db) -> Optional[dict]:
 def resolved_targets(db, bundle: dict, limit: Optional[int] = None) -> list[dict]:
     """Apply the live operator disable overlay without mutating the immutable target snapshot."""
     targets = [dict(row) for row in (bundle.get("targets") or []) if row.get("addr")]
+    legacy_missing_policy = [
+        row["addr"].lower() for row in targets if "entryEligible" not in row
+    ]
+    if legacy_missing_policy:
+        marks = ",".join("?" for _ in legacy_missing_policy)
+        policy = {
+            (row[0] or "").lower(): {
+                "entryEligible": bool(row[1]),
+                "retentionStatus": row[2] or "healthy",
+                "retentionFailureReason": row[3],
+                "retentionFailureStreak": int(row[4] or 0),
+            }
+            for row in db.execute(
+                f"SELECT addr,COALESCE(entry_eligible,1),"
+                f"COALESCE(retention_status,'healthy'),retention_failure_reason,"
+                f"COALESCE(retention_failure_streak,0) FROM follow_selection "
+                f"WHERE generation=? AND lower(addr) IN ({marks})",
+                (bundle.get("selectionGeneration"), *legacy_missing_policy),
+            ).fetchall()
+        }
+        # Rolling-deploy bridge only. New revisions always freeze these fields in targets_json.
+        targets = [{**row, **policy.get(row["addr"].lower(), {})} for row in targets]
     if targets:
         marks = ",".join("?" for _ in targets)
         disabled = {

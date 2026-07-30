@@ -114,7 +114,9 @@ Wallet quality and funded-account membership are separate decisions.
   five days. Daily refresh first certifies with the active parameters. If the proposed Core changes, it runs
   parameter optimization and repeats strict certification before publishing membership and parameters
   together; an unchanged Core skips the grid. Existing Core uses two-complete-scan retention hysteresis for
-  ordinary short-term failures; the first failure remains enabled as probation. Healthy/probation replacement
+  ordinary short-term failures; the first failure remains Core as probation but immediately loses new-open and
+  add authority. A second failure may confirm demotion only after 72 hours, so adjacent manual and scheduled
+  complete scans cannot manufacture two independent confirmations. Healthy/probation replacement
   requires at least 10% shared 30-day conservative-profit gain on both standardized and Paper accounts with no
   7-day regression. Normally demoted Core stays in the complete-scan recovery lane for seven days, while daily
   Challenger refresh excludes it. There is no promotion delay, star

@@ -4344,6 +4344,12 @@ def _complete_retention_decisions(
         if safety and safety[0] == "confirmed":
             reason = safety[1] or "source_account_liquidated_zero"
         previous = wallet_retention_state(db, addr)
+        confirmation_eligible = _retention_confirmation_eligible(
+            db,
+            previous.get("startedGeneration"),
+            generation_id,
+            previous_streak=previous.get("failureStreak"),
+        )
         decisions[addr] = core_retention.advance(
             previous_status=previous["status"],
             previous_streak=previous["failureStreak"],
@@ -4354,8 +4360,36 @@ def _complete_retention_decisions(
             scan_successful=True,
             reason=reason,
             deferred=deferred,
+            confirmation_eligible=confirmation_eligible,
         )
     return decisions
+
+
+def _retention_confirmation_eligible(
+    db, started_generation, current_generation, *, previous_streak=0,
+) -> bool:
+    """Require independent wall-clock evidence before confirming an ordinary demotion."""
+    if int(previous_streak or 0) <= 0 or not started_generation:
+        return True
+    rows = {
+        str(row[0]): row[1]
+        for row in db.execute(
+            "SELECT generation,started_at FROM scan_generation "
+            "WHERE generation IN (?,?)",
+            (started_generation, current_generation),
+        ).fetchall()
+    }
+    try:
+        started_s = calendar.timegm(time.strptime(
+            str(rows[started_generation]), "%Y-%m-%dT%H:%M:%SZ",
+        ))
+        current_s = calendar.timegm(time.strptime(
+            str(rows[current_generation]), "%Y-%m-%dT%H:%M:%SZ",
+        ))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    minimum_s = float(config.CORE_RETENTION_MIN_CONFIRMATION_HOURS) * 3600.0
+    return current_s - started_s >= minimum_s
 
 
 def _retention_exact_formation(
@@ -6341,16 +6375,9 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
                     "finalStrictCopy"
                 )
             )
-            replacement_gate = (
-                core_retention.replacement_gain(
-                    baseline_validation,
-                    (marginal.search_meta or {}).get("finalStrictCopy"),
-                )
-                if core_retention.baseline_protectable(baseline_validation)
-                else {
-                    "eligible": True,
-                    "reason": "baseline_shared_safety_unprotectable",
-                }
+            replacement_gate = core_retention.replacement_gate(
+                baseline_validation,
+                (marginal.search_meta or {}).get("finalStrictCopy"),
             )
             if not replacement_gate["eligible"]:
                 desired_retained = tuple(
@@ -8048,15 +8075,8 @@ def scan(db, p) -> None:
                         ((marginal.search_meta or {}).get("finalStrictCopy"))
                         if marginal else None
                     )
-                    replacement_gate = (
-                        core_retention.replacement_gain(
-                            baseline_validation, proposal_validation,
-                        )
-                        if core_retention.baseline_protectable(baseline_validation)
-                        else {
-                            "eligible": True,
-                            "reason": "baseline_shared_safety_unprotectable",
-                        }
+                    replacement_gate = core_retention.replacement_gate(
+                        baseline_validation, proposal_validation,
                     )
                     if not replacement_gate["eligible"]:
                         desired_retained = tuple(

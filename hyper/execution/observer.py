@@ -184,6 +184,7 @@ class Observer:
         self.vol_coins: set = set()      # coins we've encountered -> the periodic σ-refresh work set
         self.held_off: set = set()       # wallets polled ONLY because we hold a copy (off-watchlist) ->
         #                                  EXIT-ONLY: follow their reduce/close, never open a NEW position
+        self.entry_frozen: set = set()   # probation Core: manage exits, but originate no open/add exposure
         self.target_acct: dict = {}      # addr -> target's account value (conviction denominator)
         self.target_sector_policy: dict = {}  # addr -> sector allow/deny policy from watchlist
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
@@ -469,6 +470,8 @@ class Observer:
         book = book or self.taker
         if str(addr or "").lower() in self.safety_frozen:
             return "wallet_safety_frozen"
+        if str(addr or "").lower() in self.entry_frozen:
+            return "retention_probation"
         wallet_open_n = sum(
             1 for position in book.open_ep.values()
             if str(position.get("addr") or "").lower() == str(addr or "").lower()
@@ -947,6 +950,16 @@ class Observer:
                 (r[0] or "").lower(): parse_json_obj(r[1])
                 for r in self.db.execute("SELECT addr, sector_policy_json FROM watchlist").fetchall()
             }
+            entry_frozen = {
+                str(row[0] or "").lower()
+                for row in self.db.execute(
+                    "SELECT addr FROM follow_selection WHERE generation=? "
+                    "AND lower(role)='core' AND COALESCE(enabled,1)=1 "
+                    "AND COALESCE(entry_eligible,1)=0",
+                    (self.selection_generation,),
+                ).fetchall()
+                if row[0]
+            }
         else:
             rows = list(target_snapshot)[:max(0, int(self.top_n))]
             addrs = [(row.get("addr") or "").lower() for row in rows if row.get("addr")]
@@ -955,9 +968,16 @@ class Observer:
             target_sector_policy = {
                 row["addr"].lower(): dict(row.get("sectorPolicy") or {}) for row in rows
             }
+            entry_frozen = {
+                row["addr"].lower()
+                for row in rows
+                if row.get("entryEligible") is False
+                or row.get("retentionStatus") == "probation"
+            }
         self.seed_coins = seed
         self.target_acct = target_acct
         self.target_sector_policy = target_sector_policy
+        self.entry_frozen = entry_frozen
         # SAFEGUARD: never stop polling a wallet we still hold a copy on, even if it fell off the
         # watchlist this scan — else we'd miss its exit and dumb-hold the position to liquidation.
         held_off = [a for a in {addr for (addr, _) in self.open_ep} if a not in addrs]
@@ -970,7 +990,11 @@ class Observer:
         self.addrs = addrs
         if init or new or dropped or held_off:
             extra = f", {len(held_off)} held-off-list" if held_off else ""
-            _log(f"watchlist: tracking {len(addrs)} wallets (+{len(new)} new, -{len(dropped)} dropped{extra})")
+            probation = f", {len(entry_frozen)} probation-frozen" if entry_frozen else ""
+            _log(
+                f"watchlist: tracking {len(addrs)} wallets "
+                f"(+{len(new)} new, -{len(dropped)} dropped{extra}{probation})"
+            )
 
     def _reload_strategy(self, init=False):
         """Load one immutable Core+params bundle from a single SQLite read snapshot."""
@@ -1839,9 +1863,15 @@ class Observer:
                     )
                     self.db.commit()
                 return
-            if self.paused or addr in self.held_off or not self._sector_allowed(addr, coin):
+            if (
+                self.paused
+                or addr in self.held_off
+                or addr in self.entry_frozen
+                or not self._sector_allowed(addr, coin)
+            ):
                 self._tally("skip_paused_add" if self.paused else
                             "skip_heldoff_add" if addr in self.held_off else
+                            "skip_retention_probation_add" if addr in self.entry_frozen else
                             "skip_sector_add", book)
                 return
             asyncio.create_task(self._apply_add(addr, coin, ep, t, px, signed, pos1, oid, book))
@@ -2140,6 +2170,9 @@ class Observer:
         async with ep["lock"]:
             if str(addr or "").lower() in self.safety_frozen:
                 self._tally("skip_wallet_safety_frozen", book)
+                return False
+            if str(addr or "").lower() in self.entry_frozen:
+                self._tally("skip_retention_probation_add", book)
                 return False
             try:
                 await asyncio.wait_for(ep["entries_ready"].wait(), timeout=12)
