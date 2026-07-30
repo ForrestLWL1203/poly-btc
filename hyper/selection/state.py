@@ -130,13 +130,55 @@ def published_core_addrs(db, limit: Optional[int] = None) -> Optional[list]:
         tc_cols = _columns(db, "target_controls")
         if {"addr", "enabled"}.issubset(tc_cols):
             marks = ",".join("?" for _ in addrs)
+            intent_clause = (
+                " OR COALESCE(intent,'active')!='active'"
+                if "intent" in tc_cols else ""
+            )
             disabled = {
                 (r[0] or "").lower() for r in db.execute(
-                    f"SELECT addr FROM target_controls WHERE enabled=0 AND lower(addr) IN ({marks})",
+                    f"SELECT addr FROM target_controls WHERE "
+                    f"(COALESCE(enabled,1)=0{intent_clause}) AND lower(addr) IN ({marks})",
                     tuple(addrs),
                 ).fetchall()
             }
             addrs = [a for a in addrs if a not in disabled]
+    if limit is not None:
+        addrs = addrs[:max(0, int(limit))]
+    return addrs
+
+
+def published_core_membership(db, limit: Optional[int] = None) -> Optional[list]:
+    """Load effective Core seats, including draining wallets.
+
+    ``requalify`` has already released its seat.  ``draining`` retains the
+    underlying membership while execution continues to use
+    :func:`published_core_addrs`, which only returns active targets.
+    """
+    generation = latest_published_generation(db)
+    if generation is None or not _table_exists(db, "follow_selection"):
+        return None
+    rank = "COALESCE(fs.selection_rank,999999),"
+    control_join = ""
+    control_where = ""
+    if _table_exists(db, "target_controls"):
+        columns = _columns(db, "target_controls")
+        if "intent" in columns:
+            control_join = " LEFT JOIN target_controls tc ON lower(tc.addr)=lower(fs.addr)"
+            control_where = " AND COALESCE(tc.intent,'active') IN ('active','draining')"
+    rows = db.execute(
+        "SELECT fs.addr FROM follow_selection fs" + control_join
+        + " WHERE fs.generation=? AND lower(fs.role)='core' "
+        "AND COALESCE(fs.enabled,1)=1" + control_where
+        + f" ORDER BY {rank}COALESCE(fs.follow_score,-1e999) DESC,lower(fs.addr),fs.addr",
+        (generation,),
+    ).fetchall()
+    addrs = []
+    seen = set()
+    for row in rows:
+        addr = (row[0] or "").strip().lower()
+        if addr and addr not in seen:
+            addrs.append(addr)
+            seen.add(addr)
     if limit is not None:
         addrs = addrs[:max(0, int(limit))]
     return addrs

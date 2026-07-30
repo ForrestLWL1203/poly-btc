@@ -161,17 +161,16 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
   policy-mismatched complete generation makes daily fail closed. It reruns the same frozen activity, pre-strict,
   final individual strict and shared admission contract as complete discovery; daily is never a weaker route.
   It first uses the active strategy surface (`retune=False`) to replay the bounded Top16 and shared account
-  strictly. A proposed Core addition may run the
-  parameter grid only when the fixed-surface result retains every incumbent; the tuned result must also be a
-  strict superset before it can publish. A proposal which removes or replaces any incumbent carries the exact
-  previous Core snapshot into the fresh evidence generation and leaves every proposed newcomer Challenger.
-  An unchanged Core keeps its existing order, does not retune and does not reset tune age. A current-Core
-  data/path failure retains the previous generation; a deferred Challenger remains in the frozen pool for the
-  next daily run. Core demotion otherwise remains the responsibility of complete Monday/Thursday discovery
-  scans. A recent source self-liquidation may bypass the membership floor only when the fill identifies that
-  wallet as `liquidatedUser` and fresh standard/affected-dex snapshots all show zero equity and no positions.
-  A canonical Copy liquidation at or above the 8% episode-opening-equity limit may also bypass it. The same
-  daily publication makes either wallet Exit-only when an existing copy still needs management.
+  strictly. Existing `active` and `draining` Core wallets form the effective membership floor; `requalify`
+  wallets have released their seats but remain in the daily strict-requalification pool. Low and medium
+  financial risk never removes an incumbent or revokes entry permission. Empty seats may be filled by the
+  highest strict proposal; a full 16-wallet Core never auto-replaces an incumbent. Membership changes alone
+  trigger exact-membership retuning. A current-Core data/path failure retains the previous generation and does
+  not advance risk confirmation. Automatic removal is limited to durable high risk, recoverable zero-equity
+  unavailability, structural uncopyability, or an already-resolved losing operator exit. High risk requires a
+  verified source self-liquidation plus zero equity/no positions, or a Canonical/actual Copy liquidation losing
+  at least 8% of episode opening equity; legacy positions without opening equity cannot satisfy the actual-Copy
+  threshold.
 - Complete scans, manual scans and Challenger refreshes share `data/run/scanner.lock`. A busy daily job records
   `skipped_scan_busy` and exits successfully. Workset and fill transport remain separate: complete worksets are
   `all`; daily worksets are `frozen_challenger_pool`; fill transport is delta unless a complete run repairs it.
@@ -337,6 +336,12 @@ The user-facing roles are:
 - **Rejected**: business value/structure is below the observation line and is not shown as Challenger.
 - **Quarantine**: collection/cache/replay/valuation/strategy data is invalid and is not a new-entry target.
 
+Membership is separate from live operator intent. `target_controls.intent` is `active`, `draining`, or
+`requalify`. A draining wallet keeps its Core seat but cannot open or add; a requalify wallet is projected as
+Challenger and has released the seat. Risk is separately projected from immutable
+`wallet_risk_assessment` rows into `wallet_registry`: low/medium are advisory, high is durable, unavailable is
+recoverable after funding and strict requalification, and structural/data blocks are not financial risk.
+
 `CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count, service quota or
 forced replacement count: zero to sixteen wallets may publish. Complete discovery formation is:
 
@@ -359,38 +364,33 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
    a 30-day open-loss ratio at or below 50%, at least 70% open follow, positive closed and conservative PnL in
    both windows and complete price-path coverage. Every member must remain at or below three
    simulated liquidations and below 8% loss on every individual liquidated episode.
-7. Persist both the standardized `$10,000` starting-account result and the result using current Paper equity.
-   Any failed qualification or final replay aborts the proposal atomically; it cannot publish a partial list.
+7. Persist both `recommendedCore` (pure score/replay proposal) and `effectiveCore` (incumbent/risk/intent overlay),
+   plus standardized `$10,000` and current-Paper-equity results. Incomplete paths, valuation or immutable
+   context abort publication. A data-complete economic-only failure publishes `operator_review_degraded` with
+   the existing effective membership and parameters; it does not promote or retune.
 
 An operator may star a wallet through the Dashboard for attention and manual review. The durable
-`target_controls.pinned` flag is never a selection permission. Manual disable remains authoritative, and an
-open copied position whose source loses Core authority is managed exit-only.
+`target_controls.pinned` flag is never a selection permission. A conditional exit with no positions moves
+immediately to `requalify`. With positions it captures the complete current position-ID cohort and enters
+`draining`: new opens/adds stop while reductions, closes and risk management continue. Once every captured
+position is terminal, positive aggregate post-fee PnL with no liquidation/high/system block restores `active`;
+otherwise it resolves to `requalify`. There is no permanent manual-disable state.
 
 A wallet needs the generation-frozen activity proof defined above. A 72-hour signal is shown as freshness
 context but has no permission effect. Existing copied positions whose source loses Core authority remain
 managed exit-only.
 
 Shared replay evaluates real balance contention, open capture, capacity, deployment, drawdown, fees/slippage and
-per-coin limits. Core and Challenger order is the final profit-aligned score order. Leave-one-out economics may remove
-only the current low-profit suffix and remains audit telemetry for every other member. Complete discovery gives
-existing Core an independent retention lane. A first ordinary 7d/return/PF/activity/sample/open-rate or normal
-liquidation-count failure publishes that wallet as Core `probation`, but `entry_eligible=false` immediately
-blocks Observer new opens and adds while reductions, closes and risk management continue. Only a second
-successful complete generation at least 72 hours later confirms demotion; adjacent manual and scheduled scans
-cannot count as independent confirmations. Recovery clears the streak. Data/path failures do not
-publish and do not advance the streak. Structural failures, non-positive 30d closed/conservative profit,
-open-loss ratio above 50%, no executable sector, verified source zeroing, and an 8% Copy liquidation bypass
-hysteresis. Healthy/probation Core may be replaced only when both standardized and Paper shared 30d conservative
-net profit improve at least 10% and neither 7d conservative return declines; the exact final membership is
-retuned before publication. A normally demoted Core stays on the complete-scan delta/evidence recovery lane for
-seven days but does not enter the daily Challenger pool. Challenger daily refresh instead
-uses the current Core as a membership floor: it may add a strictly certified wallet, but it cannot remove or
-replace an incumbent or reshuffle the unchanged set. Its promotion candidates must already be Core or strict
-Challenger rows of the latest complete new-model generation and must pass the exact same final strict/shared
-contract as a complete scan. Hard safety is limited to a verified source
-self-liquidation plus a fresh zero-equity/no-position account snapshot, or one canonical Copy liquidation loss
-at or above 8% of its episode-opening equity. Either immediately removes new-open authority without treating an
-ordinary loss or a 5%–8% isolated liquidation as a blow-up. Observer persists `pending/confirmed/cleared`
+per-coin limits. Complete and daily assessments use the same risk state machine. The first ordinary
+7d/return/PF/activity/sample/open-rate or low-sample actual-Copy failure is low risk. A second independent
+successful assessment at least 72 hours later is medium risk; non-positive 30-day closed/conservative PnL,
+open loss above 50% of 30-day closed profit, or actual 30-day conservative loss with at least three closed
+positions is immediately medium. Low/medium remain Core with entry permission, and one complete healthy
+assessment clears them. Data/path/valuation failures do not advance confirmation. Structural failures block
+execution without masquerading as high financial risk. Zero equity/no positions without liquidation proof is
+recoverable unavailable. Verified source zeroing and Canonical/actual Copy liquidation loss at or above 8% of
+opening equity are durable high-risk events and immediately remove new-open authority.
+Ordinary losses and 5%–8% isolated liquidations remain advisory evidence. Observer persists `pending/confirmed/cleared`
 execution freezes separately from permanent risk evidence: a target self-liquidation fill blocks new opens/adds
 until standard and affected-DEX clearinghouse snapshots prove either recovery or zero equity with no positions.
 

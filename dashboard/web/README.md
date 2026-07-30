@@ -31,3 +31,7 @@ dashboard/web/
 ## Against the REAL system
 Point `--db` at the live `data/hl.db` (fed by the real observer/scanner) and drop the mock consumer.
 The frontend already speaks the real API contract and uses SSE with polling fallback for live refresh.
+
+Core wallet rows use the accessible `coin-ban-btn`/`BanIcon` control for conditional exit. Confirmation copy
+must distinguish flat (`立即转候选，等待每日重评恢复`) from held (`仅退出；整批盈利恢复，亏损或清算转候选`) wallets.
+Do not reintroduce the old enable toggle or label low/medium financial risk as an execution freeze.

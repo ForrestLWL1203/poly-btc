@@ -382,6 +382,12 @@ CREATE TABLE IF NOT EXISTS wallet_registry (
     core_retention_reason      TEXT,
     core_retention_started_generation TEXT,
     last_core_retention_generation TEXT,
+    risk_level                 TEXT NOT NULL DEFAULT 'normal',
+    risk_reasons_json          TEXT,
+    risk_confirmation_count    INTEGER NOT NULL DEFAULT 0,
+    risk_first_confirmed_at     TEXT,
+    risk_assessed_at           TEXT,
+    risk_block_reason          TEXT,
     updated_at                 TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_registry_state_role
@@ -406,6 +412,25 @@ CREATE TABLE IF NOT EXISTS wallet_risk_event (
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_risk_event_addr_type
     ON wallet_risk_event(addr, event_type, occurred_at DESC);
+
+-- Every successful scanner assessment is immutable at generation level.  The registry above is only the
+-- latest projection used by execution and the Dashboard.
+CREATE TABLE IF NOT EXISTS wallet_risk_assessment (
+    generation          TEXT NOT NULL,
+    addr                TEXT NOT NULL,
+    source              TEXT NOT NULL,
+    risk_level          TEXT NOT NULL,
+    reasons_json        TEXT,
+    evidence_json       TEXT,
+    confirmation_count  INTEGER NOT NULL DEFAULT 0,
+    first_confirmed_at  TEXT,
+    assessed_at         TEXT NOT NULL,
+    complete            INTEGER NOT NULL DEFAULT 1,
+    block_reason        TEXT,
+    PRIMARY KEY (generation, addr)
+);
+CREATE INDEX IF NOT EXISTS idx_wallet_risk_assessment_addr_time
+    ON wallet_risk_assessment(addr, assessed_at DESC);
 
 -- Fast execution-side safety freezes are deliberately separate from permanent admission vetoes.
 -- A pending source liquidation blocks new exposure while clearinghouse confirmation is retried.
@@ -616,6 +641,11 @@ CREATE INDEX IF NOT EXISTS idx_follow_history_last_followed ON follow_history(la
 CREATE TABLE IF NOT EXISTS target_controls (
     addr        TEXT PRIMARY KEY,
     enabled     INTEGER DEFAULT 1,   -- observe/copy this target?
+    intent      TEXT NOT NULL DEFAULT 'active', -- active / draining / requalify
+    intent_requested_at TEXT,
+    intent_position_ids_json TEXT,
+    intent_resolved_at TEXT,
+    intent_resolution TEXT,
     pinned      INTEGER DEFAULT 0,
     pinned_at   TEXT,                -- operator Core lock order; cleared when unstarred
     note        TEXT,
@@ -813,7 +843,8 @@ CREATE TABLE IF NOT EXISTS copy_position (
     add_count INTEGER DEFAULT 0,                   -- follow-on adds taken (capped at MAX_ADDS)
     mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
     opened_at TEXT, closed_at TEXT,
-    strategy_revision_id TEXT
+    strategy_revision_id TEXT,
+    opening_account_equity REAL
 );
 CREATE INDEX IF NOT EXISTS idx_cp_status ON copy_position(status);
 CREATE INDEX IF NOT EXISTS idx_cp_addr ON copy_position(addr);
@@ -1450,6 +1481,18 @@ _MIGRATIONS = (
     "ALTER TABLE wallet_registry ADD COLUMN core_retention_started_generation TEXT",
     "ALTER TABLE wallet_registry ADD COLUMN last_core_retention_generation TEXT",
     "ALTER TABLE target_controls ADD COLUMN pinned_at TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'normal'",
+    "ALTER TABLE wallet_registry ADD COLUMN risk_reasons_json TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN risk_confirmation_count INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE wallet_registry ADD COLUMN risk_first_confirmed_at TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN risk_assessed_at TEXT",
+    "ALTER TABLE wallet_registry ADD COLUMN risk_block_reason TEXT",
+    "ALTER TABLE target_controls ADD COLUMN intent TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE target_controls ADD COLUMN intent_requested_at TEXT",
+    "ALTER TABLE target_controls ADD COLUMN intent_position_ids_json TEXT",
+    "ALTER TABLE target_controls ADD COLUMN intent_resolved_at TEXT",
+    "ALTER TABLE target_controls ADD COLUMN intent_resolution TEXT",
+    "ALTER TABLE copy_position ADD COLUMN opening_account_equity REAL",
     "ALTER TABLE fill_cache_state ADD COLUMN backfill_start_ms INTEGER",
     "ALTER TABLE fill_cache_state ADD COLUMN backfill_cursor_ms INTEGER",
 )
@@ -1470,6 +1513,8 @@ def connect(path: str, *schemas: str) -> sqlite3.Connection:
         _retire_maker_shadow(db)
         _retire_obsolete_selection_state(db)
         _migrate_episode_seq(db)
+        _migrate_target_control_intents(db)
+        _migrate_risk_compatibility(db)
         db.commit()
     except Exception:
         db.rollback()
@@ -1512,6 +1557,50 @@ def _apply_migrations(db: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_auto_tune_runs_generation "
             "ON auto_tune_runs(generation, created_at DESC, id DESC)"
         )
+
+
+def _migrate_target_control_intents(db: sqlite3.Connection) -> None:
+    """Map legacy disabled rows to the recoverable requalification state.
+
+    The requested-at guard keeps modern ``draining`` rows from being rewritten on a rolling restart.
+    """
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "target_controls" not in tables:
+        return
+    columns = {row[1] for row in db.execute("PRAGMA table_info(target_controls)").fetchall()}
+    if {"enabled", "intent", "intent_requested_at"}.issubset(columns):
+        db.execute(
+            "UPDATE target_controls SET intent='requalify' "
+            "WHERE COALESCE(enabled,1)=0 AND COALESCE(intent,'active')='active' "
+            "AND intent_requested_at IS NULL"
+        )
+
+
+def _migrate_risk_compatibility(db: sqlite3.Connection) -> None:
+    """Project legacy probation rows to advisory low risk with entry permission."""
+    tables = {row[0] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    if "follow_selection" in tables:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(follow_selection)").fetchall()}
+        if {"entry_eligible", "retention_status"}.issubset(columns):
+            db.execute(
+                "UPDATE follow_selection SET entry_eligible=1 "
+                "WHERE retention_status IN ('probation','medium_risk')"
+            )
+    if "wallet_registry" in tables:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(wallet_registry)").fetchall()}
+        if {"risk_level", "core_retention_status"}.issubset(columns):
+            db.execute(
+                "UPDATE wallet_registry SET risk_level='low' "
+                "WHERE risk_level='normal' AND core_retention_status='probation'"
+            )
+            db.execute(
+                "UPDATE wallet_registry SET risk_level='medium' "
+                "WHERE risk_level='normal' AND core_retention_status='medium_risk'"
+            )
 
 
 def _retire_maker_shadow(db: sqlite3.Connection) -> None:

@@ -6,7 +6,7 @@ from hyper.selection import core_retention
 
 
 class CoreRetentionTest(unittest.TestCase):
-    def test_soft_failure_needs_two_complete_generations(self):
+    def test_soft_failure_becomes_medium_without_auto_exit(self):
         first = core_retention.advance(
             generation="g1", scan_kind="complete", scan_successful=True,
             reason="strict_copy_7d_conservative_return_below_floor",
@@ -23,16 +23,17 @@ class CoreRetentionTest(unittest.TestCase):
             generation="g2", scan_kind="complete", scan_successful=True,
             reason="copy_profit_factor_below_1_25",
         )
-        self.assertEqual(core_retention.EXIT_ONLY, second.status)
-        self.assertFalse(second.retain_enabled)
+        self.assertEqual(core_retention.MEDIUM_RISK, second.status)
+        self.assertTrue(second.retain_enabled)
         self.assertEqual(2, second.failure_streak)
 
-    def test_daily_and_incomplete_evidence_do_not_advance(self):
+    def test_daily_advances_and_incomplete_evidence_does_not(self):
         daily = core_retention.advance(
             generation="d1", scan_kind="challenger_refresh", scan_successful=True,
             reason="strict_copy_7d_conservative_return_below_floor",
         )
-        self.assertEqual(0, daily.failure_streak)
+        self.assertEqual(1, daily.failure_streak)
+        self.assertEqual(core_retention.PROBATION, daily.status)
         incomplete = core_retention.advance(
             previous_status=core_retention.PROBATION, previous_streak=1,
             previous_reason="copy_profit_factor_below_1_25",
@@ -89,12 +90,18 @@ class CoreRetentionTest(unittest.TestCase):
         )
         self.assertEqual(core_retention.HEALTHY, recovered.status)
         self.assertEqual(0, recovered.failure_streak)
-        hard = core_retention.advance(
+        medium = core_retention.advance(
             generation="g2", scan_kind="complete", scan_successful=True,
             reason="copy_30d_closed_pnl_not_positive",
         )
-        self.assertEqual(core_retention.EXIT_ONLY, hard.status)
-        self.assertFalse(hard.retain_enabled)
+        self.assertEqual(core_retention.MEDIUM_RISK, medium.status)
+        self.assertTrue(medium.retain_enabled)
+        structural = core_retention.advance(
+            generation="g2b", scan_kind="complete", scan_successful=True,
+            reason="source_heavy_dca",
+        )
+        self.assertEqual(core_retention.EXIT_ONLY, structural.status)
+        self.assertFalse(structural.retain_enabled)
         catastrophic = core_retention.advance(
             generation="g3", scan_kind="complete", scan_successful=True,
             reason="copy_single_liquidation_loss_over_8pct",
@@ -126,7 +133,7 @@ class CoreRetentionTest(unittest.TestCase):
                 "copyClosedProfit30d": False,
             },
         })
-        self.assertEqual("hard", classification)
+        self.assertEqual("medium", classification)
         self.assertEqual("copy_30d_closed_pnl_not_positive", reason)
 
     def test_qualified_status_is_healthy_for_core_retention(self):

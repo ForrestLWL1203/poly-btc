@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from hyper import config
+from hyper.selection import wallet_risk
 
 
 HEALTHY = "healthy"
 PROBATION = "probation"
+MEDIUM_RISK = "medium_risk"
 SAFETY_PENDING = "safety_pending"
 SAFETY_FROZEN = "safety_frozen"
 EXIT_ONLY = "exit_only"
@@ -89,25 +91,16 @@ HARD_CHECK_REASONS = (
 
 
 def failure_class(reason: Optional[str], *, deferred: bool = False) -> str:
-    """Return ``healthy``, ``soft``, ``hard`` or ``deferred`` for frozen evidence."""
-    reason = str(reason or "").strip()
-    if not reason:
+    """Return a compatibility classification for the risk model."""
+    kind = wallet_risk.reason_kind(reason, deferred=deferred)
+    if kind == wallet_risk.NORMAL:
         return HEALTHY
-    if deferred or reason in DEFERRED_FAILURE_REASONS or any(
-        token in reason for token in ("data_error", "valuation_incomplete", "path_incomplete")
-    ):
+    if kind == "deferred":
         return "deferred"
-    if reason in HARD_FAILURE_REASONS or any(
-        token in reason for token in (
-            "hft", "oid_robot", "grid", "heavy_dca", "spot_hedge",
-            "opaque", "extreme_concurrency", "too_many_concurrent",
-            "sector_not_executable",
-        )
-    ):
+    if kind == wallet_risk.MEDIUM:
+        return "medium"
+    if kind in {wallet_risk.HIGH, wallet_risk.UNAVAILABLE, "structural"}:
         return "hard"
-    # Unknown economic/quality failures are deliberately treated as ordinary.
-    # They require a second successful complete scan rather than an accidental
-    # one-generation eviction.
     return "soft"
 
 
@@ -120,7 +113,7 @@ def qualification_failure(qualification: Optional[Mapping]) -> tuple[str, Option
     checks = dict(qualification.get("checks") or {})
     for key, reason in HARD_CHECK_REASONS:
         if key in checks and not bool(checks[key]):
-            return "hard", reason
+            return failure_class(reason), reason
     reason = qualification.get("firstFailure")
     if qualification.get("eligible") is True and not reason:
         return HEALTHY, None
@@ -155,24 +148,26 @@ def advance(
 ) -> RetentionDecision:
     """Advance one Core retention state.
 
-    Only a successfully published ``complete`` generation may advance or clear
-    the streak. Daily refreshes, failed scans and incomplete evidence preserve it.
+    Any successful daily/full assessment may advance or clear the state.  The
+    caller supplies ``confirmation_eligible`` to enforce the 72-hour separation.
     """
     previous_status = str(previous_status or HEALTHY)
     previous_streak = max(0, int(previous_streak or 0))
-    if scan_kind != "complete" or not scan_successful:
+    if not scan_successful:
         return RetentionDecision(
             previous_status, previous_streak, previous_reason,
-            previous_started_generation, None, previous_status != EXIT_ONLY,
-            previous_status == PROBATION, "unchanged_non_complete",
+            previous_started_generation, None,
+            previous_status not in {EXIT_ONLY, SAFETY_FROZEN},
+            previous_status in {PROBATION, MEDIUM_RISK}, "unchanged_failed_scan",
         )
 
     classification = failure_class(reason, deferred=deferred)
     if classification == "deferred":
         return RetentionDecision(
             previous_status, previous_streak, previous_reason,
-            previous_started_generation, None, previous_status != EXIT_ONLY,
-            previous_status == PROBATION, "unchanged_incomplete_evidence",
+            previous_started_generation, None,
+            previous_status not in {EXIT_ONLY, SAFETY_FROZEN},
+            previous_status in {PROBATION, MEDIUM_RISK}, "unchanged_incomplete_evidence",
         )
     if classification == HEALTHY:
         return RetentionDecision(
@@ -180,20 +175,23 @@ def advance(
             "recovered" if previous_streak else "healthy",
         )
     if classification == "hard":
-        catastrophic = reason in {
-            "copy_single_liquidation_loss_over_8pct",
-            "source_account_liquidated_zero",
-            "historical_major_liquidation",
-        }
+        catastrophic = wallet_risk.reason_kind(reason) == wallet_risk.HIGH
         return RetentionDecision(
             SAFETY_FROZEN if catastrophic else EXIT_ONLY,
             previous_streak, reason, previous_started_generation,
             generation, False, False, "immediate_demotion",
         )
+    if classification == "medium":
+        return RetentionDecision(
+            MEDIUM_RISK, max(1, previous_streak), reason,
+            previous_started_generation or generation, generation,
+            True, True, "immediate_medium",
+        )
 
     if previous_streak > 0 and not confirmation_eligible:
         return RetentionDecision(
-            PROBATION, previous_streak, reason, previous_started_generation,
+            previous_status if previous_status in {PROBATION, MEDIUM_RISK} else PROBATION,
+            previous_streak, reason, previous_started_generation,
             None, True, True, "confirmation_interval_pending",
         )
 
@@ -201,8 +199,8 @@ def advance(
     started = previous_started_generation or generation
     if streak >= int(config.CORE_RETENTION_CONFIRMATIONS):
         return RetentionDecision(
-            EXIT_ONLY, streak, reason, started, generation,
-            False, False, "confirmed_demotion",
+            MEDIUM_RISK, streak, reason, started, generation,
+            True, True, "confirmed_medium",
         )
     return RetentionDecision(
         PROBATION, streak, reason, started, generation,

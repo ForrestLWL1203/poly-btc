@@ -972,7 +972,6 @@ class Observer:
                 row["addr"].lower()
                 for row in rows
                 if row.get("entryEligible") is False
-                or row.get("retentionStatus") == "probation"
             }
         self.seed_coins = seed
         self.target_acct = target_acct
@@ -1362,7 +1361,8 @@ class Observer:
         """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
         toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
-        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle", "wallet_star", "reload_params",
+        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle",
+                 "wallet_exit_request", "wallet_star", "reload_params",
                  "risk_radar_start", "risk_radar_stop", "set_provider_credential",
                  "delete_provider_credential", "test_provider_connection")
         last_hb = 0.0
@@ -1412,6 +1412,8 @@ class Observer:
             return await self._cmd_close_all()
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
+        if ctype == "wallet_exit_request":
+            return self._cmd_wallet_exit_request(payload["address"])
         if ctype == "wallet_star":
             return self._cmd_wallet_star(payload["address"], bool(payload["starred"]))
         if ctype == "risk_radar_start":
@@ -1506,18 +1508,141 @@ class Observer:
                 _log(f"close_all: skip {pid}: {exc}")
         return {"closed": closed, "count": len(closed)}
 
-    def _cmd_wallet_toggle(self, addr, enabled):
-        """Flip a target's enabled flag (Observer is the single writer of target_controls), then
-        re-sync targets so the effect lands now: disabled + we hold a copy -> exit-only (held_off);
-        disabled + flat -> dropped from polling; enabled -> back in the rotation."""
+    def _cmd_wallet_exit_request(self, addr):
+        """Capture the current cohort and start a recoverable conditional exit."""
         addr = addr.lower()
-        ts, e = now_iso(), 1 if enabled else 0
-        cur = self.db.execute("UPDATE target_controls SET enabled=?,updated_at=? WHERE addr=?", (e, ts, addr))
+        ts = now_iso()
+        position_ids = sorted(
+            int(row[0]) for row in self.db.execute(
+                "SELECT pos_id FROM copy_position WHERE lower(addr)=lower(?) AND status='open'",
+                (addr,),
+            ).fetchall()
+        )
+        intent = "draining" if position_ids else "requalify"
+        captured = json.dumps(position_ids, separators=(",", ":"))
+        cur = self.db.execute(
+            "UPDATE target_controls SET enabled=0,intent=?,intent_requested_at=?,"
+            "intent_position_ids_json=?,intent_resolved_at=NULL,intent_resolution=NULL,updated_at=? "
+            "WHERE lower(addr)=lower(?)",
+            (intent, ts, captured, ts, addr),
+        )
         if cur.rowcount == 0:
-            self.db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES (?,?,?)", (addr, e, ts))
+            self.db.execute(
+                "INSERT INTO target_controls "
+                "(addr,enabled,intent,intent_requested_at,intent_position_ids_json,updated_at) "
+                "VALUES (?,0,?,?,?,?)",
+                (addr, intent, ts, captured, ts),
+            )
         self.db.commit()
         self._reload_strategy()
-        return {"address": addr, "enabled": bool(enabled)}
+        return {
+            "address": addr, "intent": intent, "enabled": False,
+            "capturedPositionIds": position_ids,
+        }
+
+    def _cmd_wallet_toggle(self, addr, enabled):
+        """Compatibility adapter for pre-migration Dashboard clients."""
+        if not enabled:
+            return self._cmd_wallet_exit_request(addr)
+        addr = addr.lower()
+        blocked = self.db.execute(
+            "SELECT risk_level,risk_block_reason FROM wallet_registry WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        if blocked and (blocked[0] == "high" or blocked[1]):
+            raise ValueError("wallet is blocked by durable risk state")
+        ts = now_iso()
+        cur = self.db.execute(
+            "UPDATE target_controls SET enabled=1,intent='active',"
+            "intent_resolved_at=?,intent_resolution='legacy_manual_reenable',updated_at=? "
+            "WHERE lower(addr)=lower(?)",
+            (ts, ts, addr),
+        )
+        if cur.rowcount == 0:
+            self.db.execute(
+                "INSERT INTO target_controls "
+                "(addr,enabled,intent,intent_resolved_at,intent_resolution,updated_at) "
+                "VALUES (?,1,'active',?,'legacy_manual_reenable',?)",
+                (addr, ts, ts),
+            )
+        self.db.commit()
+        self._reload_strategy()
+        return {"address": addr, "enabled": True, "intent": "active"}
+
+    def _resolve_draining_intent(self, addr, *, reload_strategy=True):
+        """Resolve one captured cohort once every captured position is terminal."""
+        addr = (addr or "").lower()
+        row = self.db.execute(
+            "SELECT intent_position_ids_json FROM target_controls "
+            "WHERE lower(addr)=lower(?) AND intent='draining'",
+            (addr,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            position_ids = [
+                int(value) for value in json.loads(row[0] or "[]")
+            ]
+        except (TypeError, ValueError):
+            position_ids = []
+        if not position_ids:
+            return None
+        marks = ",".join("?" for _ in position_ids)
+        positions = self.db.execute(
+            f"SELECT pos_id,status,COALESCE(realized_pnl,0),COALESCE(was_liq,0) "
+            f"FROM copy_position WHERE pos_id IN ({marks})",
+            tuple(position_ids),
+        ).fetchall()
+        by_id = {int(item[0]): item for item in positions}
+        if any(
+            pos_id not in by_id or by_id[pos_id][1] == "open"
+            for pos_id in position_ids
+        ):
+            return {
+                "address": addr, "intent": "draining",
+                "remaining": sum(
+                    1 for pos_id in position_ids
+                    if pos_id not in by_id or by_id[pos_id][1] == "open"
+                ),
+            }
+        net_pnl = sum(float(by_id[pos_id][2] or 0.0) for pos_id in position_ids)
+        liquidated = any(bool(by_id[pos_id][3]) for pos_id in position_ids)
+        risk = self.db.execute(
+            "SELECT risk_level,risk_block_reason FROM wallet_registry WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        high_or_blocked = bool(risk and (risk[0] == "high" or risk[1]))
+        recovered = net_pnl > 0 and not liquidated and not high_or_blocked
+        intent = "active" if recovered else "requalify"
+        resolution = (
+            "captured_cohort_profitable_recovered" if recovered
+            else "captured_cohort_high_risk" if high_or_blocked
+            else "captured_cohort_liquidated" if liquidated
+            else "captured_cohort_not_profitable"
+        )
+        ts = now_iso()
+        self.db.execute(
+            "UPDATE target_controls SET enabled=?,intent=?,intent_resolved_at=?,"
+            "intent_resolution=?,updated_at=? WHERE lower(addr)=lower(?)",
+            (1 if recovered else 0, intent, ts, resolution, ts, addr),
+        )
+        self.db.commit()
+        if reload_strategy:
+            self._reload_strategy()
+        return {
+            "address": addr, "intent": intent, "resolution": resolution,
+            "capturedNetPnl": net_pnl, "liquidated": liquidated,
+        }
+
+    def _resolve_all_draining_intents(self):
+        resolved = []
+        for (addr,) in self.db.execute(
+            "SELECT addr FROM target_controls WHERE intent='draining'"
+        ).fetchall():
+            result = self._resolve_draining_intent(addr, reload_strategy=False)
+            if result and result.get("intent") != "draining":
+                resolved.append(result)
+        return resolved
 
     def _cmd_wallet_star(self, addr, starred):
         """Persist an operator-owned Core lock without mutating the published generation.
@@ -1661,6 +1786,7 @@ class Observer:
              f"{len(self.valid_coins) - len(self.crypto_coins)} builder/stock (REST l2Book)")
         self._load_account(self.taker)
         self._reload_open(self.taker)
+        self._resolve_all_draining_intents()
         self.vol = volatility.load_all(self.db)    # warm the σ read-cache from coin_vol (restart-safe)
         for (_, coin) in self.open_ep:             # reloaded stock positions need REST book polling
             if coin not in self.crypto_coins and self._copyable(coin):
@@ -2136,11 +2262,11 @@ class Observer:
             self.db.execute(                         # also persist the TARGET's lev/margin/entry at open
                 f"UPDATE {book.pos_table} SET leverage=?,margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,"
                 "liq_px=?,master_leverage=?,master_margin=?,master_open_notional=?,"
-                "master_open_px=COALESCE(?,master_open_px) "
+                "master_open_px=COALESCE(?,master_open_px),opening_account_equity=? "
                 "WHERE pos_id=?",
                 (
                     lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn,
-                    target_notl, m_entry, ep["pos_id"],
+                    target_notl, m_entry, risk_equity, ep["pos_id"],
                 ))
             book.balance -= abs(size * px) * config.TAKER_FEE
             self._save_account(book)
@@ -2573,6 +2699,8 @@ class Observer:
                     book.closed_n += 1
                     book.wins_n += 1 if ep["realized_pnl"] > 0 else 0
                 book.open_ep.pop((addr, coin), None)         # normal closes are in the position table; only
+                if book is self.taker:
+                    self._resolve_draining_intent(addr)
                 if liq:                                       # liquidation (our isolated stop-out) is logged
                     _log(f"[{book.name}] LIQUIDATED {addr[:10]} {coin} {ep['side']} -${ep['margin']:,.0f}  bal=${book.balance:,.0f}")
                 elif tail_close and tail_decision:

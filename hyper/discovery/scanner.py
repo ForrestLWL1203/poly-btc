@@ -50,6 +50,7 @@ from hyper.selection import (
     pre_strict,
     state as selection,
     strategy_revision,
+    wallet_risk,
 )
 from . import generation, metrics, perp_prefilter, pipeline_audit
 from .scanner_copy_bt import (
@@ -276,7 +277,7 @@ def _recent_former_core_addrs(db, *, as_of, recheck_days=None):
         return []
     current_core = {
         str(addr or "").lower()
-        for addr in (selection.published_core_addrs(db) or ())
+        for addr in (selection.published_core_membership(db) or ())
         if addr
     }
     return [
@@ -2069,9 +2070,12 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         (generation_id, generation_id),
     )
     names = [desc[0] for desc in cur.description]
-    controls = {
-        (addr or "").lower(): bool(enabled)
-        for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
+    blocked_risk = {
+        (addr or "").lower()
+        for addr, level, block in db.execute(
+            "SELECT addr,risk_level,risk_block_reason FROM wallet_registry"
+        ).fetchall()
+        if level == wallet_risk.HIGH
     }
     forward_risk = {
         (addr or "").lower(): {
@@ -2088,7 +2092,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
         ).fetchall()
     }
     rows = []
-    current_core = set(selection.published_core_addrs(db) or ())
+    current_core = set(selection.published_core_membership(db) or ())
     follow_values = params.load_follow(db)
     policy_values = {**follow_values, **params.load_category(db, "scanner")}
     for raw in cur.fetchall():
@@ -2154,7 +2158,7 @@ def _quality_core_profiles(db, generation_id, *, core_only=True, now_ms=None) ->
             qualified
             and (not core_only or rough_passed)
             and (row.get("data_status") or "valid") == "valid"
-            and controls.get(addr, True)
+            and addr not in blocked_risk
         ):
             rows.append(row)
     rows.sort(key=lambda row: (
@@ -2660,7 +2664,7 @@ def _rough_replay_source_pool(
         return {"attempted": 0, "qualified": [], "failed": []}
     follow = {**params.load_follow(db), **params.load_category(db, "scanner")}
     valuation_marks = _current_copy_valuation_marks()
-    incumbent_core = set(selection.published_core_addrs(db) or ())
+    incumbent_core = set(selection.published_core_membership(db) or ())
     qualified, failed = [], []
     cols = storage.PROFILE_COLS.split(",")
     resolver = getattr(p, "generation_market_resolver", None)
@@ -3452,7 +3456,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
     market_ctx = auto_tune._load_market_ctx(db, generation_id)
     valuation_marks = _current_copy_valuation_marks()
     current_core = (
-        () if force_entry_requalification else tuple(selection.published_core_addrs(db) or ())
+        () if force_entry_requalification else tuple(selection.published_core_membership(db) or ())
     )
     core_upper = max(1, min(
         int(config.MAX_TARGETS),
@@ -4297,7 +4301,8 @@ def _complete_retention_decisions(
     for addr in sorted({str(value or "").lower() for value in previous_core if value}):
         evidence = db.execute(
             "SELECT p.status,COALESCE(p.data_status,'valid'),p.reason,"
-            "pse.status,pse.first_failure,pse.strict_status,pse.strict_first_failure "
+            "pse.status,pse.first_failure,pse.strict_status,pse.strict_first_failure,"
+            "p.acct_value,COALESCE(p.open_position_count,0) "
             "FROM profile p LEFT JOIN pre_strict_evidence pse "
             "ON pse.generation=? AND lower(pse.addr)=lower(p.addr) "
             "WHERE p.profile_generation=? AND lower(p.addr)=lower(?)",
@@ -4337,12 +4342,22 @@ def _complete_retention_decisions(
         )
         reason = None if qualification_class == core_retention.HEALTHY else qualification_reason
         reason = reason or evidence[6] or evidence[4]
+        if (
+            evidence[7] is not None
+            and f(evidence[7]) <= max(float(config.FLAT), 1e-6)
+            and int(evidence[8] or 0) == 0
+        ):
+            reason = "source_zero_equity_no_positions"
         safety = db.execute(
             "SELECT state,reason FROM execution_wallet_safety WHERE lower(addr)=lower(?)",
             (addr,),
         ).fetchone()
         if safety and safety[0] == "confirmed":
             reason = safety[1] or "source_account_liquidated_zero"
+        if wallet_risk.actual_copy_evidence(
+            db, addr,
+        ).get("catastrophicPositionIds"):
+            reason = "actual_copy_single_liquidation_loss_over_8pct"
         previous = wallet_retention_state(db, addr)
         confirmation_eligible = _retention_confirmation_eligible(
             db,
@@ -4394,9 +4409,9 @@ def _retention_confirmation_eligible(
 
 def _retention_exact_formation(
     db, generation_id, stamp, now_ms, desired_order, *,
-    base_follow, replacement_gate, decisions,
+    base_follow, replacement_gate, decisions, retune=False,
 ) -> dict:
-    """Tune and replay an exact retained membership after a blocked replacement."""
+    """Replay an exact effective membership after a blocked replacement."""
     candidate_rows = _quality_core_profiles(
         db, generation_id, core_only=False, now_ms=now_ms,
     )
@@ -4409,12 +4424,15 @@ def _retention_exact_formation(
     sigmas = auto_tune._load_sigmas(db, generation_id)
     market_ctx = auto_tune._load_market_ctx(db, generation_id)
     valuation_marks = _current_copy_valuation_marks()
-    exact = _retune_exact_membership_surface(
-        db, desired_order, candidate_rows,
-        generation_id=generation_id, stamp=stamp, round_index=1,
-        now_ms=now_ms, base_follow=dict(base_follow),
-        valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
-    )
+    if retune:
+        exact = _retune_exact_membership_surface(
+            db, desired_order, candidate_rows,
+            generation_id=generation_id, stamp=stamp, round_index=1,
+            now_ms=now_ms, base_follow=dict(base_follow),
+            valuation_marks=valuation_marks, sigmas=sigmas, market_ctx=market_ctx,
+        )
+    else:
+        exact = {"follow": dict(base_follow), "params": dict(base_follow)}
     exact_results = _parallel_effective_follow_replays(
         db, [row_by_addr[addr] for addr in desired_order], now_ms,
         generation_id=generation_id, follow=exact["follow"],
@@ -4459,10 +4477,10 @@ def _retention_exact_formation(
             ).encode()
         ).hexdigest(),
         "search": {
-            "algorithm": "exact_retained_membership_v1",
+            "algorithm": "effective_incumbent_membership_v2",
             "selectedCount": len(desired_order),
-            "membershipChanged": True,
-            "retuneApplied": True,
+            "membershipChanged": bool(retune),
+            "retuneApplied": bool(retune),
             "retentionHysteresis": True,
             "replacementGate": replacement_gate,
             "retentionDecisions": {
@@ -4478,6 +4496,37 @@ def _retention_exact_formation(
     }
 
 
+def _effective_core_order(previous_core, proposed_rows, decisions):
+    """Retain every non-blocked incumbent and only fill genuinely empty seats."""
+    previous = tuple(dict.fromkeys(
+        str(addr or "").lower() for addr in (previous_core or ()) if addr
+    ))
+    retained = [
+        addr for addr in previous
+        if decisions.get(addr) is not None and decisions[addr].retain_enabled
+    ]
+    blocked_incumbents = {
+        addr for addr in previous
+        if decisions.get(addr) is not None and not decisions[addr].retain_enabled
+    }
+    proposed = [
+        row.addr.lower() for row in sorted(
+            (row for row in proposed_rows if row.role == selection.CORE and row.enabled),
+            key=lambda row: (row.selection_rank or 999999, row.addr),
+        )
+    ]
+    cap = max(1, min(
+        int(config.MAX_TARGETS),
+        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
+        int(getattr(config, "CORE_INITIAL_MAX_N", 16)),
+    ))
+    desired = list(retained)
+    for addr in proposed:
+        if addr not in desired and addr not in blocked_incumbents and len(desired) < cap:
+            desired.append(addr)
+    return tuple(desired)
+
+
 def _decorate_retention_rows(rows, previous_core, decisions):
     previous_core = {str(addr or "").lower() for addr in previous_core}
     out = []
@@ -4487,7 +4536,9 @@ def _decorate_retention_rows(rows, previous_core, decisions):
         if addr in previous_core and decision:
             row = replace(
                 row,
-                entry_eligible=decision.failure_streak == 0,
+                # Low/medium financial risk is advisory.  Only a financial
+                # catastrophe or a structural/system block revokes entry.
+                entry_eligible=decision.retain_enabled,
                 retention_status=decision.status,
                 retention_failure_reason=decision.failure_reason,
                 retention_failure_streak=decision.failure_streak,
@@ -4512,13 +4563,17 @@ def _apply_shared_retention_failure(
         ((marginal.search_meta or {}).get("finalStrictCopy"))
         if marginal else {}
     ) or {}
-    if validation.get("status") != "probation":
+    if validation.get("status") not in {"probation", "operator_review_degraded"}:
         return decisions
     updated = dict(decisions)
     for addr in previous_core:
         addr = str(addr or "").lower()
         current = updated.get(addr)
         if current is None or not current.retain_enabled:
+            continue
+        if current.failure_reason:
+            # One successful generation is one confirmation point even when
+            # both wallet and shared-account evidence are degraded.
             continue
         previous = wallet_retention_state(db, addr)
         updated[addr] = core_retention.advance(
@@ -4532,6 +4587,61 @@ def _apply_shared_retention_failure(
             reason="shared_copy_return_below_floor",
         )
     return updated
+
+
+def _persist_wallet_risk_assessment(
+    db, generation_id, addr, decision, *, source, assessed_at, complete=True,
+):
+    """Project compatibility retention evidence into the new risk history."""
+    previous = wallet_risk.registry_state(db, addr)
+    evidence = wallet_risk.actual_copy_evidence(db, addr)
+    reason = decision.failure_reason
+    actual_catastrophe = bool(evidence["catastrophicPositionIds"])
+    if actual_catastrophe:
+        reason = "actual_copy_single_liquidation_loss_over_8pct"
+    elif (
+        evidence["closedN30d"] >= 3
+        and evidence["conservativePnl30d"] <= 0
+    ):
+        reason = "actual_copy_30d_conservative_pnl_not_positive"
+    elif (
+        evidence["closedPnl30d"] > 0
+        and -min(0.0, evidence["openUnrealized"]) > evidence["closedPnl30d"] * 0.50
+    ):
+        reason = "actual_copy_open_loss_over_50pct"
+    elif (
+        evidence["closedN30d"] in {1, 2}
+        and evidence["conservativePnl30d"] < 0
+        and not reason
+    ):
+        reason = "actual_copy_negative_insufficient_sample"
+    assessment = wallet_risk.advance(
+        previous_level=previous["level"],
+        previous_count=previous["confirmationCount"],
+        previous_reasons=previous["reasons"],
+        previous_first_confirmed_at=previous["firstConfirmedAt"],
+        assessed_at=assessed_at,
+        reason=reason,
+        complete=bool(complete or actual_catastrophe),
+        min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+    )
+    wallet_risk.persist(
+        db, generation=generation_id, addr=addr, source=source,
+        assessment=assessment, evidence=evidence,
+    )
+    if assessment.level == wallet_risk.HIGH:
+        db.execute(
+            "INSERT INTO target_controls "
+            "(addr,enabled,intent,intent_requested_at,intent_resolved_at,intent_resolution,updated_at) "
+            "VALUES (?,0,'requalify',?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
+            "enabled=0,intent='requalify',intent_resolved_at=excluded.intent_resolved_at,"
+            "intent_resolution=excluded.intent_resolution,updated_at=excluded.updated_at",
+            (
+                addr.lower(), assessed_at, assessed_at,
+                "high_risk_override", assessed_at,
+            ),
+        )
+    return assessment
 
 
 def _build_retained_selection(
@@ -4760,7 +4870,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         return bool(
             retention_hysteresis
             and core_retention.qualification_failure(qualification)[0]
-            in {core_retention.HEALTHY, "soft"}
+            in {core_retention.HEALTHY, "soft", "medium"}
         )
 
     invalid = [
@@ -5016,18 +5126,16 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         if paper_windows is not final_windows:
             del paper_windows
         del final_windows
-        hard_shared_failures = {
-            "net_not_positive", "paper_net_not_positive",
-            "open_loss_over_50pct", "paper_open_loss_over_50pct",
-            "path_coverage", "maintenance_coverage",
-        }
+        # Economic degradation is surfaced for operator review; only missing
+        # path/maintenance proof is a publication blocker.
+        hard_shared_failures = {"path_coverage", "maintenance_coverage"}
         blocking_failures = (
             failures
             if not retention_hysteresis
             else [reason for reason in failures if reason in hard_shared_failures]
         )
         if failures and retention_hysteresis and not blocking_failures:
-            final_strict_validation["status"] = "probation"
+            final_strict_validation["status"] = "operator_review_degraded"
             final_strict_validation["retainedByHysteresis"] = True
         if blocking_failures:
             raise RuntimeError(
@@ -5061,16 +5169,28 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
     rows = []
     for rank, row in enumerate(profiles, 1):
         addr = (row.get("addr") or "").lower()
-        enabled = controls.get(addr, True)
+        selection_enabled = controls.get(addr, True)
         refreshed = row.get("profile_generation") == generation_id
         data_status = row.get("data_status") or "valid"
         selection_data_status = data_status if refreshed or data_status == "deferred_data_error" else "stale"
         active = row.get("status") in {"active", "qualified"}
         qualification = row.get("follow_qualification") or {}
         candidate_ok = refreshed and active and bool(qualification.get("eligible"))
+        current_failure = (
+            qualification.get("firstFailure")
+            or qualification.get("status")
+            or row.get("reason")
+        )
+        exit_kind = wallet_risk.reason_kind(current_failure)
+        if (
+            row.get("acct_value") is not None
+            and f(row.get("acct_value")) <= max(float(config.FLAT), 1e-6)
+            and int(row.get("open_position_count") or 0) == 0
+        ):
+            exit_kind = wallet_risk.UNAVAILABLE
         include = True
         research_only = False
-        if addr in selected_set and enabled:
+        if addr in selected_set and selection_enabled:
             role = selection.CORE
             reason = transition_reasons.get(addr, "core_quality_selected")
         elif explicit_empty_core and addr in previous_core and candidate_ok:
@@ -5078,6 +5198,16 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             # opens nothing as Challenger but remains visible and receives the next retention replay.
             role = selection.CHALLENGER
             reason = qualification.get("status") or "no_robust_core_latest_evidence"
+        elif addr in previous_core and exit_kind in {
+            wallet_risk.HIGH, wallet_risk.UNAVAILABLE, "structural",
+        }:
+            role = selection.CHALLENGER
+            selection_enabled = False
+            reason = (
+                "high_risk_isolation" if exit_kind == wallet_risk.HIGH
+                else "funds_withdrawn_requalify" if exit_kind == wallet_risk.UNAVAILABLE
+                else "structural_unfollowable"
+            )
         elif addr in held and data_status != "valid":
             role, reason = selection.EXIT_ONLY, transition_reasons.get(addr, "exit_only_open_position")
         elif data_status != "valid":
@@ -5086,9 +5216,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
             include = False
         elif candidate_ok and addr in operational_candidate_set:
             role = selection.CHALLENGER
-            if not enabled:
-                reason = "operator_disabled"
-            elif _formation_core_permission(qualification):
+            if _formation_core_permission(qualification):
                 reason = transition_reasons.get(addr, "portfolio_not_selected")
             else:
                 reason = qualification.get("status") or "sample_observation"
@@ -5107,7 +5235,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         if include:
             replay = replay_by_addr.get(addr) or {}
             rows.append(selection.SelectionRow(
-                addr=addr, role=role, enabled=enabled, reason=reason,
+                addr=addr, role=role, enabled=selection_enabled, reason=reason,
                 utility=transition.get("utilities", {}).get(addr, f(row.get("follow_score"))),
                 follow_score=f(row.get("follow_score")),
                 replay_profit_priority=row.get("replay_profit_priority"),
@@ -5180,6 +5308,28 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
                 replayed_at=stamp if replay else None,
                 entry_eligible=bool(qualification.get("eligible")),
             ))
+            if role == selection.CORE:
+                # A recoverable operator exit has completed strict
+                # requalification.  Draining remains untouched until its
+                # captured cohort settles.
+                db.execute(
+                    "UPDATE target_controls SET enabled=1,intent='active',"
+                    "intent_resolved_at=?,intent_resolution='strict_requalified',updated_at=? "
+                    "WHERE lower(addr)=lower(?) AND intent='requalify'",
+                    (stamp, stamp, addr),
+                )
+                db.execute(
+                    "UPDATE wallet_registry SET risk_level='normal',risk_reasons_json='[]',"
+                    "risk_confirmation_count=0,risk_first_confirmed_at=NULL,"
+                    "risk_assessed_at=?,risk_block_reason=NULL,updated_at=? "
+                    "WHERE lower(addr)=lower(?) AND risk_level='unavailable'",
+                    (stamp, stamp, addr),
+                )
+                db.execute(
+                    "UPDATE wallet_registry SET risk_block_reason=NULL,risk_assessed_at=?,updated_at=? "
+                    "WHERE lower(addr)=lower(?) AND risk_level!='high'",
+                    (stamp, stamp, addr),
+                )
         lifecycle_state = (
             "qualified" if research_only
             else role if role in {selection.CORE, selection.CHALLENGER, selection.EXIT_ONLY}
@@ -5234,8 +5384,10 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
     ).fetchall()}
     controls = {
-        (addr or "").lower(): bool(enabled)
-        for addr, enabled in db.execute("SELECT addr,enabled FROM target_controls").fetchall()
+        (addr or "").lower(): level != wallet_risk.HIGH
+        for addr, level, block_reason in db.execute(
+            "SELECT addr,risk_level,risk_block_reason FROM wallet_registry"
+        ).fetchall()
     }
     cur = db.execute(
         "SELECT p.addr,p.status,p.reason,p.score,p.profile_generation,p.data_status,p.evidence_status,p.last_copyable_open_ms,"
@@ -5248,7 +5400,7 @@ def _build_explicit_selection(db, generation_id, stamp, now_ms, *, force_cold_bo
         "p.source_body_after_top3_net_pnl,p.source_quality_score,p.rough_copy_score,"
         "p.copy_bt_closed_n,p.copy_bt_14d_closed_n,p.copy_bt_7d_closed_n,"
         "p.copy_evidence_days,p.execution_score,p.open_probability_48h,"
-        "p.actionable_open_rate,p.capacity_fit,p.copy_bt_net_pnl,p.copy_bt_win_rate,"
+        "p.actionable_open_rate,p.capacity_fit,p.open_position_count,p.copy_bt_net_pnl,p.copy_bt_win_rate,"
         "p.copy_bt_unrealized_pnl,p.copy_bt_valuation_status,"
         "p.copy_bt_initial_margin_equity,p.copy_bt_window_start_equity,"
         "p.copy_bt_14d_net_pnl,p.copy_bt_14d_unrealized_pnl,p.copy_bt_14d_window_start_equity,"
@@ -6305,7 +6457,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     pre_strict_counts = _pre_strict_counts(db, generation_id)
 
     now_ms = int(time.time() * 1000)
-    previous_core = selection.published_core_addrs(db) or []
+    previous_core = selection.published_core_membership(db) or []
     previous_strategy_bundle = strategy_revision.load_active(db)
     _set_scan_progress(
         db, state="scanning", stage="prepare_selection_candidates",
@@ -6338,6 +6490,7 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
     _assert_automatic_formation_tuned(
         formation, required=bool(retune or membership_retune_triggered),
     )
+    recommended_core_order = tuple(formation.get("selected") or ())
     _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
     publication_stamp = now_iso()
     try:
@@ -6364,41 +6517,66 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
             item.addr for item in rows
             if item.role == selection.CORE and item.enabled
         }
+        desired_retained = _effective_core_order(
+            previous_core, rows, retention_decisions,
+        )
         protected_removed = [
             addr for addr in previous_core
             if retention_decisions[addr].retain_enabled
             and addr not in proposed_core
         ]
-        if protected_removed:
-            baseline_validation = (
-                ((previous_strategy_bundle or {}).get("validation") or {}).get(
-                    "finalStrictCopy"
-                )
+        if protected_removed or proposed_core != set(desired_retained):
+            replacement_gate = {
+                "eligible": False,
+                "reason": (
+                    "incumbent_low_medium_risk_never_auto_replaced"
+                    if protected_removed else "high_or_system_risk_effective_overlay"
+                ),
+            }
+            membership_changed = set(desired_retained) != set(previous_core)
+            formation = _retention_exact_formation(
+                db, generation_id, publication_stamp, now_ms,
+                desired_retained,
+                base_follow=(
+                    (previous_strategy_bundle or {}).get("params")
+                    or params.load_follow(db)
+                ),
+                replacement_gate=replacement_gate,
+                decisions=retention_decisions,
+                retune=membership_changed and bool(desired_retained),
             )
-            replacement_gate = core_retention.replacement_gate(
-                baseline_validation,
-                (marginal.search_meta or {}).get("finalStrictCopy"),
+            _apply_formation_params(db, formation, publication_stamp)
+            rows, marginal = _build_retained_selection(
+                db, generation_id, publication_stamp, now_ms, formation,
             )
-            if not replacement_gate["eligible"]:
-                desired_retained = tuple(
-                    addr for addr in previous_core
-                    if retention_decisions[addr].retain_enabled
-                )
-                if desired_retained:
-                    formation = _retention_exact_formation(
-                        db, generation_id, publication_stamp, now_ms,
-                        desired_retained,
-                        base_follow=(
-                            (previous_strategy_bundle or {}).get("params")
-                            or params.load_follow(db)
-                        ),
-                        replacement_gate=replacement_gate,
-                        decisions=retention_decisions,
-                    )
-                    _apply_formation_params(db, formation, publication_stamp)
-                    rows, marginal = _build_retained_selection(
-                        db, generation_id, publication_stamp, now_ms, formation,
-                    )
+        final_validation = (
+            ((marginal.search_meta or {}).get("finalStrictCopy"))
+            if marginal else {}
+        ) or {}
+        if final_validation.get("status") == "operator_review_degraded":
+            degraded_core = tuple(
+                addr for addr in previous_core
+                if retention_decisions[addr].retain_enabled
+            )
+            degraded_gate = {
+                "eligible": False,
+                "reason": "operator_review_degraded_keep_active_surface",
+            }
+            formation = _retention_exact_formation(
+                db, generation_id, publication_stamp, now_ms,
+                degraded_core,
+                base_follow=(
+                    (previous_strategy_bundle or {}).get("params")
+                    or params.load_follow(db)
+                ),
+                replacement_gate=degraded_gate,
+                decisions=retention_decisions,
+                retune=False,
+            )
+            _apply_formation_params(db, formation, publication_stamp)
+            rows, marginal = _build_retained_selection(
+                db, generation_id, publication_stamp, now_ms, formation,
+            )
         retention_decisions = _apply_shared_retention_failure(
             db, generation_id, previous_core, retention_decisions, marginal,
         )
@@ -6407,6 +6585,10 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
             apply_wallet_retention_decision(
                 db, addr, decision, generation=generation_id,
                 stamp=publication_stamp,
+            )
+            _persist_wallet_risk_assessment(
+                db, generation_id, addr, decision,
+                source="complete", assessed_at=publication_stamp,
             )
         _assert_margin_equity_snapshot(db, expected_margin_equity_pct)
         valid = int(profile_coverage["valid"])
@@ -6450,7 +6632,10 @@ def finalize_profiled_generation(db, generation_id=None, stamp=None, *, retune=T
         active_strategy = strategy_revision.create_revision(
             db, generation_id, source="resume_finalize", reason="quality_prefix_formation",
             validation={
-                **(marginal.search_meta or {}), "marketSnapshot": market_validation,
+                **(marginal.search_meta or {}),
+                "recommendedCore": list(recommended_core_order),
+                "effectiveCore": list(current_core),
+                "marketSnapshot": market_validation,
             }, stamp=publication_stamp,
         )
         for item in rows:
@@ -6584,7 +6769,7 @@ def challenger_refresh_pool(db, base_generation=None):
     }
     current = {
         str(addr or "").lower()
-        for addr in (selection.published_core_addrs(db) or ())
+        for addr in (selection.published_core_membership(db) or ())
         if addr
     }
     held = {
@@ -6669,7 +6854,7 @@ def _verified_zero_equity_source_liquidations(
 
 
 def _challenger_daily_membership_decision(previous_order, proposed_order) -> dict:
-    """Allow daily publication to add Core wallets, but never remove or reshuffle incumbents alone."""
+    """Fill empty seats from strict proposals without replacing incumbents."""
     previous = tuple(dict.fromkeys(
         str(addr or "").lower() for addr in (previous_order or ()) if addr
     ))
@@ -6679,15 +6864,21 @@ def _challenger_daily_membership_decision(previous_order, proposed_order) -> dic
     previous_set = set(previous)
     proposed_set = set(proposed)
     removed = tuple(addr for addr in previous if addr not in proposed_set)
-    added = tuple(addr for addr in proposed if addr not in previous_set)
-    if removed:
+    proposed_added = tuple(addr for addr in proposed if addr not in previous_set)
+    cap = max(1, min(
+        int(config.MAX_TARGETS),
+        int(getattr(config, "CORE_TARGET_MAX_N", 16)),
+        int(getattr(config, "CORE_INITIAL_MAX_N", 16)),
+    ))
+    added = proposed_added[:max(0, cap - len(previous))]
+    if added:
+        mode = "promote"
+        selected = previous + added
+        reason = "daily_fill_open_core_seats"
+    elif removed:
         mode = "carry"
         selected = previous
         reason = "daily_proposal_would_remove_core"
-    elif added:
-        mode = "promote"
-        selected = proposed
-        reason = "daily_strict_superset_promotion"
     else:
         mode = "refresh"
         selected = previous
@@ -6747,7 +6938,7 @@ def refresh_challengers(db, p) -> dict:
     previous_selection_rows = selection.current_selection_rows(db)
     previous_core_order = tuple(
         str(addr or "").lower()
-        for addr in (selection.published_core_addrs(db) or ())
+        for addr in (selection.published_core_membership(db) or ())
         if addr
     )
     previous_core = set(previous_core_order)
@@ -7117,6 +7308,47 @@ def refresh_challengers(db, p) -> dict:
             db, generation_id, stamp, now_ms,
             retune=False, force_retune=False,
         )
+        daily_retention_evidence_complete = True
+        try:
+            daily_retention_decisions = _complete_retention_decisions(
+                db, generation_id, previous_core_order, fixed_formation,
+            )
+        except RuntimeError as exc:
+            if not str(exc).startswith("core_retention_evidence_incomplete:"):
+                raise
+            daily_retention_evidence_complete = False
+            # Daily refreshes may carry immutable Core rows when a wallet's
+            # research profile was intentionally outside the mocked/bounded
+            # candidate surface.  Preserve state; never invent a confirmation.
+            daily_retention_decisions = {}
+            for addr in previous_core_order:
+                previous = wallet_retention_state(db, addr)
+                daily_retention_decisions[addr] = core_retention.advance(
+                    previous_status=previous["status"],
+                    previous_streak=previous["failureStreak"],
+                    previous_reason=previous["failureReason"],
+                    previous_started_generation=previous["startedGeneration"],
+                    generation=generation_id,
+                    scan_kind="challenger_refresh",
+                    scan_successful=False,
+                    reason=previous["failureReason"],
+                )
+        structural_core = {
+            addr for addr, decision in daily_retention_decisions.items()
+            if (
+                not decision.retain_enabled
+                and wallet_risk.reason_kind(decision.failure_reason) == "structural"
+            )
+        }
+        actual_catastrophic_core = {
+            addr for addr in previous_core
+            if wallet_risk.actual_copy_evidence(
+                db, addr,
+            ).get("catastrophicPositionIds")
+        }
+        automatic_exit_core = (
+            set(hard_safety_core) | structural_core | actual_catastrophic_core
+        )
         fixed_core_order = tuple(
             str(addr or "").lower()
             for addr in (fixed_formation.get("selected") or ())
@@ -7124,7 +7356,7 @@ def refresh_challengers(db, p) -> dict:
         )
         fixed_core = set(fixed_core_order)
         daily_floor_order = tuple(
-            addr for addr in previous_core_order if addr not in hard_safety_core
+            addr for addr in previous_core_order if addr not in automatic_exit_core
         )
         fixed_decision = _challenger_daily_membership_decision(
             daily_floor_order, fixed_core_order,
@@ -7134,7 +7366,7 @@ def refresh_challengers(db, p) -> dict:
         promotion_blocked_reason = None
         formation = fixed_formation
         publish_core_order = fixed_decision["selected"]
-        if hard_safety_core:
+        if automatic_exit_core:
             promotion_blocked_reason = (
                 "challenger_daily_hard_safety_removal"
             )
@@ -7146,6 +7378,8 @@ def refresh_challengers(db, p) -> dict:
                 payload={
                     "previousCore": len(previous_core),
                     "hardSafetyRemoved": len(hard_safety_core),
+                    "structuralRemoved": len(structural_core),
+                    "actualCatastropheRemoved": len(actual_catastrophic_core),
                     "protectedCore": len(daily_floor_order),
                     "fixedSurfaceCore": len(fixed_core),
                     "promotionSuppressed": len(fixed_core - set(daily_floor_order)),
@@ -7265,6 +7499,19 @@ def refresh_challengers(db, p) -> dict:
                 )
         else:
             selection_rows = proposed_selection_rows
+        selection_rows = _decorate_retention_rows(
+            selection_rows, previous_core, daily_retention_decisions,
+        )
+        for addr, decision in daily_retention_decisions.items():
+            apply_wallet_retention_decision(
+                db, addr, decision, generation=generation_id,
+                stamp=publication_stamp,
+            )
+            _persist_wallet_risk_assessment(
+                db, generation_id, addr, decision,
+                source="challenger_daily", assessed_at=publication_stamp,
+                complete=daily_retention_evidence_complete,
+            )
         generation.mark_generation_ready(
             db, generation_id, profile_total=len(workset),
             profile_valid=valid_profiles, profile_deferred=deferred_profiles,
@@ -7285,14 +7532,14 @@ def refresh_challengers(db, p) -> dict:
             db, selection_rows, publication_stamp, previous_core, generation_id,
         )
         removed_core = sorted(previous_core - set(current_core))
-        unexpected_removed = set(removed_core) - hard_safety_core
+        unexpected_removed = set(removed_core) - automatic_exit_core
         if unexpected_removed:
             raise RuntimeError(
                 f"challenger_daily_demotion_invariant:{len(unexpected_removed)}"
             )
         strategy_reason = (
             "challenger_daily_hard_safety_exit"
-            if hard_safety_core
+            if automatic_exit_core
             else (
                 "challenger_daily_promotion_retune"
                 if membership_retune_triggered
@@ -7308,6 +7555,8 @@ def refresh_challengers(db, p) -> dict:
             reason=strategy_reason,
             validation={
                 **((marginal.search_meta or {}) if marginal is not None else {}),
+                "recommendedCore": list(fixed_core_order),
+                "effectiveCore": list(current_core),
                 "marketSnapshot": market_validation,
                 "baseFullGeneration": base_generation,
                 "promotionOnly": True,
@@ -7315,6 +7564,8 @@ def refresh_challengers(db, p) -> dict:
                 "verifiedSourceBlowups": len(verified_source_blowups),
                 "severeCopyLiquidations": len(severe_copy_liquidations),
                 "hardSafetyCoreRemoved": len(hard_safety_core),
+                "structuralCoreRemoved": len(structural_core),
+                "actualCatastropheCoreRemoved": len(actual_catastrophic_core),
                 "carriedCoreEvidenceGeneration": (
                     previous_generation if promotion_blocked_reason else None
                 ),
@@ -7561,7 +7812,7 @@ def scan(db, p) -> None:
     except Exception as exc:  # noqa: BLE001 - old published selection remains authoritative
         db.rollback()
         generation.fail_generation(db, generation_id, str(exc))
-        old_core = selection.published_core_addrs(db) or []
+        old_core = selection.published_core_membership(db) or []
         _record_run(db, started, t0, 0, 0, 0, 0, 0, 0, len(old_core),
                     full=run_full, failed=1, complete=False, generation_id=generation_id,
                     reason=str(exc), api_stats=rest.request_stats())
@@ -7601,7 +7852,7 @@ def scan(db, p) -> None:
         f"deferred {sum(result.deferred for result in perp_results.values())}", flush=True,
     )
     current_selection_generation = selection.latest_published_generation(db)
-    core_addrs = selection.published_core_addrs(db) or []
+    core_addrs = selection.published_core_membership(db) or []
     challenger_addrs = []
     if current_selection_generation:
         challenger_addrs = [r[0] for r in db.execute(
@@ -7916,7 +8167,7 @@ def scan(db, p) -> None:
             print(f"generation market-scope audit failed: {exc}", flush=True)
     published = False
     publication_stamp = None
-    previous_core = selection.published_core_addrs(db) or []
+    previous_core = selection.published_core_membership(db) or []
     previous_strategy_bundle = strategy_revision.load_active(db)
     n_active = len(previous_core)
     if complete:
@@ -8039,6 +8290,7 @@ def scan(db, p) -> None:
                 marginal = None
             else:
                 _apply_formation_params(db, formation, selection_stamp)
+                recommended_core_order = tuple((formation or {}).get("selected") or ())
                 selection_rows, marginal = _build_explicit_selection(
                     db, generation_id, selection_stamp, now_ms,
                     forced_core_order=(formation or {}).get("selected") or (),
@@ -8057,6 +8309,9 @@ def scan(db, p) -> None:
                     row.addr for row in selection_rows
                     if row.role == selection.CORE and row.enabled
                 }
+                desired_retained = _effective_core_order(
+                    previous_core, selection_rows, retention_decisions,
+                )
                 protected_removed = [
                     addr for addr in previous_core
                     if retention_decisions[addr].retain_enabled
@@ -8065,43 +8320,65 @@ def scan(db, p) -> None:
                 replacement_gate = {
                     "eligible": True, "reason": "no_protected_core_removed",
                 }
-                if protected_removed:
-                    baseline_validation = (
-                        ((previous_strategy_bundle or {}).get("validation") or {}).get(
-                            "finalStrictCopy"
-                        )
+                if protected_removed or proposed_core != set(desired_retained):
+                    replacement_gate = {
+                        "eligible": False,
+                        "reason": (
+                            "incumbent_low_medium_risk_never_auto_replaced"
+                            if protected_removed else "high_or_system_risk_effective_overlay"
+                        ),
+                    }
+                    membership_changed = set(desired_retained) != set(previous_core)
+                    retained_formation = _retention_exact_formation(
+                        db, generation_id, selection_stamp, now_ms,
+                        desired_retained,
+                        base_follow=(
+                            (previous_strategy_bundle or {}).get("params")
+                            or params.load_follow(db)
+                        ),
+                        replacement_gate=replacement_gate,
+                        decisions=retention_decisions,
+                        retune=membership_changed and bool(desired_retained),
                     )
-                    proposal_validation = (
-                        ((marginal.search_meta or {}).get("finalStrictCopy"))
-                        if marginal else None
+                    _apply_formation_params(
+                        db, retained_formation, selection_stamp,
                     )
-                    replacement_gate = core_retention.replacement_gate(
-                        baseline_validation, proposal_validation,
+                    selection_rows, marginal = _build_retained_selection(
+                        db, generation_id, selection_stamp, now_ms,
+                        retained_formation,
                     )
-                    if not replacement_gate["eligible"]:
-                        desired_retained = tuple(
-                            addr for addr in previous_core
-                            if retention_decisions[addr].retain_enabled
-                        )
-                        if desired_retained:
-                            retained_formation = _retention_exact_formation(
-                                db, generation_id, selection_stamp, now_ms,
-                                desired_retained,
-                                base_follow=(
-                                    (previous_strategy_bundle or {}).get("params")
-                                    or params.load_follow(db)
-                                ),
-                                replacement_gate=replacement_gate,
-                                decisions=retention_decisions,
-                            )
-                            _apply_formation_params(
-                                db, retained_formation, selection_stamp,
-                            )
-                            selection_rows, marginal = _build_retained_selection(
-                                db, generation_id, selection_stamp, now_ms,
-                                retained_formation,
-                            )
-                            formation = retained_formation
+                    formation = retained_formation
+                final_validation = (
+                    ((marginal.search_meta or {}).get("finalStrictCopy"))
+                    if marginal else {}
+                ) or {}
+                if final_validation.get("status") == "operator_review_degraded":
+                    degraded_core = tuple(
+                        addr for addr in previous_core
+                        if retention_decisions[addr].retain_enabled
+                    )
+                    degraded_formation = _retention_exact_formation(
+                        db, generation_id, selection_stamp, now_ms,
+                        degraded_core,
+                        base_follow=(
+                            (previous_strategy_bundle or {}).get("params")
+                            or params.load_follow(db)
+                        ),
+                        replacement_gate={
+                            "eligible": False,
+                            "reason": "operator_review_degraded_keep_active_surface",
+                        },
+                        decisions=retention_decisions,
+                        retune=False,
+                    )
+                    _apply_formation_params(
+                        db, degraded_formation, selection_stamp,
+                    )
+                    selection_rows, marginal = _build_retained_selection(
+                        db, generation_id, selection_stamp, now_ms,
+                        degraded_formation,
+                    )
+                    formation = degraded_formation
                 retention_decisions = _apply_shared_retention_failure(
                     db, generation_id, previous_core, retention_decisions, marginal,
                 )
@@ -8112,6 +8389,10 @@ def scan(db, p) -> None:
                     apply_wallet_retention_decision(
                         db, addr, decision, generation=generation_id,
                         stamp=selection_stamp,
+                    )
+                    _persist_wallet_risk_assessment(
+                        db, generation_id, addr, decision,
+                        source="complete", assessed_at=selection_stamp,
                     )
             _assert_margin_equity_snapshot(db, p.margin_equity_pct)
             # Publication timestamps describe when the complete decision became visible, not when the
@@ -8206,6 +8487,10 @@ def scan(db, p) -> None:
                         (marginal.search_meta or {}) if marginal
                         else ((formation or {}).get("search") or {})
                     ),
+                    "recommendedCore": list(
+                        locals().get("recommended_core_order", ())
+                    ),
+                    "effectiveCore": list(current_core),
                     "marketSnapshot": market_validation,
                 },
                 stamp=publication_stamp,

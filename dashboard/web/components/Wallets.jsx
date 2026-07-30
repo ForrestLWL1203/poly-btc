@@ -1,6 +1,7 @@
 import { api } from "../lib/api.js";
 import { fNum, fSign, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
+import { BanIcon } from "../lib/icons.jsx";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
 const { useState, useCallback } = React;
@@ -17,27 +18,61 @@ const dataWarning = (status) => {
   return null;
 };
 
+const riskBadge = (w) => {
+  if (w.operatorIntent === "draining") return ["仅退出中", "tint-amber"];
+  if (w.operatorIntent === "requalify") return ["人工退出·等待重评", "tint-gray"];
+  return {
+    low: ["低风险", "tint-amber"],
+    medium: ["中风险", "tint-amber"],
+    high: ["高风险", "tint-red"],
+    unavailable: ["资金撤出", "tint-red"],
+    structural: ["结构不可跟", "tint-red"],
+    data_error: ["数据异常", "tint-red"],
+  }[w.riskLevel] || null;
+};
+
 export function Wallets({ confirm }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
   const [starPending, setStarPending] = useState({});
+  const [exitPending, setExitPending] = useState({});
   const [starError, setStarError] = useState(null);
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
   const { data, setData, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
+  const portfolioRelease = data && data.portfolioRelease;
   const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
 
-  const toggle = (w) => {
-    const next = !w.enabled;
-    const act = () => api.cmd("wallet_toggle", { address: w.address, enabled: next })
-      .then(() => { setTimeout(reload, 1800); });
-    if (next) act(); else confirm({ title: "停用钱包", danger: true, ok: "停用",
-      body: `停用后不再对 ${short(w.address)} 开新仓,存量持仓继续跟到平仓。`, onConfirm: act });
+  const requestExit = (w) => {
+    if (exitPending[w.address] || w.operatorIntent === "draining") return;
+    const hasPositions = Number(w.exitPositionCount || 0) > 0;
+    const act = async () => {
+      setExitPending(pending => ({ ...pending, [w.address]: true }));
+      try {
+        await api.cmdAndWait("wallet_exit_request", { address: w.address });
+        await reload();
+      } finally {
+        setExitPending(pending => {
+          const next = { ...pending };
+          delete next[w.address];
+          return next;
+        });
+      }
+    };
+    confirm({
+      title: hasPositions ? "进入仅退出" : "转入候选",
+      danger: true,
+      ok: hasPositions ? "仅退出" : "转候选",
+      body: hasPositions
+        ? `停止 ${short(w.address)} 新开仓和加仓；当前 ${w.exitPositionCount} 笔整批净盈利平仓将自动恢复，亏损或清算后转候选。`
+        : `立即将 ${short(w.address)} 转候选，等待每日完整重评恢复。`,
+      onConfirm: act,
+    });
   };
 
   const toggleStar = async (w) => {
@@ -84,6 +119,10 @@ export function Wallets({ confirm }) {
           </div>
         </div>
       </div>
+      {tab === "followed" && portfolioRelease && portfolioRelease.status === "operator_review_degraded" &&
+        <div className="radar-alert" role="status">
+          组合经济门槛降级：保留当前有效 Core 与参数，暂停自动晋升和调参，等待人工复核。
+        </div>}
       {starError && <div className="radar-alert" role="alert">{starError}</div>}
       <div className="tbl-wrap">
         {explicit ? (
@@ -95,15 +134,16 @@ export function Wallets({ confirm }) {
               <th className="num" title="仅显示当前 generation 的最终严格 Copy 证据；缺少严格回放时不以粗回放替代。">回放数据</th>
               <th className="num" title="该钱包自开始被跟单以来的实际仓位数与累计净盈亏；包含已平仓已实现盈亏和当前持仓浮动盈亏">实际跟单</th>
               <th>主力</th>
-              {tab === "challenger" && <th>未跟原因</th>}<th>启用</th>
+              {tab === "challenger" && <th>未跟原因</th>}<th>操作</th>
             </tr></thead>
             <tbody>
               {data === null && <tr><td colSpan={tab === "challenger" ? 11 : 10} className="loading">加载中…</td></tr>}
               {data && pageRows.length === 0 && <tr><td colSpan={tab === "challenger" ? 11 : 10} className="empty">{tab === "challenger" ? "当前没有待观察钱包" : "当前没有符合实跟条件的钱包"}</td></tr>}
               {data && pageRows.map(w => {
                 const warning = dataWarning(w.dataStatus);
+                const risk = riskBadge(w);
                 return (
-                  <tr key={w.address} className={w.enabled ? "" : "row-off"}
+                  <tr key={w.address} className={w.operatorIntent === "requalify" ? "row-off" : ""}
                     style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                     <td><div className="wallet-rank-cell">
                       {tab === "followed" && <button type="button"
@@ -120,11 +160,8 @@ export function Wallets({ confirm }) {
                     <td className="addr">
                       <span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span>
                       {warning && <span className={"tint " + warning[1]} style={{ marginLeft: 6 }} title="本轮画像数据不完整">{warning[0]}</span>}
-                      {tab === "followed" && w.retentionStatus === "probation" &&
-                        <span className="tint tint-amber" style={{ marginLeft: 6 }}
-                          title={`${w.retentionFailureReason || "首次普通留任失败"}；已冻结新开仓和加仓，存量仓位继续管理`}>
-                          观察中 {w.retentionFailureStreak || 1}/2
-                        </span>}
+                      {risk && <span className={"tint " + risk[1]} style={{ marginLeft: 6 }}
+                        title={(w.riskReasons || []).join("；") || risk[0]}>{risk[0]}</span>}
                       {tab === "followed" && (w.retentionStatus === "safety_frozen" || w.retentionStatus === "safety_pending") &&
                         <span className="tint tint-red" style={{ marginLeft: 6 }}>安全冻结</span>}
                     </td>
@@ -164,8 +201,18 @@ export function Wallets({ confirm }) {
                       </React.Fragment> : <span className="muted">暂无跟单</span>}
                     </td>
                     <td><b>{w.mainCoin || "—"}</b></td>
-                    {tab === "challenger" && <td><span className="muted">{w.selectionReasonText || "未满足实跟条件"}</span></td>}
-                    <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
+                    {tab === "challenger" && <td><span className="muted">{w.operatorIntent === "requalify" ? "人工退出·等待每日完整重评" : (w.selectionReasonText || "未满足实跟条件")}</span></td>}
+                    <td>
+                      {tab === "followed" ? <button type="button"
+                        className={"coin-ban-btn" + (w.operatorIntent === "draining" ? " on" : "")}
+                        aria-label={w.operatorIntent === "draining" ? "该钱包仅退出中" : "请求该钱包条件性退榜"}
+                        title={w.operatorIntent === "draining" ? "仅退出中；捕获持仓全部结案后自动判定恢复或转候选" : "条件性退榜"}
+                        disabled={!!exitPending[w.address] || w.operatorIntent === "draining"}
+                        onClick={(e) => { e.stopPropagation(); requestExit(w); }}>
+                        {exitPending[w.address] ? <span className="spin" /> : <BanIcon />}
+                        <span className="coin-ban-tip">{w.operatorIntent === "draining" ? "仅退出中" : "条件性退榜"}</span>
+                      </button> : <span className="muted">—</span>}
+                    </td>
                   </tr>
                 );
               })}
@@ -176,7 +223,7 @@ export function Wallets({ confirm }) {
             <thead><tr>
               <th>#</th><th>地址</th><th>市场</th><th className="num">评分</th><th className="num">ROI</th><th className="num">胜率</th>
               <th className="num" title="目标钱包自己最近7天平掉的回合数(活跃度)">近7天</th>
-              <th className="num">最大亏损</th><th>主力</th><th className="num">被跟</th><th className="num">总体盈亏</th><th>启用</th>
+              <th className="num">最大亏损</th><th>主力</th><th className="num">被跟</th><th className="num">总体盈亏</th><th>操作</th>
             </tr></thead>
             <tbody>
               {data === null && <tr><td colSpan="12" className="loading">加载中…</td></tr>}
@@ -197,7 +244,12 @@ export function Wallets({ confirm }) {
                     ? <b style={{ color: (w.forwardNetPnl || 0) < 0 ? "var(--red-l)" : "var(--green-l)" }}>
                         {fSign(w.forwardNetPnl || 0, 0)}{(w.forwardNetPnl || 0) < -5 ? " ⚠" : ""}</b>
                     : <span className="muted">—</span>}</td>
-                  <td><div className={"toggle " + (w.enabled ? "on" : "")} onClick={(e) => { e.stopPropagation(); toggle(w); }}><div className="knob" /></div></td>
+                  <td><button type="button" className="coin-ban-btn"
+                    aria-label="请求该钱包条件性退榜" title="条件性退榜"
+                    disabled={!!exitPending[w.address]}
+                    onClick={(e) => { e.stopPropagation(); requestExit(w); }}>
+                    {exitPending[w.address] ? <span className="spin" /> : <BanIcon />}
+                  </button></td>
                 </tr>
               ))}
             </tbody>

@@ -33,6 +33,18 @@ def _json_obj(raw):
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _json_list(raw):
+    if isinstance(raw, list):
+        return raw
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def _selection_reason_text(row):
     """Translate internal selection states into one operator-facing explanation."""
     reason = str(_col(row, "selection_reason") or "").strip().lower()
@@ -276,17 +288,48 @@ def _portfolio_replay_summary(db, generation):
     return payload
 
 
+def _portfolio_release_summary(db):
+    row = q1(
+        db,
+        "SELECT sr.validation_json FROM active_strategy_revision ar "
+        "JOIN strategy_revision sr ON sr.revision=ar.revision WHERE ar.id=1",
+    )
+    validation = _json_obj(_col(row, "validation_json") if row else None)
+    strict = _json_obj(validation.get("finalStrictCopy"))
+    return {
+        "status": strict.get("status") or validation.get("status") or "ok",
+        "recommendedCore": validation.get("recommendedCore") or [],
+        "effectiveCore": validation.get("effectiveCore") or [],
+    }
+
+
 def _ep_selected_wallets(db, generation, role, page, size):
     """Serve one role from the immutable selection snapshot.
 
     The page CTE is intentionally selected first so episode/copy-position aggregates only touch the visible
     rows.  This preserves the endpoint's bounded-query behaviour for large registries.
     """
+    if role == "core":
+        role_filter = (
+            "fs.role='core' AND COALESCE(tc.intent,'active')!='requalify'"
+        )
+        effective_role_sql = "'core'"
+    elif role == "challenger":
+        role_filter = (
+            "(fs.role='challenger' OR "
+            "(fs.role='core' AND COALESCE(tc.intent,'active')='requalify'))"
+        )
+        effective_role_sql = "'challenger'"
+    else:
+        role_filter = "fs.role=?"
+        effective_role_sql = "fs.role"
+    total_args = (generation,) if role in {"core", "challenger"} else (generation, role)
     total_row = q1(
         db,
         "SELECT COUNT(*) c FROM follow_selection fs "
-        "WHERE fs.generation=? AND fs.role=?",
-        (generation, role),
+        "LEFT JOIN target_controls tc ON lower(tc.addr)=lower(fs.addr) "
+        "WHERE fs.generation=? AND " + role_filter,
+        total_args,
     )
     total = (_col(total_row, "c") or 0) if total_row else 0
     cutoff7d = int((time.time() - 7 * 86400) * 1000)
@@ -294,12 +337,17 @@ def _ep_selected_wallets(db, generation, role, page, size):
     rows = qall(
         db,
         "WITH page_selected AS ("
-        "  SELECT fs.addr,fs.role AS selection_role,fs.reason AS selection_reason,fs.utility,"
+        "  SELECT fs.addr," + effective_role_sql + " AS selection_role,"
+        "         fs.role AS published_role,fs.reason AS selection_reason,fs.utility,"
         "         fs.selection_rank,fs.replay_profit_priority,fs.model_version,"
         "         fs.entry_eligible,fs.retention_status,fs.retention_failure_reason,"
         "         fs.retention_failure_streak,fs.retained_by_hysteresis,"
         "         ews.state AS execution_safety_state,ews.reason AS execution_safety_reason,"
         "         COALESCE(tc.pinned,0) AS pinned,tc.pinned_at,"
+        "         COALESCE(tc.intent,'active') AS operator_intent,"
+        "         tc.intent_requested_at,tc.intent_resolved_at,tc.intent_resolution,"
+        "         wr.risk_level,wr.risk_reasons_json,wr.risk_confirmation_count,"
+        "         wr.risk_first_confirmed_at,wr.risk_assessed_at,wr.risk_block_reason,"
         "         fs.follow_score AS selection_follow_score,"
         "         CASE WHEN fs.follow_score IS NOT NULL THEN fs.follow_score "
         "              WHEN fs.role!='core' AND fs.utility BETWEEN 0 AND 1 THEN fs.utility "
@@ -325,9 +373,10 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.replayed_at "
         "  FROM follow_selection fs "
         "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+        "  LEFT JOIN wallet_registry wr ON lower(wr.addr)=lower(fs.addr) "
         "  LEFT JOIN follow_history sfh ON sfh.addr=fs.addr "
         "  LEFT JOIN execution_wallet_safety ews ON lower(ews.addr)=lower(fs.addr) "
-        "  WHERE fs.generation=? AND fs.role=? "
+        "  WHERE fs.generation=? AND " + role_filter + " "
         "  ORDER BY COALESCE(fs.selection_rank,999999),fs.addr LIMIT ? OFFSET ?"
         "), ep7 AS ("
         "  SELECT f.addr,COUNT(e.addr) AS closed_7d "
@@ -337,7 +386,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  FROM page_selected f LEFT JOIN episode e ON e.addr=f.addr GROUP BY f.addr"
         "), copy_stats AS ("
         "  SELECT f.addr,COUNT(cp.pos_id) AS follow_count,"
-        "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net "
+        "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net,"
+        "         SUM(CASE WHEN cp.status='open' THEN 1 ELSE 0 END) AS open_position_count "
         "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
         "), live_liquidity AS ("
         "  SELECT f.addr,COALESCE(SUM(l.count),0) AS live_liquidity_skip_n,"
@@ -346,11 +396,14 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "    ON l.addr=f.addr AND l.last_ms>=? "
         "  GROUP BY f.addr"
         ") "
-        "SELECT s.addr,s.selection_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
+        "SELECT s.addr,s.selection_role,s.published_role,s.selection_reason,s.selection_data_status,s.utility,s.selection_rank,"
         "s.replay_profit_priority,s.model_version,s.entry_eligible,s.retention_status,"
         "s.retention_failure_reason,s.retention_failure_streak,s.retained_by_hysteresis,"
         "s.execution_safety_state,s.execution_safety_reason,"
         "s.pinned,s.pinned_at,"
+        "s.operator_intent,s.intent_requested_at,s.intent_resolved_at,s.intent_resolution,"
+        "s.risk_level,s.risk_reasons_json,s.risk_confirmation_count,"
+        "s.risk_first_confirmed_at,s.risk_assessed_at,s.risk_block_reason,"
         "s.selection_follow_score,s.legacy_follow_score,s.replay_score_detail_json,"
         "w.market_type,w.score,w.top_coin,COALESCE(tc.enabled,1) AS enabled,"
         "fh.first_followed_at,s.replayed_at AS strict_replayed_at,"
@@ -398,6 +451,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "p.copy_bt_open_fill_rate AS rough_copy_open_fill_rate,"
         "COALESCE(ep7.closed_7d,0) AS closed_7d,COALESCE(ep_all.episode_total,0) AS episode_total,"
         "COALESCE(cs.follow_count,0) AS follow_count,COALESCE(cs.fwd_net,0) AS fwd_net,"
+        "COALESCE(cs.open_position_count,0) AS open_position_count,"
         "COALESCE(ll.live_liquidity_skip_n,0) AS live_liquidity_skip_n,"
         "ll.live_liquidity_skip_coins "
         "FROM page_selected s LEFT JOIN watchlist w ON w.addr=s.addr "
@@ -411,7 +465,10 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "LEFT JOIN copy_stats cs ON cs.addr=s.addr "
         "LEFT JOIN live_liquidity ll ON ll.addr=s.addr "
         "ORDER BY COALESCE(s.selection_rank,999999),s.addr",
-        (generation, role, size, page * size, cutoff7d, cutoff30d),
+        (
+            *((generation,) if role in {"core", "challenger"} else (generation, role)),
+            size, page * size, cutoff7d, cutoff30d,
+        ),
     )
     out = []
     for i, r in enumerate(rows):
@@ -452,6 +509,23 @@ def _ep_selected_wallets(db, generation, role, page, size):
             (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
         )
         open_audit = _json_obj(_col(display_metrics, "copy_bt_open_audit_json"))
+        operator_intent = _col(r, "operator_intent") or "active"
+        financial_risk = _col(r, "risk_level") or "normal"
+        risk_block = _col(r, "risk_block_reason")
+        risk_level = (
+            "structural" if risk_block == "structural_unfollowable"
+            else "data_error" if risk_block == "data_incomplete"
+            else financial_risk
+        )
+        effective_role = _col(r, "selection_role") or role
+        entry_allowed = bool(
+            effective_role == "core"
+            and operator_intent == "active"
+            and _col(r, "enabled", True)
+            and _col(r, "entry_eligible", True)
+            and financial_risk not in {"high", "unavailable"}
+            and not risk_block
+        )
         out.append({
             "followPos": page * size + i + 1,
             "address": _col(r, "addr"),
@@ -468,6 +542,20 @@ def _ep_selected_wallets(db, generation, role, page, size):
             ),
             "profitRank": _col(r, "selection_rank"),
             "entryEligible": bool(_col(r, "entry_eligible", True)),
+            "riskLevel": risk_level,
+            "riskReasons": _json_list(_col(r, "risk_reasons_json")),
+            "riskAssessedAt": iso_epoch(_col(r, "risk_assessed_at")),
+            "riskFirstConfirmedAt": iso_epoch(_col(r, "risk_first_confirmed_at")),
+            "riskConfirmationCount": int(_col(r, "risk_confirmation_count") or 0),
+            "operatorIntent": operator_intent,
+            "effectiveRole": effective_role,
+            "publishedRole": _col(r, "published_role"),
+            "entryAllowed": entry_allowed,
+            "exitRequestedAt": iso_epoch(_col(r, "intent_requested_at")),
+            "exitResolvedAt": iso_epoch(_col(r, "intent_resolved_at")),
+            "exitResolution": _col(r, "intent_resolution"),
+            "exitPositionCount": int(_col(r, "open_position_count") or 0),
+            "executionBlockReason": risk_block,
             "retentionStatus": (
                 "safety_frozen"
                 if _col(r, "execution_safety_state") == "confirmed"
@@ -631,6 +719,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "selectionMode": True,
         "selectionGeneration": generation,
         "portfolioReplay": _portfolio_replay_summary(db, generation),
+        "portfolioRelease": _portfolio_release_summary(db),
         "tab": tab,
         "total": total,
         "followed": total if role == "core" else None,
@@ -788,6 +877,26 @@ def ep_wallet_detail(db, addr, qs=None):
              "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_n,"
              "COALESCE(SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END),0) open_u "
              "FROM copy_position WHERE addr=?", (addr,))
+    risk = q1(
+        db,
+        "SELECT risk_level,risk_reasons_json,risk_confirmation_count,"
+        "risk_first_confirmed_at,risk_assessed_at,risk_block_reason "
+        "FROM wallet_registry WHERE lower(addr)=lower(?)",
+        (addr,),
+    )
+    control = q1(
+        db,
+        "SELECT COALESCE(intent,'active') AS intent,intent_requested_at,"
+        "intent_resolved_at,intent_resolution,intent_position_ids_json "
+        "FROM target_controls WHERE lower(addr)=lower(?)",
+        (addr,),
+    )
+    risk_history = q1(
+        db,
+        "SELECT evidence_json FROM wallet_risk_assessment "
+        "WHERE lower(addr)=lower(?) ORDER BY assessed_at DESC LIMIT 1",
+        (addr,),
+    )
     live_liquidity = q1(
         db,
         "SELECT COALESCE(SUM(count),0) AS skip_n,GROUP_CONCAT(DISTINCT coin) AS coins "
@@ -875,9 +984,36 @@ def ep_wallet_detail(db, addr, qs=None):
         (score_breakdown.get("preStrict") or {}).get("activity")
         or _json_obj(_col(pr, "pre_strict_activity_json") if pr else None)
     )
+    operator_intent = _col(control, "intent") or "active"
+    published_role = _col(pr, "selection_role") if pr else None
+    effective_role = (
+        "challenger"
+        if published_role == "core" and operator_intent == "requalify"
+        else published_role
+    )
+    risk_block = _col(risk, "risk_block_reason")
+    risk_level = (
+        "structural" if risk_block == "structural_unfollowable"
+        else "data_error" if risk_block == "data_incomplete"
+        else _col(risk, "risk_level") or "normal"
+    )
     return {
         "address": addr, "rank": (w["rank"] if w else None),
-        "role": (_col(pr, "selection_role") if pr else None),
+        "role": effective_role,
+        "publishedRole": published_role,
+        "effectiveRole": effective_role,
+        "operatorIntent": operator_intent,
+        "riskLevel": risk_level,
+        "riskReasons": _json_list(_col(risk, "risk_reasons_json")),
+        "riskConfirmationCount": int(_col(risk, "risk_confirmation_count") or 0),
+        "riskFirstConfirmedAt": iso_epoch(_col(risk, "risk_first_confirmed_at")),
+        "riskAssessedAt": iso_epoch(_col(risk, "risk_assessed_at")),
+        "executionBlockReason": risk_block,
+        "exitRequestedAt": iso_epoch(_col(control, "intent_requested_at")),
+        "exitResolvedAt": iso_epoch(_col(control, "intent_resolved_at")),
+        "exitResolution": _col(control, "intent_resolution"),
+        "exitPositionCount": open_n,
+        "actualFollowEvidence": _json_obj(_col(risk_history, "evidence_json")),
         "selectionReason": (_col(pr, "selection_reason") if pr else None),
         "selectionReasonText": (_selection_reason_text(pr) if pr else None),
         "marketType": (pr["market_type"] if pr else None),

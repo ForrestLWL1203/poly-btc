@@ -66,10 +66,14 @@ export function OpenPositionsTable({
                 <td className="addr">{short(p.wallet)} {p.followPos != null
                   ? <React.Fragment>
                       <span className="rankbadge" title={"跟单序号" + (p.walletRank ? " · 全站评分#" + p.walletRank : "")}>#{p.followPos}</span>
-                      {p.retentionStatus === "probation" &&
+                      {p.operatorIntent === "draining" &&
                         <span className="tint tint-amber" style={{ marginLeft: 6 }}
-                          title="Core 观察期：禁止新开仓和加仓，当前仓位继续减仓、平仓及风控管理">
-                          观察中
+                          title="停止新开仓和加仓；当前捕获持仓继续减仓、平仓及风控管理">
+                          仅退出中
+                        </span>}
+                      {p.executionBlockReason &&
+                        <span className="tint tint-red" style={{ marginLeft: 6 }}>
+                          {p.executionBlockReason === "structural_unfollowable" ? "结构不可跟" : "系统阻断"}
                         </span>}
                     </React.Fragment>
                   : <span className="tint tint-gray" title="当前不在跟单集(仅平仓)">脱榜</span>}</td>

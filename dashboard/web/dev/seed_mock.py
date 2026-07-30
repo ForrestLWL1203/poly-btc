@@ -16,7 +16,8 @@ db = storage.connect(DB, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
 params.seed_params(db)
 for t in ("account_stats", "copy_position", "copy_action", "coin_vol", "watchlist",
           "target_controls", "profile", "leaderboard", "scan_runs", "follow_selection",
-          "scan_generation", "wallet_registry", "pipeline_audit", "follow_history",
+          "scan_generation", "wallet_registry", "wallet_risk_assessment",
+          "pipeline_audit", "follow_history",
           "market_risk_action", "market_risk_episode",
           "market_risk_intent", "market_risk_assessment", "market_risk_snapshot",
           "provider_balance_snapshot", "provider_credential"):
@@ -105,7 +106,10 @@ for rank, (addr, name, score, roi, wr, coin, mt, worst, madds, acct, en) in enum
                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                (rank, addr, name, score, roi, wr, coin, mt, acct, GEN, GEN, ago(300), "valid",
                 "qualified" if rank <= 4 else "thin", now_iso()))
-    db.execute("INSERT INTO target_controls (addr,enabled,updated_at) VALUES (?,?,?)", (addr, en, now_iso()))
+    db.execute(
+        "INSERT INTO target_controls (addr,enabled,intent,updated_at) VALUES (?,?,?,?)",
+        (addr, en, "active" if en else "requalify", now_iso()),
+    )
     role = "core" if rank <= 3 else "challenger"
     profit_priority = (
         .70 * profile["copy_bt_net_pnl"] / profile["copy_bt_window_start_equity"]

@@ -12,10 +12,14 @@ def _follow_set_cte() -> str:
         "SELECT fs.addr,COALESCE(fs.selection_rank,"
         "ROW_NUMBER() OVER (ORDER BY COALESCE(fs.utility,-1e999) DESC,fs.addr)) AS follow_pos,"
         "COALESCE(fs.retention_status,'healthy') AS retention_status,"
-        "COALESCE(fs.retention_failure_streak,0) AS retention_failure_streak "
+        "COALESCE(fs.retention_failure_streak,0) AS retention_failure_streak,"
+        "COALESCE(tc.intent,'active') AS operator_intent,"
+        "wr.risk_block_reason "
         "FROM follow_selection fs JOIN current_selection sg ON sg.generation=fs.generation "
         "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
-        "WHERE fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1"
+        "LEFT JOIN wallet_registry wr ON lower(wr.addr)=lower(fs.addr) "
+        "WHERE fs.role='core' AND fs.enabled=1 "
+        "AND COALESCE(tc.intent,'active') IN ('active','draining')"
         ") "
     )
 
@@ -130,7 +134,8 @@ def ep_positions(db, qs):
         "ri.would_block,ri.risk_score,ri.confirmation_mode,ri.decision_reason,ri.outcome,ri.status AS risk_status,"
         "re.delayed_entry,re.blocked_entries,re.allowed_entries,re.net_benefit,re.shadow_net_pnl,"
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos,"
-        "fs.retention_status,fs.retention_failure_streak "
+        "fs.retention_status,fs.retention_failure_streak,"
+        "fs.operator_intent,fs.risk_block_reason "
         "FROM copy_position cp "
         "LEFT JOIN market_risk_intent ri ON ri.pos_id=cp.pos_id "
         "LEFT JOIN market_risk_episode re ON re.pos_id=cp.pos_id "
@@ -157,6 +162,8 @@ def ep_positions(db, qs):
             "wallet": r["addr"], "walletRank": r["wrank"], "followPos": r["follow_pos"],
             "retentionStatus": r["retention_status"] or "healthy",
             "retentionFailureStreak": int(r["retention_failure_streak"] or 0),
+            "operatorIntent": r["operator_intent"] or "active",
+            "executionBlockReason": r["risk_block_reason"],
             "lagSec": r["open_lag_sec"], "liqPx": liq, "liqDistancePct": liq_dist,
             "masterEntry": r["master_open_px"], "masterLeverage": r["master_leverage"],
             "masterNotional": (r["master_peak_sz"] or 0.0) * (r["master_open_px"] or 0.0),

@@ -20,6 +20,22 @@ const openSkipLabel = (reason) => ({
   skip_coin_blacklist: "策略禁用市场",
 }[reason] || reason || "未执行");
 
+const riskLabel = (level) => ({
+  normal: "正常", low: "低风险", medium: "中风险", high: "高风险",
+  unavailable: "资金撤出", structural: "结构不可跟", data_error: "数据异常",
+}[level] || level || "正常");
+
+const riskReasonLabel = (reason) => ({
+  actual_copy_negative_insufficient_sample: "实际跟单暂时亏损，已平样本不足",
+  actual_copy_30d_conservative_pnl_not_positive: "实际跟单30日保守盈亏转负且样本充分",
+  actual_copy_open_loss_over_50pct: "实际浮亏超过30日已平利润50%",
+  copy_30d_closed_pnl_not_positive: "Canonical Copy 30日已平利润转负",
+  source_30d_closed_pnl_not_positive: "源钱包30日已平利润转负",
+  copy_single_liquidation_loss_over_8pct: "Canonical Copy 单次清算损失达到权益8%",
+  actual_copy_single_liquidation_loss_over_8pct: "实际 Copy 单次清算损失达到开仓权益8%",
+  source_account_liquidated_zero: "源钱包已确认清算且账户归零",
+}[reason] || reason);
+
 const copyWindowRows = (breakdown, profitability) => {
   const pnl = breakdown.copyPnl || {};
   const closed = breakdown.closedN || {};
@@ -78,13 +94,18 @@ export function WalletDrawer({ address, onClose }) {
     ? `官方 Perp 短历史 ROI（累计${fNum(officialFundedDays, 0)}日有资金运行）`
     : `官方 Perp ${officialEvidence.windowDays != null ? fNum(officialEvidence.windowDays, 0) : "约30"}日 ROI`;
   const copyRows = copyWindowRows(scoreBreakdown, d && d.copyProfitability);
+  const actualEvidence = (d && d.actualFollowEvidence) || {};
   const copy30 = copyRows.find(([label]) => label === "30 天");
   const copyWinRate = scoreBreakdown.copyWinRatePct;
   const breakEvenPayoff = copyWinRate != null && copyWinRate > 0
     ? (100 - copyWinRate) / copyWinRate
     : null;
-  const roleView = !d ? null : d.role === "core"
-    ? { label: "跟单中", detail: "已通过钱包质量筛选与组合回放，当前允许新开仓。", tone: "good" }
+  const roleView = !d ? null : d.operatorIntent === "draining"
+    ? { label: "仅退出中", detail: "已停止新开仓和加仓；捕获持仓全部结案后自动决定恢复或转候选。", tone: "warn" }
+    : d.operatorIntent === "requalify"
+      ? { label: "候选", detail: "人工退出·等待每日完整重评恢复。", tone: "neutral" }
+      : d.role === "core"
+    ? { label: "跟单中", detail: "当前允许新开仓；低中风险仅提示，不自动退榜。", tone: "good" }
     : d.role === "challenger"
       ? { label: "候选", detail: d.selectionReasonText || "当前未进入跟单列表。", tone: "neutral" }
       : d.role === "exit_only"
@@ -129,6 +150,20 @@ export function WalletDrawer({ address, onClose }) {
             </div>
 
             <div className="wallet-decision-grid">
+              <DecisionCard title={`风险评级 · ${riskLabel(d.riskLevel)}`}
+                tone={d.riskLevel === "high" || d.riskLevel === "unavailable" || d.riskLevel === "structural" ? "danger" : d.riskLevel === "low" || d.riskLevel === "medium" ? "warn" : "neutral"}>
+                <div className="wallet-risk-list">
+                  <div className="wallet-risk"><span>首次 / 最近确认</span><b>{d.riskFirstConfirmedAt ? agoText(d.riskFirstConfirmedAt) : "—"} / {d.riskAssessedAt ? agoText(d.riskAssessedAt) : "—"}</b></div>
+                  {(d.riskReasons || []).map(reason => (
+                    <div className="wallet-risk warn" key={reason}><span>风险原因</span><b>{riskReasonLabel(reason)}</b></div>
+                  ))}
+                  <div className="wallet-risk"><span>实际跟单 30日保守盈亏 / 已平</span><b>{actualEvidence.conservativePnl30d != null ? fSign(actualEvidence.conservativePnl30d, 0) : "—"} / {actualEvidence.closedN30d ?? "—"} 笔</b></div>
+                  <div className="wallet-risk"><span>实际跟单 7日保守盈亏 / 已平</span><b>{actualEvidence.conservativePnl7d != null ? fSign(actualEvidence.conservativePnl7d, 0) : "—"} / {actualEvidence.closedN7d ?? "—"} 笔</b></div>
+                  {d.exitRequestedAt && <div className="wallet-risk"><span>退出请求 / 捕获持仓</span><b>{agoText(d.exitRequestedAt)} / {d.exitPositionCount || 0} 笔在持</b></div>}
+                  {d.exitResolution && <div className="wallet-risk"><span>退出结案</span><b>{d.exitResolution}</b></div>}
+                </div>
+              </DecisionCard>
+
               <DecisionCard title={d.copyReplayStage === "strict" ? "最终严格 Copy · 保守资格" : "粗略 fills-only Copy · 保守资格"} tone={copyRows.length ? "good" : "muted"}>
                 {copyRows.length ? (
                   <div className="score-window-grid">

@@ -9,7 +9,8 @@ from hyper.util import now_iso
 from .common import q1
 
 
-ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle", "wallet_star",
+ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
+                    "wallet_exit_request", "wallet_star",
                     "observer_start", "observer_stop", "rescan", "scan_stop",
                     "patch_params", "reload_params", "risk_radar_start", "risk_radar_stop",
                     "set_provider_credential", "delete_provider_credential", "test_provider_connection"}
@@ -28,6 +29,12 @@ def validate_command_payload(ctype, payload):
             raise ValueError("invalid wallet address")
         if not isinstance(payload.get(expected_flag), bool):
             raise ValueError(f"{expected_flag} must be boolean")
+    elif ctype == "wallet_exit_request":
+        if set(payload) != {"address"}:
+            raise ValueError("wallet_exit_request requires address")
+        address = payload.get("address")
+        if not isinstance(address, str) or not address.strip() or len(address) > 128:
+            raise ValueError("invalid wallet address")
     elif ctype in {"risk_radar_start", "risk_radar_stop"}:
         if payload:
             raise ValueError("risk radar control payload must be empty")

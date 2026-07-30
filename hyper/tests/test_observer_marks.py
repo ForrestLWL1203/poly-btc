@@ -1035,12 +1035,15 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                 await asyncio.sleep(0.05)
 
             position = db.execute(
-                "SELECT status,notional,entry_px FROM copy_position WHERE addr='0xaaa' AND coin='TAO'"
+                "SELECT status,notional,entry_px,opening_account_equity "
+                "FROM copy_position WHERE addr='0xaaa' AND coin='TAO'"
             ).fetchone()
             self.assertIsNotNone(position)
             self.assertEqual(position["status"], "open")
             self.assertGreaterEqual(position["notional"], 1000)
             self.assertAlmostEqual(position["entry_px"], 100.01, places=6)
+            self.assertIsNotNone(position["opening_account_equity"])
+            self.assertGreater(position["opening_account_equity"], 0)
             self.assertIsNone(
                 db.execute(
                     "SELECT reason FROM live_policy_skip WHERE addr='0xaaa' AND coin='TAO'"
@@ -1288,7 +1291,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
-    def test_probation_target_stays_tracked_but_blocks_open_and_add(self):
+    def test_low_risk_target_stays_tracked_and_keeps_entry_permission(self):
         db = self._db()
         db.execute(
             "INSERT INTO watchlist (rank,addr,score,acct_value,sector_policy_json,updated_at) "
@@ -1304,7 +1307,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             "INSERT INTO follow_selection "
             "(generation,addr,role,enabled,entry_eligible,retention_status,"
             "retention_failure_streak,selected_at) "
-            "VALUES ('g1','0xprobation','core',1,0,'probation',1,'now')"
+            "VALUES ('g1','0xprobation','core',1,1,'probation',1,'now')"
         )
         db.commit()
         loop = asyncio.new_event_loop()
@@ -1315,32 +1318,10 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             obs._reload_targets(init=True)
 
             self.assertIn("0xprobation", obs.addrs)
-            self.assertIn("0xprobation", obs.entry_frozen)
-            self.assertEqual(
-                "retention_probation",
+            self.assertNotIn("0xprobation", obs.entry_frozen)
+            self.assertIsNone(
                 obs._new_exposure_block_reason("0xprobation", "BTC"),
             )
-
-            pos_id = db.execute(
-                "INSERT INTO copy_position "
-                "(addr,coin,side,status,entry_px,leverage,margin,notional,size,rem_size,opened_at) "
-                "VALUES ('0xprobation','BTC','long','open',100,5,100,500,5,5,'now')"
-            ).lastrowid
-            db.commit()
-            ep = self._live_ep(pos_id, "long", 100, 5)
-            ep.update({
-                "master_open_px": 100,
-                "master_current": 5,
-                "source_open_oids": set(),
-                "seen_oids": set(),
-                "add_orders": {},
-            })
-            obs.taker.open_ep[("0xprobation", "BTC")] = ep
-            obs._dispatch_fill(
-                "0xprobation", "BTC", ("0xprobation", "BTC"),
-                1_000, 1, 5, 6, 99, False, 99,
-            )
-            self.assertEqual(obs.hb.get("skip_retention_probation_add"), 1)
         finally:
             asyncio.set_event_loop(None)
             loop.close()

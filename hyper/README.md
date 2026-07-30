@@ -111,22 +111,24 @@ Wallet quality and funded-account membership are separate decisions.
   stabilize within two rounds before publication.
 - Final moves must pass the dynamic 30d/7d shared-account return and path-completeness contract.
   Complete candidate discovery runs Monday and Thursday; the frozen Challenger cohort is refreshed on the other
-  five days. Daily refresh first certifies with the active parameters. If the proposed Core changes, it runs
-  parameter optimization and repeats strict certification before publishing membership and parameters
-  together; an unchanged Core skips the grid. Existing Core uses two-complete-scan retention hysteresis for
-  ordinary short-term failures; the first failure remains Core as probation but immediately loses new-open and
-  add authority. A second failure may confirm demotion only after 72 hours, so adjacent manual and scheduled
-  complete scans cannot manufacture two independent confirmations. Healthy/probation replacement
-  requires at least 10% shared 30-day conservative-profit gain on both standardized and Paper accounts with no
-  7-day regression. Normally demoted Core stays in the complete-scan recovery lane for seven days, while daily
-  Challenger refresh excludes it. There is no promotion delay, star
-  priority or minimum count.
+  five days. Daily refresh first certifies with the active parameters. Low and medium financial risk remain
+  Core with new-open/add authority; a first ordinary failure is low, an independent confirmation at least
+  72 hours later is medium, and one complete healthy assessment clears either. Severe 30-day loss is
+  immediately medium but still advisory. Only durable high risk, recoverable zero-equity unavailability,
+  structural uncopyability, incomplete system context, or a completed losing operator exit blocks execution.
+  A full 16-wallet Core is never auto-replaced; an actual empty seat may be filled by the highest strict
+  Challenger. There is no promotion delay, star priority or minimum count.
 - When tuning changes execution parameters, Observer reload waits for one membership consistency pass on the
   same complete generation. The sealed strategy revision activates new parameters and new Core together. Core
   search and portfolio tuning have no wall-clock cutoff; their finite candidate axes and move limits terminate
   the work without publishing a timed-out partial result.
-- `follow_selection` is atomically published with the scan generation. Observer opens new positions only for
-  enabled Core rows. Removed wallets with open positions remain exit-only until flat.
+- `follow_selection` is atomically published with the scan generation. `recommendedCore` stores the pure
+  score/replay recommendation, while `effectiveCore` overlays incumbency, risk and operator intent. Observer
+  opens only for effective Core with `intent=active`.
+- Dashboard conditional exit uses `active → draining/requalify`. Draining captures every position ID present at
+  the click and reserves its Core seat. Once all captured positions close, aggregate post-fee profit with no
+  liquidation/high/system block restores active automatically; otherwise the wallet moves to requalify.
+  Flat requests move to requalify immediately. There is no permanent manual disable.
 - Core has no minimum wallet quota and a maximum of sixteen. A complete scan may publish any count from zero to sixteen;
   final profit order/evidence and funded shared-account economics decide membership.
 
@@ -164,21 +166,18 @@ complete generation makes the daily job fail closed. Daily uses the same frozen 
 individual strict, unified-retune and shared-account admission contract as complete discovery—anything that
 cannot enter Core under complete-scan criteria cannot enter through daily refresh.
 
-It refreshes Portfolio evidence, cached-fill deltas, positions, valuation and required market paths, then
-reruns the new pre-strict Top32 and profit-aligned-score Top16 path. The first pass uses `retune=False`; a proposed Core
-addition runs a parameter-grid pass only if every incumbent remains in the fixed-surface result, and the tuned
-result must still be a strict superset before atomic publication. Daily refresh never removes or replaces
-an incumbent: such a proposal carries the exact prior Core snapshot into the fresh evidence generation and
-keeps proposed newcomers Challenger. Hard safety has two narrow exceptions: a recent source fill whose
-`liquidatedUser` is that wallet plus fresh standard/affected-dex snapshots showing zero equity/no positions, or
-one canonical Copy liquidation losing at least 8% of its episode-opening dynamic equity. Either removes new-open
-authority immediately and becomes Exit-only while an existing copy is managed. Ordinary losses, sub-8% Paper
-liquidations and rolling-return declines do not trigger these exceptions. Other Core
-demotion is reserved for the Monday/Thursday complete scan. Missing or incomplete 37-day caches are deferred
-to the next complete run. A current-Core data/path failure prevents publication; an individual Challenger
-failure remains eligible for the next daily attempt because the pool stays anchored to the last successful
-complete generation. Daily runs never prune discovery caches, and an unchanged-Core run preserves Core order
-and does not reset the periodic parameter-retune age.
+It refreshes Portfolio evidence, cached-fill deltas, actual Copy 7/30-day conservative PnL, positions, valuation
+and required market paths, then reruns the pre-strict Top32 and profit-aligned Top16 path. Active and draining
+incumbents form the effective membership floor; requalify wallets remain eligible for strict recovery but no
+longer reserve a seat. Low/medium observations never remove, freeze or replace an incumbent. When Core has fewer
+than 16 seats, daily may append the highest strict proposal and retune only that changed exact membership.
+Hard financial safety is limited to a verified source self-liquidation plus fresh zero-equity/no-position
+snapshots, or one Canonical/actual Copy liquidation losing at least 8% of its recorded opening equity. Legacy
+positions with no opening-equity value cannot prove that threshold. A zero-equity/no-position wallet without
+liquidation evidence is recoverable unavailable; structural HFT/DCA/hedge/unexecutable-market failures use a
+separate system block. Missing data/path/valuation evidence never advances risk confirmation and prevents
+publication. An economic-only shared replay failure retains the current membership and parameters as
+`operator_review_degraded`, pauses promotions/tuning, and appears as a Dashboard warning.
 
 Previously known wallets remain history-incremental, and only complete discovery runs bootstrap or repair 37
 days. The Dashboard rescan button queues the same complete reevaluation; changing scanner settings only persists

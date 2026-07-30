@@ -172,10 +172,18 @@ def resolved_targets(db, bundle: dict, limit: Optional[int] = None) -> list[dict
         targets = [{**row, **policy.get(row["addr"].lower(), {})} for row in targets]
     if targets:
         marks = ",".join("?" for _ in targets)
+        control_cols = {
+            row[1] for row in db.execute("PRAGMA table_info(target_controls)").fetchall()
+        }
+        intent_clause = (
+            " OR COALESCE(intent,'active')!='active'"
+            if "intent" in control_cols else ""
+        )
         disabled = {
             (row[0] or "").lower()
             for row in db.execute(
-                f"SELECT addr FROM target_controls WHERE enabled=0 AND lower(addr) IN ({marks})",
+                f"SELECT addr FROM target_controls WHERE "
+                f"(COALESCE(enabled,1)=0{intent_clause}) AND lower(addr) IN ({marks})",
                 tuple(row["addr"] for row in targets),
             ).fetchall()
         }

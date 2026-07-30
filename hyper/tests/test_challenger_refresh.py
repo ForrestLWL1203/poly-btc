@@ -285,7 +285,7 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertTrue(form.call_args_list[1].kwargs["retune"])
         self.assertTrue(form.call_args_list[1].kwargs["force_retune"])
 
-    def test_daily_replacement_proposal_carries_incumbent_and_demotes_new_core(self):
+    def test_daily_replacement_proposal_fills_an_open_seat_without_removing_incumbent(self):
         previous = [
             selection.SelectionRow(
                 "0xcore", "core", follow_score=.8, selection_rank=1,
@@ -310,7 +310,8 @@ class ChallengerRefreshTests(unittest.TestCase):
         roles = {row.addr: row.role for row in carried}
         reasons = {row.addr: row.reason for row in carried}
 
-        self.assertEqual(decision["mode"], "carry")
+        self.assertEqual(decision["mode"], "promote")
+        self.assertEqual(decision["selected"], ("0xcore", "0xchallenge"))
         self.assertEqual(decision["removed"], ("0xcore",))
         self.assertEqual(decision["added"], ("0xchallenge",))
         self.assertEqual(roles["0xcore"], "core")
@@ -330,6 +331,16 @@ class ChallengerRefreshTests(unittest.TestCase):
 
         self.assertEqual(decision["mode"], "refresh")
         self.assertEqual(decision["selected"], ("0xcoreb", "0xcorea"))
+
+    def test_daily_full_core_never_auto_replaces_incumbent(self):
+        previous = tuple(f"0xcore{i:02d}" for i in range(16))
+        decision = scanner._challenger_daily_membership_decision(
+            previous,
+            ("0xnew",) + previous[1:],
+        )
+        self.assertEqual("carry", decision["mode"])
+        self.assertEqual(previous, decision["selected"])
+        self.assertEqual((), decision["added"])
 
     def test_recent_self_liquidation_and_zero_equity_is_hard_safety_exit(self):
         with tempfile.TemporaryDirectory() as td:
