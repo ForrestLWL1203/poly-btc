@@ -33,6 +33,70 @@ const NAV = [
 ];
 const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", risk: "风险雷达 Risk Radar", discovery: "采集 Discovery", settings: "策略参数 Settings" };
 
+function ObserverControl({ status, busy, onStart, onPause, onStop }) {
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef(null);
+  const paused = status === "paused";
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = e => {
+      if (!menuRef.current?.contains(e.target)) setOpen(false);
+    };
+    const closeOnEscape = e => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  useEffect(() => setOpen(false), [status, busy]);
+
+  if (status === "stopped") {
+    return (
+      <button className="btn btn-go" onClick={onStart} disabled={busy}>
+        <span className="dot observer-control-dot" /> 启动跟单
+      </button>
+    );
+  }
+
+  const act = action => {
+    setOpen(false);
+    action();
+  };
+
+  return (
+    <div className="command-menu-wrap" ref={menuRef}>
+      <button className={"btn " + (paused ? "btn-go" : "btn-accent")}
+        onClick={() => setOpen(v => !v)} disabled={busy}
+        aria-haspopup="menu" aria-expanded={open}>
+        {paused ? "恢复 / 停止" : "暂停 / 停止"}
+        <span className={"command-caret" + (open ? " open" : "")}>⌄</span>
+      </button>
+      {open && (
+        <div className="command-menu" role="menu" aria-label="跟单运行控制">
+          <div className="command-menu-title">{paused ? "继续运行" : "温和停止"}</div>
+          <button className={"btn " + (paused ? "btn-go" : "btn-accent")} role="menuitem"
+            onClick={() => act(paused ? onStart : onPause)}>
+            {paused ? "恢复开单" : "暂停新开仓"}
+          </button>
+          <p>{paused ? "恢复跟随目标钱包的新开仓" : "不再开新仓，存量仓位继续自动管理至退出"}</p>
+          <div className="command-menu-separator" />
+          <div className="command-menu-title">彻底停止</div>
+          <button className="btn btn-danger" role="menuitem" onClick={() => act(onStop)}>
+            彻底停止跟单
+          </button>
+          <p>停止 Observer 进程，存量仓位将不再自动管理</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
   const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
@@ -132,22 +196,13 @@ function Dashboard({ onLogout }) {
               title={streamOk ? "SSE 实时推送已连接" : "轮询兜底(SSE 未连接)"}>
               <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
               {streamOk ? "实时" : "轮询"}</span>
-            <span className="pill pill-paper"><span className="dot" style={{ background: "var(--amber)" }} /> 运行模式 · Paper</span>
             {ov && ov.system && ov.system.portfolioDrawdownStop?.active &&
               <span className="pill" style={{ background: "rgba(255,82,82,.14)", color: "var(--red-l)" }}
                 title={`权益高水位回撤 ${fNum(ov.system.portfolioDrawdownStop.drawdownPct, 1)}%，已暂停并执行全平`}>
                 <span className="dot" style={{ background: "var(--red)" }} /> 总体回撤止损已触发
               </span>}
-            {/* Soft pause and process stop are deliberately separate controls.  A paused Observer remains
-                alive to manage existing positions; only “停止跟单” means the process is inactive. */}
-            {!(ov && ov.system) ? null : obs === "stopped"
-              ? <button className="btn btn-go" style={{ minWidth: 150, justifyContent: "center" }} onClick={smartStart} disabled={pausing}>
-                  <span className="dot" style={{ width: 7, height: 7, borderRadius: 9, background: "#fff" }} /> 启动跟单</button>
-              : obs === "paused"
-              ? <><button className="btn btn-go" onClick={smartStart} disabled={pausing}>恢复开单</button>
-                  <button className="btn btn-stop" onClick={stopObserver} disabled={pausing}>停止跟单</button></>
-              : <><button className="btn btn-accent" onClick={pauseOpening} disabled={pausing}>暂停新开仓</button>
-                  <button className="btn btn-stop" onClick={stopObserver} disabled={pausing}>停止跟单</button></>}
+            {ov && ov.system && <ObserverControl status={obs} busy={pausing}
+              onStart={smartStart} onPause={pauseOpening} onStop={stopObserver} />}
           </div>
         </div>
 
