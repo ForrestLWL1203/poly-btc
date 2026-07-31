@@ -10,6 +10,10 @@ The current API projects Hyperliquid state from `hyper/`, but product discovery,
 state mutation remain in the product package. When a Polymarket module is added, product switching and combined
 navigation belong here; Polymarket business logic belongs in `polymarket/`.
 
+Position fill details distinguish margin committed on entry from capital returned on reduce/close. Returned
+capital is released entry-basis margin plus realized PnL net of exit fees; it is never exit notional divided by
+leverage.
+
 The wallet control plane exposes `wallet_exit_request`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;

@@ -58,7 +58,8 @@ Repository boundaries:
 - Reuse the Dashboard's shared `.btn` variants and nearby component patterns. Do not introduce one-off inline
   or private button skins when an existing neutral/accent/go/stop/danger variant expresses the action.
 - Never expose, print, commit, or copy secrets, private keys, target files, live databases, or private VPS
-  values. Keep those in local `CLAUDE.md` or ignored paths.
+  values. The active VPS connection is available locally; `secret/vps.txt` is its canonical source. Keep values
+  there, re-read it before remote work, and never substitute a remembered or hardcoded target.
 
 ## Runtime map
 
@@ -643,11 +644,14 @@ temporary databases out of commits.
   it merely to pick up code. Use `systemctl reset-failed hl-scan.service` only to clear failed state.
 - Scanner and Observer share Hyperliquid REST weight. Observer signal polling has priority; scanner pace adapts
   to whether Observer has active work.
-- For complex remote SQL/Python, pipe a local script to the known-good SSH command instead of nesting heredocs
-  in a quoted remote shell command.
+- Before remote work, read the current connection from `secret/vps.txt`; never reuse a host, user, password,
+  key, or SSH target from memory. The local agent should attempt the canonical configuration before declaring
+  the VPS inaccessible.
+- For complex remote SQL/Python, send a local script through the current connection without embedding or
+  printing any secret value.
 - Never use a destructive Git reset on a user worktree without explicit approval. Preserve unrelated changes.
-- If a command fails before reaching the VPS (for example malformed SSH options), say so and retry with the
-  known-good command before drawing conclusions from remote state.
+- If a command fails before reaching the VPS, re-read `secret/vps.txt`, retry with that exact current
+  configuration, and report the concrete failure before drawing conclusions from remote state.
 
 ## Data and audit retention
 

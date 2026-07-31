@@ -170,12 +170,48 @@ class ApiPositionsPerfTests(unittest.TestCase):
         self.assertEqual(add_fill["qty"], 4)
         self.assertEqual(add_fill["px"], 107.5)
         self.assertEqual(add_fill["margin"], 86.0)
+        self.assertEqual(add_fill["capital"], 86.0)
+        self.assertEqual(add_fill["capitalKind"], "投入")
+        self.assertIsNone(add_fill["releasedMargin"])
         self.assertIsNone(add_fill["pnl"])
         self.assertEqual(close_fill["action"], "close")
         self.assertEqual(close_fill["fillCount"], 2)
         self.assertEqual(close_fill["qty"], 3)
         self.assertAlmostEqual(close_fill["px"], 126.6666666667)
+        self.assertIsNone(close_fill["margin"])
+        self.assertEqual(close_fill["releasedMargin"], 60.0)
+        self.assertEqual(close_fill["capital"], 80.0)
+        self.assertEqual(close_fill["capitalKind"], "返还")
         self.assertEqual(close_fill["pnl"], 20)
+
+    def test_liquidation_detail_returns_released_margin_net_of_loss(self):
+        db = self._db()
+        entry = 807.691468254631
+        qty = 5.430437031394277
+        margin = 487.3464065723514
+        pnl = -257.36531661368434
+        pos_id = db.execute(
+            "INSERT INTO copy_position "
+            "(addr,coin,side,status,entry_px,leverage,margin,size,rem_size,realized_pnl,"
+            "master_open_px,was_liq,opened_at,closed_at) "
+            "VALUES ('0xmu','xyz:MU','short','liquidated',?,9,?,?,0,?,808.86,1,"
+            "'2026-07-30T13:35:28Z','2026-07-30T14:25:21Z')",
+            (entry, margin, qty, pnl),
+        ).lastrowid
+        db.execute(
+            "INSERT INTO copy_action "
+            "(pos_id,addr,coin,ts,action,our_px,our_qty_delta,realized_pnl) "
+            "VALUES (?,'0xmu','xyz:MU',1785421521930,'close',854.6999664070169,?,?)",
+            (pos_id, qty, pnl),
+        )
+        db.commit()
+
+        detail = api_positions.ep_position_detail(DetailGuardedDb(db), pos_id)
+
+        close_fill = detail["fills"][0]
+        self.assertAlmostEqual(close_fill["releasedMargin"], margin)
+        self.assertAlmostEqual(close_fill["capital"], margin + pnl)
+        self.assertNotAlmostEqual(close_fill["capital"], qty * 854.6999664070169 / 9)
 
 
 if __name__ == "__main__":

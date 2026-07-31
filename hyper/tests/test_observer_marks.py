@@ -230,7 +230,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertIsNone(eth["mark_px"])
         self.assertIsNone(eth["unrealized_pnl"])
 
-    def test_builder_all_mids_mark_overrides_book_mid_for_dashboard_marks(self):
+    def test_exchange_mark_overrides_book_mid_and_drives_liquidation_check(self):
         db = self._db()
         db.execute(
             "INSERT INTO copy_position "
@@ -240,13 +240,41 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         db.commit()
         obs = Observer(db, [], {})
         self._set_bbo(obs, "xyz:MU", 941, 943)
-        obs.mark_mid["xyz:MU"] = 937
 
-        obs._refresh_coin_marks("xyz:MU")
+        with patch.object(obs, "_maybe_liquidate") as liquidate:
+            applied = obs._apply_authoritative_marks(
+                {"xyz:MU": {"markPx": "937", "midPx": "942"}},
+                {"xyz:MU"},
+            )
 
         mu = db.execute("SELECT mark_px,unrealized_pnl FROM copy_position WHERE coin='xyz:MU'").fetchone()
+        self.assertEqual(applied, 1)
         self.assertEqual(mu["mark_px"], 937)
         self.assertEqual(mu["unrealized_pnl"], 37)
+        liquidate.assert_called_once_with("xyz:MU", 937, obs.taker)
+
+    def test_mid_without_exchange_mark_cannot_drive_liquidation(self):
+        db = self._db()
+        obs = Observer(db, [], {})
+
+        with patch.object(obs, "_maybe_liquidate") as liquidate:
+            applied = obs._apply_authoritative_marks(
+                {"BTC": {"midPx": "150", "oraclePx": "151"}},
+                {"BTC"},
+            )
+
+        self.assertEqual(applied, 0)
+        self.assertNotIn("BTC", obs.mark_mid)
+        liquidate.assert_not_called()
+
+    def test_bbo_tick_never_drives_liquidation(self):
+        db = self._db()
+        obs = Observer(db, [], {})
+
+        with patch.object(obs, "_maybe_liquidate") as liquidate:
+            obs.on_bbo({"coin": "BTC", "bbo": [{"px": "149"}, {"px": "151"}]})
+
+        liquidate.assert_not_called()
 
     def test_execution_price_uses_only_fresh_cached_crypto_quote(self):
         async def run():

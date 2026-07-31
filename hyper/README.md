@@ -339,6 +339,11 @@ Paper uses zero-day/zero-forward-count exploration thresholds so the complete lo
 database. For real-money deployment, use conservative shadow and forward-evidence thresholds and review the
 persisted `params` values before enabling any live execution.
 
+Observer liquidation checks use only the exchange `markPx` returned by `metaAndAssetCtxs`. BBO/mid prices remain
+execution and display fallbacks and cannot initiate an isolated Paper liquidation; a missing official mark holds
+the position and retries. In Dashboard fill details, entry rows show locked margin while reduce/close rows show
+the actual available-funds return: released entry-basis margin plus realized PnL net of the exit fee.
+
 ## Runtime components
 
 | Area | Entry points |

@@ -190,7 +190,7 @@ class Observer:
         self.target_sector_policy: dict = {}  # addr -> sector allow/deny policy from watchlist
         self.bbo: dict = {}              # coin -> (bid, ask) current top-of-book (any source)
         self.bbo_ms: dict = {}           # coin -> local receive time; stale cached quotes cannot execute
-        self.mark_mid: dict = {}         # coin -> authoritative display/risk mark (builder allMids, etc.)
+        self.mark_mid: dict = {}         # coin -> latest official markPx used for display/risk
         self.mark_write_ms: dict = {}    # coin -> last DB mark write ms (throttle BBO-triggered writes)
         self.hb: dict = {}               # per-heartbeat-interval tally (fills seen / copied / skipped-by-reason);
         #                                  reset each _announce. Answers "why no trades".
@@ -1750,36 +1750,60 @@ class Observer:
             await asyncio.gather(*(_poll_one(a) for a in list(self.addrs)))
             await asyncio.sleep(1)                 # small breath between rounds
 
-    # -- PRICING for builder/stock perps (WS bbo can't serve builder dexes) ---
-    async def poll_stock_mids(self):
-        """Keep builder/stock dashboard marks fresh from allMids.
+    def _apply_authoritative_marks(self, contexts: dict, coins) -> int:
+        """Apply fresh exchange markPx values and evaluate mark-based risk.
 
-        This is separate from l2Book warming so live marks are never blocked behind the slower global
-        REST pacer used by fill polling and book-top requests."""
+        Hyperliquid liquidation is mark-triggered.  midPx, allMids and BBO values are deliberately not
+        accepted here: they remain execution/display fallbacks and can never initiate a Paper liquidation.
+        """
+        applied = 0
+        for coin in coins:
+            ctx = contexts.get(coin) if isinstance(contexts, dict) else None
+            mark = f((ctx or {}).get("markPx"))
+            if mark <= 0:
+                continue
+            self.mark_mid[coin] = mark
+            self._refresh_coin_marks_throttled(coin)
+            for (a, c), ep in self.open_ep.items():
+                if c == coin and ep["master_open_px"]:
+                    adv = ((ep["master_open_px"] - mark) if ep["side"] == "long"
+                           else (mark - ep["master_open_px"])) / ep["master_open_px"]
+                    ep["mae"] = max(ep.get("mae", 0.0), adv)
+            self._maybe_liquidate(coin, mark, self.taker)
+            self._queue_smart_take_profit(coin, mark, self.taker)
+            applied += 1
+        return applied
+
+    # -- OFFICIAL MARKS for liquidation + builder/stock REST execution books --
+    async def poll_authoritative_marks(self):
+        """Poll metaAndAssetCtxs markPx for every open market.
+
+        This is separate from fill polling and l2Book warming so liquidation checks are never blocked behind
+        historical REST work.  A failed/missing mark is fail-closed: hold and retry, never substitute a mid.
+        """
         last_log = 0
         while not self.stop:
-            coins = sorted(self.stock_coins)
+            open_coins = {coin for (_, coin) in self.open_ep}
+            groups = {}
+            for coin in open_coins:
+                dex = None if coin in self.crypto_coins else coin.split(":", 1)[0] if ":" in coin else None
+                groups.setdefault(dex, set()).add(coin)
             try:
-                mids = await asyncio.to_thread(rest.all_mids, "xyz", True)
-                for coin in coins:
-                    mid = f(mids.get(coin)) if isinstance(mids, dict) else 0.0
-                    if mid > 0:
-                        self.mark_mid[coin] = mid
-                        self._refresh_coin_marks_throttled(coin)
-                        for (a, c), ep in self.open_ep.items():
-                            if c == coin and ep["master_open_px"]:
-                                adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
-                                       else (mid - ep["master_open_px"])) / ep["master_open_px"]
-                                ep["mae"] = max(ep.get("mae", 0.0), adv)
-                        self._maybe_liquidate(coin, mid, self.taker)
-                        self._queue_smart_take_profit(coin, mid, self.taker)
-                if coins and time.time() - last_log > 300:
-                    _log(f"stock mids refreshed: {len(coins)} coins")
+                dexes = list(groups)
+                results = await asyncio.gather(*(
+                    asyncio.to_thread(rest.asset_contexts, dex, True) for dex in dexes
+                ))
+                applied = sum(
+                    self._apply_authoritative_marks(contexts, groups[dex])
+                    for dex, contexts in zip(dexes, results)
+                )
+                if open_coins and time.time() - last_log > 300:
+                    _log(f"official marks refreshed: {applied}/{len(open_coins)} open coins")
                     last_log = time.time()
             except Exception as exc:  # noqa: BLE001
                 self._rollback_db()
-                _log(f"stock mids refresh failed: {exc}")
-            await asyncio.sleep(2 if self.stock_coins else 5)
+                _log(f"official mark refresh failed: {exc}")
+            await asyncio.sleep(2 if open_coins else 5)
 
     async def poll_stock_books(self):
         """Keep best bid/ask warm for stock execution pricing. Round-robin: marks come from allMids."""
@@ -1846,7 +1870,7 @@ class Observer:
         asyncio.create_task(self.prune_live_fills())  # bound live_fills on disk (retention)
         asyncio.create_task(self.risk_radar.assessment_loop())  # 15m AI+local risk assessment (shadow-only)
         asyncio.create_task(self.risk_radar.balance_loop())     # low-frequency DeepSeek balance/runway check
-        asyncio.create_task(self.poll_stock_mids())   # stock/commodity marks (REST allMids, fast)
+        asyncio.create_task(self.poll_authoritative_marks())  # exchange markPx drives liquidation
         asyncio.create_task(self.poll_stock_books())  # stock/commodity top-of-book (REST l2Book, slower)
         asyncio.create_task(self.poll_loop())      # SIGNAL: continuous REST poll (the engine)
         while not self.stop:                        # WS: PRICING only (per-coin bbo, no user subs)
@@ -1888,7 +1912,6 @@ class Observer:
                 adv = ((ep["master_open_px"] - mid) if ep["side"] == "long"
                        else (mid - ep["master_open_px"])) / ep["master_open_px"]
                 ep["mae"] = max(ep.get("mae", 0.0), adv)
-        self._maybe_liquidate(coin, mid, self.taker)
         self._queue_smart_take_profit(coin, mid, self.taker)
 
     def _record_fill(self, addr, x) -> bool:
@@ -2797,13 +2820,14 @@ class Observer:
         await self._apply_reduce(addr, coin, ep, now_ms(), ep["liq_px"], 0.0, 0.0,
                                  closing=True, liq=True, forced_px=ep["liq_px"], book=book)
 
-    def _maybe_liquidate(self, coin, mid, book=None):
+    def _maybe_liquidate(self, coin, mark, book=None):
+        """Schedule isolated liquidation only from a fresh exchange markPx supplied by the mark poller."""
         book = book or self.taker
-        if not mid or mid <= 0:          # bad/one-sided book tick → never liquidate on a garbage price
+        if not mark or mark <= 0:
             return
         for (a, c), ep in list(book.open_ep.items()):
             if c == coin and ep.get("liq_px") and ep["rem_size"] > config.FLAT and not ep.get("liquidating"):
-                hit = mid <= ep["liq_px"] if ep["side"] == "long" else mid >= ep["liq_px"]
+                hit = mark <= ep["liq_px"] if ep["side"] == "long" else mark >= ep["liq_px"]
                 if hit:
                     asyncio.create_task(self._liquidate(a, coin, ep, book))
 

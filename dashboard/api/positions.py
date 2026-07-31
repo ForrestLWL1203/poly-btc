@@ -217,6 +217,18 @@ def ep_position_detail(db, pos_id):
         sz = g["sz"]
         px = (g["px_n"] / sz) if sz else None
         entry = g["action"] in ("open", "add")
+        pnl = (g["pnl"] or 0.0) if not entry else None
+        margin = (sz * px / lev) if (entry and px and lev) else None
+        released_margin = (
+            sz * (p["entry_px"] or 0.0) / lev
+            if (not entry and p["entry_px"] and lev) else None
+        )
+        # Paper margin is locked rather than subtracted from balance.  Closing therefore changes available
+        # funds by released entry-basis margin plus realized PnL (already net of the exit fee).  Exit notional
+        # divided by leverage is neither the original margin nor the capital returned to the account.
+        returned_capital = (
+            released_margin + pnl if released_margin is not None and pnl is not None else None
+        )
         action_label = act_labels.get(g["action"], g["action"])
         if g["action"] == "close" and p["status"] == "tail_closed":
             action_label = "尾盈平仓"
@@ -224,8 +236,11 @@ def ep_position_detail(db, pos_id):
             "atSec": (g["ts"] or 0) / 1000.0, "action": g["action"],
             "actionLabel": action_label,
             "fillCount": g["n"], "px": px, "qty": sz,
-            "margin": (sz * px / lev) if (px and lev) else None,
-            "pnl": g["pnl"] if not entry else None,
+            "margin": margin,
+            "releasedMargin": released_margin,
+            "capital": margin if entry else returned_capital,
+            "capitalKind": "投入" if entry else "返还",
+            "pnl": pnl,
         })
     return {
         "id": p["pos_id"], "coin": p["coin"], "side": p["side"], "status": p["status"],

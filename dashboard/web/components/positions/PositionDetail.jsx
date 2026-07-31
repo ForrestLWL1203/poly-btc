@@ -20,7 +20,7 @@ export function PositionDetail({ d }) {
       </div>
       <div className="muted" style={{ fontSize: 11, margin: "2px 0 5px" }}>我们的成交记录:</div>
       <table className="fills-tbl">
-        <thead><tr><th>时间</th><th>动作</th><th className="num">价格</th><th className="num">本金</th><th className="num">数量</th><th className="num">盈亏</th></tr></thead>
+        <thead><tr><th>时间</th><th>动作</th><th className="num">价格</th><th className="num">保证金投入/返还</th><th className="num">数量</th><th className="num">盈亏</th></tr></thead>
         <tbody>
           {d.fills.length === 0 && <tr><td colSpan="6" className="muted" style={{ padding: "6px 8px" }}>暂无成交</td></tr>}
           {d.fills.map((f, i) => (
@@ -29,7 +29,13 @@ export function PositionDetail({ d }) {
               <td><span className={"tint " + (ACT_TINT[f.actionLabel] || "tint-gray")}>{f.actionLabel}</span>
                 {f.fillCount > 1 && <span className="muted" style={{ marginLeft: 4, fontSize: 10 }} title="该订单分多笔成交">×{f.fillCount}</span>}</td>
               <td className="num">{fPrice(f.px)}</td>
-              <td className="num">{fUsd(f.margin)}</td>
+              <td className={"num " + (f.capitalKind === "返还" && f.capital < 0 ? "down" : "")}
+                title={f.capitalKind === "返还" && f.releasedMargin != null
+                  ? `释放保证金 ${fUsd(f.releasedMargin)} + 已实现盈亏 ${fSign(f.pnl, 1)}`
+                  : "本次开仓或加仓锁定的保证金"}>
+                {fUsd(f.capital)}
+                <div className="muted" style={{ fontSize: 10 }}>{f.capitalKind}</div>
+              </td>
               <td className="num muted">{fNum(f.qty, 2)}</td>
               <td className={"num " + (f.pnl != null ? cls(f.pnl) : "")}>{f.pnl != null ? fSign(f.pnl, 1) : "—"}</td>
             </tr>

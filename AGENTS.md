@@ -20,6 +20,9 @@ For any Hyperliquid change, including the current Dashboard's Hyperliquid projec
   them with `python3 -m ...`.
 - Never expose, print, commit, or copy secrets, private keys, live databases, private target files, or private
   deployment values.
+- The active VPS is locally accessible. For every remote check, read the current connection from
+  `secret/vps.txt`; never reuse a remembered or hardcoded target, and attempt the canonical configuration
+  before reporting that the VPS is inaccessible.
 - Preserve unrelated worktree changes and never use destructive Git resets without explicit approval.
 - Update the owning module's docs, tests, launcher/service paths, and build commands when moving an entry point.
 

@@ -326,16 +326,17 @@ def candle_snapshot_range(coin: str, interval: str, start_ms: int, end_ms: int):
     }})
 
 
-def asset_contexts(dex: str = None) -> dict:
+def asset_contexts(dex: str = None, realtime: bool = False) -> dict:
     """{coin: ctx+universe fields} from metaAndAssetCtxs.
 
     Standard perps use bare names (BTC, VINE). Builder-dex callers pass dex and receive names exactly as
     Hyperliquid returns them; the observer's low-liquidity gate only applies to standard crypto perps.
+    Realtime mode bypasses the historical-fill pacer for latency-sensitive official mark polling.
     """
     body = {"type": "metaAndAssetCtxs"}
     if dex:
         body["dex"] = dex
-    m = post_soft(body)
+    m = realtime_post_soft(body) if realtime else post_soft(body)
     if not (isinstance(m, list) and len(m) == 2 and isinstance(m[0], dict)):
         return {}
     out = {}
