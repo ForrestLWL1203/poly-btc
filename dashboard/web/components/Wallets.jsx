@@ -1,7 +1,7 @@
 import { api } from "../lib/api.js";
 import { fNum, fSign, short } from "../lib/format.js";
 import { useApiResource } from "../lib/refresh.js";
-import { BanIcon } from "../lib/icons.jsx";
+import { BanIcon, CopyIcon } from "../lib/icons.jsx";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
 const { useState, useCallback, useEffect, useRef } = React;
@@ -80,6 +80,7 @@ function CopyableAddress({ address, isNew }) {
         title={status === "copied" ? "完整地址已复制" : `点击复制完整地址\n${address}`}
         onClick={onCopy}>
         <span className={"addr-copy-label" + (status !== "idle" ? " hidden" : "")}>{short(address)}</span>
+        <span className={"addr-copy-icon" + (status !== "idle" ? " hidden" : "")}><CopyIcon /></span>
         {status !== "idle" && <span className="addr-copy-feedback" aria-live="polite">{feedback}</span>}
       </button>
       {isNew && <span className="new-wallet-badge">NEW</span>}

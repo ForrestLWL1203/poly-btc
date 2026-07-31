@@ -415,15 +415,21 @@ th.sortable:hover .sort-ind { opacity: .85; }
 .sort-ind.active { opacity: 1; color: var(--accent); }
 .addr { color: var(--t2); font-size: 11.5px; }
 .addr-with-new { display: inline-flex; align-items: flex-start; gap: 5px; white-space: nowrap; }
-.addr-copy-btn { position: relative; display: inline-flex; align-items: center; padding: 1px 0; margin: -1px 0;
+.addr-copy-btn { position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 1px 0; margin: -1px 0;
   border: 0; border-bottom: 1px dashed transparent; background: transparent; color: inherit;
-  font: inherit; line-height: inherit; cursor: copy; transition: color .15s, border-color .15s; }
+  font: inherit; line-height: inherit; cursor: pointer; transition: color .15s, border-color .15s; }
 .addr-copy-btn:hover { color: var(--green-l); border-bottom-color: currentColor; }
 .addr-copy-btn:focus-visible { color: var(--green-l); outline: 2px solid rgba(63,207,142,.4);
   outline-offset: 3px; border-radius: 2px; }
 .addr-copy-btn.copied { color: var(--green-l); }
 .addr-copy-btn.failed { color: var(--red-l); }
 .addr-copy-label.hidden { visibility: hidden; }
+.addr-copy-icon { display: inline-flex; width: 14px; height: 14px; color: var(--t3); opacity: .72;
+  transition: color .15s, opacity .15s, transform .15s; }
+.addr-copy-icon svg { width: 100%; height: 100%; }
+.addr-copy-btn:hover .addr-copy-icon, .addr-copy-btn:focus-visible .addr-copy-icon {
+  color: var(--green-l); opacity: 1; transform: translateY(-1px); }
+.addr-copy-icon.hidden { visibility: hidden; }
 .addr-copy-feedback { position: absolute; inset: 0; display: inline-flex; align-items: center;
   justify-content: flex-start; font-size: 10.5px; font-weight: 700; white-space: nowrap; }
 .new-wallet-badge { position: relative; top: -5px; display: inline-flex; align-items: center; height: 14px;

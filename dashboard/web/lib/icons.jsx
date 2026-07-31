@@ -7,6 +7,13 @@ export const BanIcon = () => (
   </svg>
 );
 
+export const CopyIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="8" y="8" width="11" height="11" rx="2" />
+    <path d="M16 8V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h1" />
+  </svg>
+);
+
 export const IC = {
   overview: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z",
   positions: "M3 3v18h18M7 16l4-4 3 3 5-6",
