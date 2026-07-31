@@ -4,7 +4,7 @@ import { useApiResource } from "../lib/refresh.js";
 import { BanIcon } from "../lib/icons.jsx";
 import { WalletDrawer } from "./wallets/WalletDrawer.jsx";
 
-const { useState, useCallback } = React;
+const { useState, useCallback, useEffect, useRef } = React;
 
 const marketLabel = (market) => ({ crypto: "加密", stock: "美股/指数", mixed: "混合" }[market] || market || "—");
 
@@ -30,6 +30,62 @@ const riskBadge = (w) => {
     data_error: ["数据异常", "tint-red"],
   }[w.riskLevel] || null;
 };
+
+const copyWalletAddress = async (address) => {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(address);
+      return;
+    } catch {
+      // Fall through for browsers that expose Clipboard API but deny access.
+    }
+  }
+  const input = document.createElement("textarea");
+  input.value = address;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  input.style.pointerEvents = "none";
+  document.body.appendChild(input);
+  input.select();
+  input.setSelectionRange(0, input.value.length);
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("copy_failed");
+};
+
+function CopyableAddress({ address, isNew }) {
+  const [status, setStatus] = useState("idle");
+  const resetTimer = useRef(null);
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+  const onCopy = async (event) => {
+    event.stopPropagation();
+    window.clearTimeout(resetTimer.current);
+    try {
+      await copyWalletAddress(address);
+      setStatus("copied");
+    } catch {
+      setStatus("failed");
+    }
+    resetTimer.current = window.setTimeout(() => setStatus("idle"), 1400);
+  };
+
+  const feedback = status === "copied" ? "已复制 ✓" : "复制失败";
+  return (
+    <span className="addr-with-new">
+      <button type="button"
+        className={"addr-copy-btn" + (status === "copied" ? " copied" : status === "failed" ? " failed" : "")}
+        aria-label={`复制钱包完整地址 ${address}`}
+        title={status === "copied" ? "完整地址已复制" : `点击复制完整地址\n${address}`}
+        onClick={onCopy}>
+        <span className={"addr-copy-label" + (status !== "idle" ? " hidden" : "")}>{short(address)}</span>
+        {status !== "idle" && <span className="addr-copy-feedback" aria-live="polite">{feedback}</span>}
+      </button>
+      {isNew && <span className="new-wallet-badge">NEW</span>}
+    </span>
+  );
+}
 
 export function Wallets({ confirm }) {
   const [drawer, setDrawer] = useState(null);
@@ -158,7 +214,7 @@ export function Wallets({ confirm }) {
                       <span className="rankbadge">{w.followPos}</span>
                     </div></td>
                     <td className="addr">
-                      <span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span>
+                      <CopyableAddress address={w.address} isNew={w.isNew} />
                       {warning && <span className={"tint " + warning[1]} style={{ marginLeft: 6 }} title="本轮画像数据不完整">{warning[0]}</span>}
                       {risk && <span className={"tint " + risk[1]} style={{ marginLeft: 6 }}
                         title={(w.riskReasons || []).join("；") || risk[0]}>{risk[0]}</span>}
@@ -231,7 +287,7 @@ export function Wallets({ confirm }) {
                 <tr key={w.address} className={w.enabled ? "" : "row-off"}
                   style={{ cursor: "pointer" }} onClick={() => setDrawer(w.address)}>
                   <td><span className="rankbadge" title={w.followPos != null ? "跟单序号(与脚本一致);全站评分名次 #" + w.rank : "全站评分名次"}>{w.followPos != null ? w.followPos : w.rank}</span></td>
-                  <td className="addr"><span className="addr-with-new">{short(w.address)}{w.isNew && <span className="new-wallet-badge">NEW</span>}</span></td>
+                  <td className="addr"><CopyableAddress address={w.address} isNew={w.isNew} /></td>
                   <td><span className={"tint " + (w.marketType === "crypto" ? "tint-blue" : w.marketType === "stock" ? "tint-amber" : "tint-gray")}>{w.marketType}</span></td>
                   <td className="num"><b style={{ color: "var(--green-l)" }}>{fNum(w.score, 1)}</b></td>
                   <td className={"num up"}>{fNum(w.roiEqPct, 0)}%</td>
