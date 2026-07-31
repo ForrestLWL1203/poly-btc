@@ -23,6 +23,10 @@ For any Hyperliquid change, including the current Dashboard's Hyperliquid projec
 - The active VPS is locally accessible. For every remote check, read the current connection from
   `secret/vps.txt`; never reuse a remembered or hardcoded target, and attempt the canonical configuration
   before reporting that the VPS is inaccessible.
+- Use the established local `~/.ssh/id_ed25519` key with `IdentitiesOnly=yes` as the active VPS's primary
+  authentication. The password in `secret/vps.txt` is bootstrap/recovery fallback only. Never generate a new
+  SSH keypair or add, replace, rotate, or remove a local/remote SSH key unless the user explicitly authorizes
+  that exact key operation; routine inspection or deployment is not authorization to change keys.
 - Preserve unrelated worktree changes and never use destructive Git resets without explicit approval.
 - Update the owning module's docs, tests, launcher/service paths, and build commands when moving an entry point.
 

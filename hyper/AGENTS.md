@@ -60,6 +60,10 @@ Repository boundaries:
 - Never expose, print, commit, or copy secrets, private keys, target files, live databases, or private VPS
   values. The active VPS connection is available locally; `secret/vps.txt` is its canonical source. Keep values
   there, re-read it before remote work, and never substitute a remembered or hardcoded target.
+- Authenticate to the active VPS with the established local `~/.ssh/id_ed25519` key and `IdentitiesOnly=yes`.
+  Use the password only for bootstrap/recovery when that key is not yet accepted. Never generate a keypair or
+  add, replace, rotate, or remove any local/remote SSH key without explicit user authorization for that exact
+  key operation; deployment permission alone never permits SSH-key changes.
 
 ## Runtime map
 
@@ -654,6 +658,9 @@ temporary databases out of commits.
 - Before remote work, read the current connection from `secret/vps.txt`; never reuse a host, user, password,
   key, or SSH target from memory. The local agent should attempt the canonical configuration before declaring
   the VPS inaccessible.
+- After reading the current target, connect with the established local `~/.ssh/id_ed25519` and
+  `IdentitiesOnly=yes`; password authentication is recovery-only. Do not create or install a replacement key
+  merely because authentication fails—report the mismatch unless the user explicitly authorizes a key change.
 - For complex remote SQL/Python, send a local script through the current connection without embedding or
   printing any secret value.
 - Never use a destructive Git reset on a user worktree without explicit approval. Preserve unrelated changes.
