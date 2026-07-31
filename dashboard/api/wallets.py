@@ -102,6 +102,7 @@ def _selection_reason_text(row):
         "copy_path_incomplete": "精细价格路径证据尚未完整",
         "strict_copy_liquidations_over_3": "最终参数模拟逐仓爆仓超过3次",
         "copy_single_liquidation_loss_over_8pct": "单次逐仓清算损失达到开仓时动态权益的8%",
+        "actual_copy_cumulative_loss_over_8pct": "实际跟单30日累计保守亏损达到开仓权益的8%",
         "copy_single_liquidation_loss_over_5pct": "历史单次较大清算记录（仅8%以上继续永久排除）",
         "historical_major_liquidation": "历史重大爆仓记录（永久排除候选）",
         "source_account_liquidated_zero": "源钱包本人清算且Perp权益归零",

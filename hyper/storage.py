@@ -413,8 +413,8 @@ CREATE TABLE IF NOT EXISTS wallet_risk_event (
 CREATE INDEX IF NOT EXISTS idx_wallet_risk_event_addr_type
     ON wallet_risk_event(addr, event_type, occurred_at DESC);
 
--- Every successful scanner assessment is immutable at generation level.  The registry above is only the
--- latest projection used by execution and the Dashboard.
+-- Scanner and Observer assessments are immutable at generation/day level.  The registry above is only the
+-- latest projection used by execution and the Dashboard; prepublication rows survive a later scan failure.
 CREATE TABLE IF NOT EXISTS wallet_risk_assessment (
     generation          TEXT NOT NULL,
     addr                TEXT NOT NULL,

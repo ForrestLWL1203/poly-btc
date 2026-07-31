@@ -18,8 +18,9 @@ The wallet control plane exposes `wallet_exit_request`; Dashboard never mutates 
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;
 wallets with open positions show “仅退出中” until Observer resolves the captured cohort. Low/medium risk labels
-are advisory and do not disable entries. High risk, funds withdrawal, structural blocks and data anomalies are
-always rendered as text as well as color.
+are advisory and do not disable entries. High risk disables entries; cumulative-loss high may later recover
+after profitable actual-Copy results, while a confirmed single catastrophic event remains durable. Funds
+withdrawal, structural blocks and data anomalies are always rendered as text as well as color.
 
 Run from the repository root:
 

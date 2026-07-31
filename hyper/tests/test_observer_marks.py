@@ -1442,6 +1442,64 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
+    def test_live_actual_copy_refresh_labels_repeated_losses_medium(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO wallet_registry "
+            "(addr,state,first_seen_at,last_seen_at,updated_at) "
+            "VALUES ('0xcore3','qualified','now','now','now')"
+        )
+        db.executemany(
+            "INSERT INTO copy_position "
+            "(addr,coin,status,realized_pnl,unrealized_pnl,was_liq,"
+            "opening_account_equity,opened_at,closed_at) "
+            "VALUES ('0xcore3',?,?,?,?,?,?,?,?)",
+            [
+                ("xyz:MU", "liquidated", -257.0, 0.0, 1, 9752.0, "2026-07-30", now_iso()),
+                ("xyz:AMD", "liquidated", -252.0, 0.0, 1, 9750.0, "2026-07-30", now_iso()),
+                ("xyz:AMD", "closed", -25.0, 0.0, 0, 11690.0, "2026-07-30", now_iso()),
+                ("xyz:AMD", "closed", 39.0, 0.0, 0, 11524.0, "2026-07-30", now_iso()),
+                ("xyz:BRENTOIL", "open", 0.0, -23.0, 0, 11588.0, "2026-07-30", None),
+            ],
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+
+        result = obs._refresh_live_wallet_risks({"0xcore3"})
+
+        self.assertEqual("medium", result["0xcore3"].level)
+        registry = db.execute(
+            "SELECT risk_level,risk_reasons_json,risk_assessed_at "
+            "FROM wallet_registry WHERE addr='0xcore3'"
+        ).fetchone()
+        self.assertEqual("medium", registry["risk_level"])
+        self.assertIn(
+            "actual_copy_30d_conservative_pnl_not_positive",
+            registry["risk_reasons_json"],
+        )
+        self.assertTrue(registry["risk_assessed_at"])
+        self.assertEqual(
+            "observer_live",
+            db.execute(
+                "SELECT source FROM wallet_risk_assessment WHERE addr='0xcore3'"
+            ).fetchone()[0],
+        )
+
+    def test_high_wallet_risk_blocks_new_exposure(self):
+        db = self._db()
+        db.execute(
+            "INSERT INTO wallet_registry "
+            "(addr,state,first_seen_at,last_seen_at,risk_level,updated_at) "
+            "VALUES ('0xhigh','qualified','now','now','high','now')"
+        )
+        db.commit()
+        obs = Observer(db, [], {})
+
+        self.assertEqual(
+            "wallet_risk_blocked",
+            obs._new_exposure_block_reason("0xhigh", "BTC"),
+        )
+
     def test_disallowed_sector_open_is_skipped(self):
         db = self._db()
         loop = asyncio.new_event_loop()

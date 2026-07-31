@@ -36,7 +36,7 @@ from hyper.copy.fill_transition import classify_fill_transition
 from hyper.copy.sector import parse_json_obj, policy_allows_coin
 from hyper.market import rest, volatility, ws
 from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
-from hyper.selection import state as selection, strategy_revision
+from hyper.selection import state as selection, strategy_revision, wallet_risk
 from hyper.util import f, now_iso, now_ms
 from .liquidity import assess_order_book
 from .risk_radar import RiskRadar
@@ -469,13 +469,21 @@ class Observer:
 
     def _new_exposure_block_reason(self, addr: str, coin: str, book=None, side=None):
         book = book or self.taker
-        if str(addr or "").lower() in self.safety_frozen:
+        addr = str(addr or "").lower()
+        if addr in self.safety_frozen:
             return "wallet_safety_frozen"
-        if str(addr or "").lower() in self.entry_frozen:
+        risk = self.db.execute(
+            "SELECT COALESCE(risk_level,'normal'),risk_block_reason "
+            "FROM wallet_registry WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        if risk and (risk[0] in {wallet_risk.HIGH, wallet_risk.UNAVAILABLE} or risk[1]):
+            return "wallet_risk_blocked"
+        if addr in self.entry_frozen:
             return "retention_probation"
         wallet_open_n = sum(
             1 for position in book.open_ep.values()
-            if str(position.get("addr") or "").lower() == str(addr or "").lower()
+            if str(position.get("addr") or "").lower() == addr
         )
         if wallet_open_n >= self.wallet_max_open_positions:
             return "wallet_position_cap"
@@ -484,6 +492,62 @@ class Observer:
         ) >= self.wallet_stock_side_max_positions:
             return "wallet_stock_side_position_cap"
         return None
+
+    def _refresh_live_wallet_risks(self, addrs=None):
+        """Refresh actual-copy risk independently of scanner publication."""
+        if addrs is None:
+            owners = {
+                str(row[0] or "").lower()
+                for row in self.db.execute(
+                    "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+                ).fetchall()
+                if row[0]
+            }
+            generation = selection.latest_published_generation(self.db)
+            if generation:
+                owners |= {
+                    str(row[0] or "").lower()
+                    for row in self.db.execute(
+                        "SELECT addr FROM follow_selection WHERE generation=? "
+                        "AND lower(role)='core' AND COALESCE(enabled,1)=1",
+                        (generation,),
+                    ).fetchall()
+                    if row[0]
+                }
+        else:
+            owners = {
+                str(addr or "").lower() for addr in addrs if str(addr or "").strip()
+            }
+        if not owners:
+            return {}
+        stamp = now_iso()
+        live_generation = f"live-{stamp[:10]}"
+        results = {}
+        for addr in sorted(owners):
+            previous = wallet_risk.registry_state(self.db, addr)
+            assessment, evidence = wallet_risk.assess_actual_copy(
+                self.db,
+                generation=live_generation,
+                addr=addr,
+                source="observer_live",
+                assessed_at=stamp,
+                complete=True,
+                min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+                cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
+            )
+            results[addr] = assessment
+            if (
+                assessment.level != previous["level"]
+                or assessment.reasons != previous["reasons"]
+            ):
+                reason = assessment.reasons[0] if assessment.reasons else "healthy"
+                _log(
+                    f"wallet risk {addr[:10]}: {previous['level']} → "
+                    f"{assessment.level} ({reason}, "
+                    f"30d={float(evidence.get('cumulativeLossPct30d') or 0.0):.2%})"
+                )
+        self.db.commit()
+        return results
 
     @staticmethod
     def _target_self_liquidation(addr: str, fill: dict) -> bool:
@@ -1273,6 +1337,7 @@ class Observer:
             (now_iso(), self.balance, upnl, equity, self.balance - init, equity / init - 1,
              open_n, closed_n, win_rate, locked, self.balance - locked, gross, net, self.taker.fees_cum))
         self.db.commit()
+        self._refresh_live_wallet_risks()
 
     def _refresh_marks(self, book=None):
         """Mark-to-market open positions into the book's position table (mark_px/unrealized_pnl) WITHOUT
@@ -1855,6 +1920,12 @@ class Observer:
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_strategy(init=True)           # atomic Core + exact follow-param revision (forward-only)
+        try:
+            if self._refresh_live_wallet_risks():
+                self._reload_strategy()
+        except Exception as exc:  # noqa: BLE001 — risk refresh is retried by live stats
+            self._rollback_db()
+            _log(f"wallet risk startup refresh failed: {exc}")
         try:
             self._write_proc_status(self._proc_state)  # preserve operator pause across worker restarts
         except Exception as exc:  # noqa: BLE001 — status is non-essential; never block the engine
@@ -2774,6 +2845,12 @@ class Observer:
                  float(ep.get("smart_tp_master_anchor") or 0.0) or None, ep["pos_id"]))
             self._save_account(book)
             self.db.commit()
+            if book is self.taker:
+                try:
+                    self._refresh_live_wallet_risks({addr})
+                except Exception as exc:  # noqa: BLE001 — execution settlement already committed
+                    self._rollback_db()
+                    _log(f"wallet risk close refresh failed for {addr[:10]}: {exc}")
             if closing:
                 if book is self.taker:
                     try:

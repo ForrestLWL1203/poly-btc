@@ -114,7 +114,11 @@ Wallet quality and funded-account membership are separate decisions.
   five days. Daily refresh first certifies with the active parameters. Low and medium financial risk remain
   Core with new-open/add authority; a first ordinary failure is low, an independent confirmation at least
   72 hours later is medium, and one complete healthy assessment clears either. Severe 30-day loss is
-  immediately medium but still advisory. Only durable high risk, recoverable zero-equity unavailability,
+  immediately medium but still advisory. Actual Copy conservative loss accumulates closed/open realized PnL
+  plus negative unrealized PnL against the 30-day opening-equity reference. Two or more closes reaching 8% are
+  recoverable high risk: later profits below 8% lower the wallet to medium and a healthy net-positive
+  assessment clears it. Single-event catastrophic high remains durable. Only high risk, recoverable
+  zero-equity unavailability,
   structural uncopyability, incomplete system context, or a completed losing operator exit blocks execution.
   A full 16-wallet Core is never auto-replaced; an actual empty seat may be filled by the highest strict
   Challenger. There is no promotion delay, star priority or minimum count.
@@ -169,10 +173,14 @@ cannot enter Core under complete-scan criteria cannot enter through daily refres
 It refreshes Portfolio evidence, cached-fill deltas, actual Copy 7/30-day conservative PnL, positions, valuation
 and required market paths, then reruns the pre-strict Top32 and profit-aligned Top16 path. Active and draining
 incumbents form the effective membership floor; requalify wallets remain eligible for strict recovery but no
-longer reserve a seat. Low/medium observations never remove, freeze or replace an incumbent. When Core has fewer
+longer reserve a seat. Actual-Copy risk is persisted before membership formation, independently of whether the
+later daily publication succeeds; Observer also refreshes it after settlements and every five minutes.
+Low/medium observations never remove, freeze or replace an incumbent. When Core has fewer
 than 16 seats, daily may append the highest strict proposal and retune only that changed exact membership.
 Hard financial safety is limited to a verified source self-liquidation plus fresh zero-equity/no-position
-snapshots, or one Canonical/actual Copy liquidation losing at least 8% of its recorded opening equity. Legacy
+snapshots, one Canonical/actual Copy liquidation losing at least 8% of its recorded opening equity, or at least
+two actual Copy closes whose 30-day cumulative conservative loss reaches 8% of the opening-equity reference.
+The cumulative case may recover through later profits; the single-event cases remain durable. Legacy
 positions with no opening-equity value cannot prove that threshold. A zero-equity/no-position wallet without
 liquidation evidence is recoverable unavailable; structural HFT/DCA/hedge/unexecutable-market failures use a
 separate system block. Missing data/path/valuation evidence never advances risk confirmation and prevents

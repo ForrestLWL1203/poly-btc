@@ -340,8 +340,9 @@ The user-facing roles are:
 Membership is separate from live operator intent. `target_controls.intent` is `active`, `draining`, or
 `requalify`. A draining wallet keeps its Core seat but cannot open or add; a requalify wallet is projected as
 Challenger and has released the seat. Risk is separately projected from immutable
-`wallet_risk_assessment` rows into `wallet_registry`: low/medium are advisory, high is durable, unavailable is
-recoverable after funding and strict requalification, and structural/data blocks are not financial risk.
+`wallet_risk_assessment` rows into `wallet_registry`: low/medium are advisory; single-event catastrophic high
+is durable; rolling cumulative-loss high is recoverable; unavailable recovers after funding and strict
+requalification; and structural/data blocks are not financial risk.
 
 `CORE_INITIAL_MAX_N` and `CORE_TARGET_MAX_N` default to 16. There is no minimum Core count, service quota or
 forced replacement count: zero to sixteen wallets may publish. Complete discovery formation is:
@@ -391,7 +392,13 @@ assessment clears them. Data/path/valuation failures do not advance confirmation
 execution without masquerading as high financial risk. Zero equity/no positions without liquidation proof is
 recoverable unavailable. Verified source zeroing and Canonical/actual Copy liquidation loss at or above 8% of
 opening equity are durable high-risk events and immediately remove new-open authority.
-Ordinary losses and 5%–8% isolated liquidations remain advisory evidence. Observer persists `pending/confirmed/cleared`
+Actual Copy also accumulates closed realized PnL plus open realized PnL and all negative unrealized PnL over
+30 days against the earliest recorded opening account equity in that window. At least two closed positions and
+an 8% cumulative conservative loss is recoverable high risk: later profit below 8% lowers it to medium, and a
+healthy net-positive assessment clears it. Observer refreshes this projection after settlements and every
+five-minute account snapshot; daily refresh persists it before selection work, so a later publication failure
+cannot erase the day's risk label. Ordinary losses and 5%–8% isolated liquidations remain advisory evidence.
+Observer persists `pending/confirmed/cleared`
 execution freezes separately from permanent risk evidence: a target self-liquidation fill blocks new opens/adds
 until standard and affected-DEX clearinghouse snapshots prove either recovery or zero equity with no positions.
 

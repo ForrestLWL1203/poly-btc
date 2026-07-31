@@ -33,6 +33,7 @@ const riskReasonLabel = (reason) => ({
   source_30d_closed_pnl_not_positive: "源钱包30日已平利润转负",
   copy_single_liquidation_loss_over_8pct: "Canonical Copy 单次清算损失达到权益8%",
   actual_copy_single_liquidation_loss_over_8pct: "实际 Copy 单次清算损失达到开仓权益8%",
+  actual_copy_cumulative_loss_over_8pct: "实际 Copy 30日累计保守亏损达到开仓权益8%（盈利后可降级）",
   source_account_liquidated_zero: "源钱包已确认清算且账户归零",
 }[reason] || reason);
 

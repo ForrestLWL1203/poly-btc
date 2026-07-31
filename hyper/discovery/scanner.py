@@ -4593,54 +4593,17 @@ def _persist_wallet_risk_assessment(
     db, generation_id, addr, decision, *, source, assessed_at, complete=True,
 ):
     """Project compatibility retention evidence into the new risk history."""
-    previous = wallet_risk.registry_state(db, addr)
-    evidence = wallet_risk.actual_copy_evidence(db, addr)
-    reason = decision.failure_reason
-    actual_catastrophe = bool(evidence["catastrophicPositionIds"])
-    if actual_catastrophe:
-        reason = "actual_copy_single_liquidation_loss_over_8pct"
-    elif (
-        evidence["closedN30d"] >= 3
-        and evidence["conservativePnl30d"] <= 0
-    ):
-        reason = "actual_copy_30d_conservative_pnl_not_positive"
-    elif (
-        evidence["closedPnl30d"] > 0
-        and -min(0.0, evidence["openUnrealized"]) > evidence["closedPnl30d"] * 0.50
-    ):
-        reason = "actual_copy_open_loss_over_50pct"
-    elif (
-        evidence["closedN30d"] in {1, 2}
-        and evidence["conservativePnl30d"] < 0
-        and not reason
-    ):
-        reason = "actual_copy_negative_insufficient_sample"
-    assessment = wallet_risk.advance(
-        previous_level=previous["level"],
-        previous_count=previous["confirmationCount"],
-        previous_reasons=previous["reasons"],
-        previous_first_confirmed_at=previous["firstConfirmedAt"],
+    assessment, _evidence = wallet_risk.assess_actual_copy(
+        db,
+        generation=generation_id,
+        addr=addr,
+        source=source,
         assessed_at=assessed_at,
-        reason=reason,
-        complete=bool(complete or actual_catastrophe),
+        fallback_reason=decision.failure_reason,
+        complete=complete,
         min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+        cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
     )
-    wallet_risk.persist(
-        db, generation=generation_id, addr=addr, source=source,
-        assessment=assessment, evidence=evidence,
-    )
-    if assessment.level == wallet_risk.HIGH:
-        db.execute(
-            "INSERT INTO target_controls "
-            "(addr,enabled,intent,intent_requested_at,intent_resolved_at,intent_resolution,updated_at) "
-            "VALUES (?,0,'requalify',?,?,?,?) ON CONFLICT(addr) DO UPDATE SET "
-            "enabled=0,intent='requalify',intent_resolved_at=excluded.intent_resolved_at,"
-            "intent_resolution=excluded.intent_resolution,updated_at=excluded.updated_at",
-            (
-                addr.lower(), assessed_at, assessed_at,
-                "high_risk_override", assessed_at,
-            ),
-        )
     return assessment
 
 
@@ -7277,6 +7240,31 @@ def refresh_challengers(db, p) -> dict:
                 "promotionUniverse": len(base_promotion_universe),
             },
         )
+        prepublication_high_core = set()
+        risk_stamp = now_iso()
+        for addr in sorted(previous_core):
+            assessment, _evidence = wallet_risk.assess_actual_copy(
+                db,
+                generation=generation_id,
+                addr=addr,
+                source="challenger_daily_prepublication",
+                assessed_at=risk_stamp,
+                fallback_reason=(outcomes.get(addr) or {}).get("reason"),
+                complete=True,
+                min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
+                cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
+            )
+            if assessment.level == wallet_risk.HIGH:
+                prepublication_high_core.add(addr)
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="challenger_daily",
+            stage="wallet_risk_prepublication", status="ok",
+            reason="actual_copy_risk_persisted",
+            payload={
+                "assessedCore": len(previous_core),
+                "highRiskCore": len(prepublication_high_core),
+            },
+        )
         db.commit()
         market_snapshot = generation_market.seal(db, generation_id)
         scope_audit = _assert_scoped_fill_cache(db, workset, universe)
@@ -7348,6 +7336,7 @@ def refresh_challengers(db, p) -> dict:
         }
         automatic_exit_core = (
             set(hard_safety_core) | structural_core | actual_catastrophic_core
+            | prepublication_high_core
         )
         fixed_core_order = tuple(
             str(addr or "").lower()
@@ -7380,6 +7369,7 @@ def refresh_challengers(db, p) -> dict:
                     "hardSafetyRemoved": len(hard_safety_core),
                     "structuralRemoved": len(structural_core),
                     "actualCatastropheRemoved": len(actual_catastrophic_core),
+                    "actualHighRiskRemoved": len(prepublication_high_core),
                     "protectedCore": len(daily_floor_order),
                     "fixedSurfaceCore": len(fixed_core),
                     "promotionSuppressed": len(fixed_core - set(daily_floor_order)),
