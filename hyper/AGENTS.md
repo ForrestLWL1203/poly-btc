@@ -627,8 +627,8 @@ explicit operational fallback for sealing the active parameter surface when expe
 capacity; it does not skip strict individual, path, cost, capacity, or shared-membership gates.
 
 `reset-paper --yes` is the supported from-zero reset. Stop Observer and Scanner first. It clears discovery,
-cache, selection, strategy, replay and Paper trading state, preserves operator `params` and encrypted provider
-credentials, and recreates the `$10,000` Paper account. `--factory-params` is the explicit restore-defaults variant;
+cache, selection, strategy, replay and Paper trading state, preserves operator `params`, and recreates the
+`$10,000` Paper account. `--factory-params` is the explicit restore-defaults variant;
 deleting the database file is also a factory reset, not a settings-preserving reset.
 
 Before Python changes:

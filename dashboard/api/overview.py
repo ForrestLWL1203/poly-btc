@@ -120,13 +120,6 @@ def ep_overview(db):
 
     obs_state = ("stopped" if (not obs or obs["state"] == "stopped" or _stale(obs))
                  else (obs["state"] or "running"))
-    radar = q1(
-        db,
-        "SELECT s.mode,s.status,a.bullish_score,a.bearish_score "
-        "FROM market_risk_state s "
-        "LEFT JOIN market_risk_assessment a ON a.assessment_id=s.current_assessment_id "
-        "WHERE s.id=1",
-    )
     active_strategy = strategy_revision.load_active(db)
     storage_guard = q1(
         db,
@@ -155,11 +148,6 @@ def ep_overview(db):
         "scannerStage": (scan_progress["stage"] if scan_progress and scan_progress["state"] == "scanning" else None),
         "lastScanAt": (last_scan["m"] if last_scan else None),
         "watchlistCount": (wl["c"] if wl else 0),
-        "riskRadar": {
-            "enabled": bool(radar and radar["mode"] == "shadow" and radar["status"] == "running"),
-            "bullishScore": radar["bullish_score"] if radar else None,
-            "bearishScore": radar["bearish_score"] if radar else None,
-        },
         "mode": "paper",
         "strategyRevision": (active_strategy or {}).get("revision"),
         "strategyGeneration": (active_strategy or {}).get("selectionGeneration"),

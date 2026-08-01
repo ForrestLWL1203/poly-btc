@@ -15,8 +15,6 @@ from .discovery import (
 from .overview import ep_equity, ep_insights, ep_overview, ep_strategy_revisions
 from .params import ep_params, patch_params, reset_params
 from .positions import ep_position_detail, ep_positions
-from .risk import (ep_connections, ep_credential_wrap_key, ep_risk_intents,
-                       ep_risk_radar, ep_risk_thresholds)
 from .wallets import ep_wallet_detail, ep_wallets
 
 
@@ -63,11 +61,6 @@ GET_ROUTES = {
     "/api/strategy-revisions": lambda db, qs: ep_strategy_revisions(
         db, int(qs.get("limit", [50])[0])
     ),
-    "/api/risk-radar": lambda db, qs: ep_risk_radar(db, qs),
-    "/api/risk-radar/intents": lambda db, qs: ep_risk_intents(db, qs),
-    "/api/risk-radar/thresholds": lambda db, qs: ep_risk_thresholds(db),
-    "/api/connections": lambda db, qs: ep_connections(db),
-    "/api/credential-wrap-key": lambda db, qs: ep_credential_wrap_key(db),
 }
 
 

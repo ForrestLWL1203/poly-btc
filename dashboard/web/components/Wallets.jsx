@@ -177,10 +177,10 @@ export function Wallets({ confirm }) {
         </div>
       </div>
       {tab === "followed" && portfolioRelease && portfolioRelease.status === "operator_review_degraded" &&
-        <div className="radar-alert" role="status">
+        <div className="wallet-alert" role="status">
           组合经济门槛降级：保留当前有效 Core 与参数，暂停自动晋升和调参，等待人工复核。
         </div>}
-      {starError && <div className="radar-alert" role="alert">{starError}</div>}
+      {starError && <div className="wallet-alert" role="alert">{starError}</div>}
       <div className="tbl-wrap">
         {explicit ? (
           <table>

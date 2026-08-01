@@ -5,7 +5,6 @@ import { History } from "./components/History.jsx";
 import { ObsMask } from "./components/ObsMask.jsx";
 import { Overview } from "./components/Overview.jsx";
 import { Positions } from "./components/Positions.jsx";
-import { RiskRadar } from "./components/RiskRadar.jsx";
 import { Settings } from "./components/Settings.jsx";
 import { Wallets } from "./components/Wallets.jsx";
 import {
@@ -28,10 +27,10 @@ const DASH_PW = "mock123";
 
 /* ----------------------------------------------------------------- shell */
 const NAV = [
-  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets], ["risk", "风险雷达", IC.risk]]],
+  ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
-const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", risk: "风险雷达 Risk Radar", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", discovery: "采集 Discovery", settings: "策略参数 Settings" };
 const fStorage = bytes => {
   const value = Number(bytes || 0);
   if (Math.abs(value) >= 1e9) return (value / 1e9).toFixed(2) + " GB";
@@ -132,11 +131,6 @@ function Dashboard({ onLogout }) {
   }, [scanning]);
 
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
-  const obsUp = obs === "running" || obs === "paused";            // process is alive (vs not started)
-  const radarState = ov && ov.system && ov.system.riskRadar ? ov.system.riskRadar : {};
-  const radarRunning = !!radarState.enabled && obsUp;
-  const radarBull = radarState.bullishScore == null ? 50 : Number(radarState.bullishScore);
-  const radarBear = radarState.bearishScore == null ? 50 : Number(radarState.bearishScore);
   const storageGuard = ov && ov.system && ov.system.storageGuard ? ov.system.storageGuard : {};
   const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
   const pausing = !!obsPending;
@@ -227,11 +221,6 @@ function Dashboard({ onLogout }) {
             <div className="strip-item"><span>在持</span><b>{ov.openCount}</b></div>
             <div className="strip-item"><span>可用</span><b>{fUsd(ov.availableBalance)}</b></div>
             <div className="strip-item"><span>浮动</span><b className={cls(ov.unrealizedPnl)}>{fSign(ov.unrealizedPnl)}</b></div>
-            <div className="strip-item strip-radar">
-              <span className="strip-radar-title"><i className="dot" style={{ background: radarRunning ? "var(--green)" : "var(--red)", animation: radarRunning ? "pulse 1.6s infinite" : "none" }} />风险雷达运行状态</span>
-              <div className="strip-radar-values"><b className={radarRunning ? "up" : "down"}>{radarRunning ? "运行中" : "未运行"}</b><small>空 {radarBear.toFixed(0)} / 多 {radarBull.toFixed(0)}</small></div>
-              <div className="strip-risk-split" aria-label={`空 ${radarBear.toFixed(0)}，多 ${radarBull.toFixed(0)}`}><i style={{ width: radarBear + "%" }} /><em style={{ width: radarBull + "%" }} /></div>
-            </div>
             {(() => { const sc = ov.system.scanner, stale = ov.system.scannerStale;
               const active = sc === "scanning" && !stale;
               const stage = active ? scanStageLabel(ov.system.scannerStage) : (SCANNER_LABEL[sc] || sc);
@@ -247,7 +236,6 @@ function Dashboard({ onLogout }) {
         {page === "positions" && <Positions confirm={setConfirmCfg} streamOpen={livePositions} />}
         {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} />}
-        {page === "risk" && <RiskRadar />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings confirm={setConfirmCfg} />}
       </main>

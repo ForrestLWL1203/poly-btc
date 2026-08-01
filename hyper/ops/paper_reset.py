@@ -5,7 +5,7 @@ from hyper import config, params
 from hyper.util import now_iso
 
 
-PRESERVED_TABLES = frozenset({"params", "provider_credential"})
+PRESERVED_TABLES = frozenset({"params"})
 DISCOVERY_CACHE_TABLES = frozenset({
     "candidate_fills",
     "fill_cache_state",

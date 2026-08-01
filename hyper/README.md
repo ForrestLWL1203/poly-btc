@@ -16,7 +16,7 @@ hyper/
 ├── selection/  wallet scoring, Core formation, optimization, strategy revisions
 ├── market/     Hyperliquid REST/WS, market universe, price paths, volatility
 ├── execution/  forward-only Observer and risk assessment
-├── ops/        process control, credentials, Paper reset
+├── ops/        process control, Paper reset, storage guard
 ├── cli/        stable command-line entry points
 ├── launcher/   local/VPS deployment tooling
 └── config.py, params.py, storage.py, util.py  shared foundations
@@ -361,7 +361,7 @@ the actual available-funds return: released entry-basis margin plus realized PnL
 | Replay/tuning | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/selection/auto_tune.py` |
 | Market data | `hyper/market/rest.py`, `hyper/market/ws.py`, `hyper/market/price_path.py` |
 | Observer/paper copy | `hyper/cli/observe.py`, `hyper/execution/observer.py` |
-| Runtime operations | `hyper/ops/procman.py`, `hyper/ops/credentials.py`, `hyper/ops/paper_reset.py`, `hyper/ops/storage_guard.py` |
+| Runtime operations | `hyper/ops/procman.py`, `hyper/ops/paper_reset.py`, `hyper/ops/storage_guard.py` |
 | Dashboard API | `dashboard/server.py`, `dashboard/api/*` |
 | Dashboard frontend | `dashboard/web/app.jsx`, `dashboard/web/components/*`, compiled `dashboard/web/app.js` |
 | Launcher/ops | `hyper/launcher/launcher.py`, `hyper/launcher/server.py`, `hyper/launcher/core/*`, `hyper/launcher/web/*` |
