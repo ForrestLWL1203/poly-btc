@@ -591,6 +591,7 @@ python3 -m hyper.cli.discover --db data/hl.db regate
 python3 -m hyper.cli.discover --db data/hl.db optimize
 python3 -m hyper.cli.discover --db data/hl.db finalize-profiled --generation GENERATION_ID
 python3 -m hyper.cli.discover --db data/hl.db repair-watchlist
+python3 -m hyper.cli.discover --db data/hl.db storage-maintenance
 python3 -m hyper.cli.discover --db data/hl.db watchlist --top 40
 python3 -m hyper.cli.discover --db data/hl.db reset-paper --yes
 # Add --factory-params only when operator settings should also return to code defaults.
@@ -670,5 +671,15 @@ temporary databases out of commits.
 ## Data and audit retention
 
 Raw fill cache is bounded to the configured profile window plus warm-up. `wallet_registry`, generation history,
-selection history, and pipeline audit are durable decision history. Live fill dedup data and account snapshots
-are retained with explicit TTLs. Do not prune the old generation manually while a scan or tuner is active.
+selection history, and compact selection/risk/tuner audit are durable decision history. High-volume per-wallet
+`pipeline_audit` stages (`official_roi`, `perp_prefilter`, `profile`, `rough_copy`) retain 90 days.
+`leaderboard_staging` retains the current generation, the latest published complete scan generation, every
+unfinished generation, and the latest 30 generations overall. Live fill dedup data, account snapshots, and
+storage-health samples have explicit TTLs.
+
+Both scheduled scanner services run `storage-maintenance` through `ExecStopPost`, so the guard still records a
+sample after a failed scan. It uses the shared scanner lock, records filesystem/SQLite/WAL growth in
+`storage_guard_run` and `process_status('storage_guard')`, and never runs `VACUUM` or forces a checkpoint on the
+live database. Warning thresholds are 70% disk use, over 1 GB normalized database growth per 24 hours, or a WAL
+over 512 MB; disk use at 85% is critical. Do not prune old generation/audit rows outside this guard while a scan
+or tuner is active.

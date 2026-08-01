@@ -121,6 +121,30 @@ class ApiOverviewPerfTests(unittest.TestCase):
         self.assertEqual(stop["highWater"], 10_000)
         self.assertAlmostEqual(stop["drawdownPct"], 16.0)
 
+    def test_overview_exposes_latest_storage_guard_alert(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO storage_guard_run "
+                "(checked_at,severity,reasons_json,disk_total_bytes,disk_used_bytes,disk_free_bytes,"
+                "disk_used_pct,db_main_bytes,db_wal_bytes,db_growth_24h_bytes,db_page_bytes,"
+                "db_freelist_bytes,pipeline_audit_rows,staging_generation_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "2026-08-01T00:00:00Z", "warning", '["db_growth_24h_warning"]',
+                    1000, 710, 290, 71.0, 200, 30, 120, 200, 20, 4, 2,
+                ),
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        guard = overview["system"]["storageGuard"]
+        self.assertEqual(guard["status"], "warning")
+        self.assertEqual(guard["reasons"], ["db_growth_24h_warning"])
+        self.assertEqual(guard["diskUsedPct"], 71.0)
+
     def test_overview_aggregates_open_risk_in_sql(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

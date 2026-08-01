@@ -113,6 +113,17 @@ LIVE_FILLS_RETENTION_DAYS = 7  # prune live_fills older than this (tid-dedup onl
 ACCOUNT_STATS_RETENTION_DAYS = 365  # keep the dashboard equity curve bounded (5-minute snapshots)
 #                                window; the rest is audit) — keeps the only unbounded table bounded
 
+# Long-running storage guard. Per-wallet discovery detail is useful for recent debugging but grows by tens
+# of megabytes per complete generation; compact selection/risk/tuner conclusions remain durable forever.
+PIPELINE_DETAIL_RETENTION_DAYS = 90
+LEADERBOARD_STAGING_KEEP_GENERATIONS = 30
+STORAGE_GUARD_SAMPLE_RETENTION_DAYS = 400
+STORAGE_GUARD_GROWTH_BASELINE_MIN_HOURS = 20
+STORAGE_GUARD_DISK_WARN_PCT = 70.0
+STORAGE_GUARD_DISK_CRITICAL_PCT = 85.0
+STORAGE_GUARD_DB_GROWTH_WARN_BYTES_24H = 1_000_000_000
+STORAGE_GUARD_WAL_WARN_BYTES = 512 * 1024 * 1024
+
 # Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
 # balance. Each copy commits isolated margin out of CURRENT AVAILABLE balance, sized by VOLATILITY
 # TARGETING (below) — never a fixed $ amount, always a fraction of available. notional = margin *

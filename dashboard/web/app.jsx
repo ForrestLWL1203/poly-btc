@@ -32,6 +32,12 @@ const NAV = [
   ["控制", [["discovery", "采集", IC.discovery], ["settings", "策略参数", IC.settings]]],
 ];
 const TITLES = { overview: "总览 Overview", positions: "持仓中 Positions", history: "历史持仓 History", wallets: "跟踪钱包 Wallets", risk: "风险雷达 Risk Radar", discovery: "采集 Discovery", settings: "策略参数 Settings" };
+const fStorage = bytes => {
+  const value = Number(bytes || 0);
+  if (Math.abs(value) >= 1e9) return (value / 1e9).toFixed(2) + " GB";
+  if (Math.abs(value) >= 1e6) return (value / 1e6).toFixed(1) + " MB";
+  return Math.round(value / 1e3) + " KB";
+};
 
 function ObserverControl({ status, busy, onStart, onPause, onStop }) {
   const [open, setOpen] = useState(false);
@@ -131,6 +137,8 @@ function Dashboard({ onLogout }) {
   const radarRunning = !!radarState.enabled && obsUp;
   const radarBull = radarState.bullishScore == null ? 50 : Number(radarState.bullishScore);
   const radarBear = radarState.bearishScore == null ? 50 : Number(radarState.bearishScore);
+  const storageGuard = ov && ov.system && ov.system.storageGuard ? ov.system.storageGuard : {};
+  const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
   const pausing = !!obsPending;
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
@@ -196,6 +204,11 @@ function Dashboard({ onLogout }) {
               title={streamOk ? "SSE 实时推送已连接" : "轮询兜底(SSE 未连接)"}>
               <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
               {streamOk ? "实时" : "轮询"}</span>
+            {storageAlert && <span className={"pill " + (storageGuard.status === "critical" ? "tint-red" : "tint-amber")}
+              title={`磁盘 ${Number(storageGuard.diskUsedPct || 0).toFixed(1)}% · DB日增 ${fStorage(storageGuard.dbGrowth24hBytes)} · WAL ${fStorage(storageGuard.dbWalBytes)}`}>
+              <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />
+              {storageGuard.status === "critical" ? "磁盘高危" : "磁盘预警"} {Number(storageGuard.diskUsedPct || 0).toFixed(0)}%
+            </span>}
             {ov && ov.system && ov.system.portfolioDrawdownStop?.active &&
               <span className="pill" style={{ background: "rgba(255,82,82,.14)", color: "var(--red-l)" }}
                 title={`权益高水位回撤 ${fNum(ov.system.portfolioDrawdownStop.drawdownPct, 1)}%，已暂停并执行全平`}>

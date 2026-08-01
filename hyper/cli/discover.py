@@ -19,7 +19,7 @@ from hyper import config, params, storage
 from hyper.discovery import frozen_audit, profit_analysis, profit_distribution, scanner
 from hyper.discovery import shadow_scan
 from hyper.market import rest
-from hyper.ops import paper_reset, procman, scan_lock
+from hyper.ops import paper_reset, procman, scan_lock, storage_guard
 from hyper.util import now_iso
 
 
@@ -276,6 +276,10 @@ def main() -> int:
     add_gate_args(g)
 
     sub.add_parser("repair-watchlist", help="rebuild watchlist if it drifted from active profiles")
+    sub.add_parser(
+        "storage-maintenance",
+        help="prune bounded discovery detail and record filesystem/database growth health",
+    )
     sub.add_parser("serve-rescan", help="daemon: run a full scan on demand when a dashboard rescan command is queued")
     t = sub.add_parser("tune", help=argparse.SUPPRESS)
     t.add_argument("--generation", required=True)
@@ -491,6 +495,13 @@ def main() -> int:
                                    candidates_scanned=0, candidates_total=0)
         scanner._set_scanner_proc(db, "idle", {"last_repair_at": now_iso(), "active": n})
         print(f"watchlist {n} active")
+    elif args.cmd == "storage-maintenance":
+        try:
+            with scan_lock.acquire(args.db):
+                result = storage_guard.run(db, args.db)
+        except scan_lock.ScanBusyError:
+            result = {"status": "skipped", "reason": "scanner_run_already_active"}
+        print(json.dumps(result, sort_keys=True, default=str))
     elif args.cmd == "tune":
         # Keep the legacy hidden verb as a compatibility alias. Formation ranks one bounded pre-Core pool,
         # searches count-specific parameter surfaces, and seals only the winning strict membership.

@@ -710,6 +710,32 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stamp_stage_id ON pipeline_audit(s
 CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stamp_source_stage_id ON pipeline_audit(stamp DESC, source, stage, id DESC);
 CREATE INDEX IF NOT EXISTS idx_pipeline_audit_stage_id ON pipeline_audit(stage, id DESC);
 CREATE INDEX IF NOT EXISTS idx_pipeline_audit_addr_id ON pipeline_audit(addr, id DESC);
+
+-- Daily bounded-retention and filesystem/database growth audit. The latest result is also projected through
+-- process_status('storage_guard') so operators can inspect one compact health record without scanning history.
+CREATE TABLE IF NOT EXISTS storage_guard_run (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    checked_at                  TEXT NOT NULL,
+    severity                    TEXT NOT NULL,
+    reasons_json                TEXT NOT NULL,
+    disk_total_bytes            INTEGER NOT NULL,
+    disk_used_bytes             INTEGER NOT NULL,
+    disk_free_bytes             INTEGER NOT NULL,
+    disk_used_pct               REAL NOT NULL,
+    db_main_bytes               INTEGER NOT NULL,
+    db_wal_bytes                INTEGER NOT NULL,
+    db_growth_bytes             INTEGER,
+    db_growth_24h_bytes         INTEGER,
+    db_page_bytes               INTEGER NOT NULL,
+    db_freelist_bytes           INTEGER NOT NULL,
+    pipeline_audit_rows         INTEGER NOT NULL,
+    staging_generation_count    INTEGER NOT NULL,
+    deleted_pipeline_rows       INTEGER NOT NULL DEFAULT 0,
+    deleted_staging_rows        INTEGER NOT NULL DEFAULT 0,
+    deleted_staging_generations INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_storage_guard_run_checked_at
+    ON storage_guard_run(checked_at DESC, id DESC);
 """
 
 PROFILE_COLS = (

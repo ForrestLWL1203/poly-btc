@@ -61,6 +61,7 @@ WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} scan --days {days} --scan-interval {scan_interval}
 TimeoutStartSec=14h
 ExecStopPost={py} -m hyper.cli.discover --db {db} repair-watchlist
+ExecStopPost={py} -m hyper.cli.discover --db {db} storage-maintenance
 """
 
 
@@ -89,6 +90,7 @@ Environment=PYTHONUNBUFFERED=1
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.discover --db {db} challenger-refresh --scan-interval {scan_interval}
 TimeoutStartSec=8h
+ExecStopPost={py} -m hyper.cli.discover --db {db} storage-maintenance
 """
 
 

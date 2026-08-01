@@ -29,6 +29,14 @@ class LauncherTests(unittest.TestCase):
             "challenger-refresh",
             rendered["/etc/systemd/system/hl-challenger-refresh.service"],
         )
+        self.assertIn(
+            " -m hyper.cli.discover --db /root/poly-btc/data/hl.db storage-maintenance",
+            rendered["/etc/systemd/system/hl-scan.service"],
+        )
+        self.assertIn(
+            " -m hyper.cli.discover --db /root/poly-btc/data/hl.db storage-maintenance",
+            rendered["/etc/systemd/system/hl-challenger-refresh.service"],
+        )
 
     def test_timer_install_touches_persistent_stamps_before_enable(self):
         commands = []

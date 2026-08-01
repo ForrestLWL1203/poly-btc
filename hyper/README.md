@@ -361,15 +361,17 @@ the actual available-funds return: released entry-basis margin plus realized PnL
 | Replay/tuning | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/selection/auto_tune.py` |
 | Market data | `hyper/market/rest.py`, `hyper/market/ws.py`, `hyper/market/price_path.py` |
 | Observer/paper copy | `hyper/cli/observe.py`, `hyper/execution/observer.py` |
-| Runtime operations | `hyper/ops/procman.py`, `hyper/ops/credentials.py`, `hyper/ops/paper_reset.py` |
+| Runtime operations | `hyper/ops/procman.py`, `hyper/ops/credentials.py`, `hyper/ops/paper_reset.py`, `hyper/ops/storage_guard.py` |
 | Dashboard API | `dashboard/server.py`, `dashboard/api/*` |
 | Dashboard frontend | `dashboard/web/app.jsx`, `dashboard/web/components/*`, compiled `dashboard/web/app.js` |
 | Launcher/ops | `hyper/launcher/launcher.py`, `hyper/launcher/server.py`, `hyper/launcher/core/*`, `hyper/launcher/web/*` |
 | Schema/migrations | `hyper/storage.py` |
 
-Important durable tables include `scan_generation`, `leaderboard_staging`, `profile`, `candidate_fills`,
-`episode`, `wallet_registry`, `watchlist`, `follow_selection`, `pipeline_audit`, `copy_position`,
-`copy_action`, `auto_tune_runs`, and `auto_tune_state`.
+Important durable tables include `scan_generation`, `profile`, `candidate_fills`, `episode`, `wallet_registry`,
+`watchlist`, `follow_selection`, `pipeline_audit`, `copy_position`, `copy_action`, `auto_tune_runs`, and
+`auto_tune_state`. `leaderboard_staging` keeps only the current/protected generation set plus the latest 30
+generations. Compact selection/risk/tuner audit remains durable; high-volume per-wallet pipeline detail has a
+90-day TTL.
 
 ## Dashboard
 
@@ -397,6 +399,7 @@ python3 -m hyper.cli.discover --db data/hl.db scan --days 14 --scan-interval 8
 python3 -m hyper.cli.discover --db data/hl.db scan --full --days 14 --scan-interval 8
 python3 -m hyper.cli.discover --db data/hl.db regate
 python3 -m hyper.cli.discover --db data/hl.db repair-watchlist
+python3 -m hyper.cli.discover --db data/hl.db storage-maintenance
 python3 -m hyper.cli.discover --db data/hl.db watchlist --top 40
 
 # Stop Scanner/Observer first. Clear Paper history + generations/selections while retaining
@@ -448,6 +451,11 @@ the local mock dashboard and inspect the rendered result.
   (`1 core → serial`, up to four workers), while all database writes remain in the parent process.
 - Do not restart `hl-scan.service` to deploy code: it starts a real scan when activated. Restart only the
   affected long-running service, normally `hl-dashboard.service` and/or `hl-observe.service`.
+- Every scheduled full or Challenger scan runs `storage-maintenance` as `ExecStopPost`. It shares the scanner
+  lock, expires only per-wallet audit detail older than 90 days, preserves the current/full/in-progress and
+  latest 30 generation snapshots, and records disk/DB/WAL growth in `storage_guard_run`. Dashboard warns at
+  70% disk use, more than 1 GB normalized database growth per 24 hours, or a WAL above 512 MB; 85% disk use is
+  critical. The task relies on SQLite freelist reuse and never runs `VACUUM` or forces a WAL checkpoint.
 - Before diagnosing a manual “full” scan, verify the command payload has `full=true`, the CLI used `--full`, or
   the completed run records `full=1`; explicit full bypasses the two-hour Portfolio decision cache but still
   uses incremental fills for wallets whose complete 37-day history is already present.

@@ -128,6 +128,16 @@ def ep_overview(db):
         "WHERE s.id=1",
     )
     active_strategy = strategy_revision.load_active(db)
+    storage_guard = q1(
+        db,
+        "SELECT checked_at,severity,reasons_json,disk_used_pct,disk_free_bytes,"
+        "db_main_bytes,db_wal_bytes,db_growth_24h_bytes "
+        "FROM storage_guard_run ORDER BY checked_at DESC,id DESC LIMIT 1",
+    )
+    try:
+        storage_reasons = json.loads(storage_guard["reasons_json"] or "[]") if storage_guard else []
+    except (TypeError, ValueError):
+        storage_reasons = ["invalid_storage_guard_record"]
     stop_high = (acct["equity_high_water"] if acct else None)
     stop_high = float(stop_high) if stop_high is not None else None
     stop_drawdown = (
@@ -156,6 +166,16 @@ def ep_overview(db):
         "strategySource": (active_strategy or {}).get("source"),
         "strategyActivatedAt": (active_strategy or {}).get("activatedAt"),
         "strategyParamsHash": (active_strategy or {}).get("paramsHash"),
+        "storageGuard": {
+            "status": (storage_guard["severity"] if storage_guard else "unknown"),
+            "checkedAt": (storage_guard["checked_at"] if storage_guard else None),
+            "reasons": storage_reasons,
+            "diskUsedPct": (storage_guard["disk_used_pct"] if storage_guard else None),
+            "diskFreeBytes": (storage_guard["disk_free_bytes"] if storage_guard else None),
+            "dbMainBytes": (storage_guard["db_main_bytes"] if storage_guard else None),
+            "dbWalBytes": (storage_guard["db_wal_bytes"] if storage_guard else None),
+            "dbGrowth24hBytes": (storage_guard["db_growth_24h_bytes"] if storage_guard else None),
+        },
         "portfolioDrawdownStop": {
             "active": bool(acct and acct["drawdown_stop_active"]),
             "highWater": stop_high,
