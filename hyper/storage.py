@@ -816,9 +816,6 @@ CREATE TABLE IF NOT EXISTS copy_account (
     id              INTEGER PRIMARY KEY CHECK (id = 1),
     initial_balance REAL,
     balance         REAL,
-    equity_high_water REAL,
-    drawdown_stop_active INTEGER NOT NULL DEFAULT 0,
-    drawdown_stopped_at TEXT,
     updated_at      TEXT
 );
 
@@ -1221,9 +1218,6 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN copy_campaign_max_drawdown REAL",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_positions INTEGER DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN copy_campaign_peak_margin_pct REAL",
-    "ALTER TABLE copy_account ADD COLUMN equity_high_water REAL",
-    "ALTER TABLE copy_account ADD COLUMN drawdown_stop_active INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE copy_account ADD COLUMN drawdown_stopped_at TEXT",
     "ALTER TABLE watchlist ADD COLUMN generation TEXT",
     "ALTER TABLE watchlist ADD COLUMN profile_generation TEXT",
     "ALTER TABLE watchlist ADD COLUMN evaluated_at TEXT",

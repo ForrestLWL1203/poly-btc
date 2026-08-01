@@ -228,8 +228,6 @@ MAX_DEPLOY_PCT = 0.90       # PORTFOLIO deployment cap: stop opening NEW positio
 #                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
 #                           a (1-this)=10% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
 #                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
-PORTFOLIO_DRAWDOWN_STOP_ENABLE = True
-PORTFOLIO_DRAWDOWN_STOP_PCT = 0.15  # live account HWM stop: pause + flatten; manual resume rebases.
 WALLET_MARGIN_CAP_PCT = 1.00       # legacy snapshot compatibility; independent wallet slices are retired.
 WALLET_SECTOR_SIDE_CAP_PCT = 1.00
 WALLET_CRYPTO_STABLE_SIDE_CAP_PCT = 1.00

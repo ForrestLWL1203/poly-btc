@@ -25,6 +25,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual(config.WALLET_STOCK_SIDE_MAX_POSITIONS, 15)
         self.assertFalse(hasattr(config, "MAX_TOTAL_MARGIN_PCT"))
         self.assertFalse(hasattr(config, "STOCK_MAX_LEV"))
+        self.assertFalse(hasattr(config, "PORTFOLIO_DRAWDOWN_STOP_ENABLE"))
+        self.assertFalse(hasattr(config, "PORTFOLIO_DRAWDOWN_STOP_PCT"))
         self.assertFalse(hasattr(config, "HARVEST_WEEK_VLM_MAX"))
         self.assertFalse(hasattr(config, "HARVEST_PNL_VOL_MIN"))
 
@@ -57,6 +59,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("WALLET_MAX_OPEN_POSITIONS", follow)
             self.assertNotIn("MAX_TOTAL_MARGIN_PCT", follow)
             self.assertNotIn("STOCK_MAX_LEV", follow)
+            self.assertNotIn("PORTFOLIO_DRAWDOWN_STOP_ENABLE", follow)
+            self.assertNotIn("PORTFOLIO_DRAWDOWN_STOP_PCT", follow)
             self.assertFalse(follow["SMART_TP_ENABLE"])
             self.assertEqual(follow["SMART_TP_GIVEBACK_1_PCT"], 0.20)
             self.assertEqual(follow["SMART_TP_CLOSE_3_PCT"], 0.25)
@@ -83,6 +87,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertNotIn("WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", visible_follow)
             self.assertNotIn("WALLET_STOCK_SIDE_CAP_PCT", visible_follow)
             self.assertNotIn("STOCK_MAX_LEV", visible_follow)
+            self.assertNotIn("PORTFOLIO_DRAWDOWN_STOP_ENABLE", visible_follow)
+            self.assertNotIn("PORTFOLIO_DRAWDOWN_STOP_PCT", visible_follow)
             self.assertNotIn("TAIL_CLOSE_ENABLE", visible_follow)
             self.assertNotIn("TAIL_CLOSE_HARD_REMAIN_PCT", visible_follow)
             self.assertNotIn("TAIL_CLOSE_RISK_REMAIN_PCT", visible_follow)
@@ -282,7 +288,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(float(values["HARVEST_MONTH_PNL_MIN"]), 0.0)
             self.assertEqual(float(values["HARVEST_PERP_PNL_SHARE_MIN"]), 60.0)
 
-    def test_seed_params_purges_retired_wallet_slices(self):
+    def test_seed_params_purges_retired_portfolio_controls(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             params.seed_params(db)
@@ -295,6 +301,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 ("WALLET_MAX_OPEN_POSITIONS", "3"),
                 ("MAX_TOTAL_MARGIN_PCT", "85"),
                 ("STOCK_MAX_LEV", "10"),
+                ("PORTFOLIO_DRAWDOWN_STOP_ENABLE", "true"),
+                ("PORTFOLIO_DRAWDOWN_STOP_PCT", "15"),
             ):
                 db.execute(
                     "INSERT INTO params "
@@ -309,7 +317,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM params WHERE key IN "
                 "('WALLET_SECTOR_SIDE_CAP_PCT','WALLET_MARGIN_CAP_PCT',"
-                "'WALLET_MAX_OPEN_POSITIONS','MAX_TOTAL_MARGIN_PCT','STOCK_MAX_LEV')"
+                "'WALLET_MAX_OPEN_POSITIONS','MAX_TOTAL_MARGIN_PCT','STOCK_MAX_LEV',"
+                "'PORTFOLIO_DRAWDOWN_STOP_ENABLE','PORTFOLIO_DRAWDOWN_STOP_PCT')"
             ).fetchone()[0], 0)
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"

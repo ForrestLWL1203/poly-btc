@@ -544,11 +544,10 @@ through those retries; only markets still missing after all five attempts are cl
 - A manual 100% close creates a 24-hour same-wallet/same-coin cooldown only when the realized episode is losing.
   A profitable/breakeven full close has no cooldown. Any partial manual close keeps the episode live so later
   target adds, reductions and close remain actionable.
-- Copy execution has no per-position hard-threshold stop-loss. The Paper account has a separate global
-  high-water equity stop (`PORTFOLIO_DRAWDOWN_STOP_PCT`, default 15%): once hit, Observer pauses new opens,
-  persists the trip and repeatedly flattens all remaining positions. A manual resume clears the trip and
-  rebases the high-water to current equity. Risk is otherwise bounded by selection, sizing, isolated margin,
-  leverage/deployment caps, mirrored exits, and liquidation accounting.
+- Copy execution has no per-position hard-threshold or portfolio-wide drawdown stop-loss. Positions use
+  isolated margin, so one copied liquidation is settled independently and never pauses or flattens unrelated
+  positions. Risk remains bounded by selection, sizing, leverage/deployment caps, mirrored exits, and
+  liquidation accounting.
 - Core/strategy reloads are command-driven (`reload_params`) and do not copy historical fills or retroactively
   rescale existing positions.
 

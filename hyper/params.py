@@ -118,12 +118,6 @@ PARAM_SPEC = [
     # ── ② 跟单策略参数 (effect = immediate) ────────────────────────────
     ("FOLLOW_SELECTION_MODE", "follow", "hidden", "text", "immediate", config.FOLLOW_SELECTION_MODE,
         "跟单集合模式", "auto使用已发布Core集合;manual保留人工集合"),
-    ("PORTFOLIO_DRAWDOWN_STOP_ENABLE", "follow", "black", "bool", "immediate",
-        config.PORTFOLIO_DRAWDOWN_STOP_ENABLE,
-        "总体权益回撤止损", "开启后按我们账户权益高水位监控；触线立即暂停新开仓并平掉全部持仓"),
-    ("PORTFOLIO_DRAWDOWN_STOP_PCT", "follow", "black", "pct", "immediate",
-        config.PORTFOLIO_DRAWDOWN_STOP_PCT * 100,
-        "总体权益回撤止损线", "达到此回撤比例时主动止损；手动恢复会按当时账户权益重设高水位"),
     ("COIN_BLACKLIST",       "follow",  "green",  "text",    "immediate", config.COIN_BLACKLIST,
         "币种黑名单", "命中的币种不再新开仓;已有仓位仍继续跟随减仓/平仓。建议从持仓行一键加入,避免符号别名写错"),
     ("BLOCK_KOREAN_STOCKS",  "follow",  "green",  "bool",    "immediate", config.BLOCK_KOREAN_STOCKS,
@@ -374,7 +368,8 @@ def seed_params(db):
         "'CORE_COPY_MIN_BODY_WIN_RATE','CORE_MIN_FOLLOW_SCORE',"
         "'OFFICIAL_PERP_FOLD_DAYS','OFFICIAL_PERP_FOLD_COUNT',"
         "'OFFICIAL_PERP_MIN_FOLD_RETURN','COPY_CAMPAIGN_ZERO_RETURN_PRIOR',"
-        "'STOCK_MAX_LEV')"
+        "'STOCK_MAX_LEV','PORTFOLIO_DRAWDOWN_STOP_ENABLE',"
+        "'PORTFOLIO_DRAWDOWN_STOP_PCT')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)

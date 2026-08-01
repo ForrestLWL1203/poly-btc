@@ -71,9 +71,6 @@ class Book:
         self.gross_traded = 0.0
         self.fees_cum = 0.0
         self.stats_loaded = False
-        self.equity_high_water = config.INITIAL_BALANCE
-        self.drawdown_stop_active = False
-        self.drawdown_stopped_at = None
 
     @property
     def acct_lock(self):
@@ -127,8 +124,6 @@ class Observer:
         self.min_coin_day_ntl_vlm = config.MIN_COIN_DAY_NTL_VLM
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
         self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
-        self.portfolio_drawdown_stop_enable = config.PORTFOLIO_DRAWDOWN_STOP_ENABLE
-        self.portfolio_drawdown_stop_pct = config.PORTFOLIO_DRAWDOWN_STOP_PCT
         self.wallet_margin_cap_pct = config.WALLET_MARGIN_CAP_PCT
         self.wallet_sector_side_cap_pct = config.WALLET_SECTOR_SIDE_CAP_PCT
         self.wallet_sector_side_caps = {
@@ -211,7 +206,6 @@ class Observer:
         self.paused = prior_state in {"paused", "pausing"}
         self._proc_state = "paused" if self.paused else "running"
         self._proc_owner = f"observer:{os.getpid()}"
-        self._portfolio_risk_last_persist = 0.0
         self.safety_frozen = {
             str(row[0] or "").lower()
             for row in self.db.execute(
@@ -234,32 +228,16 @@ class Observer:
     def _load_account(self, book=None):
         book = book or self.taker
         row = self.db.execute(
-            f"SELECT initial_balance,balance,equity_high_water,drawdown_stop_active,"
-            f"drawdown_stopped_at FROM {book.acct_table} WHERE id=1"
+            f"SELECT initial_balance,balance FROM {book.acct_table} WHERE id=1"
         ).fetchone()
         if row:
             book.initial_balance = row[0] or config.INITIAL_BALANCE
             book.balance = row[1]
-            # A manual resume rebases the live stop to current equity, which may legitimately be
-            # below initial capital. Preserve that explicit persisted high-water across restarts.
-            book.equity_high_water = (
-                float(row[2]) if row[2] is not None
-                else max(book.initial_balance, book.balance)
-            )
-            book.drawdown_stop_active = bool(row[3])
-            book.drawdown_stopped_at = row[4]
-            if book is self.taker and book.drawdown_stop_active:
-                self.paused = True
-                self._proc_state = "paused"
         else:
             self.db.execute(
-                f"INSERT INTO {book.acct_table} "
-                "(id,initial_balance,balance,equity_high_water,drawdown_stop_active,updated_at) "
-                "VALUES (1,?,?,?,?,?)",
-                (
-                    config.INITIAL_BALANCE, config.INITIAL_BALANCE,
-                    config.INITIAL_BALANCE, 0, now_iso(),
-                ),
+                f"INSERT INTO {book.acct_table} (id,initial_balance,balance,updated_at) "
+                "VALUES (1,?,?,?)",
+                (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now_iso()),
             )
             self.db.commit()
         book.protected_reserve = max(0.0, book.wallet_initial_balance - book.initial_balance)
@@ -281,22 +259,6 @@ class Observer:
         self.db.execute(f"UPDATE {book.acct_table} SET balance=?, updated_at=? WHERE id=1",
                         (book.balance, now_iso()))
 
-    def _save_portfolio_risk_state(self, *, force=False):
-        book = self.taker
-        stamp = time.time()
-        if not force and stamp - self._portfolio_risk_last_persist < 30:
-            return
-        self.db.execute(
-            f"UPDATE {book.acct_table} SET equity_high_water=?,drawdown_stop_active=?,"
-            "drawdown_stopped_at=?,updated_at=? WHERE id=1",
-            (
-                book.equity_high_water, int(book.drawdown_stop_active),
-                book.drawdown_stopped_at, now_iso(),
-            ),
-        )
-        self.db.commit()
-        self._portfolio_risk_last_persist = stamp
-
     def _book_unrealized(self, book=None) -> float:
         book = book or self.taker
         total = 0.0
@@ -313,64 +275,9 @@ class Observer:
         book = book or self.taker
         return max(0.0, book.balance + min(0.0, self._book_unrealized(book)))
 
-    def _portfolio_equity(self, book=None) -> float:
-        book = book or self.taker
-        return max(0.0, book.balance + self._book_unrealized(book))
-
     def _risk_available(self, book=None) -> float:
         book = book or self.taker
         return max(0.0, self._available(book) + min(0.0, self._book_unrealized(book)))
-
-    def _reset_portfolio_drawdown_stop(self):
-        book = self.taker
-        book.equity_high_water = self._portfolio_equity(book)
-        book.drawdown_stop_active = False
-        book.drawdown_stopped_at = None
-        self._save_portfolio_risk_state(force=True)
-
-    async def _check_portfolio_drawdown_stop(self):
-        """Own live account drawdown here instead of rejecting wallets on reconstructed history."""
-        book = self.taker
-        if not book.stats_loaded:
-            return None
-        equity = self._portfolio_equity(book)
-        if equity > book.equity_high_water:
-            book.equity_high_water = equity
-            self._save_portfolio_risk_state()
-        high = max(1.0, book.equity_high_water)
-        drawdown = max(0.0, (high - equity) / high)
-        if (
-            self.portfolio_drawdown_stop_enable
-            and not book.drawdown_stop_active
-            and drawdown >= max(0.0, self.portfolio_drawdown_stop_pct)
-        ):
-            book.drawdown_stop_active = True
-            book.drawdown_stopped_at = now_iso()
-            self.paused = True
-            self._save_portfolio_risk_state(force=True)
-            self._write_proc_status("paused")
-            _log(
-                f"PORTFOLIO-DRAWDOWN-STOP {drawdown * 100:.2f}% "
-                f"(line {self.portfolio_drawdown_stop_pct * 100:.2f}%) — pause + flatten"
-            )
-        # Retry positions that were still opening or briefly lacked an executable price on the first pass.
-        if book.drawdown_stop_active and book.open_ep:
-            await self._cmd_close_all()
-        return {
-            "active": book.drawdown_stop_active,
-            "equity": equity,
-            "highWater": book.equity_high_water,
-            "drawdown": drawdown,
-        }
-
-    async def portfolio_drawdown_loop(self):
-        while not self.stop:
-            try:
-                await self._check_portfolio_drawdown_stop()
-            except Exception as exc:  # noqa: BLE001
-                self._rollback_db()
-                _log(f"portfolio drawdown stop failed: {exc}")
-            await asyncio.sleep(2)
 
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
@@ -756,10 +663,6 @@ class Observer:
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
-            if f.get("PORTFOLIO_DRAWDOWN_STOP_ENABLE") is not None:
-                self.portfolio_drawdown_stop_enable = bool(f["PORTFOLIO_DRAWDOWN_STOP_ENABLE"])
-            if f.get("PORTFOLIO_DRAWDOWN_STOP_PCT") is not None:
-                self.portfolio_drawdown_stop_pct = f["PORTFOLIO_DRAWDOWN_STOP_PCT"]
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
             for tier, mk, lk, nk, ak in (
@@ -1452,9 +1355,7 @@ class Observer:
             "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
             (state, os.getpid(), now_iso(),
              json.dumps({"paused": self.paused, "targets": len(self.addrs),
-                         "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id,
-                         "portfolioDrawdownStop": self.taker.drawdown_stop_active,
-                         "portfolioEquityHighWater": self.taker.equity_high_water})))
+                         "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id})))
         self.db.commit()
 
     async def consume_commands(self):
@@ -1499,8 +1400,6 @@ class Observer:
             self._write_proc_status("paused")
             return {"paused": True}
         if ctype == "resume":
-            if self.taker.drawdown_stop_active:
-                self._reset_portfolio_drawdown_stop()
             self.paused = False
             self._write_proc_status("running")
             return {"paused": False}
@@ -1911,7 +1810,6 @@ class Observer:
             _log(f"proc status init failed: {exc}")
         asyncio.create_task(self.consume_commands())  # dashboard control plane (pause/close/toggle)
         asyncio.create_task(self.mark_refresh_loop())  # dashboard freshness (25s mark-to-market)
-        asyncio.create_task(self.portfolio_drawdown_loop())  # live account HWM pause + flatten
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)

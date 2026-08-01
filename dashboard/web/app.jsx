@@ -205,11 +205,6 @@ function Dashboard({ onLogout }) {
               <span className="dot" style={{ background: storageGuard.status === "critical" ? "var(--red)" : "var(--amber)", animation: "pulse 1.6s infinite" }} />
               {storageGuard.status === "critical" ? "磁盘高危" : "磁盘预警"} {Number(storageGuard.diskUsedPct || 0).toFixed(0)}%
             </span>}
-            {ov && ov.system && ov.system.portfolioDrawdownStop?.active &&
-              <span className="pill" style={{ background: "rgba(255,82,82,.14)", color: "var(--red-l)" }}
-                title={`权益高水位回撤 ${fNum(ov.system.portfolioDrawdownStop.drawdownPct, 1)}%，已暂停并执行全平`}>
-                <span className="dot" style={{ background: "var(--red)" }} /> 总体回撤止损已触发
-              </span>}
             {ov && ov.system && <ObserverControl status={obs} busy={pausing}
               onStart={smartStart} onPause={pauseOpening} onStop={stopObserver} />}
           </div>
