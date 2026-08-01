@@ -63,7 +63,10 @@ session; ordinary broker/client construction remains unable to sign Mainnet orde
 Paper and Mainnet Live use the same target signals, sizing, add/reduce/close logic and copy-ledger transitions.
 Live replaces the Paper simulated fill with a signed Mainnet IOC and updates the Live ledger only from actual
 fills. `MARGIN_EQUITY_PCT` scales each order's equity sizing base; it is not a reserved pool or total deployment
-cap. Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
+cap. Discovery data, the published Core and its immutable strategy revision are shared across modes; switching
+Paper/Live never triggers a rescan or rebuilds Core. Per-tier minimum notionals qualify the target wallet's
+source signal only, while our order scales with actual account equity down to Hyperliquid's 10 USD venue floor.
+Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
 Unified account, a passing read-only preflight and the mandatory small-funds Canary.
 
 Testnet is deliberately not a product execution mode and does not maintain a Testnet copy ledger. It is only a

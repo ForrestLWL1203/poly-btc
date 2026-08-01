@@ -13,8 +13,10 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_
 from enum import Enum
 from typing import Optional
 
+from hyper import config
 
-MIN_PERP_NOTIONAL_USD = Decimal("10")
+
+MIN_PERP_NOTIONAL_USD = Decimal(str(config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD))
 
 
 class OrderValidationError(ValueError):

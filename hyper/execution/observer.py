@@ -2400,7 +2400,11 @@ class Observer:
             if not plan.ok:
                 self._tally(f"skip_{plan.reason}", book)
                 if plan.reason == "small_notl":
-                    why = f"below {plan.tier}-tier min notl ${plan.notional:,.0f} < ${self.tier_min_notional.get(plan.tier, 0.0):,.0f} (master notl ${plan.master_notional:,.0f})"
+                    why = (
+                        f"below Hyperliquid min order ${plan.notional:,.2f} < "
+                        f"${config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:,.0f} "
+                        f"(qualified master notl ${plan.master_notional:,.0f})"
+                    )
                 else:
                     why = plan.reason
                 _log(f"skip {coin} {ep['side']} {addr[:10]}: {why} (room ${plan.room:,.0f} / deploy ${plan.deploy_room:,.0f} / cash ${plan.available:,.0f} / want ${plan.wanted_margin:,.0f})")

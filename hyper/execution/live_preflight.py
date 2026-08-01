@@ -325,8 +325,6 @@ def activate_live_session(db, preflight_id: str, confirmation_phrase: str) -> di
     session_id = f"live-{uuid.uuid4().hex}"
     stamp = now_iso()
     canary_cap = min(100.0, float(row[6]) * 0.01, float(row[7]))
-    if canary_cap < 10.0:
-        raise ValueError("live_canary_no_executable_capacity")
     db.execute(
         "INSERT INTO execution_session "
         "(session_id,mode,network,state,account_address,agent_address,strategy_revision,preflight_id,"

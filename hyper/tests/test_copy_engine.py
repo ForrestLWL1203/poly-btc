@@ -221,7 +221,8 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(plan.room, 2_400.0)
         self.assertEqual(plan.deploy_room, 6_400.0)
 
-        # The proportional dust floor follows the $6.4k sizing base, while the fixed notional floor remains real.
+        # The proportional dust floor follows the $6.4k sizing base. Tier notionals qualify only the source;
+        # they must not inflate our independently equity-scaled order.
         dust_ok = replace(params, tier_margin={"stable": 0.006, "mid": 0.006, "high": 0.006})
         self.assertTrue(plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
@@ -229,11 +230,51 @@ class CopyEngineTests(unittest.TestCase):
             master_notional=100_000.0, master_leverage=10.0, params=dust_ok,
         ).ok)
         fixed_floor = replace(params, tier_min_notional={"stable": 700.0, "mid": 700.0, "high": 700.0})
-        self.assertEqual(plan_open_sizing(
+        equity_scaled_below_tier_floor = plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
             balance=8_000.0, available=8_000.0, existing_coin_margin=0.0,
             master_notional=100_000.0, master_leverage=10.0, params=fixed_floor,
-        ).reason, "small_notl")
+        )
+        self.assertTrue(equity_scaled_below_tier_floor.ok)
+        self.assertEqual(equity_scaled_below_tier_floor.notional, 640.0)
+
+    def test_200_live_equity_scales_10k_paper_order_by_fifty(self):
+        params = OpenSizingParams(
+            high_sigma_min=0.09,
+            tier_margin={"stable": 0.05, "mid": 0.03, "high": 0.03},
+            tier_lev_cap={"stable": 30.0, "mid": 12.0, "high": 5.0},
+            tier_min_notional={"stable": 5_000.0, "mid": 1_500.0, "high": 600.0},
+            tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
+            min_lev=1.0,
+            max_deploy_pct=0.80,
+            min_open_margin_pct=0.005,
+            margin_equity_pct=0.80,
+        )
+        paper = plan_open_sizing(
+            coin="BTC", side="long", entry_px=100.0, sigma=0.04,
+            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=30.0, params=params,
+        )
+        live = plan_open_sizing(
+            coin="BTC", side="long", entry_px=100.0, sigma=0.04,
+            balance=200.0, available=200.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=30.0,
+            params=replace(params, capital_anchor=200.0),
+        )
+
+        self.assertTrue(paper.ok)
+        self.assertTrue(live.ok)
+        self.assertEqual((paper.margin, live.margin), (400.0, 8.0))
+        self.assertEqual((paper.notional, live.notional), (12_000.0, 240.0))
+
+        below_venue_minimum = plan_open_sizing(
+            coin="BTC", side="long", entry_px=100.0, sigma=0.04,
+            balance=5.0, available=5.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=30.0,
+            params=replace(params, capital_anchor=5.0),
+        )
+        self.assertFalse(below_venue_minimum.ok)
+        self.assertEqual(below_venue_minimum.reason, "small_notl")
 
     def test_open_sizing_caps_leverage_but_not_notional_to_master(self):
         params = OpenSizingParams(

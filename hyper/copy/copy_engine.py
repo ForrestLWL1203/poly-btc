@@ -540,8 +540,9 @@ def plan_open_sizing(
         wanted_margin, room, deploy_room, add_capacity_margin, group_room,
     ) + 1e-12
     # The relative dust threshold follows the same manual sizing base.  Otherwise lowering the sizing
-    # budget would silently turn valid proportional opens into "margin_too_small" skips.  Fixed per-tier
-    # minimum notionals remain real execution/economic floors and are intentionally not scaled.
+    # budget would silently turn valid proportional opens into "margin_too_small" skips.  Per-tier notionals
+    # qualify the source signal before this planner runs; our order scales with our equity down to the venue
+    # minimum, so a small funded Live account remains proportional to the $10k Paper account.
     if margin < min_add_margin:
         reason = (
             "wallet_sector_side_full" if group_limited else
@@ -559,7 +560,7 @@ def plan_open_sizing(
     # account.  Callers gate the source's cumulative opening notional before reaching this planner.  Once
     # confirmed, our notional is owned entirely by our margin/leverage/capacity surface.
     notional = margin * lev
-    if notional < params.tier_min_notional[tier]:
+    if notional < config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:
         reason = "wallet_sector_side_full" if group_limited else "wallet_full" if wallet_limited else "small_notl"
         return OpenSizingPlan(False, reason, tier, side, margin_pct, margin, notional, lev, 0.0, 0.0,
                               room, deploy_room, risk_available, wanted_margin, master_notional,

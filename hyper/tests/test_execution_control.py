@@ -157,6 +157,21 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertEqual(result["code"], "NO_AVAILABLE_COLLATERAL")
         self.assertEqual(control.execution_status(self.db)["state"], "no_funds")
 
+    def test_200_equity_can_activate_two_dollar_canary_margin_cap(self):
+        with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle), \
+                patch("hyper.execution.live_preflight.strategy_revision.resolved_targets", return_value=self.bundle["targets"]):
+            result = run_live_preflight(
+                self.db,
+                private_wrap_key_path=str(self.private),
+                websocket_probe=lambda: True,
+                info_factory=lambda *_args, **_kwargs: FakeInfo(self.wallet.address, total="200"),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sizingEquity"], 160.0)
+        with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle):
+            session = activate_live_session(self.db, result["preflightId"], "启动实盘")
+        self.assertEqual(session["canaryMarginCap"], 2.0)
+
     def test_switch_to_paper_rejects_live_projection(self):
         control.ensure_execution_control(self.db)
         self.db.execute(

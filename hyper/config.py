@@ -146,13 +146,14 @@ HIGH_MARGIN_PCT   = 0.030
 STABLE_LEV_CAP = 30.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 30x)
 MID_LEV_CAP    = 12.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
-# PER-TIER minimum order notional: the source's cumulative flat→open position and our final independently
-# sized open must each reach the tier floor. A sub-floor source open remains pending while it grows; once
-# confirmed, later adds use the existing smart-add rules without another hard notional gate. Per-tier only —
-# the old flat dust floor (MIN_COPY_NOTIONAL) was removed. UI-tunable ($).
+# PER-TIER source-signal floors: the target wallet's cumulative flat→open position must reach the tier
+# threshold before it becomes copyable. Our independently sized order is allowed to scale with real account
+# equity; only Hyperliquid's actual minimum order notional remains fixed. This keeps a $200 Live account a
+# true 1/50-scale version of the $10k Paper account without following economically tiny source probes.
 STABLE_MIN_NOTIONAL = 5000.0   # BTC only: below this it's not worth opening
 MID_MIN_NOTIONAL    = 1500.0   # mid-vol coins
 HIGH_MIN_NOTIONAL   = 600.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
+HYPERLIQUID_MIN_PERP_NOTIONAL_USD = 10.0
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
 REDUCE_STEP_FRAC = 0.10       # REDUCE STEPPING: an algo master dribbles a huge position out in 100s of tiny
