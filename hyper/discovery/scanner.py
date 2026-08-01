@@ -1742,11 +1742,14 @@ def _quality_first_core_transition(
     strict_evaluate,
     robust_allowed_memberships=None,
     allow_loo=True,
+    retain_advisory_incumbents=False,
 ):
-    """Publish exactly the currently qualified profit-ordered Core prefix.
+    """Publish the requested profit-ordered Core prefix.
 
-    There is no minimum count, promotion delay, incumbent tenure, or stale-Core retention path. Open copies
-    are handled by the caller as Exit-only and never justify Core authority.
+    There is no minimum count, promotion delay, or incumbent tenure. Daily effective
+    publication may explicitly retain advisory low/medium incumbents; structural,
+    unavailable, and high-risk wallets still fail closed. Open copies are handled by
+    the caller as Exit-only and never justify Core authority.
     """
     rows = {(row.get("addr") or "").lower(): row for row in profiles}
     previous_core = {
@@ -1762,9 +1765,16 @@ def _quality_first_core_transition(
         data_valid = refreshed and (row.get("data_status") or "valid") == "valid"
         enabled = controls.get(addr, True)
         qualification = row.get("follow_qualification") or {}
+        retention_class = core_retention.qualification_failure(qualification)[0]
+        retained_advisory = bool(
+            retain_advisory_incumbents
+            and addr in previous_core
+            and addr in desired
+            and retention_class in {core_retention.HEALTHY, "soft", "medium"}
+        )
         core_ok = (
             row.get("status") in {"active", "qualified"}
-            and _formation_core_permission(qualification)
+            and (_formation_core_permission(qualification) or retained_advisory)
             and data_valid and enabled
         )
         nominated = data_valid and enabled and core_ok and addr in desired
@@ -4898,6 +4908,7 @@ def _build_forced_prefix_selection(db, generation_id, stamp, now_ms, *, profiles
         strict_evaluate=strict_evaluate,
         robust_allowed_memberships=(formation_meta or {}).get("robustAllowedMemberships") or (),
         allow_loo=allow_loo,
+        retain_advisory_incumbents=retention_hysteresis,
     )
     final_addrs = tuple(transition["selected"])
     if final_addrs:
@@ -7450,7 +7461,14 @@ def refresh_challengers(db, p) -> dict:
         proposed_selection_rows, marginal = _build_explicit_selection(
             db, generation_id, publication_stamp, now_ms,
             forced_core_order=publish_core_order,
-            formation_meta=formation.get("search") or {},
+            formation_meta={
+                **dict(formation.get("search") or {}),
+                # Daily membership is the effective Core: low/medium incumbents
+                # remain alongside any strict new entrant.  Without this flag,
+                # the pure recommended prefix rejected those incumbents before
+                # the retention overlay could be published.
+                "retentionHysteresis": True,
+            },
             effective_qualifications=formation.get("qualifications") or {},
             effective_scores=formation.get("scores") or {},
             effective_policies=formation.get("policies") or {},

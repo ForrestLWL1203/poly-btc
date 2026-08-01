@@ -308,6 +308,76 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["reasons"]["0xstar"], "portfolio_negative_incremental_net")
         self.assertIn("0xstar", result["looRemoved"])
 
+    def test_daily_transition_retains_advisory_incumbent_with_new_entrant(self):
+        profiles = [
+            {
+                "addr": "0xincumbent", "status": "active",
+                "profile_generation": "g2", "data_status": "valid",
+                "follow_qualification": {
+                    "eligible": False, "coreEligible": False,
+                    "firstFailure": "copy_7d_closed_pnl_not_positive",
+                    "status": "copy_7d_closed_pnl_not_positive",
+                },
+            },
+            {
+                "addr": "0xentrant", "status": "active",
+                "profile_generation": "g2", "data_status": "valid",
+                "follow_qualification": {
+                    "eligible": True, "coreEligible": True,
+                },
+            },
+        ]
+        metrics = {
+            (): 0,
+            ("0xentrant",): 100,
+            ("0xincumbent",): 100,
+            ("0xentrant", "0xincumbent"): 300,
+        }
+
+        normal = scanner._quality_first_core_transition(
+            profiles, generation_id="g2",
+            previous_roles={"0xincumbent": "core"}, controls={},
+            desired_order=("0xincumbent", "0xentrant"),
+            strict_evaluate=lambda addrs: self._transition_metrics(
+                metrics[tuple(sorted(addrs))]
+            ),
+        )
+        retained = scanner._quality_first_core_transition(
+            profiles, generation_id="g2",
+            previous_roles={"0xincumbent": "core"}, controls={},
+            desired_order=("0xincumbent", "0xentrant"),
+            strict_evaluate=lambda addrs: self._transition_metrics(
+                metrics[tuple(sorted(addrs))]
+            ),
+            retain_advisory_incumbents=True,
+        )
+
+        self.assertEqual(("0xentrant",), normal["selected"])
+        self.assertEqual(
+            ("0xincumbent", "0xentrant"), retained["selected"],
+        )
+
+    def test_daily_transition_never_retains_structural_incumbent(self):
+        profiles = [{
+            "addr": "0xstructural", "status": "active",
+            "profile_generation": "g2", "data_status": "valid",
+            "follow_qualification": {
+                "eligible": False, "coreEligible": False,
+                "firstFailure": "source_heavy_dca",
+                "status": "source_heavy_dca",
+            },
+        }]
+
+        result = scanner._quality_first_core_transition(
+            profiles, generation_id="g2",
+            previous_roles={"0xstructural": "core"}, controls={},
+            desired_order=("0xstructural",),
+            strict_evaluate=lambda _addrs: self._transition_metrics(0),
+            retain_advisory_incumbents=True,
+        )
+
+        self.assertEqual((), result["selected"])
+
     @staticmethod
     def _metrics(net, *, stress=None, liqs=0, actionable=.8, capacity=.9, dd=.10,
                  deploy=.7, cost=.10, latency=None):

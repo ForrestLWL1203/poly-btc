@@ -8,6 +8,34 @@ from hyper.selection import wallet_risk
 
 
 class WalletRiskTest(unittest.TestCase):
+    def test_positive_profile_status_is_healthy_not_low_risk(self):
+        self.assertEqual(
+            wallet_risk.NORMAL,
+            wallet_risk.reason_kind("source_structure_passed"),
+        )
+        self.assertIsNone(
+            wallet_risk.assessment_reason("source_structure_passed"),
+        )
+        assessment = wallet_risk.advance(
+            previous_level=wallet_risk.LOW,
+            previous_count=1,
+            previous_reasons=("source_structure_passed",),
+            previous_first_confirmed_at="2026-01-01T00:00:00Z",
+            assessed_at="2026-01-02T00:00:00Z",
+            reason="source_structure_passed",
+        )
+        self.assertEqual(wallet_risk.NORMAL, assessment.level)
+        self.assertEqual((), assessment.reasons)
+
+    def test_unknown_status_does_not_create_low_risk(self):
+        assessment = wallet_risk.advance(
+            assessed_at="2026-01-01T00:00:00Z",
+            reason="future_success_marker",
+        )
+        self.assertEqual(wallet_risk.NORMAL, assessment.level)
+        self.assertEqual("unclassified_no_advance", assessment.action)
+        self.assertFalse(assessment.complete)
+
     def test_low_confirms_medium_after_72_hours_and_health_recovers(self):
         low = wallet_risk.advance(
             assessed_at="2026-01-01T00:00:00Z",
@@ -110,6 +138,56 @@ class WalletRiskTest(unittest.TestCase):
             )
             evidence = wallet_risk.actual_copy_evidence(db, "0xabc")
             self.assertEqual(1, len(evidence["catastrophicPositionIds"]))
+            db.close()
+
+    def test_open_actual_loss_without_closed_sample_is_low_risk(self):
+        reason = wallet_risk.actual_copy_reason({
+            "closedN30d": 0,
+            "closedPnl30d": 0.0,
+            "conservativePnl30d": -18.0,
+            "cumulativeLossPct30d": 0.0018,
+            "catastrophicPositionIds": [],
+            "openUnrealized": -18.0,
+        })
+        self.assertEqual("actual_copy_negative_insufficient_sample", reason)
+        self.assertEqual(
+            wallet_risk.LOW,
+            wallet_risk.advance(
+                assessed_at="2026-01-01T00:00:00Z", reason=reason,
+            ).level,
+        )
+
+    def test_live_refresh_clears_legacy_positive_status_risk(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(
+                str(Path(td) / "test.db"),
+                storage.DISCOVERY_SCHEMA,
+                storage.OBSERVE_SCHEMA,
+            )
+            db.execute(
+                "INSERT INTO wallet_registry "
+                "(addr,state,first_seen_at,last_seen_at,risk_level,risk_reasons_json,"
+                "risk_confirmation_count,risk_first_confirmed_at,updated_at) "
+                "VALUES ('0xhealthy','qualified','now','now','low',?,1,?,'now')",
+                ('["source_structure_passed"]', "2026-01-01T00:00:00Z"),
+            )
+
+            assessment, _evidence = wallet_risk.assess_actual_copy(
+                db,
+                generation="live-2026-01-02",
+                addr="0xhealthy",
+                source="observer_live",
+                assessed_at="2026-01-02T00:00:00Z",
+            )
+
+            self.assertEqual(wallet_risk.NORMAL, assessment.level)
+            self.assertEqual(
+                ("normal", "[]", 0),
+                tuple(db.execute(
+                    "SELECT risk_level,risk_reasons_json,risk_confirmation_count "
+                    "FROM wallet_registry WHERE addr='0xhealthy'"
+                ).fetchone()),
+            )
             db.close()
 
     def test_actual_copy_accumulates_repeated_losses_like_current_core_three(self):

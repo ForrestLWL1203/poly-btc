@@ -235,7 +235,7 @@ class ChallengerRefreshTests(unittest.TestCase):
                 stack.enter_context(patch.object(
                     scanner, "_apply_formation_params", return_value=False,
                 ))
-                stack.enter_context(patch.object(
+                build_selection = stack.enter_context(patch.object(
                     scanner, "_build_explicit_selection",
                     return_value=(rows, marginal),
                 ))
@@ -284,6 +284,11 @@ class ChallengerRefreshTests(unittest.TestCase):
         self.assertFalse(form.call_args_list[0].kwargs["retune"])
         self.assertTrue(form.call_args_list[1].kwargs["retune"])
         self.assertTrue(form.call_args_list[1].kwargs["force_retune"])
+        self.assertTrue(
+            build_selection.call_args.kwargs[
+                "formation_meta"
+            ]["retentionHysteresis"]
+        )
 
     def test_daily_replacement_proposal_fills_an_open_seat_without_removing_incumbent(self):
         previous = [

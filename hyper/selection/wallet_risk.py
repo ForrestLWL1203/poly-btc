@@ -35,6 +35,17 @@ UNAVAILABLE_REASONS = frozenset({
     "source_zero_equity_no_positions",
     "wallet_funds_withdrawn",
 })
+HEALTHY_REASONS = frozenset({
+    "healthy",
+    "ok",
+    "passed",
+    "qualified",
+    "core_quality_selected",
+    "pre_strict_qualified",
+    "rough_copy_qualified",
+    "source_quality_passed",
+    "source_structure_passed",
+})
 IMMEDIATE_MEDIUM_REASONS = frozenset({
     "source_30d_closed_pnl_not_positive",
     "source_open_loss_over_50pct",
@@ -44,6 +55,41 @@ IMMEDIATE_MEDIUM_REASONS = frozenset({
     "rough_copy_30d_conservative_not_profitable",
     "actual_copy_30d_conservative_pnl_not_positive",
     "actual_copy_open_loss_over_50pct",
+})
+LOW_RISK_REASONS = frozenset({
+    "actual_copy_negative_insufficient_sample",
+    "source_episode_evidence_insufficient",
+    "copy_episode_evidence_insufficient",
+    "source_7d_closed_pnl_not_positive",
+    "source_7d_conservative_pnl_not_positive",
+    "copy_7d_closed_pnl_not_positive",
+    "rough_copy_7d_conservative_not_profitable",
+    "activity_not_operational",
+    "latest_7d_inactive",
+    "active_weeks_below_3_of_4",
+    "max_open_gap_over_10d",
+    "actionable_open_gap_over_10d",
+    "no_actionable_open_28d",
+    "no_actionable_open_7d",
+    "source_activity_stale",
+    "activity_over_72h",
+    "rough_copy_open_rate_below_floor",
+    "strict_copy_open_rate_below_floor",
+    "copy_profit_factor_below_1_25",
+    "source_win_rate_below_floor",
+    "source_low_frequency_win_rate_below_floor",
+    "source_low_frequency_official_return_below_floor",
+    "source_low_frequency_recent_not_profitable",
+    "source_concentrated_body_win_rate_low",
+    "source_concentrated_body_unprofitable",
+    "source_lottery_profile_rejected",
+    "copy_lottery_profile_rejected",
+    "strict_copy_30d_return_below_floor",
+    "strict_copy_7d_return_below_floor",
+    "strict_copy_30d_conservative_return_below_floor",
+    "strict_copy_7d_conservative_return_below_floor",
+    "strict_copy_liquidations_over_3",
+    "shared_copy_return_below_floor",
 })
 STRUCTURAL_REASONS = frozenset({
     "sector_not_executable",
@@ -85,7 +131,7 @@ def _parse_time(value: Optional[str]) -> Optional[datetime]:
 
 def reason_kind(reason: Optional[str], *, deferred: bool = False) -> str:
     reason = str(reason or "").strip()
-    if not reason:
+    if not reason or reason in HEALTHY_REASONS:
         return NORMAL
     if deferred or reason in DEFERRED_REASONS or any(
         token in reason for token in ("data_error", "valuation_incomplete", "path_incomplete")
@@ -105,7 +151,25 @@ def reason_kind(reason: Optional[str], *, deferred: bool = False) -> str:
         return "structural"
     if reason in IMMEDIATE_MEDIUM_REASONS:
         return MEDIUM
-    return LOW
+    if reason in LOW_RISK_REASONS:
+        return LOW
+    return "unclassified"
+
+
+def assessment_reason(reason: Optional[str]) -> Optional[str]:
+    """Return only a reason which the wallet-risk state machine owns.
+
+    Profile stages also expose positive status strings through their ``reason``
+    field.  Treating every non-empty string as financial risk made
+    ``source_structure_passed`` appear as low risk and then survive every live
+    refresh.  Unknown status strings remain available in their owning audit
+    tables but may not create a wallet-risk label.
+    """
+    reason = str(reason or "").strip()
+    kind = reason_kind(reason)
+    if kind in {LOW, MEDIUM, HIGH, UNAVAILABLE, "structural", "deferred"}:
+        return reason
+    return None
 
 
 @dataclass(frozen=True)
@@ -160,6 +224,12 @@ def advance(
         )
 
     kind = reason_kind(reason, deferred=deferred or not complete)
+    if kind == "unclassified":
+        return RiskAssessment(
+            previous_level, previous_reasons, previous_count,
+            previous_first_confirmed_at, assessed_at, None, False,
+            "unclassified_no_advance",
+        )
     if kind == "deferred":
         return RiskAssessment(
             previous_level, previous_reasons, previous_count,
@@ -334,7 +404,7 @@ def actual_copy_reason(
     ):
         return "actual_copy_open_loss_over_50pct"
     if (
-        int(evidence.get("closedN30d") or 0) in {1, 2}
+        int(evidence.get("closedN30d") or 0) < 3
         and float(evidence.get("conservativePnl30d") or 0.0) < 0
         and not fallback_reason
     ):
@@ -450,11 +520,11 @@ def assess_actual_copy(
 ) -> tuple[RiskAssessment, dict]:
     """Assess, persist and enforce one wallet from current actual-copy evidence."""
     previous = registry_state(db, addr)
-    preserved_fallback = fallback_reason
+    preserved_fallback = assessment_reason(fallback_reason)
     if preserved_fallback is None and previous["reasons"]:
         prior_reason = str(previous["reasons"][0] or "")
         if prior_reason and not prior_reason.startswith("actual_copy_"):
-            preserved_fallback = prior_reason
+            preserved_fallback = assessment_reason(prior_reason)
     evidence = actual_copy_evidence(db, addr)
     reason = actual_copy_reason(
         evidence,
