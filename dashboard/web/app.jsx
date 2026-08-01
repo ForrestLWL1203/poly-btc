@@ -16,7 +16,7 @@ import {
   fUsd,
   scannerColor,
 } from "./lib/format.js";
-import { IC, Ico } from "./lib/icons.jsx";
+import { IC, Ico, PlayIcon, StopIcon } from "./lib/icons.jsx";
 import { useDashboardRefresh } from "./lib/refresh.js";
 
 /* 跟单监控台 — precompiled React dashboard. Talks to the live dashboard API. */
@@ -63,8 +63,9 @@ function ObserverControl({ status, busy, onStart, onPause, onStop }) {
 
   if (status === "stopped") {
     return (
-      <button className="btn btn-go" onClick={onStart} disabled={busy}>
-        <span className="dot observer-control-dot" /> 启动跟单
+      <button className="btn btn-go btn-icon-round" onClick={onStart} disabled={busy}
+        aria-label="启动跟单" title="启动跟单" aria-busy={busy || undefined}>
+        <PlayIcon />
       </button>
     );
   }
@@ -76,11 +77,12 @@ function ObserverControl({ status, busy, onStart, onPause, onStop }) {
 
   return (
     <div className="command-menu-wrap" ref={menuRef}>
-      <button className={"btn " + (paused ? "btn-go" : "btn-accent")}
+      <button className={"btn btn-icon-round " + (paused ? "btn-go" : "btn-accent")}
         onClick={() => setOpen(v => !v)} disabled={busy}
-        aria-haspopup="menu" aria-expanded={open}>
-        {paused ? "恢复 / 停止" : "暂停 / 停止"}
-        <span className={"command-caret" + (open ? " open" : "")}>⌄</span>
+        aria-label={paused ? "恢复或停止跟单" : "暂停或停止跟单"}
+        title={paused ? "恢复或停止跟单" : "暂停或停止跟单"}
+        aria-haspopup="menu" aria-expanded={open} aria-busy={busy || undefined}>
+        {paused ? <PlayIcon /> : <StopIcon />}
       </button>
       {open && (
         <div className="command-menu" role="menu" aria-label="跟单运行控制">

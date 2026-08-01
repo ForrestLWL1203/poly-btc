@@ -14,6 +14,18 @@ export const CopyIcon = () => (
   </svg>
 );
 
+export const PlayIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+    <path d="M8.5 5.7v12.6L18.7 12 8.5 5.7z" />
+  </svg>
+);
+
+export const StopIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+    <rect x="7" y="7" width="10" height="10" rx="1.4" />
+  </svg>
+);
+
 export const IC = {
   overview: "M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z",
   positions: "M3 3v18h18M7 16l4-4 3 3 5-6",
