@@ -8,7 +8,7 @@ import argparse
 import asyncio
 
 from hyper import config, params, storage
-from hyper.execution import observer
+from hyper.execution import control, observer
 from hyper.selection import state as selection
 
 
@@ -28,6 +28,7 @@ def main() -> int:
     args = ap.parse_args()
 
     db = storage.connect(args.db, storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+    control.ensure_execution_control(db)            # persist an explicit fail-safe Paper mode before startup
     params.seed_params(db)                          # ensure UI-tunable params exist (idempotent)
     if args.cmd == "observe":
         # A fill insert that loses a brief scanner write race is safely retried from the in-memory cursor.
