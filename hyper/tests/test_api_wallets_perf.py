@@ -53,6 +53,10 @@ class WalletDetailGuardedDb:
             "cp.master_open_px",
             "cp.add_count",
             "SELECT our_px FROM copy_action",
+            "FROM wallet_registry",
+            "FROM wallet_risk_assessment",
+            "FROM live_policy_skip",
+            "JOIN pre_strict_evidence",
         )
         if any(fragment in normalized for fragment in forbidden):
             raise AssertionError("wallet detail should aggregate once and defer row detail to position detail")
@@ -112,8 +116,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
             )
             db.commit()
 
-            with patch.object(api_wallets, "_score_breakdown", side_effect=AssertionError("detail-only")):
-                res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
+            res = api_wallets.ep_wallets(GuardedDb(db), {"tab": ["followed"]})
 
         wallet = res["wallets"][0]
         self.assertEqual(wallet["followCount"], 1)
@@ -420,9 +423,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(challenger["wallets"][0]["liveLiquiditySkipN30d"], 2)
         self.assertEqual(challenger["wallets"][0]["liveLiquiditySkipCoins30d"], ["TAO"])
         self.assertEqual(challenger_detail["selectionReasonText"], "Copy完整已平回合少于7个")
-        self.assertEqual(challenger_detail["copyExecution"]["effectiveFollowRatePct"], 80)
-        self.assertEqual(challenger_detail["copyExecution"]["smallOpenExcludedN"], 1)
-        self.assertEqual(challenger_detail["copyExecution"]["liveLiquiditySkipN30d"], 2)
+        self.assertNotIn("copyExecution", challenger_detail)
 
     def test_published_selection_scores_do_not_follow_in_progress_profile_mutations(self):
         with tempfile.TemporaryDirectory() as td:
@@ -513,8 +514,9 @@ class ApiWalletsPerfTests(unittest.TestCase):
         self.assertEqual(wallet["copyBacktestClosedN"], 11)
         self.assertEqual(wallet["copyBacktest7dNetPnl"], 171)
         self.assertAlmostEqual(wallet["winRatePct"], 6 / 11 * 100)
-        self.assertEqual(detail["scoreBreakdown"]["components"]["copy30d"], 91.0)
-        self.assertEqual(detail["scoreBreakdown"]["reasons"], ["sealed final surface"])
+        self.assertEqual(detail["copyReplay"]["stage"], "strict")
+        self.assertEqual(detail["copyReplay"]["windows"]["30d"]["qualificationPnl"], 307)
+        self.assertEqual(detail["copyReplay"]["windows"]["30d"]["closedN"], 11)
         self.assertNotIn("copyBacktest14dNetPnl", wallet)
         self.assertNotIn("copyReplayParamsHash", wallet)
         self.assertEqual(wallet["selectionReasonText"], "个人资格与共享账户组合均已通过")
@@ -573,7 +575,7 @@ class ApiWalletsPerfTests(unittest.TestCase):
         for key in ("entry", "exit", "masterEntry", "leverage", "margin", "notional", "addCount", "closedAt"):
             self.assertNotIn(key, record)
 
-    def test_wallet_detail_score_uses_final_watchlist_score(self):
+    def test_wallet_detail_omits_hidden_collection_and_scoring_fields(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
             db.row_factory = sqlite3.Row
@@ -590,8 +592,14 @@ class ApiWalletsPerfTests(unittest.TestCase):
 
             res = api_wallets.ep_wallet_detail(WalletDetailGuardedDb(db), "0xaaa")
 
-        self.assertEqual(res["score"], 89.0)
-        self.assertEqual(res["scoreBreakdown"]["components"], {})
+        self.assertEqual(res["rank"], 1)
+        self.assertIn("copyReplay", res)
+        for key in (
+            "score", "auditScore", "scoreBreakdown", "copyQuality", "preStrict",
+            "copyExecution", "sourceQuality", "officialPerpEvidence",
+            "actualFollowEvidence", "riskLevel", "riskReasons",
+        ):
+            self.assertNotIn(key, res)
 
     def test_starred_core_wallets_keep_strict_selection_rank(self):
         with tempfile.TemporaryDirectory() as td:

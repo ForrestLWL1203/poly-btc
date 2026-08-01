@@ -136,6 +136,26 @@ def _copy_economics(metrics, days):
     )
 
 
+def _detail_copy_window(metrics, days):
+    """Project only the Copy-window evidence rendered by the wallet drawer."""
+    days = int(days)
+    prefix = "copy_bt" if days == 30 else f"copy_bt_{days}d"
+    economics = _copy_economics(metrics, days)
+    qualification_return = economics.get("qualificationReturn")
+    return {
+        "qualificationPnl": economics.get("qualificationPnl"),
+        "qualificationReturnPct": (
+            round(float(qualification_return) * 100, 2)
+            if qualification_return is not None else None
+        ),
+        "closedN": _col(metrics, f"{prefix}_closed_n"),
+        "windowStartEquity": economics.get("windowStartEquity"),
+        "closedPnl": economics.get("closedPnl"),
+        "openLoss": economics.get("openLoss"),
+        "openProfitReference": economics.get("openProfitReference"),
+    }
+
+
 def _sector_policy(row):
     policy = _json_obj(_col(row, "sector_policy_json"))
     if not policy:
@@ -163,95 +183,6 @@ def _market_type_from_sector_policy(row):
         if "stock" in sector_set:
             return "stock"
     return _col(row, "market_type") or "crypto"
-
-
-def _score_breakdown(row):
-    detail = _json_obj(_col(row, "replay_score_detail_json"))
-    if not detail:
-        _score, detail = follow_score.compute_follow_score({
-            "official_perp_return_30d": _col(row, "official_perp_return_30d"),
-            "official_perp_evidence_json": _col(row, "official_perp_evidence_json"),
-            "source_win_rate_30d": _col(row, "source_win_rate_30d"),
-            "open_events_30d": _col(row, "open_events_30d"),
-            "last_copyable_open_ms": _col(row, "last_copyable_open_ms"),
-            "copy_bt_net_pnl": _col(row, "copy_bt_net_pnl"),
-            "copy_bt_closed_net_pnl": _col(row, "copy_bt_closed_net_pnl"),
-            "copy_bt_unrealized_pnl": _col(row, "copy_bt_unrealized_pnl"),
-            "copy_bt_window_start_equity": _col(row, "copy_bt_window_start_equity"),
-            "copy_bt_win_rate": _col(row, "copy_bt_win_rate"),
-            "copy_bt_closed_n": _col(row, "copy_bt_closed_n"),
-            "copy_bt_open_fill_rate": _col(row, "copy_bt_open_fill_rate"),
-            "copy_bt_7d_net_pnl": _col(row, "copy_bt_7d_net_pnl"),
-            "copy_bt_7d_closed_net_pnl": _col(row, "copy_bt_7d_closed_net_pnl"),
-            "copy_bt_7d_unrealized_pnl": _col(row, "copy_bt_7d_unrealized_pnl"),
-            "copy_bt_7d_window_start_equity": _col(row, "copy_bt_7d_window_start_equity"),
-            "actionable_open_rate": _col(
-                row, "copy_bt_open_fill_rate", _col(row, "actionable_open_rate")
-            ),
-            "copy_bt_behavior_replication_rate": _col(
-                row, "copy_bt_behavior_replication_rate"
-            ),
-            "copy_bt_profit_factor": _col(row, "copy_bt_profit_factor"),
-            "copy_bt_top3_profit_share": _col(row, "copy_bt_top3_profit_share"),
-            "copy_bt_body_after_top3_n": _col(row, "copy_bt_body_after_top3_n"),
-            "copy_bt_body_after_top3_net_pnl": _col(
-                row, "copy_bt_body_after_top3_net_pnl"
-            ),
-            "copy_bt_liquidations": _col(row, "copy_bt_liquidations"),
-            "copy_bt_max_liquidation_loss_pct": _col(
-                row, "copy_bt_max_liquidation_loss_pct"
-            ),
-            "pre_strict_activity_json": _col(row, "pre_strict_activity_json"),
-        })
-    return {
-        "stage": detail.get("stage"),
-        "mode": detail.get("mode"),
-        "components": {
-            key: score100(value) for key, value in (detail.get("components") or {}).items()
-        },
-        "profitPriorityPct": (
-            round(float(detail["profitPriorityValue"]) * 100, 2)
-            if detail.get("profitPriorityValue") is not None else None
-        ),
-        "profitComponent": score100(detail.get("profitComponent")),
-        "reliability": score100(detail.get("reliability")),
-        "confidenceMultiplier": detail.get("confidenceMultiplier"),
-        "scoreFormula": (
-            detail.get("scoreFormula")
-            or (
-                follow_score.strict_score_formula()
-                if str(detail.get("stage") or "").lower() in {"strict", "final"}
-                else {}
-            )
-        ),
-        "economicReturnsPct": {
-            key: round(float(value) * 100, 2)
-            for key, value in (detail.get("economicReturns") or {}).items()
-        },
-        "windowStartEquity": detail.get("economicEquities") or {},
-        "copyPnl": detail.get("copyPnl"),
-        "closedN": detail.get("closedN"),
-        "sourceWinRatePct": (
-            round(float(detail["sourceWinRate"]) * 100, 1)
-            if detail.get("sourceWinRate") is not None else None
-        ),
-        "copyWinRatePct": (
-            round(float(detail["copyWinRate"]) * 100, 1)
-            if detail.get("copyWinRate") is not None else None
-        ),
-        "openFillRatePct": (
-            round(float(detail["openFillRate"]) * 100, 1)
-            if detail.get("openFillRate") is not None else None
-        ),
-        "activityAgeHours": detail.get("activityAgeHours"),
-        "liquidations": detail.get("liquidations"),
-        "feeDrag": detail.get("feeDrag"),
-        "strictQuality": detail.get("strictQuality") or {},
-        "preStrict": detail.get("preStrict") or {},
-        "profitPriority": detail.get("profitPriority") or {},
-        "sectorPolicy": _sector_policy(row),
-        "reasons": detail.get("reasons") or [],
-    }
 
 
 def _is_new_followed(first_followed_at):
@@ -813,63 +744,25 @@ def ep_wallets(db, qs=None):
 
 
 def ep_wallet_detail(db, addr, qs=None):
-    w = q1(db, "SELECT rank,score FROM watchlist WHERE addr=?", (addr,))
+    w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
     selection_generation = _published_selection_generation(db)
     pr = q1(db,
-            "SELECT p.score,p.win_rate,p.n_trades,p.market_type,"
+            "SELECT p.win_rate,p.market_type,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_net_pnl ELSE p.copy_bt_net_pnl END AS copy_bt_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_closed_net_pnl ELSE p.copy_bt_closed_net_pnl END AS copy_bt_closed_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_window_start_equity ELSE p.copy_bt_window_start_equity END AS copy_bt_window_start_equity,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_win_rate ELSE p.copy_bt_win_rate END AS copy_bt_win_rate,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_closed_n ELSE p.copy_bt_closed_n END AS copy_bt_closed_n,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_open_fill_rate ELSE p.copy_bt_open_fill_rate END AS copy_bt_open_fill_rate,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_raw_target_open_n ELSE p.copy_bt_raw_target_open_n END AS copy_bt_raw_target_open_n,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_small_open_excluded_n ELSE p.copy_bt_small_open_excluded_n END AS copy_bt_small_open_excluded_n,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_effective_target_open_n ELSE p.copy_bt_effective_target_open_n END AS copy_bt_effective_target_open_n,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_opened_n ELSE p.copy_bt_opened_n END AS copy_bt_opened_n,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_raw_open_capture_rate ELSE p.copy_bt_raw_open_capture_rate END AS copy_bt_raw_open_capture_rate,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_open_audit_json ELSE p.copy_bt_open_audit_json END AS copy_bt_open_audit_json,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_liquidations ELSE p.copy_bt_liquidations END AS copy_bt_liquidations,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_fee_drag ELSE p.copy_bt_fee_drag END AS copy_bt_fee_drag,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_unrealized_pnl ELSE p.copy_bt_unrealized_pnl END AS copy_bt_unrealized_pnl,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_valuation_status ELSE p.copy_bt_valuation_status END AS copy_bt_valuation_status,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_net_pnl ELSE p.copy_bt_14d_net_pnl END AS copy_bt_14d_net_pnl,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_closed_net_pnl ELSE p.copy_bt_14d_closed_net_pnl END AS copy_bt_14d_closed_net_pnl,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_unrealized_pnl ELSE p.copy_bt_14d_unrealized_pnl END AS copy_bt_14d_unrealized_pnl,"
-            "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_14d_closed_n ELSE p.copy_bt_14d_closed_n END AS copy_bt_14d_closed_n,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_net_pnl ELSE p.copy_bt_7d_net_pnl END AS copy_bt_7d_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_closed_net_pnl ELSE p.copy_bt_7d_closed_net_pnl END AS copy_bt_7d_closed_net_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_window_start_equity ELSE p.copy_bt_7d_window_start_equity END AS copy_bt_7d_window_start_equity,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_unrealized_pnl ELSE p.copy_bt_7d_unrealized_pnl END AS copy_bt_7d_unrealized_pnl,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_copy_bt_7d_closed_n ELSE p.copy_bt_7d_closed_n END AS copy_bt_7d_closed_n,"
-            "p.official_perp_return_30d,p.official_perp_status,p.official_perp_reason,"
-            "p.official_perp_evidence_json,"
-            "p.source_episode_n_30d,p.source_episode_n_7d,p.source_win_rate_30d,"
-            "p.source_win_rate_7d,p.source_net_pnl_30d,p.source_net_pnl_7d,p.open_unrealized,"
-            "p.source_top3_profit_share,p.source_body_after_top3_n,"
-            "p.source_body_after_top3_win_rate,p.source_body_after_top3_net_pnl,"
-            "p.source_gross_profit_30d,p.source_gross_loss_30d,"
-            "p.source_profit_factor_30d,p.source_payoff_ratio_30d,"
-            "p.copy_bt_profit_factor,p.copy_bt_payoff_ratio,p.copy_bt_top3_profit_share,"
-            "p.copy_bt_body_after_top3_n,p.copy_bt_body_after_top3_win_rate,"
-            "p.copy_bt_body_after_top3_net_pnl,"
-            "p.source_quality_score,p.rough_copy_score,p.last_copyable_open_ms,"
-            "p.open_events_30d,p.actionable_open_rate,"
-            "pse.policy_version AS pre_strict_policy_version,pse.status AS pre_strict_status,"
-            "pse.first_failure AS pre_strict_first_failure,pse.tier AS pre_strict_tier,"
-            "pse.queue_rank AS pre_strict_queue_rank,pse.activity_json AS pre_strict_activity_json,"
-            "pse.strict_status AS pre_strict_strict_status,"
-            "pse.strict_first_failure AS pre_strict_strict_first_failure,"
             "CASE WHEN fs.replayed_at IS NOT NULL THEN fs.replay_sector_copy_json ELSE p.sector_copy_json END AS sector_copy_json,"
             "p.sector_policy_json,fs.role AS selection_role,fs.reason AS selection_reason,"
-            "fs.follow_score AS selection_follow_score,fs.utility AS selection_utility,"
-            "fs.replay_profit_priority,fs.selection_rank,fs.model_version,"
-            "fh.last_followed_score,fh.last_followed_generation,"
-            "fs.replay_params_hash,fs.replay_score_detail_json,fs.replayed_at "
+            "fs.replay_profit_priority,fs.selection_rank,fs.replayed_at "
             "FROM profile p LEFT JOIN follow_selection fs ON fs.generation=? AND fs.addr=p.addr "
-            "LEFT JOIN pre_strict_evidence pse ON pse.generation=? AND lower(pse.addr)=lower(p.addr) "
-            "LEFT JOIN follow_history fh ON fh.addr=p.addr "
-            "WHERE p.addr=?", (selection_generation, selection_generation, addr))
+            "WHERE p.addr=?", (selection_generation, addr))
     agg = q1(db,
              "SELECT COUNT(*) total_n,"
              "SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) closed_n,"
@@ -878,31 +771,11 @@ def ep_wallet_detail(db, addr, qs=None):
              "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_n,"
              "COALESCE(SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END),0) open_u "
              "FROM copy_position WHERE addr=?", (addr,))
-    risk = q1(
-        db,
-        "SELECT risk_level,risk_reasons_json,risk_confirmation_count,"
-        "risk_first_confirmed_at,risk_assessed_at,risk_block_reason "
-        "FROM wallet_registry WHERE lower(addr)=lower(?)",
-        (addr,),
-    )
     control = q1(
         db,
-        "SELECT COALESCE(intent,'active') AS intent,intent_requested_at,"
-        "intent_resolved_at,intent_resolution,intent_position_ids_json "
+        "SELECT COALESCE(intent,'active') AS intent "
         "FROM target_controls WHERE lower(addr)=lower(?)",
         (addr,),
-    )
-    risk_history = q1(
-        db,
-        "SELECT evidence_json FROM wallet_risk_assessment "
-        "WHERE lower(addr)=lower(?) ORDER BY assessed_at DESC LIMIT 1",
-        (addr,),
-    )
-    live_liquidity = q1(
-        db,
-        "SELECT COALESCE(SUM(count),0) AS skip_n,GROUP_CONCAT(DISTINCT coin) AS coins "
-        "FROM live_policy_skip WHERE addr=? AND last_ms>=?",
-        (addr, int((time.time() - 30 * 86_400) * 1000)),
     )
     n = (agg["closed_n"] if agg else 0) or 0
     win_n = (agg["wins"] if agg else 0) or 0
@@ -916,75 +789,11 @@ def ep_wallet_detail(db, addr, qs=None):
         "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at "
         "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
         (addr, rs, rp * rs))
-    final_score = _col(pr, "selection_follow_score") if pr else None
-    if final_score is None and pr and _col(pr, "selection_role") != "core":
-        utility = _col(pr, "selection_utility")
-        if utility is not None and 0 <= utility <= 1:
-            final_score = utility
-    if (final_score is None and pr
-            and _col(pr, "last_followed_generation") == selection_generation):
-        final_score = _col(pr, "last_followed_score")
-    if final_score is None and not _col(pr, "selection_role"):
-        final_score = w["score"] if (w and w["score"] is not None) else (pr["score"] if pr else None)
-    official_evidence = (
-        _json_obj(_col(pr, "official_perp_evidence_json")) if pr else {}
-    )
-    official_window = (
-        (official_evidence.get("windows") or {}).get("officialPerp30d") or {}
-    )
     display_metrics = apply_allowed_sector_copy_metrics(dict(pr)) if pr else {}
-    copy_economic30 = _copy_economics(display_metrics, 30)
-    copy_economic7 = _copy_economics(display_metrics, 7)
-    source_economic30 = conservative_profitability(
-        _col(pr, "source_net_pnl_30d") if pr else None,
-        _col(pr, "open_unrealized") if pr else None,
-    )
-    source_economic7 = conservative_profitability(
-        _col(pr, "source_net_pnl_7d") if pr else None,
-        _col(pr, "open_unrealized") if pr else None,
-    )
-    score_breakdown = _score_breakdown(pr) if pr else {}
-    projected_score = follow_score.project_strict_score_detail(
-        _json_obj(_col(pr, "replay_score_detail_json")) if pr else {}
-    )
-    display_score = projected_score if projected_score is not None else final_score
-    strict_quality = dict(score_breakdown.get("strictQuality") or {})
-    copy_quality = {
-        "profitFactor": strict_quality.get(
-            "profitFactor", _col(pr, "copy_bt_profit_factor") if pr else None
-        ),
-        "payoffRatio": strict_quality.get(
-            "payoffRatio", _col(pr, "copy_bt_payoff_ratio") if pr else None
-        ),
-        "top3ProfitSharePct": (
-            strict_quality.get("top3ProfitShare") * 100
-            if strict_quality.get("top3ProfitShare") is not None
-            else (
-                _col(pr, "copy_bt_top3_profit_share") * 100
-                if pr and _col(pr, "copy_bt_top3_profit_share") is not None else None
-            )
-        ),
-        "bodyAfterTop3N": strict_quality.get(
-            "bodyAfterTop3N", _col(pr, "copy_bt_body_after_top3_n") if pr else None
-        ),
-        "bodyAfterTop3WinRatePct": (
-            strict_quality.get("bodyAfterTop3WinRate") * 100
-            if strict_quality.get("bodyAfterTop3WinRate") is not None
-            else (
-                _col(pr, "copy_bt_body_after_top3_win_rate") * 100
-                if pr and _col(pr, "copy_bt_body_after_top3_win_rate") is not None
-                else None
-            )
-        ),
-        "bodyAfterTop3NetPnl": strict_quality.get(
-            "bodyAfterTop3NetPnl",
-            _col(pr, "copy_bt_body_after_top3_net_pnl") if pr else None,
-        ),
+    copy_windows = {
+        "30d": _detail_copy_window(display_metrics, 30),
+        "7d": _detail_copy_window(display_metrics, 7),
     }
-    pre_strict_activity = (
-        (score_breakdown.get("preStrict") or {}).get("activity")
-        or _json_obj(_col(pr, "pre_strict_activity_json") if pr else None)
-    )
     operator_intent = _col(control, "intent") or "active"
     published_role = _col(pr, "selection_role") if pr else None
     effective_role = (
@@ -992,168 +801,28 @@ def ep_wallet_detail(db, addr, qs=None):
         if published_role == "core" and operator_intent == "requalify"
         else published_role
     )
-    risk_block = _col(risk, "risk_block_reason")
-    risk_level = (
-        "structural" if risk_block == "structural_unfollowable"
-        else "data_error" if risk_block == "data_incomplete"
-        else _col(risk, "risk_level") or "normal"
-    )
     return {
-        "address": addr, "rank": (w["rank"] if w else None),
+        "address": addr,
+        "rank": (w["rank"] if w else None),
         "role": effective_role,
-        "publishedRole": published_role,
-        "effectiveRole": effective_role,
         "operatorIntent": operator_intent,
-        "riskLevel": risk_level,
-        "riskReasons": _json_list(_col(risk, "risk_reasons_json")),
-        "riskConfirmationCount": int(_col(risk, "risk_confirmation_count") or 0),
-        "riskFirstConfirmedAt": iso_epoch(_col(risk, "risk_first_confirmed_at")),
-        "riskAssessedAt": iso_epoch(_col(risk, "risk_assessed_at")),
-        "executionBlockReason": risk_block,
-        "exitRequestedAt": iso_epoch(_col(control, "intent_requested_at")),
-        "exitResolvedAt": iso_epoch(_col(control, "intent_resolved_at")),
-        "exitResolution": _col(control, "intent_resolution"),
-        "exitPositionCount": open_n,
-        "actualFollowEvidence": _json_obj(_col(risk_history, "evidence_json")),
-        "selectionReason": (_col(pr, "selection_reason") if pr else None),
         "selectionReasonText": (_selection_reason_text(pr) if pr else None),
         "marketType": (pr["market_type"] if pr else None),
-        "score": score100(display_score) if display_score is not None else None,
-        "auditScore": score100(final_score) if final_score is not None else None,
-        "scoreProjected": projected_score is not None,
         "profitPriorityPct": (
             _col(pr, "replay_profit_priority") * 100
             if pr and _col(pr, "replay_profit_priority") is not None else None
         ),
         "profitRank": (_col(pr, "selection_rank") if pr else None),
-        "rankingMode": (
-            follow_score.FOLLOW_SCORE_MODE
-            if pr and _col(pr, "replay_profit_priority") is not None else None
-        ),
-        "profitabilityBasis": (
-            PROFITABILITY_BASIS
-            if (
-                str(_col(pr, "model_version") or "").endswith("v2")
-                or "pre-strict32" in str(_col(pr, "model_version") or "")
-            )
-            else "legacy_marked_pnl"
-        ),
-        "copyProfitability": {
-            "30d": copy_economic30,
-            "7d": copy_economic7,
-            "markedPnl": {
-                "30d": _col(display_metrics, "copy_bt_net_pnl"),
-                "7d": _col(display_metrics, "copy_bt_7d_net_pnl"),
-            },
-        },
-        "scoreBreakdown": score_breakdown,
-        "copyQuality": copy_quality,
-        "preStrict": {
-            "policyVersion": (
-                (score_breakdown.get("preStrict") or {}).get("policyVersion")
-                or (_col(pr, "pre_strict_policy_version") if pr else None)
-            ),
-            "status": _col(pr, "pre_strict_status") if pr else None,
-            "firstFailure": _col(pr, "pre_strict_first_failure") if pr else None,
-            "tier": (
-                (score_breakdown.get("preStrict") or {}).get("tier")
-                or (_col(pr, "pre_strict_tier") if pr else None)
-            ),
-            "queueRank": (
-                (score_breakdown.get("preStrict") or {}).get("queueRank")
-                or (_col(pr, "pre_strict_queue_rank") if pr else None)
-            ),
-            "strictStatus": _col(pr, "pre_strict_strict_status") if pr else None,
-            "strictFirstFailure": (
-                _col(pr, "pre_strict_strict_first_failure") if pr else None
-            ),
-            "activity": pre_strict_activity,
-        },
-        "copyReplayParamsHash": (_col(pr, "replay_params_hash") if pr else None),
-        "copyReplayedAt": iso_epoch(_col(pr, "replayed_at")) if pr else None,
-        "copyReplayStage": "strict" if pr and _col(pr, "replayed_at") else "rough",
-        "copyExecution": {
-            "effectiveFollowRatePct": (
-                _col(pr, "copy_bt_open_fill_rate") * 100
-                if pr and _col(pr, "copy_bt_open_fill_rate") is not None else None
-            ),
-            "rawCaptureRatePct": (
-                _col(pr, "copy_bt_raw_open_capture_rate") * 100
-                if pr and _col(pr, "copy_bt_raw_open_capture_rate") is not None else None
-            ),
-            "rawTargetOpenN": _col(pr, "copy_bt_raw_target_open_n") if pr else None,
-            "smallOpenExcludedN": (
-                _col(pr, "copy_bt_small_open_excluded_n") if pr else None
-            ),
-            "effectiveTargetOpenN": (
-                _col(pr, "copy_bt_effective_target_open_n") if pr else None
-            ),
-            "openedN": _col(pr, "copy_bt_opened_n") if pr else None,
-            "historicalAudit": (
-                _json_obj(_col(pr, "copy_bt_open_audit_json")) if pr else {}
-            ),
-            "liveLiquiditySkipN30d": (
-                _col(live_liquidity, "skip_n", 0) or 0
-            ),
-            "liveLiquiditySkipCoins30d": sorted(filter(
-                None,
-                str(_col(live_liquidity, "coins") or "").split(","),
-            )),
-        },
-        "officialPerpReturn30dPct": (
-            _col(pr, "official_perp_return_30d") * 100
-            if pr and _col(pr, "official_perp_return_30d") is not None else None
-        ),
-        "officialPerpReturnPct": (
-            _col(pr, "official_perp_return_30d") * 100
-            if pr and _col(pr, "official_perp_return_30d") is not None else None
-        ),
-        "officialPerpHistoryTier": official_window.get("historyTier"),
-        "officialPerpWindowDays": official_window.get("windowDays"),
-        "officialPerpStatus": _col(pr, "official_perp_status") if pr else None,
-        "officialPerpReason": _col(pr, "official_perp_reason") if pr else None,
-        "officialPerpEvidence": official_evidence,
-        "sourceQuality": {
-            "score": score100(_col(pr, "source_quality_score")) if pr else None,
-            "episodeN30d": _col(pr, "source_episode_n_30d") if pr else None,
-            "episodeN7d": _col(pr, "source_episode_n_7d") if pr else None,
-            "winRate30dPct": (
-                _col(pr, "source_win_rate_30d") * 100
-                if pr and _col(pr, "source_win_rate_30d") is not None else None
-            ),
-            "winRate7dPct": (
-                _col(pr, "source_win_rate_7d") * 100
-                if pr and _col(pr, "source_win_rate_7d") is not None else None
-            ),
-            "netPnl30d": _col(pr, "source_net_pnl_30d") if pr else None,
-            "netPnl7d": _col(pr, "source_net_pnl_7d") if pr else None,
-            "currentUnrealizedPnl": _col(pr, "open_unrealized") if pr else None,
-            "economics30d": source_economic30,
-            "economics7d": source_economic7,
-            "top3ProfitSharePct": (
-                _col(pr, "source_top3_profit_share") * 100
-                if pr and _col(pr, "source_top3_profit_share") is not None else None
-            ),
-            "bodyAfterTop3N": _col(pr, "source_body_after_top3_n") if pr else None,
-            "bodyAfterTop3WinRatePct": (
-                _col(pr, "source_body_after_top3_win_rate") * 100
-                if pr and _col(pr, "source_body_after_top3_win_rate") is not None else None
-            ),
-            "bodyAfterTop3NetPnl": (
-                _col(pr, "source_body_after_top3_net_pnl") if pr else None
-            ),
-            "grossProfit30d": _col(pr, "source_gross_profit_30d") if pr else None,
-            "grossLoss30d": _col(pr, "source_gross_loss_30d") if pr else None,
-            "profitFactor30d": _col(pr, "source_profit_factor_30d") if pr else None,
-            "payoffRatio30d": _col(pr, "source_payoff_ratio_30d") if pr else None,
+        "copyReplay": {
+            "stage": "strict" if pr and _col(pr, "replayed_at") else "rough",
+            "windows": copy_windows,
         },
         "scoredWinRatePct": (pr["win_rate"] * 100) if (pr and pr["win_rate"] is not None) else None,
-        "scoredTrades": (pr["n_trades"] if pr else None),
         "forwardWinRatePct": (win_n / n * 100) if n else None,
         "closedN": n, "winN": win_n, "lossN": n - win_n,
-        "realizedPnl": realized, "openN": open_n, "openUnrealized": open_u,
+        "openN": open_n, "openUnrealized": open_u,
         "netPnl": realized + open_u,
-        "recordsTotal": total_recs, "recPage": rp, "recSize": rs,
+        "recordsTotal": total_recs, "recSize": rs,
         "records": [{
             "id": r["pos_id"], "coin": r["coin"], "side": r["side"], "status": r["status"],
             "pnl": (r["realized_pnl"] or 0.0) if r["status"] != "open" else (r["unrealized_pnl"] or 0.0),

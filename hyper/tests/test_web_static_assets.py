@@ -141,7 +141,7 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("function Positions(", jsx)
         self.assertIn('from "./components/Positions.jsx"', jsx)
 
-    def test_wallet_score_details_are_merged_into_wallet_drawer(self):
+    def test_wallet_drawer_keeps_only_operator_facing_detail(self):
         wallets = (ROOT / "dashboard" / "web" / "components" / "Wallets.jsx").read_text(encoding="utf-8")
         drawer = (ROOT / "dashboard" / "web" / "components" / "wallets" / "WalletDrawer.jsx").read_text(encoding="utf-8")
         css = (ROOT / "dashboard" / "web" / "app.css").read_text(encoding="utf-8")
@@ -155,9 +155,16 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn(".score-detail-modal", css)
         self.assertIn("最终严格 Copy", drawer)
         self.assertIn("粗略 fills-only Copy", drawer)
-        self.assertIn("源钱包质量", drawer)
         self.assertIn("copyWindowRows", drawer)
-        self.assertIn("scoreBreakdown", drawer)
+        self.assertIn("copyReplay", drawer)
+        for retired_card in (
+            "Pre-strict 可跟性与重复性",
+            "源钱包质量",
+            "开仓执行审计",
+            "跟单评分构成",
+            "风险评级",
+        ):
+            self.assertNotIn(retired_card, drawer)
         self.assertIn(".score-window-grid", css)
 
     def test_discovery_internals_are_split(self):
