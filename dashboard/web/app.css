@@ -116,9 +116,9 @@ body {
   display: inline-flex; align-items: center; gap: 7px; font-family: var(--sans); transition: filter .15s, background .15s; }
 .btn:hover { background: rgba(255, 255, 255, .09); }
 .btn svg { width: 15px; height: 15px; flex-shrink: 0; }
-.btn-icon-round { width: 44px; height: 44px; min-width: 44px; padding: 0; border-radius: 50%;
+.btn-icon-round { width: 35px; height: 35px; min-width: 35px; padding: 0; border-radius: 50%;
   justify-content: center; gap: 0; }
-.btn-icon-round svg { width: 17px; height: 17px; }
+.btn-icon-round svg { width: 14px; height: 14px; }
 .btn-accent { background: var(--accent-grad); border: none; color: #fff; box-shadow: 0 6px 18px rgba(255, 80, 40, .28); }
 .btn-accent:hover { filter: brightness(1.08); }
 /* prominent GREEN primary (same treatment as btn-accent, green instead of coral) — the "go/启动" action.
