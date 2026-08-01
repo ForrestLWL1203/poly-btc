@@ -906,6 +906,48 @@ CREATE INDEX IF NOT EXISTS idx_ca_pos ON copy_action(pos_id);
 CREATE INDEX IF NOT EXISTS idx_ca_pos_act ON copy_action(pos_id, action, act_id);  -- per-pos action filter + ordered detail
 CREATE INDEX IF NOT EXISTS idx_ca_pos_action_ts ON copy_action(pos_id, action, ts, act_id);
 
+-- Live strategy journal.  These tables intentionally mirror the Paper shape
+-- so the signal/decision engine can be shared, while every monetary mutation
+-- is driven by confirmed exchange fills through the execution audit tables.
+-- They never share rows with the Paper ledger.
+CREATE TABLE IF NOT EXISTS live_copy_account (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    initial_balance REAL,
+    balance         REAL,
+    available       REAL,
+    updated_at      TEXT
+);
+CREATE TABLE IF NOT EXISTS live_copy_position (
+    pos_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    addr TEXT, coin TEXT, side TEXT, status TEXT,
+    master_open_ms INTEGER, master_open_px REAL, master_peak_sz REAL,
+    master_leverage REAL, master_margin REAL, master_open_notional REAL,
+    leverage REAL, margin REAL, notional REAL,
+    entry_px REAL, size REAL, rem_size REAL, peak_size REAL,
+    master_current_sz REAL,
+    smart_tp_armed INTEGER DEFAULT 0, smart_tp_stage INTEGER DEFAULT 0,
+    smart_tp_peak_pnl REAL DEFAULT 0, smart_tp_base_size REAL,
+    smart_tp_master_anchor REAL, liq_px REAL,
+    realized_pnl REAL DEFAULT 0, add_count INTEGER DEFAULT 0,
+    mae_pct REAL DEFAULT 0, was_liq INTEGER DEFAULT 0, num_actions INTEGER DEFAULT 0,
+    opened_at TEXT, closed_at TEXT, strategy_revision_id TEXT,
+    opening_account_equity REAL, mark_px REAL, unrealized_pnl REAL, open_lag_sec REAL
+);
+CREATE INDEX IF NOT EXISTS idx_live_cp_status ON live_copy_position(status);
+CREATE INDEX IF NOT EXISTS idx_live_cp_addr ON live_copy_position(addr);
+CREATE INDEX IF NOT EXISTS idx_live_cp_status_opened ON live_copy_position(status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_live_cp_closed ON live_copy_position(closed_at DESC) WHERE status!='open';
+CREATE TABLE IF NOT EXISTS live_copy_action (
+    act_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pos_id INTEGER, addr TEXT, coin TEXT, ts INTEGER, recv_ms INTEGER,
+    action TEXT, master_oid INTEGER, master_px REAL, master_sz_delta REAL,
+    master_pos_after REAL, our_qty_delta REAL, our_px REAL,
+    realized_pnl REAL, slippage_bps REAL, strategy_revision_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_live_ca_oid ON live_copy_action(master_oid);
+CREATE INDEX IF NOT EXISTS idx_live_ca_pos ON live_copy_action(pos_id);
+CREATE INDEX IF NOT EXISTS idx_live_ca_pos_act ON live_copy_action(pos_id, action, act_id);
+
 -- ===== Dashboard layer (control plane) =====
 -- The dashboard NEVER writes business tables directly. All writes go here as commands consumed by
 -- Observer/Scanner (single-writer invariant). Read side: process_status / scan_progress / params.
@@ -1045,6 +1087,196 @@ CREATE TABLE IF NOT EXISTS auto_tune_runs (
     created_at    TEXT
 );
 
+-- ===== Paper / Live execution control and audit =====
+-- Dashboard writes requests only through ``commands``. Hyperliquid execution workers own these tables.
+CREATE TABLE IF NOT EXISTS execution_control (
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    selected_mode      TEXT NOT NULL DEFAULT 'paper',
+    state              TEXT NOT NULL DEFAULT 'paper',
+    active_session_id  TEXT,
+    canary_unlocked    INTEGER NOT NULL DEFAULT 0,
+    last_error_code    TEXT,
+    last_error_at      TEXT,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_lease (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    owner          TEXT NOT NULL,
+    acquired_at    TEXT NOT NULL,
+    heartbeat_at   TEXT NOT NULL,
+    expires_at_ms  INTEGER NOT NULL
+);
+
+-- Ciphertext-only Agent credential records. API readers must never select ``envelope_json``.
+CREATE TABLE IF NOT EXISTS execution_credential (
+    network          TEXT PRIMARY KEY,
+    account_address  TEXT NOT NULL,
+    agent_address    TEXT NOT NULL,
+    envelope_json    TEXT NOT NULL,
+    wrap_key_id      TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'encrypted',
+    valid_until      TEXT,
+    verified_at      TEXT,
+    error_code       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_preflight (
+    preflight_id       TEXT PRIMARY KEY,
+    network            TEXT NOT NULL,
+    account_address    TEXT NOT NULL,
+    agent_address      TEXT NOT NULL,
+    strategy_revision  TEXT NOT NULL,
+    snapshot_hash      TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    code               TEXT NOT NULL,
+    equity             REAL NOT NULL DEFAULT 0,
+    available          REAL NOT NULL DEFAULT 0,
+    sizing_equity      REAL NOT NULL DEFAULT 0,
+    position_count     INTEGER NOT NULL DEFAULT 0,
+    open_order_count   INTEGER NOT NULL DEFAULT 0,
+    details_json       TEXT,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    consumed_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_execution_preflight_created
+    ON execution_preflight(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS execution_session (
+    session_id           TEXT PRIMARY KEY,
+    mode                 TEXT NOT NULL,
+    network              TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    account_address      TEXT NOT NULL,
+    agent_address        TEXT NOT NULL,
+    strategy_revision    TEXT NOT NULL,
+    preflight_id         TEXT,
+    sizing_anchor        REAL NOT NULL,
+    margin_equity_pct    REAL NOT NULL,
+    sizing_equity        REAL NOT NULL,
+    canary               INTEGER NOT NULL DEFAULT 1,
+    canary_margin_cap    REAL,
+    started_at           TEXT NOT NULL,
+    stopped_at           TEXT,
+    stop_reason          TEXT,
+    updated_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_session_state
+    ON execution_session(state, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS execution_order_intent (
+    cloid                TEXT PRIMARY KEY,
+    session_id           TEXT NOT NULL,
+    strategy_revision    TEXT NOT NULL,
+    source_address       TEXT,
+    source_fill_id       TEXT,
+    source_order_id      TEXT,
+    source_time_ms       INTEGER,
+    action_seq           INTEGER NOT NULL,
+    action               TEXT NOT NULL,
+    coin                 TEXT NOT NULL,
+    side                 TEXT NOT NULL,
+    reduce_only          INTEGER NOT NULL,
+    leverage             REAL,
+    requested_size       REAL NOT NULL,
+    requested_limit_px   REAL NOT NULL,
+    state                TEXT NOT NULL,
+    oid                  INTEGER,
+    filled_size          REAL NOT NULL DEFAULT 0,
+    average_px           REAL,
+    error_code           TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_intent_session_state
+    ON execution_order_intent(session_id, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_execution_intent_oid
+    ON execution_order_intent(oid);
+
+CREATE TABLE IF NOT EXISTS execution_order_attempt (
+    attempt_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    cloid             TEXT NOT NULL,
+    attempt_no        INTEGER NOT NULL,
+    request_json      TEXT NOT NULL,
+    response_json     TEXT,
+    transport_status  TEXT NOT NULL,
+    error_code        TEXT,
+    started_at        TEXT NOT NULL,
+    completed_at      TEXT,
+    UNIQUE(cloid, attempt_no)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_attempt_cloid
+    ON execution_order_attempt(cloid, attempt_no);
+
+CREATE TABLE IF NOT EXISTS execution_fill (
+    network          TEXT NOT NULL,
+    tid              TEXT NOT NULL,
+    session_id       TEXT NOT NULL,
+    cloid            TEXT,
+    oid              INTEGER,
+    coin             TEXT NOT NULL,
+    side             TEXT,
+    size             REAL NOT NULL,
+    px               REAL NOT NULL,
+    fee              REAL NOT NULL DEFAULT 0,
+    closed_pnl       REAL NOT NULL DEFAULT 0,
+    fill_time_ms     INTEGER NOT NULL,
+    raw_json         TEXT,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY(network, tid)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_fill_session_time
+    ON execution_fill(session_id, fill_time_ms);
+CREATE INDEX IF NOT EXISTS idx_execution_fill_cloid
+    ON execution_fill(cloid);
+
+-- The exchange is authoritative. This is a replaceable projection used for reconciliation and UI only.
+CREATE TABLE IF NOT EXISTS execution_position_projection (
+    session_id        TEXT NOT NULL,
+    dex               TEXT NOT NULL,
+    coin              TEXT NOT NULL,
+    signed_size       REAL NOT NULL,
+    entry_px          REAL,
+    position_value    REAL,
+    margin_used       REAL,
+    leverage_type     TEXT,
+    leverage_value    REAL,
+    unrealized_pnl    REAL,
+    liquidation_px    REAL,
+    observed_at       TEXT NOT NULL,
+    PRIMARY KEY(session_id, dex, coin)
+);
+
+CREATE TABLE IF NOT EXISTS execution_account_snapshot (
+    snapshot_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id     TEXT NOT NULL,
+    equity         REAL NOT NULL,
+    available      REAL NOT NULL,
+    margin_used    REAL NOT NULL DEFAULT 0,
+    unrealized_pnl REAL NOT NULL DEFAULT 0,
+    observed_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_account_session_time
+    ON execution_account_snapshot(session_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS execution_reconcile_checkpoint (
+    checkpoint_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    exchange_hash       TEXT,
+    position_count      INTEGER NOT NULL DEFAULT 0,
+    open_order_count    INTEGER NOT NULL DEFAULT 0,
+    unknown_positions   INTEGER NOT NULL DEFAULT 0,
+    unknown_orders      INTEGER NOT NULL DEFAULT 0,
+    details_json        TEXT,
+    created_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_reconcile_session
+    ON execution_reconcile_checkpoint(session_id, created_at DESC);
+
 """
 
 
@@ -1059,6 +1291,7 @@ _MIGRATIONS = (
     "ALTER TABLE copy_position ADD COLUMN mark_px REAL",
     "ALTER TABLE copy_position ADD COLUMN unrealized_pnl REAL",
     "ALTER TABLE copy_position ADD COLUMN open_lag_sec REAL",
+    "ALTER TABLE live_copy_account ADD COLUMN available REAL",
     # Dashboard: denormalized onto watchlist by the scanner rebuild (API COALESCEs with profile until
     # the next scan repopulates these).
     "ALTER TABLE watchlist ADD COLUMN worst_single_loss_pct REAL",

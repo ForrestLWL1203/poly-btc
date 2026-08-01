@@ -192,7 +192,7 @@ class CopyEngineTests(unittest.TestCase):
         self.assertFalse(capped_plan.ok)
         self.assertEqual(capped_plan.reason, "coin_full")
 
-    def test_margin_equity_pct_scales_open_only_and_keeps_full_account_caps(self):
+    def test_margin_equity_pct_scales_order_sizing_not_portfolio_caps(self):
         params = OpenSizingParams(
             high_sigma_min=0.10,
             tier_margin={"stable": 0.01, "mid": 0.01, "high": 0.01},
@@ -202,33 +202,36 @@ class CopyEngineTests(unittest.TestCase):
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
-            margin_equity_pct=0.50,
+            margin_equity_pct=0.80,
+            capital_anchor=8_000.0,
         )
         plan = plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
-            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            balance=8_000.0, available=8_000.0, existing_coin_margin=0.0,
             master_notional=100_000.0, master_leverage=10.0, params=params,
         )
 
         self.assertTrue(plan.ok)
-        self.assertEqual(plan.risk_equity, 10_000.0)
-        self.assertEqual(plan.sizing_equity, 10_000.0)
-        self.assertEqual(plan.margin_equity, 5_000.0)
-        self.assertEqual(plan.margin, 50.0)
-        self.assertEqual(plan.room, 3_000.0)
-        self.assertEqual(plan.deploy_room, 8_000.0)
+        self.assertEqual(plan.risk_equity, 8_000.0)
+        self.assertEqual(plan.sizing_equity, 8_000.0)
+        self.assertEqual(plan.margin_equity, 6_400.0)
+        self.assertEqual(plan.margin, 64.0)
+        # Concentration and deployment controls remain based on real account
+        # equity; this knob reduces each order rather than reserving a hard pool.
+        self.assertEqual(plan.room, 2_400.0)
+        self.assertEqual(plan.deploy_room, 6_400.0)
 
-        # The proportional dust floor follows the $5k sizing base, while the fixed notional floor remains real.
+        # The proportional dust floor follows the $6.4k sizing base, while the fixed notional floor remains real.
         dust_ok = replace(params, tier_margin={"stable": 0.006, "mid": 0.006, "high": 0.006})
         self.assertTrue(plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
-            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            balance=8_000.0, available=8_000.0, existing_coin_margin=0.0,
             master_notional=100_000.0, master_leverage=10.0, params=dust_ok,
         ).ok)
-        fixed_floor = replace(params, tier_min_notional={"stable": 600.0, "mid": 600.0, "high": 600.0})
+        fixed_floor = replace(params, tier_min_notional={"stable": 700.0, "mid": 700.0, "high": 700.0})
         self.assertEqual(plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
-            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+            balance=8_000.0, available=8_000.0, existing_coin_margin=0.0,
             master_notional=100_000.0, master_leverage=10.0, params=fixed_floor,
         ).reason, "small_notl")
 

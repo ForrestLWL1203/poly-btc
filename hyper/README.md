@@ -15,7 +15,7 @@ hyper/
 ├── copy/       fill normalization, canonical replay, copy policy, position transitions
 ├── selection/  wallet scoring, Core formation, optimization, strategy revisions
 ├── market/     Hyperliquid REST/WS, market universe, price paths, volatility
-├── execution/  forward-only Observer and risk assessment
+├── execution/  forward-only Observer, Paper/Live broker, order recovery, and risk assessment
 ├── ops/        process control, Paper reset, storage guard
 ├── cli/        stable command-line entry points
 ├── launcher/   local/VPS deployment tooling
@@ -51,6 +51,83 @@ Paper copy positions, PnL, and execution audit
 
 The Dashboard and API expose the same published generation. `watchlist` is a derived ranked view; it is not the
 final new-entry membership once an explicit selection generation exists.
+
+## Live execution status
+
+The repository contains the complete Paper/Live execution path, including the official SDK `0.24.0`, separate
+Testnet/Mainnet venues, per-DEX metadata, precision-safe IOC orders, durable intents, deterministic CLOIDs,
+fill-based accounting, restart reconciliation, encrypted Dashboard credentials, Mainnet preflight, Canary,
+Draining and emergency close controls. Mainnet signing is available only through an explicitly activated Live
+session; ordinary broker/client construction remains unable to sign Mainnet orders.
+
+Paper and Mainnet Live use the same target signals, sizing, add/reduce/close logic and copy-ledger transitions.
+Live replaces the Paper simulated fill with a signed Mainnet IOC and updates the Live ledger only from actual
+fills. `MARGIN_EQUITY_PCT` scales each order's equity sizing base; it is not a reserved pool or total deployment
+cap. Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
+Unified account, a passing read-only preflight and the mandatory small-funds Canary.
+
+Testnet is deliberately not a product execution mode and does not maintain a Testnet copy ledger. It is only a
+bounded functional verifier for Hyperliquid signing, leverage, order, cancel, query and WebSocket APIs. Testnet
+books are not used to validate Mainnet strategy behavior, liquidity or expected slippage.
+
+Public Testnet metadata can be checked without a wallet or signature after installing `hyper/requirements.txt`:
+
+```bash
+python3 -m hyper.cli.execution_verify public-metadata --network testnet \
+  --require-coin xyz:XYZ100
+```
+
+The local signed verifier requires a Testnet-only Agent key in a regular, non-symlink `0600` file. It verifies
+that the derived Agent address and authorized master account match before trading; secret values are never
+printed. Preflight requires the authoritative Info API account-abstraction value to be exactly
+`unifiedAccount` and derives available collateral from Unified spot USDC (`total - hold`). A UI label alone is
+not accepted. Use placeholders below rather than putting a private key on the command line:
+
+```bash
+python3 -m hyper.cli.execution_verify testnet-preflight \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-roundtrip \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-scenarios \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-websocket \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-idempotency \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-reconcile \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-signal-bridge \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+
+python3 -m hyper.cli.execution_verify testnet-all \
+  --account-address <rabby-address> --agent-address <testnet-agent-address> \
+  --private-key-file <protected-testnet-key-file>
+```
+
+The aggregate suite starts only from a clean Testnet account and finishes with another clean-account preflight.
+It covers long/add/reduce/close, short, close-before-flip, BTC/ETH, standard and `xyz:*` REST reads, IOC reject
+normalization, GTC order/status/cancel paths, user fills, actual WebSocket market/user streams, process-local
+duplicate suppression, reconstructed-client recovery, and a real public Mainnet target fill mapped to a bounded
+Testnet roundtrip. Hyperliquid accepts more than one order with the same CLOID, so CLOID is a reconciliation key,
+not an exchange-side idempotency guarantee. The verifier does not create a Testnet strategy ledger.
+
+Current Testnet `xyz:XYZ100` quotes can be outside the exchange's oracle protection. The suite therefore proves
+HIP-3 routing and signing with an accepted resting GTC plus status/cancel, and separately verifies the real
+aggressive IOC `oracle_reject`; it does not claim a HIP-3 taker fill under an untradeable Testnet book. See the
+private local rollout and external-gate checklist in `hyper/docs/live-trading-rollout-plan.md`.
 
 ## Selection model
 
@@ -361,6 +438,7 @@ the actual available-funds return: released entry-basis margin plus realized PnL
 | Replay/tuning | `hyper/copy/copy_backtest.py`, `hyper/copy/copy_engine.py`, `hyper/selection/auto_tune.py` |
 | Market data | `hyper/market/rest.py`, `hyper/market/ws.py`, `hyper/market/price_path.py` |
 | Observer/paper copy | `hyper/cli/observe.py`, `hyper/execution/observer.py` |
+| Paper/Live execution and Testnet API verification | `hyper/execution/live_executor.py`, `hyper/execution/hyperliquid_broker.py`, `hyper/cli/execution_verify.py` |
 | Runtime operations | `hyper/ops/procman.py`, `hyper/ops/paper_reset.py`, `hyper/ops/storage_guard.py` |
 | Dashboard API | `dashboard/server.py`, `dashboard/api/*` |
 | Dashboard frontend | `dashboard/web/app.jsx`, `dashboard/web/components/*`, compiled `dashboard/web/app.js` |

@@ -54,6 +54,7 @@ def assess_order_book(
     remaining = wanted
     filled_notional = 0.0
     filled_size = 0.0
+    worst_px = None
     for px, size in side:
         level_notional = px * size
         take = min(remaining, level_notional)
@@ -61,6 +62,7 @@ def assess_order_book(
             continue
         filled_notional += take
         filled_size += take / px
+        worst_px = px
         remaining -= take
         if remaining <= max(1e-9, wanted * 1e-12):
             break
@@ -89,6 +91,7 @@ def assess_order_book(
         "best_bid": best_bid,
         "best_ask": best_ask,
         "average_px": average_px,
+        "worst_px": worst_px,
         "spread_bps": spread_bps,
         "impact_bps": impact_bps,
     }

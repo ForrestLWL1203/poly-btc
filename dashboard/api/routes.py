@@ -16,6 +16,9 @@ from .overview import ep_equity, ep_insights, ep_overview, ep_strategy_revisions
 from .params import ep_params, patch_params, reset_params
 from .positions import ep_position_detail, ep_positions
 from .wallets import ep_wallet_detail, ep_wallets
+from hyper.execution.control import execution_status
+from hyper.execution.credentials import public_wrap_key_payload
+import os
 
 
 TOKEN_TTL_S = 24 * 3600
@@ -61,6 +64,10 @@ GET_ROUTES = {
     "/api/strategy-revisions": lambda db, qs: ep_strategy_revisions(
         db, int(qs.get("limit", [50])[0])
     ),
+    "/api/execution/status": lambda db, qs: execution_status(db),
+    "/api/credential-wrap-key": lambda db, qs: public_wrap_key_payload(
+        os.environ.get("HL_CREDENTIAL_PUBLIC_KEY_FILE", "secret/credential-wrap-public.pem")
+    ),
 }
 
 
@@ -92,12 +99,14 @@ def _post_login_payload(db_path, auth, path, body, authed):
     return 200, {"token": token, "expiresAt": _iso_ago(-TOKEN_TTL_S)}
 
 
-def _post_command_payload(db_path, auth, path, body, authed):
+def _post_command_payload(db_path, auth, path, body, authed, secure_context=False):
     if not authed:
         return 401, {"error": "unauthorized"}
     ctype = body.get("type")
     if ctype not in ALLOWED_COMMANDS:
         return 400, {"error": "bad_command_type", "detail": ctype}
+    if ctype == "credential_upsert" and not secure_context:
+        return 403, {"error": "secure_context_required"}
     try:
         payload = validate_command_payload(ctype, body.get("payload"))
         if ctype in PROCESS_COMMANDS:
@@ -139,10 +148,13 @@ POST_PREFIX_ROUTES = (
 )
 
 
-def dispatch_post(db_path, auth, path, body, authed):
+def dispatch_post(db_path, auth, path, body, authed, secure_context=False):
     handler = POST_ROUTES.get(path)
     if handler:
-        code, payload = handler(db_path, auth, path, body, authed)
+        if handler is _post_command_payload:
+            code, payload = handler(db_path, auth, path, body, authed, secure_context)
+        else:
+            code, payload = handler(db_path, auth, path, body, authed)
         return True, code, payload
     for prefix, handler in POST_PREFIX_ROUTES:
         if path.startswith(prefix):

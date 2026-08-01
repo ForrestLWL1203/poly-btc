@@ -79,7 +79,7 @@ export function DeployRangeRow({ paramsByKey, vals, dirty, badKeys, onChange }) 
     <div className={"prow level-" + level + (dirty.MAX_DEPLOY_PCT ? " dirty" : "") + (badKeys.has("MAX_DEPLOY_PCT") ? " invalid" : "")}>
       <span className={"lvl-dot lvl-" + level} />
       <div className="pn"><b>组合部署上限</b><ParamRiskBadge level={level} /></div>
-      <div className="pd">达到此占用率后停止新开仓；加仓仍受组合总保证金硬上限约束</div>
+      <div className="pd">达到此占用率后停止新开仓；加仓仍可使用保留资金，但受真实可用余额与集中度上限约束</div>
       <EditableValue value={vals.MAX_DEPLOY_PCT} unit="%" ptype="pct" disabled={!editableParam(pLock)} onCommit={v => onChange("MAX_DEPLOY_PCT", v)} />
     </div>
   );

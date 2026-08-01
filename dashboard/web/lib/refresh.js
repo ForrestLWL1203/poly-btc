@@ -180,12 +180,15 @@ function useObserverTransition(api, setOverview) {
 export function useDashboardRefresh(api) {
   const { live, streamOk } = useDashboardStream(api.token);
   const { overview, setPolledOverview } = useOverviewRefresh(api, live, streamOk);
+  const loadExecution = useCallback(() => api.get("/api/execution/status"), [api]);
+  const { data: execution } = useApiResource(loadExecution, { intervalMs: 5000 });
   const serverScanning = !!(overview && overview.system && overview.system.scanner === "scanning");
   const scan = useManualScanProgress(api, serverScanning);
   const observer = useObserverTransition(api, setPolledOverview);
 
   return {
     ov: overview,
+    execution,
     livePositions: streamOk ? (live && live.positions) : null,
     streamOk,
     ...scan,

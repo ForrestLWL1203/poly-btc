@@ -5,7 +5,7 @@ import time
 
 from hyper import config
 from hyper.selection import strategy_revision
-from .common import iso_epoch, q1, qall
+from .common import execution_copy_tables, iso_epoch, q1, qall
 from .discovery import followed_count, scanner_status
 
 
@@ -28,14 +28,14 @@ def _db_cache_key(db):
     return id(db)
 
 
-def _gross_traded(db):
-    key = _db_cache_key(db)
-    head = q1(db, "SELECT MAX(act_id) max_id FROM copy_action") or {"max_id": None}
+def _gross_traded(db, action_table="copy_action"):
+    key = (_db_cache_key(db), action_table)
+    head = q1(db, f"SELECT MAX(act_id) max_id FROM {action_table}") or {"max_id": None}
     max_id = head["max_id"]
     cached = _GROSS_TRADED_CACHE.get(key)
     if cached and cached[0] == max_id:
         return cached[1]
-    row = q1(db, "SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM copy_action") or {"g": 0.0}
+    row = q1(db, f"SELECT COALESCE(SUM(ABS(our_qty_delta*our_px)),0) g FROM {action_table}") or {"g": 0.0}
     gross = row["g"] or 0.0
     if len(_GROSS_TRADED_CACHE) > 32:
         _GROSS_TRADED_CACHE.clear()
@@ -44,13 +44,17 @@ def _gross_traded(db):
 
 
 def ep_overview(db):
+    tables = execution_copy_tables(db)
+    mode = tables["mode"]
+    position_table, action_table, account_table = tables["position"], tables["action"], tables["account"]
     # LIVE-DERIVE from copy_position + copy_account so cards are not delayed by account_stats snapshots.
     acct = q1(
         db,
-        "SELECT initial_balance,balance FROM copy_account WHERE id=1",
+        ("SELECT initial_balance,balance,available FROM live_copy_account WHERE id=1"
+         if mode == "live" else "SELECT initial_balance,balance,NULL AS available FROM copy_account WHERE id=1"),
     )
     closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
-                    "FROM copy_position WHERE status!='open'") or {"n": 0, "wins": 0}
+                    f"FROM {position_table} WHERE status!='open'") or {"n": 0, "wins": 0}
     closed_n = closed["n"] or 0
     win_rate = ((closed["wins"] or 0) / closed_n) if closed_n else 0.0
     if acct is None:
@@ -75,20 +79,37 @@ def ep_overview(db):
             "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(notional,0)*COALESCE(rem_size,0)/size ELSE 0 END),0) gross, "
             "COALESCE(SUM(CASE WHEN size>0 THEN COALESCE(notional,0)*COALESCE(rem_size,0)/size*"
             "  (CASE WHEN side='long' THEN 1 ELSE -1 END) ELSE 0 END),0) net "
-            "FROM copy_position WHERE status='open'")
+            f"FROM {position_table} WHERE status='open'")
         open_n = (open_risk["open_n"] if open_risk else 0) or 0
         upnl = (open_risk["upnl"] if open_risk else 0.0) or 0.0
         locked = (open_risk["locked"] if open_risk else 0.0) or 0.0
         gross = (open_risk["gross"] if open_risk else 0.0) or 0.0
         net = (open_risk["net"] if open_risk else 0.0) or 0.0
-        gross_traded = _gross_traded(db)
-        equity = balance + upnl
-        realized = balance - init
-        available = balance - locked
+        gross_traded = _gross_traded(db, action_table)
+        equity = balance if mode == "live" else balance + upnl
+        if mode == "live":
+            live_pnl = q1(
+                db,
+                "SELECT COALESCE(SUM(closed_pnl),0)-COALESCE(SUM(fee),0) pnl "
+                "FROM execution_fill WHERE network='mainnet'",
+            ) or {"pnl": 0.0}
+            realized = live_pnl["pnl"] or 0.0
+        else:
+            realized = balance - init
+        available = (acct["available"] if mode == "live" else balance - locked)
+        available = available if available is not None else max(0.0, balance - locked)
         long_n = (gross + net) / 2 if gross else 0.0
         short_n = (gross - net) / 2 if gross else 0.0
-        eq24 = q1(db, "SELECT equity FROM account_stats WHERE ts<=? ORDER BY ts DESC LIMIT 1",
-                  (_iso_ago(24 * 3600),))
+        if mode == "live":
+            session = q1(db, "SELECT active_session_id FROM execution_control WHERE id=1")
+            eq24 = q1(
+                db, "SELECT equity FROM execution_account_snapshot WHERE session_id=? AND observed_at<=? "
+                "ORDER BY observed_at DESC LIMIT 1",
+                ((session["active_session_id"] if session else None), _iso_ago(24 * 3600)),
+            )
+        else:
+            eq24 = q1(db, "SELECT equity FROM account_stats WHERE ts<=? ORDER BY ts DESC LIMIT 1",
+                      (_iso_ago(24 * 3600),))
         today = ((equity / eq24["equity"] - 1) * 100) if (eq24 and eq24["equity"]) else 0.0
         bp = (realized / gross_traded * 1e4) if gross_traded else 0.0
         base = {
@@ -101,8 +122,12 @@ def ep_overview(db):
                      "netGrossRatioPct": (net / gross * 100) if gross else 0.0,
                      "longPct": (long_n / gross * 100) if gross else 0.0,
                      "shortPct": (short_n / gross * 100) if gross else 0.0},
-            "fees": {"cumulative": gross_traded * config.TAKER_FEE, "netPerGrossBp": bp},
-            "lastUpdate": (q1(db, "SELECT MAX(ts) m FROM account_stats") or {"m": None})["m"],
+            "fees": {"cumulative": (
+                (q1(db, "SELECT COALESCE(SUM(fee),0) f FROM execution_fill WHERE network='mainnet'") or {"f": 0})["f"]
+                if mode == "live" else gross_traded * config.TAKER_FEE
+            ), "netPerGrossBp": bp},
+            "lastUpdate": ((q1(db, "SELECT updated_at m FROM live_copy_account WHERE id=1") or {"m": None})["m"]
+                           if mode == "live" else (q1(db, "SELECT MAX(ts) m FROM account_stats") or {"m": None})["m"]),
         }
 
     obs = q1(db, "SELECT state,heartbeat_at FROM process_status WHERE name='observer'")
@@ -141,7 +166,7 @@ def ep_overview(db):
         "scannerStage": (scan_progress["stage"] if scan_progress and scan_progress["state"] == "scanning" else None),
         "lastScanAt": (last_scan["m"] if last_scan else None),
         "watchlistCount": (wl["c"] if wl else 0),
-        "mode": "paper",
+        "mode": mode,
         "strategyRevision": (active_strategy or {}).get("revision"),
         "strategyGeneration": (active_strategy or {}).get("selectionGeneration"),
         "strategySource": (active_strategy or {}).get("source"),
@@ -197,7 +222,20 @@ def ep_equity(db, rng):
     else:
         rng = "all"
         where_sql, args = "", ()
-    rows = qall(db,
+    tables = execution_copy_tables(db)
+    if tables["mode"] == "live":
+        session = q1(db, "SELECT active_session_id FROM execution_control WHERE id=1")
+        active_session = session["active_session_id"] if session else None
+        live_where = "WHERE session_id=?" + (" AND observed_at>=?" if cutoff else "")
+        live_args = (active_session,) + (args if cutoff else ())
+        rows = qall(db,
+            "WITH ordered AS (SELECT observed_at ts,equity,ROW_NUMBER() OVER (ORDER BY observed_at)-1 rn,"
+            "COUNT(*) OVER () total FROM execution_account_snapshot " + live_where +
+            "), sampled AS (SELECT ts,equity,rn,total,CASE WHEN total>? THEN CAST(total/? AS INTEGER)+1 ELSE 1 END stride FROM ordered) "
+            "SELECT ts,equity FROM sampled WHERE rn%stride=0 OR rn=total-1 ORDER BY ts",
+            live_args + (max_pts, max_pts))
+    else:
+        rows = qall(db,
         "WITH ordered AS ("
         "  SELECT ts,equity,ROW_NUMBER() OVER (ORDER BY ts)-1 rn,COUNT(*) OVER () total "
         "  FROM account_stats " + where_sql +
@@ -230,18 +268,20 @@ def _top_bottom_group_rows(db, stats_sql, top=5, bottom=3):
 
 
 def ep_insights(db):
+    tables = execution_copy_tables(db)
+    position_table = tables["position"]
     NET = "COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0)"
     wallet_sql = (
         f"SELECT cp.addr, {NET} net, w.rank, "
         "SUM(CASE WHEN cp.status!='open' THEN 1 ELSE 0 END) cn, "
         "SUM(CASE WHEN cp.status!='open' AND cp.realized_pnl>0 THEN 1 ELSE 0 END) wn "
-        "FROM copy_position cp LEFT JOIN watchlist w ON w.addr=cp.addr GROUP BY cp.addr"
+        f"FROM {position_table} cp LEFT JOIN watchlist w ON w.addr=cp.addr GROUP BY cp.addr"
     )
     wallets = [{
         "address": r["addr"], "rank": r["rank"], "netPnl": r["net"] or 0.0, "closedN": r["cn"] or 0,
         "winRatePct": (r["wn"] / r["cn"] * 100) if r["cn"] else None,
     } for r in _top_bottom_group_rows(db, wallet_sql)]
-    coin_sql = f"SELECT cp.coin, {NET} net, COUNT(*) n FROM copy_position cp GROUP BY cp.coin"
+    coin_sql = f"SELECT cp.coin, {NET} net, COUNT(*) n FROM {position_table} cp GROUP BY cp.coin"
     coins = [{"coin": r["coin"], "netPnl": r["net"] or 0.0, "n": r["n"]} for r in
              _top_bottom_group_rows(db, coin_sql)]
     return {"walletContrib": wallets, "coinPnl": coins}

@@ -9,7 +9,7 @@ from hyper.copy.economics import (
 )
 from hyper.copy.sector import apply_allowed_sector_copy_metrics
 from hyper.selection import follow_score
-from .common import iso_epoch, q1, qall, recent_roi_pct, score100
+from .common import execution_copy_tables, iso_epoch, q1, qall, recent_roi_pct, score100
 
 NEW_WATCHLIST_WINDOW_SEC = 12 * 3600
 
@@ -236,6 +236,7 @@ def _portfolio_release_summary(db):
 
 
 def _ep_selected_wallets(db, generation, role, page, size):
+    position_table = execution_copy_tables(db)["position"]
     """Serve one role from the immutable selection snapshot.
 
     The page CTE is intentionally selected first so episode/copy-position aggregates only touch the visible
@@ -320,7 +321,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "  SELECT f.addr,COUNT(cp.pos_id) AS follow_count,"
         "         COALESCE(SUM(CASE WHEN cp.status!='open' THEN cp.realized_pnl ELSE cp.unrealized_pnl END),0) AS fwd_net,"
         "         SUM(CASE WHEN cp.status='open' THEN 1 ELSE 0 END) AS open_position_count "
-        "  FROM page_selected f LEFT JOIN copy_position cp ON cp.addr=f.addr GROUP BY f.addr"
+        f"  FROM page_selected f LEFT JOIN {position_table} cp ON cp.addr=f.addr GROUP BY f.addr"
         "), live_liquidity AS ("
         "  SELECT f.addr,COALESCE(SUM(l.count),0) AS live_liquidity_skip_n,"
         "         GROUP_CONCAT(DISTINCT l.coin) AS live_liquidity_skip_coins "
@@ -744,6 +745,7 @@ def ep_wallets(db, qs=None):
 
 
 def ep_wallet_detail(db, addr, qs=None):
+    position_table = execution_copy_tables(db)["position"]
     w = q1(db, "SELECT rank FROM watchlist WHERE addr=?", (addr,))
     selection_generation = _published_selection_generation(db)
     pr = q1(db,
@@ -770,7 +772,7 @@ def ep_wallet_detail(db, addr, qs=None):
              "COALESCE(SUM(CASE WHEN status!='open' THEN realized_pnl ELSE 0 END),0) realized,"
              "SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) open_n,"
              "COALESCE(SUM(CASE WHEN status='open' THEN unrealized_pnl ELSE 0 END),0) open_u "
-             "FROM copy_position WHERE addr=?", (addr,))
+             f"FROM {position_table} WHERE addr=?", (addr,))
     control = q1(
         db,
         "SELECT COALESCE(intent,'active') AS intent "
@@ -787,7 +789,7 @@ def ep_wallet_detail(db, addr, qs=None):
     rs = min(50, max(1, int((qs.get("recSize", ["20"]))[0]))) if qs else 20
     recs = qall(db,
         "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.unrealized_pnl,cp.opened_at "
-        "FROM copy_position cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
+        f"FROM {position_table} cp WHERE cp.addr=? ORDER BY cp.opened_at DESC LIMIT ? OFFSET ?",
         (addr, rs, rp * rs))
     display_metrics = apply_allowed_sector_copy_metrics(dict(pr)) if pr else {}
     copy_windows = {

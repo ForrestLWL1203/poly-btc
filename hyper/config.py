@@ -191,6 +191,9 @@ LOW_LIQUIDITY_FILTER_ENABLE = True
 LIVE_BOOK_MAX_SPREAD_BPS = 20.0   # real-time only: planned order must not cross a wider top-of-book spread
 LIVE_BOOK_MAX_IMPACT_BPS = 35.0   # real-time only: average L2 execution displacement from mid, for OUR size
 LIVE_BOOK_TIMEOUT_S = 2.0
+LIVE_QUOTE_READ_ATTEMPTS = 2       # transient unsigned mids/L2 failures: one fresh retry before skipping
+LIVE_ORDER_MAX_ATTEMPTS = 2        # one IOC plus at most one fresh-price IOC for unfilled remainder
+LIVE_EXIT_SLIPPAGE_BPS = 100.0     # reduce-only exit protection; still bounded, never unlimited market impact
 # L2 is authoritative for live execution. These context floors are only a fallback when the live book cannot
 # be fetched; both must be weak before blocking, so one quiet 24h-volume snapshot cannot veto a deep-OI market.
 MIN_COIN_DAY_NTL_VLM = 5_000_000.0

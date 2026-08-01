@@ -177,12 +177,19 @@ def make_handler(db_path, auth, static_dir=None):
             token = h[7:] if h.startswith("Bearer ") else None
             return auth.valid(token)
 
+        def _secure_context(self):
+            forwarded = str(self.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip().lower()
+            host = str(self.headers.get("Host") or "").split(":", 1)[0].strip("[]").lower()
+            return forwarded == "https" or host in {"localhost", "127.0.0.1", "::1"}
+
         def do_OPTIONS(self):
             self._send(204, {})
 
         def do_POST(self):
             path = urlparse(self.path).path
-            handled, code, payload = _dispatch_post(db_path, auth, path, self._read_json() or {}, self._authed())
+            handled, code, payload = _dispatch_post(
+                db_path, auth, path, self._read_json() or {}, self._authed(), self._secure_context(),
+            )
             if handled:
                 return self._send(code, payload)
             return self._send(404, {"error": "not_found"})
@@ -217,6 +224,8 @@ def make_handler(db_path, auth, static_dir=None):
                 return self._serve_stream(qs.get("token", [None])[0])
             if not self._authed():
                 return self._send(401, {"error": "unauthorized"})
+            if path == "/api/credential-wrap-key" and not self._secure_context():
+                return self._send(403, {"error": "secure_context_required"})
             db = ro_connect(db_path)
             try:
                 handled, data = _dispatch_get(db, path, qs)

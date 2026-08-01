@@ -43,3 +43,15 @@ def iso_epoch(s):
         return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
     except (ValueError, TypeError):
         return None
+
+
+def execution_copy_tables(db):
+    """Return the fixed, allowlisted ledger names for the selected product mode."""
+    row = q1(db, "SELECT selected_mode FROM execution_control WHERE id=1")
+    live = bool(row and row["selected_mode"] == "live")
+    return {
+        "mode": "live" if live else "paper",
+        "position": "live_copy_position" if live else "copy_position",
+        "action": "live_copy_action" if live else "copy_action",
+        "account": "live_copy_account" if live else "copy_account",
+    }

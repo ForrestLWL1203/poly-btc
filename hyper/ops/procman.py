@@ -194,6 +194,7 @@ def _scan_progress_scanning(db_path):
 # double-spawns or orphan-kills). _use_systemd() picks the backend once; everything else is transparent.
 OBSERVER_UNIT = "hl-observe.service"
 SCAN_UNIT = "hl-scan.service"
+EXECUTION_CONTROL_UNIT = "hl-execution-control.service"
 
 
 def _systemctl(*args, timeout=15):
@@ -219,6 +220,32 @@ def _observe_argv(db_path):
 
 def _scan_argv(db_path):
     return [PYTHON, "-m", "hyper.cli.discover", "--db", db_path, "scan", "--days", "14"]
+
+
+def _execution_control_argv(db_path, command_id):
+    return [
+        PYTHON, "-m", "hyper.cli.execution_control", "--db", db_path,
+        "process", "--command-id", str(int(command_id)),
+    ]
+
+
+def trigger_execution_control(db_path, command_id):
+    """Wake the protected one-shot worker after an execution command is queued."""
+    if _use_systemd():
+        result = _systemctl("start", "--no-block", EXECUTION_CONTROL_UNIT)
+        if result is None or result.returncode != 0:
+            raise RuntimeError("execution_control_start_failed")
+        return {"queued": True, "backend": "systemd"}
+    logf = open(_logfile(db_path, "execution-control"), "ab", buffering=0)
+    subprocess.Popen(
+        _execution_control_argv(db_path, command_id),
+        cwd=REPO,
+        stdout=logf,
+        stderr=logf,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"queued": True, "backend": "local"}
 
 
 def _repair_scan_state(db_path):
@@ -280,6 +307,27 @@ def start_observer(db_path):
 
 def stop_observer(db_path):
     """'停止' → systemd stops it / SIGTERM the local child's group. Stays stopped until started again."""
+    try:
+        db = _db(db_path)
+        control = db.execute(
+            "SELECT selected_mode,active_session_id FROM execution_control WHERE id=1"
+        ).fetchone()
+        if control and control[0] == "live" and control[1]:
+            positions = db.execute(
+                "SELECT COUNT(*) FROM execution_position_projection WHERE session_id=? AND ABS(signed_size)>1e-12",
+                (control[1],),
+            ).fetchone()[0]
+            orders = db.execute(
+                "SELECT COUNT(*) FROM execution_order_intent WHERE session_id=? "
+                "AND state IN ('created','submitting','resting','ambiguous')",
+                (control[1],),
+            ).fetchone()[0]
+            if positions or orders:
+                db.close()
+                raise RuntimeError("live_drain_required")
+        db.close()
+    except sqlite3.Error:
+        raise RuntimeError("live_stop_safety_check_failed") from None
     if _use_systemd():
         _systemctl("stop", OBSERVER_UNIT)
     else:

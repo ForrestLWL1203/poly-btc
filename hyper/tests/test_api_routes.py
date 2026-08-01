@@ -15,9 +15,11 @@ class ApiRouteTests(unittest.TestCase):
         self.assertIn("/api/params", api_routes.GET_ROUTES)
         self.assertIn("/api/scan-status", api_routes.GET_ROUTES)
         self.assertIn("/api/score-dist", api_routes.GET_ROUTES)
+        self.assertIn("/api/execution/status", api_routes.GET_ROUTES)
+        self.assertIn("/api/credential-wrap-key", api_routes.GET_ROUTES)
         for retired in (
             "/api/risk-radar", "/api/risk-radar/intents", "/api/risk-radar/thresholds",
-            "/api/connections", "/api/credential-wrap-key", "/api/shadow",
+            "/api/connections", "/api/shadow",
         ):
             self.assertNotIn(retired, api_routes.GET_ROUTES)
 
@@ -74,6 +76,15 @@ class ApiRouteTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(code, 401)
         self.assertEqual(payload, {"error": "unauthorized"})
+
+    def test_credential_upload_requires_secure_context(self):
+        body = {"type": "credential_upsert", "payload": {}}
+        handled, code, payload = api_routes.dispatch_post(
+            "db", object(), "/api/commands", body, True, False,
+        )
+        self.assertTrue(handled)
+        self.assertEqual(code, 403)
+        self.assertEqual(payload, {"error": "secure_context_required"})
 
     def test_retired_risk_radar_commands_are_not_accepted(self):
         for retired in (

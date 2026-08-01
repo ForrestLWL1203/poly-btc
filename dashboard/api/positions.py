@@ -1,6 +1,6 @@
 """Position list/detail endpoints for the dashboard API."""
 
-from .common import iso_epoch, q1, qall
+from .common import execution_copy_tables, iso_epoch, q1, qall
 
 
 def _follow_set_cte() -> str:
@@ -36,6 +36,8 @@ def _close_type(row) -> str:
 
 
 def ep_positions(db, qs):
+    tables = execution_copy_tables(db)
+    position_table, action_table = tables["position"], tables["action"]
     status = (qs.get("status", ["open"])[0])
     if status == "closed":
         where, args = ["cp.status!='open'"], []
@@ -48,12 +50,12 @@ def ep_positions(db, qs):
                     "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.realized_pnl,cp.opened_at,cp.closed_at,"
                     "cp.entry_px,cp.leverage,cp.notional,cp.master_open_px,cp.master_leverage,cp.master_peak_sz,"
                     "cp.was_liq,cp.add_count,cp.addr,cp.strategy_revision_id "
-                    "FROM copy_position cp WHERE " + " AND ".join(where) +
+                    f"FROM {position_table} cp WHERE " + " AND ".join(where) +
                     " ORDER BY cp.closed_at DESC LIMIT 100"
                     ") "
                     "SELECT cb.*,w.rank AS wrank,fs.follow_pos,"
                     "(SELECT SUM(ABS(ca.our_qty_delta)*ca.our_px)/NULLIF(SUM(ABS(ca.our_qty_delta)),0) "
-                    " FROM copy_action ca INDEXED BY idx_ca_pos_action_ts "
+                    f" FROM {action_table} ca "
                     " WHERE ca.pos_id=cb.pos_id AND ca.action IN ('reduce','close') "
                     " AND ABS(ca.our_qty_delta)>1e-12 AND ca.our_px IS NOT NULL) AS exit_px "
                     "FROM closed_base cb "
@@ -95,7 +97,7 @@ def ep_positions(db, qs):
             "AVG(CASE WHEN realized_pnl>0 THEN realized_pnl END) avg_win, "
             "AVG(CASE WHEN realized_pnl<0 THEN realized_pnl END) avg_loss, "
             "AVG((julianday(closed_at)-julianday(opened_at))*86400.0) avg_hold "
-            "FROM copy_position cp WHERE " + sw, tuple(args))
+            f"FROM {position_table} cp WHERE " + sw, tuple(args))
         n = (s["n"] if s else 0) or 0
         wins = (s["wins"] if s else 0) or 0
         gloss = (s["gloss"] if s else 0.0) or 0.0
@@ -125,7 +127,7 @@ def ep_positions(db, qs):
         "w.rank AS wrank,COALESCE(w.market_type,pr.market_type) AS mtype,fs.follow_pos,"
         "fs.retention_status,fs.retention_failure_streak,"
         "fs.operator_intent,fs.risk_block_reason "
-        "FROM copy_position cp "
+        f"FROM {position_table} cp "
         "LEFT JOIN watchlist w ON w.addr=cp.addr "
         "LEFT JOIN profile pr ON pr.addr=cp.addr "
         "LEFT JOIN follow_set fs ON fs.addr=cp.addr "
@@ -161,20 +163,22 @@ def ep_positions(db, qs):
 
 
 def ep_position_detail(db, pos_id):
+    tables = execution_copy_tables(db)
+    position_table, action_table = tables["position"], tables["action"]
     p = q1(db, "SELECT cp.pos_id,cp.coin,cp.side,cp.status,cp.entry_px,cp.leverage,cp.margin,cp.size,cp.rem_size,cp.master_open_px,"
                "cp.realized_pnl,cp.unrealized_pnl,cp.was_liq,cp.opened_at,cp.closed_at,cp.strategy_revision_id "
-               "FROM copy_position cp WHERE cp.pos_id=?", (pos_id,))
+               f"FROM {position_table} cp WHERE cp.pos_id=?", (pos_id,))
     if not p:
         return {"error": "not_found"}
     lev = p["leverage"] or 1.0
     c = q1(db, "SELECT COUNT(DISTINCT CASE WHEN action='add' THEN master_oid END) m_adds, "
                "COUNT(DISTINCT CASE WHEN action='add' AND ABS(our_qty_delta)>1e-12 THEN master_oid END) our_adds "
-               "FROM copy_action WHERE pos_id=?", (pos_id,))
+               f"FROM {action_table} WHERE pos_id=?", (pos_id,))
     acts = qall(db,
         "WITH base AS ("
         "  SELECT act_id,ts,action,our_px,our_qty_delta,realized_pnl,"
         "         CASE WHEN master_oid IS NOT NULL THEN 'm:'||master_oid ELSE 'n:'||ts END AS gkey "
-        "  FROM copy_action WHERE pos_id=? AND ABS(our_qty_delta) > 1e-12"
+        f"  FROM {action_table} WHERE pos_id=? AND ABS(our_qty_delta) > 1e-12"
         "), grouped AS ("
         "  SELECT gkey,MIN(ts) AS ts,MIN(act_id) AS first_act_id,"
         "         SUM(ABS(our_qty_delta)) AS sz,"

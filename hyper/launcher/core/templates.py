@@ -8,7 +8,7 @@ deployed system auditable and lets `ops.update` diff/re-push a unit without touc
 # Long-lived services plus the two mutually-exclusive scanner jobs and their timers. `observe` is the copy
 # engine — installed but NOT started at deploy (the operator starts copy-trading from the dashboard).
 UNITS = (
-    "hl-dashboard", "hl-observe", "hl-scan.service", "hl-scan.timer",
+    "hl-dashboard", "hl-observe", "hl-execution-control.service", "hl-scan.service", "hl-scan.timer",
     "hl-challenger-refresh.service", "hl-challenger-refresh.timer",
 )
 
@@ -20,6 +20,13 @@ After=network.target
 
 [Service]
 Type=simple
+Environment=HL_CREDENTIAL_PUBLIC_KEY_FILE={app_dir}/secret/credential-wrap-public.pem
+InaccessiblePaths={app_dir}/secret/credential-wrap-private.pem
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+UMask=0077
 WorkingDirectory={app_dir}
 ExecStart={py} -m dashboard.server --db {db} --static dashboard/web --host {host} --port {port}
 Restart=always
@@ -38,13 +45,34 @@ Wants=network-online.target
 
 [Service]
 Environment=PYTHONUNBUFFERED=1
+LoadCredential=hl-credential-wrap-private.pem:{app_dir}/secret/credential-wrap-private.pem
+Environment=HL_CREDENTIAL_PRIVATE_KEY_FILE=%d/hl-credential-wrap-private.pem
 WorkingDirectory={app_dir}
 ExecStart={py} -m hyper.cli.observe --db {db} observe
-Restart=always
+Restart=on-failure
 RestartSec=10
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
+"""
+
+
+def execution_control_unit(app_dir, py, db):
+    return f"""[Unit]
+Description=Hyperliquid protected execution control worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+LoadCredential=hl-credential-wrap-private.pem:{app_dir}/secret/credential-wrap-private.pem
+Environment=HL_CREDENTIAL_PRIVATE_KEY_FILE=%d/hl-credential-wrap-private.pem
+WorkingDirectory={app_dir}
+ExecStart={py} -m hyper.cli.execution_control --db {db} process-pending
+TimeoutStartSec=90
+UMask=0077
 """
 
 
@@ -124,6 +152,9 @@ def render_all(cfg):
     out = {
         "/etc/systemd/system/hl-dashboard.service": dashboard_unit(cfg.app_dir, cfg.py, cfg.db, cfg.port),
         "/etc/systemd/system/hl-observe.service": observe_unit(cfg.app_dir, cfg.py, cfg.db),
+        "/etc/systemd/system/hl-execution-control.service": execution_control_unit(
+            cfg.app_dir, cfg.py, cfg.db,
+        ),
         "/etc/systemd/system/hl-scan.service": scan_service(cfg.app_dir, cfg.py, cfg.db,
                                                             cfg.scan_days, cfg.scan_interval),
         "/etc/systemd/system/hl-scan.timer": scan_timer(cfg.scan_calendar),

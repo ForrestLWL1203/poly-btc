@@ -5,10 +5,11 @@ import { ScannerSettingsPanel } from "./settings/ScannerSettingsPanel.jsx";
 import { ADD_KEYS } from "./settings/paramMeta.js";
 import { useSettingsParams } from "./settings/useSettingsParams.js";
 import { validateFollowParams } from "./settings/validation.js";
+import { AccountSettings } from "./settings/AccountSettings.jsx";
 
-const { useState } = React;
+const { useEffect, useState } = React;
 
-export function Settings({ confirm }) {
+export function Settings({ confirm, initialTab = null }) {
   const {
     params,
     vals,
@@ -22,9 +23,13 @@ export function Settings({ confirm }) {
   const [saving, setSaving] = useState(false);
   const [openTiers, setOpenTiers] = useState({});
 
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
+
   if (!params) return <div className="content"><div className="loading">加载中…</div></div>;
 
-  const list = tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
+  const list = tab === "account" ? [] : tab === "add" ? params.follow.filter(p => ADD_KEYS.has(p.key)) : params[tab];
   const tabDirty = list.filter(p => dirty[p.key]);
   const followValidation = tab === "follow" ? validateFollowParams(vals) : { errors: [], badKeys: new Set() };
   const validationErrors = followValidation.errors;
@@ -57,7 +62,7 @@ export function Settings({ confirm }) {
         danger: false,
         ok: "保存",
         body: marginEquityChanged
-          ? "保证金权益额度将从下一笔新仓立即生效；已有仓位不变。Core资格和组合回测不会自动重跑，将在下一次重采或单独重评后更新。确认保存?"
+          ? "保证金权益额度会缩放每笔新仓的权益计算基数，并从下一笔新仓立即生效；它不是总保证金硬上限，已有仓位不变。Core资格和组合回测不会自动重跑，将在下一次重采或单独重评后更新。确认保存?"
           : "包含谨慎级参数(影响每一笔新仓),确认即时生效?",
         onConfirm: doIt,
       });
@@ -100,18 +105,20 @@ export function Settings({ confirm }) {
         <div className={"tab" + (tab === "scanner" ? " on" : "")} onClick={() => setTab("scanner")}>钱包采集参数</div>
         <div className={"tab" + (tab === "follow" ? " on" : "")} onClick={() => setTab("follow")}>跟单策略参数</div>
         <div className={"tab" + (tab === "add" ? " on" : "")} onClick={() => setTab("add")}>加仓策略</div>
-        <button className="btn" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}
+        <div className={"tab account-tab" + (tab === "account" ? " on" : "")} onClick={() => setTab("account")}>账户信息</div>
+        {tab !== "account" && <button className="btn" title="把本页参数强制恢复为代码默认值" onClick={resetDefaults}
           style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12, padding: "4px 12px" }}>↺ 恢复默认</button>
+        }
       </div>
 
-      <div className="tbl-wrap">
+      {tab === "account" ? <AccountSettings confirm={confirm} /> : <div className="tbl-wrap">
         {tab === "scanner" && <ScannerSettingsPanel list={list} vals={vals} dirty={dirty} onChange={setValue} />}
         {tab === "follow" && <FollowSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers}
           validationErrors={validationErrors} badKeys={followValidation.badKeys} onChange={setValue} />}
         {tab === "add" && <AddSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers} onChange={setValue} />}
-      </div>
+      </div>}
 
       {tabDirty.length > 0 && (
         <div className="apply-bar">

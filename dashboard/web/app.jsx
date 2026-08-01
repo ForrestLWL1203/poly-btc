@@ -38,7 +38,7 @@ const fStorage = bytes => {
   return Math.round(value / 1e3) + " KB";
 };
 
-function ObserverControl({ status, busy, onStart, onPause, onStop }) {
+function ObserverControl({ status, busy, onStart, onPause, onStop, live = false }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
   const paused = status === "paused";
@@ -93,11 +93,11 @@ function ObserverControl({ status, busy, onStart, onPause, onStop }) {
           </button>
           <p>{paused ? "恢复跟随目标钱包的新开仓" : "不再开新仓，存量仓位继续自动管理至退出"}</p>
           <div className="command-menu-separator" />
-          <div className="command-menu-title">彻底停止</div>
+          <div className="command-menu-title">{live ? "实盘排空" : "彻底停止"}</div>
           <button className="btn btn-danger" role="menuitem" onClick={() => act(onStop)}>
-            彻底停止跟单
+            {live ? "排空后停止" : "彻底停止跟单"}
           </button>
-          <p>停止 Observer 进程，存量仓位将不再自动管理</p>
+          <p>{live ? "禁止新增敞口，继续跟随减仓和平仓；真实仓位归零后才停止进程" : "停止 Observer 进程，存量仓位将不再自动管理"}</p>
         </div>
       )}
     </div>
@@ -106,10 +106,11 @@ function ObserverControl({ status, busy, onStart, onPause, onStop }) {
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
-  const { ov, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
+  const { ov, execution, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
   const [confirmCfg, setConfirmCfg] = useState(null);
   const [scanStopping, setScanStopping] = useState(false);
   const [scanStopError, setScanStopError] = useState(null);
+  const [settingsTab, setSettingsTab] = useState(null);
   const mobileNavRef = useRef(null);
 
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
@@ -131,21 +132,30 @@ function Dashboard({ onLogout }) {
       setScanStopError(null);
     }
   }, [scanning]);
-
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const storageGuard = ov && ov.system && ov.system.storageGuard ? ov.system.storageGuard : {};
   const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
   const pausing = !!obsPending;
+  const liveMode = execution?.selectedMode === "live" || ov?.system?.mode === "live";
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
   const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
   // SMART start (shown when not actively opening): process alive but paused → just resume opening new
   // orders; process gone/hung (stopped) → restart the whole observer via the supervisor.
-  const smartStart = () => obs === "paused"
-    ? ctl("resume", "正在恢复开单…", "running")
-    : ctl("observer_start", "正在启动跟单…", "running");
+  const smartStart = () => {
+    if (liveMode && (!execution?.activeSessionId || ["draining", "reconcile_required", "credential_error", "no_funds"].includes(execution?.state))) {
+      setSettingsTab("account"); setPage("settings"); return;
+    }
+    return obs === "paused"
+      ? ctl("resume", "正在恢复开单…", "running")
+      : ctl("observer_start", "正在启动跟单…", "running");
+  };
   const pauseOpening = () => ctl("pause", "正在暂停新开仓…", "paused");
-  const stopObserver = () => setConfirmCfg({
+  const stopObserver = () => setConfirmCfg(liveMode ? {
+    title: "排空并停止实盘", danger: true, ok: "进入 Draining",
+    body: "系统会立即禁止开仓和加仓，但继续跟随目标减仓/平仓。真实仓位与系统订单全部归零后，Observer 才会停止；不会留下无人管理的实盘仓位。",
+    onConfirm: () => ctl("drain", "正在进入实盘排空…", ov?.openCount ? "paused" : "stopped"),
+  } : {
     title: "彻底停止跟单", danger: true, ok: "彻底停止整个进程",
     body: "将停止整个 Observer 进程：不再开新仓，存量持仓也不再由跟单进程管理。只想停止新开仓、让存量继续跟到平仓，请使用“暂停新开仓”。",
     onConfirm: () => ctl("observer_stop", "正在停止跟单…", "stopped"),
@@ -192,10 +202,14 @@ function Dashboard({ onLogout }) {
       <main className="main">
         <div className="topbar">
           <div>
-            <div className="crumb">{TITLES[page] && TITLES[page].split(" ")[1]} · 模拟盘</div>
+            <div className={"crumb " + (liveMode ? "crumb-live" : "")}>{TITLES[page] && TITLES[page].split(" ")[1]} · {liveMode ? "实盘" : "模拟盘"}</div>
             <div className="title">{TITLES[page]}</div>
           </div>
           <div className="topbar-right">
+            <span className={"pill execution-pill " + (liveMode ? "tint-red" : "tint-amber")}>
+              <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: liveMode ? "pulse 1.6s infinite" : "none" }} />
+              {liveMode ? `LIVE · ${execution?.state || "实盘"}` : "PAPER · 模拟盘"}
+            </span>
             <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: streamOk ? "var(--green-l)" : "var(--t3)" }}
               title={streamOk ? "SSE 实时推送已连接" : "轮询兜底(SSE 未连接)"}>
               <span className="dot" style={{ background: streamOk ? "var(--green)" : "var(--gray)", animation: streamOk ? "pulse 1.6s infinite" : "none" }} />
@@ -206,7 +220,7 @@ function Dashboard({ onLogout }) {
               {storageGuard.status === "critical" ? "磁盘高危" : "磁盘预警"} {Number(storageGuard.diskUsedPct || 0).toFixed(0)}%
             </span>}
             {ov && ov.system && <ObserverControl status={obs} busy={pausing}
-              onStart={smartStart} onPause={pauseOpening} onStop={stopObserver} />}
+              onStart={smartStart} onPause={pauseOpening} onStop={stopObserver} live={liveMode} />}
           </div>
         </div>
 
@@ -234,7 +248,7 @@ function Dashboard({ onLogout }) {
         {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
-        {page === "settings" && <Settings confirm={setConfirmCfg} />}
+        {page === "settings" && <Settings confirm={setConfirmCfg} initialTab={settingsTab} />}
       </main>
 
       <nav className="mobile-nav" aria-label="移动端导航" ref={mobileNavRef}>

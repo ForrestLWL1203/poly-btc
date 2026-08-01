@@ -10,6 +10,7 @@ from . import templates
 from .ssh import _q
 
 SYSTEMD_UNITS = {"dashboard": "hl-dashboard.service", "observe": "hl-observe.service",
+                 "execution_control": "hl-execution-control.service",
                  "scan": "hl-scan.service", "timer": "hl-scan.timer",
                  "challenger_scan": "hl-challenger-refresh.service",
                  "challenger_timer": "hl-challenger-refresh.timer"}
@@ -39,6 +40,20 @@ class SystemdServices:
         self.ex.run("systemctl daemon-reload", on_line=emit)
 
     def install(self, emit):
+        emit("准备 Dashboard 凭据包装密钥…")
+        private_key = _q(f"{self.cfg.app_dir}/secret/credential-wrap-private.pem")
+        public_key = _q(f"{self.cfg.app_dir}/secret/credential-wrap-public.pem")
+        generator = (
+            f"{_q(self.cfg.py)} -m hyper.cli.execution_control generate-wrap-key "
+            f"--private {private_key} --public {public_key}"
+        )
+        self.ex.run(
+            f"mkdir -p {_q(f'{self.cfg.app_dir}/secret')} && "
+            f"if [ -f {private_key} ] && [ -f {public_key} ]; then true; "
+            f"elif [ ! -e {private_key} ] && [ ! -e {public_key} ]; then {generator}; "
+            f"else echo credential_wrap_keypair_incomplete >&2; exit 1; fi",
+            on_line=emit,
+        )
         self.sync_units(emit)
         emit("启用 + 启动 dashboard(常开)…")
         self.ex.run("systemctl enable --now hl-dashboard.service", on_line=emit)

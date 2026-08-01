@@ -314,14 +314,18 @@ def registry_state(db, addr: str) -> dict:
     }
 
 
-def actual_copy_evidence(db, addr: str, *, now: Optional[datetime] = None) -> dict:
+def actual_copy_evidence(
+    db, addr: str, *, now: Optional[datetime] = None, position_table: str = "copy_position",
+) -> dict:
     """Return conservative live-copy 7/30 day evidence and catastrophe proof."""
+    if position_table not in {"copy_position", "live_copy_position"}:
+        raise ValueError("invalid_copy_position_table")
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     rows = db.execute(
         "SELECT pos_id,status,realized_pnl,COALESCE(unrealized_pnl,0),was_liq,"
-        "opening_account_equity,opened_at,closed_at FROM copy_position "
+        f"opening_account_equity,opened_at,closed_at FROM {position_table} "
         "WHERE lower(addr)=lower(?) ORDER BY COALESCE(opened_at,closed_at),pos_id",
         (addr,),
     ).fetchall()
@@ -517,6 +521,7 @@ def assess_actual_copy(
     complete: bool = True,
     min_confirmation_hours: float = 72.0,
     cumulative_high_loss_pct: float = 0.08,
+    position_table: str = "copy_position",
 ) -> tuple[RiskAssessment, dict]:
     """Assess, persist and enforce one wallet from current actual-copy evidence."""
     previous = registry_state(db, addr)
@@ -525,7 +530,7 @@ def assess_actual_copy(
         prior_reason = str(previous["reasons"][0] or "")
         if prior_reason and not prior_reason.startswith("actual_copy_"):
             preserved_fallback = assessment_reason(prior_reason)
-    evidence = actual_copy_evidence(db, addr)
+    evidence = actual_copy_evidence(db, addr, position_table=position_table)
     reason = actual_copy_reason(
         evidence,
         fallback_reason=preserved_fallback,

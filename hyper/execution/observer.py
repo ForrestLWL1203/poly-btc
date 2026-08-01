@@ -39,6 +39,7 @@ from hyper.market.coin_filter import coin_is_blocked, parse_coin_blacklist
 from hyper.selection import state as selection, strategy_revision, wallet_risk
 from hyper.util import f, now_iso, now_ms
 from .liquidity import assess_order_book
+from .live_executor import LiveExecutor
 
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
 STALE_MS = 30_000          # a detected fill older than this priced at master px (book unreliable)
@@ -71,6 +72,7 @@ class Book:
         self.gross_traded = 0.0
         self.fees_cum = 0.0
         self.stats_loaded = False
+        self.available_balance = None       # exchange-authoritative in Live; derived from rows in Paper
 
     @property
     def acct_lock(self):
@@ -193,7 +195,23 @@ class Observer:
         self.last_fill_ms: dict = {}     # addr -> cursor (latest processed fill time)
         self.valid_coins: set = set()    # COPYABLE universe (crypto perps + transparent builder)
         self.crypto_coins: set = set()   # standard crypto perps (these price via WS bbo)
-        self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
+        execution = self.db.execute(
+            "SELECT selected_mode,state,active_session_id FROM execution_control WHERE id=1"
+        ).fetchone()
+        selected_mode = str(execution[0] or "paper") if execution else "paper"
+        if selected_mode == "live":
+            if not execution[2] or execution[1] not in {
+                "live_canary", "live_running", "paused", "draining", "reconcile_required",
+            }:
+                raise RuntimeError("live_mode_without_active_session")
+            self.execution_mode = "live"
+            self.execution_state = str(execution[1])
+            self.taker = Book("live", "live_copy_position", "live_copy_action", "live_copy_account")
+        else:
+            self.execution_mode = "paper"
+            self.execution_state = "paper"
+            self.taker = Book("paper", "copy_position", "copy_action", "copy_account")
+        self.live_executor = None
         self.selection_generation = None
         self.ws = None
         self.stop = False
@@ -203,7 +221,11 @@ class Observer:
         prior_state = str(prior_state[0] or "") if prior_state else ""
         # Pause is operator intent, not process-local state. Preserve it across deploys/restarts so a worker
         # cannot briefly originate new positions before its command loop receives another pause command.
-        self.paused = prior_state in {"paused", "pausing"}
+        self.paused = (
+            prior_state in {"paused", "pausing"}
+            or self.execution_state in {"paused", "draining", "reconcile_required"}
+        )
+        self.draining = self.execution_state == "draining"
         self._proc_state = "paused" if self.paused else "running"
         self._proc_owner = f"observer:{os.getpid()}"
         self.safety_frozen = {
@@ -220,6 +242,8 @@ class Observer:
         """Balance not currently tied up as isolated margin (margin scales with rem_size/size as a
         position is partially closed). Per-book; defaults to the taker book."""
         book = book or self.taker
+        if book.name == "live" and book.available_balance is not None:
+            return max(0.0, float(book.available_balance))
         locked = self.db.execute(
             f"SELECT COALESCE(SUM(margin * rem_size / size),0) FROM {book.pos_table} "
             "WHERE status='open' AND size>0").fetchone()[0]
@@ -234,6 +258,8 @@ class Observer:
             book.initial_balance = row[0] or config.INITIAL_BALANCE
             book.balance = row[1]
         else:
+            if book.name == "live":
+                raise RuntimeError("live_account_projection_missing")
             self.db.execute(
                 f"INSERT INTO {book.acct_table} (id,initial_balance,balance,updated_at) "
                 "VALUES (1,?,?,?)",
@@ -256,6 +282,8 @@ class Observer:
 
     def _save_account(self, book=None):
         book = book or self.taker
+        if book.name == "live":
+            return
         self.db.execute(f"UPDATE {book.acct_table} SET balance=?, updated_at=? WHERE id=1",
                         (book.balance, now_iso()))
 
@@ -273,11 +301,26 @@ class Observer:
 
     def _risk_equity(self, book=None) -> float:
         book = book or self.taker
+        if book.name == "live":
+            return max(0.0, book.balance)
         return max(0.0, book.balance + min(0.0, self._book_unrealized(book)))
 
     def _risk_available(self, book=None) -> float:
         book = book or self.taker
+        if book.name == "live":
+            return max(0.0, self._available(book))
         return max(0.0, self._available(book) + min(0.0, self._book_unrealized(book)))
+
+    def _sync_live_account(self) -> None:
+        if self.execution_mode != "live" or self.live_executor is None:
+            return
+        self.taker.balance = max(0.0, float(self.live_executor.equity))
+        self.taker.available_balance = max(0.0, float(self.live_executor.available))
+        self.db.execute(
+            "UPDATE live_copy_account SET balance=?,available=?,updated_at=? WHERE id=1",
+            (self.taker.balance, self.taker.available_balance, now_iso()),
+        )
+        self.db.commit()
 
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
@@ -404,7 +447,7 @@ class Observer:
             owners = {
                 str(row[0] or "").lower()
                 for row in self.db.execute(
-                    "SELECT DISTINCT addr FROM copy_position WHERE status='open'"
+                    f"SELECT DISTINCT addr FROM {self.taker.pos_table} WHERE status='open'"
                 ).fetchall()
                 if row[0]
             }
@@ -439,6 +482,7 @@ class Observer:
                 complete=True,
                 min_confirmation_hours=config.CORE_RETENTION_MIN_CONFIRMATION_HOURS,
                 cumulative_high_loss_pct=config.COPY_CATASTROPHIC_LIQUIDATION_LOSS_PCT,
+                position_table=self.taker.pos_table,
             )
             results[addr] = assessment
             if (
@@ -1081,6 +1125,31 @@ class Observer:
         except Exception:  # noqa: BLE001 - market-context fallback remains available
             return None
 
+    async def _execute_live_order(
+        self, *, ep, addr, coin, action, is_buy, size, leverage, reduce_only,
+        source_time_ms, source_order_id,
+    ):
+        if self.execution_mode != "live" or self.live_executor is None:
+            return None
+        source_fill_id = (
+            f"{str(addr).lower()}:{int(source_time_ms)}:{source_order_id if source_order_id is not None else 'none'}:"
+            f"{action}:{int(ep.get('num_actions') or 0) + 1}"
+        )
+        return await asyncio.to_thread(
+            self.live_executor.execute,
+            coin=coin,
+            is_buy=bool(is_buy),
+            size=float(size),
+            leverage=float(leverage),
+            reduce_only=bool(reduce_only),
+            action=action,
+            source_address=addr,
+            source_fill_id=source_fill_id,
+            source_order_id=str(source_order_id) if source_order_id is not None else None,
+            source_time_ms=int(source_time_ms),
+            action_seq=int(ep.get("num_actions") or 0) + 1,
+        )
+
     def _coin_liquidity_decision(
         self, coin: str, *, book_snapshot=None, is_buy=None, planned_notional=None,
     ) -> dict:
@@ -1319,9 +1388,29 @@ class Observer:
             _log(f"heartbeat: {o} open / {c} closed | 本轮看到 {seen} → 跟 {sum(acts.values())} ({act_s}), "
                  f"跳 {sum(skips.values())} ({skip_s})")
             try:
-                self._write_stats()                # append a dashboard snapshot every 5 min
+                if self.execution_mode == "live" and self.live_executor is not None:
+                    self.live_executor.reconcile()
+                    self._sync_live_account()
+                else:
+                    self._write_stats()             # append the Paper dashboard snapshot every 5 min
             except Exception as exc:  # noqa: BLE001
                 _log(f"stats snapshot failed: {exc}")
+
+    async def live_reconcile_loop(self):
+        """Continuously refresh exchange truth and freeze increases on drift."""
+        while not self.stop and self.execution_mode == "live":
+            try:
+                result = await asyncio.to_thread(self.live_executor.reconcile)
+                self._sync_live_account()
+                if not result.get("ok"):
+                    self.paused = True
+                    self.execution_state = "reconcile_required"
+                    self._write_proc_status("paused")
+            except Exception as exc:  # noqa: BLE001
+                self.paused = True
+                self._rollback_db()
+                _log(f"live reconcile failed closed: {str(exc)[:120]}")
+            await asyncio.sleep(15)
 
     async def prune_live_fills(self):
         """Keep live_fills bounded on disk. tid-dedup only needs the last POLL_OVERLAP_MS of history
@@ -1355,14 +1444,16 @@ class Observer:
             "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
             (state, os.getpid(), now_iso(),
              json.dumps({"paused": self.paused, "targets": len(self.addrs),
-                         "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id})))
+                         "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id,
+                         "executionMode": self.execution_mode,
+                         "executionState": self.execution_state})))
         self.db.commit()
 
     async def consume_commands(self):
         """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
         toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
-        OWNED = ("pause", "resume", "close_position", "close_all", "wallet_toggle",
+        OWNED = ("pause", "resume", "close_position", "close_all", "drain", "emergency_close_all", "wallet_toggle",
                  "wallet_exit_request", "wallet_star", "reload_params")
         last_hb = 0.0
         while not self.stop:
@@ -1397,9 +1488,38 @@ class Observer:
     async def _dispatch_command(self, ctype, payload):
         if ctype == "pause":
             self.paused = True
+            if self.execution_mode == "live":
+                self.execution_state = "paused"
+                self.db.execute(
+                    "UPDATE execution_session SET state='paused',updated_at=? WHERE session_id=?",
+                    (now_iso(), self.live_executor.session["session_id"]),
+                )
+                self.db.execute(
+                    "UPDATE execution_control SET state='paused',updated_at=? WHERE id=1",
+                    (now_iso(),),
+                )
+                self.db.commit()
             self._write_proc_status("paused")
             return {"paused": True}
         if ctype == "resume":
+            if self.execution_mode == "live":
+                row = self.db.execute(
+                    "SELECT state,canary FROM execution_session WHERE session_id=?",
+                    (self.live_executor.session["session_id"],),
+                ).fetchone()
+                if not row or row[0] != "paused":
+                    raise ValueError("live_session_not_resumable")
+                next_state = "live_canary" if row[1] else "live_running"
+                self.db.execute(
+                    "UPDATE execution_session SET state=?,updated_at=? WHERE session_id=?",
+                    (next_state, now_iso(), self.live_executor.session["session_id"]),
+                )
+                self.db.execute(
+                    "UPDATE execution_control SET state=?,updated_at=? WHERE id=1",
+                    (next_state, now_iso()),
+                )
+                self.db.commit()
+                self.execution_state = next_state
             self.paused = False
             self._write_proc_status("running")
             return {"paused": False}
@@ -1407,6 +1527,33 @@ class Observer:
             return await self._cmd_close(int(payload["positionId"]), float(payload.get("fraction", 1.0)))
         if ctype == "close_all":
             return await self._cmd_close_all()
+        if ctype == "drain":
+            if self.execution_mode != "live":
+                raise ValueError("drain_requires_live_mode")
+            self.paused = True
+            self.draining = True
+            self.execution_state = "draining"
+            self.db.execute(
+                "UPDATE execution_session SET state='draining',updated_at=? WHERE session_id=?",
+                (now_iso(), self.live_executor.session["session_id"]),
+            )
+            self.db.execute(
+                "UPDATE execution_control SET state='draining',updated_at=? WHERE id=1",
+                (now_iso(),),
+            )
+            self.db.commit()
+            self._write_proc_status("paused")
+            self._finish_live_session_if_drained()
+            return {"draining": True, "open": len(self.open_ep)}
+        if ctype == "emergency_close_all":
+            if self.execution_mode != "live":
+                raise ValueError("emergency_close_all_requires_live_mode")
+            await self._dispatch_command("drain", {})
+            await asyncio.to_thread(self.live_executor.cancel_managed_orders)
+            result = await self._cmd_close_all()
+            result["emergency"] = True
+            self._finish_live_session_if_drained()
+            return result
         if ctype == "wallet_toggle":
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
         if ctype == "wallet_exit_request":
@@ -1488,6 +1635,36 @@ class Observer:
             except Exception as exc:  # noqa: BLE001
                 _log(f"close_all: skip {pid}: {exc}")
         return {"closed": closed, "count": len(closed)}
+
+    def _finish_live_session_if_drained(self):
+        if self.execution_mode != "live" or not self.draining or self.open_ep:
+            return False
+        session_id = self.live_executor.session["session_id"]
+        active_orders = self.db.execute(
+            "SELECT COUNT(*) FROM execution_order_intent WHERE session_id=? "
+            "AND state IN ('created','submitting','resting','ambiguous')",
+            (session_id,),
+        ).fetchone()[0]
+        projection = self.db.execute(
+            "SELECT COUNT(*) FROM execution_position_projection WHERE session_id=? AND ABS(signed_size)>1e-12",
+            (session_id,),
+        ).fetchone()[0]
+        if active_orders or projection:
+            return False
+        stamp = now_iso()
+        self.db.execute(
+            "UPDATE execution_session SET state='stopped',stopped_at=?,stop_reason='drained',updated_at=? "
+            "WHERE session_id=?",
+            (stamp, stamp, session_id),
+        )
+        self.db.execute(
+            "UPDATE execution_control SET state='live_ready',active_session_id=NULL,updated_at=? WHERE id=1",
+            (stamp,),
+        )
+        self.db.commit()
+        self.execution_state = "live_ready"
+        self.stop = True
+        return True
 
     def _cmd_wallet_exit_request(self, addr):
         """Capture the current cohort and start a recoverable conditional exit."""
@@ -1780,6 +1957,13 @@ class Observer:
     # -- run: REST signal tasks + a WS connection for bbo pricing ------------
     async def run(self):
         asyncio.get_event_loop().set_exception_handler(self._quiet)
+        if self.execution_mode == "live":
+            self.live_executor = LiveExecutor.from_db(self.db)
+            result = await asyncio.to_thread(self.live_executor.reconcile)
+            self._sync_live_account()
+            if not result.get("ok"):
+                self.paused = True
+                self.execution_state = "reconcile_required"
         # Use the same public executable universe boundary as Scanner/Profile.  ``copyable_universe``
         # fails closed if either standard Crypto or the transparent builder/stock universe is missing;
         # starting with a partial set would silently ignore one whole sector of Core signals.
@@ -1798,6 +1982,20 @@ class Observer:
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_strategy(init=True)           # atomic Core + exact follow-param revision (forward-only)
+        if (self.execution_mode == "live"
+                and self.strategy_revision_id != self.live_executor.session["strategy_revision"]):
+            control_state = "STRATEGY_REVISION_MISMATCH"
+            self.db.execute(
+                "UPDATE execution_session SET state='reconcile_required',updated_at=? WHERE session_id=?",
+                (now_iso(), self.live_executor.session["session_id"]),
+            )
+            self.db.execute(
+                "UPDATE execution_control SET state='reconcile_required',last_error_code=?,last_error_at=?,"
+                "updated_at=? WHERE id=1",
+                (control_state, now_iso(), now_iso()),
+            )
+            self.db.commit()
+            raise RuntimeError("live_strategy_revision_mismatch")
         try:
             if self._refresh_live_wallet_risks():
                 self._reload_strategy()
@@ -1810,6 +2008,8 @@ class Observer:
             _log(f"proc status init failed: {exc}")
         asyncio.create_task(self.consume_commands())  # dashboard control plane (pause/close/toggle)
         asyncio.create_task(self.mark_refresh_loop())  # dashboard freshness (25s mark-to-market)
+        if self.execution_mode == "live":
+            asyncio.create_task(self.live_reconcile_loop())
         asyncio.create_task(self._announce())
         asyncio.create_task(self.prewarm_vol())       # warm σ for top-volume coins (no first-open latency)
         asyncio.create_task(self.vol_refresh_loop())  # periodic regime-aware σ refresh (off hot path)
@@ -1834,6 +2034,11 @@ class Observer:
                 self._rollback_db()
                 _log(f"bbo ws error: {exc}; reconnecting in 3s")
                 await asyncio.sleep(3)
+        if self.live_executor is not None:
+            try:
+                self.live_executor.release_lease()
+            except Exception:  # noqa: BLE001 - process exit must not mask the completed drain
+                pass
 
     # -- WS message router (bbo only) ----------------------------------------
     def on_message(self, raw: str):
@@ -2255,6 +2460,38 @@ class Observer:
             notional = plan.notional
             size = plan.size
             liq_px = plan.liq_px
+            if self.execution_mode == "live":
+                try:
+                    execution = await self._execute_live_order(
+                        ep=ep, addr=addr, coin=coin, action="open", is_buy=is_buy,
+                        size=size, leverage=lev, reduce_only=False,
+                        source_time_ms=t, source_order_id=ep.get("open_oid"),
+                    )
+                except Exception as exc:  # noqa: BLE001 - state machine owns the sanitized code
+                    state = self.db.execute(
+                        "SELECT state FROM execution_control WHERE id=1"
+                    ).fetchone()
+                    if not state or state[0] != "reconcile_required":
+                        self.db.execute(
+                            f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],),
+                        )
+                        book.open_ep.pop((addr, coin), None)
+                    self.db.commit()
+                    self._tally("skip_live_execution", book)
+                    _log(f"live open {coin} failed closed: {str(exc)[:120]}")
+                    return
+                if not execution or execution.filled_size <= config.FLAT or not execution.average_px:
+                    self.db.execute(f"DELETE FROM {book.pos_table} WHERE pos_id=?", (ep["pos_id"],))
+                    book.open_ep.pop((addr, coin), None)
+                    self.db.commit()
+                    self._tally("skip_live_unfilled", book)
+                    return
+                px = float(execution.average_px)
+                size = float(execution.filled_size)
+                notional = size * px
+                margin = notional / lev
+                liq_px = isolated_liq_px(px, ep["side"], size, margin, maintenance_leverage)
+                self._sync_live_account()
             ep.update(leverage=lev, margin=margin, notional=notional, entry_px=px, first_margin=margin,
                       size=size, rem_size=size, peak_size=size, liq_px=liq_px,
                       maintenance_leverage=maintenance_leverage,
@@ -2269,7 +2506,8 @@ class Observer:
                     lev, margin, notional, px, size, size, size, liq_px, m_lev, m_mgn,
                     target_notl, m_entry, risk_equity, ep["pos_id"],
                 ))
-            book.balance -= abs(size * px) * config.TAKER_FEE
+            if self.execution_mode != "live":
+                book.balance -= abs(size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.commit()
         ep["entries_ready"].set()
@@ -2504,6 +2742,26 @@ class Observer:
                 margin_row[0] if margin_row and margin_row[0]
                 else ep.get("maintenance_leverage")
             )
+            live_add_size = None
+            if self.execution_mode == "live":
+                requested_add_size = (add_margin * lev / px) if px else 0.0
+                try:
+                    execution = await self._execute_live_order(
+                        ep=ep, addr=addr, coin=coin, action="add", is_buy=is_buy,
+                        size=requested_add_size, leverage=lev, reduce_only=False,
+                        source_time_ms=t, source_order_id=oid,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._tally("skip_live_add_execution", book)
+                    _log(f"live add {coin} failed closed: {str(exc)[:120]}")
+                    return _observe_only(final=True)
+                if not execution or execution.filled_size <= config.FLAT or not execution.average_px:
+                    self._tally("skip_live_add_unfilled", book)
+                    return _observe_only(final=True)
+                px = float(execution.average_px)
+                live_add_size = float(execution.filled_size)
+                add_margin = live_add_size * px / lev
+                self._sync_live_account()
             basis = rebase_isolated_position(
                 ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
                 maintenance_leverage,
@@ -2513,7 +2771,7 @@ class Observer:
                 notional=basis["notional"], liq_px=basis["liq_px"],
                 maintenance_leverage=maintenance_leverage,
             )
-            add_size = (add_margin * lev / px) if px else 0.0
+            add_size = live_add_size if live_add_size is not None else ((add_margin * lev / px) if px else 0.0)
             new_size = ep["rem_size"] + add_size
             ep["entry_px"] = ((ep["rem_size"] * ep["entry_px"] + add_size * px) / new_size
                               if new_size else px)    # size-weighted average entry
@@ -2548,7 +2806,8 @@ class Observer:
                     ep.setdefault("add_orders", {}).pop(oid, None)
             if oid is not None:
                 ep.setdefault("seen_oids", set()).add(oid)
-            book.balance -= abs(add_size * px) * config.TAKER_FEE
+            if self.execution_mode != "live":
+                book.balance -= abs(add_size * px) * config.TAKER_FEE
             self._save_account(book)
             self.db.execute(
                 f"UPDATE {book.pos_table} SET margin=?,notional=?,entry_px=?,size=?,rem_size=?,peak_size=?,liq_px=?,"
@@ -2648,11 +2907,39 @@ class Observer:
                     closing = True
                     tail_close = True
             close_size = ep["rem_size"] * reduce_frac
-            fee = abs(close_size * exit_px) * config.TAKER_FEE
+            requested_full_close = bool(closing)
+            live_fee = None
+            if self.execution_mode == "live":
+                try:
+                    execution = await self._execute_live_order(
+                        ep=ep, addr=addr, coin=coin,
+                        action="close" if closing else "reduce", is_buy=is_buy,
+                        size=close_size, leverage=ep["leverage"], reduce_only=True,
+                        source_time_ms=t, source_order_id=oid,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._tally("skip_live_reduce_execution", book)
+                    _log(f"live reduce {coin} failed closed: {str(exc)[:120]}")
+                    if requested_full_close:
+                        self._schedule_live_full_close_retry(addr, coin, ep, book)
+                    return
+                if not execution or execution.filled_size <= config.FLAT or not execution.average_px:
+                    self._tally("skip_live_reduce_unfilled", book)
+                    if requested_full_close:
+                        self._schedule_live_full_close_retry(addr, coin, ep, book)
+                    return
+                exit_px = float(execution.average_px)
+                close_size = min(ep["rem_size"], float(execution.filled_size))
+                reduce_frac = close_size / max(ep["rem_size"], 1e-12)
+                closing = bool(closing and close_size >= ep["rem_size"] - config.FLAT)
+                live_fee = max(0.0, float(execution.fee))
+                self._sync_live_account()
+            fee = live_fee if live_fee is not None else abs(close_size * exit_px) * config.TAKER_FEE
             pnl = close_size * (exit_px - ep["entry_px"]) * ep["sign"] - fee    # NET of our exit fee
             ep["rem_size"] -= close_size
             ep["realized_pnl"] += pnl
-            book.balance += pnl                       # realize (net of fee) into the paper account
+            if self.execution_mode != "live":
+                book.balance += pnl                   # realize (net of fee) into the paper account
             if not closing and ep["rem_size"] > config.FLAT:
                 basis = rebase_isolated_position(
                     ep["entry_px"], ep["side"], ep["rem_size"], ep["leverage"],
@@ -2708,6 +2995,7 @@ class Observer:
                 book.open_ep.pop((addr, coin), None)         # normal closes are in the position table; only
                 if book is self.taker:
                     self._resolve_draining_intent(addr)
+                    self._finish_live_session_if_drained()
                 if liq:                                       # liquidation (our isolated stop-out) is logged
                     _log(f"[{book.name}] LIQUIDATED {addr[:10]} {coin} {ep['side']} -${ep['margin']:,.0f}  bal=${book.balance:,.0f}")
                 elif tail_close and tail_decision:
@@ -2732,6 +3020,36 @@ class Observer:
                     f"stage={int(smart_tp_stage) + 1} remain={ep['rem_size'] / max(ep.get('smart_tp_base_size') or 1.0, 1e-12):.0%} "
                     f"pnl=${ep['realized_pnl']:+,.0f}"
                 )
+            if (self.execution_mode == "live" and requested_full_close and not closing
+                    and ep["rem_size"] > config.FLAT):
+                self._schedule_live_full_close_retry(addr, coin, ep, book)
+
+    def _schedule_live_full_close_retry(self, addr, coin, ep, book):
+        """Schedule a bounded retry only when the last result is definitely non-ambiguous."""
+        if self.execution_mode != "live" or ep.get("close_retry_scheduled"):
+            return
+        row = self.db.execute("SELECT state FROM execution_control WHERE id=1").fetchone()
+        if row and row[0] == "reconcile_required":
+            return
+        if (addr, coin) not in book.open_ep or ep.get("rem_size", 0.0) <= config.FLAT:
+            return
+        ep["close_retry_scheduled"] = True
+        asyncio.create_task(self._retry_live_full_close(addr, coin, ep, book))
+
+    async def _retry_live_full_close(self, addr, coin, ep, book):
+        """Bounded continuation for a target full-close whose IOC only partially filled."""
+        try:
+            for _attempt in range(2):
+                await asyncio.sleep(1.0)
+                if (addr, coin) not in book.open_ep or ep.get("rem_size", 0.0) <= config.FLAT:
+                    return
+                mark = self._mark_px(coin, ep.get("entry_px") or 0.0)
+                await self._apply_reduce(
+                    addr, coin, ep, now_ms(), mark, 0.0, 0.0,
+                    closing=True, liq=False, forced_px=mark, book=book,
+                )
+        finally:
+            ep["close_retry_scheduled"] = False
 
     async def _liquidate(self, addr, coin, ep, book=None):
         book = book or self.taker
@@ -2744,6 +3062,11 @@ class Observer:
     def _maybe_liquidate(self, coin, mark, book=None):
         """Schedule isolated liquidation only from a fresh exchange markPx supplied by the mark poller."""
         book = book or self.taker
+        if book.name == "live":
+            # Mainnet liquidation and its fills come from the exchange.  A local
+            # mark crossing a projected liquidation price must never fabricate
+            # a second reduce-only order.
+            return
         if not mark or mark <= 0:
             return
         for (a, c), ep in list(book.open_ep.items()):

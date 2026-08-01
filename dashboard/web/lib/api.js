@@ -80,18 +80,33 @@ const bytesToB64 = bytes => {
 
 const b64ToBytes = value => Uint8Array.from(atob(value), c => c.charCodeAt(0));
 
-export async function encryptCredential(secret, wrapKey) {
+export async function encryptCredential(secret, wrapKey, context) {
   if (!window.crypto || !window.crypto.subtle || !wrapKey || !wrapKey.spki) throw new Error("secure_context_required");
+  if (!window.isSecureContext) throw new Error("secure_context_required");
+  const network = String(context?.network || "").toLowerCase();
+  const account = String(context?.accountAddress || "").toLowerCase();
+  const agent = String(context?.agentAddress || "").toLowerCase();
+  if (!["testnet", "mainnet"].includes(network) || !/^0x[0-9a-f]{40}$/.test(account)
+      || !/^0x[0-9a-f]{40}$/.test(agent)) throw new Error("invalid_credential_context");
   const publicKey = await window.crypto.subtle.importKey(
     "spki", b64ToBytes(wrapKey.spki), { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]
   );
   const dek = await window.crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
   const rawDek = await window.crypto.subtle.exportKey("raw", dek);
   const nonce = window.crypto.getRandomValues(new Uint8Array(12));
+  const aad = new TextEncoder().encode(
+    `poly-btc-hyperliquid-agent-v1\n${network}\n${account}\n${agent}`
+  );
   const ciphertext = await window.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: nonce }, dek, new TextEncoder().encode(secret)
+    { name: "AES-GCM", iv: nonce, additionalData: aad }, dek, new TextEncoder().encode(secret.trim())
   );
   const wrappedKey = await window.crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, rawDek);
-  return { envelopeVersion: wrapKey.envelopeVersion, keyId: wrapKey.keyId,
-    wrappedKey: bytesToB64(wrappedKey), nonce: bytesToB64(nonce), ciphertext: bytesToB64(ciphertext) };
+  return {
+    version: wrapKey.version,
+    algorithm: wrapKey.algorithm,
+    wrapKeyId: wrapKey.wrapKeyId,
+    wrappedKey: bytesToB64(wrappedKey),
+    iv: bytesToB64(nonce),
+    ciphertext: bytesToB64(ciphertext),
+  };
 }

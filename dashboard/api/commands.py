@@ -5,20 +5,58 @@ import sqlite3
 
 from hyper.ops import procman
 from hyper.util import now_iso
+from hyper.execution.command_worker import CONTROL_COMMANDS
 from .common import q1
 
 
 ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
                     "wallet_exit_request", "wallet_star",
                     "observer_start", "observer_stop", "rescan", "scan_stop",
-                    "patch_params", "reload_params"}
-PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan", "scan_stop"}
+                    "patch_params", "reload_params", "drain", "emergency_close_all",
+                    *CONTROL_COMMANDS}
+PROCESS_COMMANDS = {"observer_start", "observer_stop", "rescan", "scan_stop", *CONTROL_COMMANDS}
 
 
 def validate_command_payload(ctype, payload):
     """Validate command payloads before they can enter the command table."""
     payload = payload or {}
-    if ctype in {"wallet_toggle", "wallet_star"}:
+    if not isinstance(payload, dict):
+        raise ValueError("command payload must be an object")
+    if ctype == "credential_upsert":
+        required = {"network", "accountAddress", "agentAddress", "envelope"}
+        if not required.issubset(payload) or set(payload) - (required | {"validUntil"}):
+            raise ValueError("credential_upsert payload shape is invalid")
+        if payload.get("network") not in {"testnet", "mainnet"}:
+            raise ValueError("invalid credential network")
+        for key in ("accountAddress", "agentAddress"):
+            value = payload.get(key)
+            if not isinstance(value, str) or len(value) != 42 or not value.startswith("0x"):
+                raise ValueError(f"invalid {key}")
+        if not isinstance(payload.get("envelope"), dict):
+            raise ValueError("encrypted envelope is required")
+        if payload.get("validUntil") is not None and not isinstance(payload.get("validUntil"), str):
+            raise ValueError("invalid validUntil")
+    elif ctype in {"credential_verify", "credential_delete"}:
+        if set(payload) != {"network"} or payload.get("network") not in {"testnet", "mainnet"}:
+            raise ValueError(f"{ctype} requires a valid network")
+    elif ctype == "set_execution_mode":
+        if set(payload) != {"mode"} or payload.get("mode") not in {"paper", "live"}:
+            raise ValueError("set_execution_mode requires paper or live")
+    elif ctype == "execution_preflight":
+        if payload:
+            raise ValueError("execution_preflight does not accept payload fields")
+    elif ctype == "activate_live":
+        if set(payload) != {"preflightId", "confirmationPhrase"}:
+            raise ValueError("activate_live requires preflightId and confirmationPhrase")
+        if not all(isinstance(payload.get(key), str) and payload.get(key) for key in payload):
+            raise ValueError("invalid activate_live payload")
+    elif ctype == "unlock_live_canary":
+        if set(payload) != {"confirmationPhrase"} or not isinstance(payload.get("confirmationPhrase"), str):
+            raise ValueError("unlock_live_canary requires confirmationPhrase")
+    elif ctype in {"drain", "emergency_close_all"}:
+        if payload:
+            raise ValueError(f"{ctype} does not accept payload fields")
+    elif ctype in {"wallet_toggle", "wallet_star"}:
         expected_flag = "enabled" if ctype == "wallet_toggle" else "starred"
         if set(payload) != {"address", expected_flag}:
             raise ValueError(f"{ctype} requires address and {expected_flag}")
@@ -75,6 +113,9 @@ def exec_process_command(db_path, ctype, payload=None):
     """Run a process-lifecycle command inline and record the result in commands."""
     cmd_id, _ = insert_command(db_path, ctype, payload, None)
     try:
+        if ctype in CONTROL_COMMANDS:
+            procman.trigger_execution_control(db_path, cmd_id)
+            return cmd_id, "pending"
         if ctype == "observer_start":
             res = procman.start_observer(db_path)
         elif ctype == "observer_stop":

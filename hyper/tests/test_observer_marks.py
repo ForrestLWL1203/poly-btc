@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from hyper import config, storage
+from hyper.execution.live_executor import LiveExecutionResult
 from hyper.execution.observer import Observer
 from hyper.market import volatility
 from hyper.util import now_iso, now_ms
@@ -1304,6 +1305,68 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             row = db.execute("SELECT status,was_liq FROM copy_position WHERE pos_id=?", (pos_id,)).fetchone()
             self.assertEqual(row["status"], "closed")
             self.assertEqual(row["was_liq"], 0)
+
+        asyncio.run(run())
+
+    def test_live_full_close_clear_unfilled_schedules_bounded_continuation(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,updated_at) "
+                "VALUES (1,'live','live_running',?) ON CONFLICT(id) DO UPDATE SET "
+                "selected_mode='live',state='live_running',updated_at=excluded.updated_at", (now_iso(),),
+            )
+            db.commit()
+            obs.execution_mode = "live"
+            obs.live_executor = object()
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+            unfilled = LiveExecutionResult(0, None, 0, 0, (), (), "unfilled", "ioc_cancel")
+
+            with patch.object(obs, "_execute_live_order", new=AsyncMock(return_value=unfilled)), \
+                    patch.object(obs, "_retry_live_full_close", new=AsyncMock()) as retry:
+                await obs._apply_reduce(
+                    "0xaaa", "BTC", ep, now_ms(), 100, -2, 0,
+                    closing=True, liq=False, forced_px=100,
+                )
+                await asyncio.sleep(0)
+
+            retry.assert_awaited_once_with("0xaaa", "BTC", ep, obs.taker)
+
+        asyncio.run(run())
+
+    def test_live_full_close_ambiguous_failure_never_blind_retries(self):
+        async def run():
+            db = self._db()
+            pos_id = db.execute(
+                "SELECT pos_id FROM copy_position WHERE addr='0xaaa' AND coin='BTC'"
+            ).fetchone()["pos_id"]
+            obs = Observer(db, [], {})
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,updated_at) "
+                "VALUES (1,'live','reconcile_required',?) ON CONFLICT(id) DO UPDATE SET "
+                "selected_mode='live',state='reconcile_required',updated_at=excluded.updated_at", (now_iso(),),
+            )
+            db.commit()
+            obs.execution_mode = "live"
+            obs.live_executor = object()
+            ep = self._live_ep(pos_id, "long", 100, 2)
+            obs.taker.open_ep[("0xaaa", "BTC")] = ep
+
+            with patch.object(
+                obs, "_execute_live_order", new=AsyncMock(side_effect=RuntimeError("live_order_status_ambiguous")),
+            ), patch.object(obs, "_retry_live_full_close", new=AsyncMock()) as retry:
+                await obs._apply_reduce(
+                    "0xaaa", "BTC", ep, now_ms(), 100, -2, 0,
+                    closing=True, liq=False, forced_px=100,
+                )
+                await asyncio.sleep(0)
+
+            retry.assert_not_awaited()
 
         asyncio.run(run())
 

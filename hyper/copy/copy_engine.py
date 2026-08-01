@@ -515,6 +515,9 @@ def plan_open_sizing(
     )
     margin_equity_pct = max(0.0, min(1.0, float(params.margin_equity_pct)))
     margin_equity = sizing_equity * margin_equity_pct
+    # ``MARGIN_EQUITY_PCT`` scales the equity base used by each order-sizing formula.  It deliberately
+    # does not create a second wallet or a hard portfolio pool: real available cash plus the independent
+    # deployment/concentration controls remain authoritative.
     margin_pct = margin_pct_for_deploy(params.tier_margin[tier])
     wanted_margin = max(0.0, margin_equity * margin_pct)
     room = max(0.0, params.tier_coin_cap[tier] * risk_equity - existing_coin_margin)
