@@ -421,7 +421,8 @@ def unlock_live_canary(db, confirmation_phrase: str) -> dict:
         raise ValueError("live_canary_must_be_flat")
     stamp = now_iso()
     db.execute(
-        "UPDATE execution_session SET canary=0,state='live_running',updated_at=? WHERE session_id=?",
+        "UPDATE execution_session SET canary=0,canary_margin_cap=NULL,state='live_running',updated_at=? "
+        "WHERE session_id=?",
         (stamp, session_id),
     )
     db.execute(

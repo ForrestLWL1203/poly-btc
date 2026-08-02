@@ -170,7 +170,10 @@ class ExecutionControlTests(unittest.TestCase):
         result = unlock_live_canary(self.db, "解除 Canary")
 
         self.assertFalse(result["canary"])
-        self.assertEqual(control.execution_status(self.db)["state"], "live_running")
+        status = control.execution_status(self.db)
+        self.assertEqual(status["state"], "live_running")
+        self.assertFalse(status["session"]["canary"])
+        self.assertIsNone(status["session"]["canaryMarginCap"])
 
     def test_no_funds_fails_closed(self):
         with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle), \
