@@ -95,7 +95,7 @@ function ObserverControl({ status, busy, onStart, onPause, onStop, live = false 
           <p>{paused ? "恢复跟随目标钱包的新开仓" : "不再开新仓，存量仓位继续自动管理至退出"}</p>
           <div className="command-menu-separator" />
           <div className="command-menu-title">{live ? "实盘排空" : "彻底停止"}</div>
-          <button className="btn btn-danger" role="menuitem" onClick={() => act(onStop)}>
+          <button className="btn btn-stop" role="menuitem" onClick={() => act(onStop)}>
             {live ? "排空后停止" : "彻底停止跟单"}
           </button>
           <p>{live ? "禁止新增敞口，继续跟随减仓和平仓；真实仓位归零后才停止进程" : "停止 Observer 进程，存量仓位将不再自动管理"}</p>

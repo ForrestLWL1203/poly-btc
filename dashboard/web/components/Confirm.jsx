@@ -22,7 +22,7 @@ export function Confirm({ cfg, onClose }) {
         </div>}
         <div className="modal-row">
           <button className="btn" onClick={onClose}>取消</button>
-          <button className={"btn " + (cfg.danger ? "btn-danger" : "btn-accent")}
+          <button className={"btn " + (cfg.danger ? "btn-stop" : "btn-accent")}
             onClick={() => { cfg.onConfirm(pick ? pct / 100 : undefined); onClose(); }}>
             {pick ? `平仓 ${pct}%` : (cfg.ok || "确认")}</button>
         </div>

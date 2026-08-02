@@ -229,6 +229,16 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertIn('from "./components/ObsMask.jsx"', jsx)
         self.assertIn("<ObsMask", jsx)
 
+    def test_runtime_stop_actions_use_prominent_shared_danger_style(self):
+        shell = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
+        confirm = (ROOT / "dashboard" / "web" / "components" / "Confirm.jsx").read_text(encoding="utf-8")
+        css = (ROOT / "dashboard" / "web" / "app.css").read_text(encoding="utf-8")
+
+        self.assertIn('className="btn btn-stop" role="menuitem"', shell)
+        self.assertNotIn('className="btn btn-danger" role="menuitem"', shell)
+        self.assertIn('cfg.danger ? "btn-stop" : "btn-accent"', confirm)
+        self.assertIn(".btn-stop { background: linear-gradient(135deg, #FF4D57, #D72F3B)", css)
+
     def test_settings_page_is_split_from_dashboard_shell(self):
         jsx = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
         settings = ROOT / "dashboard" / "web" / "components" / "Settings.jsx"

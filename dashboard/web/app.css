@@ -115,8 +115,11 @@ body {
 /* buttons */
 .btn { border: 1px solid var(--glass-border); background: rgba(255, 255, 255, .05); color: var(--t1);
   padding: 8px 16px; border-radius: 11px; font-size: 13px; font-weight: 600; cursor: pointer;
-  display: inline-flex; align-items: center; gap: 7px; font-family: var(--sans); transition: filter .15s, background .15s; }
+  display: inline-flex; align-items: center; gap: 7px; font-family: var(--sans);
+  transition: filter .15s, background .15s, border-color .15s, box-shadow .15s, transform .15s; }
 .btn:hover { background: rgba(255, 255, 255, .09); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:focus-visible { outline: 2px solid rgba(255,255,255,.72); outline-offset: 2px; }
 .btn svg { width: 15px; height: 15px; flex-shrink: 0; }
 .btn-icon-round { width: 35px; height: 35px; min-width: 35px; padding: 0; border-radius: 50%;
   justify-content: center; gap: 0; }
@@ -127,10 +130,11 @@ body {
    gradient + shadow per the design handoff applyBtnStyle, so 启动/恢复 carry 暂停's weight, not a weak tint. */
 .btn-go { background: linear-gradient(135deg, #3FCF8E, #2BA56C); border: none; color: #fff; box-shadow: 0 6px 18px rgba(63, 207, 142, .28); }
 .btn-go:hover { filter: brightness(1.08); }
-/* prominent solid RED (same base size as btn-accent/btn-go — NOT the small tinted btn-danger) for the
-   armed 彻底停止 state, so toggling the checkbox swaps color, never size. */
-.btn-stop { background: linear-gradient(135deg, #E2524A, #A32D2D); border: none; color: #fff; box-shadow: 0 6px 18px rgba(226, 82, 74, .3); }
-.btn-stop:hover { filter: brightness(1.08); }
+/* prominent RED primary: identical geometry and interaction weight to accent/go, with hue alone carrying
+   the destructive meaning. Keep secondary destructive affordances on the quieter btn-danger treatment. */
+.btn-stop { background: linear-gradient(135deg, #FF4D57, #D72F3B); border: none; color: #fff;
+  box-shadow: 0 6px 18px rgba(239, 54, 66, .3); }
+.btn-stop:hover { filter: brightness(1.08); box-shadow: 0 8px 22px rgba(239, 54, 66, .36); }
 .btn-green { background: rgba(63, 207, 142, .16); border-color: rgba(63,207,142,.3); color: var(--green-l); }
 .btn-danger { background: rgba(255, 92, 92, .14); border-color: rgba(255, 92, 92, .3); color: var(--red-l); padding: 6px 12px; font-size: 12px; }
 .btn-danger:hover { background: rgba(255, 92, 92, .22); }
