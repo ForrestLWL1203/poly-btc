@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from hyper import params, storage
 from hyper.execution.observer import Observer
@@ -129,6 +130,88 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertEqual(observer.strategy_revision_id, active["revision"])
         self.assertEqual(observer.addrs, ["0xaaa"])
         self.assertEqual(result["revision"], active["revision"])
+
+    def test_live_param_reload_advances_session_revision_and_margin_budget(self):
+        db = self._db()
+        first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        stamp = "2026-08-02T00:00:00Z"
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-current','live','mainnet','live_running',?,?,?,200,1,200,0,NULL,?,?)",
+            ("0x" + "a" * 40, "0x" + "b" * 40, first["revision"], stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','live_running','live-current',?) "
+            "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='live_running',"
+            "active_session_id='live-current',updated_at=excluded.updated_at",
+            (stamp,),
+        )
+        db.execute("UPDATE params SET value='80' WHERE key='MARGIN_EQUITY_PCT'")
+        db.commit()
+        observer = Observer(db, [], {})
+        observer.live_executor = SimpleNamespace(session={
+            "session_id": "live-current",
+            "strategy_revision": first["revision"],
+            "margin_equity_pct": 1.0,
+        })
+
+        result = asyncio.run(observer._dispatch_command("reload_params", {
+            "by": "dashboard_params",
+            "createStrategyRevision": True,
+            "reason": "operator_follow_params_changed",
+        }))
+
+        active = strategy_revision.load_active(db)
+        session = db.execute(
+            "SELECT strategy_revision,margin_equity_pct FROM execution_session "
+            "WHERE session_id='live-current'"
+        ).fetchone()
+        self.assertEqual(session["strategy_revision"], active["revision"])
+        self.assertEqual(session["margin_equity_pct"], 0.8)
+        self.assertEqual(observer.live_executor.session["strategy_revision"], active["revision"])
+        self.assertEqual(observer.live_executor.session["margin_equity_pct"], 0.8)
+        self.assertEqual(result["revision"], active["revision"])
+
+    def test_live_session_revision_rejects_lateral_active_revision(self):
+        db = self._db()
+        first = strategy_revision.create_revision(db, "g1", source="scan", enqueue_reload=False)
+        replacement = strategy_revision.create_revision(
+            db, "g1", source="replacement", parent_revision=None, enqueue_reload=False,
+        )
+        stamp = "2026-08-02T00:00:00Z"
+        db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+            "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-current','live','mainnet','live_running',?,?,?,200,1,200,0,NULL,?,?)",
+            ("0x" + "a" * 40, "0x" + "b" * 40, first["revision"], stamp, stamp),
+        )
+        db.execute(
+            "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+            "VALUES (1,'live','live_running','live-current',?) "
+            "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='live_running',"
+            "active_session_id='live-current',updated_at=excluded.updated_at",
+            (stamp,),
+        )
+        db.commit()
+        observer = Observer(db, [], {})
+        observer.live_executor = SimpleNamespace(session={
+            "session_id": "live-current",
+            "strategy_revision": first["revision"],
+            "margin_equity_pct": 1.0,
+        })
+        observer._reload_strategy()
+
+        with self.assertRaisesRegex(RuntimeError, "live_strategy_revision_not_descendant"):
+            observer._bind_live_strategy_revision()
+        session_revision = db.execute(
+            "SELECT strategy_revision FROM execution_session WHERE session_id='live-current'"
+        ).fetchone()[0]
+        self.assertEqual(observer.strategy_revision_id, replacement["revision"])
+        self.assertEqual(session_revision, first["revision"])
 
     def test_operator_disable_is_live_overlay_not_snapshot_mutation(self):
         db = self._db()

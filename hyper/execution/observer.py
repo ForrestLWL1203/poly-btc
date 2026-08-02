@@ -1086,6 +1086,67 @@ class Observer:
         if changed:
             _log(f"strategy revision: {revision or 'legacy-fallback'}")
 
+    def _bind_live_strategy_revision(self):
+        """Advance the active Live session along the immutable revision chain.
+
+        Core refreshes and operator parameter edits are deliberately hot-reloadable while Live is
+        running.  The session binding must advance with the bundle actually loaded by Observer, or a
+        later worker restart will correctly reject the otherwise-stale session revision.  Only a
+        descendant of the session's current revision may be adopted; a lateral/replaced history still
+        fails closed.
+        """
+        if self.execution_mode != "live" or self.live_executor is None:
+            return False
+        revision = self.strategy_revision_id
+        if not revision:
+            raise RuntimeError("live_strategy_revision_missing")
+        session_id = self.live_executor.session["session_id"]
+        row = self.db.execute(
+            "SELECT strategy_revision FROM execution_session WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        previous = str(row[0] or "") if row else ""
+        if not previous:
+            raise RuntimeError("live_session_strategy_revision_missing")
+        bundle = strategy_revision.load_revision(self.db, revision)
+        if not bundle or strategy_revision.active_revision_id(self.db) != revision:
+            raise RuntimeError("live_strategy_revision_not_active")
+        if previous != revision:
+            cursor = bundle
+            seen = set()
+            while cursor and cursor.get("revision") not in seen:
+                current = cursor.get("revision")
+                if current == previous:
+                    break
+                seen.add(current)
+                parent = cursor.get("parentRevision")
+                cursor = strategy_revision.load_revision(self.db, parent) if parent else None
+            if not cursor or cursor.get("revision") != previous:
+                raise RuntimeError("live_strategy_revision_not_descendant")
+        margin_pct = float(
+            (bundle.get("params") or {}).get("MARGIN_EQUITY_PCT", self.margin_equity_pct)
+        )
+        if self.db.in_transaction:
+            self.db.commit()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            if strategy_revision.active_revision_id(self.db) != revision:
+                raise RuntimeError("live_strategy_revision_changed")
+            updated = self.db.execute(
+                "UPDATE execution_session SET strategy_revision=?,margin_equity_pct=?,updated_at=? "
+                "WHERE session_id=? AND strategy_revision=?",
+                (revision, margin_pct, now_iso(), session_id, previous),
+            ).rowcount
+            if updated != 1:
+                raise RuntimeError("live_session_strategy_revision_changed")
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        self.live_executor.session["strategy_revision"] = revision
+        self.live_executor.session["margin_equity_pct"] = margin_pct
+        return previous != revision
+
     # -- WS bbo (pricing only; no user subscriptions) ------------------------
     async def _sub(self, subscription: dict):
         await self.ws.send(ws.sub_msg(subscription))
@@ -1614,6 +1675,7 @@ class Observer:
                     self.db.rollback()
                     raise
             self._reload_strategy()
+            self._bind_live_strategy_revision()
             return {"reloaded": True, "source": "strategy_revision", "targets": len(self.addrs),
                     "revision": self.strategy_revision_id, "created": created}
         raise ValueError(f"unhandled command type {ctype}")
@@ -2068,8 +2130,9 @@ class Observer:
                 self.stock_coins.add(coin)
         await self._reconcile_open()               # close any copy whose master went flat while we were down
         self._reload_strategy(init=True)           # atomic Core + exact follow-param revision (forward-only)
-        if (self.execution_mode == "live"
-                and self.strategy_revision_id != self.live_executor.session["strategy_revision"]):
+        try:
+            self._bind_live_strategy_revision()
+        except Exception:
             control_state = "STRATEGY_REVISION_MISMATCH"
             self.db.execute(
                 "UPDATE execution_session SET state='reconcile_required',updated_at=? WHERE session_id=?",
