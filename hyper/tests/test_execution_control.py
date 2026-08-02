@@ -175,6 +175,26 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertFalse(status["session"]["canary"])
         self.assertIsNone(status["session"]["canaryMarginCap"])
 
+    def test_legacy_canary_cleanup_is_idempotent_after_promotion(self):
+        stamp = now_iso()
+        self.db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,sizing_anchor,"
+            "margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+            "VALUES ('live-running','live','mainnet','live_running',?,?,'r',200,1,200,0,2,?,?)",
+            (ACCOUNT, self.wallet.address.lower(), stamp, stamp),
+        )
+        control.ensure_execution_control(self.db)
+        self.db.execute(
+            "UPDATE execution_control SET selected_mode='live',state='live_running',"
+            "active_session_id='live-running' WHERE id=1"
+        )
+
+        result = unlock_live_canary(self.db, "解除 Canary")
+
+        self.assertFalse(result["canary"])
+        self.assertIsNone(control.execution_status(self.db)["session"]["canaryMarginCap"])
+
     def test_no_funds_fails_closed(self):
         with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle), \
                 patch("hyper.execution.live_preflight.strategy_revision.resolved_targets", return_value=self.bundle["targets"]):

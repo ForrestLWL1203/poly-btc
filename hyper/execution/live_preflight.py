@@ -400,6 +400,17 @@ def unlock_live_canary(db, confirmation_phrase: str) -> dict:
         "JOIN execution_session s ON s.session_id=c.active_session_id "
         "WHERE c.id=1 AND c.selected_mode='live'"
     ).fetchone()
+    if row and not row[2] and row[1] == "live_running":
+        stamp = now_iso()
+        db.execute(
+            "UPDATE execution_session SET canary_margin_cap=NULL,updated_at=? WHERE session_id=?",
+            (stamp, row[0]),
+        )
+        db.execute(
+            "UPDATE execution_control SET canary_unlocked=1,updated_at=? WHERE id=1",
+            (stamp,),
+        )
+        return {"sessionId": row[0], "state": "live_running", "canary": False}
     if not row or not row[2] or row[1] not in {"live_canary", "paused"}:
         raise ValueError("live_canary_not_active")
     session_id = row[0]
