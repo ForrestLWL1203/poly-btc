@@ -1,4 +1,5 @@
 import { api, AUTH_EXPIRED_EVENT } from "./lib/api.js";
+import { activateLiveAndStart, friendlyExecutionError } from "./lib/execution.js";
 import { Confirm } from "./components/Confirm.jsx";
 import { Discovery, ScanMask, scanStageLabel } from "./components/Discovery.jsx";
 import { History } from "./components/History.jsx";
@@ -111,6 +112,7 @@ function Dashboard({ onLogout }) {
   const [scanStopping, setScanStopping] = useState(false);
   const [scanStopError, setScanStopError] = useState(null);
   const [settingsTab, setSettingsTab] = useState(null);
+  const [liveStarting, setLiveStarting] = useState(false);
   const mobileNavRef = useRef(null);
 
   const startRescan = useCallback(async (full = false) => { await api.cmd("rescan", { full: !!full }); setScanning(true); }, []);
@@ -135,20 +137,49 @@ function Dashboard({ onLogout }) {
   const obs = ov && ov.system ? ov.system.observer : "stopped";   // stopped | running | paused
   const storageGuard = ov && ov.system && ov.system.storageGuard ? ov.system.storageGuard : {};
   const storageAlert = storageGuard.status === "warning" || storageGuard.status === "critical";
-  const pausing = !!obsPending;
+  const pausing = !!obsPending || liveStarting;
   const liveMode = execution?.selectedMode === "live" || ov?.system?.mode === "live";
   // fire an observer-control command + raise the transition mask until the engine reaches `target`
   // (start/stop go through the supervisor + systemctl ~5-10s; pause/resume apply in the observer loop).
   const ctl = (type, label, target) => { api.cmd(type, {}); setObsPending({ label, target }); };
   // SMART start (shown when not actively opening): process alive but paused → just resume opening new
   // orders; process gone/hung (stopped) → restart the whole observer via the supervisor.
-  const smartStart = () => {
-    if (liveMode && (!execution?.activeSessionId || ["draining", "reconcile_required", "credential_error", "no_funds"].includes(execution?.state))) {
-      setSettingsTab("account"); setPage("settings"); return;
+  const openAccountSettings = () => { setSettingsTab("account"); setPage("settings"); };
+  const launchLive = async () => {
+    setLiveStarting(true);
+    try {
+      await activateLiveAndStart(api);
+      setObsPending({ label: "实盘检查通过，正在启动跟单…", target: "running" });
+    } catch (error) {
+      setObsPending(null);
+      setConfirmCfg({
+        title: "实盘启动未完成",
+        body: friendlyExecutionError(error),
+        ok: "查看账户信息",
+        danger: false,
+        onConfirm: openAccountSettings,
+      });
+    } finally {
+      setLiveStarting(false);
     }
-    return obs === "paused"
-      ? ctl("resume", "正在恢复开单…", "running")
-      : ctl("observer_start", "正在启动跟单…", "running");
+  };
+  const requestLiveStart = () => {
+    if (execution?.credentials?.mainnet?.status !== "verified") {
+      openAccountSettings();
+      return;
+    }
+    setConfirmCfg({
+      title: "启动实盘跟单",
+      danger: true,
+      ok: "确认启动实盘",
+      body: "将自动检查真实资金、Unified、Core、市场、REST/WS、仓位和挂单；全部通过后才创建实盘会话并启动 Observer。首次运行受 Canary 小额上限保护。",
+      onConfirm: launchLive,
+    });
+  };
+  const smartStart = () => {
+    if (obs === "paused") return ctl("resume", "正在恢复开单…", "running");
+    if (liveMode && !execution?.activeSessionId) return requestLiveStart();
+    return ctl("observer_start", "正在启动跟单…", "running");
   };
   const pauseOpening = () => ctl("pause", "正在暂停新开仓…", "paused");
   const stopObserver = () => setConfirmCfg(liveMode ? {
@@ -273,7 +304,8 @@ function Dashboard({ onLogout }) {
 
       {scanning && <ScanMask status={scanStatus} onStop={stopRescan} stopping={scanStopping}
         stopError={scanStopError} />}{/* Manual scans lock the page; scheduled scans stay non-blocking. */}
-      {obsPending && <ObsMask label={obsPending.label} />}
+      {liveStarting && <ObsMask label="正在完成实盘启动检查…" />}
+      {!liveStarting && obsPending && <ObsMask label={obsPending.label} />}
       <Confirm cfg={confirmCfg} onClose={() => setConfirmCfg(null)} />
     </div>
   );

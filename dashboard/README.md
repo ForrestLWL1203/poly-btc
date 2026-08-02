@@ -16,8 +16,9 @@ leverage.
 
 The Hyperliquid Account tab exposes only Paper and Mainnet Live. Paper is a compact one-line state; selecting
 Live reveals encrypted Mainnet Agent setup. Testnet is intentionally absent from product UI. Agent expiry is
-read from Hyperliquid during credential verification, and the Live start action automatically performs the full
-startup preflight before creating the session and starting Observer.
+read from Hyperliquid during credential verification. Account setup performs only the initial credential checks
+and never starts Observer; the global top-right copy-trade button is the only start/stop entry and performs the
+full Live startup preflight before creating the session. Mode changes require Observer to be stopped.
 
 The wallet control plane exposes `wallet_exit_request` and `wallet_exit_cancel`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry

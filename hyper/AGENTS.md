@@ -565,13 +565,16 @@ The dashboard reads the API and controls workers through the command/params plan
 - `/api/pipeline-audit` for generation, profile, selection, watchlist, and tuner reasons;
 - `/api/params`, `/api/commands`, and process/scan status endpoints.
 
-The Account tab is a product-mode control, not a Testnet laboratory. Paper renders as one compact mode row;
-choosing Live reveals only Mainnet credential setup and live operations. Testnet credentials and verification
-remain CLI/developer concerns. Agent authorization expiry is read from Hyperliquid `extraAgents` during
-credential verification and every startup preflight; never restore an operator-editable expiry field. The
-credential button performs encryption plus identity/owner/Unified/authorization verification. The Live start
-action automatically runs and consumes the full read-only preflight before starting Observer; do not restore a
-separate manual preflight card or confirmation-phrase input.
+The Account tab is a product-mode and credential control, not a Testnet laboratory or an Observer runtime
+console. Paper renders as one compact mode row; choosing Live reveals only Mainnet credential setup. Testnet
+credentials and verification remain CLI/developer concerns. Agent authorization expiry is read from
+Hyperliquid `extraAgents` during credential verification and every startup preflight; never restore an
+operator-editable expiry field. The credential button performs encryption plus the initial
+identity/owner/Unified/authorization verification and never starts Observer. The global top-right copy-trade
+button is the only start/stop entry: in Live mode it automatically runs and consumes the full read-only
+preflight before starting Observer. Do not restore an Account-page start button, separate manual preflight card,
+or confirmation-phrase input. Changing Paper/Live mode requires Observer to be stopped so the displayed mode
+cannot diverge from the already-running engine.
 
 The wallet list is intentionally light. Detail and position-detail requests are lazy. The UI labels the current
 roles as “跟单中”, “候选”, and “降级”; do not reintroduce internal role/model/data columns into the operator

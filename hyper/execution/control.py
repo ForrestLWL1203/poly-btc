@@ -192,6 +192,12 @@ def set_selected_mode(db, mode: ExecutionMode | str) -> dict:
     current = db.execute(
         "SELECT selected_mode,state,active_session_id FROM execution_control WHERE id=1"
     ).fetchone()
+    if current and current[0] != normalized.value:
+        observer = db.execute(
+            "SELECT state FROM process_status WHERE name='observer'"
+        ).fetchone()
+        if observer and str(observer[0] or "stopped") not in {"stopped", "error", "failed"}:
+            raise ValueError("observer_must_be_stopped")
     if normalized is ExecutionMode.PAPER and current and current[2]:
         exposure = db.execute(
             "SELECT COUNT(*) FROM execution_position_projection WHERE session_id=? AND ABS(signed_size)>1e-12",

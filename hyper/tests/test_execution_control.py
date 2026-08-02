@@ -216,6 +216,22 @@ class ExecutionControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "live_exposure_prevents_paper_switch"):
             control.set_selected_mode(self.db, "paper")
 
+    def test_mode_switch_requires_observer_to_be_stopped(self):
+        control.mark_credential_verified(
+            self.db, "mainnet", valid_until="2100-01-01T00:00:00Z",
+        )
+        self.db.execute(
+            "INSERT INTO process_status (name,state) VALUES ('observer','running') "
+            "ON CONFLICT(name) DO UPDATE SET state=excluded.state"
+        )
+
+        with self.assertRaisesRegex(ValueError, "observer_must_be_stopped"):
+            control.set_selected_mode(self.db, "live")
+
+        self.db.execute("UPDATE process_status SET state='stopped' WHERE name='observer'")
+        result = control.set_selected_mode(self.db, "live")
+        self.assertEqual(result["selectedMode"], "live")
+
 
 if __name__ == "__main__":
     unittest.main()

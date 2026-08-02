@@ -73,9 +73,11 @@ The Dashboard exposes only the product modes: compact Paper and Mainnet Live. Te
 verifier and is not shown as an operator account. Mainnet credential entry accepts the master address, Agent
 address and Agent private key; the browser encrypts the key before transport, and verification reads the
 Agent's authoritative `validUntil` from Hyperliquid `extraAgents` instead of accepting an operator-entered
-expiry. The visible credential action verifies the private-key address, owner, Unified mode and authorization.
-Starting Live then runs the full funding/strategy/Core/market/REST/WS/position/order preflight automatically,
-consumes its short-lived grant and starts Observer; there is no separate manual preflight panel.
+expiry. The visible credential action verifies the private-key address, owner, Unified mode and authorization,
+but never starts or stops Observer. The global top-right copy-trade control is the single runtime entry. In Live
+mode it runs the full funding/strategy/Core/market/REST/WS/position/order preflight automatically, consumes its
+short-lived grant and starts Observer; there is no Account-page start button or separate manual preflight panel.
+Paper/Live mode may change only while Observer is stopped.
 
 Testnet is deliberately not a product execution mode and does not maintain a Testnet copy ledger. It is only a
 bounded functional verifier for Hyperliquid signing, leverage, order, cancel, query and WebSocket APIs. Testnet

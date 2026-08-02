@@ -35,8 +35,9 @@ The frontend already speaks the real API contract and uses SSE with polling fall
 The Account tab keeps Paper to one compact mode row. Selecting Live reveals only Mainnet Agent configuration;
 Testnet remains a developer-only CLI verifier and is not rendered in product UI. Credential save encrypts the
 Agent key in-browser and verifies identity, owner, Unified mode and the Hyperliquid-reported authorization
-expiry. “启动实盘跟单” automatically runs the full startup preflight, activates the short-lived grant and starts
-Observer, so there is no separate manual preflight panel.
+expiry, but never controls Observer. The global top-right copy-trade button is the only start/stop entry; in
+Live mode it runs the full startup preflight, activates the short-lived grant and starts Observer. There is no
+Account-page start button or separate manual preflight panel, and mode changes require Observer to be stopped.
 
 Core wallet rows use the accessible `coin-ban-btn`/`BanIcon` control for conditional exit. Confirmation copy
 must distinguish flat (`立即转候选，等待每日重评恢复`) from held (`仅退出；整批盈利恢复，亏损或清算转候选`) wallets.
