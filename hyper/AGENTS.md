@@ -376,13 +376,16 @@ forced replacement count: zero to sixteen wallets may publish. Complete discover
 
 An operator may star a wallet through the Dashboard for attention and manual review. The durable
 `target_controls.pinned` flag is never a selection permission. A conditional exit with no positions moves
-immediately to `requalify`. With positions it captures the complete current position-ID cohort and enters
+immediately to `requalify`. Position detection and cohort resolution use only the currently selected Paper or
+Live execution ledger; a position in the other ledger must never block the request. With current-ledger
+positions it captures the complete current position-ID cohort and enters
 `draining`: new opens/adds stop while reductions, closes and risk management continue. Once every captured
 position is terminal, positive aggregate post-fee PnL with no liquidation/high/system block restores `active`;
 otherwise it resolves to `requalify`. While a captured position is still open, the operator may cancel the
 unresolved drain: existing positions remain intact and normal new-open/add authority returns. High-risk or
 system-blocked wallets cannot bypass their execution block through cancellation. There is no permanent
-manual-disable state.
+manual-disable state. Positions left open in the other ledger remain held-off/exit-only and resume management
+when that ledger's Observer next runs.
 
 A wallet needs the generation-frozen activity proof defined above. A 72-hour signal is shown as freshness
 context but has no permission effect. Existing copied positions whose source loses Core authority remain

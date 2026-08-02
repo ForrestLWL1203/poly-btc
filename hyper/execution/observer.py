@@ -1682,12 +1682,19 @@ class Observer:
         return True
 
     def _cmd_wallet_exit_request(self, addr):
-        """Capture the current cohort and start a recoverable conditional exit."""
+        """Capture the current execution ledger's cohort and start a conditional exit.
+
+        Paper and Live positions are independent.  A position in the inactive
+        ledger must never keep a wallet in Core for the selected execution mode.
+        Once released, any inactive-ledger position is still picked up by that
+        ledger's normal held-off/exit-only reload path when it next runs.
+        """
         addr = addr.lower()
         ts = now_iso()
         position_ids = sorted(
             int(row[0]) for row in self.db.execute(
-                "SELECT pos_id FROM copy_position WHERE lower(addr)=lower(?) AND status='open'",
+                f"SELECT pos_id FROM {self.taker.pos_table} "
+                "WHERE lower(addr)=lower(?) AND status='open'",
                 (addr,),
             ).fetchall()
         )
@@ -1710,6 +1717,7 @@ class Observer:
         self._reload_strategy()
         return {
             "address": addr, "intent": intent, "enabled": False,
+            "executionMode": self.execution_mode,
             "capturedPositionIds": position_ids,
         }
 
@@ -1801,7 +1809,7 @@ class Observer:
         marks = ",".join("?" for _ in position_ids)
         positions = self.db.execute(
             f"SELECT pos_id,status,COALESCE(realized_pnl,0),COALESCE(was_liq,0) "
-            f"FROM copy_position WHERE pos_id IN ({marks})",
+            f"FROM {self.taker.pos_table} WHERE pos_id IN ({marks})",
             tuple(position_ids),
         ).fetchall()
         by_id = {int(item[0]): item for item in positions}

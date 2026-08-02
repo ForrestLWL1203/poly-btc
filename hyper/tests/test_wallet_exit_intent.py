@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -6,7 +7,7 @@ import unittest
 from unittest import mock
 
 from hyper import storage
-from hyper.execution.observer import Observer
+from hyper.execution.observer import Book, Observer
 
 
 class WalletExitIntentTest(unittest.TestCase):
@@ -26,13 +27,20 @@ class WalletExitIntentTest(unittest.TestCase):
         self.db.close()
         self.tmp.cleanup()
 
-    def _position(self, addr="0xabc", status="open", pnl=0.0, was_liq=0):
+    def _position(self, addr="0xabc", status="open", pnl=0.0, was_liq=0, table="copy_position"):
         return self.db.execute(
-            "INSERT INTO copy_position "
-            "(addr,coin,side,status,realized_pnl,was_liq,opened_at) "
-            "VALUES (?,'BTC','long',?,?,?,'2026-07-01T00:00:00Z')",
+            f"INSERT INTO {table} "
+            "(addr,coin,side,status,realized_pnl,was_liq,entry_px,size,rem_size,leverage,margin,notional,"
+            "master_open_px,master_peak_sz,opened_at) "
+            "VALUES (?,'BTC','long',?,?,?,100,1,1,5,20,100,100,1,'2026-07-01T00:00:00Z')",
             (addr, status, pnl, was_liq),
         ).lastrowid
+
+    def _use_live_ledger(self):
+        self.observer.execution_mode = "live"
+        self.observer.taker = Book(
+            "live", "live_copy_position", "live_copy_action", "live_copy_account",
+        )
 
     def _publish_core(self, addr="0xabc"):
         self.db.execute(
@@ -70,6 +78,56 @@ class WalletExitIntentTest(unittest.TestCase):
         self.assertEqual([first, second], json.loads(row[0]))
         pending = self.observer._resolve_all_draining_intents()
         self.assertEqual([], pending)
+
+    def test_live_exit_ignores_paper_position_and_paper_reloads_it_exit_only(self):
+        paper_position = self._position()
+        self._use_live_ledger()
+
+        result = self.observer._cmd_wallet_exit_request("0xabc")
+
+        self.assertEqual("live", result["executionMode"])
+        self.assertEqual("requalify", result["intent"])
+        self.assertEqual([], result["capturedPositionIds"])
+        self.assertEqual(
+            "open",
+            self.db.execute(
+                "SELECT status FROM copy_position WHERE pos_id=?", (paper_position,),
+            ).fetchone()[0],
+        )
+
+        paper_observer = Observer(self.db, [], {})
+        async def reload_paper_positions():
+            paper_observer._reload_open()
+
+        asyncio.run(reload_paper_positions())
+        paper_observer._reload_targets(target_snapshot=[])
+        self.assertIn("0xabc", paper_observer.held_off)
+        self.assertIn("0xabc", paper_observer.addrs)
+
+    def test_live_draining_capture_and_resolution_use_live_ledger_only(self):
+        paper_position = self._position(pnl=50)
+        live_position = self._position(table="live_copy_position")
+        self._use_live_ledger()
+
+        result = self.observer._cmd_wallet_exit_request("0xabc")
+        self.assertEqual("draining", result["intent"])
+        self.assertEqual([live_position], result["capturedPositionIds"])
+        self.db.execute(
+            "UPDATE live_copy_position SET status='closed',realized_pnl=-5 WHERE pos_id=?",
+            (live_position,),
+        )
+
+        resolved = self.observer._resolve_draining_intent(
+            "0xabc", reload_strategy=False,
+        )
+        self.assertEqual("requalify", resolved["intent"])
+        self.assertEqual(-5.0, resolved["capturedNetPnl"])
+        self.assertEqual(
+            "open",
+            self.db.execute(
+                "SELECT status FROM copy_position WHERE pos_id=?", (paper_position,),
+            ).fetchone()[0],
+        )
 
     def test_operator_can_cancel_unresolved_draining_exit(self):
         self._publish_core()

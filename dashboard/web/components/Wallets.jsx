@@ -88,7 +88,7 @@ function CopyableAddress({ address, isNew }) {
   );
 }
 
-export function Wallets({ confirm }) {
+export function Wallets({ confirm, onDataChanged = null }) {
   const [drawer, setDrawer] = useState(null);
   const [wpage, setWpage] = useState(0);
   const [tab, setTab] = useState("followed");
@@ -114,7 +114,7 @@ export function Wallets({ confirm }) {
       setExitPending(pending => ({ ...pending, [w.address]: true }));
       try {
         await api.cmdAndWait("wallet_exit_request", { address: w.address });
-        await reload();
+        await Promise.all([reload(), onDataChanged ? onDataChanged() : Promise.resolve()]);
       } catch (error) {
         if (!error || error.message !== "unauth") setExitError("条件性退榜失败，请稍后重试");
       } finally {
@@ -143,7 +143,7 @@ export function Wallets({ confirm }) {
       setExitPending(pending => ({ ...pending, [w.address]: true }));
       try {
         await api.cmdAndWait("wallet_exit_cancel", { address: w.address });
-        await reload();
+        await Promise.all([reload(), onDataChanged ? onDataChanged() : Promise.resolve()]);
       } catch (error) {
         if (!error || error.message !== "unauth") setExitError("取消仅退出失败，请刷新状态后重试");
       } finally {

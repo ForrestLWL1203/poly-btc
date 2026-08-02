@@ -35,7 +35,13 @@ def scanner_status(db):
 
 
 def followed_count(db):
-    """Count the explicit published Core wallets the observer will actually copy."""
+    """Count the effective Core rows shown by the Dashboard's followed tab.
+
+    ``draining`` wallets retain their Core seat and remain visible while exits are
+    managed, even though their entry switch is disabled.  ``requalify`` is the
+    state that releases the seat.  Keep this predicate identical to the wallet
+    list instead of counting the legacy ``enabled`` flag.
+    """
     try:
         selected = q1(
             db,
@@ -50,8 +56,9 @@ def followed_count(db):
     r = q1(
         db,
         "SELECT COUNT(*) cnt FROM follow_selection fs "
-        "LEFT JOIN target_controls tc ON tc.addr=fs.addr "
-        "WHERE fs.generation=? AND fs.role='core' AND fs.enabled=1 AND COALESCE(tc.enabled,1)=1",
+        "LEFT JOIN target_controls tc ON lower(tc.addr)=lower(fs.addr) "
+        "WHERE fs.generation=? AND fs.role='core' AND COALESCE(fs.enabled,1)=1 "
+        "AND COALESCE(tc.intent,'active')!='requalify'",
         (selected["generation"],),
     )
     return (r["cnt"] if r else 0)

@@ -23,7 +23,10 @@ full Live startup preflight before creating the session. Mode changes require Ob
 The wallet control plane exposes `wallet_exit_request` and `wallet_exit_cancel`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;
-wallets with open positions show “仅退出中” until Observer resolves the captured cohort. The same control sends
+wallets with open positions in the currently selected Paper/Live ledger show “仅退出中” until Observer resolves
+that ledger's captured cohort; positions in the inactive ledger do not block the request and remain exit-only
+when that ledger resumes. The sidebar wallet count uses the same effective-Core predicate as the followed tab,
+including draining seats and excluding requalify rows. The same control sends
 `wallet_exit_cancel` while draining, restoring normal following without closing the existing cohort unless a
 durable risk or system block forbids it. Low/medium risk labels are advisory and do not disable entries. High
 risk disables entries; cumulative-loss high may later recover

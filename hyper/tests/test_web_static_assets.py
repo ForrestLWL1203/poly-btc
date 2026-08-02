@@ -102,6 +102,20 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("new EventSource", dashboard)
         self.assertNotIn("setInterval", dashboard)
         self.assertNotIn("/api/scan-status", dashboard)
+        self.assertIn('onDataChanged={refreshModeData}', dashboard)
+
+    def test_login_reads_browser_autofill_from_the_submitted_form(self):
+        jsx = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
+
+        self.assertIn('<form className="login-card" onSubmit={doLogin}>', jsx)
+        self.assertIn('new FormData(event.currentTarget)', jsx)
+        self.assertIn('name="username" defaultValue="admin"', jsx)
+        self.assertIn('name="password" required', jsx)
+        self.assertIn('type="submit"', jsx)
+        self.assertIn('disabled={checkingSession || loggingIn}', jsx)
+        self.assertNotIn('value={pw}', jsx)
+        self.assertNotIn('api.login(DASH_USER, DASH_PW)', jsx)
+        self.assertNotIn('mock123', jsx)
 
     def test_navigation_counts_history_and_manual_scan_can_be_stopped(self):
         jsx = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")

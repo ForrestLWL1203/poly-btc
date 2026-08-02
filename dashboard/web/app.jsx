@@ -23,9 +23,6 @@ import { useDashboardRefresh } from "./lib/refresh.js";
 /* 跟单监控台 — precompiled React dashboard. Talks to the live dashboard API. */
 const { useState, useEffect, useRef, useCallback } = React;
 
-const DASH_USER = "admin";                       // preview auto-login (matches launch.json env)
-const DASH_PW = "mock123";
-
 /* ----------------------------------------------------------------- shell */
 const NAV = [
   ["监控", [["overview", "总览", IC.overview], ["positions", "持仓中", IC.positions], ["history", "历史持仓", IC.history], ["wallets", "跟踪钱包", IC.wallets]]],
@@ -277,7 +274,7 @@ function Dashboard({ onLogout }) {
         {page === "overview" && <Overview ov={ov} />}
         {page === "positions" && <Positions confirm={setConfirmCfg} streamOpen={livePositions} />}
         {page === "history" && <History />}
-        {page === "wallets" && <Wallets confirm={setConfirmCfg} />}
+        {page === "wallets" && <Wallets confirm={setConfirmCfg} onDataChanged={refreshModeData} />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
         {page === "settings" && <Settings confirm={setConfirmCfg} initialTab={settingsTab}
           observerState={obs} onModeDataChanged={refreshModeData} />}
@@ -316,49 +313,76 @@ function Dashboard({ onLogout }) {
 function App() {
   const [authed, setAuthed] = useState(false);
   const [err, setErr] = useState(null);
-  const [user, setUser] = useState("admin");
-  const [pw, setPw] = useState("");          // empty by default (auto-login tries preview creds for local)
+  const [checkingSession, setCheckingSession] = useState(!!api.token);
+  const [loggingIn, setLoggingIn] = useState(false);
 
   useEffect(() => {
     const expired = () => {
       setAuthed(false);
+      setCheckingSession(false);
       setErr("登录已失效，请重新登录");
     };
     window.addEventListener(AUTH_EXPIRED_EVENT, expired);
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
   }, []);
 
-  // On mount: validate any existing token; if invalid/missing, auto-login (local preview creds only —
-  // harmless on prod where the password differs). Survives a server restart that wiped in-memory tokens.
+  // Validate an existing session only. Preview and production both require an explicit login when no
+  // valid token exists; this avoids a stale preview-credential request racing the user's first submit.
   useEffect(() => {
+    let cancelled = false;
+    if (!api.token) {
+      setCheckingSession(false);
+      return () => { cancelled = true; };
+    }
     (async () => {
       try {
-        if (api.token) { await api.get("/api/overview"); setAuthed(true); return; }
-      } catch (_e) { /* stale token -> fall through to login */ }
-      try { await api.login(DASH_USER, DASH_PW); setAuthed(true); } catch (_e) { setAuthed(false); }
+        await api.get("/api/overview");
+        if (!cancelled) setAuthed(true);
+      } catch (_e) {
+        if (!cancelled) setAuthed(false);
+      } finally {
+        if (!cancelled) setCheckingSession(false);
+      }
     })();
+    return () => { cancelled = true; };
   }, []);
 
-  const doLogin = async () => {
-    try { await api.login(user, pw); setAuthed(true); setErr(null); }
-    catch (_e) { setErr("账号或密码错误"); }
+  const doLogin = async event => {
+    event.preventDefault();
+    if (loggingIn || checkingSession) return;
+    const values = new FormData(event.currentTarget);
+    const username = String(values.get("username") || "").trim();
+    const password = String(values.get("password") || "");
+    setLoggingIn(true);
+    setErr(null);
+    try {
+      await api.login(username, password);
+      setAuthed(true);
+    } catch (_e) {
+      setErr("账号或密码错误");
+    } finally {
+      setLoggingIn(false);
+    }
   };
   const logout = () => { api.logout(); setAuthed(false); };
 
   if (authed) return <Dashboard onLogout={logout} />;
   return (
     <div className="login-shell">
-      <div className="login-card">
+      <form className="login-card" onSubmit={doLogin}>
         <div className="login-mark">跟</div>
         <h1>跟单监控台</h1>
         <p>COPY-TRADE OPS · 登录</p>
         {err && <p className="err">{err}</p>}
-        <input type="text" value={user} onChange={e => setUser(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && doLogin()} placeholder="账号" autoComplete="username" />
-        <input type="password" value={pw} onChange={e => setPw(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && doLogin()} placeholder="密码" autoComplete="current-password" />
-        <button className="btn btn-accent" style={{ width: "100%" }} onClick={doLogin}>登录</button>
-      </div>
+        <input type="text" name="username" defaultValue="admin" required disabled={checkingSession || loggingIn}
+          placeholder="账号" autoComplete="username" />
+        <input type="password" name="password" required disabled={checkingSession || loggingIn}
+          placeholder="密码" autoComplete="current-password" />
+        <button type="submit" className="btn btn-accent" style={{ width: "100%" }}
+          disabled={checkingSession || loggingIn} aria-busy={loggingIn || undefined}>
+          {checkingSession ? "验证会话…" : loggingIn ? "登录中…" : "登录"}
+        </button>
+      </form>
     </div>
   );
 }

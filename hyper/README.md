@@ -221,7 +221,9 @@ Wallet quality and funded-account membership are separate decisions.
 - `follow_selection` is atomically published with the scan generation. `recommendedCore` stores the pure
   score/replay recommendation, while `effectiveCore` overlays incumbency, risk and operator intent. Observer
   opens only for effective Core with `intent=active`.
-- Dashboard conditional exit uses `active → draining/requalify`. Draining captures every position ID present at
+- Dashboard conditional exit uses `active → draining/requalify`. The request reads only the currently selected
+  Paper or Live ledger, so an inactive-ledger position cannot block immediate requalification. Draining captures
+  every current-ledger position ID present at
   the click and reserves its Core seat. Once all captured positions close, aggregate post-fee profit with no
   liquidation/high/system block restores active automatically; otherwise the wallet moves to requalify.
   While a captured position remains open, clicking the same control again may cancel the unresolved drain,

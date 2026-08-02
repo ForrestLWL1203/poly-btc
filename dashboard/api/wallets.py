@@ -244,7 +244,8 @@ def _ep_selected_wallets(db, generation, role, page, size):
     """
     if role == "core":
         role_filter = (
-            "fs.role='core' AND COALESCE(tc.intent,'active')!='requalify'"
+            "fs.role='core' AND COALESCE(fs.enabled,1)=1 "
+            "AND COALESCE(tc.intent,'active')!='requalify'"
         )
         effective_role_sql = "'core'"
     elif role == "challenger":
@@ -305,7 +306,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "         fs.sector_policy_json AS selection_sector_policy_json,"
         "         fs.replayed_at "
         "  FROM follow_selection fs "
-        "  LEFT JOIN target_controls tc ON tc.addr=fs.addr "
+        "  LEFT JOIN target_controls tc ON lower(tc.addr)=lower(fs.addr) "
         "  LEFT JOIN wallet_registry wr ON lower(wr.addr)=lower(fs.addr) "
         "  LEFT JOIN follow_history sfh ON sfh.addr=fs.addr "
         "  LEFT JOIN execution_wallet_safety ews ON lower(ews.addr)=lower(fs.addr) "
@@ -388,7 +389,7 @@ def _ep_selected_wallets(db, generation, role, page, size):
         "COALESCE(ll.live_liquidity_skip_n,0) AS live_liquidity_skip_n,"
         "ll.live_liquidity_skip_coins "
         "FROM page_selected s LEFT JOIN watchlist w ON w.addr=s.addr "
-        "LEFT JOIN target_controls tc ON tc.addr=s.addr LEFT JOIN profile p ON p.addr=s.addr "
+        "LEFT JOIN target_controls tc ON lower(tc.addr)=lower(s.addr) LEFT JOIN profile p ON p.addr=s.addr "
         "LEFT JOIN active_strategy_revision ar ON ar.id=1 "
         "LEFT JOIN strategy_revision sr ON sr.revision=ar.revision "
         "LEFT JOIN json_each(sr.targets_json) ast "

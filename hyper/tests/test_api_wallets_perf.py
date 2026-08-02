@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dashboard.api import wallets as api_wallets
+from dashboard.api.discovery import followed_count
 from hyper import params, storage
 
 
@@ -64,6 +65,40 @@ class WalletDetailGuardedDb:
 
 
 class ApiWalletsPerfTests(unittest.TestCase):
+    def test_sidebar_count_matches_effective_followed_core_total(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO scan_generation "
+                "(generation,status,complete,publishable,is_current,started_at,published_at) "
+                "VALUES ('g1','published',1,1,1,'2026-01-01','2026-01-02')"
+            )
+            db.executemany(
+                "INSERT INTO follow_selection "
+                "(generation,addr,role,enabled,selection_rank,selected_at) "
+                "VALUES ('g1',?,'core',1,?,'2026-01-02')",
+                [("0xnew", 1), ("0xdraining", 2), ("0xrequalify", 3)],
+            )
+            db.executemany(
+                "INSERT INTO target_controls (addr,enabled,intent,updated_at) VALUES (?,?,?,'now')",
+                [
+                    ("0xdraining", 0, "draining"),
+                    ("0xrequalify", 0, "requalify"),
+                ],
+            )
+            db.commit()
+
+            sidebar_count = followed_count(db)
+            followed = api_wallets.ep_wallets(db, {"tab": ["followed"], "size": ["100"]})
+
+        self.assertEqual(2, sidebar_count)
+        self.assertEqual(followed["total"], sidebar_count)
+        self.assertEqual(
+            ["0xnew", "0xdraining"],
+            [wallet["address"] for wallet in followed["wallets"]],
+        )
+
     def _publish_selection(self, db, cores=()):
         db.execute(
             "INSERT INTO scan_generation "
