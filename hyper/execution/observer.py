@@ -1451,16 +1451,40 @@ class Observer:
         """Upsert this process's liveness + state machine row for the dashboard. heartbeat_at lets the
         UI flag a dead observer (stale) and lets the command channel self-heal."""
         self._proc_state = state
+        pid = None if state == "stopped" else os.getpid()
         self.db.execute(
             "INSERT INTO process_status (name,state,pid,heartbeat_at,detail_json) VALUES "
             "('observer',?,?,?,?) ON CONFLICT(name) DO UPDATE SET state=excluded.state,"
             "pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,detail_json=excluded.detail_json",
-            (state, os.getpid(), now_iso(),
+            (state, pid, now_iso(),
              json.dumps({"paused": self.paused, "targets": len(self.addrs),
                          "open": len(self.open_ep), "strategyRevision": self.strategy_revision_id,
                          "executionMode": self.execution_mode,
                          "executionState": self.execution_state})))
         self.db.commit()
+
+    def _interrupt_ws_for_stop(self):
+        """Wake the main WebSocket receive loop after an in-process drain completes.
+
+        With no subscribed BBO traffic, ``async for raw in conn`` can otherwise wait forever even after
+        ``self.stop`` is set.  That leaves systemd active and the Dashboard stuck on ``paused`` although the
+        Live session has already been finalized and has no exposure.
+        """
+        conn = self.ws
+        if conn is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def close_connection():
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001 — shutdown must still finish if transport close races
+                pass
+
+        loop.create_task(close_connection())
 
     async def consume_commands(self):
         """Poll the command channel and execute the commands this process OWNS (pause/resume/close/
@@ -1678,7 +1702,11 @@ class Observer:
         )
         self.db.commit()
         self.execution_state = "live_ready"
+        self.paused = False
+        self.draining = False
         self.stop = True
+        self._write_proc_status("stopped")
+        self._interrupt_ws_for_stop()
         return True
 
     def _cmd_wallet_exit_request(self, addr):

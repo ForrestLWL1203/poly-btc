@@ -155,13 +155,12 @@ export function AccountSettings({ confirm, observerState = null, onModeDataChang
     return () => clearInterval(timer);
   }, [reload]);
 
-  const active = !!status?.activeSessionId;
   const live = status?.selectedMode === "live";
   const verified = status?.credentials?.mainnet?.status === "verified";
   const observerRunning = !["stopped", "error", "failed"].includes(observerState);
 
   const toggleMode = async () => {
-    if (busy || active || observerRunning) return;
+    if (busy || observerRunning) return;
     setError(null);
     if (live) {
       setBusy(true);
@@ -208,7 +207,7 @@ export function AccountSettings({ confirm, observerState = null, onModeDataChang
         <button className={"execution-toggle " + (showLive ? "on" : "off")} type="button"
           role="switch" aria-checked={showLive} aria-label="切换 Paper 与实盘模式"
           title={observerRunning ? "请先使用右上角按钮停止当前跟单" : "切换 Paper 与实盘模式"}
-          disabled={busy || active || observerRunning} onClick={toggleMode}><i /></button>
+          disabled={busy || observerRunning} onClick={toggleMode}><i /></button>
         <span className="live-label">实盘</span>
       </div>
     </div>

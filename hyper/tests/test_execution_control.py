@@ -244,6 +244,31 @@ class ExecutionControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "live_exposure_prevents_paper_switch"):
             control.set_selected_mode(self.db, "paper")
 
+    def test_switch_to_paper_allows_flat_stopped_live_session(self):
+        control.ensure_execution_control(self.db)
+        self.db.execute(
+            "INSERT INTO execution_session "
+            "(session_id,mode,network,state,account_address,agent_address,strategy_revision,sizing_anchor,"
+            "margin_equity_pct,sizing_equity,started_at,updated_at) "
+            "VALUES ('live-flat','live','mainnet','stopped',?,?, 'r',8000,.8,6400,'t','t')",
+            (ACCOUNT, self.wallet.address.lower()),
+        )
+        self.db.execute(
+            "UPDATE execution_control SET selected_mode='live',state='live_ready',"
+            "active_session_id='live-flat' WHERE id=1"
+        )
+        self.db.execute(
+            "INSERT INTO process_status (name,state) VALUES ('observer','stopped') "
+            "ON CONFLICT(name) DO UPDATE SET state=excluded.state"
+        )
+
+        result = control.set_selected_mode(self.db, "paper")
+
+        self.assertEqual(result, {"selectedMode": "paper", "state": "paper"})
+        status = control.execution_status(self.db)
+        self.assertEqual(status["selectedMode"], "paper")
+        self.assertIsNone(status["activeSessionId"])
+
     def test_mode_switch_requires_observer_to_be_stopped(self):
         control.mark_credential_verified(
             self.db, "mainnet", valid_until="2100-01-01T00:00:00Z",
