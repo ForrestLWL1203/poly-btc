@@ -172,6 +172,39 @@ class ApiOverviewPerfTests(unittest.TestCase):
 
         self.assertEqual(overview["closedCount"], 2)
 
+    def test_verified_live_preview_drives_display_without_initializing_live_ledger(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,updated_at) "
+                "VALUES (1,'live','live_ready','2026-08-02T00:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO execution_credential "
+                "(network,account_address,agent_address,envelope_json,wrap_key_id,status,created_at,updated_at) "
+                "VALUES ('mainnet','0xaccount','0xagent','{}','key','verified',"
+                "'2026-08-02T00:00:00Z','2026-08-02T00:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO execution_account_preview "
+                "(network,account_address,equity,available,margin_used,unrealized_pnl,"
+                "position_count,open_order_count,observed_at) "
+                "VALUES ('mainnet','0xaccount',200,198,2,0,0,0,'2026-08-02T00:01:00Z')"
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+            equity = api_overview.ep_equity(db, "all")
+
+            self.assertEqual(overview["system"]["mode"], "live")
+            self.assertEqual(overview["equity"], 200.0)
+            self.assertEqual(overview["availableBalance"], 198.0)
+            self.assertEqual(overview["lastUpdate"], "2026-08-02T00:01:00Z")
+            self.assertEqual(equity["points"], [{"t": "2026-08-02T00:01:00Z", "equity": 200.0}])
+            self.assertIsNone(db.execute("SELECT * FROM live_copy_account").fetchone())
+            self.assertIsNone(db.execute("SELECT * FROM execution_session").fetchone())
+
     def test_overview_exposes_current_scan_stage(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

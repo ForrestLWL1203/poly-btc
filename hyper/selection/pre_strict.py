@@ -32,11 +32,7 @@ def copy_activity(results: Mapping, as_of_ms: int) -> dict:
     events = []
     for raw in primary.get("open_events") or ():
         event = dict(raw or {})
-        minimum = _num(event.get("minimum_notional"))
-        master = _num(event.get("master_notional"))
-        if minimum > 0.0 and master + 1e-9 < minimum:
-            continue
-        if str(event.get("outcome") or "") in {"skip_coin_blacklist", "skip_small_notl"}:
+        if str(event.get("outcome") or "") == "skip_coin_blacklist":
             continue
         stamp = int(_num(event.get("time")))
         if stamp > 0:
@@ -84,7 +80,7 @@ def copy_activity(results: Mapping, as_of_ms: int) -> dict:
     else:
         reason = "operational_activity"
     return {
-        "definition": "oid_deduped_copy_threshold_flat_to_open_or_flip",
+        "definition": "oid_deduped_flat_to_open_or_flip",
         "asOfMs": int(as_of_ms),
         "actionableOpenEvents30d": len(events),
         "actionableOpenEvents28d": len(recent),

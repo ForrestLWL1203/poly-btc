@@ -70,11 +70,11 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.09,
             tier_margin={"stable": 0.03, "mid": 0.03, "high": 0.02},
             tier_lev_cap={"stable": 20.0, "mid": 10.0, "high": 4.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
+            capital_anchor=10_000.0,
         )
         partial = plan_open_sizing(
             coin="xyz:MU", side="short", entry_px=100.0, sigma=0.06,
@@ -109,11 +109,11 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.09,
             tier_margin={"stable": 0.085, "mid": 0.05274, "high": 0.03625},
             tier_lev_cap={"stable": 20.0, "mid": 9.0, "high": 6.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.40, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
+            capital_anchor=10_000.0,
         )
         cases = (("BTC", 0.04, 850.0), ("ETH", 0.06, 527.4), ("ZEC", 0.12, 362.5))
         for coin, sigma, expected_margin in cases:
@@ -159,7 +159,6 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.10,
             tier_margin={"stable": 0.01, "mid": 0.01, "high": 0.01},
             tier_lev_cap={"stable": 25.0, "mid": 10.0, "high": 4.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
             max_deploy_pct=0.80,
@@ -197,7 +196,6 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.10,
             tier_margin={"stable": 0.01, "mid": 0.01, "high": 0.01},
             tier_lev_cap={"stable": 10.0, "mid": 10.0, "high": 4.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
             max_deploy_pct=0.80,
@@ -221,51 +219,57 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(plan.room, 2_400.0)
         self.assertEqual(plan.deploy_room, 6_400.0)
 
-        # The proportional dust floor follows the $6.4k sizing base. Tier notionals qualify only the source;
-        # they must not inflate our independently equity-scaled order.
+        # The proportional dust floor follows the $6.4k sizing base.
         dust_ok = replace(params, tier_margin={"stable": 0.006, "mid": 0.006, "high": 0.006})
         self.assertTrue(plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
             balance=8_000.0, available=8_000.0, existing_coin_margin=0.0,
             master_notional=100_000.0, master_leverage=10.0, params=dust_ok,
         ).ok)
-        fixed_floor = replace(params, tier_min_notional={"stable": 700.0, "mid": 700.0, "high": 700.0})
-        equity_scaled_below_tier_floor = plan_open_sizing(
+        equity_scaled_order = plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
             balance=8_000.0, available=8_000.0, existing_coin_margin=0.0,
-            master_notional=100_000.0, master_leverage=10.0, params=fixed_floor,
+            master_notional=100.0, master_leverage=10.0, params=params,
         )
-        self.assertTrue(equity_scaled_below_tier_floor.ok)
-        self.assertEqual(equity_scaled_below_tier_floor.notional, 640.0)
+        self.assertTrue(equity_scaled_order.ok)
+        self.assertEqual(equity_scaled_order.notional, 640.0)
 
-    def test_200_live_equity_scales_10k_paper_order_by_fifty(self):
+    def test_200_live_equity_scales_every_tier_from_10k_paper_by_fifty(self):
         params = OpenSizingParams(
             high_sigma_min=0.09,
-            tier_margin={"stable": 0.05, "mid": 0.03, "high": 0.03},
-            tier_lev_cap={"stable": 30.0, "mid": 12.0, "high": 5.0},
-            tier_min_notional={"stable": 5_000.0, "mid": 1_500.0, "high": 600.0},
+            tier_margin={"stable": 0.04, "mid": 0.029, "high": 0.015},
+            tier_lev_cap={"stable": 30.0, "mid": 9.0, "high": 4.0},
             tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
-            margin_equity_pct=0.80,
+            capital_anchor=10_000.0,
+            margin_equity_pct=1.0,
         )
-        paper = plan_open_sizing(
-            coin="BTC", side="long", entry_px=100.0, sigma=0.04,
-            balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
-            master_notional=100_000.0, master_leverage=30.0, params=params,
+        cases = (
+            ("BTC", 0.04, 30.0, 240.0),
+            ("ETH", 0.06, 9.0, 52.2),
+            ("ZEC", 0.12, 4.0, 12.0),
         )
-        live = plan_open_sizing(
-            coin="BTC", side="long", entry_px=100.0, sigma=0.04,
-            balance=200.0, available=200.0, existing_coin_margin=0.0,
-            master_notional=100_000.0, master_leverage=30.0,
-            params=replace(params, capital_anchor=200.0),
-        )
+        for coin, sigma, leverage, expected_live_notional in cases:
+            with self.subTest(coin=coin):
+                paper = plan_open_sizing(
+                    coin=coin, side="long", entry_px=100.0, sigma=sigma,
+                    balance=10_000.0, available=10_000.0, existing_coin_margin=0.0,
+                    master_notional=100_000.0, master_leverage=leverage, params=params,
+                )
+                live = plan_open_sizing(
+                    coin=coin, side="long", entry_px=100.0, sigma=sigma,
+                    balance=200.0, available=200.0, existing_coin_margin=0.0,
+                    master_notional=100_000.0, master_leverage=leverage,
+                    params=replace(params, capital_anchor=200.0),
+                )
 
-        self.assertTrue(paper.ok)
-        self.assertTrue(live.ok)
-        self.assertEqual((paper.margin, live.margin), (400.0, 8.0))
-        self.assertEqual((paper.notional, live.notional), (12_000.0, 240.0))
+                self.assertTrue(paper.ok)
+                self.assertTrue(live.ok)
+                self.assertAlmostEqual(paper.margin / live.margin, 50.0)
+                self.assertAlmostEqual(paper.notional / live.notional, 50.0)
+                self.assertAlmostEqual(live.notional, expected_live_notional)
 
         below_venue_minimum = plan_open_sizing(
             coin="BTC", side="long", entry_px=100.0, sigma=0.04,
@@ -281,11 +285,11 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.10,
             tier_margin={"stable": 0.015, "mid": 0.02, "high": 0.01},
             tier_lev_cap={"stable": 25.0, "mid": 10.0, "high": 4.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
+            capital_anchor=10_000.0,
         )
 
         plan = plan_open_sizing(
@@ -314,11 +318,11 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.10,
             tier_margin={"stable": 0.04, "mid": 0.03, "high": 0.02},
             tier_lev_cap={"stable": 35.0, "mid": 12.0, "high": 4.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
+            capital_anchor=10_000.0,
         )
 
         plan = plan_open_sizing(
@@ -337,11 +341,11 @@ class CopyEngineTests(unittest.TestCase):
             high_sigma_min=0.09,
             tier_margin={"stable": 0.04, "mid": 0.03, "high": 0.02},
             tier_lev_cap={"stable": 25.0, "mid": 12.0, "high": 4.0},
-            tier_min_notional={"stable": 0.0, "mid": 0.0, "high": 0.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
             max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
+            capital_anchor=10_000.0,
         )
 
         mid = plan_open_sizing(

@@ -102,12 +102,11 @@ STORAGE_GUARD_DISK_CRITICAL_PCT = 85.0
 STORAGE_GUARD_DB_GROWTH_WARN_BYTES_24H = 1_000_000_000
 STORAGE_GUARD_WAL_WARN_BYTES = 512 * 1024 * 1024
 
-# Copy account & sizing (UI-tunable). Real-account paper model: a simulated wallet with an initial
-# balance. Each copy commits isolated margin out of CURRENT AVAILABLE balance, sized by VOLATILITY
-# TARGETING (below) — never a fixed $ amount, always a fraction of available. notional = margin *
-# leverage; isolated liquidation (loss = margin). No stop-loss in v1.
-PAPER_WALLET_INITIAL_BALANCE = 10000.0  # paper wallet balance before strategy allocation
-INITIAL_BALANCE = 10000.0   # paper strategy initial allocation / drawdown sizing anchor ($)
+# Copy account & sizing (UI-tunable). ``INITIAL_BALANCE`` belongs only to the Paper ledger and the
+# standardized comparable replay. Mainnet Live freezes its own real account equity as each execution
+# session's sizing anchor; no Live sizing path may inherit this dollar value. Each copy commits isolated
+# margin out of CURRENT AVAILABLE balance as an equity percentage. notional = margin * leverage.
+INITIAL_BALANCE = 10000.0   # Paper / standardized replay starting equity ($); never a Live default
 # Profits compound at full current strategy equity. Below the allocation anchor,
 # position size contracts by this exponent instead of shrinking dollar-for-dollar.
 # The multiplier prevents a deeply depleted account from taking recovery-sized risk.
@@ -134,8 +133,7 @@ HIGH_MAX_ADDS   = 1         # volatile/meme/stock → at most one add (don't bui
 #   leverage = the σ-tier's LEV CAP (v10: σ-scaled RISK_BUDGET/σ dropped as redundant with tier cap +
 #              master-lev cap + margin/coin/deploy limits + σ-stop). Clipped by MIN/MAX_LEV and the
 #              master's own leverage. σ still selects the tier.
-#   notional = margin × leverage. The source's cumulative flat→open position must first cross the tier floor,
-#              but once confirmed it does not cap our independently sized notional.
+#   notional = margin × leverage. Source notional never gates or caps our independently sized order.
 HIGH_SIGMA_MIN   = 0.09     # non-BTC σ ≥ this → HIGH-VOL tier; otherwise → MID tier
 STABLE_MARGIN_MIN_PCT = 0.020  # legacy snapshot compatibility; firepower-line shrinking is retired
 MID_MARGIN_MIN_PCT    = 0.020
@@ -146,13 +144,8 @@ HIGH_MARGIN_PCT   = 0.030
 STABLE_LEV_CAP = 30.0       # leverage ceiling for STABLE-tier coins (operator-tuned: BTC 作为基准 30x)
 MID_LEV_CAP    = 12.0       # ...for MID-tier coins
 HIGH_LEV_CAP   = 5.0        # ...for HIGH-VOL-tier coins
-# PER-TIER source-signal floors: the target wallet's cumulative flat→open position must reach the tier
-# threshold before it becomes copyable. Our independently sized order is allowed to scale with real account
-# equity; only Hyperliquid's actual minimum order notional remains fixed. This keeps a $200 Live account a
-# true 1/50-scale version of the $10k Paper account without following economically tiny source probes.
-STABLE_MIN_NOTIONAL = 5000.0   # BTC only: below this it's not worth opening
-MID_MIN_NOTIONAL    = 1500.0   # mid-vol coins
-HIGH_MIN_NOTIONAL   = 600.0    # volatile/meme/stock: smaller floor (higher σ, smaller sizes are normal)
+# Every valid target flat→open/flip is a signal regardless of its source amount. Only Hyperliquid's actual
+# minimum order notional remains fixed after our equity-based sizing.
 HYPERLIQUID_MIN_PERP_NOTIONAL_USD = 10.0
 #                             (STOCK_FORCE_HIGH_TIER rolled back 2026-07-01 — stocks tier by their own σ;
 #                             their over-leverage risk is handled by the master-leverage cap, not tier-forcing.)
@@ -245,8 +238,8 @@ MIN_OPEN_MARGIN_PCT = 0.005 # skip a new copy/add if the post-cap margin is belo
 #                             position, just skip the signal (don't open dust). Existing positions stay
 #                             managed/exited. High-conviction signals (bigger rf) still open later than
 #                             low-conviction ones, which is intended. UI-tunable.
-# (the flat post-cap dust floor MIN_COPY_NOTIONAL was replaced by the per-tier STABLE/MID/HIGH_MIN_NOTIONAL
-#  above — a $4-probe master position now falls under its tier's min and is skipped.)
+# The target wallet's source notional is never an admission threshold. Our own post-sizing order still has
+# to clear Hyperliquid's venue minimum; otherwise the signal is skipped as an unexecutable dust order.
 EXECUTION_QUOTE_MAX_AGE_MS = 5_000  # Paper fills never reuse an older BBO; builder perps refetch l2Book on demand.
 OBSERVER_DB_BUSY_TIMEOUT_MS = 1_500  # Retry fills quickly instead of freezing the whole event loop for 30s.
 MAX_LEV = 50.0             # v10: raised 20→50 — leverage is now the VISIBLE σ-tier cap; MAX_LEV is only a
@@ -454,6 +447,5 @@ HEDGE_MAX_FRAC = 0.5
 
 # paper-copy simulation
 TAKER_FEE = 0.00045
-NOTIONAL = 1000.0            # fixed paper notional per copied trade ($)
 
 DEFAULT_DB = "data/hl.db"

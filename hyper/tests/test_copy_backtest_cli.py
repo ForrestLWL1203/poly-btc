@@ -84,7 +84,6 @@ class CopyBacktestCliTests(unittest.TestCase):
             params.seed_params(db)
             db.execute("UPDATE params SET value='1.5' WHERE key='STABLE_MARGIN_PCT'")
             db.execute("UPDATE params SET value='25' WHERE key='STABLE_LEV_CAP'")
-            db.execute("UPDATE params SET value='2500' WHERE key='STABLE_MIN_NOTIONAL'")
             db.execute("INSERT INTO coin_vol (coin,sigma) VALUES ('BTC',0.04)")
             fills = [
                 {"time": 1, "tid": 1, "coin": "BTC", "side": "B", "sz": "10000", "startPosition": "0", "px": "100", "oid": 1, "crossed": True},

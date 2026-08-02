@@ -113,12 +113,27 @@ function useDashboardStream(token) {
 }
 
 function useOverviewRefresh(api, live, streamOk) {
+  const [modeSnapshot, setModeSnapshot] = useState(null);
   const loadOverview = useCallback(() => api.get("/api/overview"), [api]);
   const { data: polledOverview, setData: setPolledOverview } = useApiResource(loadOverview, { intervalMs: 7000, enabled: !streamOk });
+  const streamedOverview = streamOk && live && live.overview;
+
+  useEffect(() => {
+    if (!modeSnapshot || !streamedOverview) return;
+    if (streamedOverview?.system?.mode === modeSnapshot?.system?.mode) setModeSnapshot(null);
+  }, [modeSnapshot, streamedOverview]);
+
+  const refreshOverview = useCallback(async () => {
+    const next = await loadOverview();
+    setPolledOverview(next);
+    if (streamOk) setModeSnapshot(next);
+    return next;
+  }, [loadOverview, setPolledOverview, streamOk]);
 
   return {
-    overview: (streamOk && live && live.overview) || polledOverview,
+    overview: modeSnapshot || streamedOverview || polledOverview,
     setPolledOverview,
+    refreshOverview,
   };
 }
 
@@ -179,9 +194,13 @@ function useObserverTransition(api, setOverview) {
 
 export function useDashboardRefresh(api) {
   const { live, streamOk } = useDashboardStream(api.token);
-  const { overview, setPolledOverview } = useOverviewRefresh(api, live, streamOk);
+  const { overview, setPolledOverview, refreshOverview } = useOverviewRefresh(api, live, streamOk);
   const loadExecution = useCallback(() => api.get("/api/execution/status"), [api]);
-  const { data: execution } = useApiResource(loadExecution, { intervalMs: 5000 });
+  const { data: execution, reload: refreshExecution } = useApiResource(loadExecution, { intervalMs: 5000 });
+  const refreshModeData = useCallback(async () => {
+    const [nextOverview, nextExecution] = await Promise.all([refreshOverview(), refreshExecution()]);
+    return { overview: nextOverview, execution: nextExecution };
+  }, [refreshOverview, refreshExecution]);
   const serverScanning = !!(overview && overview.system && overview.system.scanner === "scanning");
   const scan = useManualScanProgress(api, serverScanning);
   const observer = useObserverTransition(api, setPolledOverview);
@@ -191,6 +210,7 @@ export function useDashboardRefresh(api) {
     execution,
     livePositions: streamOk ? (live && live.positions) : null,
     streamOk,
+    refreshModeData,
     ...scan,
     ...observer,
   };

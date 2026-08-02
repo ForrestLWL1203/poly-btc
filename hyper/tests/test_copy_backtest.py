@@ -302,7 +302,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["closed_n"], 1)
         self.assertIsNone(result["skip_reasons"].get("skip_low_liquidity"))
 
-    def test_economic_small_open_is_excluded_from_effective_follow_denominator(self):
+    def test_source_notional_never_filters_open_signal(self):
         fills = [
             fill(1_000, "HYPE", "B", 986.34, 0, 1.0, 1),
             fill(2_000, "HYPE", "A", 986.34, 986.34, 1.01, 2),
@@ -310,24 +310,17 @@ class CopyBacktestTests(unittest.TestCase):
             fill(4_000, "ETH", "A", 10_000, 10_000, 1.01, 4),
         ]
 
-        result = run_backtest(
-            "0xabc", fills, sigmas={"HYPE": 0.062, "ETH": 0.062},
-            overrides={"MID_MIN_NOTIONAL": 1_000.0},
-        )
+        result = run_backtest("0xabc", fills, sigmas={"HYPE": 0.062, "ETH": 0.062})
 
         self.assertEqual(result["raw_target_open_events"], 2)
-        self.assertEqual(result["small_open_excluded_n"], 1)
-        self.assertEqual(result["effective_target_open_events"], 1)
-        self.assertEqual(result["opened_n"], 1)
+        self.assertEqual(result["small_open_excluded_n"], 0)
+        self.assertEqual(result["effective_target_open_events"], 2)
+        self.assertEqual(result["opened_n"], 2)
         self.assertEqual(result["effective_open_follow_rate"], 1.0)
-        self.assertEqual(result["raw_open_capture_rate"], 0.5)
-        detail = result["open_execution_audit"]["skipDetails"][0]
-        self.assertEqual(detail["coin"], "HYPE")
-        self.assertEqual(detail["tier"], "mid")
-        self.assertEqual(detail["reason"], "skip_small_notl")
-        self.assertEqual(detail["minimumNotional"], 1_000.0)
+        self.assertEqual(result["raw_open_capture_rate"], 1.0)
+        self.assertEqual(result["open_execution_audit"]["skipDetails"], [])
 
-    def test_sliced_open_retries_when_target_position_grows_past_notional_floor(self):
+    def test_sliced_open_follows_first_fill_and_same_oid_extends_open_anchor(self):
         fills = [
             fill(1_000, "BTC", "A", 1, 0, 1_000.0, 1),
             fill(1_050, "BTC", "A", 2, -1, 1_000.0, 1),
@@ -335,10 +328,7 @@ class CopyBacktestTests(unittest.TestCase):
             fill(2_000, "BTC", "B", 4, -4, 990.0, 2),
         ]
 
-        result = run_backtest(
-            "0xabc", fills, sigmas={"BTC": 0.04},
-            overrides={"STABLE_MIN_NOTIONAL": 2_500.0},
-        )
+        result = run_backtest("0xabc", fills, sigmas={"BTC": 0.04})
 
         self.assertEqual(result["raw_target_open_events"], 1)
         self.assertEqual(result["effective_target_open_events"], 1)
@@ -346,11 +336,10 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["opened_n"], 1)
         self.assertEqual(result["closed_n"], 1)
         self.assertEqual(result["effective_open_follow_rate"], 1.0)
-        self.assertIsNone(result["skip_reasons"].get("skip_small_notl"))
         self.assertIsNone(result["skip_reasons"].get("skip_midway"))
-        self.assertTrue(result["open_events"][0]["retriedAfterSmallSlice"])
-        self.assertEqual(result["open_events"][0]["master_notional"], 3_000.0)
-        self.assertGreater(result["open_events"][0]["copy_notional"], 3_000.0)
+        self.assertNotIn("retriedAfterSmallSlice", result["open_events"][0])
+        self.assertEqual(result["open_events"][0]["master_notional"], 1_000.0)
+        self.assertGreater(result["open_events"][0]["copy_notional"], 0.0)
         self.assertEqual(result["target_adds"], 0)
         self.assertGreater(result["positions"][0]["net_pnl"], 0)
 

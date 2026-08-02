@@ -64,8 +64,11 @@ Paper and Mainnet Live use the same target signals, sizing, add/reduce/close log
 Live replaces the Paper simulated fill with a signed Mainnet IOC and updates the Live ledger only from actual
 fills. `MARGIN_EQUITY_PCT` scales each order's equity sizing base; it is not a reserved pool or total deployment
 cap. Discovery data, the published Core and its immutable strategy revision are shared across modes; switching
-Paper/Live never triggers a rescan or rebuilds Core. Per-tier minimum notionals qualify the target wallet's
-source signal only, while our order scales with actual account equity down to Hyperliquid's 10 USD venue floor.
+Paper/Live never triggers a rescan or rebuilds Core. Every valid target opening signal is considered regardless
+of the target's notional; our order scales with actual account equity down to Hyperliquid's 10 USD venue floor.
+Every Live startup reconciles current exchange equity/available collateral, and each exposure increase refreshes
+them again before sizing. The session-start equity is only the same drawdown-smoothing anchor used by Paper; a
+prior Live session's ledger start or the standardized Paper balance can never become the new session's anchor.
 Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
 Unified account, a passing read-only preflight and the mandatory small-funds Canary.
 
@@ -159,7 +162,7 @@ Wallet quality and funded-account membership are separate decisions.
   `qualificationPnl = closedPnl - abs(min(unrealizedPnl, 0))`. Closed PnL must be positive in both 30-day and
   7-day windows, conservative PnL must remain positive, and 30-day open loss may not exceed 50% of closed
   profit. This definition is shared by source profiles, individual Copy, shared replay and tuning.
-- Activity is frozen once per generation from OID-deduplicated, source-notional-qualified flat-to-open/flip
+- Activity is frozen once per generation from OID-deduplicated flat-to-open/flip
   opportunities: the latest seven days must contain one opportunity, at least three of four rolling seven-day
   buckets must be active, and the maximum 28-day opening gap may not exceed ten days. The 72-hour value remains
   display/ranking context only; it is not an admission veto.
@@ -168,10 +171,9 @@ Wallet quality and funded-account membership are separate decisions.
   Copy Episodes over 30 days, Copy Profit Factor at least 1.25, at least 70% open follow, complete valuation,
   and conditional lottery protection. Fixed 60%/70%/85% win-rate floors are retired: a sub-50% win wallet may
   pass when its PF is sound, Top3 profit is not dominant, and the post-Top3 body remains profitable.
-  Historical replay assumes liquidity was executable. A source flat-to-open lifecycle remains pending until its
-  cumulative position reaches the tier minimum notional and is excluded only if it never does. Once confirmed,
-  our open is sized independently by our margin, leverage and capacity rules instead of being capped by source
-  notional. Further fills from the confirming opening OID extend the opening anchor and are never treated as
+  Historical replay assumes liquidity was executable. Every source flat-to-open lifecycle is eligible without
+  a source-notional threshold; our open is sized independently by our equity, margin, leverage and capacity
+  rules. Further fills from the opening OID extend the opening anchor and are never treated as
   smart adds. A later add OID may wait for cumulative slices to become actionable, but its first Copy execution
   seals the OID and later slices cannot submit another add. Structural execution density counts distinct OIDs,
   not exchange fill fragments. Live Observer liquidity skips remain separate audit evidence.

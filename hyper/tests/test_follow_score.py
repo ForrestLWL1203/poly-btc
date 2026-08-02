@@ -337,8 +337,8 @@ class ActivityTests(unittest.TestCase):
         ]
         activity = pre_strict.copy_activity({30: {"open_events": events}}, NOW)
         self.assertTrue(activity["operational"])
-        self.assertEqual(activity["weeklyOpenCountsOldestFirst"], [1, 1, 1, 1])
-        self.assertEqual(activity["actionableOpenEvents28d"], 4)
+        self.assertEqual(activity["weeklyOpenCountsOldestFirst"], [1, 1, 1, 2])
+        self.assertEqual(activity["actionableOpenEvents28d"], 5)
 
     def test_72_hours_has_no_veto(self):
         day = pre_strict.DAY_MS

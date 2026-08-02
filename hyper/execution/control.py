@@ -103,6 +103,7 @@ def store_encrypted_credential(
             stamp,
         ),
     )
+    db.execute("DELETE FROM execution_account_preview WHERE network=?", (normalized_network,))
     ensure_execution_control(db)
     db.execute(
         "UPDATE execution_control SET state=CASE WHEN selected_mode='live' THEN 'credential_error' ELSE state END,"
@@ -164,7 +165,24 @@ def delete_credential(db, network: ExecutionNetwork | str) -> dict:
         ).fetchone()
         if active:
             raise ValueError("mainnet_credential_in_use")
+        selected = db.execute(
+            "SELECT selected_mode FROM execution_control WHERE id=1"
+        ).fetchone()
+        if selected and selected[0] == ExecutionMode.LIVE.value:
+            observer = db.execute(
+                "SELECT state FROM process_status WHERE name='observer'"
+            ).fetchone()
+            if observer and str(observer[0] or "stopped") not in {"stopped", "error", "failed"}:
+                raise ValueError("observer_must_be_stopped")
     deleted = db.execute("DELETE FROM execution_credential WHERE network=?", (normalized,)).rowcount
+    db.execute("DELETE FROM execution_account_preview WHERE network=?", (normalized,))
+    if normalized == ExecutionNetwork.MAINNET.value and deleted:
+        ensure_execution_control(db)
+        db.execute(
+            "UPDATE execution_control SET selected_mode='paper',state='paper',active_session_id=NULL,"
+            "last_error_code=NULL,last_error_at=NULL,updated_at=? WHERE id=1",
+            (now_iso(),),
+        )
     return {"network": normalized, "deleted": bool(deleted), "authorizationRevocationRequired": bool(deleted)}
 
 
@@ -245,6 +263,17 @@ def execution_status(db) -> dict:
             "errorCode": row[6],
             "updatedAt": row[7],
         }
+    preview_row = db.execute(
+        "SELECT p.network,p.account_address,p.equity,p.available,p.margin_used,p.unrealized_pnl,"
+        "p.position_count,p.open_order_count,p.observed_at FROM execution_account_preview p "
+        "JOIN execution_credential c ON c.network=p.network AND lower(c.account_address)=lower(p.account_address) "
+        "WHERE p.network='mainnet'"
+    ).fetchone()
+    account_preview = None if not preview_row else {
+        "network": preview_row[0], "accountAddress": preview_row[1], "equity": preview_row[2],
+        "available": preview_row[3], "marginUsed": preview_row[4], "unrealizedPnl": preview_row[5],
+        "positionCount": preview_row[6], "openOrderCount": preview_row[7], "observedAt": preview_row[8],
+    }
     session = None
     if control[2]:
         row = db.execute(
@@ -320,6 +349,7 @@ def execution_status(db) -> dict:
         "lastErrorAt": control[5],
         "updatedAt": control[6],
         "credentials": credentials,
+        "accountPreview": account_preview,
         "session": session,
         "preflight": preflight,
         "reconcile": reconcile,

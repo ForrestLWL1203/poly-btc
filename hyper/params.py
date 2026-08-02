@@ -165,30 +165,24 @@ PARAM_SPEC = [
         "旧稳定档·保证金下限", "兼容旧策略快照；满火力线退役后不再参与新仓计算"),
     ("STABLE_LEV_CAP",       "follow",  "yellow", "x",       "immediate", config.STABLE_LEV_CAP,
         "稳定档·杠杆上限", "稳定档杠杆封顶"),
-    ("STABLE_MIN_NOTIONAL",  "follow",  "yellow", "usd",     "immediate", config.STABLE_MIN_NOTIONAL,
-        "稳定档·目标信号门槛", "目标钱包的BTC累计开仓名义额低于此则暂不跟；我方订单仍按自身真实权益同比缩放"),
     ("MID_MARGIN_PCT",       "follow",  "yellow", "pct",     "immediate", config.MID_MARGIN_PCT * 100,
         "中档·保证金上限", "中档低占用时每单保证金上限,占权益%"),
     ("MID_MARGIN_MIN_PCT",   "follow",  "hidden", "pct",     "immediate", config.MID_MARGIN_MIN_PCT * 100,
         "旧中档·保证金下限", "兼容旧策略快照；满火力线退役后不再参与新仓计算"),
     ("MID_LEV_CAP",          "follow",  "yellow", "x",       "immediate", config.MID_LEV_CAP,
         "中档·杠杆上限", "中档杠杆封顶"),
-    ("MID_MIN_NOTIONAL",     "follow",  "yellow", "usd",     "immediate", config.MID_MIN_NOTIONAL,
-        "中档·目标信号门槛", "目标钱包的ETH/SOL等累计开仓名义额低于此则暂不跟；不限制我方按权益缩放后的金额"),
     ("HIGH_MARGIN_PCT",      "follow",  "yellow", "pct",     "immediate", config.HIGH_MARGIN_PCT * 100,
         "剧烈档·保证金上限", "剧烈档低占用时每单保证金上限,占权益%"),
     ("HIGH_MARGIN_MIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.HIGH_MARGIN_MIN_PCT * 100,
         "旧剧烈档·保证金下限", "兼容旧策略快照；满火力线退役后不再参与新仓计算"),
     ("HIGH_LEV_CAP",         "follow",  "yellow", "x",       "immediate", config.HIGH_LEV_CAP,
         "剧烈档·杠杆上限", "剧烈档杠杆封顶"),
-    ("HIGH_MIN_NOTIONAL",    "follow",  "yellow", "usd",     "immediate", config.HIGH_MIN_NOTIONAL,
-        "剧烈档·目标信号门槛", "目标钱包的meme/高波动币累计开仓名义额低于此则暂不跟；我方只受真实权益与交易所最小单限制"),
     # 分档最多加仓 —— 仅老模式(SMART_ADD 关)生效; 智能加仓走 σ波动闸+ADD_MAX_HARD. v10: 藏,避免占版面
     ("STABLE_MAX_ADDS",      "follow",  "hidden", "int",     "immediate", config.STABLE_MAX_ADDS, "稳定档·硬上限加仓", ""),
     ("MID_MAX_ADDS",         "follow",  "hidden", "int",     "immediate", config.MID_MAX_ADDS, "中档·硬上限加仓", ""),
     ("HIGH_MAX_ADDS",        "follow",  "hidden", "int",     "immediate", config.HIGH_MAX_ADDS, "剧烈档·硬上限加仓", ""),
     ("ADD_FRAC",             "follow",  "yellow", "pct",     "immediate", config.ADD_FRAC * 100,
-        "每次加仓比例", "每次加仓额 = 首开保证金 × 此%(50=首开一半)。BTC首开3%+3次加仓 → 满仓7.5%,不是叠成12%"),
+        "每次加仓比例", "硬上限模式下每次加仓额 = 该仓首开保证金 × 此%(50=首开的一半)"),
     # ── 加仓策略引擎(B 逆向加仓)—— SMART_ADD 开=智能动态,关=老分档硬cap ──
     ("FOLLOW_POS_ADD",       "follow",  "green",  "bool",    "immediate", config.FOLLOW_POS_ADD,
         "A·跟随正向加仓", "目标顺势加仓(拉高成本追盈利)时是否跟。开=还要过顺势波动闸,避免小碎单全跟"),
@@ -283,14 +277,11 @@ _RISK_PREVIOUS_DEFAULTS = {
     "DEPLOY_FULL_PCT": ("30", "30.0", "40", "40.0", "50", "50.0", "60", "60.0"),
     "HIGH_LEV_CAP": ("4", "4.0"),
     "HIGH_MARGIN_PCT": ("2", "2.0"),
-    "HIGH_MIN_NOTIONAL": ("250", "250.0"),
     "MID_COIN_CAP_PCT": ("22", "22.0"),
     "MID_LEV_CAP": ("10", "10.0"),
-    "MID_MIN_NOTIONAL": ("1000", "1000.0"),
     "MAX_CONCURRENT_POS": ("15", "15.0"),
     "STABLE_LEV_CAP": ("25", "25.0"),
     "STABLE_MARGIN_PCT": ("3.5", "3.5000000000000004"),
-    "STABLE_MIN_NOTIONAL": ("2500", "2500.0"),
 }
 
 
@@ -369,7 +360,8 @@ def seed_params(db):
         "'OFFICIAL_PERP_FOLD_DAYS','OFFICIAL_PERP_FOLD_COUNT',"
         "'OFFICIAL_PERP_MIN_FOLD_RETURN','COPY_CAMPAIGN_ZERO_RETURN_PRIOR',"
         "'STOCK_MAX_LEV','PORTFOLIO_DRAWDOWN_STOP_ENABLE',"
-        "'PORTFOLIO_DRAWDOWN_STOP_PCT')"
+        "'PORTFOLIO_DRAWDOWN_STOP_PCT','STABLE_MIN_NOTIONAL',"
+        "'MID_MIN_NOTIONAL','HIGH_MIN_NOTIONAL')"
     )
     for key, category, level, ptype, effect, default, name, desc in PARAM_SPEC:
         dv = _to_text(default)

@@ -1,21 +1,18 @@
 export const PARAM_META = {
   // follow
   STABLE_MARGIN_PCT: { name: "稳定档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "2–10", up: "每单更重", dn: "加仓余量更多" },
-  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定稳定档的杠杆封顶(仍受目标/交易所上限约束)", range: "15–28", up: "放开高杠杆", dn: "压低杠杆" },
-  STABLE_MIN_NOTIONAL: { name: "稳定档·目标信号门槛", desc: "只检查目标钱包BTC累计开仓;我方金额仍按真实权益缩放", range: "基线$5k", up: "过滤更多目标小单", dn: "接受更小目标信号" },
+  STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定稳定档的杠杆封顶(仍受目标/交易所上限约束)", range: "15–35", up: "放开高杠杆", dn: "压低杠杆" },
   MID_MARGIN_PCT: { name: "中档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "2–6", up: "每单更重", dn: "加仓余量更多" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "非BTC且σ低于9%时的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
-  MID_MIN_NOTIONAL: { name: "中档·目标信号门槛", desc: "检查目标钱包HYPE/ETH/SOL等累计开仓;不限制我方同比缩放", range: "基线$1.5k", up: "过滤更多目标小单", dn: "接受更小目标信号" },
   HIGH_MARGIN_PCT: { name: "剧烈档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "1–4", up: "每单更重", dn: "加仓余量更多" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥9%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
-  HIGH_MIN_NOTIONAL: { name: "剧烈档·目标信号门槛", desc: "检查目标钱包meme/高波动币累计开仓;我方只受真实权益与交易所最小单限制", range: "基线$600", up: "过滤更多目标小单", dn: "接受更小目标信号" },
   SMART_TP_ENABLE: { name: "智能动态止盈", desc: "开启后接管旧尾仓保护；按波动率激活高水位并在回撤时分批止盈，保留30%尾仓", range: "默认关闭" },
   MARGIN_EQUITY_PCT: { name: "保证金权益额度", desc: "每笔新仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结", range: "10–100", up: "每个信号开得更重", dn: "单笔更轻、可容纳更多信号" },
-  MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–85", up: "允许更多新仓", dn: "更早锁住新仓" },
+  MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–90", up: "允许更多新仓", dn: "更早锁住新仓" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },
-  ADD_FRAC: { name: "每次加仓比例", desc: "每次加仓额=首开保证金×此%(50=首开一半;首开3%+3加=满仓7.5%)", range: "30–60", up: "加仓更猛、满仓更重", dn: "加仓更轻" },
+  ADD_FRAC: { name: "每次加仓比例", desc: "硬上限模式下每次加仓额=该仓首开保证金×此%(50=首开的一半)", range: "30–60", up: "加仓更猛、满仓更重", dn: "加仓更轻" },
   STABLE_MAX_ADDS: { name: "稳定档·最多加仓", desc: "BTC/大饼一笔最多跟几次加仓(波动小,可多摊)", range: "2–4", up: "跟更多加仓", dn: "更早停跟" },
   MID_MAX_ADDS: { name: "中档·最多加仓", desc: "ETH/SOL/HYPE一笔最多跟几次加仓", range: "1–3", up: "跟更多加仓", dn: "更早停跟" },
   HIGH_MAX_ADDS: { name: "剧烈档·最多加仓", desc: "meme/野币/高波股一笔最多跟几次加仓(波动大,少加/设0)", range: "0–2", up: "跟更多加仓", dn: "更早停跟" },
@@ -53,7 +50,6 @@ export const TIER_GROUPS = [
     tint: "tint-green",
     max: "STABLE_MARGIN_PCT",
     lev: "STABLE_LEV_CAP",
-    notl: "STABLE_MIN_NOTIONAL",
     cap: "STABLE_COIN_CAP_PCT",
   },
   {
@@ -63,7 +59,6 @@ export const TIER_GROUPS = [
     tint: "tint-amber",
     max: "MID_MARGIN_PCT",
     lev: "MID_LEV_CAP",
-    notl: "MID_MIN_NOTIONAL",
     cap: "MID_COIN_CAP_PCT",
   },
   {
@@ -73,7 +68,6 @@ export const TIER_GROUPS = [
     tint: "tint-red",
     max: "HIGH_MARGIN_PCT",
     lev: "HIGH_LEV_CAP",
-    notl: "HIGH_MIN_NOTIONAL",
     cap: "HIGH_COIN_CAP_PCT",
   },
 ];

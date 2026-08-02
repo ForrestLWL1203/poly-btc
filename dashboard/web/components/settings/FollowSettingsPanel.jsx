@@ -8,7 +8,7 @@ import {
   TIER_GROUPS,
 } from "./paramMeta.js";
 
-const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.max, g.lev, g.notl, g.cap]));
+const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.max, g.lev, g.cap]));
 const deployKeys = new Set(["MAX_DEPLOY_PCT"]);
 const marginEquityKey = "MARGIN_EQUITY_PCT";
 
@@ -66,7 +66,7 @@ export function FollowSettingsPanel({
       )}
       {TIER_GROUPS.map(group => {
         const open = openTiers[group.key];
-        const rows = [group.lev, group.notl, group.cap].map(k => paramsByKey.get(k)).filter(Boolean);
+        const rows = [group.lev, group.cap].map(k => paramsByKey.get(k)).filter(Boolean);
         return (
           <div key={group.key}>
             <div className={"expand-head" + (open ? " open" : "")} onClick={() => setOpenTiers(o => ({ ...o, [group.key]: !o[group.key] }))}>
@@ -74,7 +74,7 @@ export function FollowSettingsPanel({
               <span className={"pill " + group.tint}>{group.label}</span>
               <span className="muted" style={{ fontSize: 12 }}>{group.sub}</span>
               {!open && <span className="muted" style={{ marginLeft: "auto", fontSize: 11 }}>
-                保证金 {fParam(vals[group.max], "pct")}% · 杠杆 ≤{fParam(vals[group.lev], "x")}x · 最低 ${fParam(vals[group.notl], "usd")} · 单币上限 {fParam(vals[group.cap], "pct")}%
+                保证金 {fParam(vals[group.max], "pct")}% · 杠杆 ≤{fParam(vals[group.lev], "x")}x · 单币上限 {fParam(vals[group.cap], "pct")}%
               </span>}
             </div>
             {open && <div className="expand-body">

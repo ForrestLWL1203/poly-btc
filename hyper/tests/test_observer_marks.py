@@ -149,6 +149,59 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertEqual(obs._open_sizing_params().margin_equity_pct, 0.5)
         self.assertEqual(tuple(after), tuple(before))
 
+    def test_live_sizing_uses_current_session_anchor_and_fresh_exchange_balance(self):
+        async def run():
+            db = self._db()
+            stamp = now_iso()
+            db.execute(
+                "INSERT INTO execution_session "
+                "(session_id,mode,network,state,account_address,agent_address,strategy_revision,"
+                "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
+                "VALUES ('live-current','live','mainnet','live_running',?,?, 'revision-one',200,1,200,0,NULL,?,?)",
+                ("0x" + "a" * 40, "0x" + "b" * 40, stamp, stamp),
+            )
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+                "VALUES (1,'live','live_running','live-current',?) "
+                "ON CONFLICT(id) DO UPDATE SET selected_mode='live',state='live_running',"
+                "active_session_id='live-current',updated_at=excluded.updated_at",
+                (stamp,),
+            )
+            # Lifetime ROI may legitimately retain an older $8k starting point. It must not become this
+            # newly downsized session's sizing anchor.
+            db.execute(
+                "INSERT INTO live_copy_account (id,initial_balance,balance,available,updated_at) "
+                "VALUES (1,8000,205,190,?)",
+                (stamp,),
+            )
+            db.commit()
+            obs = Observer(db, [], {})
+
+            class FreshExecutor:
+                session = {"sizing_anchor": 200.0}
+                equity = 205.0
+                available = 190.0
+
+                def reconcile(self):
+                    self.equity = 204.0
+                    self.available = 187.0
+                    return {"ok": True}
+
+            obs.live_executor = FreshExecutor()
+            obs._load_account()
+            self.assertEqual(obs.taker.initial_balance, 8000.0)
+            self.assertEqual(obs._open_sizing_params().capital_anchor, 200.0)
+
+            await obs._refresh_live_sizing_state()
+            self.assertEqual(obs.taker.balance, 204.0)
+            self.assertEqual(obs._risk_available(), 187.0)
+            account = db.execute(
+                "SELECT initial_balance,balance,available FROM live_copy_account WHERE id=1"
+            ).fetchone()
+            self.assertEqual(tuple(account), (8000.0, 204.0, 187.0))
+
+        asyncio.run(run())
+
     def test_bbo_tick_immediately_persists_that_coin_marks(self):
         db = self._db()
         obs = Observer(db, [], {})
@@ -874,7 +927,7 @@ class ObserverMarkRefreshTests(unittest.TestCase):
             asyncio.set_event_loop(None)
             loop.close()
 
-    def test_source_open_waits_for_floor_then_carries_open_oid_slices(self):
+    def test_source_open_follows_first_fill_and_carries_open_oid(self):
         db = self._db()
         loop = asyncio.new_event_loop()
         try:
@@ -891,17 +944,9 @@ class ObserverMarkRefreshTests(unittest.TestCase):
                     "0xaaa", "BTC", key, 1_000,
                     1.0, 0.0, 1.0, 1_000.0, False, 77,
                 )
-                open_position.assert_not_called()
-                self.assertEqual(obs.taker.pending_source_opens[key]["source_notional"], 1_000.0)
-
-                obs._dispatch_fill(
-                    "0xaaa", "BTC", key, 1_050,
-                    5.0, 1.0, 6.0, 1_000.0, False, 77,
-                )
 
             open_position.assert_called_once()
             self.assertEqual(open_position.call_args.kwargs["source_open_oids"], {77})
-            self.assertNotIn(key, obs.taker.pending_source_opens)
         finally:
             asyncio.set_event_loop(None)
             loop.close()

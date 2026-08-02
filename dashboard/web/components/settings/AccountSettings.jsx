@@ -1,5 +1,6 @@
 import { api, encryptCredential } from "../../lib/api.js";
 import { friendlyExecutionError } from "../../lib/execution.js";
+import { fUsd } from "../../lib/format.js";
 
 const { useCallback, useEffect, useState } = React;
 
@@ -22,7 +23,8 @@ const CREDENTIAL_LABEL = {
   revoked: "已撤销",
 };
 
-function LiveAccountCard({ status, wrapKey, reload, confirm, busy, setBusy, setError }) {
+function LiveAccountCard({ status, wrapKey, reload, refreshDashboard, confirm, observerRunning,
+  busy, setBusy, setError }) {
   const existing = status?.credentials?.mainnet;
   const active = !!status?.activeSessionId;
   const [accountAddress, setAccountAddress] = useState(existing?.accountAddress || "");
@@ -48,11 +50,14 @@ function LiveAccountCard({ status, wrapKey, reload, confirm, busy, setBusy, setE
       const envelope = await encryptCredential(privateKey, wrapKey, context);
       await api.cmdAndWait("credential_upsert", { ...context, envelope });
       const verified = await api.cmdAndWait("credential_verify", { network: "mainnet" }, 90000);
+      await api.cmdAndWait("set_execution_mode", { mode: "live" }, 90000);
+      const preview = verified.accountPreview || {};
       setMessage({
         ok: true,
-        text: `基础验证完成，官方授权有效至 ${expiryText(verified.validUntil)}。选择实盘模式后，请使用右上角按钮启动跟单。`,
+        text: `验证完成并已载入真实账户：权益 ${fUsd(preview.equity)}，可用 ${fUsd(preview.available)}；官方授权有效至 ${expiryText(verified.validUntil)}。启动跟单仍使用右上角按钮。`,
       });
       await reload();
+      if (refreshDashboard) await refreshDashboard();
     } catch (error) {
       setMessage({ ok: false, text: friendlyExecutionError(error) });
     } finally {
@@ -72,6 +77,7 @@ function LiveAccountCard({ status, wrapKey, reload, confirm, busy, setBusy, setE
         await api.cmdAndWait("credential_delete", { network: "mainnet" });
         setAccountAddress(""); setAgentAddress(""); setPrivateKey(""); setMessage(null);
         await reload();
+        if (refreshDashboard) await refreshDashboard();
       } catch (error) { setMessage({ ok: false, text: friendlyExecutionError(error) }); }
       finally { setBusy(false); }
     },
@@ -106,12 +112,19 @@ function LiveAccountCard({ status, wrapKey, reload, confirm, busy, setBusy, setE
       <span><small>主钱包</small>{short(existing.accountAddress)}</span>
       <span><small>Agent</small>{short(existing.agentAddress)}</span>
       <span><small>官方授权有效至</small>{expiryText(existing.validUntil)}</span>
+      {status?.accountPreview && <React.Fragment>
+        <span><small>真实权益</small>{fUsd(status.accountPreview.equity)}</span>
+        <span><small>可用资金</small>{fUsd(status.accountPreview.available)}</span>
+        <span><small>账户仓位 / 挂单</small>{status.accountPreview.positionCount} / {status.accountPreview.openOrderCount}</span>
+      </React.Fragment>}
     </div>}
 
     <div className="live-account-actions">
-      <button className="btn btn-accent" disabled={busy || active || !privateKey || !wrapKey}
+      <button className="btn btn-accent" disabled={busy || active || observerRunning || !privateKey || !wrapKey}
+        title={observerRunning ? "请先使用右上角按钮停止当前跟单" : "加密保存并验证 Mainnet Agent"}
         onClick={save}>{busy ? "正在加密并验证…" : existing ? "替换并重新验证" : "加密保存并验证"}</button>
-      {existing && <button className="btn" disabled={busy || active} onClick={remove}>删除密文</button>}
+      {existing && <button className="btn" disabled={busy || active || observerRunning}
+        onClick={remove}>删除密文</button>}
     </div>
 
     {message && <div className={"account-inline-message " + (message.ok ? "ok" : "error")}>{message.text}</div>}
@@ -121,7 +134,7 @@ function LiveAccountCard({ status, wrapKey, reload, confirm, busy, setBusy, setE
   </section>;
 }
 
-export function AccountSettings({ confirm }) {
+export function AccountSettings({ confirm, observerState = null, onModeDataChanged = null }) {
   const [status, setStatus] = useState(null);
   const [wrapKey, setWrapKey] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -145,13 +158,18 @@ export function AccountSettings({ confirm }) {
   const active = !!status?.activeSessionId;
   const live = status?.selectedMode === "live";
   const verified = status?.credentials?.mainnet?.status === "verified";
+  const observerRunning = !["stopped", "error", "failed"].includes(observerState);
 
   const toggleMode = async () => {
-    if (busy || active) return;
+    if (busy || active || observerRunning) return;
     setError(null);
     if (live) {
       setBusy(true);
-      try { await api.cmdAndWait("set_execution_mode", { mode: "paper" }); await reload(); }
+      try {
+        await api.cmdAndWait("set_execution_mode", { mode: "paper" });
+        await reload();
+        if (onModeDataChanged) await onModeDataChanged();
+      }
       catch (e) { setError(friendlyExecutionError(e)); }
       finally { setBusy(false); }
       setShowLive(false);
@@ -164,7 +182,12 @@ export function AccountSettings({ confirm }) {
     if (!showLive) setShowLive(true);
     if (!verified) return;
     setBusy(true);
-    try { await api.cmdAndWait("set_execution_mode", { mode: "live" }); await reload(); }
+    try {
+      await api.cmdAndWait("credential_verify", { network: "mainnet" }, 90000);
+      await api.cmdAndWait("set_execution_mode", { mode: "live" });
+      await reload();
+      if (onModeDataChanged) await onModeDataChanged();
+    }
     catch (e) { setError(friendlyExecutionError(e)); }
     finally { setBusy(false); }
   };
@@ -177,21 +200,24 @@ export function AccountSettings({ confirm }) {
         <p><b>{showLive ? (live ? "实盘" : "实盘配置") : "Paper"}</b>{showLive
           ? live
             ? "已选择实盘；真正启动与停止统一使用页面右上角按钮。"
-            : "填写并验证 Mainnet Agent；验证后再打开开关选择实盘。"
+            : "填写并验证 Mainnet Agent；验证后自动选择实盘并载入真实账户。"
           : "模拟账本独立运行，不连接或签署真实账户。"}</p>
       </div>
       <div className="execution-toggle-wrap">
         <span>Paper</span>
         <button className={"execution-toggle " + (live ? "on" : "off")} type="button"
           role="switch" aria-checked={live} aria-label="切换 Paper 与实盘模式"
-          disabled={busy || active} onClick={toggleMode}><i /></button>
+          title={observerRunning ? "请先使用右上角按钮停止当前跟单" : "切换 Paper 与实盘模式"}
+          disabled={busy || active || observerRunning} onClick={toggleMode}><i /></button>
         <span className="live-label">实盘</span>
       </div>
     </div>
 
     {error && <div className="account-error-banner">{error}</div>}
 
-    {showLive && <LiveAccountCard status={status} wrapKey={wrapKey} reload={reload} confirm={confirm}
+    {showLive && <LiveAccountCard status={status} wrapKey={wrapKey} reload={reload}
+      refreshDashboard={onModeDataChanged} confirm={confirm}
+      observerRunning={observerRunning}
       busy={busy} setBusy={setBusy} setError={setError} />}
   </div>;
 }

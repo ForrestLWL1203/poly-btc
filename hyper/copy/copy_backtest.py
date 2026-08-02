@@ -52,32 +52,24 @@ CAPACITY_OPEN_OUTCOMES = frozenset({
 def open_execution_metrics(open_events) -> dict:
     """Return one auditable historical-open denominator.
 
-    Historical replay assumes the market was liquid enough to execute.  A target open whose copy-sized
-    notional is below our tier's economic floor is not an execution miss; it is excluded from the effective
-    opportunity set.  Every other policy/capacity rejection remains a real miss.
+    Historical replay assumes the market was liquid enough to execute. Every source flat-to-open/flip signal
+    is an opportunity regardless of source notional; every policy/capacity rejection is therefore a real miss.
     """
     events = [dict(event) for event in (open_events or ())]
     raw_n = len(events)
     opened_n = sum(event.get("outcome") == "opened" for event in events)
-    small_n = sum(event.get("outcome") == "skip_small_notl" for event in events)
-    effective_n = max(0, raw_n - small_n)
+    effective_n = raw_n
     capacity_skips = sum(event.get("outcome") in CAPACITY_OPEN_OUTCOMES for event in events)
     details = {}
     for event in events:
         outcome = str(event.get("outcome") or "skip_unknown_open")
         if outcome == "opened":
             continue
-        key = (
-            str(event.get("coin") or ""),
-            str(event.get("tier") or ""),
-            outcome,
-            f(event.get("minimum_notional")),
-        )
+        key = (str(event.get("coin") or ""), str(event.get("tier") or ""), outcome)
         item = details.setdefault(key, {
             "coin": key[0],
             "tier": key[1],
             "reason": outcome,
-            "minimumNotional": key[3],
             "count": 0,
             "copyNotionalMin": None,
             "copyNotionalMax": None,
@@ -100,7 +92,7 @@ def open_execution_metrics(open_events) -> dict:
     )
     return {
         "raw_target_open_events": raw_n,
-        "small_open_excluded_n": small_n,
+        "small_open_excluded_n": 0,
         "effective_target_open_events": effective_n,
         "opened_n": opened_n,
         "raw_open_capture_rate": raw_rate,
@@ -108,7 +100,7 @@ def open_execution_metrics(open_events) -> dict:
         "capacity_open_fit": capacity_fit,
         "open_execution_audit": {
             "rawTargetOpenN": raw_n,
-            "smallOpenExcludedN": small_n,
+            "smallOpenExcludedN": 0,
             "effectiveTargetOpenN": effective_n,
             "openedN": opened_n,
             "rawOpenCaptureRate": raw_rate,
@@ -506,11 +498,6 @@ class Backtest:
         self.last_px = {}
         self.skip_reasons = Counter()
         self.target_pos = {}
-        # Some large source orders arrive as a tiny first fill followed milliseconds later by the real
-        # size.  If the first slice is below the tier's economic floor, keep its one open event pending so
-        # a later add can retry against the source's current full position instead of becoming `midway`
-        # forever.  This is not a second target open and must not inflate the follow denominator.
-        self.pending_small_opens = {}
         self.target_peak_concurrent = 0
         self.copy_peak_concurrent = 0
         self.target_open_events = 0
@@ -538,11 +525,6 @@ class Backtest:
             "stable": overrides.get("STABLE_LEV_CAP", config.STABLE_LEV_CAP),
             "mid": overrides.get("MID_LEV_CAP", config.MID_LEV_CAP),
             "high": overrides.get("HIGH_LEV_CAP", config.HIGH_LEV_CAP),
-        }
-        self.tier_min_notional = {
-            "stable": overrides.get("STABLE_MIN_NOTIONAL", config.STABLE_MIN_NOTIONAL),
-            "mid": overrides.get("MID_MIN_NOTIONAL", config.MID_MIN_NOTIONAL),
-            "high": overrides.get("HIGH_MIN_NOTIONAL", config.HIGH_MIN_NOTIONAL),
         }
         self.tier_coin_cap = {
             "stable": overrides.get("STABLE_COIN_CAP_PCT", config.STABLE_COIN_CAP_PCT),
@@ -631,7 +613,6 @@ class Backtest:
             high_sigma_min=self.high_sigma_min,
             tier_margin=self.tier_margin,
             tier_lev_cap=self.tier_lev_cap,
-            tier_min_notional=self.tier_min_notional,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
             max_deploy_pct=self.max_deploy_pct,
@@ -781,7 +762,6 @@ class Backtest:
             self.target_open_events += 1
         if abs(pos1) < config.FLAT:
             self.target_pos.pop(key, None)
-            self.pending_small_opens.pop(key, None)
         else:
             self.target_pos[key] = pos1
         self.target_peak_concurrent = max(self.target_peak_concurrent, len(self.target_pos))
@@ -790,18 +770,6 @@ class Backtest:
         if ep is None:
             if transition in ("open", "flip") and abs(pos1) >= config.FLAT:
                 self._attempt_open(addr, coin, x.get("time"), px, pos1, oid, x)
-            elif (
-                transition == "add"
-                and abs(pos1) >= config.FLAT
-                and key in self.pending_small_opens
-            ):
-                self._retry_pending_small_open(
-                    addr, coin, x.get("time"), px, pos1, oid, x,
-                )
-            elif key in self.pending_small_opens and abs(pos1) >= config.FLAT:
-                # A reduction while the source is still building a sub-floor opening is neither a new
-                # opportunity nor a midway miss.  Keep the one pending lifecycle until it grows or closes.
-                return
             elif abs(pos1) >= config.FLAT:
                 self.skip_reasons["skip_midway"] += 1
             return
@@ -867,46 +835,6 @@ class Backtest:
             **dict(self._last_open_detail or {}),
         }
         self.open_events.append(event)
-        key = (addr, coin)
-        if outcome == "skip_small_notl" and event.get("source_below_minimum"):
-            self.pending_small_opens[key] = event
-        else:
-            self.pending_small_opens.pop(key, None)
-        return event
-
-    def _retry_pending_small_open(self, addr, coin, t, px, pos1, oid, fill=None):
-        """Replace one dust-slice miss when the same target position grows to executable size."""
-        key = (addr, coin)
-        event = self.pending_small_opens.get(key)
-        if event is None:
-            return None
-        # The pending event owns one final outcome.  Remove its previous provisional counter before
-        # re-evaluating so a successfully recovered sliced open does not remain in skip telemetry.
-        if self.skip_reasons.get("skip_small_notl", 0) > 0:
-            self.skip_reasons["skip_small_notl"] -= 1
-            if self.skip_reasons["skip_small_notl"] <= 0:
-                self.skip_reasons.pop("skip_small_notl", None)
-        opened_before = self.opened_n
-        skips_before = Counter(self.skip_reasons)
-        self._last_open_detail = {}
-        self._open_position(addr, coin, t, px, pos1, oid, fill)
-        if self.opened_n > opened_before:
-            outcome = "opened"
-        else:
-            changed = [
-                name for name, value in self.skip_reasons.items()
-                if int(value) > int(skips_before.get(name, 0))
-            ]
-            outcome = changed[-1] if changed else "skip_unknown_open"
-        event.clear()
-        event.update({
-            "time": int(f(t)),
-            "outcome": outcome,
-            "retriedAfterSmallSlice": True,
-            **dict(self._last_open_detail or {}),
-        })
-        if outcome != "skip_small_notl":
-            self.pending_small_opens.pop(key, None)
         return event
 
     def process_price(self, x, *, has_fill_events=None):
@@ -970,7 +898,6 @@ class Backtest:
         self._last_open_detail = {
             "coin": coin,
             "tier": tier,
-            "minimum_notional": f(self.tier_min_notional.get(tier)),
             "master_notional": abs(pos1) * px,
         }
         if coin_is_blocked(coin, self.coin_blacklist, block_korean_stocks=self.block_korean_stocks):
@@ -992,12 +919,6 @@ class Backtest:
             self.skip_reasons["skip_wallet_stock_side_position_cap"] += 1
             return
         target_notl = abs(pos1) * px
-        source_floor = f(self.tier_min_notional.get(tier))
-        if target_notl < source_floor:
-            self._last_open_detail["source_below_minimum"] = True
-            self.skip_reasons["skip_small_notl"] += 1
-            return
-        self._last_open_detail["source_below_minimum"] = False
         risk_equity = self.risk_equity()
         avail = self.risk_available()
         existing_coin = sum(
@@ -1047,7 +968,6 @@ class Backtest:
         )
         self._last_open_detail.update({
             "tier": plan.tier,
-            "minimum_notional": f(self.tier_min_notional.get(plan.tier)),
             "master_notional": f(plan.master_notional),
             "copy_notional": f(plan.notional),
         })

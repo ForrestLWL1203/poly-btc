@@ -47,12 +47,37 @@ def ep_overview(db):
     tables = execution_copy_tables(db)
     mode = tables["mode"]
     position_table, action_table, account_table = tables["position"], tables["action"], tables["account"]
+    live_control = (
+        q1(db, "SELECT active_session_id FROM execution_control WHERE id=1")
+        if mode == "live" else None
+    )
+    active_live_session = live_control["active_session_id"] if live_control else None
+    account_last_update = None
     # LIVE-DERIVE from copy_position + copy_account so cards are not delayed by account_stats snapshots.
     acct = q1(
         db,
         ("SELECT initial_balance,balance,available FROM live_copy_account WHERE id=1"
          if mode == "live" else "SELECT initial_balance,balance,NULL AS available FROM copy_account WHERE id=1"),
     )
+    if mode == "live" and not active_live_session:
+        preview = q1(
+            db,
+            "SELECT p.equity,p.available,p.observed_at FROM execution_account_preview p "
+            "JOIN execution_credential c ON c.network=p.network "
+            "AND lower(c.account_address)=lower(p.account_address) WHERE p.network='mainnet'",
+        )
+        if preview:
+            initial = (
+                acct["initial_balance"]
+                if acct is not None and acct["initial_balance"] is not None
+                else preview["equity"]
+            )
+            acct = {
+                "initial_balance": initial,
+                "balance": preview["equity"],
+                "available": preview["available"],
+            }
+            account_last_update = preview["observed_at"]
     closed = q1(db, "SELECT COUNT(*) n, SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins "
                     f"FROM {position_table} WHERE status!='open'") or {"n": 0, "wins": 0}
     closed_n = closed["n"] or 0
@@ -101,11 +126,10 @@ def ep_overview(db):
         long_n = (gross + net) / 2 if gross else 0.0
         short_n = (gross - net) / 2 if gross else 0.0
         if mode == "live":
-            session = q1(db, "SELECT active_session_id FROM execution_control WHERE id=1")
             eq24 = q1(
                 db, "SELECT equity FROM execution_account_snapshot WHERE session_id=? AND observed_at<=? "
                 "ORDER BY observed_at DESC LIMIT 1",
-                ((session["active_session_id"] if session else None), _iso_ago(24 * 3600)),
+                (active_live_session, _iso_ago(24 * 3600)),
             )
         else:
             eq24 = q1(db, "SELECT equity FROM account_stats WHERE ts<=? ORDER BY ts DESC LIMIT 1",
@@ -126,7 +150,7 @@ def ep_overview(db):
                 (q1(db, "SELECT COALESCE(SUM(fee),0) f FROM execution_fill WHERE network='mainnet'") or {"f": 0})["f"]
                 if mode == "live" else gross_traded * config.TAKER_FEE
             ), "netPerGrossBp": bp},
-            "lastUpdate": ((q1(db, "SELECT updated_at m FROM live_copy_account WHERE id=1") or {"m": None})["m"]
+            "lastUpdate": (account_last_update or (q1(db, "SELECT updated_at m FROM live_copy_account WHERE id=1") or {"m": None})["m"]
                            if mode == "live" else (q1(db, "SELECT MAX(ts) m FROM account_stats") or {"m": None})["m"]),
         }
 
@@ -226,11 +250,30 @@ def ep_equity(db, rng):
     if tables["mode"] == "live":
         session = q1(db, "SELECT active_session_id FROM execution_control WHERE id=1")
         active_session = session["active_session_id"] if session else None
-        live_where = "WHERE session_id=?" + (" AND observed_at>=?" if cutoff else "")
-        live_args = (active_session,) + (args if cutoff else ())
+        if active_session:
+            live_source = (
+                "SELECT observed_at ts,equity FROM execution_account_snapshot WHERE session_id=?"
+                + (" AND observed_at>=?" if cutoff else "")
+            )
+            live_args = (active_session,) + (args if cutoff else ())
+        else:
+            snapshot_cutoff = "WHERE s.observed_at>=?" if cutoff else ""
+            preview_cutoff = "WHERE p.observed_at>=?" if cutoff else ""
+            live_source = (
+                "SELECT s.observed_at ts,s.equity FROM execution_account_snapshot s "
+                "JOIN execution_session es ON es.session_id=s.session_id "
+                "JOIN execution_credential ec ON ec.network='mainnet' "
+                "AND lower(ec.account_address)=lower(es.account_address) " + snapshot_cutoff +
+                " UNION ALL "
+                "SELECT p.observed_at ts,p.equity FROM execution_account_preview p "
+                "JOIN execution_credential ec ON ec.network=p.network "
+                "AND lower(ec.account_address)=lower(p.account_address) " + preview_cutoff
+            )
+            live_args = ((args + args) if cutoff else ())
         rows = qall(db,
-            "WITH ordered AS (SELECT observed_at ts,equity,ROW_NUMBER() OVER (ORDER BY observed_at)-1 rn,"
-            "COUNT(*) OVER () total FROM execution_account_snapshot " + live_where +
+            "WITH source AS (" + live_source +
+            "), ordered AS (SELECT ts,equity,ROW_NUMBER() OVER (ORDER BY ts)-1 rn,"
+            "COUNT(*) OVER () total FROM source " +
             "), sampled AS (SELECT ts,equity,rn,total,CASE WHEN total>? THEN CAST(total/? AS INTEGER)+1 ELSE 1 END stride FROM ordered) "
             "SELECT ts,equity FROM sampled WHERE rn%stride=0 OR rn=total-1 ORDER BY ts",
             live_args + (max_pts, max_pts))

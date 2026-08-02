@@ -14,12 +14,12 @@ class OpenSizingParams:
     high_sigma_min: float
     tier_margin: dict
     tier_lev_cap: dict
-    tier_min_notional: dict
     tier_coin_cap: dict
     min_lev: float
     max_deploy_pct: float
     min_open_margin_pct: float
-    capital_anchor: float = config.INITIAL_BALANCE
+    # Required explicitly so a real-money caller can never inherit the standardized Paper $10k anchor.
+    capital_anchor: float
     drawdown_exponent: float = config.SIZING_DRAWDOWN_EXPONENT
     drawdown_max_multiplier: float = config.SIZING_DRAWDOWN_MAX_MULTIPLIER
     margin_equity_pct: float = config.MARGIN_EQUITY_PCT
@@ -540,9 +540,8 @@ def plan_open_sizing(
         wanted_margin, room, deploy_room, add_capacity_margin, group_room,
     ) + 1e-12
     # The relative dust threshold follows the same manual sizing base.  Otherwise lowering the sizing
-    # budget would silently turn valid proportional opens into "margin_too_small" skips.  Per-tier notionals
-    # qualify the source signal before this planner runs; our order scales with our equity down to the venue
-    # minimum, so a small funded Live account remains proportional to the $10k Paper account.
+    # budget would silently turn valid proportional opens into "margin_too_small" skips. Our order scales with
+    # our equity down to the venue minimum, so a small funded Live account remains proportional to Paper.
     if margin < min_add_margin:
         reason = (
             "wallet_sector_side_full" if group_limited else
@@ -556,9 +555,8 @@ def plan_open_sizing(
                               room, deploy_room, risk_available, wanted_margin, master_notional,
                               risk_equity, sizing_equity, margin_equity)
 
-    # The source position proves that an entry signal is economically meaningful; it does not size our
-    # account.  Callers gate the source's cumulative opening notional before reaching this planner.  Once
-    # confirmed, our notional is owned entirely by our margin/leverage/capacity surface.
+    # The source position only supplies direction and timing; its notional neither gates nor sizes our account.
+    # Our notional is owned entirely by our equity, margin, leverage and capacity surface.
     notional = margin * lev
     if notional < config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:
         reason = "wallet_sector_side_full" if group_limited else "wallet_full" if wallet_limited else "small_notl"

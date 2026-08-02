@@ -49,8 +49,6 @@ def _unified_usdc_available(snapshot: AccountSnapshot) -> float:
 def evaluate_account_preflight(
     identity: IdentitySnapshot,
     snapshot: AccountSnapshot,
-    *,
-    min_order_notional: float = 10.0,
 ) -> AccountPreflight:
     positions = []
     for state in snapshot.perp_states.values():
@@ -82,6 +80,4 @@ def evaluate_account_preflight(
         return AccountPreflight(False, AccountPreflightCode.ACCOUNT_NOT_CLEAN, **base)
     if available <= 0:
         return AccountPreflight(False, AccountPreflightCode.NO_AVAILABLE_COLLATERAL, **base)
-    if available < float(min_order_notional):
-        return AccountPreflight(False, AccountPreflightCode.NO_EXECUTABLE_CAPACITY, **base)
     return AccountPreflight(True, AccountPreflightCode.OK, **base)

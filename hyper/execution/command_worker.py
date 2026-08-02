@@ -16,6 +16,7 @@ from hyper import storage
 from hyper.util import now_iso
 
 from . import control
+from .account_state import persist_account_preview
 from .credentials import decrypt_agent_wallet
 from .hyperliquid_broker import HyperliquidBroker
 from .live_preflight import activate_live_session, resolve_agent_expiry, run_live_preflight, unlock_live_canary
@@ -76,6 +77,7 @@ def _verify_credential(db, network: str, private_key_path: str) -> dict:
             AccountPreflightCode.ACCOUNT_STATE_INVALID,
         }:
             raise ValueError(check.code.value)
+        preview = persist_account_preview(db, snapshot)
         control.mark_credential_verified(db, normalized, valid_until=valid_until)
         return {
             "network": normalized.value,
@@ -84,6 +86,7 @@ def _verify_credential(db, network: str, private_key_path: str) -> dict:
             "agentAddress": row["agent_address"],
             "accountMode": snapshot.abstraction,
             "validUntil": valid_until,
+            "accountPreview": preview,
         }
     except CredentialError as exc:
         control.mark_credential_status(

@@ -60,10 +60,8 @@ class Book:
         self.acct_table = acct_table
         self.balance = config.INITIAL_BALANCE
         self.initial_balance = config.INITIAL_BALANCE
-        self.wallet_initial_balance = config.PAPER_WALLET_INITIAL_BALANCE
-        self.protected_reserve = max(0.0, self.wallet_initial_balance - self.initial_balance)
+        self.sizing_anchor = config.INITIAL_BALANCE
         self.open_ep: dict = {}             # (addr,coin) -> position state
-        self.pending_source_opens: dict = {}  # sub-floor flat→open lifecycles, retried as the source grows
         self._acct_lock = None              # created lazily inside the running loop (sync inspection creates none)
         # Lifetime dashboard counters. Initialized once from history at startup, then maintained per action/close
         # so the 5-minute stats snapshot never rescans the ever-growing action/position tables.
@@ -138,8 +136,6 @@ class Observer:
         self.wallet_stock_side_max_positions = config.WALLET_STOCK_SIDE_MAX_POSITIONS
         self.margin_equity_pct = config.MARGIN_EQUITY_PCT    # manual per-open sizing base; full cash remains available
         self.min_open_margin_pct = config.MIN_OPEN_MARGIN_PCT
-        self.tier_min_notional = {"stable": config.STABLE_MIN_NOTIONAL, "mid": config.MID_MIN_NOTIONAL,
-                                  "high": config.HIGH_MIN_NOTIONAL}   # per-tier min order notional ($); skip below
         self.tier_max_adds = {"stable": config.STABLE_MAX_ADDS, "mid": config.MID_MAX_ADDS,
                               "high": config.HIGH_MAX_ADDS}   # per-σ-tier scale-in cap (hardcap mode)
         # ── 加仓策略引擎 (B 逆向): smart(σ波动闸+比例镜像+三档预算) vs hardcap(次数cap+ADD_FRAC) ──
@@ -266,7 +262,14 @@ class Observer:
                 (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now_iso()),
             )
             self.db.commit()
-        book.protected_reserve = max(0.0, book.wallet_initial_balance - book.initial_balance)
+        # The Live ledger keeps one lifetime initial balance for ROI, while each new Live session freezes
+        # the then-current real equity as its own drawdown/sizing anchor. Never let a prior session (or the
+        # Paper fallback initialized by Book) leak into a newly funded or downsized Mainnet account.
+        book.sizing_anchor = (
+            float(self.live_executor.session["sizing_anchor"])
+            if book.name == "live" and self.live_executor is not None
+            else float(book.initial_balance)
+        )
         closed = self.db.execute(
             f"SELECT COUNT(*),COALESCE(SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END),0) "
             f"FROM {book.pos_table} WHERE status!='open'"
@@ -321,6 +324,18 @@ class Observer:
             (self.taker.balance, self.taker.available_balance, now_iso()),
         )
         self.db.commit()
+
+    async def _refresh_live_sizing_state(self) -> None:
+        """Refresh authoritative Mainnet equity before calculating any exposure increase."""
+        if self.execution_mode != "live" or self.live_executor is None:
+            return
+        result = await asyncio.to_thread(self.live_executor.reconcile)
+        self._sync_live_account()
+        if not result.get("ok"):
+            self.paused = True
+            self.execution_state = "reconcile_required"
+            self._write_proc_status("paused")
+            raise RuntimeError("live_reconcile_required")
 
     def _target_snapshot(self, addr, coin):
         """The master's CURRENT position on this coin from clearinghouseState — returns
@@ -709,14 +724,13 @@ class Observer:
             if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
-            for tier, mk, lk, nk, ak in (
-                ("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MIN_NOTIONAL", "STABLE_MAX_ADDS"),
-                ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MIN_NOTIONAL", "MID_MAX_ADDS"),
-                ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MIN_NOTIONAL", "HIGH_MAX_ADDS"),
+            for tier, mk, lk, ak in (
+                ("stable", "STABLE_MARGIN_PCT", "STABLE_LEV_CAP", "STABLE_MAX_ADDS"),
+                ("mid", "MID_MARGIN_PCT", "MID_LEV_CAP", "MID_MAX_ADDS"),
+                ("high", "HIGH_MARGIN_PCT", "HIGH_LEV_CAP", "HIGH_MAX_ADDS"),
             ):
                 if f.get(mk) is not None: self.tier_margin[tier] = f[mk]
                 if f.get(lk): self.tier_lev_cap[tier] = f[lk]
-                if f.get(nk) is not None: self.tier_min_notional[tier] = f[nk]
                 if f.get(ak) is not None: self.tier_max_adds[tier] = int(f[ak])
             if f.get("MIN_OPEN_MARGIN_PCT") is not None: self.min_open_margin_pct = f["MIN_OPEN_MARGIN_PCT"]
             if f.get("SMART_ADD") is not None: self.add_strategy = "smart" if f["SMART_ADD"] else "hardcap"
@@ -1104,12 +1118,11 @@ class Observer:
             high_sigma_min=self.high_sigma_min,
             tier_margin=self.tier_margin,
             tier_lev_cap=self.tier_lev_cap,
-            tier_min_notional=self.tier_min_notional,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
             max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
-            capital_anchor=book.initial_balance,
+            capital_anchor=book.sizing_anchor,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
             drawdown_max_multiplier=config.SIZING_DRAWDOWN_MAX_MULTIPLIER,
             margin_equity_pct=self.margin_equity_pct,
@@ -2150,21 +2163,12 @@ class Observer:
         book = self.taker
         transition = classify_fill_transition(pos0, pos1)
         target_in_position = abs(pos1) >= config.FLAT
-        if not target_in_position:
-            book.pending_source_opens.pop(key, None)
         cooldown_until = self._manual_close_cooldown_until(addr, coin) if target_in_position else None
         side = "long" if pos1 > 0 else "short"
         risk_block = self._new_exposure_block_reason(addr, coin, book, side=side) if target_in_position else None
         ep = book.open_ep.get(key)
         if ep is None:
-            pending = book.pending_source_opens.get(key)
-            if pending and pending.get("side") != side:
-                book.pending_source_opens.pop(key, None)
-                pending = None
-            opening_lifecycle = (
-                transition in ("open", "flip")
-                or (pending is not None and transition == "add")
-            )
+            opening_lifecycle = transition in ("open", "flip")
             if opening_lifecycle and target_in_position:
                 if cooldown_until:
                     self._tally("skip_manual_cooldown", book)
@@ -2173,9 +2177,7 @@ class Observer:
                 elif (addr not in self.held_off       # held-off (off-watchlist) = exit-only, no new opens
                         and not self.paused           # dashboard pause = no new opens (existing keep to close)
                         and self._sector_allowed(addr, coin)):
-                    self._start_or_defer_source_open(
-                        addr, coin, key, t, px, pos1, oid, book, pending=pending,
-                    )
+                    self._start_source_open(addr, coin, t, px, pos1, oid, book)
                 else:
                     self._tally("skip_paused" if self.paused else
                                 "skip_heldoff" if addr in self.held_off else
@@ -2183,10 +2185,6 @@ class Observer:
                                 "skip_midway", book)
             elif not target_in_position:
                 pass                                    # target closed a position we never held — nothing to copy
-            elif pending is not None:
-                # A sub-floor source opening may shrink before growing.  It remains one pending lifecycle,
-                # not a midway miss, and only same-direction growth can cross the opening floor.
-                pending.update(last_ms=t, source_notional=abs(pos1) * px)
             else:                                       # a fresh open we chose not to take → tally the reason
                 self._tally("skip_manual_cooldown" if cooldown_until else
                             f"skip_{risk_block}" if risk_block else
@@ -2257,29 +2255,12 @@ class Observer:
             asyncio.create_task(self._apply_reduce(addr, coin, ep, t, px, signed, pos1,
                                                    closing=abs(pos1) < config.FLAT, liq=liq, oid=oid, book=book))
 
-    def _start_or_defer_source_open(self, addr, coin, key, t, px, pos1, oid, book=None, *,
-                                    pending=None, forced_entry_px=None):
-        """Confirm cumulative source opening size before our independent sizing surface runs."""
+    def _start_source_open(self, addr, coin, t, px, pos1, oid, book=None, *, forced_entry_px=None):
+        """Follow every source opening signal; our own sizing surface owns the resulting order amount."""
         book = book or self.taker
-        side = "long" if pos1 > 0 else "short"
-        tier = self._tier(self._sigma(coin), coin)
-        source_notional = abs(pos1) * px
-        source_floor = f(self.tier_min_notional.get(tier))
-        if source_notional < source_floor:
-            item = book.pending_source_opens.setdefault(key, {
-                "side": side,
-                "first_ms": t,
-                "oids": set(),
-            })
-            if oid is not None:
-                item["oids"].add(oid)
-            item.update(last_ms=t, source_notional=source_notional)
-            self._tally("pending_source_open", book)
-            return None
-        opening_oids = set((pending or {}).get("oids") or ())
+        opening_oids = set()
         if oid is not None:
             opening_oids.add(oid)
-        book.pending_source_opens.pop(key, None)
         return self._open_position(
             addr, coin, t, px, pos1, oid, book,
             forced_entry_px=forced_entry_px,
@@ -2302,10 +2283,7 @@ class Observer:
         if risk_block:
             self._tally(f"skip_{risk_block}", book)
             return
-        self._start_or_defer_source_open(
-            addr, coin, (addr, coin), t, master_px, pos1, oid, book,
-            forced_entry_px=forced_px,
-        )
+        self._start_source_open(addr, coin, t, master_px, pos1, oid, book, forced_entry_px=forced_px)
 
     def _open_position(self, addr, coin, t, px, pos1, oid, book=None, forced_entry_px=None,
                        source_open_oids=None):
@@ -2383,6 +2361,9 @@ class Observer:
         #  lands in the stable tier with big margin + high lev; a wild one (ZEC/meme) in high tier, small.
         sigma = self._sigma(coin)
         async with book.acct_lock:                   # serialize margin allocation across opens
+            # Paper reads its latest local balance here. Live first refreshes exchange-authoritative equity
+            # and available collateral so the sizing formula never starts from the 15-second projection cache.
+            await self._refresh_live_sizing_state()
             # Use the tuned tier margin until MAX_DEPLOY_PCT blocks fresh opens. Adds may still use the
             # remaining real available cash because they matter more to copy fidelity.
             risk_equity = self._risk_equity(book)
@@ -2443,7 +2424,7 @@ class Observer:
                     why = (
                         f"below Hyperliquid min order ${plan.notional:,.2f} < "
                         f"${config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:,.0f} "
-                        f"(qualified master notl ${plan.master_notional:,.0f})"
+                        f"(source signal notl ${plan.master_notional:,.0f})"
                     )
                 else:
                     why = plan.reason
@@ -2684,6 +2665,7 @@ class Observer:
                 # ③ 比例镜像，但单个目标加仓订单最多消耗一个我方首仓额度；不足整笔时填满单币余量。
                 ratio = target_add_notl / ep["master_first_notl"] if ep.get("master_first_notl") else self.add_frac
                 async with book.acct_lock:
+                    await self._refresh_live_sizing_state()
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
                     existing = sum(e.get("margin", 0.0) * (e["rem_size"] / e["size"] if e.get("size") else 1.0)
@@ -2724,6 +2706,7 @@ class Observer:
                 if ep["add_count"] >= self.tier_max_adds.get(tier, 0):
                     return _observe_only(final=True)
                 async with book.acct_lock:
+                    await self._refresh_live_sizing_state()
                     risk_equity = self._risk_equity(book)
                     coin_cap = self.tier_coin_cap[tier] * risk_equity
                     existing = sum(

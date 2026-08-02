@@ -287,12 +287,21 @@ class WebStaticAssetsTests(unittest.TestCase):
         account = (
             ROOT / "dashboard" / "web" / "components" / "settings" / "AccountSettings.jsx"
         ).read_text(encoding="utf-8")
+        settings = (ROOT / "dashboard" / "web" / "components" / "Settings.jsx").read_text(encoding="utf-8")
+        shell = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
+        execution = (ROOT / "dashboard" / "web" / "lib" / "execution.js").read_text(encoding="utf-8")
 
         self.assertIn('role="switch"', account)
+        self.assertIn('observerState={obs}', shell)
+        self.assertIn('observerState={observerState}', settings)
+        self.assertIn('observerState = null', account)
+        self.assertIn('disabled={busy || active || observerRunning}', account)
         self.assertIn("模拟账本独立运行，不连接或签署真实账户", account)
         self.assertIn("加密保存并验证", account)
         self.assertIn('className="btn btn-accent"', account)
-        self.assertIn("右上角按钮启动跟单", account)
+        self.assertIn("启动跟单仍使用右上角按钮", account)
+        self.assertIn('api.cmdAndWait("credential_verify"', account)
+        self.assertIn("真实权益", account)
         self.assertNotIn("启动实盘跟单", account)
         self.assertNotIn('api.cmdAndWait("execution_preflight"', account)
         self.assertNotIn('api.cmdAndWait("activate_live"', account)
@@ -303,8 +312,6 @@ class WebStaticAssetsTests(unittest.TestCase):
         self.assertNotIn("只读预检与实盘启动", account)
         self.assertNotIn("PreflightChecks", account)
 
-        shell = (ROOT / "dashboard" / "web" / "app.jsx").read_text(encoding="utf-8")
-        execution = (ROOT / "dashboard" / "web" / "lib" / "execution.js").read_text(encoding="utf-8")
         self.assertIn("requestLiveStart", shell)
         self.assertIn("activateLiveAndStart(api)", shell)
         self.assertIn('api.cmdAndWait("execution_preflight"', execution)

@@ -154,17 +154,17 @@ class ProfitDistributionTests(unittest.TestCase):
         self.assertIn("strict_replay_inputs", source)
         self.assertIn("strictRankingMode", source)
 
-    def test_activity_uses_real_threshold_opens_and_weekly_continuity(self):
+    def test_activity_counts_small_source_opens_and_weekly_continuity(self):
         now_ms = 40 * profit_distribution.DAY_MS
         results = _activity_results(now_ms, [
             (26, {}), (19, {}), (12, {}), (5, {}),
-            # A sub-floor trial order is not an actionable opportunity.
+            # Legacy threshold metadata no longer filters a valid source opening.
             (2, {"outcome": "skip_small_notl", "master": 100}),
         ])
         activity = profit_distribution._copy_activity(results, now_ms)
-        self.assertEqual(activity["weeklyOpenCountsOldestFirst"], [1, 1, 1, 1])
+        self.assertEqual(activity["weeklyOpenCountsOldestFirst"], [1, 1, 1, 2])
         self.assertEqual(activity["activeWeeks4"], 4)
-        self.assertEqual(activity["actionableOpenEvents28d"], 4)
+        self.assertEqual(activity["actionableOpenEvents28d"], 5)
         self.assertTrue(activity["continuous4of4"])
         self.assertTrue(activity["operational"])
 

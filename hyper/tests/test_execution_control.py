@@ -136,9 +136,15 @@ class ExecutionControlTests(unittest.TestCase):
             )
 
         self.assertEqual(result["validUntil"], "2100-01-01T00:00:00Z")
-        credential = control.execution_status(self.db)["credentials"]["mainnet"]
+        self.assertEqual(result["accountPreview"]["equity"], 8000.0)
+        status = control.execution_status(self.db)
+        credential = status["credentials"]["mainnet"]
         self.assertEqual(credential["status"], "verified")
         self.assertEqual(credential["validUntil"], "2100-01-01T00:00:00Z")
+        self.assertEqual(status["accountPreview"]["available"], 8000.0)
+        self.assertEqual(status["accountPreview"]["positionCount"], 0)
+        self.assertIsNone(self.db.execute("SELECT * FROM live_copy_account").fetchone())
+        self.assertIsNone(self.db.execute("SELECT * FROM execution_session").fetchone())
 
     def test_canary_unlock_requires_duration_completed_episode_and_clean_reconcile(self):
         stamp = "2026-07-30T00:00:00Z"
@@ -231,6 +237,12 @@ class ExecutionControlTests(unittest.TestCase):
         self.db.execute("UPDATE process_status SET state='stopped' WHERE name='observer'")
         result = control.set_selected_mode(self.db, "live")
         self.assertEqual(result["selectedMode"], "live")
+
+        self.db.execute("UPDATE process_status SET state='running' WHERE name='observer'")
+        with self.assertRaisesRegex(ValueError, "observer_must_be_stopped"):
+            control.delete_credential(self.db, "mainnet")
+        self.assertIsNotNone(control.credential_row(self.db, "mainnet"))
+        self.assertEqual(control.execution_status(self.db)["selectedMode"], "live")
 
 
 if __name__ == "__main__":

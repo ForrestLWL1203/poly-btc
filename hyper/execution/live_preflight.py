@@ -269,9 +269,14 @@ def run_live_preflight(
         ))
         margin_pct = max(0.0, min(1.0, margin_pct))
         sizing_equity = equity * margin_pct
-        checks["funded"] = available > 0 and sizing_equity >= 10.0
+        # Hyperliquid's $10 rule is order notional, not wallet equity or isolated margin. A leveraged
+        # order may satisfy it with less than $10 collateral, so preflight only proves a positive sizing
+        # base; the shared per-order planner remains authoritative for the venue notional floor.
+        checks["funded"] = available > 0 and sizing_equity > 0
         if not account_check.ok:
             raise RuntimeError(account_check.code.value)
+        if not checks["funded"]:
+            raise RuntimeError(AccountPreflightCode.NO_EXECUTABLE_CAPACITY.value)
 
         checks["strategyRevision"] = bool(
             revision_bundle and revision_bundle.get("status") == "active"

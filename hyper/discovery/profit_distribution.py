@@ -526,19 +526,13 @@ def _copy_windows(results: dict) -> dict:
 def _copy_activity(results: dict, now_ms: int) -> dict:
     """Describe recurring source opportunities using the Copy open gate itself.
 
-    ``Backtest.open_events`` already owns exactly one event per source flat->open/flip lifecycle.  A tiny
-    first slice is updated in place when the same source position grows above the tier notional floor, so
-    OID fragments never become fake extra opportunities.  Capacity misses still count as source activity;
-    economically sub-floor and blacklisted opens do not.
+    ``Backtest.open_events`` owns exactly one event per source flat->open/flip lifecycle. Source notional does
+    not gate activity; capacity misses still count as source activity while blacklisted opens do not.
     """
     primary = dict(results.get(30) or {})
     events = []
     raw_events = list(primary.get("open_events") or ())
     for event in raw_events:
-        minimum = f(event.get("minimum_notional"))
-        master = f(event.get("master_notional"))
-        if minimum > 0.0 and master + 1e-9 < minimum:
-            continue
         if str(event.get("outcome") or "") == "skip_coin_blacklist":
             continue
         stamp = int(f(event.get("time")))

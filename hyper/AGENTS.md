@@ -126,7 +126,7 @@ selection, prune discovery state, or activate new parameters. `scan_generation`,
 - `profit-distribution` is a non-publishing research path. It reads the source database in query-only mode and
   bypasses ROI/PnL, win-rate, sample-depth and score gates during broad collection, while preserving structural
   uncopyability, catastrophic source risk and data/path integrity checks. Before strict replay it separately
-  requires recurring OID-deduplicated, source-notional-qualified open/flip opportunities: the latest seven days
+  requires recurring OID-deduplicated open/flip opportunities: the latest seven days
   must be active, at least three of four rolling seven-day buckets must be active and the maximum 28-day opening
   gap must not exceed ten days. Sparse wallets remain in the research distribution but cannot consume strict
   replay slots. Every requested source artifact and derived profile is committed to a private 0600 research
@@ -229,7 +229,7 @@ valuation and market scope. Source and fills-only Copy must each have at least s
 Episodes and positive closed 30d/7d PnL. Negative unrealized PnL is fully charged and may not exceed 50% of
 30-day closed profit; positive unrealized PnL has zero qualification weight.
 
-Canonical activity is calculated once at generation start from OID-deduplicated, source-notional-qualified
+Canonical activity is calculated once at generation start from OID-deduplicated
 flat-to-open/flip opportunities. The latest seven days must be active, at least three of four rolling seven-day
 buckets must be active, and the maximum 28-day opening gap must not exceed ten days. 72-hour activity and fixed
 7d/14d trade-count gates are retired from permission.
@@ -269,12 +269,11 @@ replay. Publication requires the shared account to return at least 10% over 30 d
 rolling 7 days, with both standardized `$10,000` and actual Paper starting-equity results persisted.
 There is no second 85% total-margin slice: adds may use the remaining real available cash after fresh opens
 stop, while per-coin caps and isolated-margin liquidation still bound exposure.
-Historical replay assumes sufficient market liquidity; its effective open denominator excludes source opening
-lifecycles whose cumulative flat-to-open position never reaches our tier minimum notional and counts every other
-strategy/capacity rejection as a miss. A sub-floor source open remains one pending lifecycle while that position
-grows. Once the floor is crossed, our open is sized independently by our margin, leverage and capacity surface;
-the source notional does not cap it. Further fills from the OID that confirmed the opening extend the source
-opening anchor and never become smart adds. Later source adds continue to use the existing smart-add rules.
+Historical replay assumes sufficient market liquidity; every source flat-to-open/flip lifecycle is an effective
+open opportunity regardless of source notional, and every strategy/capacity rejection is a miss. Our open is
+sized independently by our equity, margin, leverage and capacity surface. Further fills from the opening OID
+extend the source opening anchor and never become smart adds. Later source adds continue to use the existing
+smart-add rules.
 Observer retains the live liquidity filter and persists those live-only skips separately.
 
 Qualification never credits positive marked PnL. It counts complete closed-Episode PnL and charges negative

@@ -107,7 +107,7 @@ function ObserverControl({ status, busy, onStart, onPause, onStop, live = false 
 
 function Dashboard({ onLogout }) {
   const [page, setPage] = useState("overview");
-  const { ov, execution, livePositions, streamOk, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
+  const { ov, execution, livePositions, streamOk, refreshModeData, scanning, setScanning, scanStatus, obsPending, setObsPending } = useDashboardRefresh(api);
   const [confirmCfg, setConfirmCfg] = useState(null);
   const [scanStopping, setScanStopping] = useState(false);
   const [scanStopError, setScanStopError] = useState(null);
@@ -279,7 +279,8 @@ function Dashboard({ onLogout }) {
         {page === "history" && <History />}
         {page === "wallets" && <Wallets confirm={setConfirmCfg} />}
         {page === "discovery" && <Discovery scanning={scanning} startRescan={startRescan} confirm={setConfirmCfg} />}
-        {page === "settings" && <Settings confirm={setConfirmCfg} initialTab={settingsTab} />}
+        {page === "settings" && <Settings confirm={setConfirmCfg} initialTab={settingsTab}
+          observerState={obs} onModeDataChanged={refreshModeData} />}
       </main>
 
       <nav className="mobile-nav" aria-label="移动端导航" ref={mobileNavRef}>

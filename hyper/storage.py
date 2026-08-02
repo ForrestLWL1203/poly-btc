@@ -1123,6 +1123,20 @@ CREATE TABLE IF NOT EXISTS execution_credential (
     updated_at       TEXT NOT NULL
 );
 
+-- Replaceable read-only exchange snapshot populated when a credential is verified/refreshed.
+-- It powers pre-session account display without creating a Live session or initializing the Live ledger.
+CREATE TABLE IF NOT EXISTS execution_account_preview (
+    network          TEXT PRIMARY KEY,
+    account_address  TEXT NOT NULL,
+    equity           REAL NOT NULL DEFAULT 0,
+    available        REAL NOT NULL DEFAULT 0,
+    margin_used      REAL NOT NULL DEFAULT 0,
+    unrealized_pnl   REAL NOT NULL DEFAULT 0,
+    position_count   INTEGER NOT NULL DEFAULT 0,
+    open_order_count INTEGER NOT NULL DEFAULT 0,
+    observed_at      TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS execution_preflight (
     preflight_id       TEXT PRIMARY KEY,
     network            TEXT NOT NULL,

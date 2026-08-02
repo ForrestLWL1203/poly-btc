@@ -9,7 +9,7 @@ import { AccountSettings } from "./settings/AccountSettings.jsx";
 
 const { useEffect, useState } = React;
 
-export function Settings({ confirm, initialTab = null }) {
+export function Settings({ confirm, initialTab = null, observerState = null, onModeDataChanged = null }) {
   const {
     params,
     vals,
@@ -111,7 +111,8 @@ export function Settings({ confirm, initialTab = null }) {
         }
       </div>
 
-      {tab === "account" ? <AccountSettings confirm={confirm} /> : <div className="tbl-wrap">
+      {tab === "account" ? <AccountSettings confirm={confirm} observerState={observerState}
+        onModeDataChanged={onModeDataChanged} /> : <div className="tbl-wrap">
         {tab === "scanner" && <ScannerSettingsPanel list={list} vals={vals} dirty={dirty} onChange={setValue} />}
         {tab === "follow" && <FollowSettingsPanel list={list} vals={vals} dirty={dirty}
           openTiers={openTiers} setOpenTiers={setOpenTiers}

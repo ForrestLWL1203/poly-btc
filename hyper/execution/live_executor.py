@@ -24,6 +24,7 @@ from hyper.execution.liquidity import assess_order_book
 from hyper.util import now_iso, now_ms
 
 from . import control
+from .account_state import snapshot_account_values, snapshot_orders, snapshot_positions
 from .coordinator import AmbiguousOrderError, SerializedExecutionCoordinator, SigningClockError
 from .credentials import decrypt_agent_wallet
 from .hyperliquid_broker import BrokerError, HyperliquidBroker
@@ -199,46 +200,15 @@ class LiveExecutor:
         must still be removed from that total to derive available-to-trade collateral.  Spot holds are also
         unavailable and are deducted here.
         """
-        balances = snapshot.collateral_state.get("balances") if isinstance(snapshot.collateral_state, dict) else None
-        for item in balances or []:
-            if isinstance(item, dict) and item.get("coin") == "USDC":
-                total = max(0.0, _float(item.get("total")))
-                isolated_margin = sum(
-                    max(0.0, _float(position.get("margin_used"))) for position in positions
-                    if str(position.get("leverage_type") or "").lower() == "isolated"
-                )
-                return total, max(0.0, total - _float(item.get("hold")) - isolated_margin)
-        return 0.0, 0.0
+        return snapshot_account_values(snapshot, positions)
 
     @staticmethod
     def _positions(snapshot) -> list[dict]:
-        positions = []
-        for dex, state in snapshot.perp_states.items():
-            rows = state.get("assetPositions") if isinstance(state, dict) else None
-            if not isinstance(rows, list):
-                raise RuntimeError("invalid_exchange_position_state")
-            for item in rows:
-                position = item.get("position") if isinstance(item, dict) else None
-                if not isinstance(position, dict):
-                    continue
-                size = _float(position.get("szi"))
-                if abs(size) <= 1e-12:
-                    continue
-                leverage = position.get("leverage") if isinstance(position.get("leverage"), dict) else {}
-                positions.append({
-                    "dex": str(dex or ""), "coin": str(position.get("coin") or ""),
-                    "signed_size": size, "entry_px": _float(position.get("entryPx"), None),
-                    "position_value": _float(position.get("positionValue"), None),
-                    "margin_used": _float(position.get("marginUsed"), None),
-                    "leverage_type": leverage.get("type"), "leverage_value": _float(leverage.get("value"), None),
-                    "unrealized_pnl": _float(position.get("unrealizedPnl"), None),
-                    "liquidation_px": _float(position.get("liquidationPx"), None),
-                })
-        return positions
+        return snapshot_positions(snapshot)
 
     @staticmethod
     def _orders(snapshot) -> list[dict]:
-        return [item for rows in snapshot.open_orders.values() for item in (rows or []) if isinstance(item, dict)]
+        return snapshot_orders(snapshot)
 
     def _sync_fills(self) -> list[dict]:
         session_start_ms = _iso_ms(self.session.get("started_at"))
@@ -750,7 +720,7 @@ class LiveExecutor:
             if not reduce_only:
                 allowed_margin = self._increase_margin_cap(coin, size * mark / leverage)
                 size = min(size, allowed_margin * leverage / mark)
-                if size * mark < 10.0:
+                if size * mark < config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:
                     raise RuntimeError("NO_EXECUTABLE_CAPACITY")
                 leverage_result = None
                 for leverage_attempt in range(int(config.LIVE_QUOTE_READ_ATTEMPTS)):
@@ -787,7 +757,7 @@ class LiveExecutor:
                     break
                 if result.error_code not in {None, "ioc_cancel", "no_liquidity"}:
                     break
-                if remaining * mark < 10.0:
+                if remaining * mark < config.HYPERLIQUID_MIN_PERP_NOTIONAL_USD:
                     break
 
             total = sum(item.filled_size for item in results)

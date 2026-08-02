@@ -38,12 +38,11 @@ class ExecutionPreflightTests(unittest.TestCase):
         self.assertEqual(result.code, AccountPreflightCode.OK)
         self.assertEqual(result.available_collateral, 100)
 
-    def test_agent_mode_funds_capacity_and_cleanliness_fail_closed(self):
+    def test_agent_mode_funds_and_cleanliness_fail_closed(self):
         cases = [
             (identity("0x" + "c" * 40), snapshot(), AccountPreflightCode.AGENT_MISMATCH),
             (identity(), snapshot(abstraction="default"), AccountPreflightCode.UNSUPPORTED_ACCOUNT_MODE),
             (identity(), snapshot(total="0"), AccountPreflightCode.NO_AVAILABLE_COLLATERAL),
-            (identity(), snapshot(total="9.99"), AccountPreflightCode.NO_EXECUTABLE_CAPACITY),
             (identity(), snapshot(positions=[{"position": {"szi": "0.1"}}]), AccountPreflightCode.ACCOUNT_NOT_CLEAN),
             (identity(), snapshot(orders=[{"oid": 17}]), AccountPreflightCode.ACCOUNT_NOT_CLEAN),
         ]
@@ -52,6 +51,12 @@ class ExecutionPreflightTests(unittest.TestCase):
                 result = evaluate_account_preflight(ident, account)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.code, expected)
+
+    def test_order_notional_minimum_is_not_treated_as_wallet_equity_minimum(self):
+        result = evaluate_account_preflight(identity(), snapshot(total="9.99"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.available_collateral, 9.99)
 
 
 if __name__ == "__main__":
