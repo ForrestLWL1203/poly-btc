@@ -1,14 +1,13 @@
 export const PARAM_META = {
   // follow
-  STABLE_MARGIN_PCT: { name: "稳定档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "2–10", up: "每单更重", dn: "加仓余量更多" },
+  STABLE_MARGIN_PCT: { name: "稳定档·单笔保证金", desc: "按保证金权益额度计算；必须给至少4次加仓留出单币容量", range: "2–10", up: "每单更重", dn: "加仓余量更多" },
   STABLE_LEV_CAP: { name: "稳定档·杠杆上限", desc: "BTC固定稳定档的杠杆封顶(仍受目标/交易所上限约束)", range: "15–35", up: "放开高杠杆", dn: "压低杠杆" },
-  MID_MARGIN_PCT: { name: "中档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "2–6", up: "每单更重", dn: "加仓余量更多" },
+  MID_MARGIN_PCT: { name: "中档·单笔保证金", desc: "按保证金权益额度计算；必须给至少4次加仓留出单币容量", range: "2–6", up: "每单更重", dn: "加仓余量更多" },
   MID_LEV_CAP: { name: "中档·杠杆上限", desc: "非BTC且σ低于9%时的杠杆封顶", range: "8–12", up: "放开高杠杆", dn: "压低杠杆" },
-  HIGH_MARGIN_PCT: { name: "剧烈档·单笔保证金", desc: "达到组合部署上限前使用；必须给至少4次加仓留出单币容量", range: "1–4", up: "每单更重", dn: "加仓余量更多" },
+  HIGH_MARGIN_PCT: { name: "剧烈档·单笔保证金", desc: "按保证金权益额度计算；必须给至少4次加仓留出单币容量", range: "1–4", up: "每单更重", dn: "加仓余量更多" },
   HIGH_LEV_CAP: { name: "剧烈档·杠杆上限", desc: "σ≥9%的杠杆封顶", range: "3–5", up: "放开高杠杆", dn: "压低杠杆" },
   SMART_TP_ENABLE: { name: "智能动态止盈", desc: "开启后接管旧尾仓保护；按波动率激活高水位并在回撤时分批止盈，保留30%尾仓", range: "默认关闭" },
-  MARGIN_EQUITY_PCT: { name: "保证金权益额度", desc: "每笔新仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结", range: "10–100", up: "每个信号开得更重", dn: "单笔更轻、可容纳更多信号" },
-  MAX_DEPLOY_PCT: { name: "组合部署上限", desc: "组合保证金占用达到此值后停开新仓,保留资金给加仓和平仓管理", range: "70–90", up: "允许更多新仓", dn: "更早锁住新仓" },
+  MARGIN_EQUITY_PCT: { name: "保证金权益额度", desc: "同时控制单笔保证金计算基数与累计新仓占用上限；剩余额度供已有仓位加仓和风险缓冲", range: "10–100", up: "单笔与新仓预算更高", dn: "单笔更轻、储备更多" },
   MAX_LEV: { name: "最大杠杆", desc: "杠杆上限(σ估计兜底)", range: "10–50", up: "放开高杠杆", dn: "更严格限杠杆" },
   MIN_LEV: { name: "最小杠杆", desc: "杠杆下限(极波动币≈现货)", range: "—" },
   MIN_OPEN_MARGIN_PCT: { name: "单笔最小开仓额", desc: "低于此则跳过该信号(不开尘埃仓)", range: "—" },

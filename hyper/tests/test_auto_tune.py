@@ -9,9 +9,10 @@ from hyper.selection import auto_tune
 
 
 class AutoTuneTests(unittest.TestCase):
-    def test_deployment_default_is_ninety_percent_and_not_tuned(self):
-        self.assertEqual(config.MAX_DEPLOY_PCT, .90)
-        self.assertEqual(config.DEPLOY_FULL_PCT, .90)
+    def test_unified_margin_budget_default_is_ninety_percent_and_not_tuned(self):
+        self.assertEqual(config.MARGIN_EQUITY_PCT, .90)
+        self.assertFalse(hasattr(config, "MAX_DEPLOY_PCT"))
+        self.assertFalse(hasattr(config, "DEPLOY_FULL_PCT"))
         self.assertNotIn("MAX_DEPLOY_PCT", auto_tune.TUNE_KEYS)
         self.assertNotIn("DEPLOY_FULL_PCT", auto_tune.TUNE_KEYS)
 
@@ -769,8 +770,9 @@ class AutoTuneTests(unittest.TestCase):
             base["STABLE_MARGIN_PCT"] * base["STABLE_LEV_CAP"],
         )
 
-    def test_deploy_cap_and_retired_total_cap_are_not_tuned(self):
+    def test_retired_deploy_caps_are_not_tuned(self):
         self.assertNotIn("MAX_DEPLOY_PCT", auto_tune.TUNE_KEYS)
+        self.assertFalse(hasattr(auto_tune.config, "MAX_DEPLOY_PCT"))
         self.assertFalse(hasattr(auto_tune.config, "MAX_TOTAL_MARGIN_PCT"))
 
     def test_near_best_profit_prefers_fewer_liquidations_then_capacity(self):

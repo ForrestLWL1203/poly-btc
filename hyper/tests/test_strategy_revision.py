@@ -40,8 +40,7 @@ class StrategyRevisionTests(unittest.TestCase):
 
     def test_revision_freezes_params_and_target_context(self):
         db = self._db()
-        db.execute("UPDATE params SET value='80' WHERE key='DEPLOY_FULL_PCT'")
-        db.execute("UPDATE params SET value='90' WHERE key='MAX_DEPLOY_PCT'")
+        db.execute("UPDATE params SET value='90' WHERE key='MARGIN_EQUITY_PCT'")
         created = strategy_revision.create_revision(db, "g1", source="test")
         db.commit()
 
@@ -64,8 +63,9 @@ class StrategyRevisionTests(unittest.TestCase):
         self.assertNotIn("ROUGH_COPY_MIN_RETURN_7D", active["params"])
         self.assertEqual(active["params"]["COPY_DEEP_BAG_EVENT_MIN_HOURS"], 4.0)
         self.assertEqual(active["params"]["CORE_COPY_MAX_LIQUIDATIONS_30D"], 3)
-        self.assertEqual(active["params"]["MAX_DEPLOY_PCT"], .90)
-        self.assertEqual(active["params"]["DEPLOY_FULL_PCT"], .90)
+        self.assertEqual(active["params"]["MARGIN_EQUITY_PCT"], .90)
+        self.assertNotIn("MAX_DEPLOY_PCT", active["params"])
+        self.assertNotIn("DEPLOY_FULL_PCT", active["params"])
         self.assertNotIn("CORE_INTRATRADE_DD_MAX", active["params"])
         self.assertNotIn("CORE_DEEP_BAG_MIN_RECOVERY_RATE", active["params"])
         self.assertNotIn("WALLET_HWM_EXIT_DD_PCT", active["params"])

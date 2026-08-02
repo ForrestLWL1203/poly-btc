@@ -1,6 +1,6 @@
 import { fParam } from "../../lib/format.js";
 import { CoinBlacklistEditor } from "./CoinBlacklistEditor.jsx";
-import { DeployRangeRow, editableParam, ParamRow, RangeRow } from "./ParamRow.jsx";
+import { editableParam, ParamRow, RangeRow } from "./ParamRow.jsx";
 import {
   ADD_KEYS,
   AUTO_TUNE_KEY,
@@ -9,7 +9,6 @@ import {
 } from "./paramMeta.js";
 
 const tierKeys = new Set(TIER_GROUPS.flatMap(g => [g.max, g.lev, g.cap]));
-const deployKeys = new Set(["MAX_DEPLOY_PCT"]);
 const marginEquityKey = "MARGIN_EQUITY_PCT";
 
 export function FollowSettingsPanel({
@@ -31,7 +30,7 @@ export function FollowSettingsPanel({
       invalid={badKeys.has(p.key)} onChange={onChange} />
   );
   const visibleTopRows = list.filter(p => !(
-    tierKeys.has(p.key) || deployKeys.has(p.key)
+    tierKeys.has(p.key)
     || ADD_KEYS.has(p.key) || p.key === AUTO_TUNE_KEY
     || p.key === BLACKLIST_KEY || p.key === marginEquityKey
   ));
@@ -56,9 +55,8 @@ export function FollowSettingsPanel({
       </div>
       {marginEquityParam && row(marginEquityParam)}
       {marginEquityParam && <div className="param-inline-note">
-        只缩小每笔新仓的保证金计算基数；未计入的权益仍是可用资金，不会被冻结。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
+        同时缩放每笔新仓的保证金计算基数，并限制累计新仓保证金占用；达到额度后停止新开仓。剩余权益继续供已有仓位加仓与风险缓冲使用。新开仓立即生效，Core资格和组合回测在下次重采或重评后更新。
       </div>}
-      <DeployRangeRow paramsByKey={paramsByKey} vals={vals} dirty={dirty} badKeys={badKeys} onChange={onChange} />
       {validationErrors.length > 0 && (
         <div className="param-errors">
           {validationErrors.map((e, i) => <div key={i}>{e}</div>)}

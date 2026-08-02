@@ -433,7 +433,7 @@ rather than reach the OOM killer.
 
 The compact portfolio tuner searches all three volatility-tier margins and leverage caps,
 and smart-add `ADD_GAP_K`, `POS_ADD_GAP_K`, `ADD_GAP_SHRINK_G`, and `ADD_MAX_HARD`. It does
-not tune per-coin caps, `MAX_DEPLOY_PCT`, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
+not tune per-coin caps, `MARGIN_EQUITY_PCT`, Core maximum, tail-close,
 or stop/risk-owner settings. Production Core formation uses the efficient profile: it tests every tier
 independently, keeps current/highest-profit/fewest-liquidation directions, but does not expand them into a
 three-tier Cartesian product. Its 30-day search retains Pareto representatives for highest profit, fewest
@@ -527,12 +527,12 @@ through those retries; only markets still missing after all five attempts are cl
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
   high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use
   the same tier leverage cap, plus the venue maximum and source-wallet leverage cap.
-- `MARGIN_EQUITY_PCT` is a manual-only sizing base (default 100%, UI range 10–100%). It scales each new
-  position's drawdown-adjusted equity base without freezing the remainder; real cash, per-coin caps and total
-  deployment still use full risk equity. Auto-tune and Core-count selection must not modify this value.
-- A new open uses the tuned tier margin until `MAX_DEPLOY_PCT` (default 90%); new opens stop at that cap, while follow-on
-  adds may use the remaining real cash because they preserve an already-entered episode. The former
-  `DEPLOY_FULL_PCT` linear-shrink line and second 85% total-margin slice are compatibility-only/retired.
+- `MARGIN_EQUITY_PCT` is the single manual new-entry risk budget (default 90%, UI range 10–100%). It scales
+  each new position's drawdown-adjusted equity base and also caps aggregate fresh-position margin against real
+  risk equity. Once that cap is reached, new positions stop; follow-on adds may still use remaining real cash
+  because they preserve an already-entered episode. Available balance and per-coin caps remain authoritative.
+  Auto-tune and Core-count selection must not modify this value. The former independent `MAX_DEPLOY_PCT`,
+  `DEPLOY_FULL_PCT` linear-shrink line and second 85% total-margin slice are retired.
 - Smart-add spacing compares target transaction prices only; our BBO price is execution/PnL, never mixed into the
   target volatility gate. Adverse and positive adds have separate sigma gaps that expand after each followed
   add. One target order can consume at most one first-margin unit, the final reserved add may fill remaining

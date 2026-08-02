@@ -72,7 +72,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 20.0, "mid": 10.0, "high": 4.0},
             tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
             min_lev=1.0,
-            max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
             capital_anchor=10_000.0,
         )
@@ -111,7 +110,7 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 20.0, "mid": 9.0, "high": 6.0},
             tier_coin_cap={"stable": 0.40, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            max_deploy_pct=0.80,
+            margin_equity_pct=1.0,
             min_open_margin_pct=0.005,
             capital_anchor=10_000.0,
         )
@@ -161,7 +160,7 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 25.0, "mid": 10.0, "high": 4.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            max_deploy_pct=0.80,
+            margin_equity_pct=1.0,
             min_open_margin_pct=0.001,
             capital_anchor=10_000.0,
         )
@@ -191,14 +190,13 @@ class CopyEngineTests(unittest.TestCase):
         self.assertFalse(capped_plan.ok)
         self.assertEqual(capped_plan.reason, "coin_full")
 
-    def test_margin_equity_pct_scales_order_sizing_not_portfolio_caps(self):
+    def test_margin_equity_pct_scales_order_sizing_and_fresh_entry_budget(self):
         params = OpenSizingParams(
             high_sigma_min=0.10,
             tier_margin={"stable": 0.01, "mid": 0.01, "high": 0.01},
             tier_lev_cap={"stable": 10.0, "mid": 10.0, "high": 4.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
             margin_equity_pct=0.80,
             capital_anchor=8_000.0,
@@ -214,10 +212,24 @@ class CopyEngineTests(unittest.TestCase):
         self.assertEqual(plan.sizing_equity, 8_000.0)
         self.assertEqual(plan.margin_equity, 6_400.0)
         self.assertEqual(plan.margin, 64.0)
-        # Concentration and deployment controls remain based on real account
-        # equity; this knob reduces each order rather than reserving a hard pool.
+        # Concentration remains based on real account equity. The same operator
+        # percentage also reserves the final 20% from fresh position opens.
         self.assertEqual(plan.room, 2_400.0)
         self.assertEqual(plan.deploy_room, 6_400.0)
+
+        at_entry_budget = plan_open_sizing(
+            coin="ETH", side="long", entry_px=100.0, sigma=0.04,
+            balance=8_000.0, available=1_600.0, existing_coin_margin=0.0,
+            master_notional=100_000.0, master_leverage=10.0, params=params,
+        )
+        self.assertFalse(at_entry_budget.ok)
+        self.assertEqual(at_entry_budget.reason, "deploy_cap")
+        self.assertAlmostEqual(at_entry_budget.deploy_room, 0.0)
+        # Existing-position adds do not consume the fresh-entry budget gate.
+        self.assertEqual(smart_add_order_margin(
+            first_margin=64.0, target_ratio=1.0, followed_margin=0.0,
+            coin_room=500.0, risk_available=1_600.0,
+        ), 64.0)
 
         # The proportional dust floor follows the $6.4k sizing base.
         dust_ok = replace(params, tier_margin={"stable": 0.006, "mid": 0.006, "high": 0.006})
@@ -241,7 +253,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 30.0, "mid": 9.0, "high": 4.0},
             tier_coin_cap={"stable": 1.0, "mid": 1.0, "high": 1.0},
             min_lev=1.0,
-            max_deploy_pct=0.80,
             min_open_margin_pct=0.005,
             capital_anchor=10_000.0,
             margin_equity_pct=1.0,
@@ -287,7 +298,7 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 25.0, "mid": 10.0, "high": 4.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            max_deploy_pct=0.80,
+            margin_equity_pct=1.0,
             min_open_margin_pct=0.001,
             capital_anchor=10_000.0,
         )
@@ -320,7 +331,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 35.0, "mid": 12.0, "high": 4.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
             capital_anchor=10_000.0,
         )
@@ -343,7 +353,6 @@ class CopyEngineTests(unittest.TestCase):
             tier_lev_cap={"stable": 25.0, "mid": 12.0, "high": 4.0},
             tier_coin_cap={"stable": 0.30, "mid": 0.22, "high": 0.15},
             min_lev=1.0,
-            max_deploy_pct=0.80,
             min_open_margin_pct=0.001,
             capital_anchor=10_000.0,
         )

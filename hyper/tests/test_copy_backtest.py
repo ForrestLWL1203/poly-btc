@@ -234,7 +234,7 @@ class CopyBacktestTests(unittest.TestCase):
         day = 86_400_000
         fills = [
             fill(1 * day, "BTC", "B", 1_000, 0, 100.0, 1),
-            # This simultaneous second open is blocked by the 3% aggregate deploy cap.
+            # This simultaneous second open is blocked by the unified 3% fresh-entry budget.
             fill(1 * day + 1, "ETH", "B", 1_000, 0, 100.0, 2),
             fill(2 * day, "BTC", "A", 1_000, 1_000, 101.0, 3),
             fill(25 * day, "SOL", "B", 1_000, 0, 100.0, 4),
@@ -243,9 +243,9 @@ class CopyBacktestTests(unittest.TestCase):
         result = run_backtest(
             "0xabc", fills, sigmas={"BTC": .04, "ETH": .04, "SOL": .04},
             overrides={
-                "MAX_DEPLOY_PCT": .03,
-                "STABLE_MARGIN_PCT": .03,
-                "STABLE_MARGIN_MIN_PCT": .03,
+                "MARGIN_EQUITY_PCT": .03,
+                "STABLE_MARGIN_PCT": 1.0,
+                "MID_MARGIN_PCT": 1.0,
                 "STABLE_MIN_NOTIONAL": 0.0,
             },
         )
@@ -448,6 +448,7 @@ class CopyBacktestTests(unittest.TestCase):
             "WALLET_MARGIN_CAP_PCT": 1.0,
             "WALLET_SECTOR_SIDE_CAP_PCT": 1.0,
             "MAX_TOTAL_MARGIN_PCT": 1.0,
+            "MARGIN_EQUITY_PCT": 1.0,
         })
 
         self.assertEqual(result["followed_adds"], 1)
@@ -569,6 +570,7 @@ class CopyBacktestTests(unittest.TestCase):
             "STABLE_MARGIN_PCT": 0.015,
             "STABLE_LEV_CAP": 25.0,
             "STABLE_MIN_NOTIONAL": 2500.0,
+            "MARGIN_EQUITY_PCT": 1.0,
         })
 
         self.assertEqual(result["closed_n"], 1)
@@ -593,7 +595,7 @@ class CopyBacktestTests(unittest.TestCase):
         self.assertEqual(result["master_leverage_known"], 1)
         self.assertEqual(result["master_leverage_missing"], 0)
 
-    def test_tuned_margin_does_not_shrink_before_deploy_cap(self):
+    def test_tuned_margin_does_not_shrink_before_unified_entry_budget(self):
         fills = []
         for i in range(8):
             coin = f"C{i}"
@@ -606,8 +608,7 @@ class CopyBacktestTests(unittest.TestCase):
             "MID_LEV_CAP": 10.0,
             "MID_MIN_NOTIONAL": 0.0,
             "MID_COIN_CAP_PCT": 1.0,
-            "DEPLOY_FULL_PCT": 0.08,
-            "MAX_DEPLOY_PCT": 0.50,
+            "MARGIN_EQUITY_PCT": 0.50,
             "WALLET_MARGIN_CAP_PCT": 1.0,
             "WALLET_SECTOR_SIDE_CAP_PCT": 1.0,
             "WALLET_MAX_OPEN_POSITIONS": 20,
@@ -616,9 +617,9 @@ class CopyBacktestTests(unittest.TestCase):
         margins = [p["margin"] for p in sorted(result["open_positions"], key=lambda p: p["opened_at"])]
 
         self.assertGreaterEqual(len(margins), 6)
-        self.assertGreater(margins[0], 390)
-        self.assertGreater(margins[1], 390)
-        self.assertTrue(all(margin > 390 for margin in margins))
+        self.assertGreater(margins[0], 190)
+        self.assertGreater(margins[1], 190)
+        self.assertTrue(all(margin > 190 for margin in margins))
 
     def test_retired_wallet_sector_cap_does_not_block_lone_wallet(self):
         fills = [
@@ -634,6 +635,7 @@ class CopyBacktestTests(unittest.TestCase):
             "MID_MARGIN_MIN_PCT": 0.02,
             "MID_COIN_CAP_PCT": 1.0,
             "MID_MIN_NOTIONAL": 0.0,
+            "MARGIN_EQUITY_PCT": 1.0,
         })
 
         used = sum(position["margin"] for position in result["open_positions"])
@@ -657,6 +659,7 @@ class CopyBacktestTests(unittest.TestCase):
             "MID_MARGIN_MIN_PCT": 0.02,
             "MID_COIN_CAP_PCT": 1.0,
             "MID_MIN_NOTIONAL": 0.0,
+            "MARGIN_EQUITY_PCT": 1.0,
         })
 
         by_wallet = {}

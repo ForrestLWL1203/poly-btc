@@ -215,16 +215,11 @@ FOLLOW_POS_ADD = True      # A 正向加仓:目标"顺势加仓"(价格朝其有
 STABLE_COIN_CAP_PCT = 0.30
 MID_COIN_CAP_PCT    = 0.20
 HIGH_COIN_CAP_PCT   = 0.15
-MARGIN_EQUITY_PCT = 1.00    # manual sizing base: each new open uses this share of drawdown-adjusted equity.
-#                            The remainder is NOT reserved/frozen: real available cash, per-coin caps and
-#                            portfolio deployment limits still use full risk equity, so it remains usable by
-#                            other wallets, later signals and adds.  This knob is deliberately not auto-tuned.
-DEPLOY_FULL_PCT = 0.90      # legacy snapshot compatibility; runtime no longer applies a separate firepower line.
-MAX_DEPLOY_PCT = 0.90       # PORTFOLIO deployment cap: stop opening NEW positions once total committed margin
-#                           reaches this fraction of equity. Equity-based sizing (每笔=权益×档位%) has no
-#                           self-throttle (~20 fixed-size opens = 100% full), so it saturated fast. This keeps
-#                           a (1-this)=10% dry-powder reserve for ADDS (逆势摊低仍要吃保证金) + new signals +
-#                           risk buffer. Adds MAY dip into the reserve (they're higher-value than a fresh open).
+MARGIN_EQUITY_PCT = 0.90    # Unified new-entry budget and order-sizing base. Each new open is sized from this
+#                            share of drawdown-adjusted equity, and aggregate NEW-position margin stops at the
+#                            same share of real risk equity. Remaining cash stays available to existing-position
+#                            adds and risk management, subject to available balance and concentration caps.
+#                            This operator-owned risk budget is deliberately not auto-tuned.
 WALLET_MARGIN_CAP_PCT = 1.00       # legacy snapshot compatibility; independent wallet slices are retired.
 WALLET_SECTOR_SIDE_CAP_PCT = 1.00
 WALLET_CRYPTO_STABLE_SIDE_CAP_PCT = 1.00

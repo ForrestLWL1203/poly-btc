@@ -156,9 +156,7 @@ PARAM_SPEC = [
         config.AUTO_TUNE_PRICE_PATH_MIN_COVERAGE * 100,
         "价格路径覆盖门槛", "真钱建议95%;Paper验证可设0"),
     ("MARGIN_EQUITY_PCT",   "follow",  "yellow", "pct",     "immediate", config.MARGIN_EQUITY_PCT * 100,
-        "保证金权益额度", "单笔开仓按此比例的权益计算保证金；剩余权益仍可被其他钱包、加仓和缓冲使用，并非冻结"),
-    ("DEPLOY_FULL_PCT",      "follow",  "hidden", "pct",     "immediate", config.DEPLOY_FULL_PCT * 100,
-        "旧满火力占用线", "兼容旧策略快照；新仓在组合部署上限前始终使用调参后的档位保证金"),
+        "保证金权益额度", "同时作为单笔保证金计算基数与累计新仓占用上限；达到额度后停止新开仓，剩余权益供已有仓位加仓和风险缓冲"),
     ("STABLE_MARGIN_PCT",    "follow",  "yellow", "pct",     "immediate", config.STABLE_MARGIN_PCT * 100,
         "稳定档·保证金上限", "稳定档低占用时每单保证金上限,占权益%"),
     ("STABLE_MARGIN_MIN_PCT","follow",  "hidden", "pct",     "immediate", config.STABLE_MARGIN_MIN_PCT * 100,
@@ -244,8 +242,6 @@ PARAM_SPEC = [
     ("HIGH_SIGMA_MIN",       "follow",  "hidden", "pct",     "immediate", config.HIGH_SIGMA_MIN * 100, "剧烈档σ下界", ""),
     ("MAX_LEV",              "follow",  "hidden", "x",       "immediate", config.MAX_LEV, "杠杆硬上限", ""),
     ("MIN_LEV",              "follow",  "hidden", "x",       "immediate", config.MIN_LEV, "杠杆硬下限", ""),
-    ("MAX_DEPLOY_PCT",       "follow",  "yellow", "pct",     "immediate", config.MAX_DEPLOY_PCT * 100,
-        "组合部署上限", "总占用保证金到此比例就停开新仓,留下(100-此)%干火药给加仓+新信号+缓冲。加仓可动用这部分储备。防权益开单一路铺满"),
     ("MIN_OPEN_MARGIN_PCT",  "follow",  "hidden", "pct",     "immediate", config.MIN_OPEN_MARGIN_PCT * 100, "单笔最小开仓额", ""),
     ("MAX_ENTRY_CHASE_PCT",  "follow",  "hidden", "nullable","immediate",
         (config.MAX_ENTRY_CHASE_PCT * 100) if config.MAX_ENTRY_CHASE_PCT is not None else None, "追价保护阈值", ""),
@@ -274,9 +270,9 @@ _HARVEST_PREVIOUS_DEFAULTS = {
 _RISK_PREVIOUS_DEFAULTS = {
     "ADD_GAP_K": ("0.12",),
     "ADD_GAP_SHRINK_G": ("1.2",),
-    "DEPLOY_FULL_PCT": ("30", "30.0", "40", "40.0", "50", "50.0", "60", "60.0"),
     "HIGH_LEV_CAP": ("4", "4.0"),
     "HIGH_MARGIN_PCT": ("2", "2.0"),
+    "MARGIN_EQUITY_PCT": ("100", "100.0"),
     "MID_COIN_CAP_PCT": ("22", "22.0"),
     "MID_LEV_CAP": ("10", "10.0"),
     "MAX_CONCURRENT_POS": ("15", "15.0"),
@@ -337,7 +333,7 @@ def seed_params(db):
         "'PORTFOLIO_MAX_TURNOVER','PORTFOLIO_MIN_EDGE_BPS',"
         "'CORE_RETENTION_MIN_COPY_RETURN_30D',"
         "'HARVEST_WEEK_ROI_MIN','HARVEST_MONTH_ROI_MIN','HARVEST_ALL_ROI_MIN',"
-        "'HARVEST_ROI_WINDOWS_MIN_PASS','MAX_TOTAL_MARGIN_PCT',"
+        "'HARVEST_ROI_WINDOWS_MIN_PASS','MAX_TOTAL_MARGIN_PCT','MAX_DEPLOY_PCT','DEPLOY_FULL_PCT',"
         "'WALLET_MARGIN_CAP_PCT','WALLET_SECTOR_SIDE_CAP_PCT',"
         "'WALLET_CRYPTO_STABLE_SIDE_CAP_PCT','WALLET_CRYPTO_MID_SIDE_CAP_PCT',"
         "'WALLET_CRYPTO_HIGH_SIDE_CAP_PCT','WALLET_STOCK_SIDE_CAP_PCT',"

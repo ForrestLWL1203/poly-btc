@@ -16,7 +16,6 @@ class OpenSizingParams:
     tier_lev_cap: dict
     tier_coin_cap: dict
     min_lev: float
-    max_deploy_pct: float
     min_open_margin_pct: float
     # Required explicitly so a real-money caller can never inherit the standardized Paper $10k anchor.
     capital_anchor: float
@@ -515,13 +514,12 @@ def plan_open_sizing(
     )
     margin_equity_pct = max(0.0, min(1.0, float(params.margin_equity_pct)))
     margin_equity = sizing_equity * margin_equity_pct
-    # ``MARGIN_EQUITY_PCT`` scales the equity base used by each order-sizing formula.  It deliberately
-    # does not create a second wallet or a hard portfolio pool: real available cash plus the independent
-    # deployment/concentration controls remain authoritative.
+    # One operator-owned percentage controls both order size and the aggregate fresh-entry budget. It is
+    # not a frozen sub-wallet: once new entries stop, existing-position adds may still use real available cash.
     margin_pct = margin_pct_for_deploy(params.tier_margin[tier])
     wanted_margin = max(0.0, margin_equity * margin_pct)
     room = max(0.0, params.tier_coin_cap[tier] * risk_equity - existing_coin_margin)
-    deploy_room = max(0.0, risk_available - (1.0 - params.max_deploy_pct) * risk_equity)
+    deploy_room = max(0.0, risk_available - (1.0 - margin_equity_pct) * risk_equity)
     min_add_margin = params.min_open_margin_pct * margin_equity
     add_capacity_margin = smart_add_margin_ceiling(
         coin_room=room,

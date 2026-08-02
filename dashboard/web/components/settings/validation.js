@@ -38,7 +38,5 @@ export function validateFollowParams(vals) {
   if (!Number.isFinite(marginEquity) || marginEquity < 10 || marginEquity > 100) {
     markErr("保证金权益额度必须在 10–100% 之间", ["MARGIN_EQUITY_PCT"]);
   }
-  validatePct("组合部署上限", "MAX_DEPLOY_PCT");
-
   return { errors, badKeys };
 }

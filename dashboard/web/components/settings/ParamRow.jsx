@@ -65,22 +65,8 @@ export function RangeRow({ group, paramsByKey, vals, dirty, badKeys, onChange })
     <div className={"prow level-" + level + (dirty[group.max] ? " dirty" : "") + (badKeys.has(group.max) ? " invalid" : "")}>
       <span className={"lvl-dot lvl-" + level} />
       <div className="pn"><b>{group.label}·单笔保证金</b><ParamRiskBadge level={level} /></div>
-      <div className="pd">达到组合部署上限前，每个新仓按此比例计算保证金</div>
+      <div className="pd">每个新仓按保证金权益额度乘以此比例计算，并为至少4次加仓预留单币容量</div>
       <EditableValue value={vals[group.max]} unit="%" ptype="pct" disabled={!editableParam(pMax)} onCommit={v => onChange(group.max, v)} />
-    </div>
-  );
-}
-
-export function DeployRangeRow({ paramsByKey, vals, dirty, badKeys, onChange }) {
-  const pLock = paramsByKey.get("MAX_DEPLOY_PCT");
-  if (!pLock) return null;
-  const level = resolveLevel(pLock);
-  return (
-    <div className={"prow level-" + level + (dirty.MAX_DEPLOY_PCT ? " dirty" : "") + (badKeys.has("MAX_DEPLOY_PCT") ? " invalid" : "")}>
-      <span className={"lvl-dot lvl-" + level} />
-      <div className="pn"><b>组合部署上限</b><ParamRiskBadge level={level} /></div>
-      <div className="pd">达到此占用率后停止新开仓；加仓仍可使用保留资金，但受真实可用余额与集中度上限约束</div>
-      <EditableValue value={vals.MAX_DEPLOY_PCT} unit="%" ptype="pct" disabled={!editableParam(pLock)} onCommit={v => onChange("MAX_DEPLOY_PCT", v)} />
     </div>
   );
 }

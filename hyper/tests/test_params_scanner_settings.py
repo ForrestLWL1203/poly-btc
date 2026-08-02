@@ -24,6 +24,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
         self.assertEqual(config.WALLET_MAX_OPEN_POSITIONS, 15)
         self.assertEqual(config.WALLET_STOCK_SIDE_MAX_POSITIONS, 15)
         self.assertFalse(hasattr(config, "MAX_TOTAL_MARGIN_PCT"))
+        self.assertFalse(hasattr(config, "MAX_DEPLOY_PCT"))
+        self.assertFalse(hasattr(config, "DEPLOY_FULL_PCT"))
         self.assertFalse(hasattr(config, "STOCK_MAX_LEV"))
         self.assertFalse(hasattr(config, "PORTFOLIO_DRAWDOWN_STOP_ENABLE"))
         self.assertFalse(hasattr(config, "PORTFOLIO_DRAWDOWN_STOP_PCT"))
@@ -49,7 +51,9 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(scanner["inactive_days"], 3)
             self.assertNotIn("COPY_STOP_ENABLE", follow)
             self.assertNotIn("STOP_MARGIN_PCT", follow)
-            self.assertEqual(follow["MARGIN_EQUITY_PCT"], 1.0)
+            self.assertEqual(follow["MARGIN_EQUITY_PCT"], 0.9)
+            self.assertNotIn("MAX_DEPLOY_PCT", follow)
+            self.assertNotIn("DEPLOY_FULL_PCT", follow)
             self.assertNotIn("WALLET_MARGIN_CAP_PCT", follow)
             self.assertNotIn("WALLET_SECTOR_SIDE_CAP_PCT", follow)
             self.assertNotIn("WALLET_CRYPTO_STABLE_SIDE_CAP_PCT", follow)
@@ -80,7 +84,7 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(follow["ADD_GAP_SHRINK_G"], 1.3)
 
             visible_follow = {p["key"]: p for p in params.get_all(db)["follow"]}
-            self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["value"], 100.0)
+            self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["value"], 90.0)
             self.assertEqual(visible_follow["MARGIN_EQUITY_PCT"]["level"], "yellow")
             self.assertNotIn("WALLET_MARGIN_CAP_PCT", visible_follow)
             self.assertNotIn("WALLET_SECTOR_SIDE_CAP_PCT", visible_follow)
@@ -297,6 +301,8 @@ class ScannerSettingsParamTests(unittest.TestCase):
                 ("WALLET_MARGIN_CAP_PCT", "25"),
                 ("WALLET_MAX_OPEN_POSITIONS", "3"),
                 ("MAX_TOTAL_MARGIN_PCT", "85"),
+                ("MAX_DEPLOY_PCT", "90"),
+                ("DEPLOY_FULL_PCT", "60"),
                 ("STOCK_MAX_LEV", "10"),
                 ("PORTFOLIO_DRAWDOWN_STOP_ENABLE", "true"),
                 ("PORTFOLIO_DRAWDOWN_STOP_PCT", "15"),
@@ -314,12 +320,28 @@ class ScannerSettingsParamTests(unittest.TestCase):
             self.assertEqual(db.execute(
                 "SELECT COUNT(*) FROM params WHERE key IN "
                 "('WALLET_SECTOR_SIDE_CAP_PCT','WALLET_MARGIN_CAP_PCT',"
-                "'WALLET_MAX_OPEN_POSITIONS','MAX_TOTAL_MARGIN_PCT','STOCK_MAX_LEV',"
+                "'WALLET_MAX_OPEN_POSITIONS','MAX_TOTAL_MARGIN_PCT','MAX_DEPLOY_PCT','DEPLOY_FULL_PCT','STOCK_MAX_LEV',"
                 "'PORTFOLIO_DRAWDOWN_STOP_ENABLE','PORTFOLIO_DRAWDOWN_STOP_PCT')"
             ).fetchone()[0], 0)
             self.assertEqual(float(db.execute(
                 "SELECT value FROM params WHERE key='MAX_CONCURRENT_POS'"
             ).fetchone()[0]), 15.0)
+
+    def test_seed_params_moves_untouched_margin_budget_default_to_ninety(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute(
+                "UPDATE params SET value='100',default_value='100' WHERE key='MARGIN_EQUITY_PCT'"
+            )
+            db.commit()
+
+            params.seed_params(db)
+
+            row = db.execute(
+                "SELECT value,default_value FROM params WHERE key='MARGIN_EQUITY_PCT'"
+            ).fetchone()
+            self.assertEqual(tuple(row), ("90.0", "90.0"))
 
     def test_seed_params_deletes_retired_copy_7d_floor(self):
         with tempfile.TemporaryDirectory() as td:

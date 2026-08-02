@@ -123,7 +123,6 @@ class Observer:
         self.live_book_max_impact_bps = config.LIVE_BOOK_MAX_IMPACT_BPS
         self.min_coin_day_ntl_vlm = config.MIN_COIN_DAY_NTL_VLM
         self.min_coin_oi_notional = config.MIN_COIN_OI_NOTIONAL
-        self.max_deploy_pct = config.MAX_DEPLOY_PCT          # portfolio deployment cap (new opens stop here; adds may dip in)
         self.wallet_margin_cap_pct = config.WALLET_MARGIN_CAP_PCT
         self.wallet_sector_side_cap_pct = config.WALLET_SECTOR_SIDE_CAP_PCT
         self.wallet_sector_side_caps = {
@@ -721,7 +720,6 @@ class Observer:
             if f.get("ADD_FRAC") is not None: self.add_frac = f["ADD_FRAC"]
             if f.get("MAX_LEV"): self.max_lev = f["MAX_LEV"]
             if f.get("MIN_LEV"): self.min_lev = f["MIN_LEV"]
-            if f.get("MAX_DEPLOY_PCT"): self.max_deploy_pct = f["MAX_DEPLOY_PCT"]
             if f.get("MARGIN_EQUITY_PCT") is not None: self.margin_equity_pct = f["MARGIN_EQUITY_PCT"]
             if f.get("HIGH_SIGMA_MIN") is not None: self.high_sigma_min = f["HIGH_SIGMA_MIN"]
             for tier, mk, lk, ak in (
@@ -1120,7 +1118,6 @@ class Observer:
             tier_lev_cap=self.tier_lev_cap,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
-            max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
             capital_anchor=book.sizing_anchor,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,
@@ -2400,8 +2397,8 @@ class Observer:
             # Paper reads its latest local balance here. Live first refreshes exchange-authoritative equity
             # and available collateral so the sizing formula never starts from the 15-second projection cache.
             await self._refresh_live_sizing_state()
-            # Use the tuned tier margin until MAX_DEPLOY_PCT blocks fresh opens. Adds may still use the
-            # remaining real available cash because they matter more to copy fidelity.
+            # MARGIN_EQUITY_PCT owns both the per-order base and aggregate fresh-entry budget. Once the
+            # budget is full, adds may still use remaining real cash because they preserve copy fidelity.
             risk_equity = self._risk_equity(book)
             avail = self._risk_available(book)           # cash gate after recognizing floating losses
             # PER-COIN cap (catastrophe backstop, NOT a per-wallet tax): total margin across our open positions

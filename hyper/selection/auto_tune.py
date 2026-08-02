@@ -905,9 +905,6 @@ def follow_overrides_for_tune_candidate(follow: dict, candidate: dict) -> dict:
         out[key] = float(params_[key])
     for key in CONGESTION_PCT_KEYS:
         out[key] = float(params_[key])
-    # Compatibility-only field for old snapshots.  Equalizing it with the real
-    # deploy cap disables the retired linear firepower shrink.
-    out["DEPLOY_FULL_PCT"] = float(out.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT))
     for key in CONGESTION_INT_KEYS:
         out[key] = int(round(float(params_[key])))
     if "SMART_ADD" in out:

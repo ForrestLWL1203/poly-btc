@@ -62,7 +62,7 @@ export function Settings({ confirm, initialTab = null, observerState = null, onM
         danger: false,
         ok: "保存",
         body: marginEquityChanged
-          ? "保证金权益额度会缩放每笔新仓的权益计算基数，并从下一笔新仓立即生效；它不是总保证金硬上限，已有仓位不变。Core资格和组合回测不会自动重跑，将在下一次重采或单独重评后更新。确认保存?"
+          ? "保证金权益额度会同时缩放每笔新仓的权益计算基数，并成为累计新仓保证金占用上限；达到额度后停止新开仓，已有仓位仍可使用剩余资金加仓。已有仓位不变，Core资格和组合回测将在下一次重采或单独重评后更新。确认保存?"
           : "包含谨慎级参数(影响每一笔新仓),确认即时生效?",
         onConfirm: doIt,
       });

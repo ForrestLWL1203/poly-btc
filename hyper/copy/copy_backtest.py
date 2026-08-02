@@ -544,7 +544,6 @@ class Backtest:
         self.add_max_hard = int(overrides.get("ADD_MAX_HARD", config.ADD_MAX_HARD))
         self.follow_pos_add = bool(overrides.get("FOLLOW_POS_ADD", config.FOLLOW_POS_ADD))
         self.add_frac = overrides.get("ADD_FRAC", config.ADD_FRAC)
-        self.max_deploy_pct = overrides.get("MAX_DEPLOY_PCT", config.MAX_DEPLOY_PCT)
         self.wallet_sector_side_cap_pct = 1.0
         self.wallet_sector_side_caps = {
             "stable": 1.0, "mid": 1.0, "high": 1.0, "stock": 1.0,
@@ -615,7 +614,6 @@ class Backtest:
             tier_lev_cap=self.tier_lev_cap,
             tier_coin_cap=self.tier_coin_cap,
             min_lev=self.min_lev,
-            max_deploy_pct=self.max_deploy_pct,
             min_open_margin_pct=self.min_open_margin_pct,
             capital_anchor=self.initial_balance,
             drawdown_exponent=config.SIZING_DRAWDOWN_EXPONENT,

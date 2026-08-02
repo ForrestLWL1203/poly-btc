@@ -82,6 +82,7 @@ class CopyBacktestCliTests(unittest.TestCase):
                 """
             )
             params.seed_params(db)
+            db.execute("UPDATE params SET value='100' WHERE key='MARGIN_EQUITY_PCT'")
             db.execute("UPDATE params SET value='1.5' WHERE key='STABLE_MARGIN_PCT'")
             db.execute("UPDATE params SET value='25' WHERE key='STABLE_LEV_CAP'")
             db.execute("INSERT INTO coin_vol (coin,sigma) VALUES ('BTC',0.04)")

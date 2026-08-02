@@ -62,8 +62,10 @@ session; ordinary broker/client construction remains unable to sign Mainnet orde
 
 Paper and Mainnet Live use the same target signals, sizing, add/reduce/close logic and copy-ledger transitions.
 Live replaces the Paper simulated fill with a signed Mainnet IOC and updates the Live ledger only from actual
-fills. `MARGIN_EQUITY_PCT` scales each order's equity sizing base; it is not a reserved pool or total deployment
-cap. Discovery data, the published Core and its immutable strategy revision are shared across modes; switching
+fills. `MARGIN_EQUITY_PCT` is the single new-entry risk budget: it scales each order's equity sizing base and
+stops fresh positions when aggregate committed margin reaches the same share of real risk equity. Remaining
+available cash stays usable by existing-position adds and risk management. Discovery data, the published Core
+and its immutable strategy revision are shared across modes; switching
 Paper/Live never triggers a rescan or rebuilds Core. Every valid target opening signal is considered regardless
 of the target's notional; our order scales with actual account equity down to Hyperliquid's 10 USD venue floor.
 Every Live startup reconciles current exchange equity/available collateral, and each exposure increase refreshes
