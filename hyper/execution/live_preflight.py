@@ -362,33 +362,37 @@ def activate_live_session(db, preflight_id: str, confirmation_phrase: str) -> di
     margin_pct = float(bundle.get("params", {}).get("MARGIN_EQUITY_PCT", config.MARGIN_EQUITY_PCT))
     session_id = f"live-{uuid.uuid4().hex}"
     stamp = now_iso()
-    canary_cap = min(100.0, float(row[6]) * 0.01, float(row[7]))
     db.execute(
         "INSERT INTO execution_session "
         "(session_id,mode,network,state,account_address,agent_address,strategy_revision,preflight_id,"
         "sizing_anchor,margin_equity_pct,sizing_equity,canary,canary_margin_cap,started_at,updated_at) "
-        "VALUES (?,'live',?,'starting',?,?,?,?,?,?,?,1,?,?,?)",
+        "VALUES (?,'live',?,'starting',?,?,?,?,?,?,?,0,NULL,?,?)",
         (
             session_id, row[0], row[1], row[2], row[3], preflight_id, float(row[6]), margin_pct,
-            float(row[7]), canary_cap, stamp, stamp,
+            float(row[7]), stamp, stamp,
         ),
     )
     db.execute("UPDATE execution_preflight SET consumed_at=? WHERE preflight_id=?", (stamp, preflight_id))
     ensure_execution_control(db)
     db.execute(
-        "UPDATE execution_control SET selected_mode='live',state='live_canary',active_session_id=?,"
-        "canary_unlocked=0,last_error_code=NULL,last_error_at=NULL,updated_at=? WHERE id=1",
+        "UPDATE execution_control SET selected_mode='live',state='live_running',active_session_id=?,"
+        "canary_unlocked=1,last_error_code=NULL,last_error_at=NULL,updated_at=? WHERE id=1",
         (session_id, stamp),
     )
     return {
-        "sessionId": session_id, "state": "live_canary", "canary": True,
-        "canaryMarginCap": canary_cap, "sizingAnchor": float(row[6]),
+        "sessionId": session_id, "state": "live_running", "canary": False,
+        "canaryMarginCap": None, "sizingAnchor": float(row[6]),
         "sizingEquity": float(row[7]),
     }
 
 
 def unlock_live_canary(db, confirmation_phrase: str) -> dict:
-    """Promote a flat, reconciled Canary after 24 hours and one completed copied episode."""
+    """Promote a legacy active Canary after a clean, flat reconciliation.
+
+    New sessions start directly in full Live mode. This compatibility command
+    exists only to remove the retired cap from a session created by an older
+    deployment without mutating execution state outside the control worker.
+    """
     if confirmation_phrase != CANARY_UNLOCK_PHRASE:
         raise ValueError("canary_confirmation_phrase_mismatch")
     row = db.execute(
@@ -398,14 +402,6 @@ def unlock_live_canary(db, confirmation_phrase: str) -> dict:
     ).fetchone()
     if not row or not row[2] or row[1] not in {"live_canary", "paused"}:
         raise ValueError("live_canary_not_active")
-    try:
-        started = datetime.fromisoformat(str(row[3]).replace("Z", "+00:00"))
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        raise ValueError("live_canary_invalid_start") from None
-    if datetime.now(timezone.utc) - started < timedelta(hours=24):
-        raise ValueError("live_canary_minimum_duration_not_met")
     session_id = row[0]
     checkpoint = db.execute(
         "SELECT status,unknown_positions,unknown_orders FROM execution_reconcile_checkpoint "
@@ -423,11 +419,6 @@ def unlock_live_canary(db, confirmation_phrase: str) -> dict:
     ).fetchone()[0]
     if positions or orders:
         raise ValueError("live_canary_must_be_flat")
-    completed = db.execute(
-        "SELECT 1 FROM live_copy_position WHERE status!='open' AND closed_at>=? LIMIT 1", (row[3],),
-    ).fetchone()
-    if not completed:
-        raise ValueError("live_canary_episode_not_completed")
     stamp = now_iso()
     db.execute(
         "UPDATE execution_session SET canary=0,state='live_running',updated_at=? WHERE session_id=?",

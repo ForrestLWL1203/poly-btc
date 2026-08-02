@@ -56,7 +56,7 @@ final new-entry membership once an explicit selection generation exists.
 
 The repository contains the complete Paper/Live execution path, including the official SDK `0.24.0`, separate
 Testnet/Mainnet venues, per-DEX metadata, precision-safe IOC orders, durable intents, deterministic CLOIDs,
-fill-based accounting, restart reconciliation, encrypted Dashboard credentials, Mainnet preflight, Canary,
+fill-based accounting, restart reconciliation, encrypted Dashboard credentials, Mainnet preflight,
 Draining and emergency close controls. Mainnet signing is available only through an explicitly activated Live
 session; ordinary broker/client construction remains unable to sign Mainnet orders.
 
@@ -70,7 +70,8 @@ Every Live startup reconciles current exchange equity/available collateral, and 
 them again before sizing. The session-start equity is only the same drawdown-smoothing anchor used by Paper; a
 prior Live session's ledger start or the standardized Paper balance can never become the new session's anchor.
 Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
-Unified account, a passing read-only preflight and the mandatory small-funds Canary.
+Unified account and a passing read-only preflight. A successful startup enters full Live execution immediately;
+equity sizing and the normal deployment/per-coin/add/liquidity limits remain the risk boundaries.
 
 The Dashboard exposes only the product modes: compact Paper and Mainnet Live. Testnet remains a developer CLI
 verifier and is not shown as an operator account. Mainnet credential entry accepts the master address, Agent

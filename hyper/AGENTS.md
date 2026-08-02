@@ -520,6 +520,9 @@ through those retries; only markets still missing after all five attempts are cl
 - Sizing is equity/available-balance based and volatility-tiered. Profits compound; drawdown contracts sizing
   through the configured equity curve. Isolated margin, per-coin/deploy caps, liquidity filters, and add caps
   remain hard execution boundaries.
+- A passing Mainnet preflight starts a full Live session immediately. The retired 1%-of-equity Canary cap may
+  appear only on a legacy active session and must be removed through the execution control worker after a clean,
+  flat reconciliation; new sessions never create it.
 - BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
   high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use

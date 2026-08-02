@@ -105,7 +105,7 @@ class ExecutionControlTests(unittest.TestCase):
         self.db.close()
         self.temp.cleanup()
 
-    def test_live_preflight_creates_6400_sizing_base_and_canary_session(self):
+    def test_live_preflight_creates_6400_sizing_base_and_full_live_session(self):
         with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle), \
                 patch("hyper.execution.live_preflight.strategy_revision.resolved_targets", return_value=self.bundle["targets"]):
             result = run_live_preflight(
@@ -119,9 +119,10 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertEqual(result["sizingEquity"], 6400.0)
         with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle):
             session = activate_live_session(self.db, result["preflightId"], "启动实盘")
-        self.assertEqual(session["canaryMarginCap"], 80.0)
+        self.assertFalse(session["canary"])
+        self.assertIsNone(session["canaryMarginCap"])
         self.assertEqual(session["sizingEquity"], 6400.0)
-        self.assertEqual(control.execution_status(self.db)["state"], "live_canary")
+        self.assertEqual(control.execution_status(self.db)["state"], "live_running")
 
     def test_credential_verification_syncs_authoritative_agent_expiry(self):
         with patch(
@@ -146,8 +147,8 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertIsNone(self.db.execute("SELECT * FROM live_copy_account").fetchone())
         self.assertIsNone(self.db.execute("SELECT * FROM execution_session").fetchone())
 
-    def test_canary_unlock_requires_duration_completed_episode_and_clean_reconcile(self):
-        stamp = "2026-07-30T00:00:00Z"
+    def test_legacy_canary_unlock_requires_only_clean_flat_reconcile(self):
+        stamp = now_iso()
         self.db.execute(
             "INSERT INTO execution_session "
             "(session_id,mode,network,state,account_address,agent_address,strategy_revision,sizing_anchor,"
@@ -159,10 +160,6 @@ class ExecutionControlTests(unittest.TestCase):
         self.db.execute(
             "UPDATE execution_control SET selected_mode='live',state='live_canary',"
             "active_session_id='live-canary' WHERE id=1"
-        )
-        self.db.execute(
-            "INSERT INTO live_copy_position (addr,coin,side,status,opened_at,closed_at) "
-            "VALUES ('0xsource','BTC','long','closed',?,?)", (stamp, "2026-07-30T01:00:00Z"),
         )
         self.db.execute(
             "INSERT INTO execution_reconcile_checkpoint "
@@ -188,7 +185,7 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertEqual(result["code"], "NO_AVAILABLE_COLLATERAL")
         self.assertEqual(control.execution_status(self.db)["state"], "no_funds")
 
-    def test_200_equity_can_activate_two_dollar_canary_margin_cap(self):
+    def test_200_equity_activates_full_live_without_one_percent_cap(self):
         with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle), \
                 patch("hyper.execution.live_preflight.strategy_revision.resolved_targets", return_value=self.bundle["targets"]):
             result = run_live_preflight(
@@ -201,7 +198,9 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertEqual(result["sizingEquity"], 160.0)
         with patch("hyper.execution.live_preflight.strategy_revision.load_active", return_value=self.bundle):
             session = activate_live_session(self.db, result["preflightId"], "启动实盘")
-        self.assertEqual(session["canaryMarginCap"], 2.0)
+        self.assertFalse(session["canary"])
+        self.assertIsNone(session["canaryMarginCap"])
+        self.assertEqual(session["state"], "live_running")
 
     def test_switch_to_paper_rejects_live_projection(self):
         control.ensure_execution_control(self.db)

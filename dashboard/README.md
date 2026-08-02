@@ -20,6 +20,9 @@ read from Hyperliquid during credential verification. Account setup performs onl
 and never starts Observer; the global top-right copy-trade button is the only start/stop entry and performs the
 full Live startup preflight before creating the session. Mode changes require Observer to be stopped.
 
+Passing that startup preflight enters normal Live execution immediately; there is no separate 1%-equity Canary
+stage. Normal equity sizing, deployment, per-coin, add and liquidity limits continue to apply.
+
 The wallet control plane exposes `wallet_exit_request` and `wallet_exit_cancel`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;

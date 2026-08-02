@@ -169,7 +169,7 @@ function Dashboard({ onLogout }) {
       title: "启动实盘跟单",
       danger: true,
       ok: "确认启动实盘",
-      body: "将自动检查真实资金、Unified、Core、市场、REST/WS、仓位和挂单；全部通过后才创建实盘会话并启动 Observer。首次运行受 Canary 小额上限保护。",
+      body: "将自动检查真实资金、Unified、Core、市场、REST/WS、仓位和挂单；全部通过后按当前实盘权益与策略参数创建会话并启动 Observer。",
       onConfirm: launchLive,
     });
   };
