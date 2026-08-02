@@ -122,6 +122,8 @@ class WebStaticAssetsTests(unittest.TestCase):
         mask = (ROOT / "dashboard" / "web" / "components" / "discovery" / "ScanMask.jsx").read_text(encoding="utf-8")
 
         self.assertIn('k === "history" ? ov.closedCount', jsx)
+        self.assertIn('liveMode ? "LIVE" : "PAPER · 模拟盘"', jsx)
+        self.assertNotIn("LIVE · ${execution?.state", jsx)
         self.assertIn('api.cmd("scan_stop", {})', jsx)
         self.assertIn("紧急终止采集", mask)
         self.assertIn("确认紧急终止", mask)

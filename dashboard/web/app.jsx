@@ -236,7 +236,7 @@ function Dashboard({ onLogout }) {
           <div className="topbar-right">
             <span className={"pill execution-pill " + (liveMode ? "tint-red" : "tint-amber")}>
               <span className="dot" style={{ background: liveMode ? "var(--red)" : "var(--amber)", animation: liveMode ? "pulse 1.6s infinite" : "none" }} />
-              {liveMode ? `LIVE · ${execution?.state || "实盘"}` : "PAPER · 模拟盘"}
+              {liveMode ? "LIVE" : "PAPER · 模拟盘"}
             </span>
             <span className="pill" style={{ background: "rgba(255,255,255,.05)", color: streamOk ? "var(--green-l)" : "var(--t3)" }}
               title={streamOk ? "SSE 实时推送已连接" : "轮询兜底(SSE 未连接)"}>
