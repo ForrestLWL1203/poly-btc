@@ -54,7 +54,11 @@ SOURCE_LOW_FREQ_MIN_EPISODES_30D = 7
 SOURCE_LOW_FREQ_MAX_EPISODES_30D = 9
 SOURCE_LOW_FREQ_MIN_EPISODE_WIN_RATE = 0.85
 SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN = 0.30
-SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.70
+SOURCE_TOP3_CONCENTRATION_TRIGGER = 0.60
+# Once the three largest winners dominate gross profit, the rest of the closed book must still retain a
+# material share of total net profit.  This catches a lucky headline ROI whose many ordinary attempts add
+# almost nothing, without imposing a blanket win-rate floor on genuine trend followers.
+SOURCE_BODY_MIN_RETAINED_NET = 0.20
 SOURCE_BODY_MIN_WIN_RATE = 0.70
 ROUGH_COPY_MIN_CLOSED_30D = 7
 ROUGH_COPY_MIN_WIN_RATE = 0.60       # legacy compatibility; not an admission gate.
@@ -413,6 +417,18 @@ MAX_CONCURRENT_POS = 15  # 与资金/部署模型及参数默认值一致；共�
 #                          全池 p90=8、断层在 12-17 之间;15 卡在断层,切掉极端组合客(如 0xc9c781 峰值20),不误伤 10-11 的慢波段好钱包。
 MAX_SINGLE_ADDS_PER_EP = 30  # 仅完整 round-trip 的 scale-in 次数；执行侧智能间距/单币cap/ADD_MAX_HARD
 #                              已阻止完整照抄。30+ 的完整回合仍视为不可复制的极端重DCA。
+# Stop/reopen churn is not the same as planned adds.  Reject only a statistically deep combination:
+# rapid same-coin/same-side reopenings, repeated specifically after realized losses, a long trial chain,
+# and predominantly losing loss-started chains.  Specialists that repeatedly trade one coin and planned
+# ladders inside one position remain eligible.
+COMPULSIVE_RETRY_WINDOW_HOURS = 6.0
+COMPULSIVE_RETRY_MIN_TRANSITIONS = 40
+COMPULSIVE_RETRY_MIN_SAME_SIDE_RATE = 0.60
+COMPULSIVE_RETRY_MIN_LOSS_TRANSITIONS = 20
+COMPULSIVE_RETRY_MIN_LOSS_RATE = 0.60
+COMPULSIVE_RETRY_MIN_CHAIN_EPISODES = 8
+COMPULSIVE_RETRY_MIN_LOSS_CHAINS = 5
+COMPULSIVE_RETRY_MIN_LOSS_CHAIN_LOSE_RATE = 0.60
 # How far back the profiler pulls fills (paginated, sorted, capped at max_pages*2000). We target
 # RECENTLY-ACTIVE + RECENTLY-STABLE wallets only, and we run our OWN stop-loss + isolated margin, so a
 # target's ancient blow-up doesn't transfer to us — fetching old history is wasted time. The extra 7d is

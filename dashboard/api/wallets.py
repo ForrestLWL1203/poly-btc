@@ -733,6 +733,7 @@ def ep_wallets(db, qs=None):
             "dropReason": (r["selection_reason"] or "退回挑战池" if r["selection_role"] in {"challenger", "exit_only"}
                 else "退出Core" if r["status"] == "active" else {"inactive": "失活", "blowup_loss": "扛单爆亏",
                 "spot_hedge": "对冲盘", "not_profitable": "转亏", "irregular": "低频", "grid_dca": "网格",
+                "compulsive_same_side_retry": "止损后同向反复试错",
                 "bot_frequency": "高频", "hft_uncopyable": "高频", "spot_dominant": "现货为主"}.get(r["reason"], r["reason"] or "淘汰")),
             "winRatePct": (r["win_rate"] or 0.0) * 100,
             "roiEqPct": recent_roi_pct(r["week_roi"], r["mon_roi"]),

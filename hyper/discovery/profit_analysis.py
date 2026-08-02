@@ -666,7 +666,7 @@ def _repeatability_analysis(rows, policy):
     output["conditional_closed_lottery_guard"] = {
         "policy": (
             "sample>=7; reject low-win<50% with losing post-Top3 body, or "
-            "Top3>=70% with losing/sub-50%-win body"
+            "Top3>=60% with losing/sub-50%-win body"
         ),
         "population": len(rows),
         "passed": len(conditional_passed),

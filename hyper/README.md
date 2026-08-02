@@ -173,7 +173,10 @@ Wallet quality and funded-account membership are separate decisions.
   conservative 30d/7d PnL, a 30-day open-loss ratio at or below 50%, at least seven complete closed source and
   Copy Episodes over 30 days, Copy Profit Factor at least 1.25, at least 70% open follow, complete valuation,
   and conditional lottery protection. Fixed 60%/70%/85% win-rate floors are retired: a sub-50% win wallet may
-  pass when its PF is sound, Top3 profit is not dominant, and the post-Top3 body remains profitable.
+  pass when its PF is sound, Top3 profit is not dominant, and the post-Top3 body remains profitable. When Top3
+  reaches 60% of gross profit, that body must also retain at least 20% of total closed net profit. The structural
+  profile separately rejects compulsive stop/reopen trial loops only after deep loss-conditioned evidence;
+  same-coin specialization and planned adds inside one Episode are not failures.
   Historical replay assumes liquidity was executable. Every source flat-to-open lifecycle is eligible without
   a source-notional threshold; our open is sized independently by our equity, margin, leverage and capacity
   rules. Further fills from the opening OID extend the opening anchor and are never treated as

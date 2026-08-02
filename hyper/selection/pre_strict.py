@@ -10,12 +10,13 @@ import math
 from typing import Mapping, Optional
 
 from hyper import config
+from hyper.copy.copy_policy import load_copy_policy
 from hyper.copy.economics import conservative_profitability, open_loss_ratio_within_limit
 
 
 DAY_MS = 86_400_000
-POLICY_VERSION = "pre-strict32-pf125-activity-retention-v2"
-SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-retention-v7"
+POLICY_VERSION = "pre-strict32-pf125-activity-retention-v3"
+SELECTION_MODEL_VERSION = "selection-pre-strict32-pf125-profit-score-retention-v8"
 
 
 def _num(value, default=0.0):
@@ -107,14 +108,26 @@ def conditional_lottery(
     top3_profit_share,
     body_net_pnl,
     body_win_rate,
+    closed_net_pnl,
+    concentration_trigger: float = 0.60,
+    minimum_retained_net: float = 0.20,
 ) -> dict:
-    """Reject lucky outliers without imposing a blanket minimum win rate."""
+    """Reject lucky outliers without imposing a blanket minimum win rate.
+
+    A positive remainder is not sufficient when it contributes almost none of the headline profit.  Once
+    Top3 dominates, the post-Top3 body must both avoid the old weak-body signatures and retain a meaningful
+    portion of total closed net profit.
+    """
     win = _num(win_rate)
     top3 = _num(top3_profit_share)
     body_net = _num(body_net_pnl)
     body_win = _num(body_win_rate)
+    closed_net = _num(closed_net_pnl)
+    body_retained = body_net / closed_net if closed_net > 0.0 else 0.0
     low_win_body_losing = win < 0.50 and body_net < 0.0
-    concentrated_weak_body = top3 >= 0.70 and (body_net < 0.0 or body_win < 0.50)
+    concentrated_weak_body = top3 >= float(concentration_trigger) and (
+        body_net < 0.0 or body_win < 0.50 or body_retained < float(minimum_retained_net)
+    )
     reason = (
         "low_win_rate_body_losing" if low_win_body_losing
         else "top3_concentrated_weak_body" if concentrated_weak_body
@@ -127,6 +140,10 @@ def conditional_lottery(
         "top3ProfitShare": top3,
         "bodyNetPnl": body_net,
         "bodyWinRate": body_win,
+        "closedNetPnl": closed_net,
+        "bodyRetainedNet": body_retained,
+        "concentrationTrigger": float(concentration_trigger),
+        "minimumRetainedNet": float(minimum_retained_net),
     }
 
 
@@ -161,11 +178,13 @@ def evaluate(
     *,
     stage: str = "rough",
     require_path: Optional[bool] = None,
+    policy_values: Optional[Mapping] = None,
 ) -> dict:
     """Evaluate the frozen pre-strict or final strict contract with one ordered failure."""
     strict = str(stage).lower() in {"strict", "final"}
     if require_path is None:
         require_path = strict
+    policy = load_copy_policy(policy_values)
     source30 = _source_economics(metrics, 30)
     source7 = _source_economics(metrics, 7)
     copy30 = _copy_economics(metrics, 30)
@@ -175,12 +194,18 @@ def evaluate(
         top3_profit_share=metrics.get("source_top3_profit_share"),
         body_net_pnl=metrics.get("source_body_after_top3_net_pnl"),
         body_win_rate=metrics.get("source_body_after_top3_win_rate"),
+        closed_net_pnl=source30["closedPnl"],
+        concentration_trigger=policy.source_top3_concentration_trigger,
+        minimum_retained_net=policy.source_body_min_retained_net,
     )
     copy_lottery = conditional_lottery(
         win_rate=metrics.get("copy_bt_win_rate"),
         top3_profit_share=metrics.get("copy_bt_top3_profit_share"),
         body_net_pnl=metrics.get("copy_bt_body_after_top3_net_pnl"),
         body_win_rate=metrics.get("copy_bt_body_after_top3_win_rate"),
+        closed_net_pnl=copy30["closedPnl"],
+        concentration_trigger=policy.source_top3_concentration_trigger,
+        minimum_retained_net=policy.source_body_min_retained_net,
     )
     data_status = str(metrics.get("copy_bt_data_status") or metrics.get("data_status") or "valid")
     evidence_status = str(metrics.get("copy_bt_evidence_status") or metrics.get("evidence_status") or "")

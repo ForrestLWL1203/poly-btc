@@ -43,6 +43,7 @@ HARD_FAILURE_REASONS = frozenset({
     "hft_uncopyable",
     "grid_dca",
     "heavy_dca",
+    "compulsive_same_side_retry",
     "spot_hedged",
     "opaque_or_outcome",
     "too_many_concurrent",

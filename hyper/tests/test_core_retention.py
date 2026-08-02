@@ -102,6 +102,12 @@ class CoreRetentionTest(unittest.TestCase):
         )
         self.assertEqual(core_retention.EXIT_ONLY, structural.status)
         self.assertFalse(structural.retain_enabled)
+        retry_structural = core_retention.advance(
+            generation="g2c", scan_kind="complete", scan_successful=True,
+            reason="compulsive_same_side_retry",
+        )
+        self.assertEqual(core_retention.EXIT_ONLY, retry_structural.status)
+        self.assertFalse(retry_structural.retain_enabled)
         catastrophic = core_retention.advance(
             generation="g3", scan_kind="complete", scan_successful=True,
             reason="copy_single_liquidation_loss_over_8pct",

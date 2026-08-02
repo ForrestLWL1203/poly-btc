@@ -119,6 +119,12 @@ def _current_sector_structure_policy(perp_fills, p, *, source="current_generatio
             "heavyEpisodeCount": heavy_count,
             "maxAdds": int(current.get("max_adds_per_ep") or 0),
             "medianAdds": int(current.get("median_adds_per_ep") or 0),
+            "rapidSameSideRetryRate": float(current.get("rapid_same_side_retry_rate") or 0.0),
+            "rapidLossRetryRate": float(current.get("rapid_loss_retry_rate") or 0.0),
+            "maxRetryChainEpisodes": int(current.get("rapid_retry_max_chain_episodes") or 0),
+            "lossStartedRetryChainLoseRate": float(
+                current.get("loss_started_retry_chain_lose_rate") or 0.0
+            ),
             "maxConcurrent": int(current.get("max_concurrent") or 0),
             "rawPayoffRatio": raw_payoff,
             "rawClosed": raw_closed,
@@ -951,6 +957,7 @@ def _profile_copy_qualification(m, p) -> tuple[bool, str]:
         result = follow_score.evaluate_follow_eligibility(
             enriched,
             stage="rough",
+            policy_values=getattr(p, "copy_bt_overrides", None),
         )
         if not result.get("coreEligible"):
             reason = result.get("status") or "rough_copy_unqualified"
@@ -1304,6 +1311,12 @@ def _profile_one(db, addr, now_ms, p, prior, lb, stamp, universe, force_full=Fal
              "last_fill_ms": perp[-1]["time"] if perp else 0, "active_days": 0, "activity_ratio": 0,
              "median_eps": 0, "pos_day_ratio": 0, "profit_conc": 0,
              "max_adds_per_ep": 0, "median_adds_per_ep": 0, "worst_loss": 0.0,
+             "retry_transition_n": 0, "rapid_same_side_retry_n": 0,
+             "rapid_same_side_retry_rate": 0.0, "loss_retry_transition_n": 0,
+             "rapid_loss_retry_n": 0, "rapid_loss_retry_rate": 0.0,
+             "rapid_retry_chain_n": 0, "rapid_retry_max_chain_episodes": 0,
+             "loss_started_retry_chain_n": 0, "loss_started_retry_chain_losing_n": 0,
+             "loss_started_retry_chain_lose_rate": 0.0,
              "tp_move_pct": 0.0, "market_type": None, "crypto_frac": None}
     # multi-window / lifetime realized nets from the FULL history (in-memory, no extra fetch) — the
     # long-term stability cross-check + the net_life datum the 14d window can't see. Computed even when
@@ -2296,6 +2309,7 @@ def _effective_follow_replay(db, row, now_ms, *, generation_id, follow, valuatio
             ),
         },
         stage=qualification_stage,
+        policy_values=follow,
     )
     return {
         "metrics": scoring_metrics,
@@ -2720,7 +2734,9 @@ def _rough_replay_source_pool(
         )
         effective = dict(result.get("metrics") or {})
         activity = pre_strict.copy_activity(result.get("results") or {}, int(now_ms))
-        qualification = pre_strict.evaluate(effective, activity, stage="rough")
+        qualification = pre_strict.evaluate(
+            effective, activity, stage="rough", policy_values=follow,
+        )
         qualification["copyProfitFactor"] = f(effective.get("copy_bt_profit_factor"))
         retention_soft_failure = bool(
             addr in incumbent_core
@@ -3184,7 +3200,7 @@ def _select_formation_finalist_surface(
     return dict(winner["params"]), audits
 
 
-def _formation_entry_eligibility(effective, score) -> dict:
+def _formation_entry_eligibility(effective, score, *, policy_values=None) -> dict:
     """Apply the final path-complete individual contract before shared formation."""
     metrics_ = apply_allowed_sector_copy_metrics(dict(effective or {}))
     qualification = follow_score.evaluate_follow_eligibility(
@@ -3198,6 +3214,7 @@ def _formation_entry_eligibility(effective, score) -> dict:
             ),
         },
         stage="strict",
+        policy_values=policy_values,
     )
     checks = dict(qualification.get("checks") or {})
     closed_n = int(f(metrics_.get("copy_bt_closed_n")))
@@ -3737,6 +3754,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             addr = row["addr"]
             formation = _formation_entry_eligibility(
                 effective.get("metrics") or {}, effective.get("score"),
+                policy_values=follow_surface,
             )
             qualification["individualCoreEligible"] = bool(
                 formation.get("individualCoreEligible")
@@ -6041,7 +6059,12 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     rows = db.execute(
         "SELECT p.addr,status,n_trades,n_fills,perp_frac,last_fill_ms,net_pnl,roi_equity,max_drawdown,"
         "acct_value,age_days,times_active,liq_worst_pct,active_days,activity_ratio,median_eps,avg_notional,"
-        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,median_adds_per_ep,worst_loss_pct,median_hold_s,win_rate,"
+        "pos_day_ratio,profit_conc,hold_skew,open_underwater,max_adds_per_ep,median_adds_per_ep,"
+        "retry_transition_n,rapid_same_side_retry_n,rapid_same_side_retry_rate,"
+        "loss_retry_transition_n,rapid_loss_retry_n,rapid_loss_retry_rate,"
+        "rapid_retry_chain_n,rapid_retry_max_chain_episodes,loss_started_retry_chain_n,"
+        "loss_started_retry_chain_losing_n,loss_started_retry_chain_lose_rate,"
+        "worst_loss_pct,median_hold_s,win_rate,"
         "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,liq_count,hedge_ratio,net_30d,net_life,reason,"
         "p.official_perp_status,p.official_perp_reason,p.official_perp_return_30d,"
         "p.official_perp_pnl_30d,p.official_perp_pnl_share,"
@@ -6099,7 +6122,11 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
     n_active = 0
     for r in rows:
         (addr, old, n_tr, n_fills, perp_frac, last_fill, net, roi_eq, mdd, acct, age, ta, liqw,
-         ad, ar, meps, avgnotl, pdr, conc, skew, uw, mxadds, mdadds, wloss, mhold, wr,
+         ad, ar, meps, avgnotl, pdr, conc, skew, uw, mxadds, mdadds,
+         retry_n, rapid_retry_n, rapid_retry_rate,
+         loss_retry_n, rapid_loss_retry_n, rapid_loss_retry_rate,
+         retry_chain_n, retry_chain_max, loss_chain_n, loss_chain_losing_n, loss_chain_lose_rate,
+         wloss, mhold, wr,
          roi_tot, open_unreal, oloss, owin, bagn, bagd, liqc, hedge, net30, netlife, old_reason,
          official_status, official_reason, official_return, official_pnl, official_share,
          source_n30, source_n7, source_win30, source_win7,
@@ -6119,6 +6146,17 @@ def regate(db, p, *, stamp=None, source: str = "regate", quiet: bool = False) ->
              "median_eps": meps or 0.0, "avg_notional": avgnotl or 0.0, "pos_day_ratio": pdr or 0.0, "profit_conc": conc or 0.0,
              "hold_skew": skew or 0.0, "open_underwater": uw or 0.0, "median_hold_s": mhold,
              "win_rate": wr or 0.0, "max_adds_per_ep": mxadds or 0, "median_adds_per_ep": mdadds or 0,
+             "retry_transition_n": retry_n or 0,
+             "rapid_same_side_retry_n": rapid_retry_n or 0,
+             "rapid_same_side_retry_rate": rapid_retry_rate or 0.0,
+             "loss_retry_transition_n": loss_retry_n or 0,
+             "rapid_loss_retry_n": rapid_loss_retry_n or 0,
+             "rapid_loss_retry_rate": rapid_loss_retry_rate or 0.0,
+             "rapid_retry_chain_n": retry_chain_n or 0,
+             "rapid_retry_max_chain_episodes": retry_chain_max or 0,
+             "loss_started_retry_chain_n": loss_chain_n or 0,
+             "loss_started_retry_chain_losing_n": loss_chain_losing_n or 0,
+             "loss_started_retry_chain_lose_rate": loss_chain_lose_rate or 0.0,
              "p90_fills_ep": p90fe.get(addr, 0),   # raw fragmentation remains audit-only
              "p90_orders_ep": p90oe.get(addr, 0),
              "heavy_orders_episode_n": heavyoe.get(addr, 0),

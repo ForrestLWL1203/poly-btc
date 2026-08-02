@@ -402,6 +402,7 @@ def evaluate_follow_eligibility(
     metrics: Mapping,
     *,
     stage: str = "rough",
+    policy_values: Mapping | None = None,
 ) -> dict:
     """Classify rough/final Copy exclusively through the versioned pre-strict policy."""
     stage = "strict" if str(stage).lower() in {"strict", "final"} else "rough"
@@ -410,7 +411,9 @@ def evaluate_follow_eligibility(
     activity = scoped.get("pre_strict_activity")
     if not isinstance(activity, dict):
         activity = parse_json_obj(scoped.get("pre_strict_activity_json"))
-    result = pre_strict.evaluate(scoped, activity, stage=stage)
+    result = pre_strict.evaluate(
+        scoped, activity, stage=stage, policy_values=policy_values,
+    )
     allowed = set(policy_json.get("allowed") or ())
     watched = set(policy_json.get("watch") or ())
     sector_ready = bool(allowed) if "allowed" in policy_json else True

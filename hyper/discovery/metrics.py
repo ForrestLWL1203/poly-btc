@@ -173,6 +173,75 @@ def _hold_skew(eps: list) -> float:
     return statistics.median(losers) / max(statistics.median(winners), 1.0)
 
 
+def same_side_retry_metrics(eps: list, window_hours: float = 6.0) -> dict:
+    """Measure stop-to-reopen trial behaviour from complete closed Episodes.
+
+    Repeatedly trading one coin is not itself a defect, and adds inside an open Episode are deliberately
+    excluded.  A retry is only a *new* same-coin/same-side Episode opened shortly after the prior one closed.
+    The gate additionally requires loss-conditioned retries and losing multi-Episode chains, separating
+    compulsive stop/reopen gambling from deliberate specialists and planned maker ladders.
+    """
+    window_ms = max(0, int(float(window_hours or 0.0) * 3_600_000))
+    by_coin: dict[str, list] = {}
+    for episode in eps or ():
+        if not episode.get("open_complete", True) or not int(episode.get("close_ms") or 0):
+            continue
+        by_coin.setdefault(str(episode.get("coin") or ""), []).append(episode)
+
+    transition_n = rapid_n = loss_transition_n = rapid_loss_n = 0
+    chains: list[list] = []
+    for rows in by_coin.values():
+        rows.sort(key=lambda row: (int(row.get("open_ms") or 0), int(row.get("close_ms") or 0)))
+        chain = [rows[0]] if rows else []
+        for previous, current in zip(rows, rows[1:]):
+            gap_ms = int(current.get("open_ms") or 0) - int(previous.get("close_ms") or 0)
+            if gap_ms < 0:
+                if len(chain) >= 2:
+                    chains.append(chain)
+                chain = [current]
+                continue
+            transition_n += 1
+            prior_lost = float(previous.get("net_pnl") or 0.0) < 0.0
+            if prior_lost:
+                loss_transition_n += 1
+            rapid_same_side = (
+                str(previous.get("side") or "") == str(current.get("side") or "")
+                and gap_ms <= window_ms
+            )
+            if rapid_same_side:
+                rapid_n += 1
+                if prior_lost:
+                    rapid_loss_n += 1
+                chain.append(current)
+            else:
+                if len(chain) >= 2:
+                    chains.append(chain)
+                chain = [current]
+        if len(chain) >= 2:
+            chains.append(chain)
+
+    loss_started = [chain for chain in chains if float(chain[0].get("net_pnl") or 0.0) < 0.0]
+    loss_started_losing = [
+        chain for chain in loss_started
+        if sum(float(episode.get("net_pnl") or 0.0) for episode in chain) <= 0.0
+    ]
+    return {
+        "retry_transition_n": transition_n,
+        "rapid_same_side_retry_n": rapid_n,
+        "rapid_same_side_retry_rate": rapid_n / transition_n if transition_n else 0.0,
+        "loss_retry_transition_n": loss_transition_n,
+        "rapid_loss_retry_n": rapid_loss_n,
+        "rapid_loss_retry_rate": rapid_loss_n / loss_transition_n if loss_transition_n else 0.0,
+        "rapid_retry_chain_n": len(chains),
+        "rapid_retry_max_chain_episodes": max((len(chain) for chain in chains), default=0),
+        "loss_started_retry_chain_n": len(loss_started),
+        "loss_started_retry_chain_losing_n": len(loss_started_losing),
+        "loss_started_retry_chain_lose_rate": (
+            len(loss_started_losing) / len(loss_started) if loss_started else 0.0
+        ),
+    }
+
+
 def compute_metrics(fills: list, eps: list, lookback_days: float):
     """Aggregate perp fills + reconstructed episodes into one metrics dict (or None). All metrics
     here are account-value-independent; roi_equity/dd are added by the caller (it has acct_value)."""
@@ -250,6 +319,10 @@ def compute_metrics(fills: list, eps: list, lookback_days: float):
         "loss_pain": loss_pain([e["net_pnl"] for e in eps]),   # |worst loss| / median win (小赚大亏 signal)
     }
     m.update(_daily(eps, lookback_days))
+    m.update(same_side_retry_metrics(
+        complete_eps,
+        getattr(config, "COMPULSIVE_RETRY_WINDOW_HOURS", 6.0),
+    ))
     return m
 
 
@@ -269,6 +342,34 @@ def gates_structural(m: dict, p) -> tuple:
         if getattr(p, "exclude_hft", True) and m.get("median_hold_s") is not None \
                 and m["median_hold_s"] < getattr(p, "hft_min_hold_min", 3.0) * 60:
             return False, "hft_uncopyable"
+        # Compulsive trial-loop signature. Every clause is required: high same-side reopen frequency alone
+        # would wrongly reject one-coin specialists, while loss retries alone can be a valid second attempt.
+        # The long, repeatedly losing chain is the distinguishing evidence.
+        if (
+            int(m.get("retry_transition_n") or 0) >= int(getattr(
+                p, "compulsive_retry_min_transitions", config.COMPULSIVE_RETRY_MIN_TRANSITIONS,
+            ))
+            and float(m.get("rapid_same_side_retry_rate") or 0.0) >= float(getattr(
+                p, "compulsive_retry_min_same_side_rate", config.COMPULSIVE_RETRY_MIN_SAME_SIDE_RATE,
+            ))
+            and int(m.get("loss_retry_transition_n") or 0) >= int(getattr(
+                p, "compulsive_retry_min_loss_transitions", config.COMPULSIVE_RETRY_MIN_LOSS_TRANSITIONS,
+            ))
+            and float(m.get("rapid_loss_retry_rate") or 0.0) >= float(getattr(
+                p, "compulsive_retry_min_loss_rate", config.COMPULSIVE_RETRY_MIN_LOSS_RATE,
+            ))
+            and int(m.get("rapid_retry_max_chain_episodes") or 0) >= int(getattr(
+                p, "compulsive_retry_min_chain_episodes", config.COMPULSIVE_RETRY_MIN_CHAIN_EPISODES,
+            ))
+            and int(m.get("loss_started_retry_chain_n") or 0) >= int(getattr(
+                p, "compulsive_retry_min_loss_chains", config.COMPULSIVE_RETRY_MIN_LOSS_CHAINS,
+            ))
+            and float(m.get("loss_started_retry_chain_lose_rate") or 0.0) >= float(getattr(
+                p, "compulsive_retry_min_loss_chain_lose_rate",
+                config.COMPULSIVE_RETRY_MIN_LOSS_CHAIN_LOSE_RATE,
+            ))
+        ):
+            return False, "compulsive_same_side_retry"
         complete_n = int(m.get("complete_episode_n") or 0)
         grid_n = int(m.get("grid_episode_n") or 0)
         if complete_n >= 5 and grid_n * 2 > complete_n:  # habitual means a strict majority, not one small sample.

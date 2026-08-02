@@ -248,6 +248,51 @@ class FollowScoreTests(unittest.TestCase):
         )
         self.assertEqual(result["firstFailure"], "source_lottery_profile_rejected")
 
+    def test_positive_but_immaterial_body_no_longer_hides_top3_lottery(self):
+        number_three = judge(
+            "rough",
+            source_net_pnl_30d=3_956,
+            source_top3_profit_share=.719,
+            source_win_rate_30d=.54,
+            source_body_after_top3_win_rate=.525,
+            source_body_after_top3_net_pnl=300,
+        )
+        number_eight = judge(
+            "rough",
+            source_net_pnl_30d=1_000,
+            source_top3_profit_share=.757,
+            source_body_after_top3_win_rate=.60,
+            source_body_after_top3_net_pnl=18,
+        )
+        number_ten = judge(
+            "rough",
+            source_net_pnl_30d=1_000,
+            source_top3_profit_share=.765,
+            source_body_after_top3_win_rate=.60,
+            source_body_after_top3_net_pnl=19,
+        )
+
+        for result in (number_three, number_eight, number_ten):
+            self.assertEqual(result["firstFailure"], "source_lottery_profile_rejected")
+            self.assertLess(
+                result["sourceQuality"]["lottery"]["bodyRetainedNet"], .20,
+            )
+
+    def test_concentrated_but_material_body_remains_eligible(self):
+        number_seven = judge(
+            "rough",
+            source_net_pnl_30d=1_000,
+            source_top3_profit_share=.631,
+            source_win_rate_30d=.55,
+            source_body_after_top3_win_rate=.53,
+            source_body_after_top3_net_pnl=347,
+        )
+
+        self.assertTrue(number_seven["coreEligible"])
+        self.assertAlmostEqual(
+            number_seven["sourceQuality"]["lottery"]["bodyRetainedNet"], .347,
+        )
+
     def test_strict_dynamic_return_boundaries_and_path(self):
         boundary = judge(
             "strict",

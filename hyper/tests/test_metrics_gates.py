@@ -16,6 +16,13 @@ def gate_params(**overrides):
         "max_single_adds": 10,
         "max_fills_per_ep": 50,
         "max_concurrent_pos": 15,
+        "compulsive_retry_min_transitions": 40,
+        "compulsive_retry_min_same_side_rate": 0.60,
+        "compulsive_retry_min_loss_transitions": 20,
+        "compulsive_retry_min_loss_rate": 0.60,
+        "compulsive_retry_min_chain_episodes": 8,
+        "compulsive_retry_min_loss_chains": 5,
+        "compulsive_retry_min_loss_chain_lose_rate": 0.60,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -34,6 +41,13 @@ def gate_metrics(**overrides):
         "p90_orders_ep": 5,
         "heavy_orders_episode_n": 0,
         "max_concurrent": 4,
+        "retry_transition_n": 0,
+        "rapid_same_side_retry_rate": 0.0,
+        "loss_retry_transition_n": 0,
+        "rapid_loss_retry_rate": 0.0,
+        "rapid_retry_max_chain_episodes": 0,
+        "loss_started_retry_chain_n": 0,
+        "loss_started_retry_chain_lose_rate": 0.0,
     }
     base.update(overrides)
     return base
@@ -75,6 +89,86 @@ def state_metrics(**overrides):
 
 
 class MetricsGateTests(unittest.TestCase):
+    @staticmethod
+    def _episode(index, *, coin="BTC", side="long", pnl=-1.0, gap_hours=1.0):
+        open_ms = int(index * gap_hours * 3_600_000)
+        return {
+            "coin": coin, "side": side, "open_ms": open_ms,
+            "close_ms": open_ms + 60_000, "net_pnl": pnl,
+            "open_complete": True,
+        }
+
+    def test_retry_metrics_split_stop_reopen_chains_on_long_gaps(self):
+        episodes = []
+        cursor = 0
+        for _ in range(5):
+            for _attempt in range(10):
+                episodes.append(self._episode(cursor, gap_hours=1.0))
+                cursor += 1
+            cursor += 8
+
+        retry = metrics.same_side_retry_metrics(episodes, window_hours=6.0)
+
+        self.assertEqual(retry["retry_transition_n"], 49)
+        self.assertEqual(retry["rapid_same_side_retry_n"], 45)
+        self.assertEqual(retry["rapid_retry_chain_n"], 5)
+        self.assertEqual(retry["rapid_retry_max_chain_episodes"], 10)
+        self.assertEqual(retry["loss_started_retry_chain_n"], 5)
+        self.assertEqual(retry["loss_started_retry_chain_lose_rate"], 1.0)
+
+    def test_rejects_deep_repeated_losing_stop_reopen_profile(self):
+        ok, reason = metrics.gates_structural(
+            gate_metrics(
+                n_trades=158,
+                retry_transition_n=157,
+                rapid_same_side_retry_rate=.752,
+                loss_retry_transition_n=78,
+                rapid_loss_retry_rate=.731,
+                rapid_retry_max_chain_episodes=17,
+                loss_started_retry_chain_n=15,
+                loss_started_retry_chain_lose_rate=.733,
+            ),
+            gate_params(),
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "compulsive_same_side_retry")
+
+    def test_allows_same_coin_specialist_without_loss_retry_chain(self):
+        ok, reason = metrics.gates_structural(
+            gate_metrics(
+                n_trades=80,
+                retry_transition_n=79,
+                rapid_same_side_retry_rate=.80,
+                loss_retry_transition_n=30,
+                rapid_loss_retry_rate=.20,
+                rapid_retry_max_chain_episodes=12,
+                loss_started_retry_chain_n=8,
+                loss_started_retry_chain_lose_rate=.25,
+            ),
+            gate_params(),
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+
+    def test_allows_planned_deep_adds_and_small_retry_samples(self):
+        planned_ok, _ = metrics.gates_structural(
+            gate_metrics(n_trades=20, max_adds_per_ep=20),
+            gate_params(max_single_adds=30),
+        )
+        small_ok, _ = metrics.gates_structural(
+            gate_metrics(
+                n_trades=12, retry_transition_n=11, rapid_same_side_retry_rate=1.0,
+                loss_retry_transition_n=8, rapid_loss_retry_rate=1.0,
+                rapid_retry_max_chain_episodes=12, loss_started_retry_chain_n=1,
+                loss_started_retry_chain_lose_rate=1.0,
+            ),
+            gate_params(),
+        )
+        self.assertTrue(planned_ok)
+        self.assertTrue(small_ok)
+
     def test_rejects_one_off_heavy_dca_even_when_median_is_low(self):
         ok, reason = metrics.gates_structural(
             gate_metrics(median_adds_per_ep=0, max_adds_per_ep=23),

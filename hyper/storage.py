@@ -162,6 +162,17 @@ CREATE TABLE IF NOT EXISTS profile (
     open_underwater  REAL DEFAULT 0,      -- v3: worst material current open position underwater (fraction, <=0)
     max_adds_per_ep    INTEGER DEFAULT 0, -- GRID signature: most scale-in ORDERS in a single round-trip
     median_adds_per_ep INTEGER DEFAULT 0, -- typical scale-ins/round-trip (swing 0-few, grid dozens)
+    retry_transition_n INTEGER DEFAULT 0, -- same-coin closed Episode -> next Episode transitions
+    rapid_same_side_retry_n INTEGER DEFAULT 0,
+    rapid_same_side_retry_rate REAL DEFAULT 0,
+    loss_retry_transition_n INTEGER DEFAULT 0,
+    rapid_loss_retry_n INTEGER DEFAULT 0,
+    rapid_loss_retry_rate REAL DEFAULT 0,
+    rapid_retry_chain_n INTEGER DEFAULT 0,
+    rapid_retry_max_chain_episodes INTEGER DEFAULT 0,
+    loss_started_retry_chain_n INTEGER DEFAULT 0,
+    loss_started_retry_chain_losing_n INTEGER DEFAULT 0,
+    loss_started_retry_chain_lose_rate REAL DEFAULT 0,
     worst_loss_pct   REAL DEFAULT 0,      -- loss discipline: worst single round-trip loss / acct (<=0)
     market_type      TEXT,                -- crypto / stock / mixed (by traded-notional crypto vs xyz: split)
     crypto_frac      REAL DEFAULT 1,      -- share of traded notional on crypto perps (1=pure crypto, 0=pure stock)
@@ -744,7 +755,11 @@ PROFILE_COLS = (
     "top_coin,max_drawdown,avg_notional,age_days,"
     "last_fill_ms,lev_proxy,margin_type,cur_leverage,liq_count,liq_worst_pct,"
     "active_days,activity_ratio,median_eps,pos_day_ratio,profit_conc,hold_skew,open_underwater,"
-    "max_adds_per_ep,median_adds_per_ep,worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
+    "max_adds_per_ep,median_adds_per_ep,retry_transition_n,rapid_same_side_retry_n,"
+    "rapid_same_side_retry_rate,loss_retry_transition_n,rapid_loss_retry_n,rapid_loss_retry_rate,"
+    "rapid_retry_chain_n,rapid_retry_max_chain_episodes,loss_started_retry_chain_n,"
+    "loss_started_retry_chain_losing_n,loss_started_retry_chain_lose_rate,"
+    "worst_loss_pct,market_type,crypto_frac,tp_move_pct,"
     "roi_total,open_unrealized,open_loss_frac,open_win_frac,bag_count,max_bag_days,max_win_days,hedge_ratio,loss_pain,"
     "net_7d,net_14d,net_30d,net_life,"
     "pf_week_pnl,pf_week_vlm,pf_mon_pnl,pf_mon_vlm,pf_equity,pf_turnover,"
@@ -1362,6 +1377,18 @@ _MIGRATIONS = (
     "ALTER TABLE profile ADD COLUMN payoff_ratio REAL DEFAULT 0",
     "ALTER TABLE profile ADD COLUMN max_concurrent INTEGER DEFAULT 0",  # 峰值同时持仓 → too_many_concurrent 闸
     "ALTER TABLE profile ADD COLUMN win_pt REAL DEFAULT 0",             # 赢单每笔中位收益% (审计指标)
+    # Stop/reopen trial-loop evidence. Stored so cache-only regate applies the same structural contract.
+    "ALTER TABLE profile ADD COLUMN retry_transition_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN rapid_same_side_retry_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN rapid_same_side_retry_rate REAL DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN loss_retry_transition_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN rapid_loss_retry_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN rapid_loss_retry_rate REAL DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN rapid_retry_chain_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN rapid_retry_max_chain_episodes INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN loss_started_retry_chain_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN loss_started_retry_chain_losing_n INTEGER DEFAULT 0",
+    "ALTER TABLE profile ADD COLUMN loss_started_retry_chain_lose_rate REAL DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN profiled INTEGER",
     "ALTER TABLE scan_runs ADD COLUMN full INTEGER DEFAULT 0",
     "ALTER TABLE scan_runs ADD COLUMN failed INTEGER DEFAULT 0",

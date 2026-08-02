@@ -124,11 +124,13 @@ def record_profile_snapshot(db: sqlite3.Connection, stamp: str, source: str,
                 "copy_bt_evidence_status": r.get("evidence_status"),
             },
             stage="rough",
+            policy_values=policy_values,
         )
         reason = str(r.get("reason") or qualification.get("status") or "unknown")
         structural_reasons = {
             "spot_dominant", "bot_frequency", "hft_uncopyable", "hft_turnover", "grid_dca",
-            "heavy_dca", "too_many_concurrent", "no_copyable_perp_fills",
+            "heavy_dca", "compulsive_same_side_retry", "too_many_concurrent",
+            "no_copyable_perp_fills",
         }
         if qualification.get("role") == "quarantine" or str(r.get("data_status") or "") != "valid":
             decision_stage, failure_category = "data_validation", "data_error"

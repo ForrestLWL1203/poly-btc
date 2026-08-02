@@ -343,6 +343,34 @@ class ScannerSettingsParamTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(tuple(row), ("90.0", "90.0"))
 
+    def test_seed_params_migrates_untouched_lottery_concentration_and_seeds_body_retention(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            params.seed_params(db)
+            db.execute(
+                "UPDATE params SET value='70',default_value='70' "
+                "WHERE key='SOURCE_TOP3_CONCENTRATION_TRIGGER'"
+            )
+            db.commit()
+
+            params.seed_params(db)
+
+            values = dict(db.execute(
+                "SELECT key,value FROM params WHERE key IN "
+                "('SOURCE_TOP3_CONCENTRATION_TRIGGER','SOURCE_BODY_MIN_RETAINED_NET')"
+            ).fetchall())
+            self.assertEqual(float(values["SOURCE_TOP3_CONCENTRATION_TRIGGER"]), 60.0)
+            self.assertEqual(float(values["SOURCE_BODY_MIN_RETAINED_NET"]), 20.0)
+
+            db.execute(
+                "UPDATE params SET value='65' WHERE key='SOURCE_TOP3_CONCENTRATION_TRIGGER'"
+            )
+            db.commit()
+            params.seed_params(db)
+            self.assertEqual(float(db.execute(
+                "SELECT value FROM params WHERE key='SOURCE_TOP3_CONCENTRATION_TRIGGER'"
+            ).fetchone()[0]), 65.0)
+
     def test_seed_params_deletes_retired_copy_7d_floor(self):
         with tempfile.TemporaryDirectory() as td:
             db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)

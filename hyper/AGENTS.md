@@ -223,11 +223,14 @@ Profit qualification is deliberately one-sided. `closedPnl` is fee-paid PnL from
 return divides `qualificationPnl` by that window's start equity. Source, individual Copy, standardized shared
 Copy and Paper-capital shared Copy all use the same contract.
 
-Deep fills first enforce structural hard failures: HFT/OID robot density, systematic grid/heavy DCA, spot hedge,
-opaque markets, extreme concurrency, confirmed source zeroing/major Copy liquidation, or incomplete fills,
-valuation and market scope. Source and fills-only Copy must each have at least seven complete 30-day closed
-Episodes and positive closed 30d/7d PnL. Negative unrealized PnL is fully charged and may not exceed 50% of
-30-day closed profit; positive unrealized PnL has zero qualification weight.
+Deep fills first enforce structural hard failures: HFT/OID robot density, systematic grid/heavy DCA, compulsive
+stop-to-reopen trial loops, spot hedge, opaque markets, extreme concurrency, confirmed source zeroing/major
+Copy liquidation, or incomplete fills, valuation and market scope. The retry gate is intentionally conjunctive:
+same-coin/same-side repetition alone is allowed; rejection requires deep transition/loss samples, at least 60%
+rapid same-side and loss-conditioned retries, an 8-Episode chain, and at least five predominantly losing
+loss-started chains. Source and fills-only Copy must each have at least seven complete 30-day closed Episodes
+and positive closed 30d/7d PnL. Negative unrealized PnL is fully charged and may not exceed 50% of 30-day
+closed profit; positive unrealized PnL has zero qualification weight.
 
 Canonical activity is calculated once at generation start from OID-deduplicated
 flat-to-open/flip opportunities. The latest seven days must be active, at least three of four rolling seven-day
@@ -237,8 +240,9 @@ buckets must be active, and the maximum 28-day opening gap must not exceed ten d
 Every structural survivor receives fills-only rough Copy. Rough admission also requires positive conservative
 30d/7d returns, Copy Profit Factor at least 1.25, at least 70% open follow and complete valuation. Fixed source
 70%/85% and Copy 60% win-rate gates are retired. Conditional lottery protection rejects a sub-50% win wallet
-when its post-Top3 body loses, or a wallet whose Top3 contributes at least 70% of gross profit while the body
-loses or wins below 50%. A low-win, high-PF, non-concentrated wallet with a profitable body may pass.
+when its post-Top3 body loses, or a wallet whose Top3 contributes at least 60% of gross profit while the body
+loses, wins below 50%, or retains less than 20% of total closed net profit. A low-win, high-PF wallet with a
+distributed or materially profitable body may pass.
 
 Rough 30d/7d returns of at least 20%/5% form `primary`; otherwise-qualified wallets form `reserve`. These tiers
 remain audit labels. Top32 and final formation share one profit-aligned score: conservative

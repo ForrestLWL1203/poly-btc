@@ -99,6 +99,9 @@ def _leaderboard_row(addr, account=20_000, week_pnl=2_000, week_vlm=1_000_000, m
 class ScannerWatchlistTests(unittest.TestCase):
     def test_account_wide_spot_and_turnover_never_enter_sector_recovery(self):
         self.assertNotIn("spot_dominant", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
+        self.assertNotIn(
+            "compulsive_same_side_retry", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS,
+        )
         self.assertNotIn("hft_turnover", scanner._SECTOR_RECOVERABLE_STATE_REASONS)
         self.assertNotIn("spot_hedge", scanner._SECTOR_RECOVERABLE_STRUCTURE_REASONS)
 

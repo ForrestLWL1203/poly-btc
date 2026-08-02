@@ -105,6 +105,7 @@ STRUCTURAL_REASONS = frozenset({
     "hft_uncopyable",
     "grid_dca",
     "heavy_dca",
+    "compulsive_same_side_retry",
     "spot_hedged",
     "opaque_or_outcome",
     "too_many_concurrent",
@@ -143,7 +144,7 @@ def reason_kind(reason: Optional[str], *, deferred: bool = False) -> str:
         return UNAVAILABLE
     if reason in STRUCTURAL_REASONS or any(
         token in reason for token in (
-            "hft", "oid_robot", "grid", "heavy_dca", "spot_hedge",
+            "hft", "oid_robot", "grid", "heavy_dca", "compulsive_same_side_retry", "spot_hedge",
             "opaque", "extreme_concurrency", "too_many_concurrent",
             "sector_not_executable",
         )

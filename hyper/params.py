@@ -57,6 +57,20 @@ PARAM_SPEC = [
     ("grid_max_adds",        "scanner", "hidden", "int",     "rescan", 3, "网格判定:中位加仓上限(超过=习惯性均摊,跟不动)", ""),
     ("max_single_adds",      "scanner", "hidden", "int",     "rescan", config.MAX_SINGLE_ADDS_PER_EP,
         "重DCA判定:单回合加仓上限(超过=偶发但不可复制的重仓摊价)", ""),
+    ("COMPULSIVE_RETRY_MIN_TRANSITIONS", "scanner", "hidden", "int", "rescan",
+        config.COMPULSIVE_RETRY_MIN_TRANSITIONS, "连续试错最低转换样本", ""),
+    ("COMPULSIVE_RETRY_MIN_SAME_SIDE_RATE", "scanner", "hidden", "pct", "rescan",
+        config.COMPULSIVE_RETRY_MIN_SAME_SIDE_RATE * 100, "6小时同向重开率", ""),
+    ("COMPULSIVE_RETRY_MIN_LOSS_TRANSITIONS", "scanner", "hidden", "int", "rescan",
+        config.COMPULSIVE_RETRY_MIN_LOSS_TRANSITIONS, "亏损后重开最低样本", ""),
+    ("COMPULSIVE_RETRY_MIN_LOSS_RATE", "scanner", "hidden", "pct", "rescan",
+        config.COMPULSIVE_RETRY_MIN_LOSS_RATE * 100, "亏损后6小时同向重开率", ""),
+    ("COMPULSIVE_RETRY_MIN_CHAIN_EPISODES", "scanner", "hidden", "int", "rescan",
+        config.COMPULSIVE_RETRY_MIN_CHAIN_EPISODES, "连续试错链回合数", ""),
+    ("COMPULSIVE_RETRY_MIN_LOSS_CHAINS", "scanner", "hidden", "int", "rescan",
+        config.COMPULSIVE_RETRY_MIN_LOSS_CHAINS, "亏损起始试错链样本", ""),
+    ("COMPULSIVE_RETRY_MIN_LOSS_CHAIN_LOSE_RATE", "scanner", "hidden", "pct", "rescan",
+        config.COMPULSIVE_RETRY_MIN_LOSS_CHAIN_LOSE_RATE * 100, "亏损起始试错链亏损率", ""),
     ("HFT_MIN_HOLD_MIN",     "scanner", "hidden", "float",   "rescan", 3, "高频判定持仓分钟", ""),
     ("max_fills_per_ep",     "scanner", "hidden", "int",     "rescan", 50, "算法执行判定:单回合不同OID数p90上限；同一OID的成交分片不重复计数", ""),
     ("MAX_CONCURRENT_POS",   "scanner", "blue",   "int",     "rescan", config.MAX_CONCURRENT_POS,
@@ -76,7 +90,9 @@ PARAM_SPEC = [
     ("SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN", "scanner", "hidden", "pct", "rescan",
         config.SOURCE_LOW_FREQ_MIN_OFFICIAL_RETURN * 100, "旧强力低频官方收益", "仅兼容旧快照；官方ROI大小不再参与资格"),
     ("SOURCE_TOP3_CONCENTRATION_TRIGGER", "scanner", "hidden", "pct", "rescan",
-        config.SOURCE_TOP3_CONCENTRATION_TRIGGER * 100, "前三大赢家集中检查线", "低于70%不触发主体检查"),
+        config.SOURCE_TOP3_CONCENTRATION_TRIGGER * 100, "前三大赢家集中检查线", "低于60%不触发主体检查"),
+    ("SOURCE_BODY_MIN_RETAINED_NET", "scanner", "hidden", "pct", "rescan",
+        config.SOURCE_BODY_MIN_RETAINED_NET * 100, "高集中钱包主体净收益留存", "Top3之外的回合至少保留总已平净收益的20%"),
     ("SOURCE_BODY_MIN_WIN_RATE", "scanner", "hidden", "pct", "rescan",
         config.SOURCE_BODY_MIN_WIN_RATE * 100, "高集中钱包主体最低胜率", "仅当前三大赢家占毛盈利至少70%时启用"),
     ("COPY_BT_GATE_ENABLE",  "scanner", "hidden", "bool",    "rescan", config.COPY_BT_GATE_ENABLE,
@@ -373,6 +389,14 @@ def seed_params(db):
                 "AND default_value IN ('10','10.0') AND value=default_value",
                 (dv, key),
             )
+        # Approved lottery-policy migration. Move only the untouched 70% concentration default; preserve
+        # an operator-edited value while adding the new body-retention parameter independently.
+        if key == "SOURCE_TOP3_CONCENTRATION_TRIGGER":
+            db.execute(
+                "UPDATE params SET value=? WHERE key=? AND value IN ('70','70.0') "
+                "AND default_value IN ('70','70.0') AND value=default_value",
+                (dv, key),
+            )
         # Approved harvest-policy migration. Move only previously approved default surfaces, including the
         # immediately preceding 15/20/20 + 2k/8k/0 policy,
         # to the new production default. Unrelated operator custom values remain untouched.
@@ -489,6 +513,13 @@ SCANNER_ARG_MAP = {
     "min_perp": "min_perp", "inactive_days": "inactive_days", "max_daily_eps": "max_daily_eps",
     "grid_max_adds": "grid_max_adds",
     "max_single_adds": "max_single_adds",
+    "COMPULSIVE_RETRY_MIN_TRANSITIONS": "compulsive_retry_min_transitions",
+    "COMPULSIVE_RETRY_MIN_SAME_SIDE_RATE": "compulsive_retry_min_same_side_rate",
+    "COMPULSIVE_RETRY_MIN_LOSS_TRANSITIONS": "compulsive_retry_min_loss_transitions",
+    "COMPULSIVE_RETRY_MIN_LOSS_RATE": "compulsive_retry_min_loss_rate",
+    "COMPULSIVE_RETRY_MIN_CHAIN_EPISODES": "compulsive_retry_min_chain_episodes",
+    "COMPULSIVE_RETRY_MIN_LOSS_CHAINS": "compulsive_retry_min_loss_chains",
+    "COMPULSIVE_RETRY_MIN_LOSS_CHAIN_LOSE_RATE": "compulsive_retry_min_loss_chain_lose_rate",
     "EXCLUDE_HFT": "exclude_hft", "HFT_MIN_HOLD_MIN": "hft_min_hold_min",
     "max_fills_per_ep": "max_fills_per_ep",
     "COPY_BT_GATE_ENABLE": "copy_bt_gate_enable", "COPY_BT_DAYS": "copy_bt_days",
