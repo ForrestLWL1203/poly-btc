@@ -100,6 +100,7 @@ export function Wallets({ confirm, onDataChanged = null }) {
   const { data, setData, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   const explicit = !!(data && data.selectionMode);
   const portfolioReplay = data && data.portfolioReplay;
+  const portfolioRoiReplay = portfolioReplay && (portfolioReplay.paperAccount || portfolioReplay);
   const portfolioRelease = data && data.portfolioRelease;
   const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
   const allRows = (data && data.wallets) || [];
@@ -190,11 +191,12 @@ export function Wallets({ confirm, onDataChanged = null }) {
         <h2>跟踪名单</h2>
         <div className="wallets-head-actions">
           {tab === "followed" && portfolioReplay && (
-            <div className="portfolio-replay-kpi" title="共享账户从期初权益开始连续滚动复利；30日和最近7日收益率分别使用各自窗口边界的真实浮动权益。">
-              <span>当前Core · 生效参数 · 动态严格Copy：</span>
-              <b className={(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0) < 0 ? "down" : "up"}>{fSign(portfolioReplay.netPnl30Worst || portfolioReplay.netPnl30 || 0, 0)}</b>
-              {portfolioReplay.dynamicReturn30d != null && <i>30d {fSign(portfolioReplay.dynamicReturn30d * 100, 1)}%</i>}
-              {portfolioReplay.dynamicReturn7d != null && <i>7d {fSign(portfolioReplay.dynamicReturn7d * 100, 1)}%</i>}
+            <div className="portfolio-replay-kpi" title="ROI 以本次采集时冻结的账户期初权益为分母；30日和最近7日分别使用各自窗口边界的真实浮动权益。">
+              <span>当前Core · 生效参数 · 动态严格Copy ROI：</span>
+              <b className={(portfolioRoiReplay?.dynamicReturn30d || 0) < 0 ? "down" : "up"}>
+                30d {portfolioRoiReplay?.dynamicReturn30d != null ? fSign(portfolioRoiReplay.dynamicReturn30d * 100, 1) + "%" : "—"}
+              </b>
+              {portfolioRoiReplay?.dynamicReturn7d != null && <i>7d {fSign(portfolioRoiReplay.dynamicReturn7d * 100, 1)}%</i>}
               <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
               {portfolioReplay.behaviorReplication30Worst != null && <i>复刻≈{fNum(portfolioReplay.behaviorReplication30Worst * 100, 0)}%</i>}
               {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}

@@ -23,6 +23,10 @@ full Live startup preflight before creating the session. Mode changes require Ob
 Passing that startup preflight enters normal Live execution immediately; there is no separate 1%-equity Canary
 stage. Normal equity sizing, deployment, per-coin, add and liquidity limits continue to apply.
 
+The Core-list strict-replay summary is expressed only as 30d/7d ROI. Its denominator is the account equity
+frozen at that collection's corresponding replay-window boundary; current Paper or Live balances never rewrite
+the published summary, and absolute replay PnL is not presented as an operator KPI.
+
 The wallet control plane exposes `wallet_exit_request` and `wallet_exit_cancel`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;
