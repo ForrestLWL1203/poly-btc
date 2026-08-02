@@ -43,6 +43,27 @@ def _gross_traded(db, action_table="copy_action"):
     return gross
 
 
+def _live_fill_performance(db, since_ms=None):
+    """Confirmed PnL from orders created by this copy-trading system.
+
+    Exchange fills are the Live source of truth.  Matching the durable CLOID
+    intent excludes any unrelated/manual account activity that happened while
+    a Live session was running.
+    """
+    cutoff_sql = " AND f.fill_time_ms>=?" if since_ms is not None else ""
+    args = (int(since_ms),) if since_ms is not None else ()
+    return q1(
+        db,
+        "SELECT COALESCE(SUM(f.closed_pnl),0)-COALESCE(SUM(f.fee),0) pnl,"
+        "COALESCE(SUM(f.fee),0) fee FROM execution_fill f "
+        "WHERE f.network='mainnet' AND EXISTS ("
+        "SELECT 1 FROM execution_order_intent i WHERE i.session_id=f.session_id "
+        "AND lower(i.cloid)=lower(f.cloid))" + cutoff_sql,
+        args,
+        {"pnl": 0.0, "fee": 0.0},
+    ) or {"pnl": 0.0, "fee": 0.0}
+
+
 def ep_overview(db):
     tables = execution_copy_tables(db)
     mode = tables["mode"]
@@ -113,12 +134,8 @@ def ep_overview(db):
         gross_traded = _gross_traded(db, action_table)
         equity = balance if mode == "live" else balance + upnl
         if mode == "live":
-            live_pnl = q1(
-                db,
-                "SELECT COALESCE(SUM(closed_pnl),0)-COALESCE(SUM(fee),0) pnl "
-                "FROM execution_fill WHERE network='mainnet'",
-            ) or {"pnl": 0.0}
-            realized = live_pnl["pnl"] or 0.0
+            live_performance = _live_fill_performance(db)
+            realized = live_performance["pnl"] or 0.0
         else:
             realized = balance - init
         available = (acct["available"] if mode == "live" else balance - locked)
@@ -126,18 +143,33 @@ def ep_overview(db):
         long_n = (gross + net) / 2 if gross else 0.0
         short_n = (gross - net) / 2 if gross else 0.0
         if mode == "live":
-            eq24 = q1(
-                db, "SELECT equity FROM execution_account_snapshot WHERE session_id=? AND observed_at<=? "
+            # Funding flows change real equity and available funds, but they are not strategy profit.
+            # Derive Live returns only from confirmed copy fills plus marked open-copy PnL.
+            strategy_pnl = realized + upnl
+            funded_capital = equity - strategy_pnl
+            roi = (strategy_pnl / funded_capital * 100) if funded_capital > 0 else 0.0
+
+            cutoff_epoch = time.time() - 24 * 3600
+            today_fill = _live_fill_performance(db, cutoff_epoch * 1000)
+            prior_upnl = q1(
+                db,
+                "SELECT unrealized_pnl FROM execution_account_snapshot WHERE observed_at<=? "
                 "ORDER BY observed_at DESC LIMIT 1",
-                (active_live_session, _iso_ago(24 * 3600)),
+                (_iso_ago(24 * 3600),),
             )
+            today_pnl = (today_fill["pnl"] or 0.0) + upnl - (
+                (prior_upnl["unrealized_pnl"] or 0.0) if prior_upnl else 0.0
+            )
+            today_base = equity - today_pnl
+            today = (today_pnl / today_base * 100) if today_base > 0 else 0.0
         else:
             eq24 = q1(db, "SELECT equity FROM account_stats WHERE ts<=? ORDER BY ts DESC LIMIT 1",
                       (_iso_ago(24 * 3600),))
-        today = ((equity / eq24["equity"] - 1) * 100) if (eq24 and eq24["equity"]) else 0.0
+            roi = (equity / init - 1) * 100
+            today = ((equity / eq24["equity"] - 1) * 100) if (eq24 and eq24["equity"]) else 0.0
         bp = (realized / gross_traded * 1e4) if gross_traded else 0.0
         base = {
-            "equity": equity, "roiPct": (equity / init - 1) * 100, "todayPct": today,
+            "equity": equity, "roiPct": roi, "todayPct": today,
             "realizedPnl": realized, "unrealizedPnl": upnl,
             "winRatePct": win_rate * 100, "openCount": open_n, "closedCount": closed_n,
             "availableBalance": available,
@@ -147,7 +179,7 @@ def ep_overview(db):
                      "longPct": (long_n / gross * 100) if gross else 0.0,
                      "shortPct": (short_n / gross * 100) if gross else 0.0},
             "fees": {"cumulative": (
-                (q1(db, "SELECT COALESCE(SUM(fee),0) f FROM execution_fill WHERE network='mainnet'") or {"f": 0})["f"]
+                live_performance["fee"]
                 if mode == "live" else gross_traded * config.TAKER_FEE
             ), "netPerGrossBp": bp},
             "lastUpdate": (account_last_update or (q1(db, "SELECT updated_at m FROM live_copy_account WHERE id=1") or {"m": None})["m"]

@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import time
 import unittest
 from importlib import import_module, util
 from pathlib import Path
@@ -204,6 +205,81 @@ class ApiOverviewPerfTests(unittest.TestCase):
             self.assertEqual(equity["points"], [{"t": "2026-08-02T00:01:00Z", "equity": 200.0}])
             self.assertIsNone(db.execute("SELECT * FROM live_copy_account").fetchone())
             self.assertIsNone(db.execute("SELECT * FROM execution_session").fetchone())
+
+    def test_live_overview_excludes_deposits_from_roi_and_today_return(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+                "VALUES (1,'live','live_running','live-1','2026-08-02T00:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO live_copy_account (id,initial_balance,balance,available,updated_at) "
+                "VALUES (1,169.4,2169.2,2169.2,'2026-08-02T00:01:00Z')"
+            )
+            db.execute(
+                "INSERT INTO execution_account_snapshot "
+                "(session_id,equity,available,margin_used,unrealized_pnl,observed_at) "
+                "VALUES ('live-1',169.4,169.4,0,0,?)",
+                (api_overview._iso_ago(25 * 3600),),
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        self.assertEqual(overview["equity"], 2169.2)
+        self.assertEqual(overview["realizedPnl"], 0.0)
+        self.assertEqual(overview["roiPct"], 0.0)
+        self.assertEqual(overview["todayPct"], 0.0)
+
+    def test_live_overview_returns_use_only_confirmed_copy_trade_pnl(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = storage.connect(str(Path(td) / "hl.db"), storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
+            db.row_factory = sqlite3.Row
+            db.execute(
+                "INSERT INTO execution_control (id,selected_mode,state,active_session_id,updated_at) "
+                "VALUES (1,'live','live_running','live-1','2026-08-02T00:00:00Z')"
+            )
+            db.execute(
+                "INSERT INTO live_copy_account (id,initial_balance,balance,available,updated_at) "
+                "VALUES (1,169.4,2183,2160,'2026-08-02T00:01:00Z')"
+            )
+            db.execute(
+                "INSERT INTO execution_order_intent "
+                "(cloid,session_id,strategy_revision,action_seq,action,coin,side,reduce_only,"
+                "requested_size,requested_limit_px,state,created_at,updated_at) "
+                "VALUES ('0xcopy','live-1','rev-1',1,'close','BTC','sell',1,1,100,'filled','now','now')"
+            )
+            db.execute(
+                "INSERT INTO execution_fill "
+                "(network,tid,session_id,cloid,coin,side,size,px,fee,closed_pnl,fill_time_ms,created_at) "
+                "VALUES ('mainnet','copy-fill','live-1','0xcopy','BTC','sell',1,100,1,12,?,'now')",
+                (int(time.time() * 1000),),
+            )
+            # This account fill is not tied to a durable copy intent and must not affect strategy returns.
+            db.execute(
+                "INSERT INTO execution_fill "
+                "(network,tid,session_id,cloid,coin,side,size,px,fee,closed_pnl,fill_time_ms,created_at) "
+                "VALUES ('mainnet','manual-fill','live-1','0xmanual','ETH','sell',1,100,2,100,?,'now')",
+                (int(time.time() * 1000),),
+            )
+            db.execute(
+                "INSERT INTO live_copy_position "
+                "(addr,coin,side,status,size,rem_size,entry_px,mark_px,margin,notional,"
+                "unrealized_pnl,realized_pnl,opened_at) "
+                "VALUES ('0xsource','ETH','long','open',1,1,100,103,10,100,3,0,'now')"
+            )
+            db.commit()
+
+            overview = api_overview.ep_overview(db)
+
+        expected_pnl = 12 - 1 + 3
+        self.assertEqual(overview["realizedPnl"], 11.0)
+        self.assertEqual(overview["unrealizedPnl"], 3.0)
+        self.assertAlmostEqual(overview["roiPct"], expected_pnl / (2183 - expected_pnl) * 100)
+        self.assertAlmostEqual(overview["todayPct"], expected_pnl / (2183 - expected_pnl) * 100)
+        self.assertEqual(overview["fees"]["cumulative"], 1.0)
 
     def test_overview_exposes_current_scan_stage(self):
         with tempfile.TemporaryDirectory() as td:

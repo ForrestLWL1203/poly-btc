@@ -262,9 +262,9 @@ class Observer:
                 (config.INITIAL_BALANCE, config.INITIAL_BALANCE, now_iso()),
             )
             self.db.commit()
-        # The Live ledger keeps one lifetime initial balance for ROI, while each new Live session freezes
-        # the then-current real equity as its own drawdown/sizing anchor. Never let a prior session (or the
-        # Paper fallback initialized by Book) leak into a newly funded or downsized Mainnet account.
+        # The Live ledger keeps its first funding anchor for audit, while each new Live session freezes the
+        # then-current real equity as its own drawdown/sizing anchor. Dashboard Live returns are derived from
+        # confirmed copy fills and open PnL so later deposits/withdrawals cannot masquerade as performance.
         book.sizing_anchor = (
             float(self.live_executor.session["sizing_anchor"])
             if book.name == "live" and self.live_executor is not None
