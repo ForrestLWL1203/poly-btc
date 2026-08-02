@@ -34,4 +34,6 @@ The frontend already speaks the real API contract and uses SSE with polling fall
 
 Core wallet rows use the accessible `coin-ban-btn`/`BanIcon` control for conditional exit. Confirmation copy
 must distinguish flat (`立即转候选，等待每日重评恢复`) from held (`仅退出；整批盈利恢复，亏损或清算转候选`) wallets.
+During unresolved `draining`, the same control remains enabled and confirms cancellation before restoring
+normal following; cancellation must not close or recreate the captured positions.
 Do not reintroduce the old enable toggle or label low/medium financial risk as an execution freeze.

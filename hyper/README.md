@@ -212,7 +212,10 @@ Wallet quality and funded-account membership are separate decisions.
 - Dashboard conditional exit uses `active → draining/requalify`. Draining captures every position ID present at
   the click and reserves its Core seat. Once all captured positions close, aggregate post-fee profit with no
   liquidation/high/system block restores active automatically; otherwise the wallet moves to requalify.
-  Flat requests move to requalify immediately. There is no permanent manual disable.
+  While a captured position remains open, clicking the same control again may cancel the unresolved drain,
+  preserving every existing position while restoring new-open/add authority. High/system-blocked wallets cannot
+  use cancellation to bypass their block. Flat requests move to requalify immediately. There is no permanent
+  manual disable.
 - Core has no minimum wallet quota and a maximum of sixteen. A complete scan may publish any count from zero to sixteen;
   final profit order/evidence and funded shared-account economics decide membership.
 

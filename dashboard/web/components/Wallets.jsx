@@ -95,6 +95,7 @@ export function Wallets({ confirm }) {
   const [starPending, setStarPending] = useState({});
   const [exitPending, setExitPending] = useState({});
   const [starError, setStarError] = useState(null);
+  const [exitError, setExitError] = useState(null);
   const load = useCallback(() => api.get("/api/wallets?tab=" + tab + "&size=500"), [tab]);
   const { data, setData, reload } = useApiResource(load, { intervalMs: 12000, clearOnLoadChange: true });
   const explicit = !!(data && data.selectionMode);
@@ -109,10 +110,13 @@ export function Wallets({ confirm }) {
     if (exitPending[w.address] || w.operatorIntent === "draining") return;
     const hasPositions = Number(w.exitPositionCount || 0) > 0;
     const act = async () => {
+      setExitError(null);
       setExitPending(pending => ({ ...pending, [w.address]: true }));
       try {
         await api.cmdAndWait("wallet_exit_request", { address: w.address });
         await reload();
+      } catch (error) {
+        if (!error || error.message !== "unauth") setExitError("条件性退榜失败，请稍后重试");
       } finally {
         setExitPending(pending => {
           const next = { ...pending };
@@ -128,6 +132,32 @@ export function Wallets({ confirm }) {
       body: hasPositions
         ? `停止 ${short(w.address)} 新开仓和加仓；当前 ${w.exitPositionCount} 笔整批净盈利平仓将自动恢复，亏损或清算后转候选。`
         : `立即将 ${short(w.address)} 转候选，等待每日完整重评恢复。`,
+      onConfirm: act,
+    });
+  };
+
+  const cancelExit = (w) => {
+    if (exitPending[w.address] || w.operatorIntent !== "draining") return;
+    const act = async () => {
+      setExitError(null);
+      setExitPending(pending => ({ ...pending, [w.address]: true }));
+      try {
+        await api.cmdAndWait("wallet_exit_cancel", { address: w.address });
+        await reload();
+      } catch (error) {
+        if (!error || error.message !== "unauth") setExitError("取消仅退出失败，请刷新状态后重试");
+      } finally {
+        setExitPending(pending => {
+          const next = { ...pending };
+          delete next[w.address];
+          return next;
+        });
+      }
+    };
+    confirm({
+      title: "取消仅退出",
+      ok: "恢复跟单",
+      body: `恢复 ${short(w.address)} 的新开仓和加仓权限；当前持仓不会被平掉，将继续按正常跟单规则管理。`,
       onConfirm: act,
     });
   };
@@ -181,6 +211,7 @@ export function Wallets({ confirm }) {
           组合经济门槛降级：保留当前有效 Core 与参数，暂停自动晋升和调参，等待人工复核。
         </div>}
       {starError && <div className="wallet-alert" role="alert">{starError}</div>}
+      {exitError && <div className="wallet-alert" role="alert">{exitError}</div>}
       <div className="tbl-wrap">
         {explicit ? (
           <table>
@@ -262,12 +293,13 @@ export function Wallets({ confirm }) {
                     <td>
                       {tab === "followed" ? <button type="button"
                         className={"coin-ban-btn" + (w.operatorIntent === "draining" ? " on" : "")}
-                        aria-label={w.operatorIntent === "draining" ? "该钱包仅退出中" : "请求该钱包条件性退榜"}
-                        title={w.operatorIntent === "draining" ? "仅退出中；捕获持仓全部结案后自动判定恢复或转候选" : "条件性退榜"}
-                        disabled={!!exitPending[w.address] || w.operatorIntent === "draining"}
-                        onClick={(e) => { e.stopPropagation(); requestExit(w); }}>
+                        aria-label={w.operatorIntent === "draining" ? "取消该钱包仅退出状态" : "请求该钱包条件性退榜"}
+                        aria-pressed={w.operatorIntent === "draining"}
+                        title={w.operatorIntent === "draining" ? "仅退出中；点击取消并恢复正常跟单" : "条件性退榜"}
+                        disabled={!!exitPending[w.address]}
+                        onClick={(e) => { e.stopPropagation(); w.operatorIntent === "draining" ? cancelExit(w) : requestExit(w); }}>
                         {exitPending[w.address] ? <span className="spin" /> : <BanIcon />}
-                        <span className="coin-ban-tip">{w.operatorIntent === "draining" ? "仅退出中" : "条件性退榜"}</span>
+                        <span className="coin-ban-tip">{w.operatorIntent === "draining" ? "取消仅退出" : "条件性退榜"}</span>
                       </button> : <span className="muted">—</span>}
                     </td>
                   </tr>

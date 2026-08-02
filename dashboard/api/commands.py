@@ -10,7 +10,7 @@ from .common import q1
 
 
 ALLOWED_COMMANDS = {"pause", "resume", "close_position", "close_all", "wallet_toggle",
-                    "wallet_exit_request", "wallet_star",
+                    "wallet_exit_request", "wallet_exit_cancel", "wallet_star",
                     "observer_start", "observer_stop", "rescan", "scan_stop",
                     "patch_params", "reload_params", "drain", "emergency_close_all",
                     *CONTROL_COMMANDS}
@@ -65,9 +65,9 @@ def validate_command_payload(ctype, payload):
             raise ValueError("invalid wallet address")
         if not isinstance(payload.get(expected_flag), bool):
             raise ValueError(f"{expected_flag} must be boolean")
-    elif ctype == "wallet_exit_request":
+    elif ctype in {"wallet_exit_request", "wallet_exit_cancel"}:
         if set(payload) != {"address"}:
-            raise ValueError("wallet_exit_request requires address")
+            raise ValueError(f"{ctype} requires address")
         address = payload.get("address")
         if not isinstance(address, str) or not address.strip() or len(address) > 128:
             raise ValueError("invalid wallet address")

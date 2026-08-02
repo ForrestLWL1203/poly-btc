@@ -49,6 +49,19 @@ class ApiCommandTests(unittest.TestCase):
             except OSError:
                 pass
 
+    def test_wallet_exit_cancel_requires_only_an_address(self):
+        self.assertIn("wallet_exit_cancel", api_commands.ALLOWED_COMMANDS)
+        self.assertEqual(
+            {"address": "0xabc"},
+            api_commands.validate_command_payload(
+                "wallet_exit_cancel", {"address": "0xabc"},
+            ),
+        )
+        with self.assertRaises(ValueError):
+            api_commands.validate_command_payload(
+                "wallet_exit_cancel", {"address": "0xabc", "enabled": True},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

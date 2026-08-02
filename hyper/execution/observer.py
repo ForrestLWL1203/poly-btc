@@ -1454,7 +1454,7 @@ class Observer:
         toggle). Each: acked -> done/failed. Scanner-owned commands (rescan) are left untouched. Also
         refreshes process_status heartbeat each loop so the dashboard sees the observer alive."""
         OWNED = ("pause", "resume", "close_position", "close_all", "drain", "emergency_close_all", "wallet_toggle",
-                 "wallet_exit_request", "wallet_star", "reload_params")
+                 "wallet_exit_request", "wallet_exit_cancel", "wallet_star", "reload_params")
         last_hb = 0.0
         while not self.stop:
             try:
@@ -1558,6 +1558,8 @@ class Observer:
             return self._cmd_wallet_toggle(payload["address"], bool(payload["enabled"]))
         if ctype == "wallet_exit_request":
             return self._cmd_wallet_exit_request(payload["address"])
+        if ctype == "wallet_exit_cancel":
+            return self._cmd_wallet_exit_cancel(payload["address"])
         if ctype == "wallet_star":
             return self._cmd_wallet_star(payload["address"], bool(payload["starred"]))
         if ctype == "reload_params":               # UI saved follow params or Core membership changed
@@ -1696,6 +1698,44 @@ class Observer:
         return {
             "address": addr, "intent": intent, "enabled": False,
             "capturedPositionIds": position_ids,
+        }
+
+    def _cmd_wallet_exit_cancel(self, addr):
+        """Cancel an unresolved draining request and restore normal Core execution."""
+        addr = (addr or "").lower()
+        generation = selection.latest_published_generation(self.db)
+        current_core = self.db.execute(
+            "SELECT 1 FROM follow_selection WHERE generation=? AND lower(addr)=lower(?) "
+            "AND lower(role)='core' AND COALESCE(enabled,1)=1",
+            (generation, addr),
+        ).fetchone() if generation else None
+        if not current_core:
+            raise ValueError("wallet_exit_cancel_requires_current_core")
+        blocked = self.db.execute(
+            "SELECT risk_level,risk_block_reason FROM wallet_registry WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        if blocked and (blocked[0] == "high" or blocked[1]):
+            raise ValueError("wallet is blocked by durable risk state")
+        control = self.db.execute(
+            "SELECT COALESCE(intent,'active') FROM target_controls WHERE lower(addr)=lower(?)",
+            (addr,),
+        ).fetchone()
+        if not control or control[0] != "draining":
+            raise ValueError("wallet_exit_not_draining")
+        ts = now_iso()
+        self.db.execute(
+            "UPDATE target_controls SET enabled=1,intent='active',"
+            "intent_position_ids_json=NULL,intent_resolved_at=?,"
+            "intent_resolution='operator_cancelled_exit',updated_at=? "
+            "WHERE lower(addr)=lower(?) AND intent='draining'",
+            (ts, ts, addr),
+        )
+        self.db.commit()
+        self._reload_strategy()
+        return {
+            "address": addr, "intent": "active", "enabled": True,
+            "resolution": "operator_cancelled_exit",
         }
 
     def _cmd_wallet_toggle(self, addr, enabled):

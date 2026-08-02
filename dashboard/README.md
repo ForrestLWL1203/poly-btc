@@ -14,11 +14,13 @@ Position fill details distinguish margin committed on entry from capital returne
 capital is released entry-basis margin plus realized PnL net of exit fees; it is never exit notional divided by
 leverage.
 
-The wallet control plane exposes `wallet_exit_request`; Dashboard never mutates selection or execution state
+The wallet control plane exposes `wallet_exit_request` and `wallet_exit_cancel`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;
-wallets with open positions show “仅退出中” until Observer resolves the captured cohort. Low/medium risk labels
-are advisory and do not disable entries. High risk disables entries; cumulative-loss high may later recover
+wallets with open positions show “仅退出中” until Observer resolves the captured cohort. The same control sends
+`wallet_exit_cancel` while draining, restoring normal following without closing the existing cohort unless a
+durable risk or system block forbids it. Low/medium risk labels are advisory and do not disable entries. High
+risk disables entries; cumulative-loss high may later recover
 after profitable actual-Copy results, while a confirmed single catastrophic event remains durable. Funds
 withdrawal, structural blocks and data anomalies are always rendered as text as well as color.
 
