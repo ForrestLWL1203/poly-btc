@@ -1,3 +1,4 @@
+import os
 import unittest
 from types import SimpleNamespace
 
@@ -176,6 +177,30 @@ class LiveExecutorTests(unittest.TestCase):
             self.db.execute("SELECT state FROM execution_order_intent").fetchone()[0], "filled",
         )
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM execution_fill").fetchone()[0], 1)
+
+    def test_lease_reclaims_immediately_when_previous_worker_pid_is_dead(self):
+        self.db.execute(
+            "INSERT INTO execution_lease (id,owner,acquired_at,heartbeat_at,expires_at_ms) "
+            "VALUES (1,'live-observer:999999999:old',?,?,?)",
+            (now_iso(), now_iso(), now_ms() + 60_000),
+        )
+        self.db.commit()
+
+        executor = LiveExecutor(self.db, self.session.copy(), FakeLiveBroker())
+
+        owner = self.db.execute("SELECT owner FROM execution_lease WHERE id=1").fetchone()[0]
+        self.assertEqual(owner, executor.owner)
+
+    def test_lease_still_rejects_a_different_live_worker(self):
+        self.db.execute(
+            "INSERT INTO execution_lease (id,owner,acquired_at,heartbeat_at,expires_at_ms) "
+            "VALUES (1,?,?,?,?)",
+            (f"live-observer:{os.getpid()}:old", now_iso(), now_iso(), now_ms() + 60_000),
+        )
+        self.db.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "live_execution_lease_held"):
+            LiveExecutor(self.db, self.session.copy(), FakeLiveBroker())
 
     def test_canary_clamps_margin_instead_of_rejecting_whole_signal(self):
         broker = FakeLiveBroker()

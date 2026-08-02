@@ -158,7 +158,8 @@ class LiveExecutor:
         expires = stamp + 45_000
         self.db.execute("BEGIN IMMEDIATE")
         row = self.db.execute("SELECT owner,expires_at_ms FROM execution_lease WHERE id=1").fetchone()
-        if row and row[0] != self.owner and int(row[1] or 0) > stamp:
+        if (row and row[0] != self.owner and int(row[1] or 0) > stamp
+                and self._lease_owner_process_alive(row[0])):
             self.db.rollback()
             raise RuntimeError("live_execution_lease_held")
         self.db.execute(
@@ -168,6 +169,29 @@ class LiveExecutor:
             (self.owner, now_iso(), now_iso(), expires),
         )
         self.db.commit()
+
+    @staticmethod
+    def _lease_owner_process_alive(owner: str | None) -> bool:
+        """Fail closed for unknown owners; reclaim our own lease immediately after a dead worker.
+
+        systemd terminates a Python worker with SIGTERM during deployment, so its normal async cleanup
+        may not run.  The lease owner embeds that worker's local PID.  Waiting for the full lease TTL
+        would leave real positions unmanaged and make systemd report several false crash loops.  A live
+        PID still owns the lease; an absent PID is safe for the replacement worker to take over.
+        """
+        parts = str(owner or "").split(":")
+        if len(parts) != 3 or parts[0] != "live-observer":
+            return True
+        try:
+            pid = int(parts[1])
+            if pid <= 0:
+                return True
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except (PermissionError, ValueError):
+            return True
 
     def heartbeat_lease(self) -> None:
         updated = self.db.execute(
