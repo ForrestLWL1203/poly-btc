@@ -19,9 +19,15 @@ from typing import Callable, Optional
 from hyper import config
 from hyper.selection import strategy_revision
 from hyper.util import now_iso
-from .control import credential_row, ensure_execution_control, mark_credential_status, set_control_state
+from .control import (
+    credential_row,
+    ensure_execution_control,
+    mark_credential_status,
+    mark_credential_verified,
+    set_control_state,
+)
 from .credentials import decrypt_agent_wallet
-from .hyperliquid_broker import HyperliquidBroker
+from .hyperliquid_broker import BrokerError, HyperliquidBroker
 from .preflight import AccountPreflightCode, evaluate_account_preflight
 from .sdk_clients import CredentialError, create_public_info_client
 from .venue import ExecutionNetwork, venue_config
@@ -50,6 +56,31 @@ def validate_agent_expiry(value: str | None, *, minimum_days: int = 7) -> dateti
     if expiry - datetime.now(timezone.utc) < timedelta(days=minimum_days):
         raise CredentialError(f"agent_expiry_under_{minimum_days}d")
     return expiry
+
+
+def resolve_agent_expiry(
+    broker: HyperliquidBroker,
+    agent_address: str,
+    *,
+    minimum_days: int = 7,
+) -> str:
+    """Resolve and validate an Agent expiry from Hyperliquid account state."""
+    try:
+        authorization = broker.agent_authorization(agent_address)
+    except BrokerError:
+        raise CredentialError("agent_authorization_query_failed") from None
+    if not authorization:
+        raise CredentialError("agent_authorization_not_found")
+    try:
+        expiry = datetime.fromtimestamp(
+            int(authorization["validUntil"]) / 1000,
+            tz=timezone.utc,
+        )
+    except (KeyError, TypeError, ValueError, OSError, OverflowError):
+        raise CredentialError("agent_expiry_invalid") from None
+    value = _iso(expiry)
+    validate_agent_expiry(value, minimum_days=minimum_days)
+    return value
 
 
 def _usdc(snapshot) -> tuple[float, float]:
@@ -212,7 +243,6 @@ def run_live_preflight(
             raise RuntimeError("SYSTEM_CLOCK_NOT_SYNCHRONIZED")
         if not credential:
             raise CredentialError("credential_not_configured")
-        validate_agent_expiry(credential.get("valid_until"))
         wallet = decrypt_agent_wallet(
             credential["envelope"], network="mainnet", account_address=account,
             agent_address=agent, private_key_path=private_wrap_key_path,
@@ -223,6 +253,7 @@ def run_live_preflight(
         broker = HyperliquidBroker(
             ExecutionNetwork.MAINNET, account, info_client=info, supported_dexes=("", "xyz"),
         )
+        valid_until = resolve_agent_expiry(broker, agent)
         identity = broker.identity_snapshot(agent)
         snapshot = broker.account_snapshot()
         checks["rest"] = True
@@ -267,7 +298,9 @@ def run_live_preflight(
             account=account, agent=agent, revision=revision, params_hash=params_hash,
             equity=equity, available=available, positions=positions, orders=orders,
         )
-        mark_credential_status(db, ExecutionNetwork.MAINNET, status="verified")
+        mark_credential_verified(
+            db, ExecutionNetwork.MAINNET, valid_until=valid_until,
+        )
         return _store_result(
             db, preflight_id=preflight_id, account=account, agent=agent, revision=revision,
             snapshot_hash=snapshot_hash, ok=True, code="OK", equity=equity, available=available,

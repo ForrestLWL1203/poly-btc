@@ -69,6 +69,14 @@ source signal only, while our order scales with actual account equity down to Hy
 Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
 Unified account, a passing read-only preflight and the mandatory small-funds Canary.
 
+The Dashboard exposes only the product modes: compact Paper and Mainnet Live. Testnet remains a developer CLI
+verifier and is not shown as an operator account. Mainnet credential entry accepts the master address, Agent
+address and Agent private key; the browser encrypts the key before transport, and verification reads the
+Agent's authoritative `validUntil` from Hyperliquid `extraAgents` instead of accepting an operator-entered
+expiry. The visible credential action verifies the private-key address, owner, Unified mode and authorization.
+Starting Live then runs the full funding/strategy/Core/market/REST/WS/position/order preflight automatically,
+consumes its short-lived grant and starts Observer; there is no separate manual preflight panel.
+
 Testnet is deliberately not a product execution mode and does not maintain a Testnet copy ledger. It is only a
 bounded functional verifier for Hyperliquid signing, leverage, order, cancel, query and WebSocket APIs. Testnet
 books are not used to validate Mainnet strategy behavior, liquidity or expected slippage.

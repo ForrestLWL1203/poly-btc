@@ -62,6 +62,19 @@ class ApiCommandTests(unittest.TestCase):
                 "wallet_exit_cancel", {"address": "0xabc", "enabled": True},
             )
 
+    def test_credential_upload_does_not_accept_operator_expiry(self):
+        payload = {
+            "network": "mainnet",
+            "accountAddress": "0x" + "1" * 40,
+            "agentAddress": "0x" + "2" * 40,
+            "envelope": {"encrypted": True},
+        }
+        self.assertEqual(payload, api_commands.validate_command_payload("credential_upsert", payload))
+        with self.assertRaises(ValueError):
+            api_commands.validate_command_payload(
+                "credential_upsert", {**payload, "validUntil": "2099-01-01T00:00:00Z"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

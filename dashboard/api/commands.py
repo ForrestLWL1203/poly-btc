@@ -24,7 +24,7 @@ def validate_command_payload(ctype, payload):
         raise ValueError("command payload must be an object")
     if ctype == "credential_upsert":
         required = {"network", "accountAddress", "agentAddress", "envelope"}
-        if not required.issubset(payload) or set(payload) - (required | {"validUntil"}):
+        if set(payload) != required:
             raise ValueError("credential_upsert payload shape is invalid")
         if payload.get("network") not in {"testnet", "mainnet"}:
             raise ValueError("invalid credential network")
@@ -34,8 +34,6 @@ def validate_command_payload(ctype, payload):
                 raise ValueError(f"invalid {key}")
         if not isinstance(payload.get("envelope"), dict):
             raise ValueError("encrypted envelope is required")
-        if payload.get("validUntil") is not None and not isinstance(payload.get("validUntil"), str):
-            raise ValueError("invalid validUntil")
     elif ctype in {"credential_verify", "credential_delete"}:
         if set(payload) != {"network"} or payload.get("network") not in {"testnet", "mainnet"}:
             raise ValueError(f"{ctype} requires a valid network")

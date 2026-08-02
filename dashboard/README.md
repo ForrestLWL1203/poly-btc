@@ -14,6 +14,11 @@ Position fill details distinguish margin committed on entry from capital returne
 capital is released entry-basis margin plus realized PnL net of exit fees; it is never exit notional divided by
 leverage.
 
+The Hyperliquid Account tab exposes only Paper and Mainnet Live. Paper is a compact one-line state; selecting
+Live reveals encrypted Mainnet Agent setup. Testnet is intentionally absent from product UI. Agent expiry is
+read from Hyperliquid during credential verification, and the Live start action automatically performs the full
+startup preflight before creating the session and starting Observer.
+
 The wallet control plane exposes `wallet_exit_request` and `wallet_exit_cancel`; Dashboard never mutates selection or execution state
 directly. `/api/wallets` projects financial risk, system blocks, operator intent, effective role and entry
 permission. A Core-row ban button means conditional exit: flat wallets appear in Challenger immediately;

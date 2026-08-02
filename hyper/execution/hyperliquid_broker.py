@@ -202,6 +202,43 @@ class HyperliquidBroker:
             agent_role=self.info.user_role(normalized_agent) if normalized_agent else None,
         )
 
+    def agent_authorization(self, agent_address: str) -> Optional[dict]:
+        """Return the authoritative named-Agent authorization for this account.
+
+        Hyperliquid stores an Agent's expiry in the account's ``extraAgents``
+        state.  It is not encoded in the private key and therefore must never
+        be accepted as operator-entered credential metadata.
+        """
+        self._require_info()
+        normalized_agent = self._normalize_address(agent_address)
+        fetch = getattr(self.info, "extra_agents", None)
+        rows = (
+            fetch(self.account_address)
+            if callable(fetch)
+            else self.info.post(
+                "/info", {"type": "extraAgents", "user": self.account_address}
+            )
+        )
+        if not isinstance(rows, list):
+            raise BrokerProtocolError("invalid_extra_agents_response")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("address") or "").lower() != normalized_agent:
+                continue
+            try:
+                valid_until = int(row.get("validUntil"))
+            except (TypeError, ValueError) as exc:
+                raise BrokerProtocolError("invalid_agent_authorization_expiry") from exc
+            if valid_until <= 0:
+                raise BrokerProtocolError("invalid_agent_authorization_expiry")
+            return {
+                "address": normalized_agent,
+                "name": str(row.get("name") or ""),
+                "validUntil": valid_until,
+            }
+        return None
+
     def account_snapshot(self) -> AccountSnapshot:
         self._require_info()
         perp_states = {

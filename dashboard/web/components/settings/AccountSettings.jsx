@@ -1,135 +1,162 @@
 import { api, encryptCredential } from "../../lib/api.js";
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useState } = React;
 
 const short = value => value ? value.slice(0, 8) + "…" + value.slice(-6) : "—";
 const usd = value => value == null ? "—" : "$" + Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
+const expiryText = value => {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("zh-CN", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+};
+
 const STATUS_LABEL = {
   paper: "Paper",
-  live_ready: "Live Ready",
-  live_canary: "Live Canary",
-  live_running: "Live Running",
-  paused: "Paused",
-  draining: "Draining",
-  reconcile_required: "Reconcile Required",
-  credential_error: "Credential Error",
-  no_funds: "No Funds",
+  live_ready: "待启动",
+  live_canary: "实盘 Canary",
+  live_running: "实盘运行中",
+  paused: "已暂停新增",
+  draining: "排空中",
+  reconcile_required: "需要对账",
+  credential_error: "账户验证失败",
+  no_funds: "资金不足",
+};
+
+const CREDENTIAL_LABEL = {
+  verified: "已验证",
+  encrypted: "待验证",
+  error: "验证失败",
+  expired: "已过期",
+  revoked: "已撤销",
 };
 
 const friendlyError = error => ({
   secure_context_required: "仅允许通过 HTTPS 或本机安全上下文录入私钥",
   credential_worker_not_provisioned: "VPS 凭据解密服务尚未配置",
-  credential_verification_failed: "Agent 私钥、Agent 地址、主地址或账户模式验证失败",
-  mainnet_credential_not_configured: "请先配置并验证 Mainnet Agent",
-  live_preflight_not_passed: "实盘前置检查尚未通过",
-  live_confirmation_phrase_mismatch: "确认短语不正确",
-  canary_confirmation_phrase_mismatch: "Canary 解锁短语不正确",
-  live_canary_minimum_duration_not_met: "Canary 必须连续运行至少 24 小时",
-  live_canary_episode_not_completed: "尚未完成一轮真实目标开仓到归零的跟单 episode",
-  live_canary_must_be_flat: "解除 Canary 前必须没有真实仓位和未决订单",
-  mainnet_credential_in_use: "活跃实盘会话中不能替换或删除 Mainnet Agent；请先排空",
-  mainnet_credential_not_verified: "请先验证 Mainnet Agent",
+  credential_verification_failed: "验证失败：请核对主钱包、Agent 地址、私钥以及 Hyperliquid 官方授权",
+  mainnet_credential_not_configured: "请先配置并验证实盘 Agent",
+  mainnet_credential_not_verified: "请先完成实盘 Agent 验证",
+  mainnet_credential_in_use: "实盘会话运行期间不能替换或删除 Agent；请先排空停止",
+  live_preflight_not_passed: "实盘启动检查尚未通过",
+  live_confirmation_phrase_mismatch: "实盘启动确认失败",
+  live_exposure_prevents_paper_switch: "仍有真实仓位或订单，不能切回 Paper",
+  OBSERVER_MUST_BE_STOPPED: "请先停止 Paper 跟单，再启动实盘",
+  SYSTEM_CLOCK_NOT_SYNCHRONIZED: "VPS 系统时间尚未同步",
+  STRATEGY_REVISION_INVALID: "当前策略版本不可执行",
+  NO_EXECUTABLE_CORE_TARGETS: "当前没有可执行的 Core 钱包",
+  MARKET_METADATA_INCOMPLETE: "实盘所需市场元数据不完整",
+  WEBSOCKET_UNAVAILABLE: "Hyperliquid WebSocket 暂不可用",
+  AGENT_MISMATCH: "Agent 未授权给当前主钱包",
+  UNSUPPORTED_ACCOUNT_MODE: "Hyperliquid 账户不是 Unified 模式",
+  ACCOUNT_NOT_CLEAN: "首次启动实盘前，账户必须没有仓位和挂单",
   NO_AVAILABLE_COLLATERAL: "Hyperliquid 账户没有可用 USDC",
   NO_EXECUTABLE_CAPACITY: "可用资金不足以形成最小合法订单",
-  ACCOUNT_NOT_CLEAN: "账户仍有仓位或挂单，首次启用要求干净基线",
 }[String(error?.message || error)] || String(error?.message || error || "操作失败"));
 
-function CredentialCard({ network, status, wrapKey, reload, confirm }) {
-  const existing = status?.credentials?.[network];
+function LiveAccountCard({ status, wrapKey, reload, confirm, busy, setBusy, setError, onLaunch }) {
+  const existing = status?.credentials?.mainnet;
+  const active = !!status?.activeSessionId;
   const [accountAddress, setAccountAddress] = useState(existing?.accountAddress || "");
   const [agentAddress, setAgentAddress] = useState(existing?.agentAddress || "");
   const [privateKey, setPrivateKey] = useState("");
-  const [validUntil, setValidUntil] = useState(existing?.validUntil || "");
-  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
-  const isMainnet = network === "mainnet";
 
   useEffect(() => {
     if (!existing) return;
     setAccountAddress(existing.accountAddress || "");
     setAgentAddress(existing.agentAddress || "");
-    setValidUntil(existing.validUntil || "");
   }, [existing?.updatedAt]);
 
   const save = async () => {
     setBusy(true);
+    setError(null);
     setMessage(null);
     try {
-      if (!/^(0x)?[0-9a-fA-F]{64}$/.test(privateKey.trim())) throw new Error("Agent 私钥必须是 32 字节十六进制");
-      const context = { network, accountAddress, agentAddress };
+      if (!/^(0x)?[0-9a-fA-F]{64}$/.test(privateKey.trim())) {
+        throw new Error("Agent 私钥必须是 32 字节十六进制");
+      }
+      const context = { network: "mainnet", accountAddress, agentAddress };
       const envelope = await encryptCredential(privateKey, wrapKey, context);
-      setPrivateKey("");
-      await api.cmdAndWait("credential_upsert", {
-        ...context, envelope, validUntil: validUntil || null,
+      await api.cmdAndWait("credential_upsert", { ...context, envelope });
+      const verified = await api.cmdAndWait("credential_verify", { network: "mainnet" }, 90000);
+      setMessage({
+        ok: true,
+        text: `验证完成，官方授权有效至 ${expiryText(verified.validUntil)}。启动时将自动检查资金、策略和交易通道。`,
       });
-      await api.cmdAndWait("credential_verify", { network });
-      setMessage({ ok: true, text: "已加密保存并验证 Agent 授权" });
       await reload();
     } catch (error) {
-      setPrivateKey("");
       setMessage({ ok: false, text: friendlyError(error) });
     } finally {
+      setPrivateKey("");
       setBusy(false);
     }
   };
 
   const remove = () => confirm({
-    title: `删除 ${isMainnet ? "Mainnet" : "Testnet"} Agent 凭据`,
+    title: "删除实盘 Agent 凭据",
     danger: true,
     ok: "删除 VPS 密文",
-    body: "这里只删除 VPS 保存的加密密文。你仍需到 Hyperliquid 官方 API 页面撤销该 Agent 的授权。",
+    body: "这里只删除 VPS 保存的加密密文。你仍需到 Hyperliquid 官方 API 页面撤销该 Agent 授权。",
     onConfirm: async () => {
+      setBusy(true); setError(null);
       try {
-        await api.cmdAndWait("credential_delete", { network });
-        setAccountAddress(""); setAgentAddress(""); setPrivateKey(""); setValidUntil("");
+        await api.cmdAndWait("credential_delete", { network: "mainnet" });
+        setAccountAddress(""); setAgentAddress(""); setPrivateKey(""); setMessage(null);
         await reload();
       } catch (error) { setMessage({ ok: false, text: friendlyError(error) }); }
+      finally { setBusy(false); }
     },
   });
 
-  return (
-    <section className={"account-credential-card " + (isMainnet ? "mainnet" : "testnet")}>
-      <div className="account-card-head">
-        <div><span className="account-kicker">{isMainnet ? "REAL CAPITAL" : "EXECUTION LAB"}</span>
-          <h3>{isMainnet ? "Mainnet Agent" : "Testnet Agent"}</h3></div>
-        <span className={"account-state-chip " + (existing?.status || "missing")}>{existing?.status || "未配置"}</span>
+  const verified = existing?.status === "verified";
+  return <section className="live-account-card">
+    <div className="account-card-head">
+      <div>
+        <span className="account-kicker">MAINNET ACCOUNT</span>
+        <h3>实盘账户</h3>
+        <p>私钥只在浏览器内加密。VPS 仅用于交易签名，不具备提现权限。</p>
       </div>
-      <p className="account-card-copy">{isMainnet
-        ? "只用于真实交易签名，不具备提现权限。录入前请再次核对 Hyperliquid Mainnet。"
-        : "仅用于 API、精度、订单状态和故障恢复验证，不作为产品运行模式。"}</p>
-      <div className="account-form-grid">
-        <label><span>Rabby 主地址</span><input value={accountAddress} onChange={e => setAccountAddress(e.target.value.trim())}
-          placeholder="0x…" autoComplete="off" spellCheck="false" /></label>
-        <label><span>Agent 公开地址</span><input value={agentAddress} onChange={e => setAgentAddress(e.target.value.trim())}
-          placeholder="0x…" autoComplete="off" spellCheck="false" /></label>
-        <label><span>Agent 私钥（只在浏览器内加密）</span><input type="password" value={privateKey}
-          onChange={e => setPrivateKey(e.target.value)} placeholder="0x…" autoComplete="new-password"
-          data-1p-ignore="true" data-lpignore="true" spellCheck="false" /></label>
-        <label><span>授权到期时间{isMainnet ? "（必填，至少剩余 7 天）" : "（可选）"}</span><input value={validUntil} onChange={e => setValidUntil(e.target.value)}
-          placeholder="2027-01-01T00:00:00Z" autoComplete="off" /></label>
-      </div>
-      <div className="account-card-actions">
-        <button className={"btn " + (isMainnet ? "btn-danger" : "btn-accent")} disabled={busy || !privateKey || !wrapKey || (isMainnet && !validUntil)}
-          onClick={save}>{busy ? "加密并验证中…" : existing ? "替换并重新验证" : "加密保存并验证"}</button>
-        {existing && <button className="btn" disabled={busy} onClick={remove}>删除密文</button>}
-        {existing && <span className="account-address-proof">{short(existing.accountAddress)} → {short(existing.agentAddress)}</span>}
-      </div>
-      {message && <div className={"account-inline-message " + (message.ok ? "ok" : "error")}>{message.text}</div>}
-    </section>
-  );
-}
+      <span className={"account-state-chip " + (existing?.status || "missing")}>
+        {CREDENTIAL_LABEL[existing?.status] || "未配置"}
+      </span>
+    </div>
 
-function PreflightChecks({ checks }) {
-  if (!checks) return null;
-  const labels = {
-    observerStopped: "Observer 已停止", clockSynchronized: "系统时间同步", credentialConfigured: "Agent 已配置",
-    credentialVerified: "私钥与 Agent 匹配", agentOwnerMatches: "Agent 归属主地址", unifiedAccount: "Unified 账户",
-    rest: "REST 可用", websocket: "WebSocket 可用", strategyRevision: "策略版本有效",
-    activeTargets: "存在活跃 Core", marketMetadata: "市场元数据完整", cleanAccount: "账户无未知仓位/挂单", funded: "资金可执行",
-  };
-  return <div className="preflight-grid">{Object.entries(labels).map(([key, label]) => (
-    <div key={key} className={checks[key] ? "pass" : "fail"}><i />{label}<b>{checks[key] ? "PASS" : "FAIL"}</b></div>
-  ))}</div>;
+    <div className="live-account-form">
+      <label><span>Rabby 主钱包地址</span><input value={accountAddress}
+        onChange={e => setAccountAddress(e.target.value.trim())} placeholder="0x…"
+        autoComplete="off" spellCheck="false" disabled={active} /></label>
+      <label><span>Agent 公开地址</span><input value={agentAddress}
+        onChange={e => setAgentAddress(e.target.value.trim())} placeholder="0x…"
+        autoComplete="off" spellCheck="false" disabled={active} /></label>
+      <label className="live-private-key-field"><span>Agent 私钥</span><input type="password" value={privateKey}
+        onChange={e => setPrivateKey(e.target.value)} placeholder={existing ? "输入新私钥以替换当前凭据" : "0x…"}
+        autoComplete="new-password" data-1p-ignore="true" data-lpignore="true" spellCheck="false"
+        disabled={active} /></label>
+    </div>
+
+    {existing && <div className="live-credential-proof">
+      <span><small>主钱包</small>{short(existing.accountAddress)}</span>
+      <span><small>Agent</small>{short(existing.agentAddress)}</span>
+      <span><small>官方授权有效至</small>{expiryText(existing.validUntil)}</span>
+    </div>}
+
+    <div className="live-account-actions">
+      <button className="btn btn-accent" disabled={busy || active || !privateKey || !wrapKey}
+        onClick={save}>{busy ? "正在加密并验证…" : existing ? "替换并重新验证" : "加密保存并完成验证"}</button>
+      {existing && <button className="btn" disabled={busy || active} onClick={remove}>删除密文</button>}
+      {!active && <button className="btn btn-danger" disabled={busy || !verified} onClick={onLaunch}>
+        启动实盘跟单</button>}
+    </div>
+
+    {message && <div className={"account-inline-message " + (message.ok ? "ok" : "error")}>{message.text}</div>}
+    {!active && <p className="account-safety-note">
+      点击启动后会自动完成资金、Unified、Core、市场、REST/WS、仓位和挂单检查；首次实盘自动进入小额 Canary。
+    </p>}
+  </section>;
 }
 
 export function AccountSettings({ confirm }) {
@@ -137,13 +164,13 @@ export function AccountSettings({ confirm }) {
   const [wrapKey, setWrapKey] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [preflight, setPreflight] = useState(null);
-  const [phrase, setPhrase] = useState("");
+  const [showLive, setShowLive] = useState(false);
   const [canaryPhrase, setCanaryPhrase] = useState("");
 
   const reload = useCallback(async () => {
     const next = await api.get("/api/execution/status");
     setStatus(next);
+    if (next.selectedMode === "live") setShowLive(true);
     return next;
   }, []);
 
@@ -154,48 +181,63 @@ export function AccountSettings({ confirm }) {
     return () => clearInterval(timer);
   }, [reload]);
 
-  const setMode = async mode => {
-    setBusy(true); setError(null);
-    try { await api.cmdAndWait("set_execution_mode", { mode }); await reload(); }
-    catch (e) { setError(friendlyError(e)); }
-    finally { setBusy(false); }
-  };
-
-  const runPreflight = async () => {
-    setBusy(true); setError(null); setPreflight(null);
-    try {
-      const result = await api.cmdAndWait("execution_preflight", {} , 90000);
-      setPreflight(result); await reload();
-      if (!result.ok) setError(result.code || "preflight_failed");
-    } catch (e) { setError(friendlyError(e)); }
-    finally { setBusy(false); }
-  };
-
-  const activate = async () => {
-    setBusy(true); setError(null);
-    try {
-      await api.cmdAndWait("activate_live", {
-        preflightId: preflight?.preflightId || status?.preflight?.preflightId,
-        confirmationPhrase: phrase,
-      });
-      setPhrase("");
-      await api.cmdAndWait("observer_start", {});
-      await reload();
-    } catch (e) { setError(friendlyError(e)); }
-    finally { setBusy(false); }
-  };
-
-  const live = status?.selectedMode === "live";
   const active = !!status?.activeSessionId;
+  const live = status?.selectedMode === "live";
   const paused = status?.state === "paused";
   const canary = !!status?.session?.canary;
-  const latest = preflight || status?.preflight;
-  const mainnet = status?.credentials?.mainnet;
-  const summary = useMemo(() => latest ? [
-    ["真实权益", usd(latest.equity)], ["可用抵押品", usd(latest.available)],
-    ["保证金计算基数", usd(latest.sizingEquity)], ["仓位 / 挂单", `${latest.positionCount ?? 0} / ${latest.openOrderCount ?? 0}`],
-  ] : [], [latest]);
   const runtime = status?.account;
+
+  const toggleMode = async () => {
+    if (busy || active) return;
+    setError(null);
+    if (!showLive) {
+      setShowLive(true);
+      return;
+    }
+    if (live) {
+      setBusy(true);
+      try { await api.cmdAndWait("set_execution_mode", { mode: "paper" }); await reload(); }
+      catch (e) { setError(friendlyError(e)); }
+      finally { setBusy(false); }
+    }
+    setShowLive(false);
+  };
+
+  const launchLive = async () => {
+    setBusy(true); setError(null);
+    let selectedLive = false;
+    let activated = false;
+    try {
+      const overview = await api.get("/api/overview");
+      if (overview?.system?.observer !== "stopped") throw new Error("OBSERVER_MUST_BE_STOPPED");
+      await api.cmdAndWait("set_execution_mode", { mode: "live" });
+      selectedLive = true;
+      const check = await api.cmdAndWait("execution_preflight", {}, 90000);
+      if (!check.ok) throw new Error(check.code || "live_preflight_not_passed");
+      await api.cmdAndWait("activate_live", {
+        preflightId: check.preflightId,
+        confirmationPhrase: "启动实盘",
+      });
+      activated = true;
+      await api.cmdAndWait("observer_start", {}, 90000);
+      await reload();
+    } catch (e) {
+      if (selectedLive && !activated) {
+        try { await api.cmdAndWait("set_execution_mode", { mode: "paper" }); }
+        catch (_rollbackError) { /* status reload below remains authoritative */ }
+      }
+      setError(friendlyError(e));
+      await reload().catch(() => {});
+    } finally { setBusy(false); }
+  };
+
+  const requestLaunch = () => confirm({
+    title: "启动实盘跟单",
+    danger: true,
+    ok: "确认启动实盘",
+    body: "系统将自动执行完整启动检查，通过后创建真实资金会话并启动 Observer。首次运行受 Canary 小额上限保护。",
+    onConfirm: launchLive,
+  });
 
   const runControl = async (type, payload = {}, timeout = 90000) => {
     setBusy(true); setError(null);
@@ -216,38 +258,26 @@ export function AccountSettings({ confirm }) {
 
   if (!status) return <div className="account-loading">加载账户执行状态…</div>;
   return <div className="account-settings">
-    <div className={"execution-mode-console " + (live ? "live" : "paper")}>
-      <div><span className="account-kicker">EXECUTION MODE</span><h2>{STATUS_LABEL[status.state] || status.state}</h2>
-        <p>{live ? "真实资金路径已选中；任何新增敞口都必须经过预检与会话门禁。" : "当前只记录模拟成交，绝不会签署 Mainnet 订单。"}</p></div>
-      <div className="mode-switch" role="group" aria-label="执行模式">
-        <button className={!live ? "active" : ""} disabled={busy} onClick={() => setMode("paper")}>Paper</button>
-        <button className={live ? "active danger" : ""} disabled={busy || !mainnet} onClick={() => setMode("live")}>实盘 Live</button>
+    <div className={"execution-mode-row " + (showLive ? "live" : "paper")}>
+      <div className="execution-mode-copy">
+        <span>执行模式</span>
+        <p><b>{showLive ? (live ? "实盘" : "实盘配置") : "Paper"}</b>{showLive
+          ? "配置 Mainnet Agent；启动后使用真实资金与独立实盘账本。"
+          : "模拟账本独立运行，不连接或签署真实账户。"}</p>
+      </div>
+      <div className="execution-toggle-wrap">
+        <span>Paper</span>
+        <button className={"execution-toggle " + (showLive ? "on" : "off")} type="button"
+          role="switch" aria-checked={showLive} aria-label="切换 Paper 与实盘模式"
+          disabled={busy || active} onClick={toggleMode}><i /></button>
+        <span className="live-label">实盘</span>
       </div>
     </div>
 
-    {live && <div className="live-danger-ribbon"><b>LIVE · 真金白银</b><span>主地址 {short(mainnet?.accountAddress)} · Agent {short(mainnet?.agentAddress)}</span></div>}
-    {error && <div className="account-error-banner">{friendlyError({ message: error })}</div>}
+    {error && <div className="account-error-banner">{error}</div>}
 
-    <div className="account-credential-grid">
-      <CredentialCard network="testnet" status={status} wrapKey={wrapKey} reload={reload} confirm={confirm} />
-      <CredentialCard network="mainnet" status={status} wrapKey={wrapKey} reload={reload} confirm={confirm} />
-    </div>
-
-    <section className="live-launch-console">
-      <div className="account-card-head"><div><span className="account-kicker">MAINNET GATE</span><h3>只读预检与实盘启动</h3></div>
-        <span className={"account-state-chip " + (latest?.status || "missing")}>{latest?.status || "未执行"}</span></div>
-      <p>预检不会下单。它核对 Agent 归属、Unified、资金、策略版本、Core、市场、REST/WS、仓位和挂单，并生成 5 分钟有效的一次性授权。</p>
-      {summary.length > 0 && <div className="preflight-summary">{summary.map(([label, value]) => <div key={label}><span>{label}</span><b>{value}</b></div>)}</div>}
-      <PreflightChecks checks={latest?.checks} />
-      <div className="live-launch-actions">
-        <button className="btn btn-accent" disabled={busy || !live || mainnet?.status !== "verified"} onClick={runPreflight}>
-          {busy ? "处理中…" : "执行 Mainnet 只读预检"}</button>
-        <label><span>通过后输入确认短语</span><input value={phrase} onChange={e => setPhrase(e.target.value)}
-          placeholder="启动实盘" autoComplete="off" /></label>
-        <button className="btn btn-danger" disabled={busy || latest?.status !== "passed" || phrase !== "启动实盘"} onClick={activate}>启动实盘</button>
-      </div>
-      <div className="account-safety-note">首次进入 Canary：总实盘保证金限于 min($100, 真实权益的 1%)，最多一个仓位。保证金权益额度只缩放每笔订单的权益计算基数，不是硬资金池。</div>
-    </section>
+    {showLive && <LiveAccountCard status={status} wrapKey={wrapKey} reload={reload} confirm={confirm}
+      busy={busy} setBusy={setBusy} setError={setError} onLaunch={requestLaunch} />}
 
     {live && active && <section className="live-operations-console">
       <div className="account-card-head"><div><span className="account-kicker">LIVE OPERATIONS</span><h3>实盘运行控制</h3></div>

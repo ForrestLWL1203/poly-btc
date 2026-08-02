@@ -283,6 +283,24 @@ class WebStaticAssetsTests(unittest.TestCase):
 
         self.assertEqual([], hooks_after_loading, "Settings must not call hooks after a conditional loading return")
 
+    def test_account_settings_is_compact_mainnet_only_product_flow(self):
+        account = (
+            ROOT / "dashboard" / "web" / "components" / "settings" / "AccountSettings.jsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('role="switch"', account)
+        self.assertIn("模拟账本独立运行，不连接或签署真实账户", account)
+        self.assertIn("加密保存并完成验证", account)
+        self.assertIn('className="btn btn-accent"', account)
+        self.assertIn("启动实盘跟单", account)
+        self.assertIn('api.cmdAndWait("execution_preflight"', account)
+        self.assertIn('api.cmdAndWait("activate_live"', account)
+        self.assertNotIn("Testnet Agent", account)
+        self.assertNotIn('network="testnet"', account)
+        self.assertNotIn("授权到期时间", account)
+        self.assertNotIn("只读预检与实盘启动", account)
+        self.assertNotIn("PreflightChecks", account)
+
     def test_settings_param_rows_show_risk_levels(self):
         param_row = (ROOT / "dashboard" / "web" / "components" / "settings" / "ParamRow.jsx").read_text(encoding="utf-8")
 

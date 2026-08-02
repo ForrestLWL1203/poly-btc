@@ -18,7 +18,7 @@ from hyper.util import now_iso
 from . import control
 from .credentials import decrypt_agent_wallet
 from .hyperliquid_broker import HyperliquidBroker
-from .live_preflight import activate_live_session, run_live_preflight, unlock_live_canary, validate_agent_expiry
+from .live_preflight import activate_live_session, resolve_agent_expiry, run_live_preflight, unlock_live_canary
 from .preflight import AccountPreflightCode, evaluate_account_preflight
 from .sdk_clients import CredentialError, create_public_info_client
 from .venue import ExecutionNetwork
@@ -50,8 +50,6 @@ def _verify_credential(db, network: str, private_key_path: str) -> dict:
     if not row:
         raise ValueError("credential_not_configured")
     try:
-        if normalized is ExecutionNetwork.MAINNET:
-            validate_agent_expiry(row.get("valid_until"))
         wallet = decrypt_agent_wallet(
             row["envelope"],
             network=normalized.value,
@@ -66,6 +64,7 @@ def _verify_credential(db, network: str, private_key_path: str) -> dict:
             info_client=info,
             supported_dexes=("", "xyz"),
         )
+        valid_until = resolve_agent_expiry(broker, wallet.address)
         identity = broker.identity_snapshot(wallet.address)
         snapshot = broker.account_snapshot()
         check = evaluate_account_preflight(identity, snapshot)
@@ -77,13 +76,14 @@ def _verify_credential(db, network: str, private_key_path: str) -> dict:
             AccountPreflightCode.ACCOUNT_STATE_INVALID,
         }:
             raise ValueError(check.code.value)
-        control.mark_credential_status(db, normalized, status="verified")
+        control.mark_credential_verified(db, normalized, valid_until=valid_until)
         return {
             "network": normalized.value,
             "status": "verified",
             "accountAddress": row["account_address"],
             "agentAddress": row["agent_address"],
             "accountMode": snapshot.abstraction,
+            "validUntil": valid_until,
         }
     except CredentialError as exc:
         control.mark_credential_status(
@@ -107,7 +107,6 @@ def execute_control_command(
             account_address=payload["accountAddress"],
             agent_address=payload["agentAddress"],
             envelope=payload["envelope"],
-            valid_until=payload.get("validUntil"),
         )
     if ctype == "credential_verify":
         return _verify_credential(

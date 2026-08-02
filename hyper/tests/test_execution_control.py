@@ -13,6 +13,7 @@ from eth_account import Account
 from hyper import storage
 from hyper.util import now_iso
 from hyper.execution import control
+from hyper.execution.command_worker import execute_control_command
 from hyper.execution.credentials import (
     ENVELOPE_ALGORITHM, credential_aad, generate_wrap_keypair, public_wrap_key_payload,
 )
@@ -46,6 +47,13 @@ class FakeInfo:
 
     def frontend_open_orders(self, _account, dex=""):
         return []
+
+    def extra_agents(self, _account):
+        return [{
+            "name": "copy-agent",
+            "address": self.agent,
+            "validUntil": 4_102_444_800_000,
+        }]
 
     def perp_dexs(self):
         return [{"name": ""}, {"name": "xyz"}]
@@ -84,7 +92,7 @@ class ExecutionControlTests(unittest.TestCase):
         self.db = storage.connect(":memory:", storage.DISCOVERY_SCHEMA, storage.OBSERVE_SCHEMA)
         control.store_encrypted_credential(
             self.db, network="mainnet", account_address=ACCOUNT, agent_address=self.wallet.address,
-            envelope=envelope(self.public, self.wallet), valid_until="2027-01-01T00:00:00Z",
+            envelope=envelope(self.public, self.wallet),
         )
         self.db.commit()
         self.bundle = {
@@ -114,6 +122,23 @@ class ExecutionControlTests(unittest.TestCase):
         self.assertEqual(session["canaryMarginCap"], 80.0)
         self.assertEqual(session["sizingEquity"], 6400.0)
         self.assertEqual(control.execution_status(self.db)["state"], "live_canary")
+
+    def test_credential_verification_syncs_authoritative_agent_expiry(self):
+        with patch(
+            "hyper.execution.command_worker.create_public_info_client",
+            return_value=FakeInfo(self.wallet.address),
+        ):
+            result = execute_control_command(
+                self.db,
+                "credential_verify",
+                {"network": "mainnet"},
+                private_key_path=str(self.private),
+            )
+
+        self.assertEqual(result["validUntil"], "2100-01-01T00:00:00Z")
+        credential = control.execution_status(self.db)["credentials"]["mainnet"]
+        self.assertEqual(credential["status"], "verified")
+        self.assertEqual(credential["validUntil"], "2100-01-01T00:00:00Z")
 
     def test_canary_unlock_requires_duration_completed_episode_and_clean_reconcile(self):
         stamp = "2026-07-30T00:00:00Z"

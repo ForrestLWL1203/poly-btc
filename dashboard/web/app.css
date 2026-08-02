@@ -839,93 +839,93 @@ th.sortable:hover .sort-ind { opacity: .85; }
 }
 
 /* ---------- execution account console ----------
-   Deliberately industrial: this page is an operator interlock, not a wallet
-   marketing screen. Sharp status rails and tabular proof values make the
-   irreversible Mainnet path visually different from normal settings. */
+   Compact by default: Paper is one quiet line. Mainnet configuration expands
+   only on intent, keeping the real-capital boundary explicit without turning
+   development tooling into product UI. */
 .account-tab { color: var(--amber); }
-.account-settings { display: grid; gap: 16px; padding-bottom: 28px; }
+.account-settings { display: grid; gap: 12px; padding-bottom: 28px; }
 .account-loading { padding: 42px; color: var(--t3); text-align: center; }
-.execution-mode-console,
-.account-credential-card,
-.live-launch-console,
-.live-operations-console {
-  position: relative; overflow: hidden; border: 1px solid rgba(255,255,255,.09); border-radius: 16px;
-  background: linear-gradient(145deg, rgba(27,27,31,.84), rgba(14,14,17,.70));
-  box-shadow: inset 0 1px rgba(255,255,255,.035), 0 18px 48px rgba(0,0,0,.2);
+.execution-mode-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  min-height: 62px; padding: 12px 16px; border: 1px solid rgba(255,255,255,.085); border-radius: 13px;
+  background: rgba(18,18,21,.68); box-shadow: inset 0 1px rgba(255,255,255,.025);
 }
-.execution-mode-console { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 24px; }
-.execution-mode-console::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--green); }
-.execution-mode-console.live::before { background: var(--red); box-shadow: 0 0 24px rgba(255,92,92,.7); }
-.execution-mode-console h2 { margin: 3px 0 5px; font: 650 25px/1.1 var(--mono); letter-spacing: -.04em; }
-.execution-mode-console p, .live-launch-console > p { margin: 0; max-width: 730px; color: var(--t2); font-size: 12px; line-height: 1.6; }
+.execution-mode-row.live { border-color: rgba(255,92,92,.18); }
+.execution-mode-copy { min-width: 0; }
+.execution-mode-copy > span { display: block; margin-bottom: 5px; color: var(--t4); font: 650 8.5px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; }
+.execution-mode-copy p { display: flex; align-items: baseline; gap: 10px; margin: 0; color: var(--t3); font-size: 11px; }
+.execution-mode-copy b { flex: 0 0 auto; color: var(--t1); font: 650 14px var(--mono); }
+.execution-mode-row.live .execution-mode-copy b { color: var(--red-l); }
+.execution-toggle-wrap { display: flex; align-items: center; gap: 8px; color: var(--t4); font-size: 10px; white-space: nowrap; }
+.execution-toggle-wrap .live-label { color: #a87878; }
+.execution-toggle {
+  position: relative; width: 38px; height: 21px; padding: 0; border: 1px solid rgba(255,255,255,.12);
+  border-radius: 999px; background: rgba(63,207,142,.13); cursor: pointer; transition: .18s ease;
+}
+.execution-toggle i {
+  position: absolute; top: 3px; left: 3px; width: 13px; height: 13px; border-radius: 50%;
+  background: var(--green-l); box-shadow: 0 1px 5px rgba(0,0,0,.5); transition: transform .18s ease, background .18s ease;
+}
+.execution-toggle.on { border-color: rgba(255,92,92,.3); background: rgba(255,92,92,.16); }
+.execution-toggle.on i { transform: translateX(17px); background: var(--red-l); }
+.execution-toggle:focus-visible { outline: 2px solid rgba(255,106,43,.7); outline-offset: 2px; }
+.execution-toggle:disabled { cursor: default; opacity: .45; }
+.account-error-banner { padding: 10px 13px; border: 1px solid rgba(255,92,92,.24); border-radius: 10px; background: rgba(255,92,92,.085); color: var(--red-l); font-size: 11px; }
+.live-account-card,
+.live-operations-console {
+  position: relative; overflow: hidden; padding: 20px; border: 1px solid rgba(255,92,92,.18); border-radius: 15px;
+  background: linear-gradient(145deg, rgba(25,24,27,.86), rgba(14,14,17,.72));
+  box-shadow: inset 0 1px rgba(255,255,255,.03), 0 18px 44px rgba(0,0,0,.18);
+}
+.live-account-card::before {
+  content: ""; position: absolute; top: 0; right: 0; width: 180px; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,92,92,.62));
+}
 .account-kicker { color: var(--t4); font: 650 9px/1 var(--mono); letter-spacing: .18em; }
-.mode-switch { display: grid; grid-template-columns: 1fr 1fr; min-width: 252px; padding: 4px; border-radius: 12px; background: rgba(0,0,0,.32); border: 1px solid rgba(255,255,255,.07); }
-.mode-switch button { height: 38px; border: 0; border-radius: 8px; background: transparent; color: var(--t3); font: 650 12px var(--sans); cursor: pointer; }
-.mode-switch button.active { background: rgba(63,207,142,.16); color: var(--green-l); box-shadow: inset 0 0 0 1px rgba(63,207,142,.24); }
-.mode-switch button.active.danger { background: rgba(255,92,92,.17); color: var(--red-l); box-shadow: inset 0 0 0 1px rgba(255,92,92,.28); }
-.mode-switch button:disabled { cursor: default; opacity: .46; }
-.live-danger-ribbon { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 10px 14px; border: 1px solid rgba(255,92,92,.32); border-radius: 12px; background: repeating-linear-gradient(135deg, rgba(255,92,92,.13) 0 12px, rgba(255,92,92,.07) 12px 24px); color: var(--red-l); }
-.live-danger-ribbon b { font: 700 12px var(--mono); letter-spacing: .12em; }
-.live-danger-ribbon span { color: #d9a1a1; font: 11px var(--mono); }
-.account-error-banner { padding: 11px 14px; border: 1px solid rgba(255,92,92,.26); border-radius: 11px; background: rgba(255,92,92,.09); color: var(--red-l); font-size: 12px; }
-.account-credential-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; }
-.account-credential-card, .live-launch-console, .live-operations-console { padding: 20px; }
-.account-credential-card::after { content: ""; position: absolute; right: -62px; top: -80px; width: 180px; height: 180px; border: 1px solid rgba(94,155,255,.12); border-radius: 50%; pointer-events: none; }
-.account-credential-card.mainnet::after { border-color: rgba(255,92,92,.14); }
 .account-card-head { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; }
 .account-card-head h3 { margin: 5px 0 0; font-size: 16px; }
-.account-state-chip { padding: 5px 8px; border-radius: 7px; background: rgba(122,122,130,.13); color: var(--t3); font: 650 9px var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+.account-card-head p { margin: 7px 0 0; color: var(--t3); font-size: 10.5px; line-height: 1.5; }
+.account-state-chip { padding: 5px 8px; border-radius: 7px; background: rgba(122,122,130,.13); color: var(--t3); font: 650 9px var(--mono); text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
 .account-state-chip.verified, .account-state-chip.passed { color: var(--green-l); background: rgba(63,207,142,.12); }
-.account-state-chip.error, .account-state-chip.failed { color: var(--red-l); background: rgba(255,92,92,.12); }
+.account-state-chip.error, .account-state-chip.failed, .account-state-chip.expired, .account-state-chip.revoked { color: var(--red-l); background: rgba(255,92,92,.12); }
 .account-state-chip.encrypted { color: var(--amber); background: rgba(255,178,122,.1); }
-.account-card-copy { position: relative; z-index: 1; min-height: 40px; margin: 13px 0 17px; color: var(--t3); font-size: 11px; line-height: 1.55; }
-.account-form-grid { position: relative; z-index: 1; display: grid; gap: 11px; }
-.account-form-grid label, .live-launch-actions label { display: grid; gap: 6px; color: var(--t3); font-size: 10.5px; }
-.account-form-grid input, .live-launch-actions input { width: 100%; height: 39px; padding: 0 11px; border: 1px solid rgba(255,255,255,.09); border-radius: 9px; background: rgba(0,0,0,.28); color: var(--t1); outline: none; font: 11px var(--mono); }
-.account-form-grid input:focus, .live-launch-actions input:focus { border-color: rgba(255,106,43,.62); box-shadow: 0 0 0 3px rgba(255,106,43,.08); }
-.account-card-actions { position: relative; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
-.account-address-proof { margin-left: auto; color: var(--t4); font: 9.5px var(--mono); }
-.account-inline-message { margin-top: 12px; padding: 8px 10px; border-radius: 8px; font-size: 11px; }
+.live-account-form { position: relative; z-index: 1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 11px 13px; margin-top: 18px; }
+.live-account-form label, .canary-unlock-row label { display: grid; gap: 6px; color: var(--t3); font-size: 10.5px; }
+.live-account-form .live-private-key-field { grid-column: 1 / -1; }
+.live-account-form input, .canary-unlock-row input {
+  width: 100%; height: 39px; padding: 0 11px; border: 1px solid rgba(255,255,255,.09); border-radius: 9px;
+  background: rgba(0,0,0,.28); color: var(--t1); outline: none; font: 11px var(--mono);
+}
+.live-account-form input:focus, .canary-unlock-row input:focus { border-color: rgba(255,106,43,.62); box-shadow: 0 0 0 3px rgba(255,106,43,.08); }
+.live-account-form input:disabled { opacity: .5; }
+.live-credential-proof { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 22px; margin-top: 13px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.06); border-radius: 9px; background: rgba(0,0,0,.17); color: var(--t2); font: 10px var(--mono); }
+.live-credential-proof span { display: grid; gap: 3px; }
+.live-credential-proof small { color: var(--t4); font: 9px var(--sans); }
+.live-account-actions { position: relative; z-index: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 15px; }
+.account-inline-message { margin-top: 11px; padding: 8px 10px; border-radius: 8px; font-size: 11px; }
 .account-inline-message.ok { color: var(--green-l); background: rgba(63,207,142,.09); }
 .account-inline-message.error { color: var(--red-l); background: rgba(255,92,92,.09); }
-.live-launch-console { border-color: rgba(255,178,122,.15); }
+.account-safety-note { margin: 13px 0 0; padding-left: 10px; border-left: 2px solid var(--amber); color: #a89586; font-size: 10px; line-height: 1.55; }
 .preflight-summary { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin: 17px 0 12px; }
 .preflight-summary > div { padding: 11px 12px; border: 1px solid rgba(255,255,255,.065); border-radius: 10px; background: rgba(0,0,0,.18); }
 .preflight-summary span { display: block; color: var(--t4); font-size: 9.5px; }
 .preflight-summary b { display: block; margin-top: 5px; font: 600 14px var(--mono); }
-.preflight-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 5px; margin: 12px 0 16px; }
-.preflight-grid > div { display: grid; grid-template-columns: 7px minmax(0,1fr) auto; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 7px; background: rgba(255,255,255,.025); color: var(--t3); font-size: 10.5px; }
-.preflight-grid i { width: 6px; height: 6px; border-radius: 50%; background: var(--red); }
-.preflight-grid b { color: var(--red-l); font: 600 8px var(--mono); }
-.preflight-grid .pass i { background: var(--green); }
-.preflight-grid .pass b { color: var(--green-l); }
-.live-launch-actions { display: grid; grid-template-columns: auto minmax(210px,1fr) auto; align-items: end; gap: 11px; padding-top: 4px; }
-.live-launch-actions .btn { height: 39px; justify-content: center; }
-.account-safety-note { margin-top: 14px; padding: 10px 12px; border-left: 2px solid var(--amber); background: rgba(255,178,122,.055); color: #b6a293; font-size: 10.5px; line-height: 1.55; }
 .live-operations-console { border-color: rgba(255,92,92,.22); }
 .live-operation-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 13px; }
-.live-operation-actions .live-emergency { margin-left: auto; box-shadow: 0 0 0 1px rgba(255,92,92,.2); }
+.live-operation-actions .live-emergency { margin-left: auto; }
 .account-freshness { margin: 14px 0 0; color: var(--t4); font: 9.5px/1.5 var(--mono); }
 .canary-unlock-row { display: grid; grid-template-columns: minmax(230px,1fr) auto; align-items: end; gap: 11px; margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.065); }
-.canary-unlock-row label { display: grid; gap: 6px; color: var(--t3); font-size: 10.5px; }
-.canary-unlock-row input { width: 100%; height: 39px; padding: 0 11px; border: 1px solid rgba(255,92,92,.22); border-radius: 9px; background: rgba(0,0,0,.28); color: var(--t1); outline: none; font: 11px var(--mono); }
+.canary-unlock-row input { border-color: rgba(255,92,92,.22); }
 .account-state-chip.live_canary, .account-state-chip.live_running { color: var(--red-l); background: rgba(255,92,92,.12); }
 .account-state-chip.paused, .account-state-chip.draining { color: var(--amber); background: rgba(255,178,122,.1); }
 
-@media (max-width: 980px) {
-  .account-credential-grid { grid-template-columns: 1fr; }
-  .preflight-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
-}
 @media (max-width: 680px) {
-  .execution-mode-console { align-items: stretch; flex-direction: column; padding: 18px; }
-  .mode-switch { width: 100%; min-width: 0; }
-  .live-danger-ribbon { align-items: flex-start; flex-direction: column; gap: 4px; }
-  .account-credential-card, .live-launch-console, .live-operations-console { padding: 16px; }
-  .preflight-summary, .preflight-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
-  .live-launch-actions { grid-template-columns: 1fr; }
-  .account-address-proof { width: 100%; margin-left: 0; }
-  .live-operation-actions { align-items: stretch; flex-direction: column; }
-  .live-operation-actions .btn { width: 100%; justify-content: center; }
+  .execution-mode-row { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .execution-mode-copy p { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .live-account-card, .live-operations-console { padding: 16px; }
+  .live-account-form, .preflight-summary { grid-template-columns: 1fr; }
+  .live-account-form .live-private-key-field { grid-column: auto; }
+  .live-operation-actions { align-items: flex-start; flex-direction: column; }
   .live-operation-actions .live-emergency { margin-left: 0; }
   .canary-unlock-row { grid-template-columns: 1fr; }
 }

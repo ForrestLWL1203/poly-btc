@@ -71,7 +71,6 @@ def store_encrypted_credential(
     account_address: str,
     agent_address: str,
     envelope: Any,
-    valid_until: Optional[str] = None,
 ) -> dict:
     normalized_network = _network(network).value
     if normalized_network == ExecutionNetwork.MAINNET.value:
@@ -99,7 +98,7 @@ def store_encrypted_credential(
             agent,
             json.dumps(normalized_envelope, sort_keys=True, separators=(",", ":")),
             normalized_envelope["wrapKeyId"],
-            valid_until,
+            None,
             stamp,
             stamp,
         ),
@@ -115,7 +114,7 @@ def store_encrypted_credential(
         "accountAddress": account,
         "agentAddress": agent,
         "status": "encrypted",
-        "validUntil": valid_until,
+        "validUntil": None,
     }
 
 
@@ -138,6 +137,21 @@ def mark_credential_status(
             stamp,
             _network(network).value,
         ),
+    )
+
+
+def mark_credential_verified(
+    db,
+    network: ExecutionNetwork | str,
+    *,
+    valid_until: str,
+) -> None:
+    """Persist verification together with the venue-authoritative expiry."""
+    stamp = now_iso()
+    db.execute(
+        "UPDATE execution_credential SET status='verified',valid_until=?,verified_at=?,"
+        "error_code=NULL,updated_at=? WHERE network=?",
+        (valid_until, stamp, stamp, _network(network).value),
     )
 
 

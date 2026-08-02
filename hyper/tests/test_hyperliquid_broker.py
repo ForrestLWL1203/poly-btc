@@ -54,6 +54,10 @@ class FakeInfo:
             return {"role": "agent", "data": {"user": ACCOUNT}}
         return {"role": "user"}
 
+    def extra_agents(self, address):
+        self.calls.append(("extra_agents", address))
+        return [{"name": "copy-agent", "address": AGENT, "validUntil": 4_102_444_800_000}]
+
     def query_user_abstraction_state(self, address):
         self.calls.append(("abstraction", address))
         return "unifiedAccount"
@@ -231,6 +235,19 @@ class HyperliquidBrokerTests(unittest.TestCase):
         self.assertEqual(account.account_address, ACCOUNT)
         self.assertEqual(set(account.perp_states), {"", "xyz"})
         self.assertEqual(set(account.open_orders), {"", "xyz"})
+
+    def test_agent_authorization_reads_official_expiry_for_main_account(self):
+        broker = self.broker()
+
+        authorization = broker.agent_authorization(AGENT)
+
+        self.assertEqual(authorization["validUntil"], 4_102_444_800_000)
+        self.assertIn(("extra_agents", ACCOUNT), self.info.calls)
+
+    def test_unknown_agent_has_no_authorization(self):
+        broker = self.broker()
+
+        self.assertIsNone(broker.agent_authorization("0x" + "c" * 40))
 
     def test_order_status_queries_by_cloid_for_main_account(self):
         broker = self.broker()
