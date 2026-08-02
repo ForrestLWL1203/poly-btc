@@ -102,7 +102,6 @@ export function Wallets({ confirm, onDataChanged = null }) {
   const portfolioReplay = data && data.portfolioReplay;
   const portfolioRoiReplay = portfolioReplay && (portfolioReplay.paperAccount || portfolioReplay);
   const portfolioRelease = data && data.portfolioRelease;
-  const replayLevs = portfolioReplay && portfolioReplay.effectiveParams && portfolioReplay.effectiveParams.leverageCaps;
   const allRows = (data && data.wallets) || [];
   const PER = 10, pages = Math.max(1, Math.ceil(allRows.length / PER)), pg = Math.min(wpage, pages - 1);
   const pageRows = allRows.slice(pg * PER, pg * PER + PER);
@@ -192,14 +191,12 @@ export function Wallets({ confirm, onDataChanged = null }) {
         <div className="wallets-head-actions">
           {tab === "followed" && portfolioReplay && (
             <div className="portfolio-replay-kpi" title="ROI 以本次采集时冻结的账户期初权益为分母；30日和最近7日分别使用各自窗口边界的真实浮动权益。">
-              <span>当前Core · 生效参数 · 动态严格Copy ROI：</span>
+              <span>严格回测预估收益：</span>
               <b className={(portfolioRoiReplay?.dynamicReturn30d || 0) < 0 ? "down" : "up"}>
                 30d {portfolioRoiReplay?.dynamicReturn30d != null ? fSign(portfolioRoiReplay.dynamicReturn30d * 100, 1) + "%" : "—"}
               </b>
-              {portfolioRoiReplay?.dynamicReturn7d != null && <i>7d {fSign(portfolioRoiReplay.dynamicReturn7d * 100, 1)}%</i>}
-              <i>爆仓≤{portfolioReplay.liquidations30Worst == null ? "—" : portfolioReplay.liquidations30Worst}</i>
-              {portfolioReplay.behaviorReplication30Worst != null && <i>复刻≈{fNum(portfolioReplay.behaviorReplication30Worst * 100, 0)}%</i>}
-              {replayLevs && <i>{fNum(replayLevs.STABLE_LEV_CAP, 0)}/{fNum(replayLevs.MID_LEV_CAP, 0)}/{fNum(replayLevs.HIGH_LEV_CAP, 0)}x</i>}
+              <i>｜</i>
+              <i>7d {portfolioRoiReplay?.dynamicReturn7d != null ? fSign(portfolioRoiReplay.dynamicReturn7d * 100, 1) + "%" : "—"}</i>
             </div>
           )}
           <div className="range-tabs">
