@@ -205,8 +205,8 @@ export function AccountSettings({ confirm, observerState = null, onModeDataChang
       </div>
       <div className="execution-toggle-wrap">
         <span>Paper</span>
-        <button className={"execution-toggle " + (live ? "on" : "off")} type="button"
-          role="switch" aria-checked={live} aria-label="切换 Paper 与实盘模式"
+        <button className={"execution-toggle " + (showLive ? "on" : "off")} type="button"
+          role="switch" aria-checked={showLive} aria-label="切换 Paper 与实盘模式"
           title={observerRunning ? "请先使用右上角按钮停止当前跟单" : "切换 Paper 与实盘模式"}
           disabled={busy || active || observerRunning} onClick={toggleMode}><i /></button>
         <span className="live-label">实盘</span>

@@ -302,6 +302,9 @@ class WebStaticAssetsTests(unittest.TestCase):
         execution = (ROOT / "dashboard" / "web" / "lib" / "execution.js").read_text(encoding="utf-8")
 
         self.assertIn('role="switch"', account)
+        self.assertIn('className={"execution-toggle " + (showLive ? "on" : "off")}', account)
+        self.assertIn('aria-checked={showLive}', account)
+        self.assertNotIn('aria-checked={live}', account)
         self.assertIn('observerState={obs}', shell)
         self.assertIn('observerState={observerState}', settings)
         self.assertIn('observerState = null', account)
