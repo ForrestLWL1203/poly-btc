@@ -75,6 +75,8 @@ Live reconciliation/order work owns a separate WAL database connection from Obse
 temporary transport or SQLite lock failure is reported and retried instead of leaving the engine invisibly
 paused; only a completed reconciliation that proves exchange/ledger drift requires operator recovery. Threaded
 volatility refreshes also use independent short-lived connections rather than sharing Observer's transaction.
+Target-fill cursors roll back with any uncommitted signal batch, so Scanner write contention causes a full
+idempotent re-fetch rather than a skipped fill. A busy mark-to-market write also keeps the current BBO socket alive.
 Mainnet rollout still requires external VPS deployment, a separately authorized Mainnet Agent, funded
 Unified account and a passing read-only preflight. A successful startup enters full Live execution immediately;
 equity sizing and the normal deployment/per-coin/add/liquidity limits remain the risk boundaries.

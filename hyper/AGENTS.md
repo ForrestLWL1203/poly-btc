@@ -542,6 +542,9 @@ through those retries; only markets still missing after all five attempts are cl
   persistent `reconcile_required`. Every exposure increase still performs its own mandatory fresh reconciliation.
   Threaded volatility refreshes likewise open short-lived independent connections; no worker thread may borrow
   Observer's signal/control connection.
+- REST signal batches advance a wallet's in-memory cursor only when the complete batch commits. A SQLite lock or
+  any later row failure restores the previous cursor, so the next overlap poll re-fetches the batch and tid dedup
+  prevents double execution. Replaceable mark-PnL persistence never tears down a healthy BBO socket on a busy lock.
 - BTC always uses the stable sizing tier, regardless of its measured sigma. Its real sigma still controls smart-add
   spacing and remains auditable. Every non-BTC Crypto and transparent `xyz:*` market uses mid below 9% sigma and
   high at or above 9%; unresolved/young valid markets temporarily use 7% (mid). Stock/index/commodity markets use

@@ -344,6 +344,40 @@ class ObserverMarkRefreshTests(unittest.TestCase):
         self.assertIsNone(eth["mark_px"])
         self.assertIsNone(eth["unrealized_pnl"])
 
+    def test_busy_mark_persistence_keeps_fresh_bbo_in_memory(self):
+        db = self._db()
+        obs = Observer(db, [], {})
+
+        with patch.object(
+            obs, "_refresh_coin_marks",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            obs.on_bbo({"coin": "BTC", "bbo": [{"px": "101"}, {"px": "103"}]})
+
+        self.assertEqual(obs.bbo["BTC"], (101.0, 103.0))
+        self.assertNotIn("BTC", obs.mark_write_ms)
+
+    def test_failed_signal_batch_restores_wallet_cursor_for_full_retry(self):
+        async def run():
+            db = self._db()
+            obs = Observer(db, [], {})
+            addr = "0xsignal"
+            obs.last_fill_ms[addr] = 100
+            fill = {"tid": 1, "time": 500, "coin": "BTC"}
+
+            def fail_after_cursor_advance(_addr, _fill):
+                obs.last_fill_ms[addr] = 500
+                raise sqlite3.OperationalError("database is locked")
+
+            with patch("hyper.execution.observer.rest.post_soft", return_value=[fill]), \
+                    patch.object(obs, "process_fill", side_effect=fail_after_cursor_advance):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                    await obs._poll_fills(addr, 88)
+
+            self.assertEqual(obs.last_fill_ms[addr], 100)
+
+        asyncio.run(run())
+
     def test_exchange_mark_overrides_book_mid_and_drives_liquidation_check(self):
         db = self._db()
         db.execute(

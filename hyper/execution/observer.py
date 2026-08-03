@@ -1470,7 +1470,15 @@ class Observer:
         now = now_ms()
         if now - self.mark_write_ms.get(coin, 0) < MARK_WRITE_MIN_MS:
             return
-        wrote = self._refresh_coin_marks(coin, self.taker)
+        try:
+            wrote = self._refresh_coin_marks(coin, self.taker)
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            # Mark persistence is replaceable telemetry. Keep the fresh in-memory BBO and let the next tick
+            # retry instead of tearing down the price socket because Scanner temporarily owns the write lock.
+            self._rollback_db()
+            return
         if wrote:
             self.mark_write_ms[coin] = now
 
@@ -3401,9 +3409,21 @@ class Observer:
         page = await asyncio.to_thread(rest.post_soft, {
             "type": "userFillsByTime", "user": addr, "startTime": int(max(0, since)), "aggregateByTime": True})
         if isinstance(page, list) and page:
-            for x in sorted(page, key=lambda fl: fl["time"]):
-                self.process_fill(addr, x)
-            self.db.commit()
+            previous_cursor = self.last_fill_ms.get(addr)
+            try:
+                for x in sorted(page, key=lambda fl: fl["time"]):
+                    self.process_fill(addr, x)
+                self.db.commit()
+            except Exception:
+                # A scanner write lock must never turn a fetched-but-uncommitted fill into a skipped fill.
+                # Restore the exact prior cursor so the next round re-fetches the whole batch; tid dedup makes
+                # this safe even if an inner path committed one row before a later row failed.
+                self._rollback_db()
+                if previous_cursor is None:
+                    self.last_fill_ms.pop(addr, None)
+                else:
+                    self.last_fill_ms[addr] = previous_cursor
+                raise
 
 
 # ------------------------------------------------------------------------- loaders
