@@ -189,6 +189,16 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertIn("strict_local_validate", source)
         self.assertIn("def strict_validation_path", source)
         self.assertIn("strict_path_context.clear()", source)
+        self.assertIn("def get_tune_window_fills", source)
+        self.assertIn("def get_membership_window_fills", source)
+        quick_start = source.index("def quick_surface_evaluate")
+        quick_cache = source.index("cached = _load_formation_prefix_evidence", quick_start)
+        quick_fills = source.index("tune_window_fills = get_tune_window_fills()", quick_start)
+        self.assertLess(quick_cache, quick_fills)
+        member_start = source.index("def evaluate_members")
+        member_cache = source.index("cached = _load_formation_prefix_evidence", member_start)
+        member_fills = source.index("window_fills = get_membership_window_fills()", member_start)
+        self.assertLess(member_cache, member_fills)
         self.assertIn("required_count=0", source)
         self.assertIn("exhaustive_below=0", source)
         self.assertIn("tuned_candidate_rows = list(prepath_rows)", source)
@@ -263,6 +273,59 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
 
         self.assertEqual(quick[1]["validationMode"], "quick")
         self.assertEqual(strict[1]["validationMode"], "final-shared")
+
+    def test_individual_cache_load_strips_legacy_full_replay_trajectories(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            value = scanner.core_formation.PrefixEvaluation(
+                count=1, net_pnl=10.0, stress_net_pnl=10.0,
+                max_drawdown=0.0, actionable_open_rate=1.0, capacity_fit=1.0,
+                liquidations=0, params={}, payload={},
+            )
+            scanner._store_formation_prefix_evidence(
+                db, "g1", "individual:surface", ["0xaaa"], value,
+                {
+                    "validationMode": "individual",
+                    "effective": {
+                        "metrics": {"copy_bt_net_pnl": 10.0},
+                        "qualification": {"eligible": True},
+                        "results": {"30": {"positions": [{"large": "trajectory"}]}},
+                    },
+                },
+            )
+
+            loaded = scanner._load_formation_prefix_evidence(
+                db, "g1", "individual:surface", ["0xaaa"],
+            )
+
+        self.assertEqual(
+            loaded[1]["effective"]["metrics"]["copy_bt_net_pnl"], 10.0,
+        )
+        self.assertNotIn("results", loaded[1]["effective"])
+
+    def test_final_shared_cache_uses_publication_execution_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            value = scanner.core_formation.PrefixEvaluation(
+                count=2, net_pnl=100.0, stress_net_pnl=100.0,
+                max_drawdown=0.0, actionable_open_rate=0.50, capacity_fit=0.50,
+                liquidations=0, params={},
+                payload={
+                    "return30d": 0.20, "return7d": 0.10,
+                    "requireReturnFit": True,
+                },
+            )
+            scanner._store_formation_prefix_evidence(
+                db, "g1", "final-shared:surface", ["0xaaa", "0xbbb"], value,
+                {"validationMode": "final-shared"},
+            )
+
+            loaded = scanner._load_formation_prefix_evidence(
+                db, "g1", "final-shared:surface", ["0xaaa", "0xbbb"],
+            )
+
+        self.assertTrue(loaded[0].payload["requireCongestionFit"])
+        self.assertFalse(loaded[0].feasible)
 
     def test_normal_scan_honors_auto_tune_switch_before_publication(self):
         scan_source = inspect.getsource(scanner.scan)

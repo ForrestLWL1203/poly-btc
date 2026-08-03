@@ -2281,8 +2281,17 @@ def _formation_prefix_membership_hash(addrs) -> str:
 
 def _load_formation_prefix_evidence(db, generation_id, params_hash, addrs):
     membership_hash = _formation_prefix_membership_hash(addrs)
+    # Early count-first builds accidentally stored the complete per-window
+    # replay trajectories under individual evidence.  The formation contract
+    # only consumes the compact effective metrics/qualification.  Strip that
+    # legacy branch inside SQLite before it crosses into Python so resuming 16
+    # rows cannot recreate hundreds of MiB of discarded objects.
+    replay_expression = (
+        "json_remove(replay_json,'$.effective.results')"
+        if str(params_hash).startswith("individual:") else "replay_json"
+    )
     row = db.execute(
-        "SELECT evaluation_json,replay_json FROM formation_prefix_evidence "
+        f"SELECT evaluation_json,{replay_expression} FROM formation_prefix_evidence "
         "WHERE generation=? AND policy_version=? AND params_hash=? AND membership_hash=?",
         (
             generation_id, _FORMATION_PREFIX_CACHE_POLICY,
@@ -2294,6 +2303,13 @@ def _load_formation_prefix_evidence(db, generation_id, params_hash, addrs):
     try:
         raw = json.loads(row[0] or "{}")
         replay = json.loads(row[1] or "{}")
+        payload = dict(raw.get("payload") or {})
+        if str(params_hash).startswith("final-shared:"):
+            # Final count search and atomic publication must use the same
+            # execution contract.  Historical final-shared rows already carry
+            # open/capacity metrics, so tighten their interpretation in place
+            # instead of replaying an otherwise identical surface.
+            payload["requireCongestionFit"] = True
         value = core_formation.PrefixEvaluation(
             count=int(raw["count"]),
             net_pnl=f(raw.get("netPnl")),
@@ -2303,7 +2319,7 @@ def _load_formation_prefix_evidence(db, generation_id, params_hash, addrs):
             capacity_fit=f(raw.get("capacityFit")),
             liquidations=int(raw.get("liquidations") or 0),
             params=dict(raw.get("params") or {}),
-            payload=dict(raw.get("payload") or {}),
+            payload=payload,
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
@@ -3871,18 +3887,47 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         )
     tune_ordered = tuple(row["addr"] for row in tune_ranked)
 
-    # A generation with individually promising profiles but no copyable portfolio fills is a valid zero-Core
-    # outcome, not a reason to roll back to stale members. Preflight the exact bounded tune pool before the
-    # tuner so ``maybe_tune_margins`` cannot turn ``no_cached_fills`` into a publication failure.
-    tune_window_fills = auto_tune._portfolio_window_fills(
-        db, list(tune_ordered), now_ms, include_watch=True,
-    )
-    if tune_window_fills is None or not any(tune_window_fills.values()):
-        return _explicit_empty_core_formation(
-            ranked_candidates,
-            reason=("fill_cache_guard" if tune_window_fills is None else "no_cached_fills"),
-            tunePoolCount=len(tune_ordered),
+    # Keep the longest prepared sequence lazy. A resumed generation can often
+    # rebuild the entire count/tune decision from compact evidence; eagerly
+    # decoding every fill before the first cache lookup defeated that contract.
+    tune_fill_context = {}
+
+    # Preserve the fresh-generation contract: a genuinely empty/guarded fill
+    # pool publishes an explicit empty Core rather than surfacing a tuner
+    # exception. Only a resumed generation with compact evidence can defer the
+    # decode until an exact cache miss is observed.
+    has_formation_evidence = db.execute(
+        "SELECT 1 FROM formation_prefix_evidence "
+        "WHERE generation=? AND policy_version=? LIMIT 1",
+        (generation_id, _FORMATION_PREFIX_CACHE_POLICY),
+    ).fetchone() is not None
+    if not has_formation_evidence:
+        initial_fills = auto_tune._portfolio_window_fills(
+            db, list(tune_ordered), now_ms, include_watch=True,
         )
+        if initial_fills is None or not any(initial_fills.values()):
+            return _explicit_empty_core_formation(
+                ranked_candidates,
+                reason=(
+                    "fill_cache_guard" if initial_fills is None
+                    else "no_cached_fills"
+                ),
+                tunePoolCount=len(tune_ordered),
+            )
+        tune_fill_context["fills"] = initial_fills
+
+    def get_tune_window_fills():
+        if "fills" not in tune_fill_context:
+            fills = auto_tune._portfolio_window_fills(
+                db, list(tune_ordered), now_ms, include_watch=True,
+            )
+            if fills is None or not any(fills.values()):
+                raise RuntimeError(
+                    "core_formation_fill_cache_guard"
+                    if fills is None else "core_formation_no_cached_fills"
+                )
+            tune_fill_context["fills"] = fills
+        return tune_fill_context["fills"]
 
     tune_eligible = None
     tune_reason = "retune_disabled"
@@ -3927,6 +3972,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 db, stage=stage, candidates_scanned=count,
                 candidates_total=len(tune_ordered),
             )
+            tune_window_fills = get_tune_window_fills()
             filtered = auto_tune._filter_window_fills_by_addr(
                 tune_window_fills, addrs,
             )
@@ -4063,7 +4109,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             tune_reason = "active_surface_repair_center"
 
         validation_path_start = now_ms - (
-            max(tune_window_fills) + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
+            max(auto_tune._tune_days())
+            + int(getattr(config, "COPY_BT_WARMUP_DAYS", 7) or 0)
         ) * 86_400_000
         strict_path_context = {}
 
@@ -4077,6 +4124,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             """
             if not strict_path_context:
                 resource_guard.require_replay_budget()
+                tune_window_fills = get_tune_window_fills()
                 validation_fills = list(
                     tune_window_fills.get(max(tune_window_fills)) or []
                 )
@@ -4113,6 +4161,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                     local_cache_stats["persistentHits"] += 1
                     return dict(replay_summary.get("validation") or {})
             validation_path, validation_path_meta = strict_validation_path()
+            tune_window_fills = get_tune_window_fills()
             filtered = auto_tune._filter_window_fills_by_addr(
                 tune_window_fills, addrs,
             )
@@ -4223,12 +4272,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         # bounded paths.  Do not retain the finalist path across that phase
         # boundary; this overlap was the dominant single-process RSS peak.
         strict_path_context.clear()
+        tune_fill_context.clear()
         gc.collect()
     else:
         tuned_params, tune_eligible, tune_reason = _formation_param_surface(
             base_follow, None, retune=False,
         )
-    del tune_window_fills
+    tune_fill_context.clear()
     gc.collect()
     fixed_follow = {**base_follow, **tuned_params, "AMBIGUOUS_PATH_MODE": "liquidate"}
     # ``winning_count`` says which score prefix fitted this parameter surface; it must not permanently
@@ -4295,7 +4345,13 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 )
                 _store_formation_prefix_evidence(
                     db, generation_id, individual_cache_hash, (addr,), evidence,
-                    {"validationMode": "individual", "effective": effective},
+                    {
+                        "validationMode": "individual",
+                        "effective": {
+                            key: value for key, value in effective.items()
+                            if key != "results"
+                        },
+                    },
                 )
             qualification = dict(effective.get("qualification") or {})
             formation = _formation_entry_eligibility(
@@ -4460,11 +4516,18 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "admission": admission_audit,
             },
         }
-    window_fills = auto_tune._portfolio_window_fills(
-        db, list(ordered), now_ms, include_watch=True,
-    )
-    if window_fills is None or not any(window_fills.values()):
-        raise RuntimeError("core_prefix_replay_unavailable")
+    membership_fill_context = {}
+
+    def get_membership_window_fills():
+        if "fills" not in membership_fill_context:
+            fills = auto_tune._portfolio_window_fills(
+                db, list(ordered), now_ms, include_watch=True,
+            )
+            if fills is None or not any(fills.values()):
+                raise RuntimeError("core_prefix_replay_unavailable")
+            membership_fill_context["fills"] = fills
+        return membership_fill_context["fills"]
+
     membership_eval_cache = {}
     membership_replay_cache = {}
 
@@ -4511,6 +4574,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
             db, stage="portfolio_prefix_strict",
             candidates_scanned=len(key), candidates_total=len(ordered),
         )
+        window_fills = get_membership_window_fills()
         filtered = auto_tune._filter_window_fills_by_addr(window_fills, key)
         windows = auto_tune._candidate_windows(
             db, list(key), sigmas, fixed_follow, now_ms,
@@ -4565,6 +4629,7 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
                 "return30d": return_30d,
                 "return7d": return_7d,
                 "openLossRatio30d": primary_economics.get("openLossRatio"),
+                "requireCongestionFit": True,
                 "requireReturnFit": True,
             },
         )
@@ -4706,6 +4771,8 @@ def form_quality_prefix(db, generation_id, stamp, now_ms=None, *, retune=True,
         "feasible": bool(value.feasible),
     } for value in (tune_search.evaluated if tune_search is not None else ()))
     sample_resource_peak()
+    membership_fill_context.clear()
+    gc.collect()
     result = {
         "selected": chosen_addrs, "ranked": ordered,
         "params": dict(chosen.params), "evaluations": evaluations,

@@ -119,6 +119,14 @@ Resume checks compact formation evidence before any replay allocation or resourc
 `memory.current` remains telemetry only because it includes reclaimable SQLite file pages; deferral uses the
 process RSS/Swap, available memory, decoded-surface estimate and cgroup anonymous/unreclaimable working set.
 Strict-finalist paths are loaded only for a cache miss and released before Top16 individual replay.
+Individual formation evidence persists effective metrics, qualification and score only; full 30/14/7
+positions, equity paths and event trajectories must never enter `formation_prefix_evidence`. Legacy rows are
+trimmed with SQLite JSON projection before Python decodes them.
+Final same-surface count search must apply the same actionable-open and capacity gates as atomic publication;
+those metrics cannot be treated as telemetry during count choice and then become blockers only at publish.
+Both tune-pool and final-membership fill sequences are lazy: persistent evidence lookup happens first, and a
+37-day fill sequence is decoded only for a true cache miss. Evidence-only recovery must therefore be able to
+derive a fully cached formation without touching fill/path loaders.
 
 ### 1. Generation safety
 
