@@ -3105,6 +3105,12 @@ def _rough_replay_source_pool(
                 )
                 failed.append(addr)
                 continue
+        # A previous pass may have persisted a transient market-data error on this same generation row.
+        # Reaching this point proves the frozen market inputs are now complete, so do not feed that stale
+        # deferred marker back into the successful replay/eligibility calculation.
+        row["data_status"] = "valid"
+        if str(row.get("evidence_status") or "") == "invalid":
+            row["evidence_status"] = "source_qualified"
         marks = {
             coin: f((market_ctx.get(coin) or {}).get("mark_px"))
             for coin in market_ctx
@@ -9404,6 +9410,100 @@ def scan(db, p):
         flush_persist()
 
     _profile_batch(list(workset))
+
+    # A transient transport/SQLite failure is not a completed Profile outcome.  Consume the deferred queue
+    # serially after the worker pool has closed, preserving the frozen workset and generation start time.
+    # There is deliberately no wall-clock/pass limit: a temporarily unavailable source must delay this
+    # generation instead of silently removing an otherwise eligible wallet from strict formation.  Hard
+    # data-integrity outcomes such as ``hit_page_cap`` are not transport retries and remain quarantined for
+    # the next complete collection window.
+    profile_retry_pass = 0
+    profile_retry_attempts = 0
+
+    def transient_profile_retry_addrs():
+        rows = {
+            str(addr or "").lower(): str(reason or "")
+            for addr, reason in db.execute(
+                "SELECT addr,reason FROM profile WHERE profile_generation=? "
+                "AND data_status='deferred_data_error'",
+                (generation_id,),
+            ).fetchall()
+        }
+        prefixes = (
+            "fills_error:", "profile_worker_error:",
+            "profile_worker_unhandled_error", "portfolio_error:",
+            "account_equity_unavailable", "copy_replay_unavailable",
+        )
+        return [
+            addr for addr in workset
+            if any(rows.get(addr, "").startswith(prefix) for prefix in prefixes)
+        ]
+
+    retry_addrs = transient_profile_retry_addrs()
+    while retry_addrs:
+        profile_retry_pass += 1
+        if profile_retry_pass > 1:
+            time.sleep(min(60.0, float(2 ** min(profile_retry_pass - 2, 6))))
+        _set_scan_progress(
+            db, stage="retry_deferred_profiles", candidates_scanned=0,
+            candidates_total=len(retry_addrs),
+        )
+        for retry_index, addr in enumerate(retry_addrs, 1):
+            prior = priors.get(addr)
+            try:
+                _addr, retry_prior, result = _work(addr)
+            except Exception as exc:  # noqa: BLE001 - persists a resumable transient outcome
+                resolved = perp_results.get(addr) or perp_prefilter.Result(
+                    "deferred_data_error", "profile_worker_unhandled_error",
+                    {"scanResolution": {"source": "profile_deferred_retry"}},
+                )
+                status, reason, row, _ = _defer_profile(
+                    db, addr, prior, stamp,
+                    f"profile_worker_error:{type(exc).__name__}",
+                    generation_id=generation_id, persist=False,
+                )
+                row.update(_official_profile_fields(resolved))
+                result = (status, reason, row, False)
+                retry_prior = prior
+            status, reason, row, _hit_cap = result
+            resolved_official = _profile_official_result(row)
+            if resolved_official is not None:
+                perp_results[addr] = resolved_official
+            _persist_profile_batch(db, [row])
+            profile_retry_attempts += 1
+            _set_scan_progress(
+                db, stage="retry_deferred_profiles", candidates_scanned=retry_index,
+                candidates_total=len(retry_addrs),
+            )
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="scan", stage="profile_deferred_retry",
+            status="complete", reason="transient_profile_retry_pass",
+            payload={
+                "generation": generation_id, "pass": profile_retry_pass,
+                "attempted": len(retry_addrs),
+            },
+        )
+        db.commit()
+        retry_addrs = transient_profile_retry_addrs()
+
+    # Retries replace an existing generation row rather than creating another workset outcome.  Recompute
+    # the authoritative counters so generation coverage cannot double-count a recovered wallet.
+    workset_set = set(workset)
+    profile_outcomes = [
+        str(data_status or "valid")
+        for addr, data_status in db.execute(
+            "SELECT lower(addr),data_status FROM profile WHERE profile_generation=?",
+            (generation_id,),
+        ).fetchall()
+        if str(addr or "").lower() in workset_set
+    ]
+    profiled_ok = len(profile_outcomes)
+    valid_profiles = sum(
+        status not in {"deferred_data_error", "rejected"}
+        for status in profile_outcomes
+    )
+    deferred_profiles = profile_outcomes.count("deferred_data_error")
+    rejected = profile_outcomes.count("rejected")
     # Replace the temporary eager-only audit with one complete generation surface. Cached candidates now
     # contribute their local proof, Portfolio fallback, or structural short-circuit decision here.
     _record_perp_prefilter_results(db, recall_cand, perp_results, stamp, p=p)
@@ -9456,6 +9556,58 @@ def scan(db, p):
     rough_summary = _rough_replay_source_pool(
         db, source_pool, generation_id, now_ms, p, stamp,
     )
+    # The resolver intentionally does not memoize ``sigma_request_failed``.  Re-run only the wallets whose
+    # rough Copy replay hit that transient request; all successful/business-rejected wallets keep their
+    # first-pass evidence.  The market manifest stays mutable until this queue is empty, then seals once.
+    rough_market_retry_pass = 0
+    rough_market_retry_attempts = 0
+
+    def transient_rough_market_addrs():
+        deferred = {
+            str(addr or "").lower()
+            for addr, reason in db.execute(
+                "SELECT addr,reason FROM profile WHERE profile_generation=? "
+                "AND data_status='deferred_data_error'",
+                (generation_id,),
+            ).fetchall()
+            if str(reason or "").startswith(
+                "rough_copy_market_data_error:sigma_request_failed:"
+            )
+        }
+        return [addr for addr in source_pool if addr in deferred]
+
+    market_retry_addrs = transient_rough_market_addrs()
+    while market_retry_addrs:
+        rough_market_retry_pass += 1
+        if rough_market_retry_pass > 1:
+            time.sleep(min(60.0, float(2 ** min(rough_market_retry_pass - 2, 6))))
+        _set_scan_progress(
+            db, stage="retry_deferred_market", candidates_scanned=0,
+            candidates_total=len(market_retry_addrs),
+        )
+        retry_summary = _rough_replay_source_pool(
+            db, market_retry_addrs, generation_id, now_ms, p, stamp,
+            source="scan_retry",
+        )
+        rough_market_retry_attempts += len(market_retry_addrs)
+        rough_summary["qualified"] = list(dict.fromkeys(
+            list(rough_summary.get("qualified") or ())
+            + list(retry_summary.get("qualified") or ())
+        ))
+        pipeline_audit._insert_event(
+            db, stamp=stamp, source="scan", stage="market_deferred_retry",
+            status="complete", reason="sigma_transport_retry_pass",
+            payload={
+                "generation": generation_id, "pass": rough_market_retry_pass,
+                "attempted": len(market_retry_addrs),
+            },
+        )
+        db.commit()
+        market_retry_addrs = transient_rough_market_addrs()
+    rough_summary["profileRetryPasses"] = profile_retry_pass
+    rough_summary["profileRetryAttempts"] = profile_retry_attempts
+    rough_summary["marketRetryPasses"] = rough_market_retry_pass
+    rough_summary["marketRetryAttempts"] = rough_market_retry_attempts
     p.source_only_profile = False
     pipeline_audit._insert_event(
         db, stamp=stamp, source="scan", stage="source_quality_pool",

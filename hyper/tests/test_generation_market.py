@@ -97,25 +97,32 @@ class GenerationMarketSnapshotTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual((source, n), ("insufficient_history_default", 4))
 
-    def test_transport_failure_is_cached_as_error_not_defaulted(self):
+    def test_transport_failure_is_retryable_and_not_defaulted(self):
         with tempfile.TemporaryDirectory() as td:
             db = self.open_db(td)
             resolver = generation_market.Resolver(
                 db, "g3", 1_700_000_000_000, {"ETH"}, {"ETH": context()},
             )
-            sample = {
+            failed = {
                 "status": "request_failed", "sigma": None,
                 "fast": None, "slow": None, "n": 0,
             }
-            with patch.object(generation_market.volatility, "compute_at", return_value=sample) as compute:
+            recovered = {
+                "status": "real", "sigma": .08,
+                "fast": .08, "slow": .06, "n": 30,
+            }
+            with patch.object(
+                generation_market.volatility, "compute_at",
+                side_effect=[failed, recovered],
+            ) as compute:
                 with self.assertRaisesRegex(generation_market.MarketSnapshotError, "sigma_request_failed:ETH"):
                     resolver.ensure({"ETH"})
-                with self.assertRaisesRegex(generation_market.MarketSnapshotError, "sigma_request_failed:ETH"):
-                    resolver.ensure({"ETH"})
-            self.assertEqual(compute.call_count, 1)
-            self.assertIsNone(db.execute(
-                "SELECT 1 FROM generation_market_snapshot WHERE generation='g3' AND coin='ETH'"
-            ).fetchone())
+                sigmas, _ = resolver.ensure({"ETH"})
+            self.assertEqual(compute.call_count, 2)
+            self.assertEqual(sigmas["ETH"], .08)
+            self.assertEqual(db.execute(
+                "SELECT sigma FROM generation_market_snapshot WHERE generation='g3' AND coin='ETH'"
+            ).fetchone()[0], .08)
 
     def test_missing_crypto_liquidity_and_max_leverage_fail_closed(self):
         with tempfile.TemporaryDirectory() as td:

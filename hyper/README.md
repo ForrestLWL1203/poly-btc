@@ -314,9 +314,11 @@ Previously known wallets remain history-incremental, and only complete discovery
 days. The Dashboard rescan button queues the same complete reevaluation; changing scanner settings only persists
 params and does not start a scan.
 
-Each complete generation persists its exact Profile workset as bounded audit detail. A Profile worker failure
-is retried once on the main thread after the pool closes; if it fails again, the wallet receives a durable
-deferred outcome instead of silently reducing generation coverage. Recovery of an older single-member hole
+Each complete generation persists its exact Profile workset as bounded audit detail. Profile transport/worker
+failures are consumed serially after the pool closes, with bounded exponential backoff but no generation wall
+clock limit. A transient volatility request is never memoized as immutable evidence: only affected wallets are
+retried before the generation market snapshot seals. Terminal cache-integrity outcomes such as a capped fill
+history remain quarantined for a later complete collection window. Recovery of an older single-member hole
 uses only frozen workset/Perp evidence and never mixes current market inputs into the old generation.
 If an operator-starred current Core reaches the winning surface with `copy_path_incomplete`, recovery retries
 only that wallet's bounded public path, preserves count/quick-surface evidence, and invalidates only

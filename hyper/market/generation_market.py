@@ -304,7 +304,13 @@ class Resolver:
                     try:
                         self.cache[coin] = self._resolve_one(coin)
                     except MarketSnapshotError as exc:
-                        self.errors[coin] = str(exc)
+                        # A transport failure is not immutable generation evidence.  Caching it for the
+                        # resolver lifetime makes one failed candle request poison every later wallet that
+                        # traded the same coin, even though the next request may succeed.  Permanent market
+                        # shape errors remain memoized; transient sigma transport errors are retried by the
+                        # next wallet and by scanner's explicit deferred-profile pass before sealing.
+                        if not str(exc).startswith("sigma_request_failed:"):
+                            self.errors[coin] = str(exc)
                         raise
             selected = {coin: self.cache[coin] for coin in coins if coin in self.cache}
         return (

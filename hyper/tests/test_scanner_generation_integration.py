@@ -557,6 +557,83 @@ class ScannerGenerationIntegrationTests(unittest.TestCase):
         self.assertEqual(daily_source.count("retention_addrs=previous_core_order"), 2)
         self.assertIn("_assert_daily_promotion_parity(", daily_source)
 
+    def test_complete_scan_retries_transient_profile_and_sigma_failures_before_seal(self):
+        source = inspect.getsource(scanner.scan)
+
+        self.assertIn('stage="retry_deferred_profiles"', source)
+        self.assertIn('stage="retry_deferred_market"', source)
+        self.assertIn("rough_copy_market_data_error:sigma_request_failed:", source)
+        self.assertLess(
+            source.index('stage="retry_deferred_market"'),
+            source.index("generation_market.seal("),
+        )
+        self.assertIn("while market_retry_addrs:", source)
+
+    def test_successful_rough_retry_clears_stale_market_deferred_marker(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = self.open_db(td)
+            db.execute(
+                "INSERT INTO profile "
+                "(addr,status,reason,profile_generation,data_status,evidence_status,sector_policy_json) "
+                "VALUES('0xaaa','active','source_structure_passed','g1','valid',"
+                "'source_qualified','{\"allowed\":[\"crypto\"]}')"
+            )
+            db.commit()
+            resolver = SimpleNamespace()
+            attempts = iter((
+                scanner.generation_market.MarketSnapshotError(
+                    "sigma_request_failed:BTC"
+                ),
+                ({"BTC": .05}, {"BTC": {"mark_px": 100.0}}),
+            ))
+
+            def ensure(_coins):
+                result = next(attempts)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            resolver.ensure = ensure
+            context = SimpleNamespace(
+                generation_market_resolver=resolver,
+                copy_bt_valuation_marks={},
+            )
+            replay = {
+                "metrics": {}, "score": 1.0,
+                "sectorPolicyJson": '{"allowed":["crypto"]}',
+                "results": {},
+            }
+            qualification = {
+                "eligible": True, "deferred": False,
+                "status": "qualified", "firstFailure": None,
+                "copyEconomics": {}, "closedN": 1,
+            }
+            with patch.object(scanner.params, "load_follow", return_value={}), \
+                    patch.object(scanner.params, "load_category", return_value={}), \
+                    patch.object(scanner.selection, "published_core_membership", return_value=[]), \
+                    patch.object(scanner, "_copy_bt_cached_fills", return_value=[{"coin": "BTC"}]), \
+                    patch.object(scanner, "_effective_follow_replay", return_value=replay), \
+                    patch.object(scanner.pre_strict, "copy_activity", return_value={}), \
+                    patch.object(scanner.pre_strict, "evaluate", return_value=qualification), \
+                    patch.object(scanner, "_store_pre_strict_evidence"), \
+                    patch.object(scanner, "_finalize_pre_strict_queue", return_value={}):
+                first = scanner._rough_replay_source_pool(
+                    db, ["0xaaa"], "g1", 1_000, context, "now",
+                )
+                second = scanner._rough_replay_source_pool(
+                    db, ["0xaaa"], "g1", 1_000, context, "now",
+                    source="scan_retry",
+                )
+
+            self.assertEqual(first["failed"], ["0xaaa"])
+            self.assertEqual(second["qualified"], ["0xaaa"])
+            self.assertEqual(
+                db.execute(
+                    "SELECT data_status,evidence_status FROM profile WHERE addr='0xaaa'"
+                ).fetchone(),
+                ("valid", "source_qualified"),
+            )
+
     def test_retention_overlay_reuses_winning_surface_evidence(self):
         decision = SimpleNamespace(
             status="healthy", failure_streak=0, failure_reason=None,

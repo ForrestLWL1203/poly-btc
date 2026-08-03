@@ -117,10 +117,12 @@ transient data error is retried alone: a complete frozen fill cache is reused di
 missing source delta is fetched before rebuilding current-generation Profile and Rough Copy evidence. The
 sealed generation market snapshot remains read-only throughout recovery. Per-request network timeouts and
 retry/deferred queues remain mandatory so a dead connection cannot block the generation forever.
-Every complete generation also persists its exact Profile workset in bounded pipeline audit detail. A Profile
-worker exception is retried once on the main thread after the pool closes; a repeated exception becomes an
-explicit deferred outcome rather than a missing member. Legacy/interrupted single-member holes may be closed
-only from frozen workset/Perp audit evidence and never by splicing a later market surface into the generation.
+Every complete generation also persists its exact Profile workset in bounded pipeline audit detail. Profile
+transport/worker exceptions are consumed serially after the pool closes and may not be converted into a
+published omission. Transient generation-volatility failures are not memoized; the affected wallets are
+retried with bounded exponential backoff before the market snapshot seals. Terminal cache-integrity outcomes
+remain explicit quarantine evidence. Legacy/interrupted single-member holes may be closed only from frozen
+workset/Perp audit evidence and never by splicing a later market surface into the generation.
 Resume checks compact formation evidence before any replay allocation or resource gate. Cgroup
 `memory.current` remains telemetry only because it includes reclaimable SQLite file pages; deferral uses the
 process RSS/Swap, available memory, decoded-surface estimate and cgroup anonymous/unreclaimable working set.
